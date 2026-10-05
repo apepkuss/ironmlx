@@ -1,13 +1,11 @@
 //! B1-p2.3b-2 — SchedulerActor + OpenAI handler routing integration.
 //!
-//! Three scenarios (see spec § 5.2):
+//! Three scenarios:
 //!   A. `scheduler_actor_b1_text_only_swap` — text request routes to
 //!      SchedulerActor; argmax bit-id ≥ 0.95 vs direct GenerationStream
 //!      baseline.
-//!   B. `scheduler_actor_long_prompt_routes_to_gs` — prompt_len > chunk_size
-//!      routes to GS; admit_count must NOT increment.
-//!   C. `scheduler_actor_vl_routes_to_gs` — VL request routes to GS;
-//!      admit_count must NOT increment.
+//!   B. `scheduler_actor_handles_chunked_long_prompt` — a prompt longer than
+//!      the prefill chunk is admitted and completed by SchedulerActor.
 //!
 //! Test gated `#[ignore]`; runs only with `QWEN35_MODEL` env var.
 
@@ -74,6 +72,7 @@ fn run_b1_baseline(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
 async fn scheduler_actor_b1_text_only_swap() {
+    configure_local_test_metallib();
     let model_dir = std::env::var("QWEN35_MODEL").expect("QWEN35_MODEL env var required");
     let model_path = Path::new(&model_dir);
     let loader = Loader::open(model_path).expect("Loader::open");
@@ -158,7 +157,8 @@ async fn scheduler_actor_b1_text_only_swap() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore]
-async fn scheduler_actor_long_prompt_routes_to_gs() {
+async fn scheduler_actor_handles_chunked_long_prompt() {
+    configure_local_test_metallib();
     let model_dir = std::env::var("QWEN35_MODEL").expect("QWEN35_MODEL env var required");
     let model_path = Path::new(&model_dir);
     let loader = Loader::open(model_path).expect("Loader::open");
@@ -195,25 +195,7 @@ async fn scheduler_actor_long_prompt_routes_to_gs() {
         constraint: None,
     };
 
-    // Verify the routing predicate selects GS — mirrors openai.rs:362-365.
-    let has_images = request.pixel_values.is_some();
-    let prompt_len = request.prompt_ids.len();
-    let use_scheduler = !has_images
-        && (request.prefill_chunk_size == 0 || prompt_len <= request.prefill_chunk_size);
-    assert!(
-        !use_scheduler,
-        "routing predicate failed: long prompt would go to scheduler"
-    );
-
-    // Spawn an actor and verify admit_count does NOT change when the GS
-    // path is taken (the GS path bypasses the actor entirely — never sends
-    // a SchedulerCommand).
-    //
-    // We do NOT run actual GS inference here: that would require
-    // blocking_lock() on a tokio Mutex from within an async context, which
-    // panics. The routing predicate assertion above already proves the
-    // dispatch decision is correct. The admit_count invariant holds trivially
-    // because no SchedulerCommand is ever sent on the GS path.
+    // Admit and drain the former direct-path workload through SchedulerActor.
     let meta = model.model_meta();
     let model_arc = Arc::new(Mutex::new(model));
     let handle =
@@ -221,82 +203,46 @@ async fn scheduler_actor_long_prompt_routes_to_gs() {
             .expect("spawn_scheduler_actor");
     let before = handle.admit_count.load(Ordering::Relaxed);
 
-    // GS path: no SchedulerCommand sent → admit_count unchanged.
-    drop(request);
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    handle
+        .cmd_tx
+        .send(SchedulerCommand::Admit { request, reply_tx })
+        .await
+        .expect("send long-prompt admit");
+    let mut event_rx = reply_rx
+        .await
+        .expect("long-prompt admit reply")
+        .expect("long-prompt admit accepted")
+        .event_rx;
+    let mut tokens = Vec::new();
+    while let Some(event) = event_rx.recv().await {
+        tokens.push(event.token);
+        if event.finish_reason.is_some() {
+            break;
+        }
+    }
 
     let after = handle.admit_count.load(Ordering::Relaxed);
     assert_eq!(
-        after, before,
-        "admit_count incremented unexpectedly: {} -> {}",
-        before, after
+        after - before,
+        1,
+        "expected one long-prompt admit, got delta={}",
+        after - before
+    );
+    assert!(
+        !tokens.is_empty(),
+        "long-prompt SchedulerActor produced no tokens"
     );
 
     let _ = tokenizer;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore]
-async fn scheduler_actor_vl_routes_to_gs() {
-    let model_dir = std::env::var("QWEN35_MODEL").expect("QWEN35_MODEL env var required");
-    let model_path = Path::new(&model_dir);
-    let loader = Loader::open(model_path).expect("Loader::open");
-    let model = Qwen35Model::from_loader(&loader).expect("Qwen35Model::from_loader");
-    let tokenizer = Tokenizer::from_loader(&loader).expect("Tokenizer::from_loader");
-
-    // Build a minimal VL request marker — pixel_values = Some(non-empty image list).
-    // The routing decision only checks `pixel_values.is_some()`; building a
-    // real VL prompt for end-to-end inference is heavy (P6 fixture) and is
-    // already covered by `qwen35_vl_logits_match`. This test verifies the
-    // routing-decision branch only.
-    let dummy_image: mlx::Array = (&[0.0_f32; 1][..], (1_i32,))
-        .try_into()
-        .expect("dummy array");
-    // image_grid_thw is Vec<(T, H, W)> — one dummy tile.
-    let dummy_grid: Vec<(i32, i32, i32)> = vec![(1, 1, 1)];
-
-    let request = GenerateRequest {
-        priority: Default::default(),
-        prompt_ids: tokenize_prompt(&tokenizer, "Describe the picture."),
-        max_new_tokens: 4,
-        sampler: Sampler::greedy(),
-        stop_token_ids: tokenizer.eos_token_ids().to_vec(),
-        prefill_chunk_size: 0, // chunking off — VL routing wins anyway
-        decode_cadence_mid_chunk_cap: 256,
-        kv_cache_turboquant_bits: None,
-        pixel_values: Some(vec![dummy_image]),
-        image_grid_thw: Some(dummy_grid),
-        image_spatial_merge_size: 2,
-        image_token_id: 248056,
-        constraint: None,
-    };
-
-    // Routing predicate must select GS path (mirrors openai.rs:362-365).
-    let has_images = request.pixel_values.is_some();
-    let prompt_len = request.prompt_ids.len();
-    let use_scheduler = !has_images
-        && (request.prefill_chunk_size == 0 || prompt_len <= request.prefill_chunk_size);
-    assert!(
-        !use_scheduler,
-        "routing predicate failed: VL would go to scheduler"
-    );
-
-    let meta = model.model_meta();
-    let model_arc = Arc::new(Mutex::new(model));
-    let handle =
-        spawn_scheduler_actor(model_arc, 4, Duration::from_millis(5), 32, 32768, 256, meta)
-            .expect("spawn_scheduler_actor");
-    let before = handle.admit_count.load(Ordering::Relaxed);
-
-    // Routing predicate verified above; drop the request without running
-    // end-to-end inference (real VL inference covered by qwen35_vl_logits_match).
-    drop(request);
-
-    let after = handle.admit_count.load(Ordering::Relaxed);
-    assert_eq!(
-        after, before,
-        "admit_count incremented unexpectedly for VL request: {} -> {}",
-        before, after
-    );
-
-    let _ = tokenizer;
+fn configure_local_test_metallib() {
+    static CONFIGURED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    CONFIGURED.get_or_init(|| {
+        let mlx_dir = std::env::var("MLX_DIR").expect("MLX_DIR required for MLX tests");
+        let path = Path::new(&mlx_dir).join("lib/mlx.metallib");
+        mlx::metal::set_metallib_path(path.to_string_lossy().as_ref())
+            .expect("load MLX_DIR/lib/mlx.metallib for test");
+    });
 }

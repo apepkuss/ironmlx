@@ -222,11 +222,10 @@ async fn post_chat(
     assert_eq!(status, 200, "chat completion failed: {text}");
     let json: serde_json::Value = serde_json::from_str(&text).expect("chat completion json");
     assert!(
-        json["choices"][0]["message"]["content"]
+        !json["choices"][0]["message"]["content"]
             .as_str()
             .unwrap_or_default()
-            .len()
-            > 0,
+            .is_empty(),
         "assistant content must not be empty: {json}"
     );
     assert!(

@@ -28,7 +28,6 @@ ironmlx serve \
   --model /path/to/Qwen3.8-27B-8bit \
   --model-id mlx-community/Qwen3.8-27B-8bit \
   --dflash2-model-dir /path/to/Qwen3.8-27B-DFlash2 \
-  --dflash2-block-size 4 \
   --dflash2-draft-bits 4 \
   --max-sequences 8 \
   --dflash2-tensor-batch-max-width 4 \
@@ -38,7 +37,7 @@ ironmlx serve \
 
 | Option | Accepted values / behavior |
 | --- | --- |
-| `--dflash2-block-size` | 2–16; widths above 8 require a draft checkpoint whose declared block size supports them |
+| `--dflash2-block-size` | Optional 2–16 override. When omitted, IronMLX uses the checkpoint width capped at the qualified Q8 default. Widths above 8 are explicit opt-in and require a compatible checkpoint. |
 | `--dflash2-draft-bits` | 0, 4 or 8; 0 preserves BF16 draft weights |
 | `--dflash2-tree-max-nodes` | 0–15; 0 is the stable linear default, while a positive value opts affine-4 B1 requests into the bounded best-first tree |
 | `--dflash2-position-keyed-sampling` | Explicitly opts sampled requests into the versioned device-side position-keyed sampler; changes same-seed output |
@@ -48,13 +47,13 @@ ironmlx serve \
 
 Actual group width is the minimum of max sequences, tensor width limit and the number of ready requests with compatible execution shapes. The width limit does not increase active slots or replace max sequences.
 
-The recorded `z-lab/Qwen3.8-27B-DFlash2` checkpoint declares block size 8, so it cannot exercise the Q16 proposal lane. Q16 is fail-closed: the target's affine-4 B1 verify capability and the draft checkpoint must both support the requested width. No checkpoint is widened implicitly.
+The recorded `z-lab/Qwen3.8-27B-DFlash2` checkpoint declares block size 8, so automatic resolution selects Q8 and it cannot exercise the Q16 proposal lane. Q16 is fail-closed and explicit: the target's affine-4 B1 verify capability and the draft checkpoint must both support the requested width. No checkpoint is widened implicitly.
 
 ## App configuration
 
 The scanner identifies `DFlash2DraftModel` as an auxiliary artifact. A draft appears in the selector only if it satisfies backend constraints and matches the target's hidden/intermediate size, vocabulary, context length, layer count, RMS epsilon and RoPE theta. Incomplete or incompatible artifacts are rejected.
 
-Dashboard exposes the DFlash2 switch, compatible draft, block size, draft precision and Tensor Batch limit. An empty limit uses the backend default of 4. The effective width is also bounded by Max Sequences.
+Dashboard exposes the DFlash2 switch, compatible draft, block size, draft precision and Tensor Batch limit. An empty block size uses the selected checkpoint width capped at Q8. An empty tensor batch limit uses the backend default of 4. The effective tensor batch width is also bounded by Max Sequences.
 Enabling DFlash2 retains one default target and restarts the backend into the fixed target/draft actor. Disabling or changing its settings also requires a controlled restart. Validation, startup or recovery failure restores the prior configuration and model parameters, then restarts the previous path.
 
 The App retains `GET /v1/models` with the stable target ID but no dynamic model-management API. Dashboard and menu bar recover target/draft state from health and saved settings without exposing the draft as an ordinary model.

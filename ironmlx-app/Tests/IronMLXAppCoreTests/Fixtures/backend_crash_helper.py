@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import errno
 import json
 import sys
 import time
@@ -7,6 +8,21 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 loaded_models = []
+
+
+def bind_server(host, port, retry_timeout):
+    deadline = time.monotonic() + retry_timeout
+    reported_contention = False
+    while True:
+        try:
+            return ThreadingHTTPServer((host, port), Handler)
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE or time.monotonic() >= deadline:
+                raise
+            if not reported_contention:
+                print(f"helper waiting for port handoff port={port}", flush=True)
+                reported_contention = True
+            time.sleep(0.05)
 
 
 def model_info(body):
@@ -195,8 +211,9 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--bind-retry-timeout", type=float, default=2.0)
     args = parser.parse_args()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server = bind_server("127.0.0.1", args.port, args.bind_retry_timeout)
     print(f"helper ready pid={server.server_address} port={args.port}", flush=True)
     server.serve_forever()
 

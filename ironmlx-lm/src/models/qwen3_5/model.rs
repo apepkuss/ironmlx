@@ -139,13 +139,243 @@ impl Qwen35Model {
             None
         };
         let text = Qwen35TextModel::from_loader_dflash2(loader, cfg)?;
-        Ok(Self {
+        let mut model = Self {
             text,
             exact_batched_verify_profile,
             loaded_weight_bytes: Some(loaded_weight_bytes),
             lm_head,
             vision,
-        })
+        };
+        if crate::nn::shared_weight_layout::requested() {
+            model.enable_shared_weight_layout()?;
+            // The serving loader outlives construction. Drop its references
+            // to the unfused projections now owned by single-layout stores
+            // (fused sources were already released during construction).
+            let mut released = vec!["lm_head".to_owned()];
+            for i in 0..model.config().num_hidden_layers {
+                let prefix = format!("model.layers.{i}");
+                released.push(format!("{prefix}.mlp.down_proj"));
+                released.push(match model.config().layer_kind(i) {
+                    crate::nn::decoder_layer::AttnKind::Full => {
+                        format!("{prefix}.self_attn.o_proj")
+                    }
+                    crate::nn::decoder_layer::AttnKind::Linear => {
+                        format!("{prefix}.linear_attn.out_proj")
+                    }
+                });
+            }
+            loader.release_projection_prefixes(&released);
+            mlx::clear_cache();
+        }
+        if crate::nn::m5_affine4::precompile_requested() {
+            model.precompile_m5_affine4()?;
+        }
+        Ok(model)
+    }
+
+    /// Experimental, default off (`IRONMLX_EXPERIMENTAL_M5_PRECOMPILE=1`):
+    /// before the server is ready, evaluate every M5 affine4 kernel variant
+    /// this model's DFlash2 lane can reach, so the Metal library compile and
+    /// pipeline creation do not land in the first request that needs them.
+    /// Reachable keys are (N, K, tmr, edge) of each projection that takes the
+    /// route: decoder projections see 1..=128 rows (prefill chunks up to 128
+    /// rows and verify windows), the lm_head sees at most 16 rows (the last
+    /// position, or one DFlash2 verify window). Throwaway constant activations,
+    /// no request cache, no extra weight copy (a shared store switches to the
+    /// tiled layout exactly as the first M5 request would).
+    /// Diagnostic-only (tree batching feasibility): time every activation
+    /// projection of the text model plus `lm_head` at `rows` input rows inside
+    /// the M5 affine4 route scope (one evaluation per pass, median of `iters`
+    /// passes after two warmups), and check that each 16-row block of a wider
+    /// input gives the same bits as that block alone. Not used by serving.
+    #[doc(hidden)]
+    pub fn diagnostic_projection_bench(
+        &self,
+        rows: &[i32],
+        iters: usize,
+    ) -> Result<serde_json::Value> {
+        use crate::nn::m5_affine4;
+        let target = mlx::StreamOrDevice::default();
+        let _route = m5_affine4::scope();
+        let key = mlx::random::key(20261005)?;
+        let sites: Vec<(&str, &Linear)> = self
+            .text
+            .activation_projections()
+            .into_iter()
+            .map(|l| ("decoder", l))
+            .chain(self.lm_head.iter().map(|l| ("lm_head", l)))
+            .collect();
+        let input = |m: i32, k: i32| -> Result<Array> {
+            Ok(mlx::random::normal()
+                .shape(&[1, m, k][..])
+                .dtype(mlx::Dtype::Bfloat16)
+                .key(&key)
+                .sample()?)
+        };
+        let mut timing = Vec::new();
+        for &m in rows {
+            let mut inputs = std::collections::HashMap::new();
+            for (_, l) in &sites {
+                let k = l.in_features() as i32;
+                if let std::collections::hash_map::Entry::Vacant(e) = inputs.entry(k) {
+                    let x = input(m, k)?;
+                    mlx::transforms::eval(&[&x])?;
+                    e.insert(x);
+                }
+            }
+            let pass = |which: &str| -> Result<u64> {
+                let outs = sites
+                    .iter()
+                    .filter(|(kind, _)| which == "all" || *kind == which)
+                    .map(|(_, l)| l.forward_on(&inputs[&(l.in_features() as i32)], target))
+                    .collect::<Result<Vec<_>>>()?;
+                mlx::transforms::synchronize()?;
+                let started = std::time::Instant::now();
+                mlx::transforms::eval(&outs.iter().collect::<Vec<_>>())?;
+                Ok(started.elapsed().as_micros() as u64)
+            };
+            let mut result = serde_json::Map::new();
+            for which in ["decoder", "lm_head"] {
+                for _ in 0..2 {
+                    pass(which)?;
+                }
+                let mut samples = (0..iters)
+                    .map(|_| pass(which))
+                    .collect::<Result<Vec<_>>>()?;
+                samples.sort_unstable();
+                result.insert(
+                    which.to_string(),
+                    serde_json::json!({"median_us": samples[samples.len() / 2], "min_us": samples[0],
+                                       "max_us": samples[samples.len() - 1], "samples": samples}),
+                );
+            }
+            timing.push(serde_json::json!({"rows": m, "timing": result,
+                "sites": sites.len(), "m5_route_sites": sites.iter().filter(|(_, l)| l.m5_route_capable()).count()}));
+            drop(inputs);
+            mlx::clear_cache();
+        }
+        // Numeric consistency per distinct projection shape.
+        let wide = *rows.iter().max().unwrap_or(&16);
+        let mut seen = std::collections::HashSet::new();
+        let mut numerics = Vec::new();
+        for (kind, l) in &sites {
+            let (k, n) = (l.in_features() as i32, l.out_features() as i32);
+            if !seen.insert((n, k, l.m5_route_capable())) {
+                continue;
+            }
+            let x = input(wide, k)?;
+            let y = l.forward_on(&x, target)?;
+            let mut blocks = Vec::new();
+            for &m in rows.iter().filter(|&&m| m < wide) {
+                let mut equal = true;
+                let mut max_abs = 0.0_f32;
+                for start in (0..wide).step_by(m as usize) {
+                    let xs = mlx::ops::indexing::slice_on(
+                        &x,
+                        &[0, start, 0][..],
+                        &[1, start + m, k][..],
+                        target,
+                    )?;
+                    let ys = l.forward_on(&xs, target)?;
+                    let yw = mlx::ops::indexing::slice_on(
+                        &y,
+                        &[0, start, 0][..],
+                        &[1, start + m, n][..],
+                        target,
+                    )?;
+                    let a = mlx::ops::cast::astype(&ys, mlx::Dtype::Float32)?.to_vec::<f32>()?;
+                    let b = mlx::ops::cast::astype(&yw, mlx::Dtype::Float32)?.to_vec::<f32>()?;
+                    for (p, q) in a.iter().zip(&b) {
+                        if p.to_bits() != q.to_bits() {
+                            equal = false;
+                            max_abs = max_abs.max((p - q).abs());
+                        }
+                    }
+                }
+                blocks.push(serde_json::json!({"block_rows": m, "bitwise_equal": equal, "max_abs_diff": max_abs}));
+            }
+            numerics.push(
+                serde_json::json!({"kind": kind, "n": n, "k": k, "m5_route": l.m5_route_capable(),
+                "wide_rows": wide, "blocks": blocks}),
+            );
+        }
+        Ok(serde_json::json!({"timing": timing, "numerics": numerics}))
+    }
+
+    fn precompile_m5_affine4(&self) -> Result<()> {
+        use crate::nn::m5_affine4;
+        if !(super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4
+            && m5_affine4::enabled())
+        {
+            tracing::warn!("experimental M5 affine4 pre-compilation skipped: lane not active");
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        let target = mlx::StreamOrDevice::default();
+        let _route = m5_affine4::scope();
+        let decoder_rows = m5_affine4::variant_rows(128);
+        let head_rows = m5_affine4::variant_rows(16);
+        let mut sites: Vec<(&Linear, &[i32])> = self
+            .text
+            .activation_projections()
+            .into_iter()
+            .map(|linear| (linear, decoder_rows.as_slice()))
+            .collect();
+        if let Some(lm_head) = self.lm_head.as_ref() {
+            sites.push((lm_head, head_rows.as_slice()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut keys = Vec::new();
+        let mut outputs = Vec::new();
+        for (linear, rows) in sites {
+            if !linear.m5_route_capable() {
+                continue;
+            }
+            let (k, n) = (linear.in_features() as i32, linear.out_features() as i32);
+            for &m in rows {
+                let (tmr, edge) = m5_affine4::kernel_variant(m);
+                if !seen.insert((n, k, tmr, edge)) {
+                    continue;
+                }
+                let x = mlx::ops::ones(&[1, m, k][..], mlx::Dtype::Bfloat16)?;
+                outputs.push(linear.forward_on(&x, target)?);
+                keys.push(format!("{n}x{k}/tmr{tmr}/edge{}", u8::from(edge)));
+            }
+        }
+        mlx::transforms::eval(&outputs.iter().collect::<Vec<_>>())?;
+        drop(outputs);
+        mlx::clear_cache();
+        tracing::info!(
+            kernels = keys.len(),
+            keys = %keys.join(","),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "M5 affine4 pre-compilation finished"
+        );
+        Ok(())
+    }
+
+    /// Experimental, default-off: keep one resident affine4 layout per
+    /// projection (see `nn::shared_weight_layout`). Only the Qwen3.8-27B
+    /// affine4 M5 DFlash2 lane is admitted; anything else fails closed.
+    fn enable_shared_weight_layout(&mut self) -> Result<()> {
+        crate::nn::shared_weight_layout::validate_environment()?;
+        anyhow::ensure!(
+            super::dflash2_lane::is_qwen38_27b(self.config())
+                && self.exact_batched_verify_profile
+                    == super::speculative::ExactBatchedVerifyProfile::Affine4
+                && crate::nn::m5_affine4::enabled(),
+            "experimental shared weight layout requires the Qwen3.8-27B affine4 M5 lane"
+        );
+        let mut stores = self.text.share_weight_layout()?;
+        if let Some(lm_head) = self.lm_head.as_mut() {
+            if lm_head.share_whole()?.is_some() {
+                stores += 1;
+            }
+        }
+        tracing::info!(stores, "M5 shared weight layout enabled");
+        Ok(())
     }
 
     pub fn from_loader_with_config(loader: &Loader, cfg: Qwen35Config) -> Result<Self> {
@@ -1147,20 +1377,45 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
                 }
             }
         }
+        let m5 = super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4
+            && crate::nn::m5_affine4::enabled();
+        let mut lane_pack =
+            super::dflash2_lane::kernel_pack(self.config(), self.exact_batched_verify_profile);
+        if m5 {
+            if let Some(pack) = lane_pack.as_mut() {
+                pack.revision = 2;
+                pack.prepared_layout = crate::nn::m5_affine4::fingerprint();
+                pack.attention_layout = "experimental-tree-or-bulk-position-stable-v1".into();
+            }
+        }
         DFlash2VerifyCapabilities {
-            profile: profile.into(),
+            profile: if m5 {
+                "qwen38-m5-affine4-experimental".into()
+            } else {
+                profile.into()
+            },
             row_bit_exact_qmm: !supported_shapes.is_empty(),
             row_bit_exact_attention: !supported_shapes.is_empty(),
             transactional_state_restore: !supported_shapes.is_empty(),
             supported_shapes,
-            lane_kernel_pack: super::dflash2_lane::kernel_pack(
-                self.config(),
-                self.exact_batched_verify_profile,
-            ),
+            lane_kernel_pack: lane_pack,
         }
     }
 
     fn dflash2_execution_fingerprint(&self) -> String {
+        if super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4
+            && crate::nn::m5_affine4::enabled()
+        {
+            return format!(
+                "qwen38-dflash2;{};reference=lane-serial-not-ordinary-mlx;{}",
+                crate::nn::m5_affine4::fingerprint(),
+                self.dflash2_verify_capabilities().stable_fingerprint()
+            );
+        }
         format!(
             "qwen35-dflash2-v2;prepared-qmm=lane-product-stable-v2;attention=bulk-position-stable-v1;recurrent=logical-prefix-v2;{}",
             self.dflash2_verify_capabilities().stable_fingerprint()
@@ -1175,6 +1430,60 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         self.text.embed_on(input_ids, target)
     }
 
+    fn dflash2_forward_tree_on(
+        &self,
+        input_ids: &Array,
+        parents: &[i32],
+        start: i32,
+        cache: &mut [LayerCache],
+        target_layer_ids: &[usize],
+        target: StreamOrDevice,
+    ) -> crate::Result<crate::models::dflash2::DFlash2TargetOutput> {
+        anyhow::ensure!(
+            self.dflash2_execution_fingerprint()
+                .contains("experimental-m5-affine4"),
+            "flat tree requires M5 affine4 route"
+        );
+        let plan = crate::nn::dflash_tree::Plan::new(parents)?;
+        let positions = plan.positions(start)?;
+        let _tree = crate::nn::dflash_tree::enter(plan)?;
+        self.dflash2_forward_target_on(
+            input_ids,
+            &positions,
+            Some(cache),
+            target_layer_ids,
+            crate::models::dflash2::DFlash2TargetForwardMode::GreedyVerify,
+            target,
+        )
+    }
+
+    fn dflash2_commit_tree_on(
+        &self,
+        cache: &mut [LayerCache],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+        rows: &[i32],
+        target: StreamOrDevice,
+    ) -> crate::Result<()> {
+        use crate::core::cache::layer::LayerCacheSnapshot;
+        anyhow::ensure!(
+            cache.len() == snapshots.len(),
+            "tree snapshot count mismatch"
+        );
+        for (live, saved) in cache.iter_mut().zip(snapshots) {
+            match (live, saved) {
+                (LayerCache::Full(kv), LayerCacheSnapshot::Full(saved)) => {
+                    kv.commit_tree_rows(saved.offsets()[0], rows, target)?
+                }
+                (LayerCache::Linear(gdn), LayerCacheSnapshot::Linear(_)) => {
+                    gdn.select_tree_replay_rows(rows, target)?
+                }
+                _ => anyhow::bail!("unsupported tree cache"),
+            }
+        }
+        self.text
+            .restore_dflash2_speculative_prefix_on(cache, snapshots, rows.len(), target)
+    }
+
     fn dflash2_forward_target_on(
         &self,
         input_ids: &mlx::Array,
@@ -1184,6 +1493,11 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         mode: crate::models::dflash2::DFlash2TargetForwardMode,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<crate::models::dflash2::DFlash2TargetOutput> {
+        let _m5_lane = (super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4
+            && crate::nn::m5_affine4::enabled())
+        .then(crate::nn::m5_affine4::scope);
         let input_shape = input_ids.shape();
         let input_dims = input_shape.as_slice();
         let batch_width = input_dims.first().copied().unwrap_or(0) as usize;
@@ -1265,6 +1579,11 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         hidden: &mlx::Array,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
+        let _m5_lane = (super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4
+            && crate::nn::m5_affine4::enabled())
+        .then(crate::nn::m5_affine4::scope);
         let shape = hidden.shape();
         let dims = shape.as_slice();
         if dims.len() != 3 || dims[0] <= 0 {

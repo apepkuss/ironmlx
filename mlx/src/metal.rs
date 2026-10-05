@@ -71,3 +71,24 @@ pub fn stop() -> Result<()> {
 pub fn architecture() -> Result<String> {
     mlx_sys::metal::ffi::device_architecture().map_err(Error::from)
 }
+
+/// Precompiled prefill kernel libraries for Apple GPU generation 17+.
+pub use mlx_sys::shaders as prefill_shaders;
+
+/// Configure the QMM M-tile prefill library (an empty path disables it).
+/// Must run before the first prefill; returns `false` if it is too late.
+pub fn set_prefill_qmm_mtile_library(path: &str) -> bool {
+    mlx_sys::metal::ffi::set_prefill_qmm_mtile_library(path)
+}
+
+/// Configure the D256 NAX prefill attention library (an empty path disables
+/// it). Must run before the first prefill; returns `false` if it is too late.
+pub fn set_prefill_d256_nax_library(path: &str) -> bool {
+    mlx_sys::metal::ffi::set_prefill_d256_nax_library(path)
+}
+
+/// Enable or disable the masked causal softmax prefill fallback. Must run
+/// before the first prefill; returns `false` if it is too late.
+pub fn set_prefill_masked_softmax(enabled: bool) -> bool {
+    mlx_sys::metal::ffi::set_prefill_masked_softmax(enabled)
+}

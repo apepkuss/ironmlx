@@ -273,6 +273,12 @@ enum RollingEvent {
     Shutdown,
 }
 
+// The process-memory governor polls every 250 ms by default. A B1 decode turn
+// is normally single-digit milliseconds, so forcing full rolling maintenance
+// every ninth turn stays comfortably inside that interval while removing
+// invariant scheduler bookkeeping from the steady-state token gap.
+const B1_GREEDY_FAST_TURNS_BETWEEN_MAINTENANCE: u8 = 8;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RollingMidAdmitSource {
     Direct,
@@ -669,6 +675,13 @@ where
 {
     type MidAdmitHandle: Send + 'static;
 
+    /// Only the plain autoregressive mode may use Scheduler's B=1 greedy
+    /// async look-ahead. Speculative modes own different cache/state
+    /// transitions and keep their existing step implementations.
+    fn allow_b1_greedy_pipeline(&self) -> bool {
+        false
+    }
+
     fn allow_rolling_mid_admit(&self) -> bool {
         true
     }
@@ -725,6 +738,29 @@ where
         handle: Self::MidAdmitHandle,
         counters: &SchedulerActorMtpCounters,
     ) -> Result<(RequestId, StepEvent)>;
+}
+
+fn prefill_admitted_route_and_optional_b1_pipeline<M, A>(
+    sched: &mut Scheduler<M>,
+    model: &M,
+    mode: &mut A,
+    counters: &SchedulerActorMtpCounters,
+    can_prime_b1_pipeline: bool,
+    event_txs: &HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+) -> Result<usize>
+where
+    M: Model + DenseVlMethods,
+    A: SchedulerActorMtpMode<M>,
+{
+    let events = mode.prefill_admitted(sched, model, counters)?;
+    let event_count = events.len();
+    for event in events {
+        route_event(event, event_txs);
+    }
+    if can_prime_b1_pipeline && mode.allow_b1_greedy_pipeline() {
+        let _ = sched.prime_b1_greedy_pipeline(model)?;
+    }
+    Ok(event_count)
 }
 
 struct SchedulerActorNoMtp;
@@ -1295,6 +1331,10 @@ where
 {
     type MidAdmitHandle = AdmitMidHandle;
 
+    fn allow_b1_greedy_pipeline(&self) -> bool {
+        true
+    }
+
     fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
         handle.request_id
     }
@@ -1333,9 +1373,18 @@ where
         sched: &mut Scheduler<M>,
         model: &M,
         _counters: &SchedulerActorMtpCounters,
-        _admission_pending: bool,
+        admission_pending: bool,
     ) -> Result<Vec<StepEvent>> {
-        sched.step(model)
+        if let Some(events) =
+            sched.step_b1_greedy_pipeline(model, /* continue_pipeline */ !admission_pending)?
+        {
+            return Ok(events);
+        }
+        let events = sched.step(model)?;
+        if !admission_pending {
+            let _ = sched.prime_b1_greedy_pipeline(model)?;
+        }
+        Ok(events)
     }
 
     fn begin_mid_admit(
@@ -2828,38 +2877,6 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn spawn_scheduler_actor_for_prompt_lookup_control<M>(
-    model: Arc<Mutex<M>>,
-    b_max: usize,
-    admission_deadline: Duration,
-    admission_queue_max: usize,
-    effective_cap_max: usize,
-    decode_cadence_mid_chunk_cap: usize,
-    meta: ironmlx_lm::core::model::ModelMeta,
-    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
-    prefix_lru_cache: Option<PrefixLruCacheConfig>,
-    active_kv_offload: ActiveKvOffloadConfig,
-) -> Result<SchedulerActorHandle, crate::core::memory_budget::MemoryBudgetError>
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    spawn_scheduler_actor_with_mode(
-        model,
-        SchedulerActorNoMtp,
-        b_max,
-        admission_deadline,
-        admission_queue_max,
-        effective_cap_max,
-        decode_cadence_mid_chunk_cap,
-        meta,
-        paged_prefix_cache,
-        prefix_lru_cache,
-        AdaptiveAdmissionPolicy::prompt_lookup(),
-        active_kv_offload,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_scheduler_actor_with_active_kv_offload<M>(
     model: Arc<Mutex<M>>,
     b_max: usize,
@@ -3699,12 +3716,21 @@ fn driver_loop<M, A>(
         batch_count.fetch_add(1, Ordering::Relaxed);
         let prefill_profile = rolling_profile_enabled()
             .then(|| (sched.active_count(), admission_queue.len(), Instant::now()));
+        let can_prime_b1_pipeline =
+            mtp_mode.allow_b1_greedy_pipeline() && admission_queue.is_empty() && cmd_rx.is_empty();
         let prefill_result = {
             let model_lock = model.blocking_lock();
-            mtp_mode.prefill_admitted(&mut sched, &model_lock, &mtp_counters)
+            prefill_admitted_route_and_optional_b1_pipeline(
+                &mut sched,
+                &model_lock,
+                &mut mtp_mode,
+                &mtp_counters,
+                can_prime_b1_pipeline,
+                &event_txs,
+            )
         };
         match prefill_result {
-            Ok(prefill_events) => {
+            Ok(prefill_event_count) => {
                 if let Some((prefill_active, prefill_queue_len, prefill_timer)) = prefill_profile {
                     let prefill_end = Instant::now();
                     tracing::info!(
@@ -3713,12 +3739,9 @@ fn driver_loop<M, A>(
                         prefill_active,
                         prefill_queue_len,
                         fresh_batch_limit,
-                        prefill_events.len(),
+                        prefill_event_count,
                         rolling_profile_elapsed_ms(prefill_timer, prefill_end)
                     );
-                }
-                for ev in prefill_events {
-                    route_event(ev, &event_txs);
                 }
             }
             Err(e) => {
@@ -3770,125 +3793,146 @@ fn driver_loop<M, A>(
         // ===== Rolling decode loop with bounded mid-batch admit + queue drain. =====
         let mut admission_policy = RollingAdmissionPolicy::default();
         admission_policy.record_admission_work();
+        let mut b1_fast_turns_since_maintenance = 0_u8;
         'rolling: loop {
-            process_scheduler_control_commands(&mut sched, &mut control_rx, &mtp_counters);
-            prune_abandoned_pending_admits(&mut admission_queue);
-            evict_abandoned_active_requests::<M, A>(
-                &mut sched,
-                &mut event_txs,
-                &mut in_flight_mid_admit,
-            );
-            discard_abandoned_parked_requests(
-                &sched,
-                &mut parked_active_kv,
-                &mut event_txs,
-                &active_kv_stats,
-            );
-            if let Err(error) = reconcile_background_priority::<M, A>(
-                &mut sched,
-                &model,
-                &admission_queue,
-                &in_flight_mid_admit,
-                &mut paused_background,
-                &mut event_txs,
-                &background_paused,
-                &background_preemptions,
-                &background_resumes,
-            ) {
-                tracing::error!(%error, "background priority reconciliation failed");
-                if let Err(evict_error) = sched.evict_all() {
-                    tracing::warn!(%evict_error, "scheduler cleanup after priority failure failed");
-                }
-                cleanup_paused_background(
+            let pending_pipeline_id = mtp_mode
+                .allow_b1_greedy_pipeline()
+                .then(|| sched.b1_greedy_pipeline_pending_id())
+                .flatten();
+            let b1_fast_turn = b1_fast_turns_since_maintenance
+                < B1_GREEDY_FAST_TURNS_BETWEEN_MAINTENANCE
+                && admission_queue.is_empty()
+                && in_flight_mid_admit.is_none()
+                && parked_active_kv.is_empty()
+                && paused_background.is_empty()
+                && cmd_rx.is_empty()
+                && control_rx.is_empty()
+                && pending_pipeline_id
+                    .is_some_and(|id| event_txs.get(&id).is_some_and(|tx| !tx.is_closed()));
+            if b1_fast_turn {
+                b1_fast_turns_since_maintenance += 1;
+            } else {
+                b1_fast_turns_since_maintenance = 0;
+                process_scheduler_control_commands(&mut sched, &mut control_rx, &mtp_counters);
+                prune_abandoned_pending_admits(&mut admission_queue);
+                evict_abandoned_active_requests::<M, A>(
                     &mut sched,
-                    &mut paused_background,
                     &mut event_txs,
-                    &background_paused,
+                    &mut in_flight_mid_admit,
                 );
-                cleanup_parked_active_kv_requests(
+                discard_abandoned_parked_requests(
                     &sched,
                     &mut parked_active_kv,
                     &mut event_txs,
                     &active_kv_stats,
-                    "background priority reconciliation failed",
                 );
-                while let Some(pending) = admission_queue.pop_front() {
-                    let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
-                        "scheduler failed to reconcile background priority"
-                    )));
-                }
-                continue 'outer;
-            }
-            // Cancellation can empty the scheduler before the rolling-loop
-            // tail is reached. Publish the post-eviction state here so
-            // /healthz never reports a ghost active request while the actor is
-            // already blocked in the outer idle receive.
-            b_active.store(sched.active_count() as u64, Ordering::Relaxed);
-            b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
-            match sched.apply_process_memory_pressure() {
-                Ok(reclaim) if reclaim.should_park_request && in_flight_mid_admit.is_none() => {
-                    let _ = try_park_one_active_kv_request(
+                if let Err(error) = reconcile_background_priority::<M, A>(
+                    &mut sched,
+                    &model,
+                    &admission_queue,
+                    &in_flight_mid_admit,
+                    &mut paused_background,
+                    &mut event_txs,
+                    &background_paused,
+                    &background_preemptions,
+                    &background_resumes,
+                ) {
+                    tracing::error!(%error, "background priority reconciliation failed");
+                    if let Err(evict_error) = sched.evict_all() {
+                        tracing::warn!(%evict_error, "scheduler cleanup after priority failure failed");
+                    }
+                    cleanup_paused_background(
                         &mut sched,
+                        &mut paused_background,
+                        &mut event_txs,
+                        &background_paused,
+                    );
+                    cleanup_parked_active_kv_requests(
+                        &sched,
+                        &mut parked_active_kv,
+                        &mut event_txs,
+                        &active_kv_stats,
+                        "background priority reconciliation failed",
+                    );
+                    while let Some(pending) = admission_queue.pop_front() {
+                        let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
+                            "scheduler failed to reconcile background priority"
+                        )));
+                    }
+                    continue 'outer;
+                }
+                // Cancellation can empty the scheduler before the rolling-loop
+                // tail is reached. Publish the post-eviction state here so
+                // /healthz never reports a ghost active request while the actor is
+                // already blocked in the outer idle receive.
+                b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+                b_queued.store(admission_queue.len() as u64, Ordering::Relaxed);
+                match sched.apply_process_memory_pressure() {
+                    Ok(reclaim) if reclaim.should_park_request && in_flight_mid_admit.is_none() => {
+                        let _ = try_park_one_active_kv_request(
+                            &mut sched,
+                            &model,
+                            &mut parked_active_kv,
+                            &active_kv_stats,
+                        );
+                        b_active.store(sched.active_count() as u64, Ordering::Relaxed);
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "scheduler memory-pressure reclaim failed");
+                    }
+                }
+                // A rejected queued admit or cancellation can leave an empty Idle
+                // scheduler. Hand off before selecting Step: there is no batch to
+                // decode. Finished also needs finalization even if its slots have
+                // not been collected yet (e.g. max_new_tokens=1).
+                if sched.phase() == Phase::Finished || sched.active_count() == 0 {
+                    match drive_empty_scheduler_handoff(
+                        &mut sched,
+                        &mut cmd_rx,
+                        &mut event_txs,
+                        &mut admission_queue,
                         &model,
+                        &admit_count,
+                        &saturate_triggered,
+                        &queue_depth_peak,
+                        &queue_rejected,
+                        &batch_count,
+                        &mut mtp_mode,
+                        &mtp_counters,
                         &mut parked_active_kv,
                         &active_kv_stats,
-                    );
-                    b_active.store(sched.active_count() as u64, Ordering::Relaxed);
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(%error, "scheduler memory-pressure reclaim failed");
-                }
-            }
-            // A rejected queued admit or cancellation can leave an empty Idle
-            // scheduler. Hand off before selecting Step: there is no batch to
-            // decode. Finished also needs finalization even if its slots have
-            // not been collected yet (e.g. max_new_tokens=1).
-            if sched.phase() == Phase::Finished || sched.active_count() == 0 {
-                match drive_empty_scheduler_handoff(
-                    &mut sched,
-                    &mut cmd_rx,
-                    &mut event_txs,
-                    &mut admission_queue,
-                    &model,
-                    &admit_count,
-                    &saturate_triggered,
-                    &queue_depth_peak,
-                    &queue_rejected,
-                    &batch_count,
-                    &mut mtp_mode,
-                    &mtp_counters,
-                    &mut parked_active_kv,
-                    &active_kv_stats,
-                    b_max,
-                    admission_queue_max,
-                    admission_deadline,
-                    adaptive_policy,
-                    &rt,
-                ) {
-                    RollingControl::ContinueRolling => {
-                        admission_policy.record_admission_work();
-                        continue 'rolling;
-                    }
-                    RollingControl::BreakRolling => break 'rolling,
-                    RollingControl::ContinueOuter => continue 'outer,
-                    RollingControl::ReturnActor => {
-                        cleanup_paused_background(
-                            &mut sched,
-                            &mut paused_background,
-                            &mut event_txs,
-                            &background_paused,
-                        );
-                        return;
+                        b_max,
+                        admission_queue_max,
+                        admission_deadline,
+                        adaptive_policy,
+                        &rt,
+                    ) {
+                        RollingControl::ContinueRolling => {
+                            admission_policy.record_admission_work();
+                            continue 'rolling;
+                        }
+                        RollingControl::BreakRolling => break 'rolling,
+                        RollingControl::ContinueOuter => continue 'outer,
+                        RollingControl::ReturnActor => {
+                            cleanup_paused_background(
+                                &mut sched,
+                                &mut paused_background,
+                                &mut event_txs,
+                                &background_paused,
+                            );
+                            return;
+                        }
                     }
                 }
             }
 
-            let evt: RollingEvent = if admission_policy.should_force_decode(
-                sched.phase(),
-                scheduler_has_decodable_rows(&sched),
-                in_flight_mid_admit.is_some() || !admission_queue.is_empty(),
-            ) {
+            let evt: RollingEvent = if b1_fast_turn
+                || admission_policy.should_force_decode(
+                    sched.phase(),
+                    scheduler_has_decodable_rows(&sched),
+                    in_flight_mid_admit.is_some() || !admission_queue.is_empty(),
+                ) {
                 RollingEvent::Step
             } else if in_flight_mid_admit.is_some() {
                 RollingEvent::AdvanceMidAdmit
@@ -3930,6 +3974,55 @@ fn driver_loop<M, A>(
                     return;
                 }
                 RollingEvent::Admit(cmd) => {
+                    // A command can arrive after the prior decode step has
+                    // already pre-submitted its successor. Resolve that one
+                    // pending token before any mid-admit/cache-layout change.
+                    if mtp_mode.allow_b1_greedy_pipeline() {
+                        if let Err(error) =
+                            drain_b1_greedy_pipeline_before_mutation(&mut sched, &mut event_txs)
+                        {
+                            tracing::error!(%error, "failed to drain B1 greedy pipeline before admission");
+                            let SchedulerCommand::Admit { reply_tx, .. } = cmd;
+                            let _ = reply_tx.send(Err(anyhow::anyhow!(
+                                "scheduler B1 greedy pipeline failed before admission: {error:#}"
+                            )));
+                            if let Err(evict_error) = sched.evict_all() {
+                                tracing::warn!(%evict_error, "scheduler cleanup after B1 pipeline failure failed");
+                            }
+                            mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
+                            in_flight_mid_admit = None;
+                            cleanup_parked_active_kv_requests(
+                                &sched,
+                                &mut parked_active_kv,
+                                &mut event_txs,
+                                &active_kv_stats,
+                                "B1 greedy pipeline admission-boundary failure",
+                            );
+                            cleanup_paused_background(
+                                &mut sched,
+                                &mut paused_background,
+                                &mut event_txs,
+                                &background_paused,
+                            );
+                            event_txs.clear();
+                            while let Some(pending) = admission_queue.pop_front() {
+                                let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
+                                    "scheduler B1 greedy pipeline failed before admission"
+                                )));
+                            }
+                            continue 'outer;
+                        }
+                        if sched.phase() == Phase::Finished || sched.active_count() == 0 {
+                            enqueue_or_reject(
+                                cmd,
+                                &mut admission_queue,
+                                admission_queue_max,
+                                &queue_depth_peak,
+                                &queue_rejected,
+                            );
+                            continue 'rolling;
+                        }
+                    }
                     let SchedulerCommand::Admit { request, .. } = &cmd;
                     if (request.priority.is_background() && sched.has_foreground_request())
                         || !mtp_mode.allow_rolling_mid_admit()
@@ -4068,7 +4161,9 @@ fn driver_loop<M, A>(
                             &mut sched,
                             &model_lock,
                             &mtp_counters,
-                            in_flight_mid_admit.is_some() || !admission_queue.is_empty(),
+                            in_flight_mid_admit.is_some()
+                                || !admission_queue.is_empty()
+                                || !cmd_rx.is_empty(),
                         )
                     };
                     let step_end = step_profile.map(|_| Instant::now());
@@ -4078,7 +4173,19 @@ fn driver_loop<M, A>(
                             for ev in events {
                                 route_event(ev, &event_txs);
                             }
-                            let evicted_count = match sched.gc_finished_rows(&mut event_txs) {
+                            // A live look-ahead implies the sole occupied row
+                            // is non-terminal, so the ordinary finished-row
+                            // sweep would only allocate and scan empty lists
+                            // on every token. Defer it until the pipeline is
+                            // drained or reaches a terminal event.
+                            let pipeline_continues =
+                                sched.b1_greedy_pipeline_pending_id().is_some();
+                            let gc_result = if pipeline_continues {
+                                Ok(Vec::new())
+                            } else {
+                                sched.gc_finished_rows(&mut event_txs)
+                            };
+                            let evicted_count = match gc_result {
                                 Ok(evicted) => evicted.len(),
                                 Err(error) => {
                                     tracing::error!(%error, "request-owned KV release failed");
@@ -4113,7 +4220,9 @@ fn driver_loop<M, A>(
                                     continue 'outer;
                                 }
                             };
-                            mtp_counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
+                            if !pipeline_continues {
+                                mtp_counters.store_prompt_lookup_stats(sched.prompt_lookup_stats());
+                            }
                             if let (
                                 Some((
                                     step_active_before,
@@ -4234,6 +4343,24 @@ fn driver_loop<M, A>(
                         }
                     }
                 }
+            }
+
+            // The sole ordinary B1 row is still live and its successor is
+            // already executing on the GPU. None of the generic tail work can
+            // change scheduler state in this regime; external work or client
+            // cancellation prevents this shortcut and is handled on the very
+            // next turn.
+            let can_continue_b1_fast = admission_queue.is_empty()
+                && in_flight_mid_admit.is_none()
+                && parked_active_kv.is_empty()
+                && paused_background.is_empty()
+                && cmd_rx.is_empty()
+                && control_rx.is_empty()
+                && sched
+                    .b1_greedy_pipeline_pending_id()
+                    .is_some_and(|id| event_txs.get(&id).is_some_and(|tx| !tx.is_closed()));
+            if can_continue_b1_fast {
+                continue 'rolling;
             }
 
             // B1-p2.5 G3: update /healthz live counters at tail of every rolling step.
@@ -4861,6 +4988,15 @@ where
     A: SchedulerActorMtpMode<M>,
 {
     let mut evicted = 0;
+    if let Some(id) = sched.b1_greedy_pipeline_pending_id() {
+        let abandoned = event_txs.get(&id).is_none_or(|tx| tx.is_closed());
+        if abandoned {
+            if let Err(error) = sched.discard_b1_greedy_pipeline() {
+                tracing::warn!(request_id = id.0, %error, "failed to drain cancelled B1 greedy pipeline");
+                return 0;
+            }
+        }
+    }
     if let Some(handle) = in_flight_mid_admit.as_ref() {
         let id = A::mid_admit_request_id(handle);
         let abandoned = event_txs.get(&id).is_some_and(|tx| tx.is_closed());
@@ -5164,6 +5300,20 @@ fn route_event(ev: StepEvent, event_txs: &HashMap<RequestId, mpsc::UnboundedSend
         // that request and releases its KV/governor reservations.
         let _ = tx.send(ev);
     }
+}
+
+fn drain_b1_greedy_pipeline_before_mutation<M>(
+    sched: &mut Scheduler<M>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+) -> Result<()>
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    if let Some(event) = sched.drain_b1_greedy_pipeline()? {
+        route_event(event, event_txs);
+        let _ = sched.gc_finished_rows(event_txs)?;
+    }
+    Ok(())
 }
 
 fn try_park_one_active_kv_request<M>(
@@ -5545,16 +5695,20 @@ where
             }
         }
         batch_count.fetch_add(1, Ordering::Relaxed);
+        let can_prime_b1_pipeline = admission_queue.is_empty() && cmd_rx.is_empty();
         let prefill_result = {
             let model_lock = model.blocking_lock();
-            mtp_mode.prefill_admitted(sched, &model_lock, mtp_counters)
+            prefill_admitted_route_and_optional_b1_pipeline(
+                sched,
+                &model_lock,
+                mtp_mode,
+                mtp_counters,
+                can_prime_b1_pipeline,
+                event_txs,
+            )
         };
         match prefill_result {
-            Ok(events) => {
-                for ev in events {
-                    route_event(ev, event_txs);
-                }
-            }
+            Ok(_) => {}
             Err(e) => {
                 tracing::error!("[SchedulerActor] re-prefill (queue drain) error: {e:?}");
                 if let Err(evict_err) = sched.evict_all() {
@@ -5621,16 +5775,20 @@ where
                 ));
             }
             batch_count.fetch_add(1, Ordering::Relaxed);
+            let can_prime_b1_pipeline = admission_queue.is_empty() && cmd_rx.is_empty();
             let prefill_result = {
                 let model_lock = model.blocking_lock();
-                mtp_mode.prefill_admitted(sched, &model_lock, mtp_counters)
+                prefill_admitted_route_and_optional_b1_pipeline(
+                    sched,
+                    &model_lock,
+                    mtp_mode,
+                    mtp_counters,
+                    can_prime_b1_pipeline,
+                    event_txs,
+                )
             };
             match prefill_result {
-                Ok(events) => {
-                    for ev in events {
-                        route_event(ev, event_txs);
-                    }
-                }
+                Ok(_) => {}
                 Err(e) => {
                     tracing::error!("[SchedulerActor] re-prefill error: {e:?}");
                     if let Err(evict_err) = sched.evict_all() {
@@ -5661,6 +5819,7 @@ pub(crate) mod tests {
     use crate::core::generation_types::GenerateRequest;
     use ironmlx_core::sampler::Sampler;
     use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
+    use serial_test::serial;
 
     use super::test_support::*;
 
@@ -5684,6 +5843,10 @@ pub(crate) mod tests {
             meta,
         )
         .expect("test scheduler startup")
+    }
+
+    fn configure_local_test_metallib() {
+        crate::test_metallib::configure_from_mlx_dir();
     }
 
     #[test]
@@ -6195,7 +6358,9 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial(mlx_metal)]
     async fn queued_admission_failures_preserve_later_requests() {
+        configure_local_test_metallib();
         for queue_valid_request in [false, true] {
             let model = Arc::new(Mutex::new(SchedulerActorFakeModel::with_forward_delay(
                 Duration::from_millis(25),
@@ -6343,7 +6508,9 @@ pub(crate) mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial(mlx_metal)]
     async fn foreground_request_preempts_and_then_resumes_background_in_place() {
+        configure_local_test_metallib();
         let model = Arc::new(Mutex::new(SchedulerActorFakeModel::with_forward_delay(
             Duration::from_millis(20),
         )));

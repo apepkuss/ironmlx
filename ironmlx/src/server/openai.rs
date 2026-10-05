@@ -18,7 +18,6 @@ use axum::{
 };
 use mlx::Array;
 use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
 
 use super::image_input::ImageRequestBudget;
 use crate::server::chat_format::render_and_encode;
@@ -28,7 +27,6 @@ use ironmlx_lm::core::image_input::ImageInputError;
 use ironmlx_lm::core::model::Model;
 use ironmlx_lm::core::vision::DenseVlMethods;
 use ironmlx_lm::core::vision_input::VisionInputConfig;
-use ironmlx_runtime::core::direct_execution::spawn_direct;
 use ironmlx_runtime::core::generation_types::{GenerateRequest, RequestPriority};
 use ironmlx_runtime::core::scheduler_actor::AdmitReply;
 use ironmlx_runtime::core::speculative::MtpSpeculativeConfig;
@@ -85,11 +83,6 @@ pub(crate) fn generation_err_to_response(err: anyhow::Error) -> Response {
 
 fn bad_request_response(code: &'static str, message: impl Into<String>) -> Response {
     super::api_error::ApiError::invalid_request(code, message)
-        .into_response(super::api_error::ApiProtocol::OpenAi)
-}
-
-fn internal_error_response(code: &'static str, message: impl Into<String>) -> Response {
-    super::api_error::ApiError::internal(code, message)
         .into_response(super::api_error::ApiProtocol::OpenAi)
 }
 
@@ -915,23 +908,6 @@ pub(crate) fn build_sampler(req: &ChatRequest, defaults: SamplingDefaults) -> Sa
     s
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ChatCompletionsRoute {
-    SchedulerStream,
-    GenerationStreamStream,
-    SchedulerUnary,
-    GenerationStreamUnary,
-}
-
-fn chat_completions_route(stream: bool, use_scheduler: bool) -> ChatCompletionsRoute {
-    match (stream, use_scheduler) {
-        (true, true) => ChatCompletionsRoute::SchedulerStream,
-        (true, false) => ChatCompletionsRoute::GenerationStreamStream,
-        (false, true) => ChatCompletionsRoute::SchedulerUnary,
-        (false, false) => ChatCompletionsRoute::GenerationStreamUnary,
-    }
-}
-
 pub(crate) fn stop_token_ids_for_request(eos_token_ids: &[u32], ignore_eos: bool) -> Vec<u32> {
     if ignore_eos {
         Vec::new()
@@ -1056,20 +1032,6 @@ where
     let prompt_len = prompt_ids.len();
     let scheduler_config = state.scheduler_request_config(prompt_len, max_tokens);
 
-    // Routing: short-prompt, paged-prefix-cache, and model-limited chunked
-    // long-prompt requests use SchedulerActor; other chunked long prompts keep
-    // using GenerationStream.
-    // B1-p2.4: VL fallback removed — VL requests now route through Scheduler
-    // via Scheduler::admit/admit_mid + batched_prefill_vl.
-    let use_scheduler = state.request_execution.is_dflash2()
-        || super::should_route_to_scheduler::<M>(
-            prompt_len,
-            scheduler_config.prefill_chunk_size,
-            state.b_max,
-            state.paged_prefix_cache_enabled,
-            state.force_scheduler_for_greedy && sampler.is_pipelinable(),
-        );
-
     let stop_token_ids = stop_token_ids_for_request(state.tokenizer.eos_token_ids(), ignore_eos);
     let native_output = match state
         .tokenizer
@@ -1124,65 +1086,30 @@ where
             output_format: output_format.clone(),
             constraint_options,
         };
-        return match chat_completions_route(stream, use_scheduler) {
-            ChatCompletionsRoute::SchedulerStream | ChatCompletionsRoute::SchedulerUnary => {
-                serve_via_scheduler_tools(
-                    state,
-                    request,
-                    model_label,
-                    prompt_tokens,
-                    include_usage,
-                    stream,
-                    tool_context,
-                )
-                .await
-            }
-            ChatCompletionsRoute::GenerationStreamStream
-            | ChatCompletionsRoute::GenerationStreamUnary => {
-                serve_via_gs_tools(
-                    state,
-                    request,
-                    model_label,
-                    prompt_tokens,
-                    include_usage,
-                    stream,
-                    tool_context,
-                )
-                .await
-            }
-        };
+        return serve_via_scheduler_tools(
+            state,
+            request,
+            model_label,
+            prompt_tokens,
+            include_usage,
+            stream,
+            tool_context,
+        )
+        .await;
     }
 
-    match chat_completions_route(stream, use_scheduler) {
-        ChatCompletionsRoute::SchedulerStream => {
-            serve_via_scheduler_stream(
-                state,
-                request,
-                model_label,
-                prompt_tokens,
-                include_usage,
-                output_format,
-            )
-            .await
-        }
-        ChatCompletionsRoute::GenerationStreamStream => {
-            serve_via_gs_stream(
-                state,
-                request,
-                model_label,
-                prompt_tokens,
-                include_usage,
-                output_format,
-            )
-            .await
-        }
-        ChatCompletionsRoute::SchedulerUnary => {
-            serve_via_scheduler_unary(state, request, model_label, prompt_tokens, output_format)
-                .await
-        }
-        ChatCompletionsRoute::GenerationStreamUnary => {
-            serve_via_gs_unary(state, request, model_label, prompt_tokens, output_format).await
-        }
+    if stream {
+        serve_via_scheduler_stream(
+            state,
+            request,
+            model_label,
+            prompt_tokens,
+            include_usage,
+            output_format,
+        )
+        .await
+    } else {
+        serve_via_scheduler_unary(state, request, model_label, prompt_tokens, output_format).await
     }
 }
 
@@ -1743,189 +1670,6 @@ fn tool_finish_chunk(id: &str, model_id: &str, finish_reason: &'static str) -> B
     })
 }
 
-async fn serve_via_gs_tools_stream<M>(
-    state: AppState<M>,
-    request: GenerateRequest,
-    model_id: String,
-    prompt_tokens: u32,
-    include_usage: bool,
-    tool_context: ToolResponseContext,
-) -> Response
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    let started_at = Instant::now();
-    let (decoder_config, constraint_options, output_format) = tool_context.decoder_config();
-    let id = gen_id();
-    let id_for_task = id.clone();
-    let model_for_task = model_id.clone();
-    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
-    let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
-    spawn_direct(state, request, move |initialized| {
-        let mut generation = match initialized {
-            Ok(generation) => generation,
-            Err(error) => {
-                let _ = init_tx.send(Err(error));
-                return;
-            }
-        };
-        let tokenizer = generation.tokenizer();
-        let first_event = match generation.next_token() {
-            Ok(event) => event,
-            Err(error) => {
-                let _ = init_tx.send(Err(error));
-                return;
-            }
-        };
-        let mut decoder = match GeneratedOutputDecoder::new(tokenizer, Some(decoder_config)) {
-            Ok(decoder) => decoder,
-            Err(error) => {
-                let _ = init_tx.send(Err(error));
-                return;
-            }
-        };
-        generation.commit_memory();
-        let mut performance = generation.record_request_started(prompt_tokens, started_at);
-        if init_tx.send(Ok(())).is_err()
-            || tx
-                .blocking_send(Ok(tool_role_chunk(&id_for_task, &model_for_task)))
-                .is_err()
-        {
-            return;
-        }
-
-        let mut completion_tokens = 0_u32;
-        let mut next_call_index = 0_usize;
-        let mut call_names = Vec::new();
-        let mut first_event = Some(first_event);
-        let mut model_finish = "stop";
-        let mut typed_finish = None;
-        let mut content = String::new();
-        loop {
-            if disconnect.is_cancelled() {
-                return;
-            }
-            let event_result = match first_event.take() {
-                Some(event) => Ok(event),
-                None => generation.next_token(),
-            };
-            let event = match event_result {
-                Ok(Some(event)) => event,
-                Ok(None) => break,
-                Err(error) => {
-                    let _ = tx.blocking_send(Ok(format_sse_error(&error)));
-                    return;
-                }
-            };
-            completion_tokens += 1;
-            performance.record_output_tokens(1);
-            let events = if event.finish_reason == Some("stop") {
-                Ok(Vec::new())
-            } else {
-                decoder.push_token(event.token)
-            };
-            let events = match events {
-                Ok(events) => events,
-                Err(error) => {
-                    let _ = tx.blocking_send(Ok(format_sse_error(&error)));
-                    return;
-                }
-            };
-            for frame in match format_tool_output_events(
-                &id_for_task,
-                &model_for_task,
-                events,
-                &mut next_call_index,
-                &mut call_names,
-                &mut typed_finish,
-                &mut content,
-            ) {
-                Ok(frames) => frames,
-                Err(error) => {
-                    let _ = tx.blocking_send(Ok(format_sse_error(&error)));
-                    return;
-                }
-            } {
-                if tx.blocking_send(Ok(frame)).is_err() {
-                    return;
-                }
-            }
-            if let Some(reason) = event.finish_reason {
-                model_finish = reason;
-                break;
-            }
-        }
-        if disconnect.is_cancelled() {
-            return;
-        }
-        let events = match decoder.finish(model_finish) {
-            Ok(events) => events,
-            Err(error) => {
-                let _ = tx.blocking_send(Ok(format_sse_error(&error)));
-                return;
-            }
-        };
-        for frame in match format_tool_output_events(
-            &id_for_task,
-            &model_for_task,
-            events,
-            &mut next_call_index,
-            &mut call_names,
-            &mut typed_finish,
-            &mut content,
-        ) {
-            Ok(frames) => frames,
-            Err(error) => {
-                let _ = tx.blocking_send(Ok(format_sse_error(&error)));
-                return;
-            }
-        } {
-            if tx.blocking_send(Ok(frame)).is_err() {
-                return;
-            }
-        }
-        if let Err(error) = validate_tool_choice_output(&constraint_options, &call_names) {
-            let _ = tx.blocking_send(Ok(format_sse_error(&error)));
-            return;
-        }
-        let finish = typed_finish.unwrap_or(model_finish);
-        if let Err(error) =
-            output_format.validate_completion(&content, !call_names.is_empty(), finish)
-        {
-            let _ = tx.blocking_send(Ok(format_sse_error(&error)));
-            return;
-        }
-        performance.complete();
-        if tx
-            .blocking_send(Ok(tool_finish_chunk(&id_for_task, &model_for_task, finish)))
-            .is_err()
-        {
-            return;
-        }
-        if include_usage {
-            let usage = StreamUsageChunk::new(
-                id_for_task,
-                model_for_task,
-                prompt_tokens,
-                completion_tokens,
-            );
-            if tx.blocking_send(Ok(format_sse_data(&usage))).is_err() {
-                return;
-            }
-        }
-        let _ = tx.blocking_send(Ok(Bytes::from_static(b"data: [DONE]\n\n")));
-    });
-
-    match init_rx.await {
-        Ok(Ok(())) => super::api_transport::disconnect_aware_sse_response(rx),
-        Ok(Err(error)) => generation_err_to_response(error),
-        Err(error) => internal_error_response(
-            "generation_initialization_channel_closed",
-            format!("generation initialization channel closed: {error}"),
-        ),
-    }
-}
-
 async fn serve_via_scheduler_tools_stream<M>(
     state: AppState<M>,
     request: GenerateRequest,
@@ -2069,103 +1813,6 @@ where
     super::api_transport::disconnect_aware_sse_response(rx)
 }
 
-async fn serve_via_gs_tools<M>(
-    state: AppState<M>,
-    request: GenerateRequest,
-    model_id: String,
-    prompt_tokens: u32,
-    include_usage: bool,
-    stream_response: bool,
-    tool_context: ToolResponseContext,
-) -> Response
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    if stream_response {
-        return serve_via_gs_tools_stream(
-            state,
-            request,
-            model_id,
-            prompt_tokens,
-            include_usage,
-            tool_context,
-        )
-        .await;
-    }
-    let started_at = Instant::now();
-    let (decoder_config, constraint_options, output_format) = tool_context.decoder_config();
-    let id = gen_id();
-    let result = spawn_direct(
-        state,
-        request,
-        move |initialized| -> anyhow::Result<ParsedAssistantOutput> {
-            let mut generation = initialized?;
-            let tokenizer = generation.tokenizer();
-            let mut decoder = GeneratedOutputDecoder::new(tokenizer, Some(decoder_config))?;
-            let mut output = ParsedAssistantOutput {
-                content: String::new(),
-                tool_calls: Vec::new(),
-                finish_reason: "stop",
-                completion_tokens: 0,
-            };
-            let mut performance = None;
-            loop {
-                let Some(event) = generation.next_token()? else {
-                    break;
-                };
-                if generation.commit_memory() {
-                    performance =
-                        Some(generation.record_request_started(prompt_tokens, started_at));
-                }
-                output.completion_tokens += 1;
-                performance
-                    .as_mut()
-                    .expect("performance tracker starts with the first generated token")
-                    .record_output_tokens(1);
-                let events = if event.finish_reason == Some("stop") {
-                    Vec::new()
-                } else {
-                    decoder.push_token(event.token)?
-                };
-                collect_generated_events(&mut output, events)?;
-                if let Some(reason) = event.finish_reason {
-                    output.finish_reason = reason;
-                    break;
-                }
-            }
-            let model_finish = output.finish_reason;
-            finish_output_decoder(&mut decoder, &mut output, model_finish)?;
-            let call_names = output
-                .tool_calls
-                .iter()
-                .map(|call| call.name.clone())
-                .collect::<Vec<_>>();
-            validate_tool_choice_output(&constraint_options, &call_names)?;
-            output_format.validate_completion(
-                &output.content,
-                !output.tool_calls.is_empty(),
-                output.finish_reason,
-            )?;
-            performance
-                .ok_or_else(|| anyhow::anyhow!("generation ended before producing a token"))?
-                .complete();
-            Ok(output)
-        },
-    )
-    .await;
-    let output = match result {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => return generation_err_to_response(error),
-        Err(error) => {
-            return internal_error_response(
-                "generation_task_failed",
-                format!("join error: {error}"),
-            );
-        }
-    };
-    tool_completion_response(id, model_id, prompt_tokens, output)
-}
-
 async fn serve_via_scheduler_tools<M>(
     state: AppState<M>,
     request: GenerateRequest,
@@ -2256,189 +1903,6 @@ where
     tool_completion_response(id, model_id, prompt_tokens, output)
 }
 
-async fn serve_via_gs_stream<M>(
-    state: AppState<M>,
-    request: GenerateRequest,
-    model_id: String,
-    prompt_tokens: u32,
-    include_usage: bool,
-    output_format: StructuredOutputFormat,
-) -> Response
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    let started_at = Instant::now();
-    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
-    let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
-    let id = gen_id();
-    let id_for_task = id.clone();
-    let model_id_for_task = model_id.clone();
-
-    spawn_direct(state, request, move |initialized| {
-        let mut stream = match initialized {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = init_tx.send(Err(e));
-                return;
-            }
-        };
-        let tokenizer = stream.tokenizer();
-        let first_event = match stream.next_token() {
-            Ok(event) => event,
-            Err(error) => {
-                let _ = init_tx.send(Err(error));
-                return;
-            }
-        };
-        stream.commit_memory();
-        let mut performance = stream.record_request_started(prompt_tokens, started_at);
-        if init_tx.send(Ok(())).is_err() {
-            return;
-        }
-
-        // First chunk: emit role.
-        let role_chunk = ChunkResponse {
-            id: id_for_task.clone(),
-            object: "chat.completion.chunk",
-            created: now_unix(),
-            model: model_id_for_task.clone(),
-            choices: vec![Choice {
-                index: 0,
-                delta: DeltaRole {
-                    role: "assistant",
-                    content: String::new(),
-                },
-                finish_reason: None,
-            }],
-        };
-
-        // T0a.8 Step 5 (role): wrap the role-chunk send in sse_write_role_chunk.
-
-        let role_send_result = tx.blocking_send(Ok(format_sse_data(&role_chunk)));
-
-        if role_send_result.is_err() {
-            return;
-        }
-
-        let mut decoder = match GeneratedOutputDecoder::new(tokenizer, None) {
-            Ok(decoder) => decoder,
-            Err(error) => {
-                let _ = tx.blocking_send(Ok(format_sse_error(&error)));
-                return;
-            }
-        };
-        let mut completion_tokens = 0_u32;
-        let mut first_event = Some(first_event);
-        let mut finish_reason = None;
-        let mut next_call_index = 0_usize;
-        let mut call_names = Vec::new();
-        let mut content = String::new();
-        loop {
-            if disconnect.is_cancelled() {
-                return;
-            }
-            let ev_result = match first_event.take() {
-                Some(event) => Ok(event),
-                None => stream.next_token(),
-            };
-
-            match ev_result {
-                Ok(Some(ev)) => {
-                    completion_tokens += 1;
-                    let mut events = if ev.finish_reason == Some("stop") {
-                        Vec::new()
-                    } else {
-                        match decoder.push_token(ev.token) {
-                            Ok(events) => events,
-                            Err(error) => {
-                                let _ = tx.blocking_send(Ok(format_sse_error(&error)));
-                                return;
-                            }
-                        }
-                    };
-                    if let Some(reason) = ev.finish_reason {
-                        match decoder.finish(reason) {
-                            Ok(tail) => events.extend(tail),
-                            Err(error) => {
-                                let _ = tx.blocking_send(Ok(format_sse_error(&error)));
-                                return;
-                            }
-                        }
-                    }
-                    let frames = match format_tool_output_events(
-                        &id_for_task,
-                        &model_id_for_task,
-                        events,
-                        &mut next_call_index,
-                        &mut call_names,
-                        &mut finish_reason,
-                        &mut content,
-                    ) {
-                        Ok(frames) => frames,
-                        Err(error) => {
-                            let _ = tx.blocking_send(Ok(format_sse_error(&error)));
-                            return;
-                        }
-                    };
-                    for frame in frames {
-                        if tx.blocking_send(Ok(frame)).is_err() {
-                            return;
-                        }
-                    }
-                    performance.record_output_tokens(1);
-                    if ev.finish_reason.is_some() {
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    let _ = tx.blocking_send(Ok(format_sse_error(&e)));
-                    break;
-                }
-            }
-        }
-        if disconnect.is_cancelled() {
-            return;
-        }
-        if let Some(reason) = finish_reason {
-            if let Err(error) = output_format.validate_completion(&content, false, reason) {
-                let _ = tx.blocking_send(Ok(format_sse_error(&error)));
-                return;
-            }
-            performance.complete();
-            let _ = tx.blocking_send(Ok(tool_finish_chunk(
-                &id_for_task,
-                &model_id_for_task,
-                reason,
-            )));
-        }
-        if include_usage {
-            let usage = StreamUsageChunk::new(
-                id_for_task.clone(),
-                model_id_for_task.clone(),
-                prompt_tokens,
-                completion_tokens,
-            );
-            let _ = tx.blocking_send(Ok(format_sse_data(&usage)));
-        }
-        let _ = tx.blocking_send(Ok(Bytes::from_static(b"data: [DONE]\n\n")));
-    });
-
-    match init_rx.await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => return generation_err_to_response(error),
-        Err(error) => {
-            return internal_error_response(
-                "generation_initialization_channel_closed",
-                format!("generation initialization channel closed: {error}"),
-            );
-        }
-    }
-
-    super::api_transport::disconnect_aware_sse_response(rx)
-}
-
-/// Text-only short-prompt SSE path via SchedulerActor (3b-2 swap-in).
 async fn serve_via_scheduler_stream<M>(
     state: AppState<M>,
     request: GenerateRequest,
@@ -2589,93 +2053,6 @@ where
     super::api_transport::disconnect_aware_sse_response(rx)
 }
 
-async fn serve_via_gs_unary<M>(
-    state: AppState<M>,
-    request: GenerateRequest,
-    model_id: String,
-    prompt_tokens: u32,
-    output_format: StructuredOutputFormat,
-) -> Response
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    let started_at = Instant::now();
-    let id = gen_id();
-    let result = spawn_direct(
-        state,
-        request,
-        move |initialized| -> anyhow::Result<ParsedAssistantOutput> {
-            let mut stream = initialized?;
-            let tokenizer = stream.tokenizer();
-            let mut decoder = GeneratedOutputDecoder::new(tokenizer, None)?;
-            let mut performance = stream.record_request_started(prompt_tokens, started_at);
-            let mut output = ParsedAssistantOutput {
-                content: String::new(),
-                tool_calls: Vec::new(),
-                finish_reason: "stop",
-                completion_tokens: 0,
-            };
-            let mut finished = false;
-            loop {
-                let next = stream.next_token()?;
-                stream.commit_memory();
-                let Some(ev) = next else {
-                    break;
-                };
-                performance.record_output_tokens(1);
-                let events = if ev.finish_reason == Some("stop") {
-                    Vec::new()
-                } else {
-                    decoder.push_token(ev.token)?
-                };
-                collect_generated_events(&mut output, events)?;
-                output.completion_tokens += 1;
-                if let Some(reason) = ev.finish_reason {
-                    collect_generated_events(&mut output, decoder.finish(reason)?)?;
-                    finished = true;
-                    break;
-                }
-            }
-            anyhow::ensure!(finished, "generation ended before a terminal event");
-            output_format.validate_completion(&output.content, false, output.finish_reason)?;
-            performance.complete();
-            Ok(output)
-        },
-    )
-    .await;
-
-    let output = match result {
-        Ok(Ok(output)) => output,
-        Ok(Err(err)) => return generation_err_to_response(err),
-        Err(e) => {
-            return internal_error_response("generation_task_failed", format!("join error: {e}"));
-        }
-    };
-
-    let resp = CompletionResponse {
-        id,
-        object: "chat.completion",
-        created: now_unix(),
-        model: model_id,
-        choices: vec![CompletionChoice {
-            index: 0,
-            message: CompletionMessage {
-                role: "assistant",
-                content: Some(output.content),
-                tool_calls: Vec::new(),
-            },
-            finish_reason: output.finish_reason,
-        }],
-        usage: Usage {
-            prompt_tokens,
-            completion_tokens: output.completion_tokens,
-            total_tokens: prompt_tokens + output.completion_tokens,
-        },
-    };
-    Json(resp).into_response()
-}
-
-/// Text-only short-prompt unary path via SchedulerActor (3b-2 swap-in).
 async fn serve_via_scheduler_unary<M>(
     state: AppState<M>,
     request: GenerateRequest,
@@ -2843,26 +2220,6 @@ mod tests {
         assert!(s.starts_with("data: "), "missing prefix: {s:?}");
         assert!(s.ends_with("\n\n"), "missing terminator: {s:?}");
         assert!(s.contains("\"a\":1"), "payload not embedded: {s:?}");
-    }
-
-    #[test]
-    fn chat_completions_routes_streaming_and_unary_scheduler_requests() {
-        assert_eq!(
-            chat_completions_route(true, true),
-            ChatCompletionsRoute::SchedulerStream
-        );
-        assert_eq!(
-            chat_completions_route(false, true),
-            ChatCompletionsRoute::SchedulerUnary
-        );
-        assert_eq!(
-            chat_completions_route(true, false),
-            ChatCompletionsRoute::GenerationStreamStream
-        );
-        assert_eq!(
-            chat_completions_route(false, false),
-            ChatCompletionsRoute::GenerationStreamUnary
-        );
     }
 
     #[test]

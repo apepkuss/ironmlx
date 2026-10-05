@@ -25,6 +25,9 @@ public struct AppConfig: Codable, Equatable, Sendable {
     public var cacheDir: String?
     public var kvQuant: String?
     public var activeKvOffload: Bool?
+    /// DFlash2 profile for Apple GPU generation 17+ (M5); nil or true = auto,
+    /// false = off.
+    public var m5Dflash2Profile: Bool?
     public var maxSequences: Int?
     public var maxModels: Int?
     public var modelTtlMinutes: Int?
@@ -65,6 +68,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
         cacheDir: String? = nil,
         kvQuant: String? = nil,
         activeKvOffload: Bool? = nil,
+        m5Dflash2Profile: Bool? = nil,
         maxSequences: Int? = nil,
         maxModels: Int? = nil,
         modelTtlMinutes: Int? = nil,
@@ -104,6 +108,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
         self.cacheDir = cacheDir
         self.kvQuant = kvQuant
         self.activeKvOffload = activeKvOffload
+        self.m5Dflash2Profile = m5Dflash2Profile
         self.maxSequences = maxSequences
         self.maxModels = maxModels
         self.modelTtlMinutes = modelTtlMinutes
@@ -145,6 +150,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
         case cacheDir = "cache_dir"
         case kvQuant = "kv_quant"
         case activeKvOffload = "active_kv_offload"
+        case m5Dflash2Profile = "m5_dflash2_profile"
         case maxSequences = "max_sequences"
         case maxModels = "max_models"
         case modelTtlMinutes = "model_ttl_minutes"
@@ -656,6 +662,7 @@ public final class AppConfigStore: @unchecked Sendable {
         "language", "theme", "log_level", "mem_limit_total", "mem_limit_model",
         "mem_total_auto", "mem_total", "mem_model_auto", "mem_model", "hot_cache",
         "cold_cache", "cache_enable", "cache_dir", "kv_quant", "active_kv_offload",
+        "m5_dflash2_profile",
         "max_sequences", "max_models", "model_ttl_minutes", "verify_model_on_load",
         "distributed_backend", "parallel_mode", "prefill_chunk_size", "b_max",
         "admission_deadline_ms", "admission_queue_max", "max_cache_cap",

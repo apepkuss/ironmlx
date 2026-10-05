@@ -14,11 +14,16 @@ product.
 | gguflib | `8fa6eb65236618e28fd7710a0fba565f7faa1848` | MIT | `THIRD_PARTY_LICENSES/native-gguflib-mit.txt` | https://github.com/antirez/gguf-tools.git |
 | metal-cpp | `metal-cpp_26.zip` | Apache-2.0 | `THIRD_PARTY_LICENSES/native-metal-cpp-apache-2.0.txt` | https://developer.apple.com/metal/cpp/ |
 | MLX C++ with bundled JACCL | `73ad5df20cb30be4192e5c4d0ae8130674773427` | MIT | `THIRD_PARTY_LICENSES/native-mlx-mit.txt` | https://github.com/apepkuss/mlx.git |
+| MLX Metal kernel headers (vendored, IronMLX fork) | `73ad5df20cb30be4192e5c4d0ae8130674773427` | MIT | `THIRD_PARTY_LICENSES/native-mlx-kernel-headers-fork-mit.txt` | https://github.com/apepkuss/mlx.git |
+| MLX Metal kernel headers (vendored, upstream v0.32.3) | `64ea011cb65f14d9ce2737e60db9a4ae91ed7441` | MIT | `THIRD_PARTY_LICENSES/native-mlx-kernel-headers-v0.32.3-mit.txt` | https://github.com/ml-explore/mlx.git |
 | nlohmann/json | `3.11.3` | MIT | `THIRD_PARTY_LICENSES/native-nlohmann-json-mit.txt` | https://github.com/nlohmann/json.git |
 
 The MLX entry identifies the non-official IronMLX fork and its exact
 revision. Bundled JACCL sources are part of that checkout and are covered
-by the checkout's MLX license file.
+by the checkout's MLX license file. The MLX Metal kernel header entries
+are vendored copies (`mlx-sys/shaders/vendor`) compiled into the
+embedded prefill kernel libraries; each file is verified against the
+listed MLX revision.
 
 ## Rust dependencies
 

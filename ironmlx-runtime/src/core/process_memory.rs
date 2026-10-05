@@ -377,9 +377,27 @@ impl Default for MemoryGovernorConfig {
             mlx_cache_ratio: 0.05,
             mlx_cache_min_bytes: 128 * MIB,
             mlx_cache_cold_max_bytes: 512 * MIB,
-            mlx_cache_max_bytes: 2 * GIB,
+            mlx_cache_max_bytes: experimental_mlx_cache_max_bytes().unwrap_or(2 * GIB),
         }
     }
+}
+
+/// Experimental, default off: `IRONMLX_EXPERIMENTAL_MLX_CACHE_MAX_MIB` raises
+/// the governor's MLX buffer-cache ceiling (default 2 GiB) so long-prefill
+/// attention score buffers (3.2 GB at 32K) can be reused between layers.
+/// Pressure levels, headroom and the ratio budget still apply.
+fn experimental_mlx_cache_max_bytes() -> Option<usize> {
+    static VALUE: OnceLock<Option<usize>> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        let mib = ironmlx_core::m5_profile::setting(
+            ironmlx_core::m5_profile::settings::MLX_CACHE_MAX_MIB,
+        )?
+        .parse::<usize>()
+        .ok()
+        .filter(|mib| *mib > 0)?;
+        tracing::info!(mib, "MLX cache ceiling raised");
+        mib.checked_mul(MIB)
+    })
 }
 
 impl MemoryGovernorConfig {
@@ -1248,7 +1266,7 @@ struct RusageInfoV4 {
     tail: [u64; 27],
 }
 
-fn macos_phys_footprint_bytes() -> Option<usize> {
+pub(crate) fn macos_phys_footprint_bytes() -> Option<usize> {
     #[cfg(target_os = "macos")]
     {
         #[link(name = "proc")]

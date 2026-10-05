@@ -41,6 +41,8 @@ public struct BackendLaunchOptions: Equatable {
     public var prefixLruCacheMaxBytes: Int?
     public var ssdPrefixCacheMaxGB: Int?
     public var activeKvOffload: Bool
+    /// M5 DFlash2 profile (`--m5-dflash2-profile auto`); false passes `off`.
+    public var m5DFlash2Profile: Bool
     public var maxLoadedModels: Int?
     public var modelTtlMinutes: Int?
     public var memoryLimitTotalGB: Int?
@@ -60,6 +62,7 @@ public struct BackendLaunchOptions: Equatable {
         prefixLruCacheMaxBytes: Int? = nil,
         ssdPrefixCacheMaxGB: Int? = nil,
         activeKvOffload: Bool = false,
+        m5DFlash2Profile: Bool = true,
         maxLoadedModels: Int? = nil,
         modelTtlMinutes: Int? = nil,
         memoryLimitTotalGB: Int? = nil,
@@ -78,6 +81,7 @@ public struct BackendLaunchOptions: Equatable {
         self.prefixLruCacheMaxBytes = prefixLruCacheMaxBytes
         self.ssdPrefixCacheMaxGB = ssdPrefixCacheMaxGB
         self.activeKvOffload = activeKvOffload
+        self.m5DFlash2Profile = m5DFlash2Profile
         self.maxLoadedModels = maxLoadedModels
         self.modelTtlMinutes = modelTtlMinutes
         self.memoryLimitTotalGB = Self.positiveGigabytes(memoryLimitTotalGB)
@@ -112,6 +116,7 @@ public struct BackendLaunchOptions: Equatable {
             prefixLruCacheMaxBytes: prefixLruCacheMaxBytes,
             ssdPrefixCacheMaxGB: ssdPrefixCacheMaxGB,
             activeKvOffload: config.activeKvOffload == true,
+            m5DFlash2Profile: config.m5Dflash2Profile != false,
             maxLoadedModels: config.maxModels,
             modelTtlMinutes: config.modelTtlMinutes ?? Self.defaultModelTtlMinutes,
             memoryLimitTotalGB: config.memLimitTotal,
@@ -268,6 +273,9 @@ public struct BackendLaunchConfiguration: Equatable {
             appendIntegerFlag("--memory-limit-total-gb", options.memoryLimitTotalGB, to: &arguments)
             appendIntegerFlag("--memory-limit-model-gb", options.memoryLimitModelGB, to: &arguments)
             appendIntegerFlag("--prefix-lru-cache-max-bytes", options.prefixLruCacheMaxBytes, to: &arguments)
+            if !options.m5DFlash2Profile {
+                arguments += ["--m5-dflash2-profile", "off"]
+            }
             return arguments
         }
         appendIntegerFlag("--prefill-chunk-size", options.prefillChunkSize, to: &arguments, allowsZero: true)

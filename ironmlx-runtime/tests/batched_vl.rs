@@ -51,6 +51,13 @@ fn argmax_bit_id_ratio(a: &[u32], b: &[u32]) -> f64 {
 }
 
 fn load_fixture() -> (Arc<Mutex<Qwen35Model>>, Arc<Tokenizer>) {
+    static METALLIB: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    METALLIB.get_or_init(|| {
+        let mlx_dir = std::env::var("MLX_DIR").expect("MLX_DIR required for MLX tests");
+        let path = Path::new(&mlx_dir).join("lib/mlx.metallib");
+        mlx::metal::set_metallib_path(path.to_string_lossy().as_ref())
+            .expect("load MLX_DIR/lib/mlx.metallib for test");
+    });
     let model_dir = std::env::var("QWEN35_MODEL").expect("QWEN35_MODEL env var required");
     let model_path = Path::new(&model_dir);
     let loader = Loader::open_multimodal(model_path).expect("Loader::open_multimodal");

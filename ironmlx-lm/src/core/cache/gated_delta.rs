@@ -303,6 +303,41 @@ impl GatedDeltaCache {
             .ok_or_else(|| anyhow!("GatedDeltaCache speculative replay inputs were not recorded"))
     }
 
+    pub(crate) fn select_tree_replay_rows(
+        &mut self,
+        rows: &[i32],
+        target: StreamOrDevice,
+    ) -> Result<()> {
+        let capture = self
+            .speculative_replay
+            .as_mut()
+            .ok_or_else(|| anyhow!("tree replay missing"))?;
+        let width = capture.q.shape().as_slice()[1];
+        anyhow::ensure!(
+            !rows.is_empty() && rows.iter().all(|&r| r >= 0 && r < width),
+            "invalid tree replay rows"
+        );
+        let idx: Array = (rows, &[rows.len() as i32][..]).try_into()?;
+        for value in [
+            &mut capture.q,
+            &mut capture.k,
+            &mut capture.v,
+            &mut capture.g,
+            &mut capture.beta,
+        ] {
+            *value = mlx::ops::indexing::take_on(value, &idx, 1, target)?;
+        }
+        let keep = capture.conv_input.shape().as_slice()[1] - width;
+        let conv_indices = (0..keep)
+            .chain(rows.iter().map(|&r| keep + r))
+            .collect::<Vec<_>>();
+        let idx: Array = (conv_indices.as_slice(), &[conv_indices.len() as i32][..]).try_into()?;
+        capture.conv_input = mlx::ops::indexing::take_on(&capture.conv_input, &idx, 1, target)?;
+        capture.prefix_states.clear(); // Tree verification deliberately did not commit a linear state.
+        anyhow::ensure!(capture.mask.is_none(), "tree replay does not support masks");
+        Ok(())
+    }
+
     pub(crate) fn discard_speculative_prefix_capture(&mut self) {
         self.speculative_base = None;
         self.speculative_replay = None;

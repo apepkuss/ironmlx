@@ -26,17 +26,21 @@ tokio.workspace = true
 uuid = { version = "1", features = ["v4"] }
 dirs = "6"
 libc.workspace = true
+# Enables pre-harness metallib setup for integration/all-target test builds.
+ctor = { version = "1", optional = true }
 
 [features]
 default = []
 tools = ["dep:clap"]
-test-support = []
+test-support = ["dep:ctor"]
 
 [dev-dependencies]
 ironmlx-lm = { path = "../ironmlx-lm", features = ["test-support"] }
 ironmlx-core = { path = "../ironmlx-core", features = ["test-support"] }
 approx = "0.5"
 serial_test = { version = "3", default-features = false }
+# Unit-test builds do not enable crate features, so they need the macro here too.
+ctor = "1"
 
 [[bin]]
 name = "ironmlx-core-bench"
@@ -51,4 +55,29 @@ required-features = ["tools"]
 [[bin]]
 name = "dflash2-batched-q8-q16-gate"
 path = "src/bin/dflash2-batched-q8-q16-gate.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "prefill-nll"
+path = "src/bin/prefill-nll.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "b1-path-qualification"
+path = "src/bin/b1-path-qualification.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "dflash2-lane-diagnostic"
+path = "src/bin/dflash2-lane-diagnostic.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "dflash2-tree-batch-diagnostic"
+path = "src/bin/dflash2-tree-batch-diagnostic.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "dflash2-ragged-batch-prototype"
+path = "src/bin/dflash2-ragged-batch-prototype.rs"
 required-features = ["tools"]

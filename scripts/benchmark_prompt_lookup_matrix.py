@@ -491,7 +491,6 @@ def build_serve_command(
         str(max_cache_cap),
         "--prefill-chunk-size",
         str(config.prefill_chunk_size),
-        "--force-scheduler",
     ]
     if variant.lookup is not None:
         lookup = variant.lookup

@@ -15,10 +15,12 @@ use anyhow::Context;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::core::dflash2::{
-    DFlash2PrefixCache, DFlash2TensorBatchCache, DFlash2TextGenerationStream,
+    DFlash2PrefixCache, DFlash2RaggedBatchCache, DFlash2TensorBatchCache,
+    DFlash2TextGenerationStream,
 };
 use crate::core::generation_types::{GenerateEvent, GenerateRequest, RequestPriority};
 use crate::core::memory_budget::BudgetState;
+use crate::core::runtime_health::DFlash2RaggedLinearCounters;
 use crate::core::scheduler::{RequestId, SchedulerError, StepEvent};
 use crate::core::scheduler_actor::AdmitReply;
 use crate::Result;
@@ -42,7 +44,7 @@ where
 
 #[derive(Default)]
 struct DFlash2StepOutcome {
-    event: Option<GenerateEvent>,
+    events: Vec<GenerateEvent>,
     cancelled: bool,
     finished: bool,
     failure: Option<String>,
@@ -95,6 +97,184 @@ where
         base = index + 1;
     }
     Ok(streams)
+}
+
+/// Tree/linear switch setting (on with the M5 profile).
+const RAGGED_LINEAR_ENV: &str = ironmlx_core::m5_profile::settings::DFLASH2_RAGGED_LINEAR;
+/// Ragged linear windows use verify width `draft_len + 1` for 2..=4 rows.
+const RAGGED_LINEAR_MAX_WIDTH: usize = 4;
+/// Diagnostic only: an extra limit (bytes) on the KV budget charge allowed
+/// when reserving a ragged group cache, to exercise the budget fallback.
+const RAGGED_BUDGET_LIMIT_ENV: &str = "IRONMLX_DIAGNOSTIC_DFLASH2_RAGGED_BUDGET_LIMIT_BYTES";
+
+/// Rows sharing one batched target cache for ragged linear windows. Each
+/// row's own target cache is stale while the group exists; the group cache
+/// is scattered back before any member runs another window path or leaves.
+struct DFlash2RaggedGroup {
+    request_ids: Vec<RequestId>,
+    cache: DFlash2RaggedBatchCache,
+    /// KV budget charge of the batched cache; released when the group is
+    /// dropped (scatter on membership change, finish, cancel, pause or
+    /// failure).
+    memory_charge: DFlash2MemoryCharge,
+}
+
+/// Charge the KV budget for a ragged group cache: `rows` sequences of
+/// `cap_tokens` each, the same cost model as an admission. `limit` is the
+/// diagnostic extra limit on the resulting active charge.
+/// Process-memory headroom for a ragged group cache, mirroring admission:
+/// refresh the governor sample first (decode does not sample, so a reserve
+/// on stale telemetry would fail closed and force soft pressure for later
+/// admissions), fall back without reserving unless pressure is normal, then
+/// reserve. The caller commits the reservation once the cache exists.
+fn reserve_ragged_group_headroom(
+    governor: &crate::core::process_memory::SharedProcessMemoryGovernor,
+    bytes: usize,
+    refresh: impl FnOnce(
+        &crate::core::process_memory::ProcessMemoryGovernor,
+    ) -> crate::core::process_memory::MemoryGovernorSnapshot,
+) -> Result<crate::core::process_memory::MemoryReservation> {
+    let snapshot = refresh(governor);
+    anyhow::ensure!(
+        snapshot.pressure_level == crate::core::process_memory::PressureLevel::Normal
+            && !snapshot.telemetry_degraded,
+        "process memory pressure {:?} (telemetry degraded: {})",
+        snapshot.pressure_level,
+        snapshot.telemetry_degraded
+    );
+    governor
+        .try_reserve(bytes, "dflash2_ragged_group")
+        .map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+fn reserve_ragged_group_memory(
+    budget_state: &BudgetState,
+    cache_cost: DFlash2TargetCacheCost,
+    cap_tokens: usize,
+    rows: usize,
+    limit: Option<usize>,
+) -> Result<DFlash2MemoryCharge> {
+    let requested_bytes = cache_cost.request_bytes(cap_tokens).saturating_mul(rows);
+    if let Some(limit) = limit {
+        let active_bytes = budget_state.active_bytes();
+        if active_bytes.saturating_add(requested_bytes) > limit {
+            return Err(anyhow::Error::new(SchedulerError::MemoryBudgetExceeded {
+                active_bytes,
+                requested_bytes,
+                soft_limit_bytes: limit,
+            }));
+        }
+    }
+    budget_state
+        .try_admit_with_allowance(requested_bytes, 0)
+        .map_err(|(active_bytes, requested_bytes, soft_limit_bytes)| {
+            anyhow::Error::new(SchedulerError::MemoryBudgetExceeded {
+                active_bytes,
+                requested_bytes,
+                soft_limit_bytes,
+            })
+        })?;
+    Ok(DFlash2MemoryCharge {
+        budget_state: budget_state.clone(),
+        bytes: requested_bytes,
+    })
+}
+
+/// Rows for one ragged linear window. `candidates` are `(active index,
+/// draft_len, supported batch-width mask)` of rows at a window boundary that
+/// may batch; members of the current group come first so an unchanged
+/// membership keeps its batched cache. Returns the chosen active indices in
+/// increasing order, or nothing when fewer than two rows can batch.
+fn select_ragged_linear_rows(
+    candidates: &[(usize, usize, u64)],
+    current_group: &[usize],
+    max_width: usize,
+) -> Vec<usize> {
+    let mut ordered = candidates
+        .iter()
+        .filter(|candidate| current_group.contains(&candidate.0))
+        .chain(
+            candidates
+                .iter()
+                .filter(|candidate| !current_group.contains(&candidate.0)),
+        )
+        .copied()
+        .collect::<Vec<_>>();
+    let Some(&(_, draft_len, _)) = ordered.first() else {
+        return Vec::new();
+    };
+    ordered.retain(|candidate| candidate.1 == draft_len);
+    let mut width = max_width.min(ordered.len());
+    while width >= 2 {
+        let supported = width < u64::BITS as usize
+            && ordered[..width]
+                .iter()
+                .all(|candidate| candidate.2 & (1_u64 << width) != 0);
+        if supported {
+            break;
+        }
+        width -= 1;
+    }
+    if width < 2 {
+        return Vec::new();
+    }
+    let mut chosen = ordered[..width]
+        .iter()
+        .map(|candidate| candidate.0)
+        .collect::<Vec<_>>();
+    chosen.sort_unstable();
+    chosen
+}
+
+/// Active indices of the ragged group's rows that are still present (used
+/// to fail them if the group cannot be scattered back).
+fn ragged_member_positions<'m, M>(
+    active: &[ActiveDFlash2Request<'m, M>],
+    group: Option<&DFlash2RaggedGroup>,
+) -> Vec<usize>
+where
+    M: DFlash2Target,
+{
+    group
+        .map(|group| {
+            group
+                .request_ids
+                .iter()
+                .filter_map(|request_id| {
+                    active
+                        .iter()
+                        .position(|request| request.request_id == *request_id)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn scatter_ragged_group<'m, M>(
+    active: &mut [ActiveDFlash2Request<'m, M>],
+    group: &mut Option<DFlash2RaggedGroup>,
+    counters: &DFlash2RaggedLinearCounters,
+) -> Result<()>
+where
+    M: DFlash2Target,
+{
+    let Some(group) = group.take() else {
+        return Ok(());
+    };
+    counters.active_groups.store(0, Ordering::Relaxed);
+    counters.reserved_bytes.store(0, Ordering::Relaxed);
+    counters.groups_scattered.fetch_add(1, Ordering::Relaxed);
+    let started = std::time::Instant::now();
+    let positions = tensor_group_positions(active, &group.request_ids)
+        .ok_or_else(|| anyhow::anyhow!("DFlash2 ragged group lost a row"))?;
+    let mut streams = tensor_group_streams_mut(active, &positions)?;
+    group.cache.scatter_to_rows(&mut streams)?;
+    drop(group.memory_charge);
+    counters.scatter_us.fetch_add(
+        u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
+    Ok(())
 }
 
 fn scatter_all_tensor_groups<'m, M>(
@@ -392,6 +572,7 @@ pub struct DFlash2ActorHandle {
     pub(crate) prefix_cache_saves: Arc<AtomicU64>,
     pub(crate) prefix_cache_evictions: Arc<AtomicU64>,
     pub(crate) prefix_cache_hit_tokens: Arc<AtomicU64>,
+    pub(crate) ragged_linear: DFlash2RaggedLinearCounters,
 }
 
 #[derive(Clone)]
@@ -495,6 +676,36 @@ where
         "DFlash2 tensor batch width limit must be in 1..=b_max"
     );
     let capacity = admission_queue_max.saturating_add(b_max);
+    let ragged_linear_max_width = b_max.min(RAGGED_LINEAR_MAX_WIDTH);
+    let ragged_linear_enabled =
+        ragged_linear_max_width >= 2 && ironmlx_core::m5_profile::flag(RAGGED_LINEAR_ENV);
+    if ragged_linear_enabled {
+        tracing::info!(
+            target: "ironmlx::dflash2",
+            max_width = ragged_linear_max_width,
+            "DFlash2 tree/linear switch enabled"
+        );
+    }
+    let ragged_linear = DFlash2RaggedLinearCounters {
+        enabled: ragged_linear_enabled,
+        max_width_limit: if ragged_linear_enabled {
+            ragged_linear_max_width
+        } else {
+            0
+        },
+        ..Default::default()
+    };
+    let worker_ragged_linear = ragged_linear.clone();
+    let ragged_budget_limit = std::env::var(RAGGED_BUDGET_LIMIT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok());
+    if let Some(limit) = ragged_budget_limit {
+        tracing::warn!(
+            target: "ironmlx::dflash2",
+            limit,
+            "diagnostic DFlash2 ragged group budget limit enabled"
+        );
+    }
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     let in_flight = Arc::new(AtomicUsize::new(0));
     let b_active = Arc::new(AtomicU64::new(0));
@@ -629,6 +840,9 @@ where
         let mut active = Vec::<ActiveDFlash2Request<'_, M>>::with_capacity(b_max);
         let mut paused_background = VecDeque::<ActiveDFlash2Request<'_, M>>::with_capacity(b_max);
         let mut tensor_groups = Vec::<DFlash2TensorGroup>::with_capacity(b_max / 2);
+        let mut ragged_group = None::<DFlash2RaggedGroup>;
+        let mut token_id_diagnostic =
+            crate::core::dflash2_token_diagnostic::DFlash2TokenIdDiagnostic::from_env();
         let mut pending = VecDeque::<DFlash2Command>::new();
         let mut command_channel_open = true;
 
@@ -658,7 +872,11 @@ where
                     .iter()
                     .any(|request| request.priority.is_background())
             {
-                if let Err(error) = scatter_all_tensor_groups(&mut active, &mut tensor_groups) {
+                if let Err(error) = scatter_all_tensor_groups(&mut active, &mut tensor_groups)
+                    .and_then(|()| {
+                        scatter_ragged_group(&mut active, &mut ragged_group, &worker_ragged_linear)
+                    })
+                {
                     tracing::error!(%error, "DFlash2 background priority scatter failed");
                     for request in active.drain(..).chain(paused_background.drain(..)) {
                         drop(request);
@@ -1101,6 +1319,11 @@ where
 
             worker_batch_count.fetch_add(1, Ordering::Relaxed);
             let batch_width = active.len();
+            // With two or more active rows and the switch on, every row
+            // publishes its whole committed window so rows reach window
+            // boundaries together. A lone row keeps the original one token
+            // per step.
+            let publish_whole_windows = ragged_linear_enabled && active.len() >= 2;
             let mut outcomes = (0..active.len())
                 .map(|_| DFlash2StepOutcome::default())
                 .collect::<Vec<_>>();
@@ -1111,15 +1334,23 @@ where
                     outcomes[index].finished = true;
                     continue;
                 }
-                match request.stream.next_token_deferred() {
-                    Ok(Some(event)) => {
-                        outcomes[index].finished = event.finish_reason.is_some();
-                        outcomes[index].event = Some(event);
+                loop {
+                    match request.stream.next_token_deferred() {
+                        Ok(Some(event)) => {
+                            outcomes[index].finished = event.finish_reason.is_some();
+                            outcomes[index].events.push(event);
+                        }
+                        Ok(None) => outcomes[index].finished = true,
+                        Err(error) => {
+                            outcomes[index].finished = true;
+                            outcomes[index].failure = Some(format!("{error:#}"));
+                        }
                     }
-                    Ok(None) => outcomes[index].finished = true,
-                    Err(error) => {
-                        outcomes[index].finished = true;
-                        outcomes[index].failure = Some(format!("{error:#}"));
+                    if !publish_whole_windows
+                        || outcomes[index].finished
+                        || request.stream.pending_token_count() == 0
+                    {
+                        break;
                     }
                 }
             }
@@ -1131,20 +1362,20 @@ where
                 if outcome.failure.is_some() {
                     continue;
                 }
-                let Some(event) = outcome.event.as_ref() else {
-                    continue;
-                };
-                if active[index]
-                    .event_tx
-                    .send(StepEvent {
-                        id: active[index].request_id,
-                        token: event.token,
-                        finish_reason: event.finish_reason,
-                    })
-                    .is_err()
-                {
-                    outcome.cancelled = true;
-                    outcome.finished = true;
+                for event in &outcome.events {
+                    if active[index]
+                        .event_tx
+                        .send(StepEvent {
+                            id: active[index].request_id,
+                            token: event.token,
+                            finish_reason: event.finish_reason,
+                        })
+                        .is_err()
+                    {
+                        outcome.cancelled = true;
+                        outcome.finished = true;
+                        break;
+                    }
                 }
             }
 
@@ -1284,6 +1515,175 @@ where
                 }
             }
 
+            if ragged_linear_enabled && (active.len() >= 2 || ragged_group.is_some()) {
+                let candidates = keys
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, key)| {
+                        let key = (*key)?;
+                        (!claimed[index]
+                            && !outcomes[index].finished
+                            && !key.is_ordinary_decode()
+                            && active[index].stream.ragged_linear_eligible())
+                        .then_some((index, key.draft_len(), key.supported_batch_widths()))
+                    })
+                    .collect::<Vec<_>>();
+                if candidates.len() == 1 && active.len() > 1 {
+                    worker_ragged_linear
+                        .single_eligible_steps
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                let current_positions = ragged_group
+                    .as_ref()
+                    .and_then(|group| tensor_group_positions(&active, &group.request_ids))
+                    .unwrap_or_default();
+                let selected = select_ragged_linear_rows(
+                    &candidates,
+                    &current_positions,
+                    ragged_linear_max_width,
+                );
+                let reuse = ragged_group.is_some() && selected == current_positions;
+                if !reuse {
+                    let members = ragged_member_positions(&active, ragged_group.as_ref());
+                    if let Err(error) =
+                        scatter_ragged_group(&mut active, &mut ragged_group, &worker_ragged_linear)
+                    {
+                        let error = format!("{error:#}");
+                        for &index in &members {
+                            outcomes[index].finished = true;
+                            outcomes[index].failure = Some(error.clone());
+                        }
+                    }
+                }
+                // A new group needs a KV budget charge (and process headroom)
+                // for its batched cache before it is built; otherwise the
+                // rows keep their original path this step.
+                let mut reservation = None;
+                if selected.len() >= 2
+                    && selected.iter().all(|&index| !outcomes[index].finished)
+                    && ragged_group.is_none()
+                {
+                    let cap_tokens = crate::core::dflash2::ragged_batch_cache_cap(
+                        selected
+                            .iter()
+                            .map(|&index| active[index].stream.ragged_cache_tokens()),
+                    );
+                    match reserve_ragged_group_memory(
+                        &budget_state,
+                        cache_cost,
+                        cap_tokens,
+                        selected.len(),
+                        ragged_budget_limit,
+                    ) {
+                        Ok(charge) => {
+                            match reserve_ragged_group_headroom(
+                                &crate::core::process_memory::global_process_memory_governor(),
+                                charge.bytes(),
+                                crate::core::process_memory::ProcessMemoryGovernor::sample_process,
+                            ) {
+                                Ok(governor) => reservation = Some((charge, governor)),
+                                Err(error) => {
+                                    tracing::debug!(%error, "DFlash2 ragged group: governor fallback");
+                                    worker_ragged_linear
+                                        .governor_fallbacks
+                                        .fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, "DFlash2 ragged group: budget fallback");
+                            worker_ragged_linear
+                                .budget_fallbacks
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                let runnable = ragged_group.is_some() || reservation.is_some();
+                if runnable
+                    && selected.len() >= 2
+                    && selected.iter().all(|&index| !outcomes[index].finished)
+                {
+                    for &index in &selected {
+                        claimed[index] = true;
+                    }
+                    let request_ids = selected
+                        .iter()
+                        .map(|&index| active[index].request_id)
+                        .collect::<Vec<_>>();
+                    let (cache, memory_charge, governor) = match ragged_group.take() {
+                        Some(group) => (Some(group.cache), group.memory_charge, None),
+                        None => {
+                            let (charge, governor) =
+                                reservation.take().expect("new ragged group is reserved");
+                            (None, charge, Some(governor))
+                        }
+                    };
+                    let built = cache.is_none();
+                    let result =
+                        tensor_group_streams_mut(&mut active, &selected).and_then(|mut streams| {
+                            DFlash2TextGenerationStream::fill_ragged_linear_window_bn(
+                                &mut streams,
+                                cache,
+                            )
+                        });
+                    match result {
+                        Ok((cache, timing)) => {
+                            let width = selected.len();
+                            let counters = &worker_ragged_linear;
+                            counters.windows.fetch_add(1, Ordering::Relaxed);
+                            counters.windows_by_width[width - 2].fetch_add(1, Ordering::Relaxed);
+                            counters
+                                .row_windows
+                                .fetch_add(width as u64, Ordering::Relaxed);
+                            counters.emitted_tokens.fetch_add(
+                                timing.emitted.iter().sum::<usize>() as u64,
+                                Ordering::Relaxed,
+                            );
+                            counters.accepted_draft_tokens.fetch_add(
+                                timing.accepted.iter().sum::<usize>() as u64,
+                                Ordering::Relaxed,
+                            );
+                            counters
+                                .window_us
+                                .fetch_add(timing.window_us, Ordering::Relaxed);
+                            counters.max_width.fetch_max(width, Ordering::Relaxed);
+                            if built {
+                                counters.groups_built.fetch_add(1, Ordering::Relaxed);
+                                counters
+                                    .cache_build_us
+                                    .fetch_add(timing.cache_build_us, Ordering::Relaxed);
+                            }
+                            counters.active_groups.store(1, Ordering::Relaxed);
+                            counters
+                                .reserved_bytes
+                                .store(memory_charge.bytes(), Ordering::Relaxed);
+                            if let Some(governor) = governor {
+                                governor.commit();
+                            }
+                            ragged_group = Some(DFlash2RaggedGroup {
+                                request_ids,
+                                cache,
+                                memory_charge,
+                            });
+                        }
+                        Err(error) => {
+                            drop(memory_charge);
+                            worker_ragged_linear
+                                .active_groups
+                                .store(0, Ordering::Relaxed);
+                            worker_ragged_linear
+                                .reserved_bytes
+                                .store(0, Ordering::Relaxed);
+                            let error = format!("{error:#}");
+                            for &index in &selected {
+                                outcomes[index].finished = true;
+                                outcomes[index].failure = Some(error.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
             let mut ready = BTreeMap::new();
             for (index, key) in keys.iter().enumerate() {
                 if !claimed[index] && !outcomes[index].finished {
@@ -1381,6 +1781,22 @@ where
                 }
             }
 
+            if ragged_group.as_ref().is_some_and(|group| {
+                tensor_group_positions(&active, &group.request_ids)
+                    .is_none_or(|positions| positions.iter().any(|&index| outcomes[index].finished))
+            }) {
+                let members = ragged_member_positions(&active, ragged_group.as_ref());
+                if let Err(error) =
+                    scatter_ragged_group(&mut active, &mut ragged_group, &worker_ragged_linear)
+                {
+                    let error = format!("{error:#}");
+                    for &index in &members {
+                        outcomes[index].finished = true;
+                        outcomes[index].failure = Some(error.clone());
+                    }
+                }
+            }
+
             for index in (0..active.len()).rev() {
                 if !outcomes[index].finished {
                     continue;
@@ -1396,6 +1812,27 @@ where
                     );
                 }
                 worker_counters.record(&metrics);
+                if let Some(diagnostic) = token_id_diagnostic.as_mut() {
+                    diagnostic.record(
+                        completed.request_id.0,
+                        completed.stream.prompt_token_ids(),
+                        completed.stream.published_token_ids(),
+                        outcome.cancelled,
+                        outcome.failure.as_deref(),
+                        serde_json::to_value(&metrics).unwrap_or_default(),
+                    );
+                }
+                if metrics.ragged_linear_windows > 0 {
+                    worker_ragged_linear
+                        .requests_with_ragged_windows
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                worker_ragged_linear
+                    .tree_to_ragged_switches
+                    .fetch_add(metrics.tree_to_ragged_switches as u64, Ordering::Relaxed);
+                worker_ragged_linear
+                    .ragged_to_tree_switches
+                    .fetch_add(metrics.ragged_to_tree_switches as u64, Ordering::Relaxed);
                 if let Some(error) = outcome.failure {
                     tracing::error!(
                         target: "ironmlx::dflash2",
@@ -1486,6 +1923,7 @@ where
         prefix_cache_saves,
         prefix_cache_evictions,
         prefix_cache_hit_tokens,
+        ragged_linear,
     }
 }
 
@@ -1511,6 +1949,176 @@ mod tests {
             image_token_id: 248_056,
             constraint: None,
         }
+    }
+
+    const WIDTHS_1_TO_8: u64 = 0b1_1111_1110;
+
+    #[test]
+    fn ragged_linear_selection_needs_two_rows_and_never_waits() {
+        assert!(select_ragged_linear_rows(&[], &[], 4).is_empty());
+        // A single row at a window boundary keeps its own (tree) path.
+        assert!(select_ragged_linear_rows(&[(3, 7, WIDTHS_1_TO_8)], &[], 4).is_empty());
+        assert_eq!(
+            select_ragged_linear_rows(&[(0, 7, WIDTHS_1_TO_8), (2, 7, WIDTHS_1_TO_8)], &[], 4),
+            vec![0, 2]
+        );
+        // Width limit 1 (b_max 1) never batches.
+        assert!(
+            select_ragged_linear_rows(&[(0, 7, WIDTHS_1_TO_8), (1, 7, WIDTHS_1_TO_8)], &[], 1)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ragged_linear_selection_caps_width_and_keeps_current_members() {
+        let candidates = (0..6)
+            .map(|index| (index, 7, WIDTHS_1_TO_8))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            select_ragged_linear_rows(&candidates, &[], 4),
+            vec![0, 1, 2, 3]
+        );
+        // Members of the current group are kept first so the batched cache
+        // can be reused; free slots go to the earliest other rows.
+        assert_eq!(
+            select_ragged_linear_rows(&candidates, &[2, 4, 5], 4),
+            vec![0, 2, 4, 5]
+        );
+        assert_eq!(
+            select_ragged_linear_rows(&candidates, &[1, 3], 2),
+            vec![1, 3]
+        );
+    }
+
+    #[test]
+    fn ragged_linear_selection_respects_draft_len_and_qualified_widths() {
+        // Rows with another draft length are not mixed into the batch.
+        assert_eq!(
+            select_ragged_linear_rows(
+                &[
+                    (0, 7, WIDTHS_1_TO_8),
+                    (1, 3, WIDTHS_1_TO_8),
+                    (2, 7, WIDTHS_1_TO_8)
+                ],
+                &[],
+                4
+            ),
+            vec![0, 2]
+        );
+        // Width 3 unqualified: three candidates batch as two.
+        let no_three = WIDTHS_1_TO_8 & !(1 << 3);
+        assert_eq!(
+            select_ragged_linear_rows(
+                &[(0, 7, no_three), (1, 7, no_three), (2, 7, no_three)],
+                &[],
+                4
+            ),
+            vec![0, 1]
+        );
+        // No qualified batch width: every row keeps its own path.
+        assert!(select_ragged_linear_rows(&[(0, 7, 1 << 1), (1, 7, 1 << 1)], &[], 4).is_empty());
+    }
+
+    #[test]
+    fn ragged_group_charge_is_rows_times_cap_and_released_on_drop() {
+        let budget = BudgetState::with_soft_limit(10_000, 100, 100, KvBudgetPolicy::FullResident);
+        let cost = DFlash2TargetCacheCost {
+            bytes_per_token: 10,
+            fixed_bytes_per_sequence: 100,
+        };
+        let rows = reserve_dflash2_request_memory(&budget, cost, 40, 0, &AtomicU64::new(0))
+            .expect("row admission fits");
+        let group = reserve_ragged_group_memory(&budget, cost, 50, 4, None)
+            .expect("group cache fits the budget");
+        assert_eq!(group.bytes(), 4 * (50 * 10 + 100));
+        assert_eq!(budget.active_bytes(), 500 + 2_400);
+        drop(group);
+        assert_eq!(budget.active_bytes(), 500);
+        drop(rows);
+        assert_eq!(budget.active_bytes(), 0);
+    }
+
+    #[test]
+    fn ragged_group_reservation_fails_without_charging_when_budget_is_short() {
+        let budget = BudgetState::with_soft_limit(2_500, 100, 100, KvBudgetPolicy::FullResident);
+        let cost = DFlash2TargetCacheCost {
+            bytes_per_token: 10,
+            fixed_bytes_per_sequence: 100,
+        };
+        let rows = reserve_dflash2_request_memory(&budget, cost, 40, 0, &AtomicU64::new(0))
+            .expect("row admission fits");
+        let error = reserve_ragged_group_memory(&budget, cost, 50, 4, None)
+            .expect_err("group cache exceeds the soft limit");
+        assert!(matches!(
+            error.downcast_ref::<SchedulerError>(),
+            Some(SchedulerError::MemoryBudgetExceeded {
+                active_bytes: 500,
+                requested_bytes: 2_400,
+                soft_limit_bytes: 2_500,
+            })
+        ));
+        assert_eq!(budget.active_bytes(), 500);
+        // The diagnostic limit rejects even when the budget itself has room.
+        let roomy = BudgetState::with_soft_limit(1_000_000, 100, 100, KvBudgetPolicy::FullResident);
+        assert!(reserve_ragged_group_memory(&roomy, cost, 50, 2, Some(1_000)).is_err());
+        assert_eq!(roomy.active_bytes(), 0);
+        assert!(reserve_ragged_group_memory(&roomy, cost, 50, 1, Some(1_000)).is_ok());
+        assert_eq!(roomy.active_bytes(), 0);
+        drop(rows);
+    }
+
+    fn governor_telemetry(usage: usize) -> crate::core::process_memory::MemoryTelemetry {
+        const GIB: usize = 1 << 30;
+        crate::core::process_memory::MemoryTelemetry {
+            total_ram_bytes: 32 * GIB,
+            phys_footprint_bytes: Some(usage),
+            vm: Some(crate::core::process_memory::HostVmStatistics {
+                free_bytes: 8 * GIB,
+                inactive_bytes: 2 * GIB,
+                active_bytes: 8 * GIB,
+                wired_bytes: 8 * GIB,
+            }),
+            mlx_active_bytes: Some(usage.saturating_sub(1)),
+            mlx_cache_bytes: Some(0),
+            metal_limit_bytes: Some(24 * GIB),
+        }
+    }
+
+    #[test]
+    fn ragged_group_headroom_refreshes_stale_telemetry_before_reserving() {
+        use crate::core::process_memory::{
+            MemoryGovernorConfig, PressureLevel, ProcessMemoryGovernor,
+        };
+        const GIB: usize = 1 << 30;
+        let governor = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                poll_interval: std::time::Duration::from_millis(1),
+                telemetry_stale_after: std::time::Duration::from_millis(2),
+                ..MemoryGovernorConfig::default()
+            })
+            .expect("valid governor config"),
+        );
+        governor.update(governor_telemetry(4 * GIB));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Stale telemetry: the refresh makes the reservation authoritative,
+        // so it succeeds and leaves pressure normal for later admissions.
+        let reservation = reserve_ragged_group_headroom(&governor, GIB, |g| {
+            g.update(governor_telemetry(4 * GIB))
+        })
+        .expect("fresh sample with headroom reserves");
+        assert_eq!(reservation.bytes(), GIB);
+        reservation.commit();
+        assert_eq!(governor.snapshot().pressure_level, PressureLevel::Normal);
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+        // Under pressure the group falls back without reserving anything.
+        for _ in 0..3 {
+            governor.update(governor_telemetry(23 * GIB));
+        }
+        assert!(reserve_ragged_group_headroom(&governor, GIB, |g| {
+            g.update(governor_telemetry(23 * GIB))
+        })
+        .is_err());
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
     }
 
     #[test]

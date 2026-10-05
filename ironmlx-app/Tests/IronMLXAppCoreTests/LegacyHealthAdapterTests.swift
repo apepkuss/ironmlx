@@ -133,7 +133,11 @@ import Testing
     )
     dflash2Snapshot.dflash2 = HealthzSnapshot.DFlash2Info(
         enabled: true,
+        checkpointBlockSize: 8,
         blockSize: 4,
+        maxDraftTokens: 3,
+        draftBudgetChanges: 5,
+        currentDraftBudget: 2,
         draftQuantizationBits: 4,
         requests: 3,
         windows: 30,
@@ -184,6 +188,10 @@ import Testing
         .legacyStatus(from: dflash2Snapshot)
     let dflash2Model = try #require(dflash2Legacy.runtimeModels.first)
     #expect(dflash2Legacy.dflash2?.enabled == true)
+    #expect(dflash2Legacy.dflash2?.checkpointBlockSize == 8)
+    #expect(dflash2Legacy.dflash2?.maxDraftTokens == 3)
+    #expect(dflash2Legacy.dflash2?.draftBudgetChanges == 5)
+    #expect(dflash2Legacy.dflash2?.currentDraftBudget == 2)
     #expect(dflash2Model.id == "mlx-community/Qwen3.8-27B-4bit")
     #expect(dflash2Model.dflash2?.latestGenerationTPS == 49.2)
     #expect(dflash2Model.scheduler == "dflash2")
@@ -351,4 +359,15 @@ import Testing
 """))
     #expect(html.contains("function setupFixedTooltips()"))
     #expect(html.contains("setupFixedTooltips();"))
+}
+
+@Test func dflash2HealthDecodesM5ProfileStatus() throws {
+    let json = Data(
+        #"{"installed":true,"mode":"auto","status":"active","architecture":"applegpu_g17s","settings":[],"prefill_libraries":[]}"#
+            .utf8)
+    let profile = try JSONDecoder().decode(HealthzSnapshot.M5ProfileInfo.self, from: json)
+    #expect(profile.installed)
+    #expect(profile.mode == "auto")
+    #expect(profile.status == "active")
+    #expect(profile.architecture == "applegpu_g17s")
 }

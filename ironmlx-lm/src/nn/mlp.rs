@@ -82,6 +82,40 @@ impl Mlp {
         })
     }
 
+    /// Projections applied to activations (fused storage when fused).
+    pub(crate) fn activation_projections(&self) -> Vec<&Linear> {
+        let mut out = match &self.gate_up {
+            GateUp::Separate { gate, up } => vec![gate, up],
+            GateUp::Fused(fused) => vec![&fused.projection],
+        };
+        out.push(&self.down);
+        out
+    }
+
+    /// Experimental shared weight layout: move gate/up (fused storage plus
+    /// its row views) and down into single-resident stores. Returns the
+    /// number of stores created.
+    pub(crate) fn share_weight_layout(&mut self) -> Result<usize> {
+        let mut stores = 0;
+        if let GateUp::Fused(fused) = &mut self.gate_up {
+            let FusedGateUp {
+                projection,
+                gate,
+                up,
+            } = fused.as_mut();
+            if let Some(store) = projection.share_whole()? {
+                let gate_width = gate.out_features();
+                gate.share_rows(&store, 0)?;
+                up.share_rows(&store, gate_width)?;
+                stores += 1;
+            }
+        }
+        if self.down.share_whole()?.is_some() {
+            stores += 1;
+        }
+        Ok(stores)
+    }
+
     /// Test/composition seam: build an `Mlp` from pre-built sub-projections.
     ///
     /// `pub` (not `pub(crate)`) so integration tests in `ironmlx-lm/tests/` can use it.
@@ -123,6 +157,7 @@ impl Mlp {
                 } = fused.as_ref();
                 if super::product_stable_qmm::is_armed()
                     || super::dflash2_drafter_fusion::is_armed()
+                    || super::m5_affine4::armed()
                 {
                     let output = projection.forward_on(x, target)?;
                     let mut parts = mlx::ops::shape::split_n_on(&output, 2, -1, target)?;
@@ -135,7 +170,9 @@ impl Mlp {
                 }
             }
         };
+        super::decoder_layer::prefill_stage("mlp_gate_up", &[&g, &u])?;
         let activated = self.swiglu_on(&g, &u)?;
+        super::decoder_layer::prefill_stage("mlp_swiglu", &[&activated])?;
         self.down.forward_on(&activated, target)
     }
 }

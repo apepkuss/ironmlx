@@ -11,11 +11,15 @@ pub(crate) mod batch_stable_qmm;
 pub mod conv;
 pub mod decoder_layer;
 pub(crate) mod dflash2_drafter_fusion;
+pub(crate) mod dflash_tree;
 pub mod embedding;
 pub mod gated_attention;
 pub mod gated_delta_net;
 pub(crate) mod gemma4_verify_attention;
 pub mod linear;
+pub(crate) mod m5_affine4;
+pub(crate) mod m5_attention;
+pub(crate) mod m5_tree_attention;
 pub mod mlp;
 pub mod mrope;
 pub mod mtp;
@@ -24,6 +28,7 @@ pub(crate) mod position_stable_linear;
 pub(crate) mod position_stable_qmm;
 pub(crate) mod product_stable_qmm;
 pub(crate) mod sequence_stable_gated_delta;
+pub(crate) mod shared_weight_layout;
 pub(crate) mod sorted_moe_weighted_sum;
 pub(crate) mod verify_qmm;
 
@@ -100,4 +105,15 @@ pub fn exact_affine8_b4_q2_scope() -> impl Drop {
 #[doc(hidden)]
 pub fn affine8_b4_q2_exact_supported() -> bool {
     verify_qmm::affine8_b4_q2_exact_supported()
+}
+
+/// Diagnostic accounting of persistent M5 decode-layout weight copies.
+pub fn m5_prepared_totals() -> (usize, usize) {
+    m5_affine4::prepared_totals()
+}
+
+/// Diagnostic counters of the experimental shared weight layout:
+/// (stores, conversions to tiled, conversions to native).
+pub fn shared_weight_layout_totals() -> (usize, usize, usize) {
+    shared_weight_layout::conversion_totals()
 }

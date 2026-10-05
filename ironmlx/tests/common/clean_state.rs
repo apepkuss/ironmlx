@@ -20,7 +20,7 @@ pub struct CleanStateReport {
     pub small_alloc_probe_us: u128,
 }
 
-pub const MIN_FREE_RAM_BYTES: usize = 1 * 1024 * 1024 * 1024; // 1 GiB
+pub const MIN_FREE_RAM_BYTES: usize = 1024 * 1024 * 1024; // 1 GiB
 pub const MAX_ALLOC_PROBE_US: u128 = 10_000; // 10 ms
 
 /// Run all hygiene checks. Returns `Ok(report)` if all thresholds met,

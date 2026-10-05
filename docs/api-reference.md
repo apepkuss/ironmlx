@@ -96,6 +96,7 @@ Retryable 503 errors return JSON; Messages uses `overloaded_error` for overload.
 ### Runtime topology
 
 Ordinary causal serving, DFlash2, Gemma4 drafter, DiffusionGemma, EnginePool and App daemon share strict extraction, model-independent validation, protocol error rendering and SSE headers. This does not imply identical model capabilities.
+All ordinary causal HTTP requests use SchedulerActor, including long chunked-prefill, multimodal, sampled and constrained requests; request shape no longer selects a direct GenerationStream serving path.
 Fixed services select a model at startup; EnginePool/App daemon resolve the request model or their default. `/v1/models` is available in EnginePool, App daemon and App DFlash2 discovery. `/admin/api/models/*` is App-daemon-only.
 
 ### SSE disconnection and cancellation
@@ -104,9 +105,8 @@ Once SSE starts, dropping the HTTP response publishes a cancellation signal. Enc
 
 | Path | Cancellation boundary | Released state |
 | --- | --- | --- |
-| Scheduler, including MTP/drafter | Next safe scheduling boundary after the current forward | Request, slot, KV cache and budget |
+| Scheduler, including ordinary causal, MTP and drafter serving | Next safe scheduling boundary after the current forward | Request, slot, KV cache and budget |
 | DFlash2 | Next safe event boundary after target/draft forward | Per-request caches, slot and budget |
-| Direct GenerationStream | Next token boundary after forward | Generation state and reservation |
 | DiffusionGemma | Next event boundary after the current diffusion step | Lane and request state |
 
 Cancellation does not interrupt an in-flight Metal operation. Resource release can therefore include the remainder of that operation. Version 0.1 does not promise cancellation of underlying non-streaming generation when its client disconnects.

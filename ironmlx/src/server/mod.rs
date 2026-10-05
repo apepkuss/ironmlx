@@ -75,12 +75,11 @@ pub async fn serve<M>(
     scheduler_autotune_report: bool,
     vision_input_override: Option<VisionInputConfig>,
     static_memory_estimate: ironmlx_runtime::core::process_memory::StaticMemoryEstimate,
-    force_scheduler: bool,
 ) -> Result<()>
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let state = build_plain_app_state_with_force_scheduler(
+    let state = build_plain_app_state(
         model,
         tokenizer,
         model_id,
@@ -98,7 +97,6 @@ where
         prefix_lru_cache,
         static_memory_estimate,
         active_kv_offload,
-        force_scheduler,
     )
     .await?;
     serve_inner(state, network_config).await
@@ -483,10 +481,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    use mlx::{Array, Dtype, StreamOrDevice};
     use tokio::time::sleep;
-
-    use ironmlx_lm::core::cache::layer::LayerCache;
 
     #[test]
     fn dflash2_model_list_exposes_only_the_public_target_identifier() {
@@ -517,146 +512,6 @@ mod tests {
         assert_eq!(json["model"]["name"], "test-model");
         assert_eq!(json["mode"], "single");
         assert_eq!(json["models"], serde_json::json!([]));
-    }
-
-    struct DefaultRouteModel;
-    struct LimitedRouteModel;
-
-    impl Model for DefaultRouteModel {
-        fn make_cache(&self, _batch: i32, _cap: i32, _dtype: Dtype) -> Result<Vec<LayerCache>> {
-            unimplemented!("route tests only call the associated route policy")
-        }
-
-        fn forward_on(
-            &self,
-            _input_ids: &Array,
-            _position_ids: &Array,
-            _per_row_lens: Option<&[i32]>,
-            _decode_mask: Option<&Array>,
-            _cache: Option<&mut [LayerCache]>,
-            _target: StreamOrDevice,
-        ) -> Result<Array> {
-            unimplemented!("route tests only call the associated route policy")
-        }
-
-        fn batched_prefill(
-            &self,
-            _input_ids: &Array,
-            _position_ids: &Array,
-            _attention_mask: &Array,
-            _linear_attention_mask: &Array,
-            _per_row_lens: &[i32],
-            _cache: Option<&mut [LayerCache]>,
-            _target: StreamOrDevice,
-        ) -> Result<Array> {
-            unimplemented!("route tests only call the associated route policy")
-        }
-
-        fn forward_text_hidden(
-            &self,
-            _input_ids: &Array,
-            _position_ids: &Array,
-            _per_row_lens: Option<&[i32]>,
-            _decode_mask: Option<&Array>,
-            _cache: Option<&mut [LayerCache]>,
-            _target: StreamOrDevice,
-        ) -> Result<Array> {
-            unimplemented!("route tests only call the associated route policy")
-        }
-
-        fn model_meta(&self) -> ironmlx_lm::core::model::ModelMeta {
-            ironmlx_runtime::core::memory_budget::test_meta_qwen35()
-        }
-
-        fn num_hidden_layers(&self) -> usize {
-            0
-        }
-    }
-
-    impl Model for LimitedRouteModel {
-        fn make_cache(&self, _batch: i32, _cap: i32, _dtype: Dtype) -> Result<Vec<LayerCache>> {
-            unimplemented!("route tests only call the associated route policy")
-        }
-
-        fn forward_on(
-            &self,
-            _input_ids: &Array,
-            _position_ids: &Array,
-            _per_row_lens: Option<&[i32]>,
-            _decode_mask: Option<&Array>,
-            _cache: Option<&mut [LayerCache]>,
-            _target: StreamOrDevice,
-        ) -> Result<Array> {
-            unimplemented!("route tests only call the associated route policy")
-        }
-
-        fn batched_prefill(
-            &self,
-            _input_ids: &Array,
-            _position_ids: &Array,
-            _attention_mask: &Array,
-            _linear_attention_mask: &Array,
-            _per_row_lens: &[i32],
-            _cache: Option<&mut [LayerCache]>,
-            _target: StreamOrDevice,
-        ) -> Result<Array> {
-            unimplemented!("route tests only call the associated route policy")
-        }
-
-        fn forward_text_hidden(
-            &self,
-            _input_ids: &Array,
-            _position_ids: &Array,
-            _per_row_lens: Option<&[i32]>,
-            _decode_mask: Option<&Array>,
-            _cache: Option<&mut [LayerCache]>,
-            _target: StreamOrDevice,
-        ) -> Result<Array> {
-            unimplemented!("route tests only call the associated route policy")
-        }
-
-        fn fresh_prefill_batch_limit(_prompt_len: usize, b_max: usize) -> usize
-        where
-            Self: Sized,
-        {
-            b_max.min(2)
-        }
-
-        fn model_meta(&self) -> ironmlx_lm::core::model::ModelMeta {
-            ironmlx_runtime::core::memory_budget::test_meta_qwen35()
-        }
-
-        fn num_hidden_layers(&self) -> usize {
-            0
-        }
-    }
-
-    #[test]
-    fn route_keeps_unlimited_model_long_prompt_on_generation_stream() {
-        assert!(!should_route_to_scheduler::<DefaultRouteModel>(
-            4096, 2048, 4, false, false,
-        ));
-    }
-
-    #[test]
-    fn route_uses_scheduler_for_model_limited_chunked_long_prompt() {
-        assert!(should_route_to_scheduler::<LimitedRouteModel>(
-            4096, 2048, 4, false, false,
-        ));
-    }
-
-    #[test]
-    fn route_uses_scheduler_for_long_prompt_when_paged_prefix_cache_enabled() {
-        assert!(should_route_to_scheduler::<DefaultRouteModel>(
-            4096, 2048, 4, true, false,
-        ));
-    }
-
-    #[test]
-    fn route_uses_scheduler_for_long_prompt_when_greedy_scheduler_is_forced() {
-        assert!(should_route_to_scheduler::<DefaultRouteModel>(
-            4096, 2048, 1, false, true,
-        ));
     }
 
     #[test]

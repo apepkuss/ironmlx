@@ -540,7 +540,7 @@ mod tests {
                     args.dflash2_model_dir.as_deref(),
                     Some(std::path::Path::new("/tmp/dflash2"))
                 );
-                assert_eq!(args.dflash2_block_size, 6);
+                assert_eq!(args.dflash2_block_size, Some(6));
                 assert_eq!(args.dflash2_draft_bits, 8);
                 assert_eq!(args.dflash2_tensor_batch_max_width, Some(6));
             }

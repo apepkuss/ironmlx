@@ -107,10 +107,11 @@ pub struct GenerateArgs {
     #[arg(long = "dflash2-model-dir")]
     pub dflash2_model_dir: Option<PathBuf>,
 
-    /// DFlash2 proposal block width. Widths above 8 are an explicit Q16 opt-in
+    /// DFlash2 proposal block width. When omitted, use the checkpoint width up
+    /// to the qualified Q8 default. Widths above 8 are an explicit Q16 opt-in
     /// and require a compatible draft checkpoint that declares that width.
-    #[arg(long, default_value_t = 4)]
-    pub dflash2_block_size: usize,
+    #[arg(long)]
+    pub dflash2_block_size: Option<usize>,
 
     /// Runtime affine quantization for the official BF16 DFlash2 draft. Zero
     /// keeps BF16; 4 and 8 select the supported quantized variants.
@@ -119,8 +120,14 @@ pub struct GenerateArgs {
 
     /// Maximum nodes in the DFlash2 best-first draft tree. Zero keeps the
     /// stable linear proposal path; the P2 tree is capped at 15 nodes.
-    #[arg(long, default_value_t = 0)]
-    pub dflash2_tree_max_nodes: usize,
+    /// Default: 15 with an active M5 DFlash2 profile, otherwise 0.
+    #[arg(long)]
+    pub dflash2_tree_max_nodes: Option<usize>,
+
+    /// DFlash2 profile for Apple GPU generation 17+ (M5): `auto` or `off`
+    /// (see `ironmlx serve --help`).
+    #[arg(long = "m5-dflash2-profile", default_value = "auto", value_parser = parse_m5_profile_mode)]
+    pub m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode,
 
     /// Use versioned position-keyed sampling for DFlash2. This changes output
     /// for the same seed and is therefore explicit rather than a new default.
@@ -182,10 +189,11 @@ fn ensure_dflash2_generation_supported(
             "--dflash2-model-dir P0-P2 has not qualified --kv-quant"
         ));
     }
-    if !(2..=16).contains(&args.dflash2_block_size) {
-        return Err(anyhow!(
-            "--dflash2-block-size must be in [2, 16]; widths above 8 require a compatible Q16 draft checkpoint"
-        ));
+    if args
+        .dflash2_block_size
+        .is_some_and(|block_size| !(2..=16).contains(&block_size))
+    {
+        return Err(anyhow!("--dflash2-block-size must be in [2, 16]"));
     }
     if !matches!(args.dflash2_draft_bits, 0 | 4 | 8) {
         return Err(anyhow!("--dflash2-draft-bits must be one of 0, 4, or 8"));
@@ -317,16 +325,28 @@ fn run_generation_with_dflash2_model(
         draft_bits,
     )
     .context("DFlash2DraftModel::from_loader")?;
+    let checkpoint_block_size = usize::try_from(draft.config().dflash_config.block_size)
+        .context("DFlash2 checkpoint block_size")?;
+    let block_size_resolution = ironmlx_runtime::core::dflash2::resolve_dflash2_block_size(
+        args.dflash2_block_size,
+        checkpoint_block_size,
+    )?;
     drop(draft_loader);
     mlx::clear_cache();
+    eprintln!(
+        "ironmlx generate: DFlash2 checkpoint_block_size={} resolved_block_size={} block_size_source={}",
+        block_size_resolution.checkpoint_block_size,
+        block_size_resolution.block_size,
+        if block_size_resolution.explicit { "explicit" } else { "auto" },
+    );
     let mut stream = DFlash2TextGenerationStream::new_text_only_with_options(
         model,
         &draft,
         tokenizer,
         request,
-        args.dflash2_block_size,
+        block_size_resolution.block_size,
         ironmlx_runtime::core::dflash2::DFlash2P2Options {
-            tree_max_nodes: args.dflash2_tree_max_nodes,
+            tree_max_nodes: args.dflash2_tree_max_nodes.unwrap_or(0),
             position_keyed_sampling: args.dflash2_position_keyed_sampling,
         },
     )?;
@@ -498,7 +518,21 @@ fn run_diffusion_gemma_generation(
     Ok(())
 }
 
-pub fn run(args: GenerateArgs) -> Result<()> {
+fn parse_m5_profile_mode(value: &str) -> Result<ironmlx_core::m5_profile::M5ProfileMode, String> {
+    value.parse()
+}
+
+pub fn run(mut args: GenerateArgs) -> Result<()> {
+    let profile = ironmlx_core::m5_profile::install(
+        args.m5_dflash2_profile,
+        args.dflash2_model_dir.is_some(),
+    );
+    args.dflash2_tree_max_nodes
+        .get_or_insert(if profile.is_active() {
+            ironmlx_core::m5_profile::DFLASH2_TREE_MAX_NODES
+        } else {
+            0
+        });
     let model_dir = PathBuf::from(&args.model);
     if !model_dir.exists() {
         return Err(anyhow::anyhow!(
@@ -622,9 +656,13 @@ mod tests {
         assert!(default_cli.args.mtp_model_dir.is_none());
         assert!(default_cli.args.dflash2_model_dir.is_none());
         assert_eq!(default_cli.args.mtp_draft_tokens, None);
-        assert_eq!(default_cli.args.dflash2_block_size, 4);
+        assert_eq!(default_cli.args.dflash2_block_size, None);
         assert_eq!(default_cli.args.dflash2_draft_bits, 4);
-        assert_eq!(default_cli.args.dflash2_tree_max_nodes, 0);
+        assert_eq!(default_cli.args.dflash2_tree_max_nodes, None);
+        assert_eq!(
+            default_cli.args.m5_dflash2_profile,
+            ironmlx_core::m5_profile::M5ProfileMode::Auto
+        );
         assert!(!default_cli.args.dflash2_position_keyed_sampling);
 
         let enabled_cli = GenerateTestCli::parse_from([
@@ -691,7 +729,7 @@ mod tests {
         assert!(isolation_error.to_string().contains("cannot be combined"));
 
         args.mtp_model_dir = None;
-        args.dflash2_block_size = 1;
+        args.dflash2_block_size = Some(1);
         let block_error = ensure_dflash2_generation_supported(
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
             &args,
@@ -699,9 +737,9 @@ mod tests {
         .expect_err("reject invalid block size");
         assert!(block_error.to_string().contains("must be in [2, 16]"));
 
-        args.dflash2_block_size = 16;
+        args.dflash2_block_size = Some(16);
         args.temperature = 0.8;
-        args.dflash2_tree_max_nodes = 15;
+        args.dflash2_tree_max_nodes = Some(15);
         args.dflash2_position_keyed_sampling = true;
         assert!(ensure_dflash2_generation_supported(
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
@@ -720,7 +758,7 @@ mod tests {
             .contains("temperature greater than zero"));
 
         args.dflash2_position_keyed_sampling = false;
-        args.dflash2_block_size = 5;
+        args.dflash2_block_size = Some(5);
         args.dflash2_draft_bits = 6;
         let draft_bits_error = ensure_dflash2_generation_supported(
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,

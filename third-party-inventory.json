@@ -255,6 +255,34 @@
         "upstream_revision": "8a81722b1d71cac9b7dde47e56a438c4b529129b"
       },
       {
+        "component": "MLX Metal kernel headers (vendored, IronMLX fork)",
+        "license": "MIT",
+        "license_file": "native-mlx-kernel-headers-fork-mit.txt",
+        "license_sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
+        "repository": "https://github.com/apepkuss/mlx.git",
+        "revision": "73ad5df20cb30be4192e5c4d0ae8130674773427",
+        "source_integrity": {
+          "commit": "73ad5df20cb30be4192e5c4d0ae8130674773427",
+          "files": 17,
+          "tree_sha256": "34427d535d5778e47a6b5764d792e6b6c2ae8e3bbbe629c3b54d77ea98687016",
+          "type": "git-files"
+        }
+      },
+      {
+        "component": "MLX Metal kernel headers (vendored, upstream v0.32.3)",
+        "license": "MIT",
+        "license_file": "native-mlx-kernel-headers-v0.32.3-mit.txt",
+        "license_sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
+        "repository": "https://github.com/ml-explore/mlx.git",
+        "revision": "64ea011cb65f14d9ce2737e60db9a4ae91ed7441",
+        "source_integrity": {
+          "commit": "64ea011cb65f14d9ce2737e60db9a4ae91ed7441",
+          "files": 14,
+          "tree_sha256": "afd4fa106706c8669e0cd26e825def710dcdb12dc2c078f93426c86ecc897c62",
+          "type": "git-files"
+        }
+      },
+      {
         "component": "nlohmann/json",
         "license": "MIT",
         "license_file": "native-nlohmann-json-mit.txt",

@@ -133,7 +133,11 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
 
     public struct DFlash2Info: Codable, Equatable, Sendable {
         public var enabled: Bool
+        public var checkpointBlockSize: Int?
         public var blockSize: Int?
+        public var maxDraftTokens: Int?
+        public var draftBudgetChanges: UInt64?
+        public var currentDraftBudget: Int?
         public var draftQuantizationBits: Int?
         public var requests: UInt64
         public var windows: UInt64
@@ -164,10 +168,16 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
         public var prefixCacheEvictions: UInt64
         public var prefixCacheHitTokens: UInt64
         public var runtimeUsage: BackendModelRuntimeUsage
+        public var treeMaxNodes: Int? = nil
+        public var m5Profile: M5ProfileInfo? = nil
 
         enum CodingKeys: String, CodingKey {
             case enabled
+            case checkpointBlockSize = "checkpoint_block_size"
             case blockSize = "block_size"
+            case maxDraftTokens = "max_draft_tokens"
+            case draftBudgetChanges = "draft_budget_changes"
+            case currentDraftBudget = "current_draft_budget"
             case draftQuantizationBits = "draft_quantization_bits"
             case requests
             case windows
@@ -198,7 +208,19 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
             case prefixCacheEvictions = "prefix_cache_evictions"
             case prefixCacheHitTokens = "prefix_cache_hit_tokens"
             case runtimeUsage = "runtime_usage"
+            case treeMaxNodes = "tree_max_nodes"
+            case m5Profile = "m5_profile"
         }
+    }
+
+    /// Process DFlash2 profile for Apple GPU generation 17+ (M5).
+    public struct M5ProfileInfo: Codable, Equatable, Sendable {
+        public var installed: Bool
+        /// `auto` or `off`.
+        public var mode: String?
+        /// `active`, `disabled`, `not_dflash2`, `unsupported_gpu` or `gpu_unknown`.
+        public var status: String?
+        public var architecture: String?
     }
 }
 

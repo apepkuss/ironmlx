@@ -148,24 +148,16 @@ impl EngineVariantHttpAdapter for EngineVariant {
             Self::Audio(_) | Self::Decision(_) | Self::QwenImage(_) => {
                 super::audio::task_mismatch(super::api_error::ApiProtocol::OpenAi)
             }
-            Self::Qwen35(state) => responses::responses_with_state(state.clone(), req, false).await,
-            Self::Qwen35Moe(state) => {
-                responses::responses_with_state(state.clone(), req, false).await
-            }
-            Self::Qwen36Moe(state) => {
-                responses::responses_with_state(state.clone(), req, false).await
-            }
-            Self::Gemma4(state) => responses::responses_with_state(state.clone(), req, false).await,
+            Self::Qwen35(state) => responses::responses_with_state(state.clone(), req).await,
+            Self::Qwen35Moe(state) => responses::responses_with_state(state.clone(), req).await,
+            Self::Qwen36Moe(state) => responses::responses_with_state(state.clone(), req).await,
+            Self::Gemma4(state) => responses::responses_with_state(state.clone(), req).await,
             Self::Gemma4Drafter(state) => {
-                responses::responses_with_state(state.base.clone(), req, true).await
+                responses::responses_with_state(state.base.clone(), req).await
             }
-            Self::Glm4MoeLite(state) => {
-                responses::responses_with_state(state.clone(), req, false).await
-            }
-            Self::Llama(state) => responses::responses_with_state(state.clone(), req, false).await,
-            Self::MiniCpmV46(state) => {
-                responses::responses_with_state(state.clone(), req, false).await
-            }
+            Self::Glm4MoeLite(state) => responses::responses_with_state(state.clone(), req).await,
+            Self::Llama(state) => responses::responses_with_state(state.clone(), req).await,
+            Self::MiniCpmV46(state) => responses::responses_with_state(state.clone(), req).await,
             Self::DiffusionGemma(state) => {
                 diffusion_gemma::openai_responses_with_state(state.clone(), req).await
             }

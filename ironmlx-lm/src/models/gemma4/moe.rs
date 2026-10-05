@@ -13,7 +13,7 @@ use super::mlp::Gemma4GeGluMlp;
 use super::profile;
 
 pub(crate) enum Gemma4FeedForward {
-    Dense(Gemma4GeGluMlp),
+    Dense(Box<Gemma4GeGluMlp>),
     Moe(Box<Gemma4MoeBlock>),
 }
 
@@ -57,13 +57,13 @@ impl Gemma4FeedForward {
                 dense_intermediate_size,
             )?)))
         } else {
-            Ok(Self::Dense(Gemma4GeGluMlp::from_loader(
+            Ok(Self::Dense(Box::new(Gemma4GeGluMlp::from_loader(
                 loader,
                 &format!("{prefix}.mlp"),
                 dense_intermediate_size,
                 layer_idx,
                 layer_kind,
-            )?))
+            )?)))
         }
     }
 

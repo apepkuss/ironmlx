@@ -119,7 +119,9 @@ pub struct MtpHealthInfo {
 #[derive(Debug, Serialize)]
 pub struct DFlash2HealthInfo {
     pub enabled: bool,
+    pub checkpoint_block_size: Option<usize>,
     pub block_size: Option<usize>,
+    pub max_draft_tokens: usize,
     pub draft_quantization_bits: Option<i32>,
     pub tree_max_nodes: usize,
     pub position_keyed_sampling: bool,
@@ -170,12 +172,163 @@ pub struct DFlash2HealthInfo {
     pub prefix_cache_evictions: u64,
     pub prefix_cache_hit_tokens: u64,
     pub runtime_usage: crate::core::runtime_usage::ModelRuntimeUsageSnapshot,
+    pub ragged_linear: DFlash2RaggedLinearHealth,
+    pub m5_profile: M5ProfileHealth,
+}
+
+/// Process M5 DFlash2 profile (Apple GPU generation 17+).
+#[derive(Debug, Default, Serialize)]
+pub struct M5ProfileHealth {
+    pub installed: bool,
+    /// `auto` or `off`.
+    pub mode: Option<&'static str>,
+    /// `active`, `disabled`, `not_dflash2`, `unsupported_gpu` or `gpu_unknown`.
+    pub status: Option<&'static str>,
+    pub architecture: Option<String>,
+    /// Effective value of each profile setting (null = off).
+    pub settings: Vec<M5ProfileSetting>,
+    pub prefill_libraries: Vec<M5PrefillLibraryHealth>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct M5ProfileSetting {
+    pub name: &'static str,
+    pub value: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct M5PrefillLibraryHealth {
+    pub name: &'static str,
+    pub source: &'static str,
+    pub error: Option<String>,
+}
+
+impl M5ProfileHealth {
+    pub fn current() -> Self {
+        let Some(profile) = ironmlx_core::m5_profile::installed() else {
+            return Self::default();
+        };
+        Self {
+            installed: true,
+            mode: Some(profile.mode.as_str()),
+            status: Some(profile.status.as_str()),
+            architecture: profile.architecture.clone(),
+            settings: profile
+                .settings()
+                .into_iter()
+                .map(|(name, value)| M5ProfileSetting { name, value })
+                .collect(),
+            prefill_libraries: profile
+                .prefill_libraries
+                .iter()
+                .map(|library| M5PrefillLibraryHealth {
+                    name: library.name,
+                    source: library.source,
+                    error: library.error.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Experimental DFlash2 tree/linear switch (default off): rows that reach a
+/// window boundary together run width-8 linear windows as one ragged batch.
+#[derive(Debug, Default, Serialize)]
+pub struct DFlash2RaggedLinearHealth {
+    pub enabled: bool,
+    pub max_width_limit: usize,
+    /// Batched windows, and windows by batch width 2/3/4.
+    pub windows: u64,
+    pub windows_by_width: [u64; 3],
+    /// Row windows executed inside batched windows (sum of widths).
+    pub row_windows: u64,
+    pub emitted_tokens: u64,
+    pub accepted_draft_tokens: u64,
+    /// Steps where exactly one eligible row was at a window boundary while
+    /// other rows were active (that row kept its own window path).
+    pub single_eligible_steps: u64,
+    pub groups_built: u64,
+    pub groups_scattered: u64,
+    pub active_groups: u64,
+    pub max_width: usize,
+    pub cache_build_us: u64,
+    pub scatter_us: u64,
+    pub window_us: u64,
+    /// Completed requests that ran at least one batched window, and their
+    /// window path changes (tree -> ragged linear, ragged linear -> tree).
+    pub requests_with_ragged_windows: u64,
+    pub tree_to_ragged_switches: u64,
+    pub ragged_to_tree_switches: u64,
+    /// Group builds skipped because the KV budget (or the diagnostic budget
+    /// limit) could not hold the extra batched cache, or the process memory
+    /// governor rejected it; those rows kept their original path.
+    pub budget_fallbacks: u64,
+    pub governor_fallbacks: u64,
+    /// KV budget bytes currently charged for the batched group cache.
+    pub reserved_bytes: usize,
+}
+
+#[derive(Clone, Default)]
+pub struct DFlash2RaggedLinearCounters {
+    pub enabled: bool,
+    pub max_width_limit: usize,
+    pub windows: Arc<AtomicU64>,
+    pub windows_by_width: Arc<[AtomicU64; 3]>,
+    pub row_windows: Arc<AtomicU64>,
+    pub emitted_tokens: Arc<AtomicU64>,
+    pub accepted_draft_tokens: Arc<AtomicU64>,
+    pub single_eligible_steps: Arc<AtomicU64>,
+    pub groups_built: Arc<AtomicU64>,
+    pub groups_scattered: Arc<AtomicU64>,
+    pub active_groups: Arc<AtomicU64>,
+    pub max_width: Arc<AtomicUsize>,
+    pub cache_build_us: Arc<AtomicU64>,
+    pub scatter_us: Arc<AtomicU64>,
+    pub window_us: Arc<AtomicU64>,
+    pub requests_with_ragged_windows: Arc<AtomicU64>,
+    pub tree_to_ragged_switches: Arc<AtomicU64>,
+    pub ragged_to_tree_switches: Arc<AtomicU64>,
+    pub budget_fallbacks: Arc<AtomicU64>,
+    pub governor_fallbacks: Arc<AtomicU64>,
+    pub reserved_bytes: Arc<AtomicUsize>,
+}
+
+impl DFlash2RaggedLinearCounters {
+    pub fn snapshot(&self) -> DFlash2RaggedLinearHealth {
+        DFlash2RaggedLinearHealth {
+            enabled: self.enabled,
+            max_width_limit: self.max_width_limit,
+            windows: self.windows.load(Ordering::Relaxed),
+            windows_by_width: std::array::from_fn(|index| {
+                self.windows_by_width[index].load(Ordering::Relaxed)
+            }),
+            row_windows: self.row_windows.load(Ordering::Relaxed),
+            emitted_tokens: self.emitted_tokens.load(Ordering::Relaxed),
+            accepted_draft_tokens: self.accepted_draft_tokens.load(Ordering::Relaxed),
+            single_eligible_steps: self.single_eligible_steps.load(Ordering::Relaxed),
+            groups_built: self.groups_built.load(Ordering::Relaxed),
+            groups_scattered: self.groups_scattered.load(Ordering::Relaxed),
+            active_groups: self.active_groups.load(Ordering::Relaxed),
+            max_width: self.max_width.load(Ordering::Relaxed),
+            cache_build_us: self.cache_build_us.load(Ordering::Relaxed),
+            scatter_us: self.scatter_us.load(Ordering::Relaxed),
+            window_us: self.window_us.load(Ordering::Relaxed),
+            requests_with_ragged_windows: self.requests_with_ragged_windows.load(Ordering::Relaxed),
+            tree_to_ragged_switches: self.tree_to_ragged_switches.load(Ordering::Relaxed),
+            ragged_to_tree_switches: self.ragged_to_tree_switches.load(Ordering::Relaxed),
+            budget_fallbacks: self.budget_fallbacks.load(Ordering::Relaxed),
+            governor_fallbacks: self.governor_fallbacks.load(Ordering::Relaxed),
+            reserved_bytes: self.reserved_bytes.load(Ordering::Relaxed),
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct DFlash2HealthConfig {
     enabled: bool,
+    checkpoint_block_size: Option<usize>,
     block_size: Option<usize>,
+    max_draft_tokens: usize,
     draft_quantization_bits: Option<i32>,
     tree_max_nodes: usize,
     position_keyed_sampling: bool,
@@ -226,13 +379,16 @@ pub struct DFlash2HealthConfig {
     prefix_cache_evictions: Arc<AtomicU64>,
     prefix_cache_hit_tokens: Arc<AtomicU64>,
     runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
+    ragged_linear: DFlash2RaggedLinearCounters,
 }
 
 impl DFlash2HealthConfig {
     pub fn disabled() -> Self {
         Self {
             enabled: false,
+            checkpoint_block_size: None,
             block_size: None,
+            max_draft_tokens: 0,
             draft_quantization_bits: None,
             tree_max_nodes: 0,
             position_keyed_sampling: false,
@@ -285,12 +441,20 @@ impl DFlash2HealthConfig {
             runtime_usage: Arc::new(
                 crate::core::runtime_usage::ModelRuntimeUsageCounters::default(),
             ),
+            ragged_linear: DFlash2RaggedLinearCounters::default(),
         }
+    }
+
+    pub fn with_ragged_linear(mut self, ragged_linear: DFlash2RaggedLinearCounters) -> Self {
+        self.ragged_linear = ragged_linear;
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn enabled(
+        checkpoint_block_size: usize,
         block_size: usize,
+        max_draft_tokens: usize,
         draft_quantization_bits: Option<i32>,
         tree_max_nodes: usize,
         position_keyed_sampling: bool,
@@ -344,7 +508,9 @@ impl DFlash2HealthConfig {
     ) -> Self {
         Self {
             enabled: true,
+            checkpoint_block_size: Some(checkpoint_block_size),
             block_size: Some(block_size),
+            max_draft_tokens,
             draft_quantization_bits,
             tree_max_nodes,
             position_keyed_sampling,
@@ -395,13 +561,16 @@ impl DFlash2HealthConfig {
             prefix_cache_evictions,
             prefix_cache_hit_tokens,
             runtime_usage,
+            ragged_linear: DFlash2RaggedLinearCounters::default(),
         }
     }
 
     pub fn snapshot(&self) -> DFlash2HealthInfo {
         DFlash2HealthInfo {
             enabled: self.enabled,
+            checkpoint_block_size: self.checkpoint_block_size,
             block_size: self.block_size,
+            max_draft_tokens: self.max_draft_tokens,
             draft_quantization_bits: self.draft_quantization_bits,
             tree_max_nodes: self.tree_max_nodes,
             position_keyed_sampling: self.position_keyed_sampling,
@@ -461,6 +630,8 @@ impl DFlash2HealthConfig {
             prefix_cache_evictions: self.prefix_cache_evictions.load(Ordering::Relaxed),
             prefix_cache_hit_tokens: self.prefix_cache_hit_tokens.load(Ordering::Relaxed),
             runtime_usage: self.runtime_usage.snapshot(self.prefix_cache_enabled),
+            ragged_linear: self.ragged_linear.snapshot(),
+            m5_profile: M5ProfileHealth::current(),
         }
     }
 }
@@ -1534,8 +1705,22 @@ mod tests {
         active.record_output_tokens(2);
         std::thread::sleep(std::time::Duration::from_millis(1));
         let mut collector = test_collector(MtpHealthConfig::disabled());
+        let ragged_linear = DFlash2RaggedLinearCounters {
+            enabled: true,
+            max_width_limit: 4,
+            ..Default::default()
+        };
+        ragged_linear.windows.store(7, Ordering::Relaxed);
+        ragged_linear.windows_by_width[2].store(5, Ordering::Relaxed);
+        ragged_linear.row_windows.store(26, Ordering::Relaxed);
+        ragged_linear.active_groups.store(1, Ordering::Relaxed);
+        ragged_linear.max_width.store(4, Ordering::Relaxed);
+        ragged_linear.budget_fallbacks.store(2, Ordering::Relaxed);
+        ragged_linear.reserved_bytes.store(4096, Ordering::Relaxed);
         collector.dflash2 = DFlash2HealthConfig::enabled(
+            8,
             4,
+            3,
             Some(4),
             15,
             true,
@@ -1586,7 +1771,8 @@ mod tests {
             prefix_cache_evictions,
             prefix_cache_hit_tokens,
             runtime_usage,
-        );
+        )
+        .with_ragged_linear(ragged_linear);
 
         // This test exercises the DFlash2 health projection only. Calling the
         // full collector snapshot would also initialize MLX's global memory
@@ -1595,7 +1781,9 @@ mod tests {
         let snapshot = collector.dflash2.snapshot();
 
         assert!(snapshot.enabled);
+        assert_eq!(snapshot.checkpoint_block_size, Some(8));
         assert_eq!(snapshot.block_size, Some(4));
+        assert_eq!(snapshot.max_draft_tokens, 3);
         assert_eq!(snapshot.draft_quantization_bits, Some(4));
         assert_eq!(snapshot.tree_max_nodes, 15);
         assert!(snapshot.position_keyed_sampling);
@@ -1609,6 +1797,12 @@ mod tests {
         assert_eq!(snapshot.tree_drafted_nodes, 42);
         assert_eq!(snapshot.draft_budget_changes, 3);
         assert_eq!(snapshot.current_draft_budget, 2);
+        let json = serde_json::to_value(&snapshot).expect("DFlash2 health should serialize");
+        assert_eq!(json["checkpoint_block_size"], 8);
+        assert_eq!(json["block_size"], 4);
+        assert_eq!(json["max_draft_tokens"], 3);
+        assert_eq!(json["draft_budget_changes"], 3);
+        assert_eq!(json["current_draft_budget"], 2);
         assert_eq!(snapshot.latest_adaptive_acceptance_ewma, 0.625);
         assert_eq!(snapshot.verify_profile.as_deref(), Some("qwen35-affine4"));
         assert_eq!(
@@ -1656,6 +1850,22 @@ mod tests {
         assert!(performance.decode_tokens_per_second.is_some());
         assert!(performance.session_decode_tokens_per_second.is_some());
         assert!(performance.ttft_ms.is_some());
+        assert!(snapshot.ragged_linear.enabled);
+        assert_eq!(snapshot.ragged_linear.max_width_limit, 4);
+        assert_eq!(snapshot.ragged_linear.windows, 7);
+        assert_eq!(snapshot.ragged_linear.windows_by_width, [0, 0, 5]);
+        assert_eq!(snapshot.ragged_linear.row_windows, 26);
+        assert_eq!(snapshot.ragged_linear.active_groups, 1);
+        assert_eq!(snapshot.ragged_linear.max_width, 4);
+        assert_eq!(snapshot.ragged_linear.budget_fallbacks, 2);
+        assert_eq!(snapshot.ragged_linear.reserved_bytes, 4096);
+        assert_eq!(json["ragged_linear"]["windows"], 7);
+        assert!(
+            !DFlash2HealthConfig::disabled()
+                .snapshot()
+                .ragged_linear
+                .enabled
+        );
     }
 
     #[test]

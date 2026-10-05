@@ -19,14 +19,8 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use serde::{Deserialize, Serialize};
-use tokio::sync::oneshot;
-
-#[cfg(not(test))]
-use ironmlx_runtime::core::direct_execution::spawn_direct;
-#[cfg(test)]
-use ironmlx_runtime::core::direct_execution::spawn_direct_with_events as spawn_direct;
 use ironmlx_runtime::core::generation_types::GenerateRequest;
+use serde::{Deserialize, Serialize};
 #[cfg(test)]
 #[path = "responses_eof_tests.rs"]
 mod eof_tests;
@@ -1292,7 +1286,6 @@ struct PreparedResponse {
     request: GenerateRequest,
     model: String,
     prompt_tokens: u32,
-    use_scheduler: bool,
     stream: bool,
     max_output_tokens: usize,
     instructions: Option<String>,
@@ -1311,7 +1304,6 @@ struct PreparedResponse {
 async fn prepare_response<M>(
     state: &AppState<M>,
     normalized: NormalizedRequest,
-    force_scheduler: bool,
 ) -> std::result::Result<PreparedResponse, Response>
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -1407,15 +1399,6 @@ where
     };
     let prompt_len = prompt_ids.len();
     let scheduler_config = state.scheduler_request_config(prompt_len, max_output_tokens);
-    let use_scheduler = state.request_execution.is_dflash2()
-        || force_scheduler
-        || super::should_route_to_scheduler::<M>(
-            prompt_len,
-            scheduler_config.prefill_chunk_size,
-            state.b_max,
-            state.paged_prefix_cache_enabled,
-            state.force_scheduler_for_greedy && sampler.is_pipelinable(),
-        );
     let output_schema = text_format.constraint_schema();
     let constraint = match openai::compile_output_constraint_with_native(
         &state.tokenizer,
@@ -1471,7 +1454,6 @@ where
         },
         model,
         prompt_tokens: prompt_len as u32,
-        use_scheduler,
         stream,
         max_output_tokens,
         instructions,
@@ -2376,88 +2358,6 @@ fn finish_decoder(
     validate_collected_output(output, context)
 }
 
-async fn serve_unary_gs<M>(state: AppState<M>, prepared: PreparedResponse) -> Response
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    let started_at = Instant::now();
-    let meta = prepared.meta();
-    let input_tokens = prepared.prompt_tokens;
-    let tool_context = prepared.tool_context;
-    let native_output = prepared.native_output;
-    let request = prepared.request;
-    let result = spawn_direct(
-        state,
-        request,
-        #[cfg(test)]
-        prepared.injected_events,
-        move |initialized| -> anyhow::Result<CollectedOutput> {
-            let mut generation = initialized?;
-            let tokenizer = generation.tokenizer();
-            let mut output = CollectedOutput::new();
-            let mut decoder = GeneratedOutputDecoder::new_with_native(
-                tokenizer,
-                tool_context.as_ref().map(ToolContext::decoder_config),
-                native_output,
-            )?;
-            let mut performance = None;
-            let mut finished = false;
-            loop {
-                let Some(event) = generation.next_token()? else {
-                    break;
-                };
-                if generation.commit_memory() {
-                    performance = Some(generation.record_request_started(input_tokens, started_at));
-                }
-                output.completion_tokens += 1;
-                performance
-                    .as_mut()
-                    .expect("performance tracker starts with the first generated token")
-                    .record_output_tokens(1);
-                let events = if event.finish_reason == Some("stop") {
-                    Vec::new()
-                } else {
-                    decoder.push_token(event.token)?
-                };
-                if decoder.last_token_was_reasoning() {
-                    output.reasoning_tokens = output.reasoning_tokens.saturating_add(1);
-                }
-                output.collect(events)?;
-                if let Some(reason) = event.finish_reason {
-                    output.finish_reason = reason;
-                    finished = true;
-                    break;
-                }
-            }
-            require_terminal_event(finished)?;
-            let model_finish = output.finish_reason;
-            if let Some(context) = tool_context.as_ref() {
-                finish_decoder(&mut output, &mut decoder, context, model_finish)?;
-            } else {
-                output.finish_decode(&mut decoder, model_finish)?;
-            }
-            performance
-                .ok_or_else(|| anyhow::anyhow!("generation ended before producing a token"))?
-                .complete();
-            Ok(output)
-        },
-    )
-    .await;
-    match result {
-        Ok(Ok(output)) => unary_response(meta, input_tokens, output),
-        Ok(Err(error)) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "generation_error",
-            format!("{error:#}"),
-        ),
-        Err(error) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "generation_task_failed",
-            format!("generation task failed: {error}"),
-        ),
-    }
-}
-
 async fn admit_request<M>(
     state: &AppState<M>,
     request: GenerateRequest,
@@ -2789,191 +2689,6 @@ where
     super::api_transport::disconnect_aware_sse_response(rx)
 }
 
-async fn serve_stream_gs<M>(state: AppState<M>, prepared: PreparedResponse) -> Response
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    let started_at = Instant::now();
-    let meta = prepared.meta();
-    let input_tokens = prepared.prompt_tokens;
-    let tool_context = prepared.tool_context;
-    let native_output = prepared.native_output;
-    let request = prepared.request;
-    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
-    let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
-    spawn_direct(
-        state,
-        request,
-        #[cfg(test)]
-        prepared.injected_events,
-        move |initialized| {
-            let mut generation = match initialized {
-                Ok(generation) => generation,
-                Err(error) => {
-                    let _ = init_tx.send(Err(error));
-                    return;
-                }
-            };
-            let tokenizer = generation.tokenizer();
-            let first = match generation.next_token() {
-                Ok(first) => first,
-                Err(error) => {
-                    let _ = init_tx.send(Err(error));
-                    return;
-                }
-            };
-            generation.commit_memory();
-            let mut performance = generation.record_request_started(input_tokens, started_at);
-            if init_tx.send(Ok(())).is_err() {
-                return;
-            }
-            let mut formatter = ResponsesStream::new(meta);
-            if tx.blocking_send(Ok(formatter.created())).is_err() {
-                return;
-            }
-            let mut decoder = match GeneratedOutputDecoder::new_with_native(
-                tokenizer,
-                tool_context.as_ref().map(ToolContext::decoder_config),
-                native_output,
-            ) {
-                Ok(decoder) => decoder,
-                Err(error) => {
-                    let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                    return;
-                }
-            };
-            let mut completion_tokens = 0_u32;
-            let mut reasoning_tokens = 0_u32;
-            let mut finish_reason = "stop";
-            let mut call_names = Vec::new();
-            let mut typed_finish = None;
-            let mut first = Some(first);
-            let mut finished = false;
-            loop {
-                if disconnect.is_cancelled() {
-                    return;
-                }
-                let event = match first.take() {
-                    Some(event) => Ok(event),
-                    None => generation.next_token(),
-                };
-                let event = match event {
-                    Ok(Some(event)) => event,
-                    Ok(None) => break,
-                    Err(error) => {
-                        let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                        return;
-                    }
-                };
-                completion_tokens += 1;
-                performance.record_output_tokens(1);
-                let events = if event.finish_reason == Some("stop") {
-                    Ok(Vec::new())
-                } else {
-                    decoder.push_token(event.token)
-                };
-                let events = match events {
-                    Ok(events) => events,
-                    Err(error) => {
-                        let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                        return;
-                    }
-                };
-                if decoder.last_token_was_reasoning() {
-                    reasoning_tokens = reasoning_tokens.saturating_add(1);
-                }
-                let frames = match stream_generated_events(
-                    &mut formatter,
-                    events,
-                    &mut call_names,
-                    &mut typed_finish,
-                ) {
-                    Ok(frames) => frames,
-                    Err(error) => {
-                        let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                        return;
-                    }
-                };
-                for frame in frames {
-                    if tx.blocking_send(Ok(frame)).is_err() {
-                        return;
-                    }
-                }
-                if let Some(reason) = event.finish_reason {
-                    finish_reason = reason;
-                    finished = true;
-                    break;
-                }
-            }
-            if disconnect.is_cancelled() {
-                return;
-            }
-            if let Err(error) = require_terminal_event(finished) {
-                let _ = tx.blocking_send(Ok(formatter.failed(error.to_string())));
-                return;
-            }
-            let events = match decoder.finish(finish_reason) {
-                Ok(events) => events,
-                Err(error) => {
-                    let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                    return;
-                }
-            };
-            let frames = match stream_generated_events(
-                &mut formatter,
-                events,
-                &mut call_names,
-                &mut typed_finish,
-            ) {
-                Ok(frames) => frames,
-                Err(error) => {
-                    let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                    return;
-                }
-            };
-            for frame in frames {
-                if tx.blocking_send(Ok(frame)).is_err() {
-                    return;
-                }
-            }
-            if let Some(context) = tool_context.as_ref() {
-                if let Err(error) =
-                    openai::validate_tool_choice_output(&context.constraint_options, &call_names)
-                {
-                    let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
-                    return;
-                }
-            }
-            finish_reason = typed_finish.unwrap_or(finish_reason);
-            if finished {
-                performance.complete();
-            }
-            for frame in formatter.completed(
-                finish_reason,
-                Usage::new(input_tokens, completion_tokens).with_reasoning_tokens(reasoning_tokens),
-                decoder.reasoning_incomplete(),
-            ) {
-                if tx.blocking_send(Ok(frame)).is_err() {
-                    return;
-                }
-            }
-        },
-    );
-    match init_rx.await {
-        Ok(Ok(())) => super::api_transport::disconnect_aware_sse_response(rx),
-        Ok(Err(error)) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "generation_initialization_error",
-            format!("{error:#}"),
-        ),
-        Err(error) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "generation_initialization_channel_closed",
-            format!("generation initialization channel closed: {error}"),
-        ),
-    }
-}
-
 pub(crate) async fn responses<M>(
     State(state): State<AppState<M>>,
     ApiJson(request): ApiJson<ResponsesRequest>,
@@ -2981,13 +2696,12 @@ pub(crate) async fn responses<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    responses_with_state(state, request, false).await
+    responses_with_state(state, request).await
 }
 
 pub(crate) async fn responses_with_state<M>(
     state: AppState<M>,
     request: ResponsesRequest,
-    force_scheduler: bool,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -3002,7 +2716,7 @@ where
             );
         }
     };
-    let prepared = match prepare_response(&state, normalized, force_scheduler).await {
+    let prepared = match prepare_response(&state, normalized).await {
         Ok(prepared) => prepared,
         Err(response) => return response,
     };
@@ -3013,11 +2727,10 @@ async fn serve_prepared_response<M>(state: AppState<M>, prepared: PreparedRespon
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    match (prepared.stream, prepared.use_scheduler) {
-        (true, true) => serve_stream_scheduler(state, prepared).await,
-        (true, false) => serve_stream_gs(state, prepared).await,
-        (false, true) => serve_unary_scheduler(state, prepared).await,
-        (false, false) => serve_unary_gs(state, prepared).await,
+    if prepared.stream {
+        serve_stream_scheduler(state, prepared).await
+    } else {
+        serve_unary_scheduler(state, prepared).await
     }
 }
 
@@ -3025,7 +2738,7 @@ pub(crate) async fn gemma4_drafter_responses(
     State(state): State<Gemma4DrafterAppState>,
     ApiJson(request): ApiJson<ResponsesRequest>,
 ) -> Response {
-    responses_with_state(state.base, request, true).await
+    responses_with_state(state.base, request).await
 }
 
 #[cfg(test)]

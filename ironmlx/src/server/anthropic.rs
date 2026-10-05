@@ -19,7 +19,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 #[cfg(test)]
 use super::image_input::ImageRequestBudget;
@@ -31,7 +31,6 @@ use ironmlx_lm::core::image_input::ImageInputError;
 use ironmlx_lm::core::model::Model;
 use ironmlx_lm::core::native_output::NativeOutputDecoderConfig;
 use ironmlx_lm::core::vision::DenseVlMethods;
-use ironmlx_runtime::core::direct_execution::spawn_direct;
 use ironmlx_runtime::core::generation_types::GenerateRequest;
 use ironmlx_runtime::core::scheduler_actor::AdmitReply;
 use ironmlx_runtime::core::speculative::MtpSpeculativeConfig;
@@ -121,10 +120,6 @@ pub(crate) fn anthropic_error_response_with_code(
 
 fn service_unavailable_response(code: &'static str, message: impl Into<String>) -> Response {
     anthropic_error_response_with_code(StatusCode::SERVICE_UNAVAILABLE, code, message)
-}
-
-fn internal_error_response(code: &'static str, message: impl Into<String>) -> Response {
-    anthropic_error_response_with_code(StatusCode::INTERNAL_SERVER_ERROR, code, message)
 }
 
 fn format_stream_error(error: &anyhow::Error) -> Bytes {
@@ -533,14 +528,6 @@ fn build_sampler(req: &MessagesRequest, defaults: SamplingDefaults) -> Sampler {
     s
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MessagesRoute {
-    SchedulerStream,
-    GenerationStreamStream,
-    SchedulerUnary,
-    GenerationStreamUnary,
-}
-
 struct ToolResponseContext {
     dialect: ToolDialect,
     definitions: Vec<ToolDefinition>,
@@ -558,15 +545,6 @@ impl ToolResponseContext {
             definitions: self.definitions.clone(),
             output_schema: self.output_schema.clone(),
         }
-    }
-}
-
-fn messages_route(stream: bool, use_scheduler: bool) -> MessagesRoute {
-    match (stream, use_scheduler) {
-        (true, true) => MessagesRoute::SchedulerStream,
-        (true, false) => MessagesRoute::GenerationStreamStream,
-        (false, true) => MessagesRoute::SchedulerUnary,
-        (false, false) => MessagesRoute::GenerationStreamUnary,
     }
 }
 
@@ -1107,15 +1085,6 @@ where
         constraint,
     };
 
-    let use_scheduler = state.request_execution.is_dflash2()
-        || super::should_route_to_scheduler::<M>(
-            prompt_len,
-            scheduler_config.prefill_chunk_size,
-            state.b_max,
-            state.paged_prefix_cache_enabled,
-            state.force_scheduler_for_greedy && sampler.is_pipelinable(),
-        );
-
     if let Some(prepared) = prepared_tools.filter(|prepared| prepared.constraint_options.is_some())
     {
         let constraint_options = prepared
@@ -1134,77 +1103,37 @@ where
             constraint_options,
             native_output,
         };
-        return match messages_route(stream, use_scheduler) {
-            MessagesRoute::SchedulerStream | MessagesRoute::SchedulerUnary => {
-                serve_via_scheduler_tools(
-                    state,
-                    request,
-                    model_label,
-                    input_tokens,
-                    stream,
-                    tool_context,
-                )
-                .await
-            }
-            MessagesRoute::GenerationStreamStream | MessagesRoute::GenerationStreamUnary => {
-                serve_via_gs_tools(
-                    state,
-                    request,
-                    model_label,
-                    input_tokens,
-                    stream,
-                    tool_context,
-                )
-                .await
-            }
-        };
+        return serve_via_scheduler_tools(
+            state,
+            request,
+            model_label,
+            input_tokens,
+            stream,
+            tool_context,
+        )
+        .await;
     }
 
-    match messages_route(stream, use_scheduler) {
-        MessagesRoute::SchedulerStream => {
-            serve_via_scheduler_stream_with_output_format(
-                state,
-                request,
-                model_label,
-                input_tokens,
-                output_format,
-                native_output,
-            )
-            .await
-        }
-        MessagesRoute::GenerationStreamStream => {
-            serve_via_gs_stream(
-                state,
-                request,
-                model_label,
-                input_tokens,
-                output_format,
-                native_output,
-            )
-            .await
-        }
-        MessagesRoute::SchedulerUnary => {
-            serve_via_scheduler_unary_with_output_format(
-                state,
-                request,
-                model_label,
-                input_tokens,
-                output_format,
-                native_output,
-            )
-            .await
-        }
-        MessagesRoute::GenerationStreamUnary => {
-            serve_via_gs_unary(
-                state,
-                request,
-                model_label,
-                input_tokens,
-                output_format,
-                native_output,
-            )
-            .await
-        }
+    if stream {
+        serve_via_scheduler_stream_with_output_format(
+            state,
+            request,
+            model_label,
+            input_tokens,
+            output_format,
+            native_output,
+        )
+        .await
+    } else {
+        serve_via_scheduler_unary_with_output_format(
+            state,
+            request,
+            model_label,
+            input_tokens,
+            output_format,
+            native_output,
+        )
+        .await
     }
 }
 
@@ -1829,24 +1758,6 @@ impl ToolStreamEncoder {
     }
 }
 
-async fn serve_via_gs_tools<M>(
-    state: AppState<M>,
-    request: GenerateRequest,
-    model_id: String,
-    input_tokens: u32,
-    stream: bool,
-    context: ToolResponseContext,
-) -> Response
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    if stream {
-        serve_via_gs_tools_stream(state, request, model_id, input_tokens, context).await
-    } else {
-        serve_via_gs_tools_unary(state, request, model_id, input_tokens, context).await
-    }
-}
-
 async fn serve_via_scheduler_tools<M>(
     state: AppState<M>,
     request: GenerateRequest,
@@ -1862,88 +1773,6 @@ where
         serve_via_scheduler_tools_stream(state, request, model_id, input_tokens, context).await
     } else {
         serve_via_scheduler_tools_unary(state, request, model_id, input_tokens, context).await
-    }
-}
-
-async fn serve_via_gs_tools_unary<M>(
-    state: AppState<M>,
-    request: GenerateRequest,
-    model_id: String,
-    input_tokens: u32,
-    context: ToolResponseContext,
-) -> Response
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    let started_at = Instant::now();
-    let id = gen_msg_id();
-    let decoder_config = context.decoder_config();
-    let native_output = context.native_output;
-    let output_format = context.output_format.clone();
-    let constraint_options = context.constraint_options;
-    let result = spawn_direct(
-        state,
-        request,
-        move |initialized| -> anyhow::Result<ParsedToolOutput> {
-            let mut generation = initialized?;
-            let tokenizer = generation.tokenizer();
-            let mut decoder = GeneratedOutputDecoder::new_with_native(
-                tokenizer,
-                Some(decoder_config),
-                native_output,
-            )?;
-            let mut performance = generation.record_request_started(input_tokens, started_at);
-            let mut output = ParsedToolOutput {
-                content: String::new(),
-                reasoning: String::new(),
-                tool_calls: Vec::new(),
-                finish_reason: "end_turn",
-                completion_tokens: 0,
-                thinking_tokens: 0,
-            };
-            let mut finished = false;
-            let mut model_finish = "stop";
-            while let Some(event) = generation.next_token()? {
-                generation.commit_memory();
-                output.completion_tokens += 1;
-                performance.record_output_tokens(1);
-                let events = if event.finish_reason == Some("stop") {
-                    Vec::new()
-                } else {
-                    decoder.push_token(event.token)?
-                };
-                if event.finish_reason != Some("stop") && decoder.last_token_was_reasoning() {
-                    output.thinking_tokens += 1;
-                }
-                collect_tool_events(&mut output, events)?;
-                if let Some(reason) = event.finish_reason {
-                    model_finish = reason;
-                    output.finish_reason = match reason {
-                        "stop" => "end_turn",
-                        "length" => "max_tokens",
-                        other => other,
-                    };
-                    finished = true;
-                    break;
-                }
-            }
-            anyhow::ensure!(finished, "generation ended before a terminal event");
-            let events = decoder.finish(model_finish)?;
-            collect_tool_events(&mut output, events)?;
-            validate_tool_output(&constraint_options, &output.tool_calls)?;
-            performance.complete();
-            Ok(output)
-        },
-    )
-    .await;
-
-    match result {
-        Ok(Ok(output)) => tool_unary_response(id, model_id, input_tokens, output, output_format),
-        Ok(Err(error)) => generation_err_to_response(error),
-        Err(error) => internal_error_response(
-            "generation_task_failed",
-            format!("generation task failed: {error}"),
-        ),
     }
 }
 
@@ -2066,178 +1895,6 @@ where
     }
     performance.complete();
     tool_unary_response(id, model_id, input_tokens, output, output_format)
-}
-
-async fn serve_via_gs_tools_stream<M>(
-    state: AppState<M>,
-    request: GenerateRequest,
-    model_id: String,
-    input_tokens: u32,
-    context: ToolResponseContext,
-) -> Response
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    let started_at = Instant::now();
-    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
-    let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
-    let message_id = gen_msg_id();
-    spawn_direct(state, request, move |initialized| {
-        let decoder_config = context.decoder_config();
-        let native_output = context.native_output;
-        let output_format = context.output_format.clone();
-        let constraint_options = context.constraint_options;
-        let mut generation = match initialized {
-            Ok(generation) => generation,
-            Err(error) => {
-                let _ = init_tx.send(Err(error));
-                return;
-            }
-        };
-        let tokenizer = generation.tokenizer();
-        let first_event = match generation.next_token() {
-            Ok(event) => event,
-            Err(error) => {
-                let _ = init_tx.send(Err(error));
-                return;
-            }
-        };
-        let mut decoder = match GeneratedOutputDecoder::new_with_native(
-            tokenizer,
-            Some(decoder_config),
-            native_output,
-        ) {
-            Ok(decoder) => decoder,
-            Err(error) => {
-                let _ = init_tx.send(Err(error));
-                return;
-            }
-        };
-        generation.commit_memory();
-        let mut performance = generation.record_request_started(input_tokens, started_at);
-        if init_tx.send(Ok(())).is_err() {
-            return;
-        }
-        let mut encoder = ToolStreamEncoder::new(message_id, model_id, input_tokens, output_format);
-        if tx.blocking_send(Ok(encoder.message_start())).is_err() {
-            return;
-        }
-        let mut output_tokens = 0_u32;
-        let mut thinking_tokens = 0_u32;
-        let mut model_finish = "stop";
-        let mut finished = false;
-        let mut first_event = first_event;
-        loop {
-            if disconnect.is_cancelled() {
-                return;
-            }
-            let event = match first_event.take() {
-                Some(event) => Some(event),
-                None => match generation.next_token() {
-                    Ok(event) => event,
-                    Err(error) => {
-                        let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-                        return;
-                    }
-                },
-            };
-            let Some(event) = event else {
-                break;
-            };
-            output_tokens += 1;
-            performance.record_output_tokens(1);
-            let events = if event.finish_reason == Some("stop") {
-                Ok(Vec::new())
-            } else {
-                decoder.push_token(event.token)
-            };
-            if event.finish_reason != Some("stop") && decoder.last_token_was_reasoning() {
-                thinking_tokens += 1;
-            }
-            let events = match events {
-                Ok(events) => events,
-                Err(error) => {
-                    let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-                    return;
-                }
-            };
-            let frames = match encoder.push_events(events) {
-                Ok(frames) => frames,
-                Err(error) => {
-                    let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-                    return;
-                }
-            };
-            for frame in frames {
-                if tx.blocking_send(Ok(frame)).is_err() {
-                    return;
-                }
-            }
-            if let Some(reason) = event.finish_reason {
-                model_finish = reason;
-                finished = true;
-                break;
-            }
-        }
-        if disconnect.is_cancelled() {
-            return;
-        }
-        if !finished {
-            let error = anyhow::anyhow!("generation ended before a terminal event");
-            let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-            return;
-        }
-        let events = match decoder.finish(model_finish) {
-            Ok(events) => events,
-            Err(error) => {
-                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-                return;
-            }
-        };
-        let frames = match encoder.push_events(events) {
-            Ok(frames) => frames,
-            Err(error) => {
-                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-                return;
-            }
-        };
-        for frame in frames {
-            if tx.blocking_send(Ok(frame)).is_err() {
-                return;
-            }
-        }
-        let stop_reason = anthropic_finish_reason(
-            GeneratedFinishReason::from_generation(model_finish, !encoder.call_names.is_empty())
-                .expect("generation finish reason already validated"),
-        );
-        let frames = match encoder.finish(
-            &constraint_options,
-            stop_reason,
-            output_tokens,
-            thinking_tokens,
-        ) {
-            Ok(frames) => frames,
-            Err(error) => {
-                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-                return;
-            }
-        };
-        for frame in frames {
-            if tx.blocking_send(Ok(frame)).is_err() {
-                return;
-            }
-        }
-        performance.complete();
-    });
-
-    match init_rx.await {
-        Ok(Ok(())) => super::api_transport::disconnect_aware_sse_response(rx),
-        Ok(Err(error)) => generation_err_to_response(error),
-        Err(error) => anthropic_error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("generation initialization channel closed: {error}"),
-        ),
-    }
 }
 
 async fn serve_via_scheduler_tools_stream<M>(
@@ -2371,197 +2028,8 @@ where
     super::api_transport::disconnect_aware_sse_response(rx)
 }
 
-async fn serve_via_gs_stream<M>(
-    state: AppState<M>,
-    request: GenerateRequest,
-    model_id: String,
-    input_tokens: u32,
-    output_format: StructuredOutputFormat,
-    native_output: Option<NativeOutputDecoderConfig>,
-) -> Response
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    let started_at = Instant::now();
-    let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
-    let (init_tx, init_rx) = oneshot::channel::<anyhow::Result<()>>();
-    let id = gen_msg_id();
-    let id_for_task = id.clone();
-    let model_id_for_task = model_id.clone();
-
-    spawn_direct(state, request, move |initialized| {
-        let mut stream = match initialized {
-            Ok(stream) => stream,
-            Err(error) => {
-                let _ = init_tx.send(Err(error));
-                return;
-            }
-        };
-        let tokenizer = stream.tokenizer();
-        let first_event = match stream.next_token() {
-            Ok(event) => event,
-            Err(error) => {
-                let _ = init_tx.send(Err(error));
-                return;
-            }
-        };
-        stream.commit_memory();
-        let mut performance = stream.record_request_started(input_tokens, started_at);
-        if init_tx.send(Ok(())).is_err() {
-            return;
-        }
-
-        // 1. message_start
-        let start_payload = serde_json::json!({
-            "type": "message_start",
-            "message": {
-                "id": id_for_task,
-                "type": "message",
-                "role": "assistant",
-                "content": [],
-                "model": model_id_for_task,
-                "stop_reason": null,
-                "stop_sequence": null,
-                "usage": {"input_tokens": input_tokens, "output_tokens": 0}
-            }
-        });
-        if tx
-            .blocking_send(Ok(format_event("message_start", &start_payload)))
-            .is_err()
-        {
-            return;
-        }
-        let mut decoder =
-            match GeneratedOutputDecoder::new_with_native(tokenizer, None, native_output) {
-                Ok(decoder) => decoder,
-                Err(error) => {
-                    let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-                    return;
-                }
-            };
-        let mut encoder =
-            ToolStreamEncoder::new(id_for_task, model_id_for_task, input_tokens, output_format);
-
-        // 2..N. Protocol-neutral events become Anthropic content blocks.
-        let mut output_tokens: u32 = 0;
-        let mut thinking_tokens: u32 = 0;
-        let mut model_finish: &'static str = "stop";
-        let mut finished = false;
-        let mut first_event = Some(first_event);
-        loop {
-            if disconnect.is_cancelled() {
-                return;
-            }
-            let event = match first_event.take() {
-                Some(event) => Ok(event),
-                None => stream.next_token(),
-            };
-            match event {
-                Ok(Some(ev)) => {
-                    let mut events = if ev.finish_reason == Some("stop") {
-                        Vec::new()
-                    } else {
-                        match decoder.push_token(ev.token) {
-                            Ok(events) => events,
-                            Err(error) => {
-                                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-                                return;
-                            }
-                        }
-                    };
-                    if ev.finish_reason != Some("stop") && decoder.last_token_was_reasoning() {
-                        thinking_tokens += 1;
-                    }
-                    if let Some(reason) = ev.finish_reason {
-                        model_finish = reason;
-                        match decoder.finish(reason) {
-                            Ok(tail) => events.extend(tail),
-                            Err(error) => {
-                                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-                                return;
-                            }
-                        }
-                        finished = true;
-                    }
-                    let frames = match encoder.push_events(events) {
-                        Ok(frames) => frames,
-                        Err(error) => {
-                            let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-                            return;
-                        }
-                    };
-                    for frame in frames {
-                        if tx.blocking_send(Ok(frame)).is_err() {
-                            return;
-                        }
-                    }
-                    output_tokens += 1;
-                    performance.record_output_tokens(1);
-                    if ev.finish_reason.is_some() {
-                        break;
-                    }
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    let payload = serde_json::json!({
-                        "type": "error",
-                        "error": {"message": e.to_string()}
-                    });
-                    let _ = tx.blocking_send(Ok(format_event("error", &payload)));
-                    return;
-                }
-            }
-        }
-        if disconnect.is_cancelled() {
-            return;
-        }
-        if !finished {
-            let error = anyhow::anyhow!("generation ended before a terminal event");
-            let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-            return;
-        }
-        let stop_reason = anthropic_finish_reason(
-            GeneratedFinishReason::from_generation(model_finish, false)
-                .expect("generation finish reason already validated"),
-        );
-        let frames = match encoder.finish(
-            &ToolConstraintOptions::default(),
-            stop_reason,
-            output_tokens,
-            thinking_tokens,
-        ) {
-            Ok(frames) => frames,
-            Err(error) => {
-                let _ = tx.blocking_send(Ok(format_stream_error(&error)));
-                return;
-            }
-        };
-        for frame in frames {
-            if tx.blocking_send(Ok(frame)).is_err() {
-                return;
-            }
-        }
-        performance.complete();
-    });
-
-    match init_rx.await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => return generation_err_to_response(error),
-        Err(error) => {
-            return internal_error_response(
-                "generation_initialization_channel_closed",
-                format!("generation initialization channel closed: {error}"),
-            );
-        }
-    }
-
-    super::api_transport::disconnect_aware_sse_response(rx)
-}
-
-/// Text-only short-prompt streaming path via SchedulerActor (3b-4 swap-in).
-/// Emits the same 6-event SSE sequence as `serve_via_gs_stream`:
-///   message_start → content_block_start → N × content_block_delta →
-///   content_block_stop → message_delta → message_stop.
+/// SchedulerActor streaming entry point used by integration tests and
+/// protocol-level callers that need the default text output format.
 pub async fn serve_via_scheduler_stream<M>(
     state: AppState<M>,
     request: GenerateRequest,
@@ -2712,99 +2180,6 @@ where
     super::api_transport::disconnect_aware_sse_response(rx)
 }
 
-async fn serve_via_gs_unary<M>(
-    state: AppState<M>,
-    request: GenerateRequest,
-    model_id: String,
-    input_tokens: u32,
-    output_format: StructuredOutputFormat,
-    native_output: Option<NativeOutputDecoderConfig>,
-) -> Response
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    let started_at = Instant::now();
-    let id = gen_msg_id();
-    let result = spawn_direct(
-        state,
-        request,
-        move |initialized| -> anyhow::Result<ParsedToolOutput> {
-            let mut stream = initialized?;
-            let tokenizer = stream.tokenizer();
-            let mut decoder =
-                GeneratedOutputDecoder::new_with_native(tokenizer, None, native_output)?;
-            let mut performance = stream.record_request_started(input_tokens, started_at);
-            let mut output = ParsedToolOutput {
-                content: String::new(),
-                reasoning: String::new(),
-                tool_calls: Vec::new(),
-                finish_reason: "end_turn",
-                completion_tokens: 0,
-                thinking_tokens: 0,
-            };
-            let mut finished = false;
-            loop {
-                let next = stream.next_token()?;
-                stream.commit_memory();
-                let Some(ev) = next else {
-                    break;
-                };
-                performance.record_output_tokens(1);
-                let events = if ev.finish_reason == Some("stop") {
-                    Vec::new()
-                } else {
-                    decoder.push_token(ev.token)?
-                };
-                if ev.finish_reason != Some("stop") && decoder.last_token_was_reasoning() {
-                    output.thinking_tokens += 1;
-                }
-                collect_tool_events(&mut output, events)?;
-                output.completion_tokens += 1;
-                if let Some(reason) = ev.finish_reason {
-                    collect_tool_events(&mut output, decoder.finish(reason)?)?;
-                    finished = true;
-                    break;
-                }
-            }
-            anyhow::ensure!(finished, "generation ended before a terminal event");
-            performance.complete();
-            Ok(output)
-        },
-    )
-    .await;
-
-    let output = match result {
-        Ok(Ok(output)) => output,
-        Ok(Err(err)) => return generation_err_to_response(err),
-        Err(e) => {
-            return internal_error_response("generation_task_failed", format!("join: {e}"));
-        }
-    };
-
-    tool_unary_response(id, model_id, input_tokens, output, output_format)
-}
-
-/// Text-only short-prompt unary path via SchedulerActor (3b-4 swap-in).
-pub async fn serve_via_scheduler_unary<M>(
-    state: AppState<M>,
-    request: GenerateRequest,
-    model_id: String,
-    input_tokens: u32,
-) -> Response
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
-    serve_via_scheduler_unary_with_output_format(
-        state,
-        request,
-        model_id,
-        input_tokens,
-        StructuredOutputFormat::Text,
-        None,
-    )
-    .await
-}
-
 async fn serve_via_scheduler_unary_with_output_format<M>(
     state: AppState<M>,
     request: GenerateRequest,
@@ -2919,20 +2294,6 @@ mod tests {
         assert!(s.starts_with("event: message_stop\ndata: "));
         assert!(s.ends_with("\n\n"));
         assert!(s.contains("\"type\":\"message_stop\""));
-    }
-
-    #[test]
-    fn messages_routes_streaming_and_unary_scheduler_requests() {
-        assert_eq!(messages_route(true, true), MessagesRoute::SchedulerStream);
-        assert_eq!(messages_route(false, true), MessagesRoute::SchedulerUnary);
-        assert_eq!(
-            messages_route(true, false),
-            MessagesRoute::GenerationStreamStream
-        );
-        assert_eq!(
-            messages_route(false, false),
-            MessagesRoute::GenerationStreamUnary
-        );
     }
 
     #[test]

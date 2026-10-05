@@ -1,4 +1,5 @@
 #include "cxx_mlx_shim/quantization.h"
+#include "cxx_mlx_shim/prefill_qmm_mtile.h"
 #include "cxx_mlx_shim/shim_helpers.h"
 
 #include <chrono>
@@ -89,6 +90,11 @@ std::unique_ptr<MlxArray> quantized_matmul(
     rust::Str mode,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
   auto target = decode_stream_or_device(has_target, is_device_only, device_type, stream_index);
+  if (auto candidate = experimental_prefill_qmm_mtile(
+          x, w, scales, opt_arr(biases), transpose,
+          opt_i(has_group_size, group_size), opt_i(has_bits, bits), std::string(mode), target)) {
+    return std::make_unique<MlxArray>(std::move(*candidate));
+  }
   return std::make_unique<MlxArray>(mlx::core::quantized_matmul(
       x, w, scales, opt_arr(biases),
       transpose,

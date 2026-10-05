@@ -39,6 +39,7 @@ import Testing
         targetModelDir: "/models/target",
         draftModelID: "draft",
         draftModelDir: "/models/draft",
+        checkpointBlockSize: 8,
         blockSize: 4,
         draftBits: 8,
         tensorBatchMaxWidth: 6,
@@ -400,4 +401,45 @@ private func argumentValue(_ flag: String, in arguments: [String]) -> String? {
     #expect(!config.arguments.contains("--paged-prefix-cache-dir"))
     #expect(!config.arguments.contains("--prefix-lru-cache-max-bytes"))
     #expect(!config.arguments.contains("--ssd-prefix-cache-max-gb"))
+}
+
+private func dflash2LaunchArguments(config appConfig: AppConfig) -> [String] {
+    let runtime = ModelDFlash2Runtime(
+        targetModelID: "target",
+        targetModelDir: "/models/target",
+        draftModelID: "draft",
+        draftModelDir: "/models/draft",
+        checkpointBlockSize: 8,
+        blockSize: 8,
+        draftBits: 4,
+        tensorBatchMaxWidth: nil,
+        maxCacheCap: nil
+    )
+    return BackendLaunchConfiguration(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        host: "127.0.0.1",
+        port: 9068,
+        options: BackendLaunchOptions(config: appConfig),
+        dflash2Runtime: runtime
+    ).arguments
+}
+
+@Test func dflash2ArgumentsKeepM5ProfileAutomaticByDefault() {
+    #expect(!dflash2LaunchArguments(config: AppConfig()).contains("--m5-dflash2-profile"))
+    #expect(
+        !dflash2LaunchArguments(config: AppConfig(m5Dflash2Profile: true))
+            .contains("--m5-dflash2-profile"))
+}
+
+@Test func dflash2ArgumentsTurnM5ProfileOffWhenDisabled() {
+    let arguments = dflash2LaunchArguments(config: AppConfig(m5Dflash2Profile: false))
+    #expect(argumentValue("--m5-dflash2-profile", in: arguments) == "off")
+}
+
+@Test func appConfigRoundTripsM5ProfileSetting() throws {
+    let encoded = try JSONEncoder().encode(AppConfig(m5Dflash2Profile: false))
+    let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+    #expect(object?["m5_dflash2_profile"] as? Bool == false)
+    let decoded = try JSONDecoder().decode(AppConfig.self, from: encoded)
+    #expect(decoded.m5Dflash2Profile == false)
 }

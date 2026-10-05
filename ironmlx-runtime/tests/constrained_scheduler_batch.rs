@@ -13,6 +13,17 @@ use ironmlx_lm::core::Sampler;
 use ironmlx_runtime::core::generation_types::GenerateRequest;
 use ironmlx_runtime::core::Scheduler;
 use mlx::{Array, Dtype, StreamOrDevice};
+use std::sync::OnceLock;
+
+fn configure_local_test_metallib() {
+    static CONFIGURED: OnceLock<()> = OnceLock::new();
+    CONFIGURED.get_or_init(|| {
+        let mlx_dir = std::env::var("MLX_DIR").expect("MLX_DIR required for MLX tests");
+        let path = std::path::Path::new(&mlx_dir).join("lib/mlx.metallib");
+        mlx::metal::set_metallib_path(path.to_string_lossy().as_ref())
+            .expect("load MLX_DIR/lib/mlx.metallib for test");
+    });
+}
 
 struct ConstraintBatchModel;
 
@@ -174,6 +185,7 @@ fn request(constraint: bool) -> GenerateRequest {
 
 #[test]
 fn scheduler_b2_keeps_constrained_and_unconstrained_rows_isolated() {
+    configure_local_test_metallib();
     let model = ConstraintBatchModel;
     let mut scheduler = Scheduler::<ConstraintBatchModel>::new(
         2,
@@ -235,6 +247,7 @@ fn scheduler_b2_keeps_constrained_and_unconstrained_rows_isolated() {
 
 #[test]
 fn scheduler_preserves_required_choice_plan_state() {
+    configure_local_test_metallib();
     let options = ToolConstraintOptions {
         choice: ToolChoiceConstraint::Required,
         allow_parallel_calls: false,

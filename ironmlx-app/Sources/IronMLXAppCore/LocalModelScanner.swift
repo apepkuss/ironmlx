@@ -379,7 +379,7 @@ private struct DFlash2CompatibilitySignature: Equatable {
             && targetLayerCount == target.targetLayerCount
             && floatValuesMatch(rmsNormEps, target.rmsNormEps)
             && floatValuesMatch(ropeTheta, target.ropeTheta)
-            && blockSize.map { (2 ... 8).contains($0) } == true
+            && blockSize.map { $0 >= 2 } == true
             && !targetLayerIDs.isEmpty
             && targetLayerIDs.allSatisfy { layer in
                 layer >= 0 && targetLayerCount.map { layer < $0 } == true

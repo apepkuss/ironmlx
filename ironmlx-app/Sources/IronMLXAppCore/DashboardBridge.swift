@@ -2214,6 +2214,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             || existing.cacheDir != updated.cacheDir
             || existing.kvQuant != updated.kvQuant
             || existing.activeKvOffload != updated.activeKvOffload
+            || existing.m5Dflash2Profile != updated.m5Dflash2Profile
             || existing.maxSequences != updated.maxSequences
             || existing.maxModels != updated.maxModels
             || existing.modelTtlMinutes != updated.modelTtlMinutes
@@ -2269,6 +2270,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         config.cacheDir = stringValue(object, "cache_dir") ?? config.cacheDir
         config.kvQuant = stringValue(object, "kv_quant") ?? config.kvQuant
         config.activeKvOffload = boolValue(object, "active_kv_offload") ?? config.activeKvOffload
+        config.m5Dflash2Profile = boolValue(object, "m5_dflash2_profile") ?? config.m5Dflash2Profile
         config.maxSequences = intValue(object, "max_sequences") ?? config.maxSequences
         config.bMax = nil
         config.maxModels = intValue(object, "max_models") ?? config.maxModels

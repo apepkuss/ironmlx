@@ -81,6 +81,21 @@ impl Qwen35TextModel {
     /// DFlash2-only constructor. It materializes fused input projections one
     /// layer at a time and immediately releases the loader-owned source rows,
     /// keeping load-time peak memory bounded to one layer of duplicate weights.
+    pub(crate) fn activation_projections(&self) -> Vec<&crate::nn::linear::Linear> {
+        self.layers
+            .iter()
+            .flat_map(|layer| layer.activation_projections())
+            .collect()
+    }
+
+    pub(crate) fn share_weight_layout(&mut self) -> Result<usize> {
+        let mut stores = 0;
+        for layer in &mut self.layers {
+            stores += layer.share_weight_layout()?;
+        }
+        Ok(stores)
+    }
+
     pub(crate) fn from_loader_dflash2(loader: &mut Loader, cfg: Qwen35Config) -> Result<Self> {
         let embed_tokens = Embedding::from_loader(loader, "model.embed_tokens")?;
 

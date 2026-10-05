@@ -128,6 +128,73 @@ class BundledAssetMaterialsTests(unittest.TestCase):
                 GENERATOR.bundled_asset_materials(manifest, root, licenses_dir)
 
 
+class VendoredNativeSourceTests(unittest.TestCase):
+    def git_fixture(self, root: Path) -> tuple[Path, str]:
+        import subprocess
+
+        upstream = root / "upstream"
+        (upstream / "mlx/kernels").mkdir(parents=True)
+        (upstream / "mlx/kernels/a.h").write_text("a\n")
+        (upstream / "mlx/kernels/b.h").write_text("b\n")
+        for command in (
+            ["init", "-q"],
+            ["add", "."],
+            ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x"],
+        ):
+            subprocess.run(["git", "-C", str(upstream), *command], check=True)
+        commit = subprocess.run(
+            ["git", "-C", str(upstream), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        vendored = root / "repo/vendor/include/mlx/kernels"
+        vendored.mkdir(parents=True)
+        (vendored / "a.h").write_text("a\n")
+        return upstream, commit
+
+    def test_vendored_files_match_the_listed_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream, commit = self.git_fixture(root)
+            result = GENERATOR.verify_native_source(
+                {
+                    "commit": commit,
+                    "repository": "mlx:.",
+                    "source": "repo:vendor/include",
+                    "type": "git-files",
+                },
+                upstream,
+                root / "build",
+                root / "repo",
+            )
+            self.assertEqual(result["files"], 1)
+            self.assertEqual(result["commit"], commit)
+            self.assertEqual(len(result["tree_sha256"]), 64)
+
+    def test_rejects_vendored_file_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream, commit = self.git_fixture(root)
+            (root / "repo/vendor/include/mlx/kernels/a.h").write_text("changed\n")
+            with self.assertRaisesRegex(ValueError, "vendored file differs"):
+                GENERATOR.verify_native_source(
+                    {
+                        "commit": commit,
+                        "repository": "mlx:.",
+                        "source": "repo:vendor/include",
+                        "type": "git-files",
+                    },
+                    upstream,
+                    root / "build",
+                    root / "repo",
+                )
+
+    def test_repository_sources_require_a_repository_root(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported native license source prefix"):
+            GENERATOR.resolve_native_source("repo:x", Path("/m"), Path("/b"))
+
+
 class SourceAttributionTests(unittest.TestCase):
     def test_shipped_notices_include_mpl_source(self):
         root = SCRIPT_PATH.parents[1]

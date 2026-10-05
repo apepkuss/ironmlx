@@ -952,6 +952,17 @@ pub struct RequestState {
     pub kv_bytes_admitted: usize,
 }
 
+/// One-token look-ahead owned by the ordinary SchedulerActor B=1 greedy
+/// fast path. The model forward that produced `token` has already been
+/// submitted, so the row's KV cache is one input token ahead of the
+/// scheduler's committed `generated_tokens` until the pending token is
+/// materialized and committed.
+struct B1GreedyPipelinePending {
+    request_id: RequestId,
+    row_idx: usize,
+    token: Array,
+}
+
 fn completed_prompt_lookup_history(state: &RequestState) -> Option<Vec<u32>> {
     if !state.finished || !matches!(state.finish_reason, Some("stop") | Some("length")) {
         return None;
@@ -5139,6 +5150,10 @@ pub struct Scheduler<M: Model> {
     /// compact: `cache_rows[i]` is the scheduler slot stored at model batch
     /// row `i`.
     cache_rows: Vec<usize>,
+    /// At most one device-resident argmax token pre-submitted for the sole
+    /// active ordinary greedy row. Any operation that can rebuild, move, or
+    /// release the active cache must drain or discard this state first.
+    b1_greedy_pipeline_pending: Option<B1GreedyPipelinePending>,
     request_block_tables: HashMap<RequestId, RequestBlockTable>,
     request_owned_kv_forks: u64,
     request_owned_kv_layout_rebuilds: u64,
@@ -5209,6 +5224,10 @@ impl<M: Model> std::fmt::Debug for Scheduler<M> {
             .field("phase", &self.phase)
             .field("cache_layers", &self.cache.as_ref().map(|c| c.len()))
             .field("cache_rows", &self.cache_rows)
+            .field(
+                "has_b1_greedy_pipeline_pending",
+                &self.b1_greedy_pipeline_pending.is_some(),
+            )
             .field("has_dummy_position_ids", &self.dummy_position_ids.is_some())
             .field("has_mtp_state", &self.mtp_state.is_some())
             .field(
@@ -5287,6 +5306,7 @@ impl<M: Model> Scheduler<M> {
             phase: Phase::Idle,
             cache: None,
             cache_rows: Vec::new(),
+            b1_greedy_pipeline_pending: None,
             request_block_tables: HashMap::new(),
             request_owned_kv_forks: 0,
             request_owned_kv_layout_rebuilds: 0,
@@ -6996,6 +7016,9 @@ impl<M: Model> Scheduler<M> {
     /// counter keeps incrementing).
     pub fn evict(&mut self, id: RequestId) -> Result<()> {
         self.ensure_not_poisoned()?;
+        if self.b1_greedy_pipeline_pending_id() == Some(id) {
+            let _ = self.discard_b1_greedy_pipeline()?;
+        }
         // 3c-3: evict allowed in all phases. Slot is cleared; compact cache
         // rows are reconciled lazily on the next decode step or mid-admit
         // finalize.
@@ -7842,6 +7865,7 @@ impl<M: Model> Scheduler<M> {
     /// `next_id` is **not** reset — the monotonic-no-reuse guarantee from
     /// 3a continues across batches.
     pub fn evict_all(&mut self) -> Result<()> {
+        let _ = self.discard_b1_greedy_pipeline()?;
         let completed_histories = self
             .slots
             .iter()
@@ -15646,6 +15670,233 @@ impl<M: Model> Scheduler<M> {
         Ok(vec![event])
     }
 
+    /// Whether the ordinary single-row decode state can use the one-token
+    /// async greedy pipeline. This deliberately excludes constrained and VL
+    /// requests in the first implementation; both remain on the existing
+    /// scheduler path.
+    pub(crate) fn b1_greedy_pipeline_eligible(&self) -> bool {
+        if self.phase != Phase::Decoding
+            || self.b1_greedy_pipeline_pending.is_some()
+            || self.active_count() != 1
+            || self.paged_prefix_cache.is_some()
+            || self.active_kv_store.is_some()
+            || self.mtp_state.is_some()
+            || self.gemma4_drafter_state.is_some()
+            || self.prompt_lookup_state.is_some()
+        {
+            return false;
+        }
+        let Some((row_idx, state)) = self
+            .slots
+            .iter()
+            .enumerate()
+            .find_map(|(row_idx, slot)| slot.as_ref().map(|state| (row_idx, state)))
+        else {
+            return false;
+        };
+        !state.finished
+            && !state.generated_tokens.is_empty()
+            && state.sampler.is_pipelinable()
+            && state.constraint.is_none()
+            && state.pixel_values.is_none()
+            && self.cache_rows.as_slice() == [row_idx]
+    }
+
+    pub(crate) fn b1_greedy_pipeline_pending_id(&self) -> Option<RequestId> {
+        self.b1_greedy_pipeline_pending
+            .as_ref()
+            .map(|pending| pending.request_id)
+    }
+
+    /// Submit the next ordinary B=1 greedy forward + argmax without waiting
+    /// for the scalar token. The caller can route the current token while the
+    /// GPU evaluates this pending token.
+    pub(crate) fn prime_b1_greedy_pipeline(&mut self, model: &M) -> Result<bool> {
+        self.ensure_not_poisoned()?;
+        if !self.b1_greedy_pipeline_eligible() {
+            return Ok(false);
+        }
+        match self.dispatch_b1_greedy_pipeline(model, None) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                self.poisoned = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn dispatch_b1_greedy_pipeline(
+        &mut self,
+        model: &M,
+        input_token: Option<&Array>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.b1_greedy_pipeline_pending.is_none(),
+            "B1 greedy pipeline already has a pending token"
+        );
+        anyhow::ensure!(
+            self.phase == Phase::Decoding && self.active_count() == 1,
+            "B1 greedy pipeline requires one active Decoding row"
+        );
+        let (row_idx, request_id, last_token, sampler) = self
+            .slots
+            .iter()
+            .enumerate()
+            .find_map(|(row_idx, slot)| {
+                slot.as_ref().map(|state| {
+                    (
+                        row_idx,
+                        state.id,
+                        state.generated_tokens.last().copied(),
+                        state.sampler,
+                    )
+                })
+            })
+            .ok_or_else(|| anyhow!("B1 greedy pipeline active row is absent"))?;
+        anyhow::ensure!(
+            sampler.is_pipelinable(),
+            "B1 greedy pipeline requires a pipelinable sampler"
+        );
+        anyhow::ensure!(
+            self.slots[row_idx]
+                .as_ref()
+                .is_some_and(|state| state.constraint.is_none() && state.pixel_values.is_none()),
+            "B1 greedy pipeline requires an unconstrained text-only row"
+        );
+        let last_token = last_token
+            .ok_or_else(|| anyhow!("B1 greedy pipeline row has no generated input token"))?;
+
+        self.rebuild_cache_layout(model, &[row_idx])?;
+        let pre_offsets = first_full_layer_offsets(
+            self.cache
+                .as_ref()
+                .ok_or_else(|| anyhow!("B1 greedy pipeline cache is absent"))?,
+        )?
+        .to_vec();
+        anyhow::ensure!(
+            pre_offsets.len() == 1,
+            "B1 greedy pipeline expected one cache offset, got {}",
+            pre_offsets.len()
+        );
+        self.reclaim_idle_immutable_blocks_for_decode_rows(&[row_idx], &pre_offsets)?;
+
+        let input_ids = match input_token {
+            Some(token) => token.reshape((1_i32, 1_i32))?,
+            None => (&[last_token as i32][..], &[1_i32, 1_i32][..]).try_into()?,
+        };
+        let position_ids = if model.requires_position_ids() {
+            build_decode_position_ids(&pre_offsets)?
+        } else {
+            self.reusable_dummy_position_ids()?
+        };
+        let cache = self
+            .cache
+            .as_mut()
+            .ok_or_else(|| anyhow!("B1 greedy pipeline cache disappeared before forward"))?;
+        let logits = model.forward_on(
+            &input_ids,
+            &position_ids,
+            None,
+            None,
+            Some(cache),
+            mlx::StreamOrDevice::default(),
+        )?;
+        let vocab = logits.shape().as_slice()[2];
+        let logits = logits.reshape((vocab,))?;
+        let token = sampler.sample_async_greedy(&logits)?;
+        mlx::transforms::async_eval(&[&token])?;
+        self.b1_greedy_pipeline_pending = Some(B1GreedyPipelinePending {
+            request_id,
+            row_idx,
+            token,
+        });
+        Ok(())
+    }
+
+    fn commit_b1_greedy_pipeline_pending(&mut self) -> Result<Option<(StepEvent, Array)>> {
+        let Some(pending) = self.b1_greedy_pipeline_pending.take() else {
+            return Ok(None);
+        };
+        let token = pending.token.item::<u32>()?;
+        let state = self
+            .slots
+            .get_mut(pending.row_idx)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| anyhow!("B1 greedy pipeline owner row was removed"))?;
+        anyhow::ensure!(
+            state.id == pending.request_id,
+            "B1 greedy pipeline owner changed from {} to {}",
+            pending.request_id.0,
+            state.id.0
+        );
+        state.generated_tokens.push(token);
+        state.real_len += 1;
+        if state.stop_token_ids.contains(&token) {
+            state.finished = true;
+            state.finish_reason = Some("stop");
+        } else if state.generated_tokens.len() >= state.max_new_tokens {
+            state.finished = true;
+            state.finish_reason = Some("length");
+        }
+        let event = StepEvent {
+            id: state.id,
+            token,
+            finish_reason: state.finish_reason,
+        };
+        if state.finished {
+            self.phase = Phase::Finished;
+        }
+        Ok(Some((event, pending.token)))
+    }
+
+    /// Resolve one pre-submitted token. When `continue_pipeline` is true and
+    /// the row remains live, immediately submit its successor before
+    /// returning the event.
+    pub(crate) fn step_b1_greedy_pipeline(
+        &mut self,
+        model: &M,
+        continue_pipeline: bool,
+    ) -> Result<Option<Vec<StepEvent>>> {
+        self.ensure_not_poisoned()?;
+        let result = (|| {
+            let Some((event, token_array)) = self.commit_b1_greedy_pipeline_pending()? else {
+                return Ok(None);
+            };
+            if continue_pipeline && event.finish_reason.is_none() {
+                self.dispatch_b1_greedy_pipeline(model, Some(&token_array))?;
+            }
+            Ok(Some(vec![event]))
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    /// Materialize and commit a pending token without submitting another
+    /// one. SchedulerActor uses this at admission/preemption boundaries.
+    pub(crate) fn drain_b1_greedy_pipeline(&mut self) -> Result<Option<StepEvent>> {
+        self.ensure_not_poisoned()?;
+        let result = self
+            .commit_b1_greedy_pipeline_pending()
+            .map(|pending| pending.map(|(event, _)| event));
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    /// Wait for a pending graph and forget its uncommitted token. This is
+    /// valid only when the owner is about to be evicted (for example, after
+    /// its event receiver has been dropped).
+    pub(crate) fn discard_b1_greedy_pipeline(&mut self) -> Result<Option<RequestId>> {
+        let Some(pending) = self.b1_greedy_pipeline_pending.take() else {
+            return Ok(None);
+        };
+        mlx::transforms::eval(&[&pending.token])?;
+        Ok(Some(pending.request_id))
+    }
+
     /// Advance every non-finished active row by exactly one decode token.
     /// Only legal in `Decoding` phase.
     ///
@@ -20146,6 +20397,10 @@ mod tests {
     /// Concrete scheduler type for unit tests — pinned to `Qwen35Model` so
     /// `Scheduler::new` calls don't need turbofish at every site.
     type TestScheduler = Scheduler<ironmlx_lm::models::qwen3_5::Qwen35Model>;
+
+    fn configure_local_test_metallib() {
+        crate::test_metallib::configure_from_mlx_dir();
+    }
 
     /// Keep tests that use the process-wide asynchronous prefix-store queue
     /// independent of work left by an earlier test. The queue intentionally
@@ -30112,5 +30367,160 @@ mod tests {
             s.get(id).unwrap().generated_tokens.is_empty(),
             "reserved row must not receive a generated token before admit_mid_finalize"
         );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn b1_greedy_pipeline_keeps_one_token_pending_and_preserves_events() {
+        configure_local_test_metallib();
+        let model = FinishedPhaseFakeModel;
+        let mut scheduler = Scheduler::<FinishedPhaseFakeModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let mut request = mk_req(vec![1, 2, 3, 4]);
+        request.max_new_tokens = 4;
+        request.stop_token_ids.clear();
+        let id = scheduler.admit(request).expect("admit");
+
+        let first = scheduler.prefill_admitted(&model).expect("prefill");
+        assert_eq!(
+            first,
+            vec![StepEvent {
+                id,
+                token: 3,
+                finish_reason: None
+            }]
+        );
+        assert!(scheduler.b1_greedy_pipeline_eligible());
+        assert!(scheduler
+            .prime_b1_greedy_pipeline(&model)
+            .expect("prime pipeline"));
+        assert_eq!(scheduler.b1_greedy_pipeline_pending_id(), Some(id));
+
+        let second = scheduler
+            .step_b1_greedy_pipeline(&model, true)
+            .expect("resolve and continue pipeline")
+            .expect("pipeline was pending");
+        assert_eq!(
+            second,
+            vec![StepEvent {
+                id,
+                token: 3,
+                finish_reason: None
+            }]
+        );
+        assert_eq!(scheduler.get(id).unwrap().generated_tokens.len(), 2);
+        assert_eq!(scheduler.b1_greedy_pipeline_pending_id(), Some(id));
+
+        let third = scheduler
+            .step_b1_greedy_pipeline(&model, false)
+            .expect("resolve pipeline at boundary")
+            .expect("pipeline was pending");
+        assert_eq!(
+            third,
+            vec![StepEvent {
+                id,
+                token: 3,
+                finish_reason: None
+            }]
+        );
+        assert_eq!(scheduler.get(id).unwrap().generated_tokens.len(), 3);
+        assert_eq!(scheduler.b1_greedy_pipeline_pending_id(), None);
+
+        let fourth = scheduler.step(&model).expect("ordinary fallback step");
+        assert_eq!(
+            fourth,
+            vec![StepEvent {
+                id,
+                token: 3,
+                finish_reason: Some("length")
+            }]
+        );
+        assert_eq!(scheduler.phase(), Phase::Finished);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn b1_greedy_pipeline_drain_commits_terminal_token() {
+        configure_local_test_metallib();
+        let model = FinishedPhaseFakeModel;
+        let mut scheduler = Scheduler::<FinishedPhaseFakeModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let mut request = mk_req(vec![1, 2, 3, 4]);
+        request.max_new_tokens = 2;
+        request.stop_token_ids.clear();
+        let id = scheduler.admit(request).expect("admit");
+        scheduler.prefill_admitted(&model).expect("prefill");
+        scheduler
+            .prime_b1_greedy_pipeline(&model)
+            .expect("prime pipeline");
+
+        let event = scheduler
+            .drain_b1_greedy_pipeline()
+            .expect("drain pipeline")
+            .expect("pipeline was pending");
+        assert_eq!(
+            event,
+            StepEvent {
+                id,
+                token: 3,
+                finish_reason: Some("length")
+            }
+        );
+        assert_eq!(scheduler.phase(), Phase::Finished);
+        assert_eq!(scheduler.b1_greedy_pipeline_pending_id(), None);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn b1_greedy_pipeline_rejects_constraints_and_penalties_and_evict_drains_pending() {
+        configure_local_test_metallib();
+        let model = FinishedPhaseFakeModel;
+        let mut scheduler = Scheduler::<FinishedPhaseFakeModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        let mut request = mk_req(vec![1, 2, 3, 4]);
+        request.stop_token_ids.clear();
+        let id = scheduler.admit(request).expect("admit");
+        scheduler.prefill_admitted(&model).expect("prefill");
+
+        let tokenizer = ironmlx_lm::test_support::byte_level_constraint_tokenizer()
+            .expect("byte-level constraint tokenizer");
+        let plan = tokenizer
+            .compile_json_output(&serde_json::json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": false
+            }))
+            .expect("JSON constraint");
+        scheduler.get_mut(id).unwrap().constraint = Some(
+            plan.start_session()
+                .expect("start constrained decoding session"),
+        );
+        assert!(!scheduler.b1_greedy_pipeline_eligible());
+
+        scheduler.get_mut(id).unwrap().constraint = None;
+        scheduler.get_mut(id).unwrap().sampler = Sampler::greedy().with_repetition_penalty(1.1);
+        assert!(!scheduler.b1_greedy_pipeline_eligible());
+
+        scheduler.get_mut(id).unwrap().sampler = Sampler::greedy();
+        scheduler
+            .prime_b1_greedy_pipeline(&model)
+            .expect("prime pipeline");
+        assert_eq!(scheduler.b1_greedy_pipeline_pending_id(), Some(id));
+        scheduler.evict(id).expect("evict pipeline owner");
+        assert_eq!(scheduler.b1_greedy_pipeline_pending_id(), None);
+        assert_eq!(scheduler.active_count(), 0);
     }
 }

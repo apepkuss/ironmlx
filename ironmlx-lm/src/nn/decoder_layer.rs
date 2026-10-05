@@ -55,11 +55,43 @@ fn format_decode_layer_turbo_profile_line(event: DecodeLayerTurboProfileEvent) -
     )
 }
 
+thread_local! {
+    static PREFILL_STAGE_LAYER: std::cell::Cell<(i32, &'static str)> =
+        const { std::cell::Cell::new((-1, "")) };
+}
+
+fn prefill_stages_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("IRONMLX_DIAGNOSTIC_PREFILL_STAGES").as_deref() == Ok("1"))
+}
+
+/// Diagnostic-only prefill stage boundary (`IRONMLX_DIAGNOSTIC_PREFILL_STAGES=1`,
+/// sequences longer than 128 rows): evaluates `arrays` and prints the wall
+/// time since the previous boundary. It inserts synchronization, so stage
+/// times attribute work but are not production timings.
+pub(crate) fn prefill_stage(stage: &'static str, arrays: &[&Array]) -> Result<()> {
+    let (layer_idx, kind) = PREFILL_STAGE_LAYER.with(|cell| cell.get());
+    if layer_idx < 0 || !prefill_stages_enabled() {
+        return Ok(());
+    }
+    let start = std::time::Instant::now();
+    mlx::transforms::eval(arrays).map_err(|e| anyhow!("{e}"))?;
+    eprintln!(
+        "prefill_stage layer={layer_idx} kind={kind} stage={stage} elapsed_us={}",
+        start.elapsed().as_micros()
+    );
+    Ok(())
+}
+
 fn profile_decode_layer_turbo_stage(
     stage: &'static str,
     arrays: &[&Array],
     shape: DecodeLayerTurboProfileShape,
 ) -> Result<()> {
+    if shape.seq > 128 {
+        return prefill_stage(stage, arrays);
+    }
     if shape.seq != 1 || std::env::var_os("IRONMLX_TURBOQUANT_ATTN_PROFILE").is_none() {
         return Ok(());
     }
@@ -136,6 +168,24 @@ pub struct DecoderLayer {
 }
 
 impl DecoderLayer {
+    /// Experimental shared weight layout for this layer's projections.
+    pub(crate) fn activation_projections(&self) -> Vec<&super::linear::Linear> {
+        let mut out = match &self.attn {
+            AttnPath::Full(attention) => attention.activation_projections(),
+            AttnPath::Linear(linear) => linear.activation_projections(),
+        };
+        out.extend(self.mlp.activation_projections());
+        out
+    }
+
+    pub(crate) fn share_weight_layout(&mut self) -> Result<usize> {
+        let attention = match &mut self.attn {
+            AttnPath::Full(attention) => attention.share_weight_layout()?,
+            AttnPath::Linear(linear) => linear.share_weight_layout()?,
+        };
+        Ok(attention + self.mlp.share_weight_layout()?)
+    }
+
     /// Test/composition seam — full-attention variant. Equivalent to P3b4's
     /// `from_components` (renamed for symmetry with the linear-attn variant).
     #[doc(hidden)]
@@ -391,6 +441,9 @@ impl DecoderLayer {
             seq: dims[1],
             hidden_size: dims[2],
         };
+        if dims[1] > 128 && prefill_stages_enabled() {
+            PREFILL_STAGE_LAYER.with(|cell| cell.set((layer_idx, profile_shape.attn_kind)));
+        }
         profile_decode_layer_turbo_stage("decode_layer_input", &[x], profile_shape)?;
 
         // Block 1: input_layernorm + attn dispatch + residual
@@ -480,6 +533,7 @@ impl DecoderLayer {
         profile_decode_layer_turbo_stage("decode_mlp_path", &[&mlp_out], profile_shape)?;
         let out = &h + &mlp_out;
         profile_decode_layer_turbo_stage("decode_layer_output", &[&out], profile_shape)?;
+        PREFILL_STAGE_LAYER.with(|cell| cell.set((-1, "")));
         Ok(out)
     }
 

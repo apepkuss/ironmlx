@@ -11,6 +11,7 @@ mod conv;
 mod layer;
 mod model;
 mod selector;
+mod topk;
 
 pub use config::DFlash2Config;
 pub use model::{DFlash2DraftCache, DFlash2DraftModel, DFlash2TreeSpec};
@@ -23,6 +24,17 @@ use crate::nn::Linear;
 use crate::Result;
 
 const DFLASH2_DRAFT_QUANT_GROUP_SIZE: i32 = 64;
+
+/// tf-v1 tree proposal profile (M5 profile setting
+/// `IRONMLX_EXPERIMENTAL_DFLASH2_TREE_PROFILE=tf-v1`).
+pub fn experimental_tree_profile() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        ironmlx_core::m5_profile::setting(ironmlx_core::m5_profile::settings::DFLASH2_TREE_PROFILE)
+            .as_deref()
+            == Some("tf-v1")
+    })
+}
 
 fn load_linear(loader: &Loader, prefix: &str, draft_bits: Option<i32>) -> Result<Linear> {
     let Some(bits) = draft_bits else {
@@ -356,6 +368,28 @@ pub trait DFlash2Target: crate::core::Model {
     fn dflash2_verify_capabilities(&self) -> DFlash2VerifyCapabilities;
 
     fn dflash2_execution_fingerprint(&self) -> String;
+
+    #[allow(clippy::too_many_arguments)]
+    fn dflash2_forward_tree_on(
+        &self,
+        _input_ids: &Array,
+        _parents: &[i32],
+        _start: i32,
+        _cache: &mut [LayerCache],
+        _target_layer_ids: &[usize],
+        _target: StreamOrDevice,
+    ) -> Result<DFlash2TargetOutput> {
+        anyhow::bail!("target does not support experimental flat trees")
+    }
+    fn dflash2_commit_tree_on(
+        &self,
+        _cache: &mut [LayerCache],
+        _snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+        _rows: &[i32],
+        _target: StreamOrDevice,
+    ) -> Result<()> {
+        anyhow::bail!("target does not support experimental flat tree commits")
+    }
 
     fn dflash2_embed_on(&self, input_ids: &Array, target: StreamOrDevice) -> Result<Array>;
 

@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:71fd9ebb-7336-56d0-a1d1-8a889d82504c",
+  "serialNumber": "urn:uuid:6332ed42-0187-5aae-ba46-1dffbda4874a",
   "version": 1,
   "metadata": {
     "component": {
@@ -9173,6 +9173,70 @@
         }
       ],
       "purl": "pkg:github/apepkuss/mlx@73ad5df20cb30be4192e5c4d0ae8130674773427"
+    },
+    {
+      "type": "library",
+      "bom-ref": "native:MLX Metal kernel headers (vendored, IronMLX fork)@73ad5df20cb30be4192e5c4d0ae8130674773427",
+      "name": "MLX Metal kernel headers (vendored, IronMLX fork)",
+      "version": "73ad5df20cb30be4192e5c4d0ae8130674773427",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:license-file",
+          "value": "native-mlx-kernel-headers-fork-mit.txt"
+        },
+        {
+          "name": "ironmlx:license-sha256",
+          "value": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01"
+        },
+        {
+          "name": "ironmlx:source-commit",
+          "value": "73ad5df20cb30be4192e5c4d0ae8130674773427"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/apepkuss/mlx.git"
+        }
+      ],
+      "purl": "pkg:github/apepkuss/mlx@73ad5df20cb30be4192e5c4d0ae8130674773427"
+    },
+    {
+      "type": "library",
+      "bom-ref": "native:MLX Metal kernel headers (vendored, upstream v0.32.3)@64ea011cb65f14d9ce2737e60db9a4ae91ed7441",
+      "name": "MLX Metal kernel headers (vendored, upstream v0.32.3)",
+      "version": "64ea011cb65f14d9ce2737e60db9a4ae91ed7441",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:license-file",
+          "value": "native-mlx-kernel-headers-v0.32.3-mit.txt"
+        },
+        {
+          "name": "ironmlx:license-sha256",
+          "value": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01"
+        },
+        {
+          "name": "ironmlx:source-commit",
+          "value": "64ea011cb65f14d9ce2737e60db9a4ae91ed7441"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/ml-explore/mlx.git"
+        }
+      ],
+      "purl": "pkg:github/ml-explore/mlx@64ea011cb65f14d9ce2737e60db9a4ae91ed7441"
     },
     {
       "type": "library",

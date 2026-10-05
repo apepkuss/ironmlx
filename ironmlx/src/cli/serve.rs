@@ -113,11 +113,6 @@ pub struct ServeArgs {
     #[arg(long)]
     pub prefill_chunk_size: Option<usize>,
 
-    /// Route greedy HTTP generation through SchedulerActor even when the
-    /// ordinary GenerationStream path would otherwise be eligible.
-    #[arg(long)]
-    pub force_scheduler: bool,
-
     /// Maximum concurrent in-flight requests (Scheduler slot count).
     /// Requests beyond this limit go to the admission queue. Default `1`
     /// optimizes single-request prefill / decode by avoiding [B,T_max]-padded
@@ -182,10 +177,11 @@ pub struct ServeArgs {
     #[arg(long = "dflash2-model-dir")]
     pub dflash2_model_dir: Option<PathBuf>,
 
-    /// DFlash2 proposal block width. Widths above 8 explicitly opt into the
-    /// Q16 B1 lane and require a compatible draft checkpoint.
-    #[arg(long = "dflash2-block-size", default_value_t = 4)]
-    pub dflash2_block_size: usize,
+    /// DFlash2 proposal block width. When omitted, use the checkpoint width up
+    /// to the qualified Q8 default. Widths above 8 explicitly opt into the Q16
+    /// B1 lane and require a compatible draft checkpoint.
+    #[arg(long = "dflash2-block-size")]
+    pub dflash2_block_size: Option<usize>,
 
     /// Runtime affine quantization for the official BF16 DFlash2 draft.
     /// Pass 0 to keep the draft in BF16.
@@ -194,8 +190,22 @@ pub struct ServeArgs {
 
     /// Maximum nodes in the B1 best-first DFlash2 draft tree. Zero keeps the
     /// stable linear path; values up to 15 reserve target lanes for tree paths.
-    #[arg(long = "dflash2-tree-max-nodes", default_value_t = 0)]
-    pub dflash2_tree_max_nodes: usize,
+    /// Default: 15 with an active M5 DFlash2 profile, otherwise 0.
+    #[arg(long = "dflash2-tree-max-nodes")]
+    pub dflash2_tree_max_nodes: Option<usize>,
+
+    /// DFlash2 serving profile for Apple GPU generation 17+ (M5). `auto`
+    /// enables the qualified M5 settings (tensor-unit affine4 kernels, flat
+    /// tree, fixed draft budget, linear batching under load, prefill
+    /// kernels) when the GPU supports them; each feature still falls back
+    /// when its quantization, shape or request checks do not hold. `off`
+    /// keeps the generic defaults.
+    #[arg(
+        long = "m5-dflash2-profile",
+        default_value = "auto",
+        value_parser = parse_m5_profile_mode
+    )]
+    pub m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode,
 
     /// Use versioned position-keyed sampling for DFlash2 requests. This changes
     /// same-seed output and is never enabled by default.
@@ -593,8 +603,11 @@ fn ensure_dflash2_serve_supported(
     if args.scheduler_profile.is_some() || args.scheduler_autotune_report {
         bail!("--dflash2-model-dir does not use scheduler profiles or scheduler autotune reports");
     }
-    if !(2..=16).contains(&args.dflash2_block_size) {
-        bail!("--dflash2-block-size must be in [2, 16]; widths above 8 require a compatible Q16 draft checkpoint");
+    if args
+        .dflash2_block_size
+        .is_some_and(|block_size| !(2..=16).contains(&block_size))
+    {
+        bail!("--dflash2-block-size must be in [2, 16]");
     }
     if !matches!(args.dflash2_draft_bits, 0 | 4 | 8) {
         bail!("--dflash2-draft-bits must be one of 0, 4, or 8");
@@ -602,11 +615,60 @@ fn ensure_dflash2_serve_supported(
     Ok(())
 }
 
+fn parse_m5_profile_mode(value: &str) -> Result<ironmlx_core::m5_profile::M5ProfileMode, String> {
+    value.parse()
+}
+
+/// Install the process M5 DFlash2 profile and apply its serve defaults to
+/// options that were not given explicitly.
+fn install_m5_profile(args: &mut ServeArgs, dflash2: bool) {
+    use ironmlx_core::m5_profile;
+    let profile = m5_profile::install(args.m5_dflash2_profile, dflash2);
+    apply_m5_profile_defaults(args, dflash2, profile.is_active());
+    for library in &profile.prefill_libraries {
+        if let Some(error) = &library.error {
+            tracing::warn!(
+                library = library.name,
+                error,
+                "M5 prefill kernel unavailable; using the native path"
+            );
+        }
+    }
+    tracing::info!(
+        mode = profile.mode.as_str(),
+        status = profile.status.as_str(),
+        architecture = profile.architecture.as_deref().unwrap_or("unknown"),
+        "M5 DFlash2 profile"
+    );
+}
+
+/// DFlash2 serve defaults of the M5 profile for options not given
+/// explicitly: tree max nodes (15, otherwise 0) and admission deadline (0).
+fn apply_m5_profile_defaults(args: &mut ServeArgs, dflash2: bool, active: bool) {
+    use ironmlx_core::m5_profile;
+    if !dflash2 {
+        return;
+    }
+    args.dflash2_tree_max_nodes.get_or_insert(if active {
+        m5_profile::DFLASH2_TREE_MAX_NODES
+    } else {
+        0
+    });
+    if active {
+        args.admission_deadline_ms
+            .get_or_insert(m5_profile::DFLASH2_ADMISSION_DEADLINE_MS);
+    }
+}
+
+fn dflash2_tree_max_nodes(args: &ServeArgs) -> usize {
+    args.dflash2_tree_max_nodes.unwrap_or(0)
+}
+
 fn resolve_dflash2_tensor_batch_width(args: &ServeArgs, b_max: usize) -> (usize, usize) {
     let requested = args
         .dflash2_tensor_batch_max_width
         .unwrap_or(DEFAULT_DFLASH2_TENSOR_BATCH_MAX_WIDTH);
-    let effective = if args.dflash2_tree_max_nodes > 0 {
+    let effective = if dflash2_tree_max_nodes(args) > 0 {
         1
     } else {
         requested.min(b_max)
@@ -807,7 +869,6 @@ where
             args.scheduler_autotune_report,
             vision_input,
             static_memory_estimate,
-            args.force_scheduler,
         ))
     }
 }
@@ -900,6 +961,12 @@ fn serve_with_dflash2_model(
         draft_bits,
     )
     .context("DFlash2DraftModel::from_loader")?;
+    let checkpoint_block_size = usize::try_from(draft.config().dflash_config.block_size)
+        .context("DFlash2 checkpoint block_size")?;
+    let block_size_resolution = ironmlx_runtime::core::dflash2::resolve_dflash2_block_size(
+        args.dflash2_block_size,
+        checkpoint_block_size,
+    )?;
     static_memory_estimate.speculative_cold_bytes = draft_loader.loaded_tensor_bytes();
     drop(draft_loader);
     mlx::clear_cache();
@@ -909,11 +976,13 @@ fn serve_with_dflash2_model(
     let (tensor_batch_requested_max_width, tensor_batch_max_width) =
         resolve_dflash2_tensor_batch_width(args, scheduler_config.b_max);
     tracing::info!(
-        "ironmlx serve: DFlash2 enabled model_dir={} block_size={} draft_bits={} tree_max_nodes={} position_keyed_sampling={} max_sequences={} tensor_batch_requested_max_width={} tensor_batch_effective_max_width={} prefix_cache_max_bytes={:?}",
+        "ironmlx serve: DFlash2 enabled model_dir={} checkpoint_block_size={} resolved_block_size={} block_size_source={} draft_bits={} tree_max_nodes={} position_keyed_sampling={} max_sequences={} tensor_batch_requested_max_width={} tensor_batch_effective_max_width={} prefix_cache_max_bytes={:?}",
         draft_dir.display(),
-        args.dflash2_block_size,
+        block_size_resolution.checkpoint_block_size,
+        block_size_resolution.block_size,
+        if block_size_resolution.explicit { "explicit" } else { "auto" },
         args.dflash2_draft_bits,
-        args.dflash2_tree_max_nodes,
+        dflash2_tree_max_nodes(args),
         args.dflash2_position_keyed_sampling,
         scheduler_config.b_max,
         tensor_batch_requested_max_width,
@@ -933,9 +1002,9 @@ fn serve_with_dflash2_model(
         tensor_batch_max_width,
         scheduler_config.admission_queue_max,
         scheduler_config.max_cache_cap,
-        args.dflash2_block_size,
+        block_size_resolution.block_size,
         ironmlx_runtime::core::dflash2::DFlash2P2Options {
-            tree_max_nodes: args.dflash2_tree_max_nodes,
+            tree_max_nodes: dflash2_tree_max_nodes(args),
             position_keyed_sampling: args.dflash2_position_keyed_sampling,
         },
         draft_bits,
@@ -1177,6 +1246,9 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
         args.lan_host,
         args.security_bootstrap_stdin,
     )?);
+    let dflash2 =
+        args.model.is_some() && args.model_manifest.is_none() && args.dflash2_model_dir.is_some();
+    install_m5_profile(&mut args, dflash2);
     if let Some(manifest_path) = args.model_manifest.clone() {
         return run_engine_pool(args, &manifest_path);
     }
@@ -1459,6 +1531,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod scheduler_profile_tests {
     use ironmlx_runtime::core::scheduler_resolution::{
         check_loaded_scheduler_profile_health, default_scheduler_runtime_profile,
@@ -1469,6 +1542,7 @@ mod scheduler_profile_tests {
 
     use clap::Parser;
 
+    use super::apply_m5_profile_defaults;
     use crate::cli::Command;
     use ironmlx_runtime::core::scheduler_profile_store::SchedulerProfileStore;
     use {
@@ -1558,7 +1632,6 @@ mod scheduler_profile_tests {
                 crate::server::security::ServerNetworkConfig::local("127.0.0.1", 8080).unwrap(),
             ),
             prefill_chunk_size: None,
-            force_scheduler: false,
             b_max: None,
             admission_deadline_ms: None,
             admission_queue_max: None,
@@ -1569,9 +1642,10 @@ mod scheduler_profile_tests {
             mtp_model_dir: None,
             mtp_draft_tokens: None,
             dflash2_model_dir: None,
-            dflash2_block_size: 4,
+            dflash2_block_size: None,
             dflash2_draft_bits: 4,
-            dflash2_tree_max_nodes: 0,
+            dflash2_tree_max_nodes: None,
+            m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode::Auto,
             dflash2_position_keyed_sampling: false,
             dflash2_tensor_batch_max_width: None,
             prompt_lookup: false,
@@ -1665,6 +1739,53 @@ mod scheduler_profile_tests {
     }
 
     #[test]
+    fn m5_profile_defaults_apply_only_to_unset_dflash2_options() {
+        let mut args = base_args();
+        apply_m5_profile_defaults(&mut args, true, true);
+        assert_eq!(args.dflash2_tree_max_nodes, Some(15));
+        assert_eq!(args.admission_deadline_ms, Some(0));
+
+        let mut explicit = base_args();
+        explicit.dflash2_tree_max_nodes = Some(0);
+        explicit.admission_deadline_ms = Some(9);
+        apply_m5_profile_defaults(&mut explicit, true, true);
+        assert_eq!(explicit.dflash2_tree_max_nodes, Some(0));
+        assert_eq!(explicit.admission_deadline_ms, Some(9));
+
+        let mut inactive = base_args();
+        apply_m5_profile_defaults(&mut inactive, true, false);
+        assert_eq!(inactive.dflash2_tree_max_nodes, Some(0));
+        assert_eq!(inactive.admission_deadline_ms, None);
+
+        let mut not_dflash2 = base_args();
+        apply_m5_profile_defaults(&mut not_dflash2, false, true);
+        assert_eq!(not_dflash2.dflash2_tree_max_nodes, None);
+        assert_eq!(not_dflash2.admission_deadline_ms, None);
+    }
+
+    #[test]
+    fn m5_profile_flag_parses_auto_and_off() {
+        #[derive(Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: ServeArgs,
+        }
+        let default = Wrapper::try_parse_from(["serve"]).expect("defaults parse");
+        assert_eq!(
+            default.args.m5_dflash2_profile,
+            ironmlx_core::m5_profile::M5ProfileMode::Auto
+        );
+        assert_eq!(default.args.dflash2_tree_max_nodes, None);
+        let off =
+            Wrapper::try_parse_from(["serve", "--m5-dflash2-profile", "off"]).expect("off parses");
+        assert_eq!(
+            off.args.m5_dflash2_profile,
+            ironmlx_core::m5_profile::M5ProfileMode::Off
+        );
+        assert!(Wrapper::try_parse_from(["serve", "--m5-dflash2-profile", "on"]).is_err());
+    }
+
+    #[test]
     fn dflash2_tensor_batch_width_uses_certified_default_and_max_sequence_cap() {
         let mut args = base_args();
         assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8), (4, 4));
@@ -1677,7 +1798,7 @@ mod scheduler_profile_tests {
         assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8), (1, 1));
 
         args.dflash2_tensor_batch_max_width = Some(6);
-        args.dflash2_tree_max_nodes = 15;
+        args.dflash2_tree_max_nodes = Some(15);
         assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8), (6, 1));
     }
 

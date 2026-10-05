@@ -8,6 +8,7 @@ use crate::core::scheduler_autotune::{
 use crate::core::task_execution::RequestExecutionHandle;
 use crate::core::{dflash2_actor, runtime_health as health, scheduler_actor};
 use crate::Result;
+use anyhow::Context;
 use ironmlx_core::sampler::Sampler;
 use ironmlx_lm::core::model::Model;
 use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
@@ -26,9 +27,9 @@ use {
 /// concurrent requests serialize behind the lock (P4 single-stream contract).
 ///
 /// `request_execution` selects either the mature SchedulerActor or the isolated
-/// DFlash2 actor. Ordinary engines may still route long text requests directly
-/// through GenerationStream; DFlash2 engines route every request to their actor
-/// so unsupported capabilities cannot silently fall back to ordinary decoding.
+/// DFlash2 actor. Every ordinary HTTP request routes through SchedulerActor;
+/// DFlash2 engines route every request to their actor. `GenerationStream`
+/// remains available to benchmarks and diagnostics, but is not a serving path.
 ///
 /// P5a-T5: CausalEngine is now generic over `M: Model + DenseVlMethods + Send +
 /// 'static`. CLI call sites pass either `Qwen35Model` or `Qwen35MoeModel`
@@ -70,12 +71,11 @@ pub struct CausalEngine<M: Model + DenseVlMethods + Send + 'static> {
     pub model_weight_bytes: usize,
     /// Metadata-only mmap liability split by first-use component.
     pub static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
-    /// Engine-lifetime first-use tracker shared by Scheduler and direct paths.
+    /// Engine-lifetime first-use tracker shared by Scheduler and direct
+    /// execution diagnostics.
     pub cold_materialization_tracker: Arc<crate::core::process_memory::ColdMaterializationTracker>,
     /// Optional TurboQuant K/V bit-widths for full-attention KV cache reads.
     pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
-    /// Route eligible greedy requests through SchedulerActor.
-    pub force_scheduler_for_greedy: bool,
     /// True when PromptLookup is enabled for this model engine.
     pub prompt_lookup_enabled: bool,
     /// Runtime health snapshot collector. Holds shared Arc atomics
@@ -106,7 +106,6 @@ impl<M: Model + DenseVlMethods + Send + 'static> Clone for CausalEngine<M> {
             static_memory_estimate: self.static_memory_estimate,
             cold_materialization_tracker: self.cold_materialization_tracker.clone(),
             kv_cache_turboquant_bits: self.kv_cache_turboquant_bits,
-            force_scheduler_for_greedy: self.force_scheduler_for_greedy,
             prompt_lookup_enabled: self.prompt_lookup_enabled,
             health_collector: self.health_collector.clone(),
             runtime_usage: self.runtime_usage.clone(),
@@ -227,32 +226,11 @@ impl Gemma4DrafterEngine {
     }
 }
 
-pub fn should_route_to_scheduler<M: Model>(
-    prompt_len: usize,
-    prefill_chunk_size: usize,
-    b_max: usize,
-    paged_prefix_cache_enabled: bool,
-    force_scheduler: bool,
-) -> bool {
-    if force_scheduler {
-        return true;
-    }
-    if paged_prefix_cache_enabled {
-        return true;
-    }
-    if prefill_chunk_size == 0 || prompt_len <= prefill_chunk_size {
-        return true;
-    }
-    M::fresh_prefill_batch_limit(prompt_len, b_max) < b_max
-}
-
 pub(crate) trait SchedulerActorSpawner<M>
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
     fn paged_prefix_cache_enabled(&self) -> bool;
-
-    fn force_scheduler_for_greedy(&self) -> bool;
 
     fn prompt_lookup_config(&self) -> Option<crate::core::prompt_lookup::PromptLookupConfig> {
         None
@@ -275,7 +253,6 @@ pub(crate) struct PlainSchedulerActorSpawner {
     pub(crate) paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     pub(crate) prefix_lru_cache: Option<PrefixLruCacheConfig>,
     pub(crate) active_kv_offload: ActiveKvOffloadConfig,
-    pub(crate) force_scheduler: bool,
 }
 
 impl<M> SchedulerActorSpawner<M> for PlainSchedulerActorSpawner
@@ -284,10 +261,6 @@ where
 {
     fn paged_prefix_cache_enabled(&self) -> bool {
         self.paged_prefix_cache.is_some()
-    }
-
-    fn force_scheduler_for_greedy(&self) -> bool {
-        self.force_scheduler
     }
 
     fn spawn(
@@ -300,22 +273,6 @@ where
         decode_cadence_mid_chunk_cap: usize,
         meta: ironmlx_lm::core::model::ModelMeta,
     ) -> Result<scheduler_actor::SchedulerActorHandle> {
-        if self.force_scheduler {
-            return Ok(
-                scheduler_actor::spawn_scheduler_actor_for_prompt_lookup_control(
-                    model,
-                    b_max,
-                    admission_deadline,
-                    admission_queue_max,
-                    effective_cap_max,
-                    decode_cadence_mid_chunk_cap,
-                    meta,
-                    self.paged_prefix_cache,
-                    self.prefix_lru_cache,
-                    self.active_kv_offload,
-                )?,
-            );
-        }
         if let Some(config) = self.paged_prefix_cache {
             if self.active_kv_offload.enabled {
                 return Ok(
@@ -414,10 +371,6 @@ impl SchedulerActorSpawner<ironmlx_lm::models::Gemma4Model> for Gemma4DrafterSch
         self.paged_prefix_cache.is_some()
     }
 
-    fn force_scheduler_for_greedy(&self) -> bool {
-        true
-    }
-
     fn prompt_lookup_config(&self) -> Option<crate::core::prompt_lookup::PromptLookupConfig> {
         self.prompt_lookup.as_ref().map(|(cfg, _)| *cfg)
     }
@@ -494,10 +447,6 @@ where
 {
     fn paged_prefix_cache_enabled(&self) -> bool {
         self.paged_prefix_cache.is_some()
-    }
-
-    fn force_scheduler_for_greedy(&self) -> bool {
-        true
     }
 
     fn prompt_lookup_config(&self) -> Option<crate::core::prompt_lookup::PromptLookupConfig> {
@@ -577,10 +526,6 @@ where
         self.paged_prefix_cache.is_some()
     }
 
-    fn force_scheduler_for_greedy(&self) -> bool {
-        true
-    }
-
     fn prompt_lookup_config(&self) -> Option<crate::core::prompt_lookup::PromptLookupConfig> {
         Some(self.cfg)
     }
@@ -635,53 +580,6 @@ pub async fn build_plain_app_state<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    build_plain_app_state_with_force_scheduler(
-        model,
-        tokenizer,
-        model_id,
-        prefill_chunk_size,
-        b_max,
-        admission_deadline_ms,
-        admission_queue_max,
-        max_cache_cap,
-        decode_cadence_mid_chunk_cap,
-        kv_cache_turboquant_bits,
-        scheduler_runtime_profile,
-        scheduler_autotune_report,
-        vision_input_override,
-        paged_prefix_cache,
-        prefix_lru_cache,
-        static_memory_estimate,
-        active_kv_offload,
-        false,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn build_plain_app_state_with_force_scheduler<M>(
-    model: M,
-    tokenizer: Tokenizer,
-    model_id: String,
-    prefill_chunk_size: usize,
-    b_max: usize,
-    admission_deadline_ms: u64,
-    admission_queue_max: usize,
-    max_cache_cap: usize,
-    decode_cadence_mid_chunk_cap: usize,
-    kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
-    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
-    scheduler_autotune_report: bool,
-    vision_input_override: Option<VisionInputConfig>,
-    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
-    prefix_lru_cache: Option<PrefixLruCacheConfig>,
-    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
-    active_kv_offload: ActiveKvOffloadConfig,
-    force_scheduler: bool,
-) -> Result<CausalEngine<M>>
-where
-    M: Model + DenseVlMethods + Send + 'static,
-{
     build_app_state(
         model,
         tokenizer,
@@ -702,7 +600,6 @@ where
             paged_prefix_cache,
             prefix_lru_cache,
             active_kv_offload,
-            force_scheduler,
         },
     )
     .await
@@ -992,7 +889,6 @@ where
     }
 
     let paged_prefix_cache_enabled = scheduler_actor_spawner.paged_prefix_cache_enabled();
-    let force_scheduler_for_greedy = scheduler_actor_spawner.force_scheduler_for_greedy();
     let prompt_lookup_config = scheduler_actor_spawner.prompt_lookup_config();
     let prompt_lookup_enabled = prompt_lookup_config.is_some();
     let scheduler_handle = scheduler_actor_spawner.spawn(
@@ -1080,7 +976,6 @@ where
         static_memory_estimate,
         cold_materialization_tracker,
         kv_cache_turboquant_bits,
-        force_scheduler_for_greedy,
         prompt_lookup_enabled,
         health_collector,
         runtime_usage,
@@ -1193,6 +1088,11 @@ pub async fn build_dflash2_engine_with_options<M>(
 where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
 {
+    let checkpoint_block_size = usize::try_from(draft.config().dflash_config.block_size)
+        .context("DFlash2 checkpoint block_size")?;
+    let block_size =
+        crate::core::dflash2::resolve_dflash2_block_size(Some(block_size), checkpoint_block_size)?
+            .block_size;
     let model = Arc::new(Mutex::new(model));
     let (
         mut meta,
@@ -1220,6 +1120,12 @@ where
             capabilities.profile,
         )
     };
+    tracing::info!(
+        checkpoint_block_size,
+        resolved_block_size = block_size,
+        max_draft_tokens = initial_draft_budget,
+        "DFlash2 runtime configuration resolved"
+    );
     meta.weight_bytes =
         effective_model_weight_bytes(meta.weight_bytes, static_memory_estimate.total_cold_bytes());
     let model_max_context = meta.max_position_embeddings.max(0) as usize;
@@ -1277,7 +1183,9 @@ where
         kv_cache_budget_policy: dflash2_handle.kv_cache_budget_policy.to_owned(),
         mtp: health::MtpHealthConfig::disabled(),
         dflash2: health::DFlash2HealthConfig::enabled(
+            checkpoint_block_size,
             block_size,
+            initial_draft_budget,
             draft_quantization_bits,
             p2_options.tree_max_nodes,
             p2_options.position_keyed_sampling,
@@ -1328,7 +1236,8 @@ where
             dflash2_handle.prefix_cache_evictions.clone(),
             dflash2_handle.prefix_cache_hit_tokens.clone(),
             dflash2_handle.runtime_usage.clone(),
-        ),
+        )
+        .with_ragged_linear(dflash2_handle.ragged_linear.clone()),
         prompt_lookup: health::PromptLookupHealthConfig::disabled(),
         active_kv_offload: crate::core::cache::ActiveKvOffloadSharedStats::new(
             &ActiveKvOffloadConfig::disabled(),
@@ -1356,7 +1265,6 @@ where
         static_memory_estimate,
         cold_materialization_tracker,
         kv_cache_turboquant_bits: None,
-        force_scheduler_for_greedy: true,
         prompt_lookup_enabled: false,
         health_collector,
         runtime_usage,

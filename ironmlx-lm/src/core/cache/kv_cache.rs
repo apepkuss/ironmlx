@@ -65,6 +65,13 @@ impl KVCacheSnapshot {
 }
 
 impl KVCache {
+    /// Diagnostic-only: the dense key/value buffers, used as evaluation
+    /// barriers by `IRONMLX_DIAGNOSTIC_DFLASH2_WINDOW_STAGES`.
+    #[doc(hidden)]
+    pub fn diagnostic_buffers(&self) -> Vec<&Array> {
+        self.keys.iter().chain(self.values.iter()).collect()
+    }
+
     /// Construct a fresh cache. Keys/values are allocated lazily on first
     /// `update_and_fetch`.
     ///
@@ -866,6 +873,45 @@ impl KVCache {
             dense_values: None,
             restores_dense_storage: false,
         }
+    }
+
+    pub(crate) fn commit_tree_rows(
+        &mut self,
+        base: i32,
+        rows: &[i32],
+        target: StreamOrDevice,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.batch == 1 && self.turboquant.is_none() && self.paged.is_none(),
+            "flat tree requires dense B1 KV"
+        );
+        anyhow::ensure!(
+            !rows.is_empty()
+                && base >= 0
+                && rows.iter().all(|&r| r >= 0 && base + r < self.offsets[0]),
+            "invalid tree KV commit"
+        );
+        let indices = rows.iter().map(|&r| base + r).collect::<Vec<_>>();
+        let indices: Array = (indices.as_slice(), &[indices.len() as i32][..]).try_into()?;
+        let keys = mlx::ops::indexing::take_on(
+            self.keys
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("missing tree keys"))?,
+            &indices,
+            2,
+            target,
+        )?;
+        let values = mlx::ops::indexing::take_on(
+            self.values
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("missing tree values"))?,
+            &indices,
+            2,
+            target,
+        )?;
+        self.restore_offsets(&[base])?;
+        self.update_and_fetch_on(&keys, &values, &[rows.len() as i32], target)?;
+        Ok(())
     }
 
     /// Restore offsets and, for dense storage, the exact pre-verify K/V graph.

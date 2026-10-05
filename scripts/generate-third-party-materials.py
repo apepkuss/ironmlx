@@ -48,11 +48,15 @@ def validate_output_filename(filename: str) -> None:
         raise ValueError(f"invalid generated license filename: {filename}")
 
 
-def resolve_native_source(source: str, mlx_source: Path, mlx_build: Path) -> Path:
+def resolve_native_source(
+    source: str, mlx_source: Path, mlx_build: Path, repository_root: Path | None = None
+) -> Path:
     prefix, separator, relative = source.partition(":")
     if not separator or not relative:
         raise ValueError(f"invalid native license source: {source}")
     roots = {"mlx": mlx_source, "mlx-build": mlx_build}
+    if repository_root is not None:
+        roots["repo"] = repository_root
     if prefix not in roots:
         raise ValueError(f"unsupported native license source prefix: {prefix}")
     resolved = (roots[prefix] / relative).resolve()
@@ -62,13 +66,48 @@ def resolve_native_source(source: str, mlx_source: Path, mlx_build: Path) -> Pat
     return resolved
 
 
+def verify_git_files(
+    source_path: Path, git_repository: Path, commit: str
+) -> dict[str, Any]:
+    """Every file under `source_path` must equal the file at the same relative
+    path in `commit` of `git_repository` (vendored copies of upstream files)."""
+    if not source_path.is_dir():
+        raise ValueError(f"vendored source directory is missing: {source_path}")
+    files = sorted(path for path in source_path.rglob("*") if path.is_file())
+    if not files:
+        raise ValueError(f"vendored source directory is empty: {source_path}")
+    tree = hashlib.sha256()
+    for path in files:
+        relative = path.relative_to(source_path).as_posix()
+        expected = subprocess.run(
+            ["git", "-C", str(git_repository), "show", f"{commit}:{relative}"],
+            capture_output=True,
+        )
+        content = path.read_bytes()
+        if expected.returncode != 0 or expected.stdout != content:
+            raise ValueError(
+                f"vendored file differs from {commit}: {relative} in {source_path}"
+            )
+        tree.update(f"{relative}\0{sha256_bytes(content)}\n".encode())
+    return {"files": len(files), "tree_sha256": tree.hexdigest()}
+
+
 def verify_native_source(
-    verification: dict[str, Any], mlx_source: Path, mlx_build: Path
+    verification: dict[str, Any],
+    mlx_source: Path,
+    mlx_build: Path,
+    repository_root: Path | None = None,
 ) -> dict[str, Any]:
     source_path = resolve_native_source(
-        verification["source"], mlx_source, mlx_build
+        verification["source"], mlx_source, mlx_build, repository_root
     )
     verification_type = verification["type"]
+    if verification_type == "git-files":
+        git_repository = resolve_native_source(
+            verification["repository"], mlx_source, mlx_build, repository_root
+        )
+        result = verify_git_files(source_path, git_repository, verification["commit"])
+        return {"commit": verification["commit"], "type": verification_type, **result}
     if verification_type == "git":
         actual = subprocess.run(
             ["git", "-C", str(source_path), "rev-parse", "HEAD"],
@@ -156,12 +195,16 @@ def rust_materials(
 
 
 def native_materials(
-    manifest: dict[str, Any], mlx_source: Path, mlx_build: Path, licenses_dir: Path
+    manifest: dict[str, Any],
+    mlx_source: Path,
+    mlx_build: Path,
+    licenses_dir: Path,
+    repository_root: Path | None = None,
 ) -> list[dict[str, Any]]:
     dependencies: list[dict[str, Any]] = []
     for dependency in manifest["dependencies"]:
         source_path = resolve_native_source(
-            dependency["license_source"], mlx_source, mlx_build
+            dependency["license_source"], mlx_source, mlx_build, repository_root
         )
         if not source_path.is_file():
             raise ValueError(f"native license source is missing: {source_path}")
@@ -179,7 +222,7 @@ def native_materials(
             if key not in {"license_source", "source_verification"}
         }
         normalized["source_integrity"] = verify_native_source(
-            dependency["source_verification"], mlx_source, mlx_build
+            dependency["source_verification"], mlx_source, mlx_build, repository_root
         )
         dependencies.append(normalized)
     dependencies.sort(key=lambda entry: entry["component"].casefold())
@@ -353,7 +396,10 @@ def render_notices(inventory: dict[str, Any]) -> str:
             "",
             "The MLX entry identifies the non-official IronMLX fork and its exact",
             "revision. Bundled JACCL sources are part of that checkout and are covered",
-            "by the checkout's MLX license file.",
+            "by the checkout's MLX license file. The MLX Metal kernel header entries",
+            "are vendored copies (`mlx-sys/shaders/vendor`) compiled into the",
+            "embedded prefill kernel libraries; each file is verified against the",
+            "listed MLX revision.",
             "",
             "## Rust dependencies",
             "",
@@ -485,7 +531,11 @@ def main() -> None:
     )
     rust_crates, rust_licenses = rust_materials(cargo_about_documents, licenses_dir)
     native_dependencies = native_materials(
-        native_manifest, args.mlx_source, args.mlx_build, licenses_dir
+        native_manifest,
+        args.mlx_source,
+        args.mlx_build,
+        licenses_dir,
+        args.repository_root,
     )
     swift_hash = sha256_bytes(args.swift_manifest.read_bytes())
     swift_package = read_json(args.swift_package_json)

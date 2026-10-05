@@ -9,6 +9,9 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=shim");
     println!("cargo:rerun-if-changed=src/bridge");
+    println!("cargo:rerun-if-changed=shaders");
+
+    compile_prefill_shaders();
 
     // P0 only supports the MLX_DIR discovery path. P1 adds MLX_INCLUDE_DIR/MLX_LIB_DIR
     // and pkg-config fallback; P2 adds the `bundled` feature.
@@ -67,7 +70,11 @@ fn main() {
     .file("shim/src/fft.cc")
     .file("shim/src/transforms.cc")
     .file("shim/src/stream.cc")
+    .file("shim/src/experiment_config.cc")
     .file("shim/src/fast.cc")
+    .file("shim/src/prefill_d256_nax.cc")
+    .file("shim/src/prefill_masked_softmax.cc")
+    .file("shim/src/prefill_qmm_mtile.cc")
     .file("shim/src/io.cc")
     .file("shim/src/metal.cc")
     .file("shim/src/memory.cc")
@@ -75,9 +82,62 @@ fn main() {
     .file("shim/src/random.cc")
     .include("shim/include")
     .include(&include_dir)
+    .include(include_dir.join("metal_cpp"))
     .std("c++20")
     .flag_if_supported("-fvisibility=hidden")
     .compile("cxx_mlx_shim");
+}
+
+/// Precompiled prefill kernels for Apple GPU generation 17+ (NAX). Built from
+/// `shaders/` with the pinned MLX kernel headers in `shaders/vendor` (QMM
+/// M-tile: MLX 0.32.2; D256 attention: MLX 0.32.3) using the same flags as
+/// the qualified candidate, so the output is byte-identical to it. The
+/// libraries are embedded in the crate (`mlx_sys::shaders`) and loaded at
+/// runtime only when the device profile enables them.
+fn compile_prefill_shaders() {
+    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let shaders = manifest.join("shaders");
+    for (name, source, mlx_headers) in [
+        ("prefill_qmm_mtile", "qmm_mtile_probe.metal", "mlx-0.32.2"),
+        ("prefill_d256_nax", "nax_dsplit_probe.metal", "mlx-0.32.3"),
+    ] {
+        let air = out_dir.join(format!("{name}.air"));
+        let library = out_dir.join(format!("{name}.metallib"));
+        let include = shaders.join("vendor").join(mlx_headers).join("include");
+        run_xcrun(&[
+            "metal".as_ref(),
+            "-std=metal4.0".as_ref(),
+            "-O2".as_ref(),
+            "-fno-fast-math".as_ref(),
+            "-mmacosx-version-min=26.2".as_ref(),
+            "-I".as_ref(),
+            include.as_os_str(),
+            "-c".as_ref(),
+            shaders.join(source).as_os_str(),
+            "-o".as_ref(),
+            air.as_os_str(),
+        ]);
+        run_xcrun(&[
+            "metallib".as_ref(),
+            air.as_os_str(),
+            "-o".as_ref(),
+            library.as_os_str(),
+        ]);
+    }
+}
+
+fn run_xcrun(args: &[&std::ffi::OsStr]) {
+    let status = std::process::Command::new("xcrun")
+        .args(args)
+        .status()
+        .unwrap_or_else(|error| panic!("failed to run xcrun {args:?}: {error}"));
+    if !status.success() {
+        panic!(
+            "xcrun {args:?} failed ({status}). The Metal toolchain is required to build \
+             the prefill kernels (install it with `xcodebuild -downloadComponent MetalToolchain`)."
+        );
+    }
 }
 
 fn locate_mlx() -> (PathBuf, PathBuf) {

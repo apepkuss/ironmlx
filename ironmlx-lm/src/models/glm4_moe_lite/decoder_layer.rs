@@ -19,10 +19,10 @@ use super::rope::RopeOffset;
 
 /// Feed-forward sub-block: dense SwiGLU MLP (layer 0) or the MoE router block.
 ///
-/// `Glm4MoeBlock` is large (stacked expert weights), so it is boxed to keep the
-/// enum (and the `Vec<Glm4DecoderLayer>` element stride) small.
+/// Both variants are boxed to keep the enum (and the `Vec<Glm4DecoderLayer>`
+/// element stride) small.
 enum Ffn {
-    Dense(Mlp),
+    Dense(Box<Mlp>),
     Moe(Box<Glm4MoeBlock>),
 }
 
@@ -65,7 +65,7 @@ impl Glm4DecoderLayer {
                 cfg,
             )?))
         } else {
-            Ffn::Dense(Mlp::from_loader(loader, &format!("{p}.mlp"))?)
+            Ffn::Dense(Box::new(Mlp::from_loader(loader, &format!("{p}.mlp"))?))
         };
         Ok(Self {
             input_layernorm,

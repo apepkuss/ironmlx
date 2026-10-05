@@ -77,6 +77,49 @@ use {
 #[cfg(feature = "tools")]
 static BATCHED_Q16_QUALIFICATION_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Widest DFlash2 proposal block promoted for automatic production use.
+/// Wider lanes remain an explicit opt-in until they pass the promotion gate.
+pub const DEFAULT_DFLASH2_BLOCK_SIZE_CAP: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DFlash2BlockSizeResolution {
+    pub checkpoint_block_size: usize,
+    pub block_size: usize,
+    pub explicit: bool,
+}
+
+/// Resolve the runtime proposal width from an optional operator override and
+/// the draft checkpoint capability. Automatic selection never promotes a lane
+/// wider than the qualified Q8 default; explicit Q16 remains available when
+/// the checkpoint supports it.
+pub fn resolve_dflash2_block_size(
+    requested: Option<usize>,
+    checkpoint_block_size: usize,
+) -> Result<DFlash2BlockSizeResolution> {
+    anyhow::ensure!(
+        checkpoint_block_size >= 2,
+        "DFlash2 checkpoint block_size must be at least 2, got {checkpoint_block_size}"
+    );
+    let block_size = if let Some(requested) = requested {
+        anyhow::ensure!(
+            (2..=16).contains(&requested),
+            "DFlash2 runtime block_size {requested} must be in [2, 16]"
+        );
+        anyhow::ensure!(
+            requested <= checkpoint_block_size,
+            "DFlash2 runtime block_size {requested} exceeds checkpoint block_size {checkpoint_block_size}"
+        );
+        requested
+    } else {
+        checkpoint_block_size.min(DEFAULT_DFLASH2_BLOCK_SIZE_CAP)
+    };
+    Ok(DFlash2BlockSizeResolution {
+        checkpoint_block_size,
+        block_size,
+        explicit: requested.is_some(),
+    })
+}
+
 /// Process-local capability guard used only by qualification binaries.
 ///
 /// Production builds do not expose this type because they do not enable the
@@ -342,6 +385,8 @@ pub enum DFlash2RequestError {
 pub struct DFlash2Metrics {
     pub block_size: usize,
     pub tree_max_nodes: usize,
+    pub experimental_tree_profile: bool,
+    pub tree_proposal_width: usize,
     pub position_keyed_sampling: bool,
     pub sampled: bool,
     pub prompt_tokens: usize,
@@ -353,6 +398,9 @@ pub struct DFlash2Metrics {
     pub ordinary_windows: usize,
     pub tree_windows: usize,
     pub tree_drafted_nodes: usize,
+    pub ragged_linear_windows: usize,
+    pub tree_to_ragged_switches: usize,
+    pub ragged_to_tree_switches: usize,
     pub draft_budget_changes: usize,
     pub current_draft_budget: usize,
     pub adaptive_acceptance_ewma: Option<f64>,
@@ -386,6 +434,11 @@ struct DFlash2Counters {
     ordinary_windows: usize,
     tree_windows: usize,
     tree_drafted_nodes: usize,
+    ragged_linear_windows: usize,
+    /// Path of the latest tree or ragged linear window (true = ragged).
+    last_window_ragged: Option<bool>,
+    tree_to_ragged_switches: usize,
+    ragged_to_tree_switches: usize,
     draft_budget_changes: usize,
     exact_sampling: ExactSamplingCounters,
     draft_build_us: u64,
@@ -415,6 +468,14 @@ impl DFlash2TensorBatchKey {
         self.draft_len == 0
     }
 
+    pub(crate) fn draft_len(self) -> usize {
+        self.draft_len
+    }
+
+    pub(crate) fn supported_batch_widths(self) -> u64 {
+        self.supported_batch_widths
+    }
+
     pub(crate) fn supports_batch_width(self, batch_width: usize) -> bool {
         batch_width < u64::BITS as usize
             && self.supported_batch_widths & (1_u64 << batch_width) != 0
@@ -440,6 +501,22 @@ struct DFlash2PrefillContext<'a> {
     is_cancelled: Option<&'a dyn Fn() -> bool>,
 }
 
+fn experimental_fixed_budget(maximum: usize) -> Result<Option<usize>> {
+    let Some(raw) =
+        ironmlx_core::m5_profile::setting(ironmlx_core::m5_profile::settings::DFLASH2_FIXED_BUDGET)
+    else {
+        return Ok(None);
+    };
+    let value: usize = raw
+        .parse()
+        .map_err(|_| anyhow!("fixed DFlash2 budget must be a non-negative integer"))?;
+    anyhow::ensure!(
+        value <= maximum,
+        "fixed DFlash2 budget {value} exceeds supported {maximum}"
+    );
+    Ok(Some(value))
+}
+
 /// Text-only, single-request DFlash2 stream with greedy and exact sampled decoding.
 pub struct DFlash2TextGenerationStream<'m, M>
 where
@@ -456,6 +533,7 @@ where
     pending_context_hidden: Array,
     verify_capabilities: DFlash2VerifyCapabilities,
     draft_policy: QwenMtpDraftPolicyState,
+    experimental_fixed_budget: Option<usize>,
     prng_state: Array,
     block_size: usize,
     emitted_new_tokens: usize,
@@ -467,6 +545,65 @@ where
     prefix_cache_hit_tokens: usize,
     target_cache_cap: i32,
     p2_options: DFlash2P2Options,
+}
+
+/// Token capacity of a ragged batched target cache for rows needing
+/// `row_tokens` (the largest row, floored at the GPU-efficient minimum). The
+/// actor reserves memory for exactly this capacity before building a group.
+pub(crate) fn ragged_batch_cache_cap(row_tokens: impl IntoIterator<Item = usize>) -> usize {
+    row_tokens.into_iter().max().unwrap_or(1).max(
+        usize::try_from(ironmlx_lm::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF)
+            .unwrap_or(usize::MAX),
+    )
+}
+
+/// Prototype, default off: persistent target cache of a ragged linear batch
+/// (rows at different context lengths). Built by copying each row's target
+/// cache into one batched cache; scattered back when membership changes.
+#[doc(hidden)]
+pub struct DFlash2RaggedBatchCache {
+    target: Vec<LayerCache>,
+    batch_size: usize,
+}
+
+/// Prototype, default off: per-window timings of a ragged linear batch
+/// window. With `IRONMLX_DIAGNOSTIC_DFLASH2_WINDOW_STAGES=1` the stage
+/// boundaries synchronize (draft, verify, head, commit attributable);
+/// without it only `window_us` is meaningful.
+#[doc(hidden)]
+#[derive(Debug, Clone, Serialize)]
+pub struct DFlash2RaggedWindowTiming {
+    pub rows: usize,
+    pub positions: Vec<usize>,
+    pub accepted: Vec<usize>,
+    pub emitted: Vec<usize>,
+    pub cache_build_us: u64,
+    pub stages: Vec<(&'static str, u64)>,
+    pub window_us: u64,
+}
+
+impl DFlash2RaggedBatchCache {
+    /// Copy the batched target cache back into the rows (in row order).
+    pub fn scatter_to_rows<M: DFlash2Target>(
+        &self,
+        rows: &mut [&mut DFlash2TextGenerationStream<'_, M>],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            rows.len() == self.batch_size,
+            "ragged cache width {} cannot address {} rows",
+            self.batch_size,
+            rows.len()
+        );
+        for (batch_row, row) in rows.iter_mut().enumerate() {
+            ironmlx_lm::core::cache::layer::adopt_layer_cache_rows(
+                &mut row.target_cache,
+                &self.target,
+                0,
+                batch_row,
+            )?;
+        }
+        Ok(())
+    }
 }
 
 pub(crate) struct DFlash2TensorBatchCache {
@@ -610,6 +747,15 @@ where
         is_cancelled: &dyn Fn() -> bool,
     ) -> Result<Self> {
         let options = execution.p2.validate()?;
+        // Single-graph prefill is qualified only with the M5 affine4 target
+        // route and without a prefix cache (it needs the whole prompt in one
+        // pass); otherwise the request keeps the chunked scheduler prefill.
+        let single_prefill = ironmlx_core::m5_profile::flag(
+            ironmlx_core::m5_profile::settings::DFLASH2_SINGLE_PREFILL,
+        ) && prefix_cache.is_none()
+            && model
+                .dflash2_execution_fingerprint()
+                .contains("experimental-m5-affine4");
         let mut request = request;
         if options.position_keyed_sampling {
             request.sampler = request.sampler.with_position_keyed_v1();
@@ -622,7 +768,11 @@ where
             execution.block_size,
             options,
             DFlash2PrefillContext {
-                execution: DFlash2PrefillExecution::SchedulerB1,
+                execution: if single_prefill {
+                    DFlash2PrefillExecution::GenerationStream
+                } else {
+                    DFlash2PrefillExecution::SchedulerB1
+                },
                 prefix_cache,
                 is_cancelled: Some(is_cancelled),
             },
@@ -822,6 +972,7 @@ where
                 pending_context_hidden: row_context,
                 verify_capabilities,
                 draft_policy: QwenMtpDraftPolicyState::new(max_draft_tokens),
+                experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
                 prng_state,
                 block_size,
                 emitted_new_tokens: 0,
@@ -866,6 +1017,7 @@ where
         let target_layer_ids = &draft.config().dflash_config.target_layer_ids;
         let context_limit = draft.config().sliding_window - 1;
         let prefill_started = Instant::now();
+        memory_phase_diagnostic("prefill_start", 0, prompt_len);
         let mut context_hidden: Option<Array> = None;
         let mut last_hidden: Option<Array> = None;
         let mut position = 0_i32;
@@ -904,6 +1056,16 @@ where
         }
 
         while position < prompt_len_i32 {
+            // Experimental, default off: at each bulk chunk boundary release
+            // cached buffers sized for the previous chunk (attention scores
+            // grow with KV and are never reused), so a raised MLX cache
+            // ceiling retains only the current chunk's buffers.
+            if position > 0
+                && prompt_len_i32 - position > 128
+                && prefill_chunk_cache_reset_requested()
+            {
+                mlx::clear_cache();
+            }
             ensure_dflash2_request_not_cancelled(is_cancelled)?;
             let remaining = prompt_len_i32 - position;
             let chunk_len = dflash2_prefill_chunk_len(
@@ -944,6 +1106,7 @@ where
                 .as_ref()
                 .ok_or_else(|| anyhow!("DFlash2 prefill retained no final hidden"))?;
             mlx::transforms::eval(&[retained, chunk_last_hidden])?;
+            memory_phase_diagnostic("prefill_chunk_evaluated", position + chunk_len, prompt_len);
             ensure_dflash2_request_not_cancelled(is_cancelled)?;
             // Dense and linear target state is materially larger than an
             // ordinary paged-KV prefix entry. Retain the last reusable chunk
@@ -994,6 +1157,7 @@ where
         // logically independent.
         mlx::transforms::eval(&[&first_logits])?;
         mlx::transforms::eval(&[&context_hidden])?;
+        memory_phase_diagnostic("first_logits_evaluated", prompt_len_i32, prompt_len);
         ensure_dflash2_request_not_cancelled(is_cancelled)?;
         let prefill_us = elapsed_us(prefill_started);
         let generation_started = Instant::now();
@@ -1045,6 +1209,7 @@ where
             pending_context_hidden: context_hidden,
             verify_capabilities,
             draft_policy: QwenMtpDraftPolicyState::new(max_draft_tokens),
+            experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
             prng_state,
             block_size,
             emitted_new_tokens: 0,
@@ -1074,6 +1239,14 @@ where
         DFlash2Metrics {
             block_size: self.block_size,
             tree_max_nodes: self.p2_options.tree_max_nodes,
+            experimental_tree_profile: ironmlx_lm::models::dflash2::experimental_tree_profile(),
+            tree_proposal_width: if self.p2_options.tree_max_nodes > 0
+                && ironmlx_lm::models::dflash2::experimental_tree_profile()
+            {
+                self.p2_options.tree_max_nodes.min(15) + 1
+            } else {
+                self.block_size
+            },
             position_keyed_sampling: self.p2_options.position_keyed_sampling,
             sampled: self.request.sampler.temperature > 0.0,
             prompt_tokens,
@@ -1085,8 +1258,11 @@ where
             ordinary_windows: self.counters.ordinary_windows,
             tree_windows: self.counters.tree_windows,
             tree_drafted_nodes: self.counters.tree_drafted_nodes,
+            ragged_linear_windows: self.counters.ragged_linear_windows,
+            tree_to_ragged_switches: self.counters.tree_to_ragged_switches,
+            ragged_to_tree_switches: self.counters.ragged_to_tree_switches,
             draft_budget_changes: self.counters.draft_budget_changes,
-            current_draft_budget: self.draft_policy.current_budget(),
+            current_draft_budget: self.current_draft_budget(),
             adaptive_acceptance_ewma: self.draft_policy.acceptance_ewma(),
             exact_sampling_windows: self.counters.exact_sampling.windows,
             exact_acceptance_draws: self.counters.exact_sampling.acceptance_draws,
@@ -1149,6 +1325,11 @@ where
         }
         if finish_reason.is_some() {
             self.finished = true;
+            memory_phase_diagnostic(
+                "generation_finished",
+                i32::try_from(self.history.len()).unwrap_or(i32::MAX),
+                self.request.prompt_ids.len(),
+            );
         }
         Ok(Some(GenerateEvent {
             token,
@@ -1168,7 +1349,7 @@ where
         if remaining == 0 {
             return Ok(None);
         }
-        let draft_len = self.draft_policy.current_budget().min(remaining);
+        let draft_len = self.current_draft_budget().min(remaining);
         let context_shape = self.pending_context_hidden.shape();
         let context_dims = context_shape.as_slice();
         anyhow::ensure!(
@@ -1209,6 +1390,52 @@ where
         }))
     }
 
+    pub(crate) fn pending_token_count(&self) -> usize {
+        self.pending_tokens.len()
+    }
+
+    pub(crate) fn prompt_token_ids(&self) -> &[u32] {
+        &self.request.prompt_ids
+    }
+
+    /// Token ids already handed to the actor for publication (popped from
+    /// the pending queue), in order.
+    pub(crate) fn published_token_ids(&self) -> &[u32] {
+        let start = self.request.prompt_ids.len().min(self.history.len());
+        let end = start
+            .saturating_add(self.emitted_new_tokens)
+            .min(self.history.len());
+        &self.history[start..end]
+    }
+
+    /// Token capacity this row needs in a ragged batched target cache.
+    pub(crate) fn ragged_cache_tokens(&self) -> usize {
+        self.request
+            .prompt_ids
+            .len()
+            .saturating_add(self.request.max_new_tokens)
+    }
+
+    /// Whether the next window of this row may run as a ragged linear batch
+    /// row: greedy, unconstrained, fixed positive draft budget, and enough
+    /// remaining tokens for a full linear block. Other rows keep their own
+    /// window path.
+    pub(crate) fn ragged_linear_eligible(&self) -> bool {
+        let Some(draft_len) = self.experimental_fixed_budget else {
+            return false;
+        };
+        !self.finished
+            && self.pending_tokens.is_empty()
+            && draft_len > 0
+            && self.request.sampler.is_greedy()
+            && self.constraint.is_none()
+            && self
+                .request
+                .max_new_tokens
+                .saturating_sub(self.emitted_new_tokens)
+                > draft_len
+    }
+
     pub(crate) fn fill_deferred_window_b1(&mut self) -> Result<()> {
         let current_token = *self
             .history
@@ -1218,7 +1445,7 @@ where
     }
 
     fn fill_next_window(&mut self, current_token: u32) -> Result<()> {
-        if self.draft_policy.current_budget() == 0 {
+        if self.current_draft_budget() == 0 {
             self.fill_ordinary_window(current_token)
         } else if self.tree_eligible() {
             self.fill_tree_window(current_token)
@@ -1236,6 +1463,360 @@ where
                 .lane_kernel_pack
                 .as_ref()
                 .is_some_and(|pack| pack.quant_bits == 4)
+    }
+
+    /// Prototype diagnostic: evaluate this stream's target cache buffers
+    /// (used to time cache scatter, which is otherwise lazy).
+    #[doc(hidden)]
+    pub fn diagnostic_eval_target_cache(&self) -> Result<()> {
+        let arrays: Vec<&Array> = self
+            .target_cache
+            .iter()
+            .flat_map(LayerCache::diagnostic_buffers)
+            .collect();
+        mlx::transforms::eval(&arrays)?;
+        Ok(())
+    }
+
+    /// Prototype diagnostic: true when the next token needs a new window.
+    #[doc(hidden)]
+    pub fn diagnostic_needs_window(&self) -> bool {
+        !self.finished && self.pending_tokens.is_empty()
+    }
+
+    /// Prototype diagnostic: pop the next committed token without filling a
+    /// window (the caller decides between B1 and a batched window).
+    #[doc(hidden)]
+    pub fn diagnostic_next_token_deferred(&mut self) -> Result<Option<GenerateEvent>> {
+        self.next_token_deferred()
+    }
+
+    /// Prototype diagnostic: fill one ordinary single-request window.
+    #[doc(hidden)]
+    pub fn diagnostic_fill_b1(&mut self) -> Result<()> {
+        self.fill_deferred_window_b1()
+    }
+
+    /// Prototype diagnostic: position of the next verify block.
+    #[doc(hidden)]
+    pub fn diagnostic_verify_start(&self) -> usize {
+        self.history.len() - 1
+    }
+
+    /// Prototype diagnostic: time the draft proposal for `widths` identical
+    /// copies of this stream's draft state (equal positions, so the existing
+    /// batched draft path applies). Each pass stacks fresh copies, so this
+    /// stream's state is not changed. Returns (width, median us, samples).
+    #[doc(hidden)]
+    pub fn diagnostic_draft_batch_bench(
+        &self,
+        widths: &[usize],
+        iters: usize,
+    ) -> Result<Vec<(usize, u64, Vec<u64>)>> {
+        let target = StreamOrDevice::default();
+        let draft_len = self.current_draft_budget();
+        anyhow::ensure!(draft_len > 0, "draft bench needs a positive draft budget");
+        let current = *self
+            .history
+            .last()
+            .ok_or_else(|| anyhow!("empty history"))?;
+        let mask_token = self.draft.config().dflash_config.mask_token_id;
+        let mut out = Vec::new();
+        for &width in widths {
+            let mut samples = Vec::with_capacity(iters + 2);
+            for pass in 0..iters + 2 {
+                let rows = (0..width).map(|_| &self.draft_cache).collect::<Vec<_>>();
+                let mut cache = DFlash2DraftCache::stack_rows_on(&rows, target)?;
+                let contexts = (0..width)
+                    .map(|_| &self.pending_context_hidden)
+                    .collect::<Vec<_>>();
+                let context = mlx::ops::shape::concatenate_on(&contexts, 0, target)?;
+                let mut block = Vec::with_capacity(width * (draft_len + 1));
+                for _ in 0..width {
+                    block.push(current);
+                    block.resize(block.len() + draft_len, mask_token);
+                }
+                let block: Array = (
+                    &block[..],
+                    &[i32::try_from(width)?, i32::try_from(draft_len + 1)?][..],
+                )
+                    .try_into()?;
+                mlx::transforms::eval(&[&context, &block])?;
+                mlx::transforms::synchronize()?;
+                let started = Instant::now();
+                let tokens = self
+                    .draft
+                    .propose_greedy_on(self.model, &block, &context, &mut cache, target)?;
+                mlx::transforms::eval(&[&tokens])?;
+                mlx::transforms::synchronize()?;
+                if pass >= 2 {
+                    samples.push(elapsed_us(started));
+                }
+            }
+            let mut sorted = samples.clone();
+            sorted.sort_unstable();
+            out.push((width, sorted[sorted.len() / 2], samples));
+        }
+        Ok(out)
+    }
+
+    /// Prototype, default off: one linear draft/verify window for rows at
+    /// different context lengths (greedy, equal draft budget). Drafts run per
+    /// row (the draft cache has one shared position per batch); the target
+    /// verify block runs batched with per-row positions and cache offsets,
+    /// attention per row on its exact key range (`ragged_rows_scope`), and
+    /// each row commits its own accepted prefix. The batched target cache is
+    /// returned for reuse while membership is unchanged.
+    #[doc(hidden)]
+    pub fn diagnostic_ragged_window_bn(
+        rows: &mut [&mut Self],
+        cache: Option<DFlash2RaggedBatchCache>,
+    ) -> Result<(DFlash2RaggedBatchCache, DFlash2RaggedWindowTiming)> {
+        Self::fill_ragged_linear_window_bn(rows, cache)
+    }
+
+    /// One ragged linear window (see [`Self::diagnostic_ragged_window_bn`]);
+    /// used by the DFlash2 actor when the experimental tree/linear switch is
+    /// enabled.
+    pub(crate) fn fill_ragged_linear_window_bn(
+        rows: &mut [&mut Self],
+        cache: Option<DFlash2RaggedBatchCache>,
+    ) -> Result<(DFlash2RaggedBatchCache, DFlash2RaggedWindowTiming)> {
+        anyhow::ensure!(rows.len() >= 2, "ragged batch needs at least two rows");
+        let batch_size = rows.len();
+        let batch_size_i32 = i32::try_from(batch_size)?;
+        let target = StreamOrDevice::default();
+        let window_started = Instant::now();
+        let draft_len = rows[0].current_draft_budget();
+        for (i, row) in rows.iter().enumerate() {
+            anyhow::ensure!(
+                row.ragged_linear_eligible() && row.current_draft_budget() == draft_len,
+                "ragged row {i} is not an eligible greedy linear row"
+            );
+        }
+        anyhow::ensure!(draft_len > 0, "ragged batch needs a positive draft budget");
+        DFlash2VerifyPlan::build(&rows[0].verify_capabilities, batch_size, draft_len)?;
+        let verify_len = draft_len + 1;
+        let mask_token = rows[0].draft.config().dflash_config.mask_token_id;
+        let positions_before = rows.iter().map(|r| r.history.len() - 1).collect::<Vec<_>>();
+
+        // Persistent batched target cache.
+        let cache_started = Instant::now();
+        let mut batch_cache = match cache {
+            Some(cache) => {
+                anyhow::ensure!(cache.batch_size == batch_size, "ragged cache width changed");
+                cache
+            }
+            None => {
+                let cap = i32::try_from(ragged_batch_cache_cap(
+                    rows.iter().map(|row| row.ragged_cache_tokens()),
+                ))?;
+                let mut target_cache =
+                    rows[0]
+                        .model
+                        .make_cache(batch_size_i32, cap, rows[0].model.cache_dtype())?;
+                for (batch_row, row) in rows.iter().enumerate() {
+                    ironmlx_lm::core::cache::layer::adopt_layer_cache_rows(
+                        &mut target_cache,
+                        &row.target_cache,
+                        batch_row,
+                        0,
+                    )?;
+                }
+                if window_stages_enabled() {
+                    let arrays: Vec<&Array> = target_cache
+                        .iter()
+                        .flat_map(LayerCache::diagnostic_buffers)
+                        .collect();
+                    mlx::transforms::eval(&arrays)?;
+                    mlx::transforms::synchronize()?;
+                }
+                DFlash2RaggedBatchCache {
+                    target: target_cache,
+                    batch_size,
+                }
+            }
+        };
+        let cache_build_us = elapsed_us(cache_started);
+        let mut stage_clock = StageClock::start()?;
+
+        // Drafts per row (single-request draft path, unchanged).
+        let current_tokens = rows
+            .iter()
+            .map(|row| {
+                row.history
+                    .last()
+                    .copied()
+                    .ok_or_else(|| anyhow!("empty history"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut draft_rows = Vec::with_capacity(batch_size);
+        for (row, &current_token) in rows.iter_mut().zip(&current_tokens) {
+            let mut block = vec![current_token];
+            block.resize(verify_len, mask_token);
+            let block_arr: Array =
+                (&block[..], &[1_i32, i32::try_from(verify_len)?][..]).try_into()?;
+            let draft = row.draft.propose_greedy_on(
+                row.model,
+                &block_arr,
+                &row.pending_context_hidden,
+                &mut row.draft_cache,
+                target,
+            )?;
+            anyhow::ensure!(
+                draft.shape().as_slice() == [1, i32::try_from(draft_len)?],
+                "ragged draft shape {:?}",
+                draft.shape().as_slice()
+            );
+            draft_rows.push(draft);
+        }
+        let draft_refs = draft_rows.iter().collect::<Vec<_>>();
+        let draft_tokens_arr = mlx::ops::shape::concatenate_on(&draft_refs, 0, target)?;
+        StageClock::mark(&mut stage_clock, "draft", &[&draft_tokens_arr])?;
+
+        // Batched target verify with per-row positions.
+        let current_arr: Array = (&current_tokens[..], &[batch_size_i32, 1][..]).try_into()?;
+        let verify_arr =
+            mlx::ops::shape::concatenate_on(&[&current_arr, &draft_tokens_arr], 1, target)?;
+        let position_rows = positions_before
+            .iter()
+            .map(|&start| build_position_ids(i32::try_from(start)?, i32::try_from(verify_len)?))
+            .collect::<Result<Vec<_>>>()?;
+        let position_refs = position_rows.iter().collect::<Vec<_>>();
+        let verify_positions = mlx::ops::shape::concatenate_on(&position_refs, 1, target)?;
+        let snapshots = batch_cache
+            .target
+            .iter()
+            .map(LayerCache::dflash2_transaction_snapshot)
+            .collect::<Result<Vec<_>>>()?;
+        for layer in &mut batch_cache.target {
+            layer.begin_speculative_prefix_capture()?;
+        }
+        let verified = {
+            let _ragged = ironmlx_lm::nn::gated_attention::ragged_rows_scope();
+            rows[0].model.dflash2_forward_target_on(
+                &verify_arr,
+                &verify_positions,
+                Some(&mut batch_cache.target),
+                &rows[0].draft.config().dflash_config.target_layer_ids,
+                dflash2_target_forward_mode(rows[0].request.sampler),
+                target,
+            )?
+        };
+        StageClock::mark(
+            &mut stage_clock,
+            "verify",
+            &[&verified.hidden, &verified.context_hidden],
+        )?;
+
+        let logits = rows[0]
+            .model
+            .dflash2_project_hidden_on(&verified.hidden, target)?;
+        let verified_tokens_arr = mlx::ops::reduction::argmax(&logits, -1, false)?;
+        mlx::transforms::async_eval(&[&verified_tokens_arr, &verified.context_hidden])?;
+        let draft_tokens =
+            materialize_dflash2_draft_tokens(&draft_tokens_arr, batch_size, draft_len, mask_token)?;
+        let greedy = verified_tokens_arr.to_vec::<u32>()?;
+        StageClock::mark(&mut stage_clock, "head", &[])?;
+
+        let mut resolutions = Vec::with_capacity(batch_size);
+        for batch_row in 0..batch_size {
+            resolutions.push(resolve_speculative_tokens(
+                &draft_tokens[batch_row],
+                &greedy[batch_row * verify_len..(batch_row + 1) * verify_len],
+            )?);
+        }
+        let accepted_lens = resolutions
+            .iter()
+            .map(|r| r.accepted_verify_input_len)
+            .collect::<Vec<_>>();
+        for (batch_row, &len) in accepted_lens.iter().enumerate() {
+            anyhow::ensure!(
+                len > 0 && len <= verify_len,
+                "ragged row {batch_row} accepted invalid prefix {len}/{verify_len}"
+            );
+        }
+        rows[0].model.dflash2_restore_target_prefix_rows_on(
+            &mut batch_cache.target,
+            &snapshots,
+            &accepted_lens,
+            target,
+        )?;
+        let mut contexts = Vec::with_capacity(batch_size);
+        for (batch_row, &len) in accepted_lens.iter().enumerate() {
+            let context_row = slice_batch_row(&verified.context_hidden, batch_row, target)?;
+            contexts.push(slice_sequence_prefix(
+                &context_row,
+                i32::try_from(len)?,
+                target,
+            )?);
+        }
+        if stage_clock.is_some() {
+            let mut arrays: Vec<&Array> = batch_cache
+                .target
+                .iter()
+                .flat_map(LayerCache::diagnostic_buffers)
+                .collect();
+            arrays.extend(contexts.iter());
+            StageClock::mark(&mut stage_clock, "commit", &arrays)?;
+        }
+
+        let mut emitted = Vec::with_capacity(batch_size);
+        let mut accepted = Vec::with_capacity(batch_size);
+        for ((batch_row, row), (resolution, context)) in rows
+            .iter_mut()
+            .enumerate()
+            .zip(resolutions.into_iter().zip(contexts))
+        {
+            row.pending_context_hidden = context;
+            row.counters.windows += 1;
+            row.counters.drafted_tokens += draft_tokens[batch_row].len();
+            row.counters.accepted_draft_tokens += resolution.accepted_draft_len;
+            if resolution.needs_rollback {
+                row.counters.rollback_count += 1;
+            }
+            let remaining = row
+                .request
+                .max_new_tokens
+                .saturating_sub(row.emitted_new_tokens);
+            let mut tokens_to_append = resolution.tokens_to_append;
+            if let Some(stop_index) = tokens_to_append
+                .iter()
+                .position(|token| row.request.stop_token_ids.contains(token))
+            {
+                tokens_to_append.truncate(stop_index + 1);
+            }
+            tokens_to_append.truncate(remaining);
+            anyhow::ensure!(
+                !tokens_to_append.contains(&mask_token),
+                "ragged verification emitted the mask token"
+            );
+            accepted.push(resolution.accepted_draft_len);
+            emitted.push(tokens_to_append.len());
+            for token in tokens_to_append {
+                row.history.push(token);
+                row.pending_tokens.push_back(token);
+            }
+        }
+        let window_us = elapsed_us(window_started);
+        for row in rows.iter_mut() {
+            if row.counters.last_window_ragged == Some(false) {
+                row.counters.tree_to_ragged_switches += 1;
+            }
+            row.counters.last_window_ragged = Some(true);
+            row.counters.ragged_linear_windows += 1;
+            row.counters.window_us = row.counters.window_us.saturating_add(window_us);
+        }
+        let timing = DFlash2RaggedWindowTiming {
+            rows: batch_size,
+            positions: positions_before,
+            accepted,
+            emitted,
+            cache_build_us,
+            stages: stage_clock.map(|c| c.stages).unwrap_or_default(),
+            window_us,
+        };
+        Ok((batch_cache, timing))
     }
 
     /// Execute one equal-shape multi-row draft/verify window. Rows with a common
@@ -1727,7 +2308,22 @@ where
         if remaining == 0 {
             return Ok(());
         }
-        let draft_len = self.draft_policy.current_budget().min(remaining);
+        let mut stage_clock = StageClock::start()?;
+        let tf_tree_profile = ironmlx_lm::models::dflash2::experimental_tree_profile();
+        if tf_tree_profile {
+            anyhow::ensure!(
+                ironmlx_core::m5_profile::flag(
+                    ironmlx_core::m5_profile::settings::DFLASH2_FLAT_TREE
+                ),
+                "experimental tf-v1 proposal requires flat-tree verification"
+            );
+        }
+        let draft_len = if tf_tree_profile {
+            self.p2_options.tree_max_nodes.min(15)
+        } else {
+            self.current_draft_budget()
+        }
+        .min(remaining);
         let mask_token = self.draft.config().dflash_config.mask_token_id;
         let mut block = Vec::with_capacity(draft_len + 1);
         block.push(current_token);
@@ -1743,7 +2339,7 @@ where
             &mut self.draft_cache,
             ironmlx_lm::models::dflash2::DFlash2TreeSpec {
                 max_nodes: self.p2_options.tree_max_nodes,
-                children_per_node: 2,
+                children_per_node: if tf_tree_profile { 4 } else { 2 },
             },
             StreamOrDevice::default(),
         )?;
@@ -1751,6 +2347,16 @@ where
             .counters
             .draft_build_us
             .saturating_add(elapsed_us(draft_started));
+        StageClock::mark(&mut stage_clock, "draft", &[])?;
+        if ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::DFLASH2_FLAT_TREE) {
+            return self.fill_flat_tree(
+                current_token,
+                &tree,
+                remaining,
+                window_started,
+                stage_clock,
+            );
+        }
         let paths = tree.leaf_paths();
         anyhow::ensure!(
             !paths.is_empty() && paths.len() <= 8,
@@ -1962,6 +2568,125 @@ where
         Ok(())
     }
 
+    fn fill_flat_tree(
+        &mut self,
+        current_token: u32,
+        tree: &DFlash2DraftTree,
+        remaining: usize,
+        started: Instant,
+        mut stage_clock: Option<StageClock>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.request.sampler.is_greedy() && self.experimental_fixed_budget.is_some(),
+            "experimental flat tree requires greedy sampling and fixed draft budget"
+        );
+        let history_before = self.history.len();
+        let mut tokens = vec![current_token];
+        tokens.extend_from_slice(&tree.tokens);
+        let mut parents = vec![-1];
+        parents.extend(tree.parents.iter().map(|p| p + 1));
+        let input: Array = (tokens.as_slice(), &[1, tokens.len() as i32][..]).try_into()?;
+        let snapshots = self
+            .target_cache
+            .iter()
+            .map(LayerCache::dflash2_transaction_snapshot)
+            .collect::<Result<Vec<_>>>()?;
+        for cache in &mut self.target_cache {
+            cache.begin_speculative_prefix_capture()?;
+        }
+        let begin = Instant::now();
+        let verified = self.model.dflash2_forward_tree_on(
+            &input,
+            &parents,
+            (self.history.len() - 1) as i32,
+            &mut self.target_cache,
+            &self.draft.config().dflash_config.target_layer_ids,
+            StreamOrDevice::default(),
+        )?;
+        self.counters.verify_build_us += elapsed_us(begin);
+        StageClock::mark(
+            &mut stage_clock,
+            "verify",
+            &[&verified.hidden, &verified.context_hidden],
+        )?;
+        let begin = Instant::now();
+        let logits = self
+            .model
+            .dflash2_project_hidden_on(&verified.hidden, StreamOrDevice::default())?;
+        let predictions = mlx::ops::reduction::argmax(&logits, -1, false)?;
+        self.counters.projection_build_us += elapsed_us(begin);
+        let begin = Instant::now();
+        mlx::transforms::async_eval(&[&predictions, &verified.context_hidden])?;
+        self.counters.verify_schedule_us += elapsed_us(begin);
+        let begin = Instant::now();
+        let predictions = predictions.to_vec::<u32>()?;
+        self.counters.host_sync_us += elapsed_us(begin);
+        StageClock::mark(&mut stage_clock, "head", &[])?;
+        let mut rows = vec![0_i32];
+        loop {
+            let last = *rows.last().unwrap() as usize;
+            let next = (last + 1..tokens.len())
+                .find(|&i| parents[i] == last as i32 && tokens[i] == predictions[last]);
+            match next {
+                Some(i) => rows.push(i as i32),
+                None => break,
+            }
+        }
+        let accepted = rows.len() - 1;
+        let bonus = predictions[*rows.last().unwrap() as usize];
+        let begin = Instant::now();
+        self.model.dflash2_commit_tree_on(
+            &mut self.target_cache,
+            &snapshots,
+            &rows,
+            StreamOrDevice::default(),
+        )?;
+        let indices: Array = (rows.as_slice(), &[rows.len() as i32][..]).try_into()?;
+        self.pending_context_hidden =
+            mlx::ops::indexing::take(&verified.context_hidden, &indices, 1)?;
+        self.counters.rollback_us += elapsed_us(begin);
+        if stage_clock.is_some() {
+            let arrays = cache_barrier_arrays(&self.target_cache, &self.pending_context_hidden);
+            StageClock::mark(&mut stage_clock, "commit", &arrays)?;
+        }
+        let mut append = rows[1..]
+            .iter()
+            .map(|&r| tokens[r as usize])
+            .collect::<Vec<_>>();
+        append.push(bonus);
+        if let Some(i) = append
+            .iter()
+            .position(|t| self.request.stop_token_ids.contains(t))
+        {
+            append.truncate(i + 1);
+        }
+        append.truncate(remaining);
+        for token in append {
+            self.history.push(token);
+            self.pending_tokens.push_back(token);
+        }
+        StageClock::finish(
+            stage_clock,
+            "tree",
+            tree.tokens.len(),
+            accepted,
+            self.history.len() - history_before,
+            history_before,
+        );
+        self.counters.windows += 1;
+        self.counters.tree_windows += 1;
+        if self.counters.last_window_ragged == Some(true) {
+            self.counters.ragged_to_tree_switches += 1;
+        }
+        self.counters.last_window_ragged = Some(false);
+        self.counters.tree_drafted_nodes += tree.tokens.len();
+        self.counters.drafted_tokens += tree.tokens.len();
+        self.counters.accepted_draft_tokens += accepted;
+        self.counters.rollback_count += 1;
+        self.counters.window_us += elapsed_us(started);
+        Ok(())
+    }
+
     fn fill_window(&mut self, current_token: u32) -> Result<()> {
         let window_started = Instant::now();
         let counters_before = self.counters.clone();
@@ -1972,7 +2697,9 @@ where
         if remaining == 0 {
             return Ok(());
         }
-        let draft_len = self.draft_policy.current_budget().min(remaining);
+        let mut stage_clock = StageClock::start()?;
+        let history_before = self.history.len();
+        let draft_len = self.current_draft_budget().min(remaining);
         DFlash2VerifyPlan::build(&self.verify_capabilities, 1, draft_len)?;
         let sampling_prepare_started = Instant::now();
         let exact_sampling_uniforms = if self.request.sampler.temperature > 0.0
@@ -2010,6 +2737,7 @@ where
                 draft_tokens_arr.shape().as_slice()
             ));
         }
+        StageClock::mark(&mut stage_clock, "draft", &[&draft_tokens_arr])?;
         let draft_schedule_started = Instant::now();
         mlx::transforms::async_eval(&[&draft_tokens_arr])?;
         self.counters.draft_schedule_us = self
@@ -2047,6 +2775,11 @@ where
             .counters
             .verify_build_us
             .saturating_add(elapsed_us(verify_started));
+        StageClock::mark(
+            &mut stage_clock,
+            "verify",
+            &[&verified.hidden, &verified.context_hidden],
+        )?;
         let projection_started = Instant::now();
         // DFlash2 has its own product-stable target projection. Do not arm the
         // MTP verify-QMM candidate here: its MSG route is throughput-oriented
@@ -2134,6 +2867,7 @@ where
             .counters
             .host_sync_us
             .saturating_add(elapsed_us(host_sync_started));
+        StageClock::mark(&mut stage_clock, "head", &[])?;
         if draft_tokens.contains(&mask_token) {
             return Err(anyhow!(
                 "DFlash2 draft emitted reserved mask token {mask_token}"
@@ -2212,6 +2946,10 @@ where
             .counters
             .rollback_us
             .saturating_add(elapsed_us(rollback_started));
+        if stage_clock.is_some() {
+            let arrays = cache_barrier_arrays(&self.target_cache, &self.pending_context_hidden);
+            StageClock::mark(&mut stage_clock, "commit", &arrays)?;
+        }
 
         let accepted_draft_len = resolution.accepted_draft_len;
         let mut tokens_to_append = resolution.tokens_to_append;
@@ -2236,6 +2974,14 @@ where
             self.history.push(token);
             self.pending_tokens.push_back(token);
         }
+        StageClock::finish(
+            stage_clock,
+            "linear",
+            draft_tokens.len(),
+            accepted_draft_len,
+            self.history.len() - history_before,
+            history_before,
+        );
         let window_us = elapsed_us(window_started);
         self.counters.window_us = self.counters.window_us.saturating_add(window_us);
         self.observe_adaptive_window(MtpDraftPolicyWindow::from_measured_components(
@@ -2277,7 +3023,15 @@ where
         Ok(())
     }
 
+    fn current_draft_budget(&self) -> usize {
+        self.experimental_fixed_budget
+            .unwrap_or_else(|| self.draft_policy.current_budget())
+    }
+
     fn observe_adaptive_window(&mut self, window: MtpDraftPolicyWindow) {
+        if self.experimental_fixed_budget.is_some() {
+            return;
+        }
         let change = self.draft_policy.observe_external_window(window);
         if change.reduced || change.increased {
             self.counters.draft_budget_changes =
@@ -2840,8 +3594,150 @@ fn retain_context_tail_batched(
     .map_err(Into::into)
 }
 
+/// Diagnostic-only DFlash2 window stage accounting
+/// (`IRONMLX_DIAGNOSTIC_DFLASH2_WINDOW_STAGES=1`): evaluates and synchronizes
+/// at stage boundaries and records the wall time of each stage. It removes
+/// CPU/GPU overlap, so stage times attribute work but are not production
+/// timings. Default off; never enabled by a serving profile.
+#[doc(hidden)]
+#[derive(Debug, Clone, Serialize)]
+pub struct WindowStageRecord {
+    pub kind: &'static str,
+    pub stages: Vec<(&'static str, u64)>,
+    pub drafted: usize,
+    pub accepted: usize,
+    pub emitted: usize,
+    pub context: usize,
+}
+
+static WINDOW_STAGE_RECORDS: std::sync::Mutex<Vec<WindowStageRecord>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Diagnostic-only: drain the recorded window stages.
+#[doc(hidden)]
+pub fn take_window_stage_records() -> Vec<WindowStageRecord> {
+    std::mem::take(&mut *WINDOW_STAGE_RECORDS.lock().expect("stage records"))
+}
+
+fn window_stages_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("IRONMLX_DIAGNOSTIC_DFLASH2_WINDOW_STAGES").as_deref() == Ok("1")
+    })
+}
+
+struct StageClock {
+    last: Instant,
+    stages: Vec<(&'static str, u64)>,
+}
+
+impl StageClock {
+    fn start() -> Result<Option<Self>> {
+        if !window_stages_enabled() {
+            return Ok(None);
+        }
+        mlx::transforms::synchronize()?;
+        Ok(Some(Self {
+            last: Instant::now(),
+            stages: Vec::new(),
+        }))
+    }
+
+    fn mark(clock: &mut Option<Self>, stage: &'static str, arrays: &[&Array]) -> Result<()> {
+        if let Some(clock) = clock.as_mut() {
+            if !arrays.is_empty() {
+                mlx::transforms::eval(arrays)?;
+            }
+            mlx::transforms::synchronize()?;
+            let now = Instant::now();
+            clock
+                .stages
+                .push((stage, (now - clock.last).as_micros() as u64));
+            clock.last = now;
+        }
+        Ok(())
+    }
+
+    fn finish(
+        clock: Option<Self>,
+        kind: &'static str,
+        drafted: usize,
+        accepted: usize,
+        emitted: usize,
+        context: usize,
+    ) {
+        if let Some(clock) = clock {
+            WINDOW_STAGE_RECORDS
+                .lock()
+                .expect("stage records")
+                .push(WindowStageRecord {
+                    kind,
+                    stages: clock.stages,
+                    drafted,
+                    accepted,
+                    emitted,
+                    context,
+                });
+        }
+    }
+}
+
+fn cache_barrier_arrays<'a>(cache: &'a [LayerCache], extra: &'a Array) -> Vec<&'a Array> {
+    let mut arrays: Vec<&Array> = cache
+        .iter()
+        .flat_map(LayerCache::diagnostic_buffers)
+        .collect();
+    arrays.push(extra);
+    arrays
+}
+
 fn elapsed_us(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+/// Diagnostic-only memory phase record. Reads counters; never evaluates arrays,
+/// adds barriers or changes graph roots. Enabled by
+/// `IRONMLX_DIAGNOSTIC_MEMORY_PHASES=1`.
+fn prefill_chunk_cache_reset_requested() -> bool {
+    static REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *REQUESTED.get_or_init(|| {
+        let enabled = ironmlx_core::m5_profile::flag(
+            ironmlx_core::m5_profile::settings::PREFILL_CHUNK_CACHE_RESET,
+        );
+        if enabled {
+            tracing::info!("prefill chunk cache reset enabled");
+        }
+        enabled
+    })
+}
+
+fn memory_phase_diagnostic(phase: &str, position: i32, prompt_len: usize) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ENABLED
+        .get_or_init(|| std::env::var("IRONMLX_DIAGNOSTIC_MEMORY_PHASES").as_deref() == Ok("1"))
+    {
+        return;
+    }
+    let memory = mlx::memory::snapshot();
+    let (prepared_count, prepared_bytes) = ironmlx_lm::nn::m5_prepared_totals();
+    let (shared_stores, shared_to_tiled, shared_to_native) =
+        ironmlx_lm::nn::shared_weight_layout_totals();
+    tracing::warn!(
+        diagnostic = "memory_phase",
+        phase,
+        position,
+        prompt_len,
+        active_bytes = memory.active_bytes,
+        cache_bytes = memory.cache_bytes,
+        peak_bytes = memory.peak_bytes,
+        footprint_bytes = super::process_memory::macos_phys_footprint_bytes().unwrap_or(0),
+        m5_prepared_count = prepared_count,
+        m5_prepared_bytes = prepared_bytes,
+        shared_stores,
+        shared_to_tiled,
+        shared_to_native,
+        "diagnostic memory phase; not a formal resource measurement"
+    );
 }
 
 fn dflash2_prefill_chunk_len(
@@ -2899,6 +3795,39 @@ fn rate_per_second(tokens: usize, elapsed_us: u64) -> f64 {
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn automatic_block_size_uses_checkpoint_width_up_to_q8() {
+        assert_eq!(
+            resolve_dflash2_block_size(None, 4).expect("Q4 auto"),
+            DFlash2BlockSizeResolution {
+                checkpoint_block_size: 4,
+                block_size: 4,
+                explicit: false,
+            }
+        );
+        assert_eq!(
+            resolve_dflash2_block_size(None, 8)
+                .expect("Q8 auto")
+                .block_size,
+            8
+        );
+        assert_eq!(
+            resolve_dflash2_block_size(None, 32)
+                .expect("b32 remains Q8 by default")
+                .block_size,
+            8
+        );
+    }
+
+    #[test]
+    fn explicit_block_size_preserves_q16_opt_in_and_checkpoint_guard() {
+        let q16 = resolve_dflash2_block_size(Some(16), 32).expect("explicit Q16");
+        assert_eq!(q16.block_size, 16);
+        assert!(q16.explicit);
+        assert!(resolve_dflash2_block_size(Some(16), 8).is_err());
+        assert!(resolve_dflash2_block_size(Some(1), 8).is_err());
+    }
 
     fn assert_array_exact(label: &str, expected: &Array, actual: &Array) {
         assert_eq!(expected.shape(), actual.shape(), "{label} shape");

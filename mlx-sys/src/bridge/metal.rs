@@ -11,6 +11,7 @@
 mod ffi_bridge {
     unsafe extern "C++" {
         include!("cxx_mlx_shim/metal.h");
+        include!("cxx_mlx_shim/experiment_config.h");
 
         /// Open an Xcode-compatible `.gputrace` file at `path` and start
         /// capturing every Metal command submitted on the default device.
@@ -35,11 +36,24 @@ mod ffi_bridge {
         /// the entry's variant is unexpectedly not a string (defensive —
         /// MLX always stores it as `std::string`).
         fn device_architecture() -> Result<String>;
+
+        /// Configure the QMM M-tile prefill library path (empty = off).
+        /// Returns false if the setting was already read.
+        fn set_prefill_qmm_mtile_library(path: &str) -> bool;
+
+        /// Configure the D256 NAX prefill attention library path (empty =
+        /// off). Returns false if the setting was already read.
+        fn set_prefill_d256_nax_library(path: &str) -> bool;
+
+        /// Enable or disable the masked causal softmax prefill fallback.
+        /// Returns false if the setting was already read.
+        fn set_prefill_masked_softmax(enabled: bool) -> bool;
     }
 }
 
 pub mod ffi {
     pub use super::ffi_bridge::{
-        device_architecture, set_metallib_path, start_capture, stop_capture,
+        device_architecture, set_metallib_path, set_prefill_d256_nax_library,
+        set_prefill_masked_softmax, set_prefill_qmm_mtile_library, start_capture, stop_capture,
     };
 }

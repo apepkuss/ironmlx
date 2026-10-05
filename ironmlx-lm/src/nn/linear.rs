@@ -7,15 +7,23 @@ use mlx::{Array, StreamOrDevice};
 
 pub struct Linear {
     inner: ironmlx_core::nn::Linear,
+    m5_prepared: std::sync::OnceLock<super::m5_affine4::Prepared>,
+    /// Experimental single-resident weight store; when set, `inner` is an
+    /// empty placeholder and every forward routes through the store.
+    shared: Option<Box<super::shared_weight_layout::Shared>>,
 }
 impl Linear {
     pub fn from_loader(loader: &(impl WeightSource + ?Sized), prefix: &str) -> Result<Self> {
         Ok(Self {
+            m5_prepared: std::sync::OnceLock::new(),
+            shared: None,
             inner: ironmlx_core::nn::Linear::from_loader(loader, prefix)?,
         })
     }
     pub fn new_fp(weight: Array, bias: Option<Array>) -> Self {
         Self {
+            m5_prepared: std::sync::OnceLock::new(),
+            shared: None,
             inner: ironmlx_core::nn::Linear::new_fp(weight, bias),
         }
     }
@@ -31,6 +39,8 @@ impl Linear {
             inner: ironmlx_core::nn::Linear::new_quant(
                 weight, scales, biases, bias, group_size, bits,
             ),
+            m5_prepared: std::sync::OnceLock::new(),
+            shared: None,
         }
     }
     pub fn new_quant_with_mode(
@@ -46,25 +56,90 @@ impl Linear {
             inner: ironmlx_core::nn::Linear::new_quant_with_mode(
                 weight, scales, biases, bias, group_size, bits, mode,
             ),
+            m5_prepared: std::sync::OnceLock::new(),
+            shared: None,
         }
     }
     pub fn forward(&self, x: &Array) -> Result<Array> {
         self.forward_on(x, ())
     }
     pub fn in_features(&self) -> usize {
-        self.inner.in_features()
+        match &self.shared {
+            Some(shared) => shared.in_features(),
+            None => self.inner.in_features(),
+        }
     }
     pub fn out_features(&self) -> usize {
-        self.inner.out_features()
+        match &self.shared {
+            Some(shared) => shared.out_features(),
+            None => self.inner.out_features(),
+        }
     }
+    /// Borrowed quantized arrays. `None` for a shared-layout Linear, whose
+    /// arrays live in its store; callers must not use it to infer precision.
     pub(crate) fn quantized_parts(&self) -> Option<QuantizedLinearParts<'_>> {
+        if self.shared.is_some() {
+            return None;
+        }
         self.inner.quantized_parts()
+    }
+
+    fn shared_placeholder(shared: super::shared_weight_layout::Shared) -> Result<Self> {
+        let empty: Array = (&[0.0_f32][..], &[1, 1][..]).try_into()?;
+        Ok(Self {
+            inner: ironmlx_core::nn::Linear::new_fp(empty, None),
+            m5_prepared: std::sync::OnceLock::new(),
+            shared: Some(Box::new(shared)),
+        })
+    }
+
+    /// Move this projection's arrays into a single-resident store. Returns
+    /// the store, or `None` (unchanged) when the weight is not M5-eligible.
+    pub(crate) fn share_whole(
+        &mut self,
+    ) -> Result<Option<std::sync::Arc<super::shared_weight_layout::Store>>> {
+        if self.shared.is_some() {
+            return Err(anyhow!("projection already uses the shared weight layout"));
+        }
+        let Some(store) = super::shared_weight_layout::take(self) else {
+            return Ok(None);
+        };
+        let (in_features, out_features) = (self.in_features(), self.out_features());
+        *self = Self::shared_placeholder(super::shared_weight_layout::whole(
+            &store,
+            in_features,
+            out_features,
+        ))?;
+        Ok(Some(store))
+    }
+
+    /// Replace a former row view of a fused projection with a lazy row
+    /// view of that projection's store.
+    pub(crate) fn share_rows(
+        &mut self,
+        store: &std::sync::Arc<super::shared_weight_layout::Store>,
+        start: usize,
+    ) -> Result<()> {
+        let (in_features, len) = (self.in_features(), self.out_features());
+        *self = Self::shared_placeholder(super::shared_weight_layout::rows(
+            store,
+            i32::try_from(start)?,
+            i32::try_from(len)?,
+            in_features,
+        ))?;
+        Ok(())
     }
     /// Fuse output rows from matching quantized projections without retaining
     /// duplicate weights. Each output row keeps the same affine-4 or affine-8
     /// dot-product accumulation tree; callers split the fused result on the
     /// original row boundaries.
     pub(crate) fn fuse_quantized_outputs(projections: &[&Linear], context: &str) -> Result<Self> {
+        if projections
+            .iter()
+            .any(|projection| projection.shared.is_some())
+        {
+            return Err(anyhow!("{context} cannot fuse shared-layout projections"));
+        }
         let first = projections
             .first()
             .ok_or_else(|| anyhow!("{context} requires at least one projection"))?;
@@ -226,9 +301,30 @@ impl Linear {
         Ok(projections)
     }
 
+    /// Whether this projection can take the M5 affine4 route (used only by
+    /// the experimental start-up pre-compilation).
+    pub(crate) fn m5_route_capable(&self) -> bool {
+        match &self.shared {
+            Some(shared) => shared.m5_route_capable(),
+            None => self
+                .quantized_parts()
+                .is_some_and(|p| super::m5_affine4::weight_compatible(&p)),
+        }
+    }
+
     /// Stream-targeted forward pass.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
+        if let Some(shared) = &self.shared {
+            return shared.forward_on(x, target);
+        }
+        if super::m5_affine4::armed() {
+            if let Some(parts) = self.quantized_parts() {
+                if let Some(y) = super::m5_affine4::forward(x, parts, &self.m5_prepared, target)? {
+                    return Ok(y);
+                }
+            }
+        }
         if super::position_stable_qmm::exact_affine8_b4_q2_is_armed() {
             if let Some(parts) = self.quantized_parts() {
                 if let Some(output) =
@@ -344,6 +440,9 @@ impl Linear {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        if let Some(shared) = &self.shared {
+            return shared.forward_positions_isolated_on(x, target);
+        }
         let shape = x.shape();
         let shape = shape.as_slice();
         let Some(&[batch, sequence, _]) = <&[i32; 3]>::try_from(shape).ok() else {
@@ -449,6 +548,9 @@ impl Linear {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        if let Some(shared) = &self.shared {
+            return shared.forward_mtp_verify_on(x, target);
+        }
         if let Some(parts) = self.quantized_parts() {
             if let Some(output) = super::verify_qmm::forward_candidate_on(x, parts, target)? {
                 return Ok(output);

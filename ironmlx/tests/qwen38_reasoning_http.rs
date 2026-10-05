@@ -98,7 +98,6 @@ async fn boot_server(port: u16) -> (tokio::task::JoinHandle<anyhow::Result<()>>,
             false,
             None,
             Default::default(),
-            false,
         )
         .await
     });

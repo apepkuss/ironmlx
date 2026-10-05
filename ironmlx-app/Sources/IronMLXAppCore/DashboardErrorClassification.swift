@@ -65,6 +65,8 @@ extension ModelDFlash2RuntimeError: DashboardErrorCodeProviding {
             "dflash2_target_not_found"
         case .noCompatibleDraft, .draftPathNotFound:
             "dflash2_draft_not_found"
+        case .blockSizeExceedsCheckpoint:
+            "dflash2_block_size_incompatible"
         case .incompatibleAccelerationConfiguration:
             "dflash2_acceleration_conflict"
         }

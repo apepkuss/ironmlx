@@ -4985,6 +4985,22 @@
         <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="model_ttl">Model Auto-Unload (TTL)</span></div><div class="settings-row-desc" data-i18n="model_ttl_desc">Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.</div></div>
         <div class="settings-row-right"><input type="number" min="0" max="1440" value="30" style="min-width:80px;" id="cfg-model-ttl"> <span style="font-size:12px;color:var(--text-secondary);" data-i18n="minutes">minutes</span></div>
       </div>
+      <div class="settings-row">
+        <div class="settings-row-left">
+          <div class="settings-row-label" style="display:flex;align-items:center;gap:6px;">
+            <span data-i18n="m5_dflash2_profile">M5 DFlash2 Profile</span>
+            <span class="profile-help profile-help-fixed">
+              <button type="button" class="profile-help-trigger" id="m5-dflash2-profile-help-trigger" aria-describedby="m5-dflash2-profile-help-tooltip" aria-label="M5 DFlash2 Profile help" data-i18n-aria-label="m5_dflash2_profile_help_label">?</button>
+              <span class="profile-help-tooltip profile-help-tooltip-fixed" id="m5-dflash2-profile-help-tooltip" role="tooltip">
+                <span class="profile-help-tooltip-title" data-i18n="m5_dflash2_profile_help_title">About the M5 DFlash2 Profile</span>
+                <span class="profile-help-tooltip-body" data-i18n="m5_dflash2_profile_help_body">On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings.</span>
+              </span>
+            </span>
+          </div>
+          <div class="settings-row-desc" data-i18n="m5_dflash2_profile_desc">Automatically optimizes DFlash2 inference on supported devices.</div>
+        </div>
+        <div class="settings-row-right"><label class="toggle"><input type="checkbox" id="cfg-m5-dflash2-profile" checked><span class="toggle-slider"></span></label></div>
+      </div>
     </div>
 
     </div>
@@ -5418,7 +5434,7 @@
           </div>
           <div class="modal-field">
             <label data-i18n="dflash2_block_size">Block Size</label>
-            <input type="text" value="4" id="modal-dflash2-block-size">
+            <input type="text" placeholder="Auto (8)" id="modal-dflash2-block-size">
           </div>
           <div class="modal-field">
             <label data-i18n="dflash2_draft_bits">Draft Precision</label>
@@ -5803,6 +5819,7 @@
       active_kv_incident: "Active KV tiering is degraded for {models}. Requests can continue, but cache offload may be impaired.",
       runtime_not_applicable: "Not applicable",
       runtime_dflash2: "DFlash2 verification", runtime_dflash2_config: "Block {block} · Draft {bits}", runtime_dflash2_acceptance: "Acceptance", runtime_dflash2_windows: "Verify windows", runtime_dflash2_rollbacks: "Rollbacks", runtime_dflash2_residuals: "Residual corrections",
+      runtime_m5_profile: "M5 profile {status}", m5_profile_active: "active", m5_profile_disabled: "off", m5_profile_not_dflash2: "not used", m5_profile_unsupported_gpu: "unsupported GPU", m5_profile_gpu_unknown: "GPU unknown",
       status_subtitle: "Server status and resource usage overview.",
       service_overview: "Service Overview", endpoint_address: "Endpoint", copy_endpoint: "Copy endpoint", runtime_network_local: "Local", runtime_network_lan: "LAN", authentication_status: "Authentication", authentication_status_local: "Local access only; API Key not required", authentication_status_api_key: "API Key enabled",
       endpoints_hint_local: "Only this Mac can reach the server. Enable LAN mode explicitly to add an authenticated HTTPS endpoint.",
@@ -5839,10 +5856,10 @@
       prompt_lookup_cross_request: "Reuse Across Requests", prompt_lookup_cross_request_help_label: "About reuse across requests", prompt_lookup_cross_request_help: "Requires Repeated-Text Acceleration to be enabled. Keeps matching history from completed requests so later similar requests can also benefit from repeated-text acceleration.", prompt_lookup_clear: "Clear Reuse History", prompt_lookup_cleared: "Reuse history cleared.", prompt_lookup_clear_failed: "Failed to clear reuse history.",
       mtp_status_available: "MTP available", mtp_status_incompatible: "No compatible MTP weights", mtp_status_unavailable: "No compatible MTP weights",
       dflash2_badge_available: "DFlash2", dflash2_badge_enabled: "DFlash2", dflash2_badge_available_title: "A compatible DFlash2 draft is available.", dflash2_badge_enabled_title: "This model is running with DFlash2 acceleration.",
-      dflash2_acceleration: "DFlash2 Acceleration", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft Precision", dflash2_tensor_batch_max_width: "Tensor Batch Limit", auto_default_4: "Auto (4)",
+      dflash2_acceleration: "DFlash2 Acceleration", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_block_size_auto: "Auto ({value})", dflash2_draft_bits: "Draft Precision", dflash2_tensor_batch_max_width: "Tensor Batch Limit", auto_default_4: "Auto (4)",
       dflash2_tensor_batch_help_label: "About Tensor Batch Limit", dflash2_tensor_batch_help_title: "How Tensor Batch Limit is applied", dflash2_tensor_batch_help_body: "Limits how many compatible requests can be combined in one MLX tensor batch. Leave blank for Auto (4).", dflash2_tensor_batch_help_constraint: "The effective width is the minimum of this limit, Settings > Advanced > Max Sequences, and the number of ready compatible requests. This setting does not increase Max Sequences; incompatible or divergent requests use B1.",
       dflash2_help_label: "About DFlash2 acceleration", dflash2_help_title: "How DFlash2 acceleration works", dflash2_help_body: "DFlash2 uses a dedicated draft model and an isolated verification actor. Tensor Batch Limit caps compatible requests combined in one tensor operation; the actual width is the minimum of Max Sequences, this limit, and ready compatible requests. Empty uses the certified default 4. Changing this setting restarts the backend in single-target mode.", dflash2_help_exclusive: "DFlash2 cannot run together with MTP or repeated-text acceleration.",
-      dflash2_help_status_available: "Current status: compatible DFlash2 draft detected.", dflash2_help_status_incompatible: "Current status: the detected DFlash2 draft is incompatible with this model.", dflash2_help_status_unavailable: "Current status: no compatible DFlash2 draft was found.", dflash2_status_incompatible: "DFlash2 draft is incompatible", dflash2_status_unavailable: "No compatible DFlash2 draft", params_invalid_dflash2_block_size: "DFlash2 Block Size must be an integer from 2 to 8.", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch Limit must be a positive integer, or empty for Auto (4).",
+      dflash2_help_status_available: "Current status: compatible DFlash2 draft detected. Empty Block Size uses the checkpoint width up to the qualified Q8 default.", dflash2_help_status_incompatible: "Current status: the detected DFlash2 draft is incompatible with this model.", dflash2_help_status_unavailable: "Current status: no compatible DFlash2 draft was found.", dflash2_status_incompatible: "DFlash2 draft is incompatible", dflash2_status_unavailable: "No compatible DFlash2 draft", params_invalid_dflash2_block_size: "DFlash2 Block Size must be from 2 to the selected checkpoint limit (maximum 16), or empty for Auto.", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch Limit must be a positive integer, or empty for Auto (4).",
       model_exists_locally: "Model \"{name}\" already exists locally.",
       menu_start_needs_model: "No default model is set. Download a model and choose it as the default; IronMLX will start the backend automatically.",
       model_download_complete: "Model \"{name}\" downloaded successfully.",
@@ -5938,6 +5955,7 @@
       err_model_version_invalid_request: "The model version request is invalid. Refresh the version list and try again.",
       err_dflash2_target_not_found: "The DFlash2 target model is not available locally. Download it again and retry.",
       err_dflash2_draft_not_found: "No compatible local DFlash2 draft is available. Download a matching draft and retry.",
+      err_dflash2_block_size_incompatible: "The selected block size exceeds the DFlash2 draft checkpoint capability. Use Auto or choose a smaller value.",
       err_dflash2_acceleration_conflict: "DFlash2 cannot be enabled together with MTP or repeated-text acceleration.",
       integrity_error_toast: "Model integrity verification could not be completed. See the App log for technical details.",
       warn_default_scheduler_profile_used: "No matching scheduler profile was found for this model. The model is running with the default scheduler configuration. Generate a dedicated profile with Scheduler Profile for better model-specific scheduling.",
@@ -6021,6 +6039,7 @@
       auto: "Auto",
       cache: "Cache", enable_cache: "Enable Cache", ssd_cache_dir: "SSD Cache Directory",
       active_kv_offload: "Active KV Cache Offload", active_kv_offload_desc: "Experimental. Keep a hot KV window resident and move paused active KV cache payloads to SSD for long logical MAX CONTEXT TOKENS.", active_kv_offload_help_title: "Experimental cache residency", active_kv_offload_help_body: "Moves paused active KV cache payloads to local SSD storage so new requests can run when sequence slots are full.", active_kv_offload_help_trigger: "Enabling it does not mean offload happens immediately. The system triggers it automatically when scheduling, KV residency pressure, or request park/restore requires it; it may stay idle when the system is idle or memory pressure is low.", active_kv_offload_help_applicable: "Applicable: Full Attention dense/paged, TurboQuant packed Full Attention, MLA, and GatedDelta/Linear.", active_kv_offload_help_not_applicable: "Not applicable: MTP speculative side cache.",
+      m5_dflash2_profile: "M5 DFlash2 Profile", m5_dflash2_profile_desc: "Automatically optimizes DFlash2 inference on supported devices.", m5_dflash2_profile_help_title: "About the M5 DFlash2 Profile", m5_dflash2_profile_help_body: "On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings.", m5_dflash2_profile_help_label: "M5 DFlash2 Profile help",
       kv_quant: "KV Cache Compression", kv_quant_desc: "Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.", kv_quant_off: "Off", model_ttl: "Model Auto-Unload (TTL)", model_ttl_desc: "Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.", minutes: "minutes",
       advanced: "Advanced", batch_processing: "Batch Processing",
       max_sequences: "Max Sequences", max_sequences_desc: "Maximum number of concurrent parallel requests.",
@@ -6363,6 +6382,7 @@
       active_kv_incident: "模型 {models} 的 Active KV 分层卸载发生错误。请求仍可继续，但缓存卸载能力可能已降级。",
       runtime_not_applicable: "不适用",
       runtime_dflash2: "DFlash2 验证", runtime_dflash2_config: "Block {block} · Draft {bits}", runtime_dflash2_acceptance: "接受率", runtime_dflash2_windows: "验证窗口", runtime_dflash2_rollbacks: "回滚", runtime_dflash2_residuals: "残差修正",
+      runtime_m5_profile: "M5 配置：{status}", m5_profile_active: "已启用", m5_profile_disabled: "已关闭", m5_profile_not_dflash2: "未使用", m5_profile_unsupported_gpu: "GPU 不支持", m5_profile_gpu_unknown: "GPU 未知",
       status_subtitle: "服务器状态与资源使用概览。",
       service_overview: "服务概览", endpoint_address: "端点地址", copy_endpoint: "复制端点地址", runtime_network_local: "本机", runtime_network_lan: "局域网", authentication_status: "认证状态", authentication_status_local: "仅限本机访问，无需 API Key", authentication_status_api_key: "API Key 已启用",
       endpoints_hint_local: "仅当前 Mac 可访问服务。若需局域网访问，请在设置中显式启用 LAN 模式并选择一个具体接口。",
@@ -6399,10 +6419,10 @@
       prompt_lookup_cross_request: "跨请求复用", prompt_lookup_cross_request_help_label: "了解跨请求复用", prompt_lookup_cross_request_help: "需先启用“重复文本加速”。启用后会保留已完成请求的匹配历史，让后续相似请求也能使用重复文本加速。", prompt_lookup_clear: "清空复用历史", prompt_lookup_cleared: "已清空重复文本复用历史。", prompt_lookup_clear_failed: "清空复用历史失败。",
       mtp_status_available: "MTP 可用", mtp_status_incompatible: "无兼容 MTP 权重", mtp_status_unavailable: "未发现兼容的 MTP 权重",
       dflash2_badge_available: "DFlash2", dflash2_badge_enabled: "DFlash2", dflash2_badge_available_title: "已发现兼容的 DFlash2 Draft。", dflash2_badge_enabled_title: "该模型正在使用 DFlash2 加速。",
-      dflash2_acceleration: "DFlash2 加速", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自动（4）",
+      dflash2_acceleration: "DFlash2 加速", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_block_size_auto: "自动（{value}）", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自动（4）",
       dflash2_tensor_batch_help_label: "了解 Tensor Batch 上限", dflash2_tensor_batch_help_title: "Tensor Batch 上限如何生效", dflash2_tensor_batch_help_body: "限制一次 MLX tensor batch 最多合并的兼容请求数。留空使用自动值 4。", dflash2_tensor_batch_help_constraint: "约束关系：实际宽度取该上限、【设置 → 高级 → 最大序列数】和当前就绪兼容请求数的最小值。该配置不会提高最大序列数；不兼容或发生分叉的请求使用 B1。",
       dflash2_help_label: "了解 DFlash2 加速", dflash2_help_title: "DFlash2 加速如何工作", dflash2_help_body: "DFlash2 使用独立 Draft 模型和隔离的验证 actor。Tensor Batch 上限控制一次 tensor 操作最多合并多少个兼容请求；实际宽度取 Max Sequences、该上限和当前就绪兼容请求数的最小值。留空使用认证默认值 4。修改此设置后，后端将以单 Target 模式重启。", dflash2_help_exclusive: "DFlash2 不能与 MTP 或重复文本加速同时启用。",
-      dflash2_help_status_available: "当前状态：已检测到兼容的 DFlash2 Draft。", dflash2_help_status_incompatible: "当前状态：检测到的 DFlash2 Draft 与该模型不兼容。", dflash2_help_status_unavailable: "当前状态：未发现兼容的 DFlash2 Draft。", dflash2_status_incompatible: "DFlash2 Draft 不兼容", dflash2_status_unavailable: "未发现兼容的 DFlash2 Draft", params_invalid_dflash2_block_size: "DFlash2 Block Size 必须是 2 到 8 之间的整数。", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限必须为正整数，或留空使用自动值 4。",
+      dflash2_help_status_available: "当前状态：已检测到兼容的 DFlash2 Draft。Block Size 留空时自动采用 checkpoint 宽度，且不超过已资格化的 Q8 默认值。", dflash2_help_status_incompatible: "当前状态：检测到的 DFlash2 Draft 与该模型不兼容。", dflash2_help_status_unavailable: "当前状态：未发现兼容的 DFlash2 Draft。", dflash2_status_incompatible: "DFlash2 Draft 不兼容", dflash2_status_unavailable: "未发现兼容的 DFlash2 Draft", params_invalid_dflash2_block_size: "DFlash2 Block Size 必须在 2 到所选 checkpoint 上限之间（最高 16），或留空使用自动值。", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限必须为正整数，或留空使用自动值 4。",
       model_exists_locally: "模型 \"{name}\" 已存在于本地。",
       menu_start_needs_model: "尚未设置默认模型。请先下载一个模型并设为默认模型，IronMLX 会自动启动后端。",
       model_download_complete: "模型 \"{name}\" 下载完成。",
@@ -6498,6 +6518,7 @@
       err_model_version_invalid_request: "模型版本请求无效。请刷新版本列表后重试。",
       err_dflash2_target_not_found: "本地不存在 DFlash2 Target 模型。请重新下载后重试。",
       err_dflash2_draft_not_found: "本地不存在兼容的 DFlash2 Draft。请下载匹配的 Draft 后重试。",
+      err_dflash2_block_size_incompatible: "所选 Block Size 超过 DFlash2 Draft checkpoint 的能力。请使用自动值或选择更小的数值。",
       err_dflash2_acceleration_conflict: "DFlash2 不能与 MTP 或重复文本加速同时启用。",
       integrity_error_toast: "模型完整性验证未能完成。技术详情请查看 App 日志。",
       warn_default_scheduler_profile_used: "未找到该模型匹配的 scheduler profile，已使用默认调度配置运行。建议通过 Scheduler Profile 为该模型生成专用 profile，以获得更合适的模型调度参数。",
@@ -6581,6 +6602,7 @@
       auto: "自动",
       cache: "缓存", enable_cache: "启用缓存", ssd_cache_dir: "SSD 缓存目录",
       active_kv_offload: "活跃 KV Cache 分层卸载", active_kv_offload_desc: "实验性能力。为长逻辑 MAX CONTEXT TOKENS 保持热 KV 窗口常驻，并将暂停中的活跃 KV Cache 写入 SSD。", active_kv_offload_help_title: "实验性缓存驻留", active_kv_offload_help_body: "当序列槽位已满时，可将暂停中的活跃 KV Cache 写入本地 SSD，让新的请求先继续运行。", active_kv_offload_help_trigger: "开启后不代表立即发生卸载。系统会在请求调度、KV 驻留压力或请求暂停/恢复需要时自动触发；空闲或内存压力较低时可能保持 idle。", active_kv_offload_help_applicable: "适用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。", active_kv_offload_help_not_applicable: "不适用：MTP speculative side cache。",
+      m5_dflash2_profile: "M5 DFlash2 优化配置", m5_dflash2_profile_desc: "在支持的设备上自动优化 DFlash2 推理。", m5_dflash2_profile_help_title: "关于 M5 DFlash2 优化配置", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新机型上，DFlash2 服务启用针对 M5 调优的内核、树式草稿和负载下的合批；各项不适用时自动回退。关闭后使用通用设置。", m5_dflash2_profile_help_label: "M5 DFlash2 优化配置说明",
       kv_quant: "KV 缓存压缩", kv_quant_desc: "使用 TurboQuant 降低长上下文运行时 KV Cache 的内存占用。K3V3 更省内存，K4V4 更保守，K3V4 为推荐均衡选项。", kv_quant_off: "无压缩", model_ttl: "模型自动卸载 (TTL)", model_ttl_desc: "已加载模型闲置超过指定分钟数后自动卸载。0 = 不启用；默认模型偏好会保留。", minutes: "分钟",
       advanced: "高级", batch_processing: "批处理",
       max_sequences: "最大序列数", max_sequences_desc: "并行处理的最大并发请求数。",
@@ -6923,6 +6945,7 @@
       active_kv_incident: "模型 {models} 的 Active KV 分層卸載發生錯誤。請求仍可繼續，但快取卸載能力可能已降級。",
       runtime_not_applicable: "不適用",
       runtime_dflash2: "DFlash2 驗證", runtime_dflash2_config: "Block {block} · Draft {bits}", runtime_dflash2_acceptance: "接受率", runtime_dflash2_windows: "驗證視窗", runtime_dflash2_rollbacks: "回滾", runtime_dflash2_residuals: "殘差修正",
+      runtime_m5_profile: "M5 設定：{status}", m5_profile_active: "已啟用", m5_profile_disabled: "已關閉", m5_profile_not_dflash2: "未使用", m5_profile_unsupported_gpu: "GPU 不支援", m5_profile_gpu_unknown: "GPU 未知",
       status_subtitle: "伺服器狀態與資源使用概覽。",
       service_overview: "服務概覽", endpoint_address: "端點位址", copy_endpoint: "複製端點位址", runtime_network_local: "本機", runtime_network_lan: "區域網路", authentication_status: "驗證狀態", authentication_status_local: "僅限本機存取，無需 API Key", authentication_status_api_key: "API Key 已啟用",
       endpoints_hint_local: "僅目前 Mac 可存取服務。若需區域網路存取，請在設定中明確啟用 LAN 模式並選擇一個具體介面。",
@@ -6959,10 +6982,10 @@
       prompt_lookup_cross_request: "跨請求重用", prompt_lookup_cross_request_help_label: "瞭解跨請求重用", prompt_lookup_cross_request_help: "需先啟用「重複文字加速」。啟用後會保留已完成請求的比對歷史，讓後續相似請求也能使用重複文字加速。", prompt_lookup_clear: "清除重用歷史", prompt_lookup_cleared: "已清除重複文字重用歷史。", prompt_lookup_clear_failed: "清除重用歷史失敗。",
       mtp_status_available: "MTP 可用", mtp_status_incompatible: "無相容 MTP 權重", mtp_status_unavailable: "未發現相容的 MTP 權重",
       dflash2_badge_available: "DFlash2", dflash2_badge_enabled: "DFlash2", dflash2_badge_available_title: "已發現相容的 DFlash2 Draft。", dflash2_badge_enabled_title: "此模型正在使用 DFlash2 加速。",
-      dflash2_acceleration: "DFlash2 加速", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自動（4）",
+      dflash2_acceleration: "DFlash2 加速", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_block_size_auto: "自動（{value}）", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自動（4）",
       dflash2_tensor_batch_help_label: "瞭解 Tensor Batch 上限", dflash2_tensor_batch_help_title: "Tensor Batch 上限如何生效", dflash2_tensor_batch_help_body: "限制一次 MLX tensor batch 最多合併的相容請求數。留空使用自動值 4。", dflash2_tensor_batch_help_constraint: "約束關係：實際寬度取此上限、【設定 → 進階 → 最大序列數】與目前就緒相容請求數的最小值。此設定不會提高最大序列數；不相容或發生分歧的請求使用 B1。",
       dflash2_help_label: "瞭解 DFlash2 加速", dflash2_help_title: "DFlash2 加速如何運作", dflash2_help_body: "DFlash2 使用獨立 Draft 模型與隔離的驗證 actor。Tensor Batch 上限控制一次 tensor 操作最多合併多少個相容請求；實際寬度取 Max Sequences、該上限與目前就緒相容請求數的最小值。留空使用認證預設值 4。修改此設定後，後端將以單一 Target 模式重新啟動。", dflash2_help_exclusive: "DFlash2 無法與 MTP 或重複文字加速同時啟用。",
-      dflash2_help_status_available: "目前狀態：已偵測到相容的 DFlash2 Draft。", dflash2_help_status_incompatible: "目前狀態：偵測到的 DFlash2 Draft 與此模型不相容。", dflash2_help_status_unavailable: "目前狀態：未發現相容的 DFlash2 Draft。", dflash2_status_incompatible: "DFlash2 Draft 不相容", dflash2_status_unavailable: "未發現相容的 DFlash2 Draft", params_invalid_dflash2_block_size: "DFlash2 Block Size 必須是 2 到 8 之間的整數。", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限必須是正整數，或留空使用自動值 4。",
+      dflash2_help_status_available: "目前狀態：已偵測到相容的 DFlash2 Draft。Block Size 留空時自動採用 checkpoint 寬度，且不超過已資格化的 Q8 預設值。", dflash2_help_status_incompatible: "目前狀態：偵測到的 DFlash2 Draft 與此模型不相容。", dflash2_help_status_unavailable: "目前狀態：未發現相容的 DFlash2 Draft。", dflash2_status_incompatible: "DFlash2 Draft 不相容", dflash2_status_unavailable: "未發現相容的 DFlash2 Draft", params_invalid_dflash2_block_size: "DFlash2 Block Size 必須在 2 到所選 checkpoint 上限之間（最高 16），或留空使用自動值。", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限必須是正整數，或留空使用自動值 4。",
       model_exists_locally: "模型 \"{name}\" 已存在於本地。",
       menu_start_needs_model: "尚未設定預設模型。請先下載一個模型並設為預設模型，IronMLX 會自動啟動後端。",
       model_download_complete: "模型 \"{name}\" 下載完成。",
@@ -7066,6 +7089,7 @@
       err_model_version_invalid_request: "模型版本請求無效。請重新整理版本清單後再試。",
       err_dflash2_target_not_found: "本機沒有 DFlash2 Target 模型。請重新下載後再試。",
       err_dflash2_draft_not_found: "本機沒有相容的 DFlash2 Draft。請下載相符的 Draft 後再試。",
+      err_dflash2_block_size_incompatible: "所選 Block Size 超過 DFlash2 Draft checkpoint 的能力。請使用自動值或選擇較小的數值。",
       err_dflash2_acceleration_conflict: "DFlash2 無法與 MTP 或重複文字加速同時啟用。",
       integrity_error_toast: "模型完整性驗證未能完成。技術詳情請查看 App 日誌。",
       warn_default_scheduler_profile_used: "未找到此模型匹配的 scheduler profile，已使用預設調度設定執行。建議透過 Scheduler Profile 為此模型產生專用 profile，以取得更合適的模型調度參數。",
@@ -7144,6 +7168,7 @@
       auto: "自動",
       cache: "快取", enable_cache: "啟用快取", ssd_cache_dir: "SSD 快取目錄",
       active_kv_offload: "活躍 KV Cache 分層卸載", active_kv_offload_desc: "實驗性能力。為長邏輯 MAX CONTEXT TOKENS 保持熱 KV 視窗常駐，並將暫停中的活躍 KV Cache 寫入 SSD。", active_kv_offload_help_title: "實驗性快取駐留", active_kv_offload_help_body: "當序列槽位已滿時，可將暫停中的活躍 KV Cache 寫入本地 SSD，讓新的請求先繼續執行。", active_kv_offload_help_trigger: "開啟後不代表立即發生卸載。系統會在請求調度、KV 駐留壓力或請求暫停/恢復需要時自動觸發；空閒或記憶體壓力較低時可能保持 idle。", active_kv_offload_help_applicable: "適用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。", active_kv_offload_help_not_applicable: "不適用：MTP speculative side cache。",
+      m5_dflash2_profile: "M5 DFlash2 最佳化設定", m5_dflash2_profile_desc: "在支援的裝置上自動最佳化 DFlash2 推論。", m5_dflash2_profile_help_title: "關於 M5 DFlash2 最佳化設定", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新機型上，DFlash2 服務啟用針對 M5 調校的核心、樹狀草稿與負載下的合批；各項不適用時自動回退。關閉後使用通用設定。", m5_dflash2_profile_help_label: "M5 DFlash2 最佳化設定說明",
       advanced: "進階", batch_processing: "批次處理",
       max_sequences: "最大序列數", max_sequences_desc: "平行處理的最大並行請求數。",
       max_models: "最大同時載入模型數", max_models_desc: "App 同時保持載入狀態的模型數量上限。達到上限後，新模型不會自動替換舊模型；請先手動卸載暫不使用的模型，再載入新模型。",
@@ -7486,6 +7511,7 @@
       active_kv_incident: "モデル {models} の Active KV 階層化でエラーが発生しました。リクエストは継続できますが、キャッシュのオフロード機能が低下している可能性があります。",
       runtime_not_applicable: "対象外",
       runtime_dflash2: "DFlash2 検証", runtime_dflash2_config: "Block {block} · Draft {bits}", runtime_dflash2_acceptance: "採用率", runtime_dflash2_windows: "検証ウィンドウ", runtime_dflash2_rollbacks: "ロールバック", runtime_dflash2_residuals: "残差補正",
+      runtime_m5_profile: "M5 プロファイル: {status}", m5_profile_active: "有効", m5_profile_disabled: "オフ", m5_profile_not_dflash2: "未使用", m5_profile_unsupported_gpu: "非対応 GPU", m5_profile_gpu_unknown: "GPU 不明",
       status_subtitle: "サーバーステータスとリソース使用状況の概要。",
       service_overview: "サービス概要", endpoint_address: "エンドポイントアドレス", copy_endpoint: "エンドポイントをコピー", runtime_network_local: "ローカル", runtime_network_lan: "LAN", authentication_status: "認証状態", authentication_status_local: "この Mac からのみアクセス可能。API Key は不要", authentication_status_api_key: "API Key 有効",
       endpoints_hint_local: "この Mac からのみアクセスできます。LAN アクセスが必要な場合は、設定で LAN モードを明示的に有効にし、具体的なインターフェースを選択してください。",
@@ -7522,10 +7548,10 @@
       prompt_lookup_cross_request: "リクエスト間で再利用", prompt_lookup_cross_request_help_label: "リクエスト間の再利用について", prompt_lookup_cross_request_help: "先に「繰り返しテキストの高速化」を有効にする必要があります。有効にすると、完了したリクエストの照合履歴が保持され、後続の類似リクエストでも繰り返しテキストによる高速化を利用できます。", prompt_lookup_clear: "再利用履歴を消去", prompt_lookup_cleared: "再利用履歴を消去しました。", prompt_lookup_clear_failed: "再利用履歴を消去できませんでした。",
       mtp_status_available: "MTP 利用可", mtp_status_incompatible: "互換 MTP ウェイトなし", mtp_status_unavailable: "互換性のある MTP ウェイトはありません",
       dflash2_badge_available: "DFlash2", dflash2_badge_enabled: "DFlash2", dflash2_badge_available_title: "互換性のある DFlash2 Draft が見つかりました。", dflash2_badge_enabled_title: "このモデルは DFlash2 アクセラレーションで実行中です。",
-      dflash2_acceleration: "DFlash2 アクセラレーション", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自動（4）",
+      dflash2_acceleration: "DFlash2 アクセラレーション", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_block_size_auto: "自動（{value}）", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自動（4）",
       dflash2_tensor_batch_help_label: "Tensor Batch 上限について", dflash2_tensor_batch_help_title: "Tensor Batch 上限の適用方法", dflash2_tensor_batch_help_body: "1 回の MLX tensor batch にまとめる互換リクエスト数を制限します。空欄では自動値 4 を使用します。", dflash2_tensor_batch_help_constraint: "実際の幅は、この上限、［設定 → 詳細 → 最大シーケンス数］、準備済み互換リクエスト数の最小値です。この設定で最大シーケンス数は増えません。非互換または分岐したリクエストは B1 を使用します。",
       dflash2_help_label: "DFlash2 アクセラレーションについて", dflash2_help_title: "DFlash2 アクセラレーションの仕組み", dflash2_help_body: "DFlash2 は専用 Draft モデルと分離された検証 actor を使用します。Tensor Batch 上限は、1 回の tensor 演算でまとめる互換リクエスト数を制限します。実際の幅は Max Sequences、この上限、準備済み互換リクエスト数の最小値です。空欄では認定済み既定値 4 を使用します。この設定を変更すると、バックエンドは単一 Target モードで再起動します。", dflash2_help_exclusive: "DFlash2 は MTP または繰り返しテキスト高速化と同時に使用できません。",
-      dflash2_help_status_available: "現在の状態：互換性のある DFlash2 Draft が見つかりました。", dflash2_help_status_incompatible: "現在の状態：検出された DFlash2 Draft はこのモデルと互換性がありません。", dflash2_help_status_unavailable: "現在の状態：互換性のある DFlash2 Draft が見つかりません。", dflash2_status_incompatible: "DFlash2 Draft は非互換です", dflash2_status_unavailable: "互換性のある DFlash2 Draft はありません", params_invalid_dflash2_block_size: "DFlash2 Block Size は 2 から 8 の整数で指定してください。", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限は正の整数で指定するか、空欄にして自動値 4 を使用してください。",
+      dflash2_help_status_available: "現在の状態：互換性のある DFlash2 Draft が見つかりました。Block Size を空欄にすると checkpoint 幅を使用し、認定済み Q8 既定値を上限とします。", dflash2_help_status_incompatible: "現在の状態：検出された DFlash2 Draft はこのモデルと互換性がありません。", dflash2_help_status_unavailable: "現在の状態：互換性のある DFlash2 Draft が見つかりません。", dflash2_status_incompatible: "DFlash2 Draft は非互換です", dflash2_status_unavailable: "互換性のある DFlash2 Draft はありません", params_invalid_dflash2_block_size: "DFlash2 Block Size は 2 から選択した checkpoint の上限（最大 16）で指定するか、自動設定のため空欄にしてください。", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限は正の整数で指定するか、空欄にして自動値 4 を使用してください。",
       model_exists_locally: "モデル \"{name}\" はローカルに既に存在します。",
       menu_start_needs_model: "デフォルトモデルが設定されていません。モデルをダウンロードしてデフォルトに設定すると、IronMLX がバックエンドを自動起動します。",
       model_download_complete: "モデル \"{name}\" のダウンロードが完了しました。",
@@ -7629,6 +7655,7 @@
       err_model_version_invalid_request: "モデルバージョンのリクエストが無効です。バージョン一覧を更新してから再試行してください。",
       err_dflash2_target_not_found: "DFlash2 Target モデルがローカルにありません。再ダウンロードしてから再試行してください。",
       err_dflash2_draft_not_found: "互換性のある DFlash2 Draft がローカルにありません。対応する Draft をダウンロードしてから再試行してください。",
+      err_dflash2_block_size_incompatible: "選択した Block Size は DFlash2 Draft checkpoint の能力を超えています。自動設定または小さい値を使用してください。",
       err_dflash2_acceleration_conflict: "DFlash2 は MTP または繰り返しテキスト高速化と同時に有効化できません。",
       integrity_error_toast: "モデルの整合性検証を完了できませんでした。技術的な詳細は App ログを確認してください。",
       warn_default_scheduler_profile_used: "このモデルに一致する scheduler profile が見つかりませんでした。デフォルトのスケジューラ設定で実行しています。モデルに合わせたスケジューリングのため、Scheduler Profile で専用 profile を生成してください。",
@@ -7707,6 +7734,7 @@
       auto: "自動",
       cache: "キャッシュ", enable_cache: "キャッシュを有効化", ssd_cache_dir: "SSDキャッシュディレクトリ",
       active_kv_offload: "Active KV Cache オフロード", active_kv_offload_desc: "実験的機能。長い論理 MAX CONTEXT TOKENS では熱い KV ウィンドウだけを常駐させ、一時停止中の Active KV Cache を SSD に書き出します。", active_kv_offload_help_title: "実験的キャッシュ常駐管理", active_kv_offload_help_body: "シーケンススロットが満杯の場合、一時停止中の Active KV Cache をローカル SSD に書き出し、新しいリクエストを先に実行できます。", active_kv_offload_help_trigger: "有効にしても、すぐにオフロードが発生するとは限りません。スケジューリング、KV 常駐圧力、またはリクエストの一時停止/復元が必要な場合に自動で発動します。アイドル時やメモリ圧力が低い場合は idle のままになることがあります。", active_kv_offload_help_applicable: "適用: Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。", active_kv_offload_help_not_applicable: "非対象: MTP speculative side cache。",
+      m5_dflash2_profile: "M5 DFlash2 プロファイル", m5_dflash2_profile_desc: "対応デバイスで DFlash2 推論を自動的に最適化します。", m5_dflash2_profile_help_title: "M5 DFlash2 プロファイルについて", m5_dflash2_profile_help_body: "Apple M5（GPU 第 17 世代）以降では、DFlash2 の提供に M5 向けに調整したカーネル、ツリー型ドラフト、負荷時のバッチ処理を使います。適用できない場合は各機能が自動でフォールバックします。オフにすると汎用設定を使います。", m5_dflash2_profile_help_label: "M5 DFlash2 プロファイルのヘルプ",
       advanced: "詳細設定", batch_processing: "バッチ処理",
       max_sequences: "最大シーケンス数", max_sequences_desc: "並列処理の最大同時リクエスト数。",
       max_models: "最大同時ロードモデル数", max_models_desc: "App が同時に読み込み済みとして保持するモデル数の上限。上限に達すると新しいモデルの読み込みは拒否され、既存の読み込み済みモデルは自動的に置き換えられません。不要なモデルを手動でアンロードしてから読み込んでください。",
@@ -8049,6 +8077,7 @@
       active_kv_incident: "모델 {models}의 Active KV 계층화에서 오류가 발생했습니다. 요청은 계속 처리할 수 있지만 캐시 오프로드 기능이 저하되었을 수 있습니다.",
       runtime_not_applicable: "해당 없음",
       runtime_dflash2: "DFlash2 검증", runtime_dflash2_config: "Block {block} · Draft {bits}", runtime_dflash2_acceptance: "수락률", runtime_dflash2_windows: "검증 윈도우", runtime_dflash2_rollbacks: "롤백", runtime_dflash2_residuals: "잔차 보정",
+      runtime_m5_profile: "M5 프로필: {status}", m5_profile_active: "활성", m5_profile_disabled: "꺼짐", m5_profile_not_dflash2: "사용 안 함", m5_profile_unsupported_gpu: "지원되지 않는 GPU", m5_profile_gpu_unknown: "GPU 알 수 없음",
       status_subtitle: "서버 상태 및 리소스 사용 개요.",
       service_overview: "서비스 개요", endpoint_address: "엔드포인트 주소", copy_endpoint: "엔드포인트 주소 복사", runtime_network_local: "로컬", runtime_network_lan: "LAN", authentication_status: "인증 상태", authentication_status_local: "이 Mac에서만 접근 가능, API Key 불필요", authentication_status_api_key: "API Key 활성화됨",
       endpoints_hint_local: "이 Mac에서만 서버에 접근할 수 있습니다. LAN 접근이 필요하면 설정에서 LAN 모드를 명시적으로 활성화하고 특정 인터페이스를 선택하세요.",
@@ -8085,10 +8114,10 @@
       prompt_lookup_cross_request: "요청 간 재사용", prompt_lookup_cross_request_help_label: "요청 간 재사용 정보", prompt_lookup_cross_request_help: "먼저 ‘반복 텍스트 가속’을 활성화해야 합니다. 활성화하면 완료된 요청의 일치 기록을 보관하여 이후의 유사한 요청에서도 반복 텍스트 가속을 사용할 수 있습니다.", prompt_lookup_clear: "재사용 기록 지우기", prompt_lookup_cleared: "재사용 기록을 지웠습니다.", prompt_lookup_clear_failed: "재사용 기록을 지우지 못했습니다.",
       mtp_status_available: "MTP 사용 가능", mtp_status_incompatible: "호환 MTP 가중치 없음", mtp_status_unavailable: "호환되는 MTP 가중치 없음",
       dflash2_badge_available: "DFlash2", dflash2_badge_enabled: "DFlash2", dflash2_badge_available_title: "호환되는 DFlash2 Draft를 찾았습니다.", dflash2_badge_enabled_title: "이 모델은 DFlash2 가속으로 실행 중입니다.",
-      dflash2_acceleration: "DFlash2 가속", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 정밀도", dflash2_tensor_batch_max_width: "Tensor Batch 제한", auto_default_4: "자동(4)",
+      dflash2_acceleration: "DFlash2 가속", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_block_size_auto: "자동({value})", dflash2_draft_bits: "Draft 정밀도", dflash2_tensor_batch_max_width: "Tensor Batch 제한", auto_default_4: "자동(4)",
       dflash2_tensor_batch_help_label: "Tensor Batch 제한 정보", dflash2_tensor_batch_help_title: "Tensor Batch 제한 적용 방식", dflash2_tensor_batch_help_body: "한 번의 MLX tensor batch에 결합할 호환 요청 수를 제한합니다. 비워 두면 자동값 4를 사용합니다.", dflash2_tensor_batch_help_constraint: "실제 너비는 이 제한, [설정 → 고급 → 최대 시퀀스 수], 준비된 호환 요청 수 중 최솟값입니다. 이 설정은 최대 시퀀스 수를 늘리지 않으며, 호환되지 않거나 분기된 요청은 B1을 사용합니다.",
       dflash2_help_label: "DFlash2 가속 정보", dflash2_help_title: "DFlash2 가속 작동 방식", dflash2_help_body: "DFlash2는 전용 Draft 모델과 분리된 검증 actor를 사용합니다. Tensor Batch 제한은 한 번의 tensor 연산에 결합되는 호환 요청 수를 제한합니다. 실제 너비는 Max Sequences, 이 제한, 준비된 호환 요청 수 중 최솟값입니다. 비워 두면 인증된 기본값 4를 사용합니다. 이 설정을 변경하면 백엔드가 단일 Target 모드로 재시작됩니다.", dflash2_help_exclusive: "DFlash2는 MTP 또는 반복 텍스트 가속과 동시에 사용할 수 없습니다.",
-      dflash2_help_status_available: "현재 상태: 호환되는 DFlash2 Draft를 찾았습니다.", dflash2_help_status_incompatible: "현재 상태: 감지된 DFlash2 Draft가 이 모델과 호환되지 않습니다.", dflash2_help_status_unavailable: "현재 상태: 호환되는 DFlash2 Draft를 찾지 못했습니다.", dflash2_status_incompatible: "DFlash2 Draft가 호환되지 않습니다", dflash2_status_unavailable: "호환되는 DFlash2 Draft 없음", params_invalid_dflash2_block_size: "DFlash2 Block Size는 2에서 8 사이의 정수여야 합니다.", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 제한은 양의 정수이거나 자동값 4를 사용하려면 비워 두어야 합니다.",
+      dflash2_help_status_available: "현재 상태: 호환되는 DFlash2 Draft를 찾았습니다. Block Size를 비워 두면 checkpoint 폭을 사용하며 검증된 Q8 기본값을 상한으로 적용합니다.", dflash2_help_status_incompatible: "현재 상태: 감지된 DFlash2 Draft가 이 모델과 호환되지 않습니다.", dflash2_help_status_unavailable: "현재 상태: 호환되는 DFlash2 Draft를 찾지 못했습니다.", dflash2_status_incompatible: "DFlash2 Draft가 호환되지 않습니다", dflash2_status_unavailable: "호환되는 DFlash2 Draft 없음", params_invalid_dflash2_block_size: "DFlash2 Block Size는 2에서 선택한 checkpoint 한도(최대 16) 사이이거나 자동 설정을 위해 비워 두어야 합니다.", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 제한은 양의 정수이거나 자동값 4를 사용하려면 비워 두어야 합니다.",
       model_exists_locally: "모델 \"{name}\"이(가) 이미 로컬에 존재합니다.",
       menu_start_needs_model: "기본 모델이 설정되어 있지 않습니다. 모델을 다운로드하고 기본값으로 선택하면 IronMLX가 백엔드를 자동으로 시작합니다.",
       model_download_complete: "모델 \"{name}\" 다운로드가 완료되었습니다.",
@@ -8192,6 +8221,7 @@
       err_model_version_invalid_request: "모델 버전 요청이 유효하지 않습니다. 버전 목록을 새로 고친 뒤 다시 시도하십시오.",
       err_dflash2_target_not_found: "DFlash2 Target 모델을 로컬에서 사용할 수 없습니다. 다시 다운로드한 뒤 시도하십시오.",
       err_dflash2_draft_not_found: "호환되는 DFlash2 Draft를 로컬에서 사용할 수 없습니다. 일치하는 Draft를 다운로드한 뒤 시도하십시오.",
+      err_dflash2_block_size_incompatible: "선택한 Block Size가 DFlash2 Draft checkpoint 기능을 초과합니다. 자동 설정이나 더 작은 값을 사용하십시오.",
       err_dflash2_acceleration_conflict: "DFlash2는 MTP 또는 반복 텍스트 가속과 동시에 활성화할 수 없습니다.",
       integrity_error_toast: "모델 무결성 검증을 완료하지 못했습니다. 기술 세부 정보는 App 로그를 확인하십시오.",
       warn_default_scheduler_profile_used: "이 모델에 맞는 scheduler profile을 찾지 못했습니다. 기본 스케줄러 설정으로 실행 중입니다. 모델에 맞는 스케줄링을 위해 Scheduler Profile에서 전용 profile을 생성하세요.",
@@ -8270,6 +8300,7 @@
       auto: "자동",
       cache: "캐시", enable_cache: "캐시 활성화", ssd_cache_dir: "SSD 캐시 디렉토리",
       active_kv_offload: "Active KV Cache 오프로드", active_kv_offload_desc: "실험적 기능입니다. 긴 논리 MAX CONTEXT TOKENS에서는 뜨거운 KV 창만 상주시켜 두고, 일시 중지된 Active KV Cache를 SSD에 기록합니다.", active_kv_offload_help_title: "실험적 캐시 상주 관리", active_kv_offload_help_body: "시퀀스 슬롯이 가득 찼을 때 일시 중지된 Active KV Cache를 로컬 SSD에 기록하여 새 요청을 먼저 실행할 수 있습니다.", active_kv_offload_help_trigger: "켜도 즉시 오프로드가 발생하는 것은 아닙니다. 스케줄링, KV 상주 압력 또는 요청 일시 중지/복원이 필요할 때 시스템이 자동으로 트리거합니다. 유휴 상태이거나 메모리 압력이 낮으면 idle 상태로 유지될 수 있습니다.", active_kv_offload_help_applicable: "적용: Full Attention dense/paged, TurboQuant packed Full Attention, MLA, GatedDelta/Linear.", active_kv_offload_help_not_applicable: "비대상: MTP speculative side cache.",
+      m5_dflash2_profile: "M5 DFlash2 프로필", m5_dflash2_profile_desc: "지원되는 기기에서 DFlash2 추론을 자동으로 최적화합니다.", m5_dflash2_profile_help_title: "M5 DFlash2 프로필 안내", m5_dflash2_profile_help_body: "Apple M5(GPU 17세대) 이상에서는 DFlash2 서빙에 M5용으로 조정된 커널, 트리 드래프트, 부하 시 배치를 사용합니다. 적용되지 않으면 각 기능이 자동으로 폴백합니다. 끄면 일반 설정을 사용합니다.", m5_dflash2_profile_help_label: "M5 DFlash2 프로필 도움말",
       advanced: "고급", batch_processing: "배치 처리",
       max_sequences: "최대 시퀀스 수", max_sequences_desc: "병렬 처리의 최대 동시 요청 수.",
       max_models: "최대 동시 로드 모델 수", max_models_desc: "App 이 동시에 로드 상태로 유지하는 모델 수의 상한입니다. 상한에 도달하면 새 모델 로드는 거부되고 기존 로드 모델은 자동으로 교체되지 않습니다. 사용하지 않는 모델을 수동으로 언로드한 뒤 다시 로드하세요.",
@@ -9675,7 +9706,17 @@
     checkbox.checked = !!saved.dflash2_enabled && hasCandidates;
     if (saved.dflash2_model_id && hasCandidates) select.value = saved.dflash2_model_id;
     else if (hasCandidates) select.value = candidates[0].id;
-    blockSize.value = saved.dflash2_block_size || '4';
+    blockSize.value = saved.dflash2_block_size || '';
+    const updateAutoBlockSizePlaceholder = () => {
+      const candidate = candidates.find(item => item.id === select.value);
+      const checkpointBlockSize = Number(candidate && candidate.block_size);
+      const automaticBlockSize = Number.isInteger(checkpointBlockSize) && checkpointBlockSize >= 2
+        ? Math.min(checkpointBlockSize, 8) : 8;
+      blockSize.placeholder = (dict.dflash2_block_size_auto || 'Auto ({value})')
+        .replace('{value}', String(automaticBlockSize));
+    };
+    select.onchange = updateAutoBlockSizePlaceholder;
+    updateAutoBlockSizePlaceholder();
     draftBits.value = saved.dflash2_draft_bits || '4';
     tensorBatchMaxWidth.value = saved.dflash2_tensor_batch_max_width || '';
     const isIncompatible = !hasCandidates && dflash2.status === 'incompatible';
@@ -9802,9 +9843,17 @@
       return;
     }
     const dflash2BlockSizeText = document.getElementById('modal-dflash2-block-size').value.trim();
-    const dflash2BlockSize = parsePositiveInteger(dflash2BlockSizeText);
-    if (local.dflash2 && (!dflash2BlockSize || dflash2BlockSize < 2 || dflash2BlockSize > 8)) {
-      showToast(dict.params_invalid_dflash2_block_size || 'DFlash2 Block Size must be an integer from 2 to 8.', 'warn');
+    const dflash2BlockSize = dflash2BlockSizeText
+      ? parsePositiveInteger(dflash2BlockSizeText) : null;
+    const selectedDFlash2Candidate = ((local.dflash2 && local.dflash2.candidates) || [])
+      .find(candidate => candidate.id === document.getElementById('modal-dflash2-model').value);
+    const selectedCheckpointBlockSize = Number(selectedDFlash2Candidate && selectedDFlash2Candidate.block_size);
+    const maximumDFlash2BlockSize = Number.isInteger(selectedCheckpointBlockSize)
+      ? Math.min(selectedCheckpointBlockSize, 16) : 16;
+    if (local.dflash2 && dflash2BlockSizeText
+        && (!dflash2BlockSize || dflash2BlockSize < 2
+          || dflash2BlockSize > maximumDFlash2BlockSize)) {
+      showToast(dict.params_invalid_dflash2_block_size || 'DFlash2 Block Size must be an integer from 2 to the selected checkpoint limit (maximum 16), or empty for Auto.', 'warn');
       return;
     }
     const dflash2TensorBatchMaxWidthText = document
@@ -9837,7 +9886,7 @@
         && document.getElementById('modal-dflash2-enabled').checked,
       dflash2_model_id: local.dflash2
         ? (document.getElementById('modal-dflash2-model').value.trim() || null) : null,
-      dflash2_block_size: local.dflash2 ? String(dflash2BlockSize) : '',
+      dflash2_block_size: local.dflash2 ? dflash2BlockSizeText : '',
       dflash2_draft_bits: local.dflash2
         ? document.getElementById('modal-dflash2-draft-bits').value : '',
       dflash2_tensor_batch_max_width: local.dflash2 ? dflash2TensorBatchMaxWidthText : '',
@@ -13701,6 +13750,7 @@
     setCheckboxInput('cfg-cache-enable', appConfig.cache_enable, true);
     setTextInput('cfg-cache-dir', appConfig.cache_dir, '~/.ironmlx/cache/paged_prefix_cache');
     setCheckboxInput('cfg-active-kv-offload', appConfig.active_kv_offload, false);
+    setCheckboxInput('cfg-m5-dflash2-profile', appConfig.m5_dflash2_profile, true);
     setCheckboxInput('cfg-verify-model-on-load', appConfig.verify_model_on_load, false);
     const cfgKvQuant = document.getElementById('cfg-kv-quant');
     if (cfgKvQuant) cfgKvQuant.value = normalizeKVQuantValue(window.__IRONMLX_KV_QUANT__);
@@ -13856,6 +13906,7 @@
       cache_enable: checkedInputValue('cfg-cache-enable', true),
       cache_dir: document.getElementById('cfg-cache-dir').value,
       active_kv_offload: checkedInputValue('cfg-active-kv-offload', false),
+      m5_dflash2_profile: checkedInputValue('cfg-m5-dflash2-profile', true),
       verify_model_on_load: checkedInputValue('cfg-verify-model-on-load', false),
       kv_quant: normalizeKVQuantValue(document.getElementById('cfg-kv-quant').value),
       max_sequences: Math.max(1, numberInputValue('cfg-max-sequences', 1)),
@@ -13925,7 +13976,7 @@
     'cfg-hot-cache', 'cfg-hot-cache-auto',
     'cfg-cold-cache',
     'cfg-max-sequences', 'cfg-max-models',
-    'cfg-cache-enable', 'cfg-cache-dir', 'cfg-active-kv-offload',
+    'cfg-cache-enable', 'cfg-cache-dir', 'cfg-active-kv-offload', 'cfg-m5-dflash2-profile',
     'cfg-kv-quant', 'cfg-model-ttl',
     'cfg-distributed-backend', 'cfg-parallel-mode'
   ];
@@ -14529,7 +14580,11 @@
             + (dict.runtime_dflash2_config || 'Block {block} · Draft {bits}')
               .replace('{block}', String(dflash2.block_size || '—'))
               .replace('{bits}', Number(dflash2.draft_quantization_bits) === 0
-                ? 'BF16' : String(dflash2.draft_quantization_bits || '—') + '-bit'))
+                ? 'BF16' : String(dflash2.draft_quantization_bits || '—') + '-bit')
+            + (dflash2.m5_profile && dflash2.m5_profile.status
+              ? ' · ' + (dict.runtime_m5_profile || 'M5 profile {status}').replace('{status}',
+                dict['m5_profile_' + dflash2.m5_profile.status] || dflash2.m5_profile.status)
+              : ''))
           + '</span></div>'
           + '<div class="runtime-metric-rail runtime-performance-rail">'
           + metric(dict.runtime_dflash2_acceptance || 'Acceptance', '', acceptanceRate, '%', 1, true)

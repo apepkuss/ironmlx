@@ -278,6 +278,15 @@ fn qembedding_decode_on(
     params: QEmbeddingDecode<'_>,
     target: impl Into<StreamOrDevice>,
 ) -> Result<Option<Array>> {
+    qembedding_decode_with(tokens, params, target, qembedding_runtime_count_requested())
+}
+
+fn qembedding_decode_with(
+    tokens: &Array,
+    params: QEmbeddingDecode<'_>,
+    target: impl Into<StreamOrDevice>,
+    runtime_count: bool,
+) -> Result<Option<Array>> {
     let Some(biases) = params.biases else {
         return Ok(None);
     };
@@ -326,8 +335,8 @@ fn qembedding_decode_on(
         )?));
     }
     let target = target.into();
-    let kernel = qembedding_decode_kernel(params.bits)?;
-    let mut outputs = kernel
+    let kernel = qembedding_decode_kernel(params.bits, runtime_count)?;
+    let builder = kernel
         .dispatch_builder()
         .inputs(&[tokens, params.weight, params.scales, biases])
         .output_shapes(&[out_shape])
@@ -337,20 +346,95 @@ fn qembedding_decode_on(
         .stream(target)
         .template_int("PACKED_DIM", packed_dim)
         .template_int("GROUPS", dim / params.group_size)
-        .template_int("DIM", dim)
-        .template_int("TOKEN_COUNT", token_count)
-        .dispatch()?;
+        .template_int("DIM", dim);
+    // The baseline specializes the library on the token count, so every new
+    // prompt length compiles a new Metal library on first use. The runtime
+    // variant bounds by the dispatched grid (exactly token_count * dim).
+    let builder = if runtime_count {
+        builder
+    } else {
+        builder.template_int("TOKEN_COUNT", token_count)
+    };
+    let mut outputs = builder.dispatch()?;
     Ok(Some(outputs.take_at(0)?))
 }
 
-fn qembedding_decode_kernel(bits: i32) -> Result<&'static MetalKernel> {
-    match bits {
-        4 => qembedding_decode_4bit_kernel(),
-        8 => qembedding_decode_8bit_kernel(),
+/// Experimental, default off (`IRONMLX_EXPERIMENTAL_QEMBEDDING_RUNTIME_COUNT=1`):
+/// quantized embedding decode without the token-count template constant.
+/// Identical per-element arithmetic; one compiled library for all lengths.
+fn qembedding_runtime_count_requested() -> bool {
+    static REQUESTED: OnceLock<bool> = OnceLock::new();
+    *REQUESTED.get_or_init(|| {
+        crate::m5_profile::flag(crate::m5_profile::settings::QEMBEDDING_RUNTIME_COUNT)
+    })
+}
+
+fn qembedding_decode_kernel(bits: i32, runtime_count: bool) -> Result<&'static MetalKernel> {
+    match (bits, runtime_count) {
+        (4, false) => qembedding_decode_4bit_kernel(),
+        (8, false) => qembedding_decode_8bit_kernel(),
+        (4, true) => qembedding_decode_runtime_count_kernel(4),
+        (8, true) => qembedding_decode_runtime_count_kernel(8),
         _ => Err(anyhow!(
             "quantized embedding decode kernel does not support {bits}-bit weights"
         )),
     }
+}
+
+/// Same body as the baseline kernels with `TOKEN_COUNT * DIM` replaced by
+/// the dispatched grid size.
+fn qembedding_decode_runtime_count_kernel(bits: i32) -> Result<&'static MetalKernel> {
+    static CELL4: OnceLock<MetalKernel> = OnceLock::new();
+    static CELL8: OnceLock<MetalKernel> = OnceLock::new();
+    let (cell, packed_shift, lane_mask, shift_mul, value_mask, name) = match bits {
+        4 => (
+            &CELL4,
+            3,
+            "7u",
+            2,
+            "0x0fu",
+            "ironmlx_qembedding_decode_4bit_gs64_rc",
+        ),
+        8 => (
+            &CELL8,
+            2,
+            "3u",
+            3,
+            "0xffu",
+            "ironmlx_qembedding_decode_8bit_gs64_rc",
+        ),
+        _ => return Err(anyhow!("unsupported bits {bits}")),
+    };
+    if let Some(kernel) = cell.get() {
+        return Ok(kernel);
+    }
+    let source = format!(
+        r#"
+        uint elem = thread_position_in_grid.x;
+        if (elem >= threads_per_grid.x) {{
+            return;
+        }}
+
+        uint token_idx = elem / DIM;
+        uint d = elem - token_idx * DIM;
+        uint token = uint(tokens[token_idx]);
+        uint packed_idx = d >> {packed_shift};
+        uint shift = (d & {lane_mask}) << {shift_mul};
+        uint q = (w[token * PACKED_DIM + packed_idx] >> shift) & {value_mask};
+        uint group = d >> 6;
+        uint sb = token * GROUPS + group;
+        float y = float(scales[sb]) * float(q) + float(biases[sb]);
+        out[elem] = static_cast<__typeof__(*out)>(y);
+    "#
+    );
+    let kernel = MetalKernel::builder(name)
+        .inputs(&["tokens", "w", "scales", "biases"])
+        .outputs(&["out"])
+        .source(source)
+        .ensure_row_contiguous(true)
+        .atomic_outputs(false)
+        .build()?;
+    Ok(cell.get_or_init(|| kernel))
 }
 
 fn qembedding_decode_4bit_kernel() -> Result<&'static MetalKernel> {
@@ -567,6 +651,109 @@ mod tests {
         )
         .unwrap();
         assert_all_close(&got_output, &expected_output, 0.001);
+    }
+
+    fn quantized_table(vocab: i32, dim: i32, bits: i32, dtype: Dtype) -> (Array, Array, Array) {
+        let data: Vec<f32> = (0..(vocab * dim))
+            .map(|i| (((i * 7919) % 2003) as f32 - 1001.0) * 0.00037)
+            .collect();
+        let raw: Array = (data.as_slice(), (vocab, dim)).try_into().unwrap();
+        let raw = ops::cast::astype(&raw, dtype).unwrap();
+        let q = mlx::quantization::quantize(&raw, Some(64), Some(bits), "affine", None).unwrap();
+        (q[0].clone(), q[1].clone(), q[2].clone())
+    }
+
+    /// The runtime-count kernel must reproduce the token-count-specialized
+    /// kernel bit for bit (same per-element arithmetic, different bound).
+    #[test]
+    #[serial(mlx_metal)]
+    fn runtime_count_kernel_is_bitwise_identical() {
+        let (vocab, dim) = (300_i32, 512_i32);
+        for bits in [4, 8] {
+            for dtype in [Dtype::Bfloat16, Dtype::Float32] {
+                let (w, s, b) = quantized_table(vocab, dim, bits, dtype);
+                for count in [1_i32, 2, 15, 26, 46, 129, 1000] {
+                    let ids: Vec<u32> =
+                        (0..count).map(|i| ((i * 37 + 11) % vocab) as u32).collect();
+                    let tokens: Array = (ids.as_slice(), &[1_i32, count][..]).try_into().unwrap();
+                    let params = || QEmbeddingDecode {
+                        weight: &w,
+                        scales: &s,
+                        biases: Some(&b),
+                        group_size: 64,
+                        bits,
+                        mode: QuantMode::Affine,
+                    };
+                    let base =
+                        qembedding_decode_with(&tokens, params(), StreamOrDevice::default(), false)
+                            .unwrap()
+                            .unwrap();
+                    let rc =
+                        qembedding_decode_with(&tokens, params(), StreamOrDevice::default(), true)
+                            .unwrap()
+                            .unwrap();
+                    assert_eq!(base.dtype(), rc.dtype());
+                    assert_eq!(base.shape().as_slice(), rc.shape().as_slice());
+                    let base = ops::cast::astype(&base, Dtype::Float32)
+                        .unwrap()
+                        .to_vec::<f32>()
+                        .unwrap();
+                    let rc = ops::cast::astype(&rc, Dtype::Float32)
+                        .unwrap()
+                        .to_vec::<f32>()
+                        .unwrap();
+                    assert!(
+                        base.iter()
+                            .zip(&rc)
+                            .all(|(x, y)| x.to_bits() == y.to_bits()),
+                        "bits={bits} dtype={dtype:?} count={count}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Single-token decode dispatch cost, baseline versus runtime count
+    /// (run with `--ignored --nocapture`; timing only, no assertion).
+    #[test]
+    #[ignore]
+    #[serial(mlx_metal)]
+    fn runtime_count_single_token_dispatch_cost() {
+        let (w, s, b) = quantized_table(4096, 5120, 4, Dtype::Bfloat16);
+        mlx::transforms::eval(&[&w, &s, &b]).unwrap();
+        for runtime_count in [false, true, false, true] {
+            let run = |i: u32| {
+                let tokens: Array = (&[i % 4096][..], &[1_i32, 1][..]).try_into().unwrap();
+                let params = QEmbeddingDecode {
+                    weight: &w,
+                    scales: &s,
+                    biases: Some(&b),
+                    group_size: 64,
+                    bits: 4,
+                    mode: QuantMode::Affine,
+                };
+                let y = qembedding_decode_with(
+                    &tokens,
+                    params,
+                    StreamOrDevice::default(),
+                    runtime_count,
+                )
+                .unwrap()
+                .unwrap();
+                mlx::transforms::eval(&[&y]).unwrap();
+            };
+            for i in 0..50 {
+                run(i);
+            }
+            let started = std::time::Instant::now();
+            for i in 0..2000 {
+                run(i);
+            }
+            println!(
+                "single-token qembedding runtime_count={runtime_count} mean_us={:.2}",
+                started.elapsed().as_secs_f64() * 1e6 / 2000.0
+            );
+        }
     }
 
     #[test]

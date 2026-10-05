@@ -1,5 +1,7 @@
 #include "cxx_mlx_shim/fast.h"
 #include "cxx_mlx_shim/shim_helpers.h"
+#include "cxx_mlx_shim/prefill_d256_nax.h"
+#include "cxx_mlx_shim/prefill_masked_softmax.h"
 
 #include <optional>
 #include <stdexcept>
@@ -77,6 +79,14 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
   auto target = cxx_mlx::helpers::decode_stream_or_device(
       has_target, is_device_only, device_type, stream_index);
+  if (mask_mode == "causal" && mask_arr == nullptr && sinks == nullptr) {
+    if (auto candidate = experimental_prefill_d256_nax(queries, keys, values, scale, target)) {
+      return std::make_unique<MlxArray>(std::move(*candidate));
+    }
+    if (auto candidate = experimental_masked_causal_sdpa(queries, keys, values, scale, target)) {
+      return std::make_unique<MlxArray>(std::move(*candidate));
+    }
+  }
   return std::make_unique<MlxArray>(
       mlx::core::fast::scaled_dot_product_attention(
           queries, keys, values, scale,

@@ -30,7 +30,6 @@ ironmlx serve \
   --model /path/to/Qwen3.8-27B-8bit \
   --model-id mlx-community/Qwen3.8-27B-8bit \
   --dflash2-model-dir /path/to/Qwen3.8-27B-DFlash2 \
-  --dflash2-block-size 4 \
   --dflash2-draft-bits 4 \
   --max-sequences 8 \
   --dflash2-tensor-batch-max-width 4 \
@@ -38,7 +37,9 @@ ironmlx serve \
   --port 8080
 ```
 
-`--dflash2-block-size` 接受 `2..=16`；大于 `8` 的宽度要求 draft checkpoint 自身声明支持。
+`--dflash2-block-size` 是可选的 `2..=16` 显式覆盖值；省略时 IronMLX 自动采用
+draft checkpoint 声明的宽度，并以已资格化的 Q8 作为默认上限。大于 `8` 的宽度属于
+显式 opt-in，并要求 draft checkpoint 自身声明支持。
 `--dflash2-draft-bits` 接受 `0`、`4` 或
 `8`，其中 `0` 表示保持 draft BF16。`--max-sequences` 必须大于零。`--model-id`
 用于把稳定的公开模型 ID 与本地 target 路径分离；省略时沿用 `--model` 的值。

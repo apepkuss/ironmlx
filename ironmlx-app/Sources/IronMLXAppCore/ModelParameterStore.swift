@@ -84,6 +84,9 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         if dflash2ModelID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
             result.dflash2ModelID = nil
         }
+        if dflash2BlockSize?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            result.dflash2BlockSize = nil
+        }
         return result
     }
 
@@ -112,8 +115,8 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         positiveInt(mtpDraftTokens)
     }
 
-    public var dflash2BlockSizeValue: Int {
-        Int(dflash2BlockSize?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 4
+    public var dflash2BlockSizeValue: Int? {
+        positiveInt(dflash2BlockSize)
     }
 
     public var dflash2DraftBitsValue: Int {
@@ -518,7 +521,7 @@ public final class ModelParameterStore: @unchecked Sendable {
         try validatePositiveInteger(parameters.topK, field: "top_k")
         try validatePositiveInteger(parameters.mtpDraftTokens, field: "mtp_draft_tokens")
         if let value = nonEmpty(parameters.dflash2BlockSize),
-           !(Int(value).map { (2 ... 8).contains($0) } ?? false) {
+           !(Int(value).map { (2 ... 16).contains($0) } ?? false) {
             throw ConfigurationPersistenceError.invalidValue("dflash2_block_size")
         }
         if let value = nonEmpty(parameters.dflash2DraftBits),
