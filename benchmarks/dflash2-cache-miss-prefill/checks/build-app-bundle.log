@@ -1,0 +1,638 @@
+IronMLX version consistency passed: 0.2.0 (build 5)
+==> Build MLX 73ad5df20cb30be4192e5c4d0ae8130674773427 (Release, arm64, macOS 26.4)
+-- The C compiler identification is AppleClang 21.0.0.21000101
+-- The CXX compiler identification is AppleClang 21.0.0.21000101
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Building MLX for arm64 processor on Darwin
+-- Metal found /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Metal.framework
+-- Building on macOS 26.4
+-- Building with macOS 26.5 SDK
+-- Building for macOS 26.4
+-- Metal version: 400
+-- Accelerate found /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Accelerate.framework
+-- Downloading json
+-- Using the multi-header code from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/.build/app-bundle/mlx-build/_deps/json-src/include/
+-- Downloading json for JACCL
+-- Downloading gguflib
+-- {fmt} version: 12.1.0
+-- Build type: Release
+-- Performing Test HAS_NULLPTR_WARNING
+-- Performing Test HAS_NULLPTR_WARNING - Success
+-- Configuring done (10.6s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/xin/workspace/perf-dflash2-cache-miss-prefill/.build/app-bundle/mlx-build
+[  0%] Building CXX object jaccl/CMakeFiles/jaccl.dir/jaccl/tcp.cpp.o
+[  1%] Building CXX object jaccl/CMakeFiles/jaccl.dir/jaccl/rdma.cpp.o
+[  1%] Building CXX object mlx/CMakeFiles/mlx_version.dir/version.cpp.o
+[  2%] Generating compiled_preamble.cpp
+[  2%] Generating jit/binary_ops.cpp
+[  3%] Generating jit/unary_ops.cpp
+[  3%] Building arg_reduce.air
+[  4%] Generating jit/utils.cpp
+[  4%] Generating jit/ternary_ops.cpp
+[  4%] Building C object mlx/io/CMakeFiles/gguflib.dir/__/__/_deps/gguflib-src/fp16.c.o
+[  5%] Generating jit/gather_front.cpp
+[  5%] Generating jit/scatter.cpp
+[  5%] Generating jit/masked_scatter.cpp
+[  7%] Generating jit/gather.cpp
+[  7%] Generating jit/gather_axis.cpp
+[  7%] Generating jit/hadamard.cpp
+[  9%] Generating jit/reduce_utils.cpp
+[  9%] Generating jit/scatter_axis.cpp
+[  9%] Built target mlx_version
+[  9%] Built target cpu_compiled_preamble
+[  9%] Building CXX object jaccl/CMakeFiles/jaccl.dir/jaccl/mesh.cpp.o
+[ 10%] Building C object mlx/io/CMakeFiles/gguflib.dir/__/__/_deps/gguflib-src/gguflib.c.o
+[ 10%] Built target binary_ops
+[ 10%] Built target ternary_ops
+[ 11%] Building steel_attention_nax.air
+[ 13%] Building CXX object jaccl/CMakeFiles/jaccl.dir/jaccl/ring.cpp.o
+[ 13%] Building fp_quantized_nax.air
+[ 13%] Built target unary_ops
+[ 13%] Built target scatter_axis
+[ 13%] Building CXX object jaccl/CMakeFiles/jaccl.dir/jaccl/jaccl.cpp.o
+[ 13%] Built target masked_scatter
+[ 13%] Built target gather_axis
+[ 13%] Built target gather_front
+[ 14%] Building steel_gemm_segmented_nax.air
+[ 15%] Building quantized_nax.air
+[ 16%] Building steel_gemm_splitk_nax.air
+[ 16%] Built target hadamard
+[ 16%] Built target scatter
+[ 16%] Built target gather
+[ 16%] Built target reduce_utils
+[ 16%] Building steel_gemm_gather_nax.air
+[ 16%] Building steel_gemm_fused_nax.air
+[ 16%] Built target utils
+[ 16%] Building steel_attention.air
+[ 17%] Building gemv_masked.air
+[ 17%] Building gemv.air
+[ 17%] Building steel_gemm_segmented.air
+[ 17%] Linking C static library libgguflib.a
+[ 17%] Built target gguflib
+[ 17%] Building steel_gemm_splitk.air
+[ 18%] Building steel_gemm_masked.air
+[ 19%] Building steel_gemm_gather.air
+[ 20%] Building steel_gemm_fused.air
+[ 20%] Building steel_conv_general.air
+[ 21%] Building steel_conv_3d.air
+[ 21%] Building steel_conv.air
+[ 22%] Building unary.air
+[ 22%] Building ternary.air
+[ 23%] Building sort.air
+[ 23%] Building searchsorted.air
+[ 24%] Building logsumexp.air
+[ 25%] Building softmax.air
+[ 26%] Building scan.air
+[ 26%] Building fp_quantized.air
+[ 26%] Building quantized.air
+[ 27%] Building reduce.air
+[ 28%] Building fft.air
+[ 28%] Building copy.air
+[ 28%] Building binary_two.air
+[ 29%] Building binary.air
+[ 30%] Building arange.air
+[ 30%] Building fence.air
+[ 30%] Building scaled_dot_product_attention.air
+[ 31%] Building rope.air
+[ 31%] Building rms_norm.air
+[ 31%] Building random.air
+[ 31%] Building layer_norm.air
+[ 32%] Building dot.air
+[ 33%] Building conv.air
+[ 34%] Linking CXX static library libjaccl.a
+[ 34%] Built target jaccl
+[ 35%] Building mlx.metallib
+[ 35%] Built target mlx-metallib
+[ 35%] Building CXX object CMakeFiles/mlx.dir/mlx/dtype.cpp.o
+[ 35%] Building CXX object CMakeFiles/mlx.dir/mlx/einsum.cpp.o
+[ 36%] Building CXX object CMakeFiles/mlx.dir/mlx/compile.cpp.o
+[ 37%] Building CXX object CMakeFiles/mlx.dir/mlx/device.cpp.o
+[ 37%] Building CXX object CMakeFiles/mlx.dir/mlx/array.cpp.o
+[ 38%] Building CXX object CMakeFiles/mlx.dir/mlx/dtype_utils.cpp.o
+[ 38%] Building CXX object CMakeFiles/mlx.dir/mlx/fft.cpp.o
+[ 39%] Building CXX object CMakeFiles/mlx.dir/mlx/random.cpp.o
+[ 39%] Building CXX object CMakeFiles/mlx.dir/mlx/fast.cpp.o
+[ 39%] Building CXX object CMakeFiles/mlx.dir/mlx/stream.cpp.o
+[ 40%] Building CXX object CMakeFiles/mlx.dir/mlx/graph_utils.cpp.o
+[ 40%] Building CXX object CMakeFiles/mlx.dir/mlx/ops.cpp.o
+[ 42%] Building CXX object CMakeFiles/mlx.dir/mlx/primitives.cpp.o
+[ 42%] Building CXX object CMakeFiles/mlx.dir/mlx/export.cpp.o
+[ 42%] Building CXX object CMakeFiles/mlx.dir/mlx/utils.cpp.o
+[ 45%] Building CXX object CMakeFiles/mlx.dir/mlx/scheduler.cpp.o
+[ 45%] Building CXX object CMakeFiles/mlx.dir/mlx/linalg.cpp.o
+[ 45%] Building CXX object CMakeFiles/mlx.dir/mlx/transforms.cpp.o
+[ 45%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/common/broadcasting.cpp.o
+[ 46%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/common/compiled.cpp.o
+[ 46%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/common/common.cpp.o
+[ 47%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/common/load.cpp.o
+[ 47%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/common/metal_kernel.cpp.o
+[ 48%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/common/reduce.cpp.o
+[ 48%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/common/slicing.cpp.o
+[ 49%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/common/utils.cpp.o
+[ 49%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/device_info.cpp.o
+[ 50%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/arg_reduce.cpp.o
+[ 51%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/binary.cpp.o
+[ 51%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/conv.cpp.o
+[ 52%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/copy.cpp.o
+[ 52%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/distributed.cpp.o
+[ 53%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/eig.cpp.o
+[ 53%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/eigh.cpp.o
+[ 54%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/encoder.cpp.o
+[ 54%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/fft.cpp.o
+[ 55%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/hadamard.cpp.o
+[ 55%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/matmul.cpp.o
+[ 56%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/gemms/cblas.cpp.o
+[ 56%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/masked_mm.cpp.o
+[ 57%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/primitives.cpp.o
+[ 57%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/quantized.cpp.o
+[ 58%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/reduce.cpp.o
+[ 58%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/scan.cpp.o
+[ 59%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/select.cpp.o
+[ 59%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/softmax.cpp.o
+[ 60%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/logsumexp.cpp.o
+[ 60%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/sort.cpp.o
+[ 61%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/threefry.cpp.o
+[ 61%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/indexing.cpp.o
+[ 62%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/luf.cpp.o
+[ 62%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/qrf.cpp.o
+[ 63%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/svd.cpp.o
+[ 64%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/inverse.cpp.o
+[ 64%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/cholesky.cpp.o
+[ 65%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/unary.cpp.o
+[ 65%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/eval.cpp.o
+[ 66%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/compiled_preamble.cpp.o
+[ 66%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/gemms/bnns.cpp.o
+[ 67%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/compiled.cpp.o
+[ 67%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cpu/jit_compiler.cpp.o
+[ 68%] Building CXX object CMakeFiles/mlx.dir/mlx/distributed/primitives.cpp.o
+[ 68%] Building CXX object CMakeFiles/mlx.dir/mlx/distributed/ops.cpp.o
+[ 69%] Building CXX object CMakeFiles/mlx.dir/mlx/distributed/distributed.cpp.o
+[ 69%] Building CXX object CMakeFiles/mlx.dir/mlx/distributed/utils.cpp.o
+[ 70%] Building CXX object CMakeFiles/mlx.dir/mlx/distributed/mpi/mpi.cpp.o
+[ 70%] Building CXX object CMakeFiles/mlx.dir/mlx/distributed/ring/ring.cpp.o
+[ 71%] Building CXX object CMakeFiles/mlx.dir/mlx/distributed/nccl/no_nccl.cpp.o
+[ 71%] Building CXX object CMakeFiles/mlx.dir/mlx/distributed/jaccl/jaccl.cpp.o
+[ 72%] Building CXX object CMakeFiles/mlx.dir/mlx/io/load.cpp.o
+[ 72%] Building CXX object CMakeFiles/mlx.dir/mlx/io/safetensors.cpp.o
+[ 73%] Building CXX object CMakeFiles/mlx.dir/mlx/io/gguf.cpp.o
+[ 73%] Building CXX object CMakeFiles/mlx.dir/mlx/io/gguf_quants.cpp.o
+[ 74%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/jit/utils.cpp.o
+[ 74%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/jit/unary_ops.cpp.o
+[ 75%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/jit/binary_ops.cpp.o
+[ 76%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/jit/ternary_ops.cpp.o
+[ 76%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/jit/reduce_utils.cpp.o
+[ 77%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/jit/scatter.cpp.o
+[ 77%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/jit/masked_scatter.cpp.o
+[ 78%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/jit/gather.cpp.o
+[ 78%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/jit/gather_front.cpp.o
+[ 79%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/jit/gather_axis.cpp.o
+[ 79%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/jit/scatter_axis.cpp.o
+[ 80%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/jit/hadamard.cpp.o
+[ 80%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/nojit_kernels.cpp.o
+[ 81%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/allocator.cpp.o
+[ 81%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/binary.cpp.o
+[ 82%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/device_info.cpp.o
+[ 82%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/compiled.cpp.o
+[ 83%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/conv.cpp.o
+[ 83%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/copy.cpp.o
+[ 84%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/custom_kernel.cpp.o
+[ 84%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/distributed.cpp.o
+[ 85%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/device.cpp.o
+[ 85%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/event.cpp.o
+[ 86%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/eval.cpp.o
+[ 86%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/fence.cpp.o
+[ 87%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/fft.cpp.o
+[ 87%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/hadamard.cpp.o
+[ 88%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/indexing.cpp.o
+[ 89%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/logsumexp.cpp.o
+[ 89%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/matmul.cpp.o
+[ 90%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/scaled_dot_product_attention.cpp.o
+[ 90%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/metal.cpp.o
+[ 91%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/primitives.cpp.o
+[ 91%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/quantized.cpp.o
+[ 92%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/normalization.cpp.o
+[ 92%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/rope.cpp.o
+[ 93%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/scan.cpp.o
+[ 93%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/slicing.cpp.o
+[ 94%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/softmax.cpp.o
+[ 94%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/sort.cpp.o
+[ 95%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/reduce.cpp.o
+[ 95%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/ternary.cpp.o
+[ 96%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/unary.cpp.o
+[ 96%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/resident.cpp.o
+[ 97%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/metal/utils.cpp.o
+[ 97%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/cuda/no_cuda.cpp.o
+[ 98%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/gpu/copy.cpp.o
+[ 98%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/gpu/primitives.cpp.o
+[100%] Building CXX object CMakeFiles/mlx.dir/mlx/backend/gpu/slicing.cpp.o
+[100%] Linking CXX static library libmlx.a
+[100%] Built target mlx
+-- Install configuration: "Release"
+-- Install configuration: "Release"
+-- Install configuration: "Release"
+==> Verify tracked third-party dependency materials
+...............
+----------------------------------------------------------------------
+Ran 15 tests in 0.764s
+
+OK
+Fetching https://github.com/sparkle-project/Sparkle.git from cache
+Fetching https://github.com/weichsel/ZIPFoundation.git from cache
+Fetched https://github.com/weichsel/ZIPFoundation.git from cache (2.14s)
+Fetched https://github.com/sparkle-project/Sparkle.git from cache (2.19s)
+Computing version for https://github.com/weichsel/ZIPFoundation.git
+Computed https://github.com/weichsel/ZIPFoundation.git at 0.9.20 (2.83s)
+Computing version for https://github.com/sparkle-project/Sparkle.git
+Computed https://github.com/sparkle-project/Sparkle.git at 2.9.6 (0.71s)
+Creating working copy for https://github.com/weichsel/ZIPFoundation.git
+Working copy of https://github.com/weichsel/ZIPFoundation.git resolved at 0.9.20
+Creating working copy for https://github.com/sparkle-project/Sparkle.git
+Working copy of https://github.com/sparkle-project/Sparkle.git resolved at 2.9.6
+Fetching binary artifact https://github.com/sparkle-project/Sparkle/releases/download/2.9.6/Sparkle-for-Swift-Package-Manager.zip from cache
+Fetched https://github.com/sparkle-project/Sparkle/releases/download/2.9.6/Sparkle-for-Swift-Package-Manager.zip from cache (0.39s)
+Generated third-party materials in: /var/folders/9j/jzqt0r7n091gg212wf4j1tpc0000gn/T//ironmlx-third-party-verify.ln5CZo
+Third-party materials are complete and reproducible
+CycloneDX SBOM verified: 317 components
+==> Build Rust helpers (Release, isolated target directory)
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.189
+   Compiling cfg-if v1.0.4
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling pin-project-lite v0.2.17
+   Compiling memchr v2.8.3
+   Compiling futures-core v0.3.33
+   Compiling itoa v1.0.18
+   Compiling once_cell v1.21.4
+   Compiling smallvec v1.15.2
+   Compiling serde_core v1.0.229
+   Compiling zerocopy v0.8.55
+   Compiling futures-io v0.3.33
+   Compiling serde v1.0.229
+   Compiling bytes v1.12.1
+   Compiling hashbrown v0.17.1
+   Compiling version_check v0.9.5
+   Compiling equivalent v1.0.2
+   Compiling bitflags v2.13.1
+   Compiling futures-sink v0.3.33
+   Compiling crossbeam-utils v0.8.22
+   Compiling atomic-waker v1.1.2
+   Compiling stable_deref_trait v1.2.1
+   Compiling log v0.4.33
+   Compiling percent-encoding v2.3.2
+   Compiling lazy_static v1.5.0
+   Compiling regex-syntax v0.8.11
+   Compiling slab v0.4.12
+   Compiling zmij v1.0.23
+   Compiling futures-channel v0.3.33
+   Compiling tracing-core v0.1.36
+   Compiling serde_json v1.0.151
+   Compiling getrandom v0.3.4
+   Compiling autocfg v1.5.1
+   Compiling aho-corasick v1.1.4
+   Compiling indexmap v2.14.0
+   Compiling http v1.5.0
+   Compiling bytemuck v1.25.2
+   Compiling futures-task v0.3.33
+   Compiling anyhow v1.0.104
+   Compiling either v1.17.0
+   Compiling scratch v1.0.9
+   Compiling encoding_rs v0.8.35
+   Compiling ident_case v1.0.1
+   Compiling termcolor v1.4.1
+   Compiling crossbeam-epoch v0.9.20
+   Compiling regex-automata v0.4.16
+   Compiling fnv v1.0.7
+   Compiling unicode-width v0.2.2
+   Compiling cxxbridge-flags v1.0.198
+   Compiling strsim v0.11.1
+   Compiling codespan-reporting v0.13.1
+   Compiling syn v2.0.119
+   Compiling syn v3.0.3
+   Compiling http-body v1.1.0
+   Compiling typenum v1.20.1
+   Compiling litemap v0.8.2
+   Compiling httparse v1.10.1
+   Compiling writeable v0.6.3
+   Compiling paste v1.0.15
+   Compiling parking v2.2.1
+   Compiling synstructure v0.13.2
+   Compiling darling_core v0.20.11
+   Compiling crossbeam-deque v0.8.7
+   Compiling zeroize v1.9.0
+   Compiling rustls-pki-types v1.15.1
+   Compiling serde_derive v1.0.229
+   Compiling jobserver v0.1.35
+   Compiling mio v1.2.2
+   Compiling getrandom v0.2.17
+   Compiling cc v1.4.0
+   Compiling socket2 v0.6.5
+   Compiling tokio-macros v2.7.2
+   Compiling zerocopy-derive v0.8.55
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling tokio v1.53.1
+   Compiling zerovec-derive v0.11.3
+   Compiling futures-macro v0.3.33
+   Compiling tracing-attributes v0.1.31
+   Compiling zerofrom v0.1.8
+   Compiling displaydoc v0.2.7
+   Compiling link-cplusplus v1.0.12
+   Compiling cxx v1.0.198
+   Compiling futures-util v0.3.33
+   Compiling ring v0.17.14
+   Compiling darling_macro v0.20.11
+   Compiling event-listener v5.4.2
+   Compiling tracing v0.1.44
+   Compiling num-traits v0.2.19
+   Compiling generic-array v0.14.7
+   Compiling base64 v0.22.1
+   Compiling minimal-lexical v0.2.1
+   Compiling pkg-config v0.3.33
+   Compiling rayon-core v1.13.0
+   Compiling thiserror v2.0.19
+   Compiling heck v0.5.0
+   Compiling core-foundation-sys v0.8.7
+   Compiling tower-service v0.3.3
+   Compiling system-configuration-sys v0.6.0
+   Compiling icu_properties_data v2.2.0
+   Compiling icu_normalizer_data v2.2.0
+   Compiling rustversion v1.0.23
+   Compiling utf8_iter v1.0.4
+   Compiling cxx-build v1.0.198
+   Compiling mlx-sys v0.2.0 (/Users/xin/workspace/perf-dflash2-cache-miss-prefill/mlx-sys)
+   Compiling onig_sys v69.9.3
+   Compiling nom v7.1.3
+   Compiling yoke v0.8.3
+   Compiling tokio-util v0.7.19
+   Compiling ppv-lite86 v0.2.21
+   Compiling event-listener-strategy v0.5.4
+   Compiling darling v0.20.11
+   Compiling concurrent-queue v2.5.0
+   Compiling thiserror-impl v2.0.19
+   Compiling cxxbridge-macro v1.0.198
+   Compiling untrusted v0.9.0
+   Compiling fastrand v2.5.0
+   Compiling try-lock v0.2.5
+   Compiling foldhash v0.2.0
+   Compiling want v0.3.1
+   Compiling piper v0.2.5
+   Compiling async-channel v2.5.0
+   Compiling half v2.7.1
+   Compiling core-foundation v0.9.4
+   Compiling rand_core v0.6.4
+   Compiling regex v1.13.1
+   Compiling ahash v0.8.12
+   Compiling futures-lite v2.6.1
+   Compiling thiserror v1.0.69
+   Compiling httpdate v1.0.3
+   Compiling simd-adler32 v0.3.10
+   Compiling esaxx-rs v0.1.10
+   Compiling ref-cast v1.0.26
+   Compiling parking_lot_core v0.9.12
+   Compiling async-task v4.7.1
+   Compiling rustls v0.23.45
+   Compiling arrayvec v0.7.8
+   Compiling crc32fast v1.5.0
+   Compiling bitflags v1.3.2
+   Compiling blocking v1.6.2
+   Compiling symphonia-core v0.5.5
+   Compiling h2 v0.4.16
+   Compiling hyper v1.11.0
+   Compiling system-configuration v0.7.0
+   Compiling rand_chacha v0.3.1
+   Compiling rayon v1.12.0
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling rustls-webpki v0.103.15
+   Compiling thiserror-impl v1.0.69
+   Compiling monostate-impl v0.1.18
+   Compiling ref-cast-impl v1.0.26
+   Compiling itertools v0.11.0
+   Compiling sync_wrapper v1.0.2
+   Compiling pastey v0.2.3
+   Compiling subtle v2.6.1
+   Compiling unicode-segmentation v1.13.3
+   Compiling macro_rules_attribute-proc_macro v0.2.3
+   Compiling mime v0.3.17
+   Compiling scopeguard v1.2.0
+   Compiling tower-layer v0.3.3
+   Compiling adler2 v2.0.1
+   Compiling base64 v0.13.1
+   Compiling ipnet v2.12.1
+   Compiling miniz_oxide v0.8.9
+   Compiling hyper-util v0.1.20
+   Compiling spm_precompiled v0.1.4
+   Compiling lock_api v0.4.14
+   Compiling rayon-cond v0.3.0
+   Compiling macro_rules_attribute v0.2.3
+   Compiling derive_builder_core v0.20.2
+   Compiling monostate v0.1.18
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling rand v0.8.7
+   Compiling derive_builder_macro v0.20.2
+   Compiling derive_builder v0.20.2
+   Compiling symphonia-metadata v0.5.5
+   Compiling strum_macros v0.28.0
+   Compiling rand_core v0.9.5
+   Compiling bytemuck_derive v1.11.0
+   Compiling itertools v0.12.1
+   Compiling form_urlencoded v1.2.2
+   Compiling unicode-normalization-alignments v0.1.12
+   Compiling unicode_categories v0.1.1
+   Compiling unicase v2.9.0
+   Compiling borrow-or-share v0.2.4
+   Compiling mime_guess v2.0.5
+   Compiling strum v0.28.0
+   Compiling flate2 v1.1.9
+   Compiling rand_chacha v0.9.0
+   Compiling parking_lot v0.12.5
+   Compiling digest v0.10.7
+   Compiling tower v0.5.3
+   Compiling fdeflate v0.3.7
+   Compiling cpufeatures v0.2.17
+   Compiling http-body-util v0.1.4
+   Compiling byteorder-lite v0.1.0
+   Compiling llguidance v1.7.6
+   Compiling quick-error v2.0.1
+   Compiling pxfm v0.1.30
+   Compiling zune-core v0.5.1
+   Compiling bit-vec v0.8.0
+   Compiling utf8parse v0.2.2
+   Compiling anstyle-parse v1.0.0
+   Compiling bit-set v0.8.0
+   Compiling zune-jpeg v0.5.15
+   Compiling image-webp v0.2.4
+   Compiling png v0.18.1
+   Compiling sha2 v0.10.9
+   Compiling moxcms v0.8.1
+   Compiling rand v0.9.5
+   Compiling toktrie v1.7.6
+   Compiling symphonia-utils-xiph v0.5.5
+   Compiling mecab-sys v0.1.0
+   Compiling webpki-roots v1.0.9
+   Compiling ryu v1.0.23
+   Compiling getrandom v0.4.3
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling memo-map v0.3.3
+   Compiling anstyle-query v1.1.5
+   Compiling portable-atomic v1.14.0
+   Compiling option-ext v0.2.0
+   Compiling anstyle v1.0.14
+   Compiling colorchoice v1.0.5
+   Compiling anstream v1.0.0
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_collections v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling tokio-rustls v0.26.4
+   Compiling url v2.5.8
+   Compiling hyper-rustls v0.27.9
+   Compiling tower-http v0.6.11
+   Compiling image v0.25.10
+   Compiling dirs-sys v0.5.0
+   Compiling minijinja v2.21.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling derivre v0.3.12
+   Compiling symphonia-bundle-flac v0.5.5
+   Compiling fancy-regex v0.17.0
+   Compiling onig v6.5.3
+   Compiling fluent-uri v0.3.2
+   Compiling referencing v0.29.1
+   Compiling symphonia-bundle-mp3 v0.5.5
+   Compiling ordered-float v5.5.0
+   Compiling generic-array v1.4.5
+   Compiling turboquant v0.2.0 (/Users/xin/workspace/perf-dflash2-cache-miss-prefill/turboquant)
+   Compiling futures-executor v0.3.33
+   Compiling bstr v1.13.1
+   Compiling itertools v0.14.0
+   Compiling fs-err v3.3.1
+   Compiling multer v3.1.0
+   Compiling bimap v0.6.3
+   Compiling superslice v1.0.0
+   Compiling rustc-hash v2.1.3
+   Compiling clap_lex v1.1.0
+   Compiling tiktoken-rs v0.12.0
+   Compiling clap_builder v4.6.5
+   Compiling console v0.15.11
+   Compiling reqwest v0.12.28
+   Compiling futures v0.3.33
+   Compiling symphonia v0.5.5
+   Compiling dirs v6.0.0
+   Compiling clap_derive v4.6.4
+   Compiling tokenizers v0.20.4
+   Compiling async-trait v0.1.91
+   Compiling number_prefix v0.4.0
+   Compiling spin v0.9.9
+   Compiling indicatif v0.17.11
+   Compiling uuid v1.24.0
+   Compiling axum-core v0.4.5
+   Compiling arc-swap v1.9.2
+   Compiling clap v4.6.5
+   Compiling axum-macros v0.4.2
+   Compiling num_cpus v1.17.0
+   Compiling rustls-pemfile v2.2.0
+   Compiling serde_path_to_error v0.1.20
+   Compiling matchers v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling sharded-slab v0.1.7
+   Compiling rustfst v1.3.1
+   Compiling thread_local v1.1.10
+   Compiling matchit v0.7.3
+   Compiling nu-ansi-term v0.50.3
+   Compiling hf-hub v0.4.3
+   Compiling tracing-subscriber v0.3.23
+   Compiling tokio-stream v0.1.19
+   Compiling axum-server v0.7.3
+   Compiling axum v0.7.9
+   Compiling mlx v0.2.0 (/Users/xin/workspace/perf-dflash2-cache-miss-prefill/mlx)
+   Compiling ironmlx-core v0.2.0 (/Users/xin/workspace/perf-dflash2-cache-miss-prefill/ironmlx-core)
+   Compiling ironmlx-decision v0.2.0 (/Users/xin/workspace/perf-dflash2-cache-miss-prefill/ironmlx-decision)
+   Compiling ironmlx-audio v0.2.0 (/Users/xin/workspace/perf-dflash2-cache-miss-prefill/ironmlx-audio)
+   Compiling ironmlx-lm v0.2.0 (/Users/xin/workspace/perf-dflash2-cache-miss-prefill/ironmlx-lm)
+   Compiling iron-bench v0.2.0 (/Users/xin/workspace/perf-dflash2-cache-miss-prefill/iron-bench)
+   Compiling ironmlx-image v0.2.0 (/Users/xin/workspace/perf-dflash2-cache-miss-prefill/ironmlx-image)
+   Compiling ironmlx-runtime v0.2.0 (/Users/xin/workspace/perf-dflash2-cache-miss-prefill/ironmlx-runtime)
+   Compiling ironmlx v0.2.0 (/Users/xin/workspace/perf-dflash2-cache-miss-prefill/ironmlx)
+    Finished `release` profile [optimized] target(s) in 1m 08s
+==> Build Swift App executable (Release, App-Bundle resource mode)
+Fetching https://github.com/sparkle-project/Sparkle.git from cache
+Fetching https://github.com/weichsel/ZIPFoundation.git from cache
+Fetched https://github.com/weichsel/ZIPFoundation.git from cache (1.93s)
+Fetched https://github.com/sparkle-project/Sparkle.git from cache (1.98s)
+Computing version for https://github.com/weichsel/ZIPFoundation.git
+Computed https://github.com/weichsel/ZIPFoundation.git at 0.9.20 (2.43s)
+Computing version for https://github.com/sparkle-project/Sparkle.git
+Computed https://github.com/sparkle-project/Sparkle.git at 2.9.6 (0.47s)
+Computed https://github.com/weichsel/ZIPFoundation.git at 0.9.20 (0.00s)
+Computed https://github.com/sparkle-project/Sparkle.git at 2.9.6 (0.00s)
+Creating working copy for https://github.com/sparkle-project/Sparkle.git
+Working copy of https://github.com/sparkle-project/Sparkle.git resolved at 2.9.6
+Creating working copy for https://github.com/weichsel/ZIPFoundation.git
+Working copy of https://github.com/weichsel/ZIPFoundation.git resolved at 0.9.20
+Fetching binary artifact https://github.com/sparkle-project/Sparkle/releases/download/2.9.6/Sparkle-for-Swift-Package-Manager.zip from cache
+Fetched https://github.com/sparkle-project/Sparkle/releases/download/2.9.6/Sparkle-for-Swift-Package-Manager.zip from cache (0.39s)
+Building for production...
+[0/19] Write sources
+[0/19] Copying logo.png
+[0/19] Copying hermes-agent-logo.svg
+[4/19] Write sources
+[5/19] Copying indextts25-preparation.json
+[5/19] Copying sidebar-logo@2x.png
+[5/19] Copying oh-my-pi-logo.svg
+[5/19] Copying dashboard2.html
+[5/19] Copying menubar-icon.png
+[5/19] Copying supported-models.json
+[5/19] Copying deepseek-harness-logo-dark.svg
+[5/19] Copying menubar-icon@2x.png
+[5/19] Copying PrivacyInfo.xcprivacy
+[5/19] Copying deepseek-harness-logo.svg
+[15/19] Copying Sparkle.framework
+[16/19] Write swift-version--58304C5D6DBC2206.txt
+[18/20] Compiling ZIPFoundation Archive+BackingConfiguration.swift
+[19/21] Compiling IronMLXAppCore AppConfig.swift
+[20/22] Compiling IronMLXApp main.swift
+[20/22] Write Objects.LinkFileList
+[21/22] Linking ironmlx-app
+Build of product 'ironmlx-app' complete! (33.17s)
+==> Assemble IronMLX.app
+==> Thin Sparkle to the supported arm64 product architecture
+==> Ad-hoc sign nested code from the inside out
+/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate: replacing existing signature
+/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater: replacing existing signature
+/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader: replacing existing signature
+/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer: replacing existing signature
+/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle: replacing existing signature
+/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc: replacing existing signature
+/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc: replacing existing signature
+/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app: replacing existing signature
+/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/Frameworks/Sparkle.framework: replacing existing signature
+/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/Helpers/ironmlx: replacing existing signature
+/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/Helpers/iron-bench: replacing existing signature
+/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/MacOS/IronMLX: replacing existing signature
+/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app: replacing existing signature
+ok: IronMLX App executable is arm64, minos 26.4, with system-only dynamic dependencies
+ok: IronMLX backend helper is arm64, minos 26.4, with system-only dynamic dependencies
+ok: iron-bench helper is arm64, minos 26.4, with system-only dynamic dependencies
+IronMLX.app static bundle verification passed
+Model distribution boundary passed: /Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app
+Built: /Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app
+exit=0

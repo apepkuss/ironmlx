@@ -1,0 +1,4 @@
+   Compiling iron-bench v0.2.0 (/Users/xin/workspace/perf-dflash2-cache-miss-prefill/iron-bench)
+   Compiling ironmlx-bench-kernel v0.2.0 (/Users/xin/workspace/perf-dflash2-cache-miss-prefill/ironmlx-bench-kernel)
+    Finished `release` profile [optimized] target(s) in 2.86s
+exit=0

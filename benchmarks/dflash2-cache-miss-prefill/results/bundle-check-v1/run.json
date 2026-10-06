@@ -1,0 +1,148 @@
+{
+ "label": "bundle-check-v1",
+ "helper_sha256": "03f6c13f5e2f216965d2244b589a62ee458db7d0edac26eb4a683cc7d8000cee",
+ "metallib_sha256": "264855558092d158ec6b2e72c225b532708310b2ae4494f37ec880f6438735c1",
+ "rows": [
+  {
+   "step": "short:code-1:miss",
+   "valid": true,
+   "finish": "stop",
+   "tokens": 686,
+   "hit": 0,
+   "saves": 1,
+   "ttft_ms": 95.3,
+   "equal_to_scenario_c_on": true,
+   "output_sha256": "dd739b43f1311dd2b5a95479450bdc3cf8ce0dfde6347df65fc44e5eebc327bb",
+   "memory": {
+    "samples": 95,
+    "observed_peak_footprint_bytes": 20941088080,
+    "peak_monotonic_s": 3725139.433988125,
+    "observed_peak_resident_bytes": 6132645888,
+    "maximum_gap_s": 0.06004612520337105,
+    "maximum_snapshot_duration_s": 0.0017900411039590836
+   }
+  },
+  {
+   "step": "short:code-1:repeat",
+   "valid": true,
+   "finish": "stop",
+   "tokens": 686,
+   "hit": 62,
+   "saves": 0,
+   "ttft_ms": 13.8,
+   "equal_to_scenario_c_on": true,
+   "output_sha256": "dd739b43f1311dd2b5a95479450bdc3cf8ce0dfde6347df65fc44e5eebc327bb",
+   "memory": {
+    "samples": 96,
+    "observed_peak_footprint_bytes": 20948919680,
+    "peak_monotonic_s": 3725146.061437833,
+    "observed_peak_resident_bytes": 6133972992,
+    "maximum_gap_s": 0.060048042330890894,
+    "maximum_snapshot_duration_s": 0.0017525418661534786
+   }
+  },
+  {
+   "step": "short:knowledge-1:miss",
+   "valid": true,
+   "finish": "stop",
+   "tokens": 1420,
+   "hit": 0,
+   "saves": 1,
+   "ttft_ms": 107.2,
+   "equal_to_scenario_c_on": true,
+   "output_sha256": "4ecf04f4b238a7085de48a840983032a9fb78db684c86d35d61f9930e0f4b2ae",
+   "memory": {
+    "samples": 368,
+    "observed_peak_footprint_bytes": 23856424488,
+    "peak_monotonic_s": 3725168.611408458,
+    "observed_peak_resident_bytes": 6142525440,
+    "maximum_gap_s": 0.06005491688847542,
+    "maximum_snapshot_duration_s": 0.002082916907966137
+   }
+  },
+  {
+   "step": "short:knowledge-1:repeat",
+   "valid": true,
+   "finish": "stop",
+   "tokens": 1420,
+   "hit": 46,
+   "saves": 0,
+   "ttft_ms": 24.7,
+   "equal_to_scenario_c_on": true,
+   "output_sha256": "4ecf04f4b238a7085de48a840983032a9fb78db684c86d35d61f9930e0f4b2ae",
+   "memory": {
+    "samples": 374,
+    "observed_peak_footprint_bytes": 22808945664,
+    "peak_monotonic_s": 3725191.38967825,
+    "observed_peak_resident_bytes": 5976981504,
+    "maximum_gap_s": 0.060123167000710964,
+    "maximum_snapshot_duration_s": 0.002057333942502737
+   }
+  },
+  {
+   "step": "30k:code-1:miss",
+   "valid": true,
+   "finish": "stop",
+   "tokens": 466,
+   "hit": 0,
+   "saves": 2,
+   "ttft_ms": 50419.2,
+   "equal_to_scenario_c_on": true,
+   "output_sha256": "b272c4314622d0af91449712e9f99693e812f670a2cb1366a608aa8c524a529a",
+   "memory": {
+    "samples": 1010,
+    "observed_peak_footprint_bytes": 32728441736,
+    "peak_monotonic_s": 3725244.054633708,
+    "observed_peak_resident_bytes": 5989662720,
+    "maximum_gap_s": 0.060081582982093096,
+    "maximum_snapshot_duration_s": 0.002914958167821169
+   }
+  }
+ ],
+ "command": [
+  "/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/Helpers/ironmlx",
+  "--mlx-metallib",
+  "/Users/xin/workspace/perf-dflash2-cache-miss-prefill/dist/IronMLX.app/Contents/Resources/mlx.metallib",
+  "serve",
+  "--host",
+  "127.0.0.1",
+  "--port",
+  "18490",
+  "--network-mode",
+  "local",
+  "--model",
+  "/Users/xin/.ironmlx/models/huggingface/mlx-community--Qwen3.8-27B-4bit/snapshots/3e6447f082e89cc7f0bc6e5441afd38dfce760ff",
+  "--model-id",
+  "benchmark",
+  "--dflash2-model-dir",
+  "/Users/xin/.ironmlx/models/huggingface/z-lab--Qwen3.8-27B-DFlash2/snapshots/50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+  "--dflash2-block-size",
+  "8",
+  "--dflash2-draft-bits",
+  "4",
+  "--max-cache-cap",
+  "32768",
+  "--prefix-lru-cache-max-bytes",
+  "8589934592"
+ ],
+ "env_keys": [
+  "HOME",
+  "IRONMLX_LOG_LEVEL",
+  "LOGNAME",
+  "PATH",
+  "TMPDIR",
+  "USER"
+ ],
+ "fingerprint": "dflash2-prefix-v2:ironmlx=0.2.0;backend=mlx;kernel-contract=row-exact-v1;prefill=scheduler-b1-chunk-v2-cold-single;target=qwen38-dflash2;experimental-m5-affine4-v2;tile64=false;shape-split=false;grouped-attn=false;lane-attn=true;reference=lane-serial-not-ordinary-mlx;profile=qwen38-m5-affine4-experimental;qmm=true;attention=true;state=true;shapes=b1q2,b1q3,b1q4,b1q5,b1q6,b1q7,b1q8,b1q9,b1q10,b1q11,b1q12,b1q13,b1q14,b1q15,b1q16,b2q2,b2q3,b2q4,b2q5,b2q6,b2q7,b2q8,b3q2,b3q3,b3q4,b3q5,b3q6,b3q7,b3q8,b4q2,b4q3,b4q4,b4q5,b4q6,b4q7,b4q8,b5q2,b5q3,b5q4,b5q5,b5q6,b5q7,b5q8,b6q2,b6q3,b6q4,b6q5,b6q6,b6q7,b6q8,b7q2,b7q3,b7q4,b7q5,b7q6,b7q7,b7q8,b8q2,b8q3,b8q4,b8q5,b8q6,b8q7,b8q8;lane-pack=family=qwen3.8-27b-dflash2;revision=2;quant=affine4g64;max-lanes=64;weights=experimental-m5-affine4-v2;tile64=false;shape-split=false;grouped-attn=false;lane-attn=true;attention=experimental-tree-or-bulk-position-stable-v1;state=logical-kv-gdn-prefix-v2;submit=4;draft-dtype=bfloat16;draft-hidden=5120;draft-layer-count=5;target-layers=[5, 19, 33, 47, 61];sliding-window=2048;block-size=8",
+ "m5_profile": "active",
+ "server": {
+  "sampler": {
+   "samples": 2152,
+   "error": null,
+   "interval_s": 0.05
+  },
+  "exit_code": -15,
+  "remaining_group": [],
+  "log_sha256": "6f7d63b57d52e8a8cfa7f36fa43a5adef898a9fa57e8effc6bd94dba6e7f6206"
+ }
+}

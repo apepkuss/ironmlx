@@ -1,0 +1,31 @@
+{
+ "seed": 20261007,
+ "method": "random.Random(20261007).shuffle(['BC']*12 + ['CB']*12) (Python 3)",
+ "adaptation": "BC",
+ "rounds": [
+  "CB",
+  "CB",
+  "BC",
+  "BC",
+  "CB",
+  "CB",
+  "BC",
+  "CB",
+  "BC",
+  "CB",
+  "CB",
+  "BC",
+  "CB",
+  "CB",
+  "CB",
+  "BC",
+  "BC",
+  "BC",
+  "CB",
+  "CB",
+  "BC",
+  "BC",
+  "BC",
+  "BC"
+ ]
+}

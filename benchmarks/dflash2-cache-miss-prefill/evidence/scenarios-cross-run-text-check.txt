@@ -1,0 +1,28 @@
+single-prefill-off C vs main B-on
+  short:code-1:miss            text+finish equal hits 0 0
+  short:code-1:repeat          text+finish equal hits 62 62
+  short:code-1:append          text+finish equal hits 62 62
+  short:code-1:fork            text+finish equal hits 62 62
+  short:knowledge-1:miss       text+finish equal hits 0 0
+  short:knowledge-1:repeat     text+finish equal hits 46 46
+  short:knowledge-1:append     text+finish equal hits 46 46
+  short:knowledge-1:fork       text+finish equal hits 46 46
+cache-1g C vs main C-on
+  short:code-1:miss            text+finish equal hits 0 0
+  short:code-1:repeat          text+finish equal hits 62 62
+  short:code-1:append          text+finish equal hits 62 62
+  short:code-1:fork            text+finish equal hits 62 62
+  short:knowledge-1:miss       text+finish equal hits 0 0
+  short:knowledge-1:repeat     text+finish equal hits 46 46
+  short:knowledge-1:append     text+finish equal hits 46 46
+  short:knowledge-1:fork       text+finish equal hits 46 46
+  30k:code-1:miss              text+finish equal hits 0 0
+  30k:code-1:repeat            text+finish equal hits 0 30732
+  30k:code-1:append            text+finish equal hits 0 30732
+  30k:code-1:fork              DIFFERENT hits 0 30732
+  30k:code-1:doc-fork          text+finish equal hits 0 0
+cancel C vs main C-on
+  short:code-1:miss            text+finish equal hits 0 0
+  short:code-1:repeat          text+finish equal hits 62 62
+  short:code-1:append          text+finish equal hits 62 62
+  short:code-1:fork            text+finish equal hits 62 62

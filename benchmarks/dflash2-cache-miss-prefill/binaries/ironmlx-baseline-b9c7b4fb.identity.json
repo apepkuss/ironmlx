@@ -1,0 +1,11 @@
+{
+ "binary": "ironmlx-baseline-b9c7b4fb",
+ "sha256": "b9c7b4fb55bc5b6e51757db0361cb08ef8a1bcc1e5f66698f2fc6f264b8bdf85",
+ "source_commit": "6c1774ceeb0a5aa95f000c0705139e04770cc3d2",
+ "source_status": "clean (tracked files)",
+ "build": "MLX_DIR=/Users/xin/.local/mlx cargo build --release -p ironmlx",
+ "mlx_lib_sha256": {
+  "libmlx.a": "27f1e5d1bb1d5772d79ea527025666d3a1a7d53f9df9756e8ab656b0718f3400",
+  "mlx.metallib": "adc6967e4a81b1e33777f81f2742db8deef7e817a958ad7637aeefca1cf73a06"
+ }
+}

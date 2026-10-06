@@ -774,7 +774,7 @@ where
     let runtime_usage = Arc::new(crate::core::runtime_usage::ModelRuntimeUsageCounters::default());
     let worker_runtime_usage = Arc::clone(&runtime_usage);
     let prefix_fingerprint = format!(
-        "dflash2-prefix-v2:ironmlx={};backend=mlx;kernel-contract=row-exact-v1;prefill=scheduler-b1-chunk-v1;target={};draft-dtype={};draft-hidden={};draft-layer-count={};target-layers={:?};sliding-window={};block-size={}",
+        "dflash2-prefix-v2:ironmlx={};backend=mlx;kernel-contract=row-exact-v1;prefill=scheduler-b1-chunk-v2-cold-single;target={};draft-dtype={};draft-hidden={};draft-layer-count={};target-layers={:?};sliding-window={};block-size={}",
         env!("CARGO_PKG_VERSION"),
         target_execution_fingerprint,
         draft.config().dtype,
@@ -1030,6 +1030,16 @@ where
                 };
                 let governor = crate::core::process_memory::global_process_memory_governor();
                 let mut snapshot = governor.sample_process();
+                if super::dflash2::prefill_phase_diagnostic_enabled() {
+                    tracing::warn!(
+                        diagnostic = "dflash2_admission_pressure",
+                        level = ?snapshot.pressure_level,
+                        current_bytes = snapshot.current_usage_bytes,
+                        soft_watermark_bytes = snapshot.soft_watermark_bytes,
+                        ceiling_bytes = snapshot.effective_ceiling_bytes,
+                        "diagnostic admission memory pressure; not a formal measurement"
+                    );
+                }
                 if snapshot.pressure_level != crate::core::process_memory::PressureLevel::Normal {
                     let retain_ratio = match snapshot.pressure_level {
                         crate::core::process_memory::PressureLevel::Normal => 1.0,

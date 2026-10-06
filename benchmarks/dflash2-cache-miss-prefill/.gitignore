@@ -1,0 +1,20 @@
+# Local-only experiment artifacts (kept on disk, identities in MANIFEST.sha256
+# and binaries/*.identity.json / *.build.log).
+binaries/ironmlx-baseline-b9c7b4fb
+binaries/ironmlx-candidate-f007c386
+binaries/ironmlx-diag-phases-4efae5b0
+binaries/ironmlx-baseline-diag2-f2fc817d
+binaries/ironmlx-candidate-diag2-c40265c9
+tools/footprint-probe.dylib
+results/**/*.footprint.jsonl
+scripts/__pycache__/
+
+# Archived raw evidence; see docs/artifact-storage.md for restoration.
+checks/diag2/
+results/diag30k-hit-v1.stdout.log
+results/r1-confirmation-v1.stdout.log
+results/scenarios-docfork-v1.stdout.log
+results/diag30k-hit-v1/*.server.log
+results/r1-confirmation-v1/*.server.log
+results/scenarios-docfork-v1/*.server.log
+results/scenarios-docfork-v1/*.token-ids.jsonl

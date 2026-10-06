@@ -1,0 +1,114 @@
+diff --git a/ironmlx-runtime/src/core/dflash2.rs b/ironmlx-runtime/src/core/dflash2.rs
+index fd2719a95..2183f84bd 100644
+--- a/ironmlx-runtime/src/core/dflash2.rs
++++ b/ironmlx-runtime/src/core/dflash2.rs
+@@ -1034,16 +1034,20 @@ where
+         let mut phases = PrefillPhaseDiagnostic::start();
+ 
+         if let Some(cache) = prefix_cache.as_deref_mut() {
+-            if let Some(artifact) = cache.load_longest(&request.prompt_ids, prefix_fingerprint) {
++            let artifact = cache.load_longest(&request.prompt_ids, prefix_fingerprint);
++            PrefillPhaseDiagnostic::mark(&mut phases, "load", 0);
++            if let Some(artifact) = artifact {
+                 let restore_result = restore_prefix_entry_for_row(
+                     &mut target_cache,
+                     &artifact.target_cache,
+                     0,
+                     artifact.cached_len,
+-                )
+-                .and_then(|()| {
++                );
++                PrefillPhaseDiagnostic::mark(&mut phases, "restore_graph", artifact.cached_len);
++                let restore_result = restore_result.and_then(|()| {
+                     materialize_dflash2_target_cache_prefix(&target_cache, artifact.cached_len)
+                 });
++                PrefillPhaseDiagnostic::mark(&mut phases, "materialize", artifact.cached_len);
+                 match restore_result {
+                     Ok(()) => {
+                         position = artifact.cached_len;
+@@ -3742,28 +3746,41 @@ fn prefill_chunk_cache_reset_requested() -> bool {
+ /// prefill's existing synchronization points; adds no evaluation.
+ struct PrefillPhaseDiagnostic {
+     last: Instant,
+-    phases: Vec<(&'static str, i32, u64)>,
++    /// (phase, size, elapsed us, MLX active MiB, MLX cache MiB, footprint MiB)
++    phases: Vec<(&'static str, i32, u64, usize, usize, usize)>,
++}
++
++pub(crate) fn prefill_phase_diagnostic_enabled() -> bool {
++    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ENABLED.get_or_init(|| {
++        std::env::var("IRONMLX_DIAGNOSTIC_DFLASH2_PREFILL_PHASES").as_deref() == Ok("1")
++    })
+ }
+ 
+ impl PrefillPhaseDiagnostic {
+     fn start() -> Option<Self> {
+-        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+-        ENABLED
+-            .get_or_init(|| {
+-                std::env::var("IRONMLX_DIAGNOSTIC_DFLASH2_PREFILL_PHASES").as_deref() == Ok("1")
+-            })
+-            .then(|| Self {
+-                last: Instant::now(),
+-                phases: Vec::new(),
+-            })
++        prefill_phase_diagnostic_enabled().then(|| Self {
++            last: Instant::now(),
++            phases: Vec::new(),
++        })
+     }
+ 
+     fn mark(this: &mut Option<Self>, phase: &'static str, size: i32) {
+         if let Some(this) = this {
+             let now = Instant::now();
+             let us = u64::try_from((now - this.last).as_micros()).unwrap_or(u64::MAX);
+-            this.phases.push((phase, size, us));
+-            this.last = now;
++            // Counter reads only; no evaluation.
++            let memory = mlx::memory::snapshot();
++            let footprint = super::process_memory::macos_phys_footprint_bytes().unwrap_or(0);
++            this.phases.push((
++                phase,
++                size,
++                us,
++                memory.active_bytes >> 20,
++                memory.cache_bytes >> 20,
++                footprint >> 20,
++            ));
++            this.last = Instant::now();
+         }
+     }
+ 
+@@ -3777,7 +3794,9 @@ impl PrefillPhaseDiagnostic {
+             let phases = this
+                 .phases
+                 .iter()
+-                .map(|(phase, size, us)| format!("{phase}:{size}:{us}"))
++                .map(|(phase, size, us, active, cache, footprint)| {
++                    format!("{phase}:{size}:{us}:{active}:{cache}:{footprint}")
++                })
+                 .collect::<Vec<_>>()
+                 .join(",");
+             tracing::warn!(
+diff --git a/ironmlx-runtime/src/core/dflash2_actor.rs b/ironmlx-runtime/src/core/dflash2_actor.rs
+index ff8040f6b..317ec4033 100644
+--- a/ironmlx-runtime/src/core/dflash2_actor.rs
++++ b/ironmlx-runtime/src/core/dflash2_actor.rs
+@@ -1030,6 +1030,16 @@ where
+                 };
+                 let governor = crate::core::process_memory::global_process_memory_governor();
+                 let mut snapshot = governor.sample_process();
++                if super::dflash2::prefill_phase_diagnostic_enabled() {
++                    tracing::warn!(
++                        diagnostic = "dflash2_admission_pressure",
++                        level = ?snapshot.pressure_level,
++                        current_bytes = snapshot.current_usage_bytes,
++                        soft_watermark_bytes = snapshot.soft_watermark_bytes,
++                        ceiling_bytes = snapshot.effective_ceiling_bytes,
++                        "diagnostic admission memory pressure; not a formal measurement"
++                    );
++                }
+                 if snapshot.pressure_level != crate::core::process_memory::PressureLevel::Normal {
+                     let retain_ratio = match snapshot.pressure_level {
+                         crate::core::process_memory::PressureLevel::Normal => 1.0,

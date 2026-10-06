@@ -1,0 +1,107 @@
+diff --git a/ironmlx-runtime/src/core/dflash2.rs b/ironmlx-runtime/src/core/dflash2.rs
+index 4f771299d..13049feb2 100644
+--- a/ironmlx-runtime/src/core/dflash2.rs
++++ b/ironmlx-runtime/src/core/dflash2.rs
+@@ -1023,6 +1023,7 @@ where
+         let mut position = 0_i32;
+         let mut prefix_cache_hit_tokens = 0_usize;
+         let prompt_len_i32 = i32::try_from(prompt_len).context("DFlash2 prompt is too long")?;
++        let mut phases = PrefillPhaseDiagnostic::start();
+ 
+         if let Some(cache) = prefix_cache.as_deref_mut() {
+             if let Some(artifact) = cache.load_longest(&request.prompt_ids, prefix_fingerprint) {
+@@ -1054,6 +1055,7 @@ where
+                 }
+             }
+         }
++        PrefillPhaseDiagnostic::mark(&mut phases, "lookup", position);
+ 
+         while position < prompt_len_i32 {
+             // Experimental, default off: at each bulk chunk boundary release
+@@ -1106,6 +1108,7 @@ where
+                 .as_ref()
+                 .ok_or_else(|| anyhow!("DFlash2 prefill retained no final hidden"))?;
+             mlx::transforms::eval(&[retained, chunk_last_hidden])?;
++            PrefillPhaseDiagnostic::mark(&mut phases, "chunk", chunk_len);
+             memory_phase_diagnostic("prefill_chunk_evaluated", position + chunk_len, prompt_len);
+             ensure_dflash2_request_not_cancelled(is_cancelled)?;
+             // Dense and linear target state is materially larger than an
+@@ -1139,6 +1142,7 @@ where
+                         "DFlash2 cross-request prefix save skipped"
+                     ),
+                 }
++                PrefillPhaseDiagnostic::mark(&mut phases, "save", stop as i32);
+             }
+             position += chunk_len;
+         }
+@@ -1157,6 +1161,8 @@ where
+         // logically independent.
+         mlx::transforms::eval(&[&first_logits])?;
+         mlx::transforms::eval(&[&context_hidden])?;
++        PrefillPhaseDiagnostic::mark(&mut phases, "first_logits", 1);
++        PrefillPhaseDiagnostic::finish(phases, prefill_execution, prompt_len, prefix_cache_hit_tokens);
+         memory_phase_diagnostic("first_logits_evaluated", prompt_len_i32, prompt_len);
+         ensure_dflash2_request_not_cancelled(is_cancelled)?;
+         let prefill_us = elapsed_us(prefill_started);
+@@ -3711,6 +3717,61 @@ fn prefill_chunk_cache_reset_requested() -> bool {
+     })
+ }
+ 
++/// Diagnostic-only prefill phase timing, enabled by
++/// `IRONMLX_DIAGNOSTIC_DFLASH2_PREFILL_PHASES=1`. Reads the clock only at the
++/// prefill's existing synchronization points; adds no evaluation.
++struct PrefillPhaseDiagnostic {
++    last: Instant,
++    phases: Vec<(&'static str, i32, u64)>,
++}
++
++impl PrefillPhaseDiagnostic {
++    fn start() -> Option<Self> {
++        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++        ENABLED
++            .get_or_init(|| {
++                std::env::var("IRONMLX_DIAGNOSTIC_DFLASH2_PREFILL_PHASES").as_deref() == Ok("1")
++            })
++            .then(|| Self {
++                last: Instant::now(),
++                phases: Vec::new(),
++            })
++    }
++
++    fn mark(this: &mut Option<Self>, phase: &'static str, size: i32) {
++        if let Some(this) = this {
++            let now = Instant::now();
++            let us = u64::try_from((now - this.last).as_micros()).unwrap_or(u64::MAX);
++            this.phases.push((phase, size, us));
++            this.last = now;
++        }
++    }
++
++    fn finish(
++        this: Option<Self>,
++        execution: DFlash2PrefillExecution,
++        prompt_len: usize,
++        hit_tokens: usize,
++    ) {
++        if let Some(this) = this {
++            let phases = this
++                .phases
++                .iter()
++                .map(|(phase, size, us)| format!("{phase}:{size}:{us}"))
++                .collect::<Vec<_>>()
++                .join(",");
++            tracing::warn!(
++                diagnostic = "dflash2_prefill_phases",
++                execution = ?execution,
++                prompt_len,
++                hit_tokens,
++                phases,
++                "diagnostic prefill phases; not a formal measurement"
++            );
++        }
++    }
++}
++
+ fn memory_phase_diagnostic(phase: &str, position: i32, prompt_len: usize) {
+     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+     if !*ENABLED

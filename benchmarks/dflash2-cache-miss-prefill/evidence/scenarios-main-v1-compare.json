@@ -1,0 +1,388 @@
+{
+ "label": "scenarios-main-v1",
+ "input_sha256": "7465d2dba8866f0b57588a7fbcb7d07e1c213adcc0842534b9e978db7e51ae14",
+ "failures": {},
+ "pairs": {
+  "C-on:B-off": {
+   "short:code-1:miss": "equal",
+   "short:code-1:repeat": "equal",
+   "short:code-1:append": "equal",
+   "short:code-1:fork": "differs at token 226 (490 vs 428)",
+   "short:knowledge-1:miss": "equal",
+   "short:knowledge-1:repeat": "equal",
+   "short:knowledge-1:append": "equal",
+   "short:knowledge-1:fork": "differs at token 120 (1041 vs 1051)",
+   "short:code-3:miss": "equal",
+   "short:code-3:repeat": "equal",
+   "short:code-3:append": "differs at token 26 (50 vs 53)",
+   "short:code-3:fork": "differs at token 118 (930 vs 1017)",
+   "30k:code-1:miss": "equal",
+   "30k:code-1:repeat": "equal",
+   "30k:code-1:append": "equal",
+   "30k:code-1:fork": "differs at token 66 (217 vs 195)",
+   "30k:code-1:doc-fork": "text equal (token record truncated)"
+  },
+  "C-on:C-off": {
+   "short:code-1:miss": "equal",
+   "short:code-1:repeat": "equal",
+   "short:code-1:append": "equal",
+   "short:code-1:fork": "differs at token 226 (490 vs 428)",
+   "short:knowledge-1:miss": "equal",
+   "short:knowledge-1:repeat": "equal",
+   "short:knowledge-1:append": "equal",
+   "short:knowledge-1:fork": "differs at token 120 (1041 vs 1051)",
+   "short:code-3:miss": "equal",
+   "short:code-3:repeat": "equal",
+   "short:code-3:append": "differs at token 26 (50 vs 53)",
+   "short:code-3:fork": "differs at token 118 (930 vs 1017)",
+   "30k:code-1:miss": "equal",
+   "30k:code-1:repeat": "equal",
+   "30k:code-1:append": "equal",
+   "30k:code-1:fork": "differs at token 66 (217 vs 195)",
+   "30k:code-1:doc-fork": "text equal (token record truncated)"
+  },
+  "C-off:B-off": {
+   "short:code-1:miss": "equal",
+   "short:code-1:repeat": "equal",
+   "short:code-1:append": "equal",
+   "short:code-1:fork": "equal",
+   "short:knowledge-1:miss": "equal",
+   "short:knowledge-1:repeat": "equal",
+   "short:knowledge-1:append": "equal",
+   "short:knowledge-1:fork": "equal",
+   "short:code-3:miss": "equal",
+   "short:code-3:repeat": "equal",
+   "short:code-3:append": "equal",
+   "short:code-3:fork": "equal",
+   "30k:code-1:miss": "equal",
+   "30k:code-1:repeat": "equal",
+   "30k:code-1:append": "equal",
+   "30k:code-1:fork": "equal",
+   "30k:code-1:doc-fork": "text equal (token record truncated)"
+  },
+  "C-on:B-on": {
+   "short:code-1:miss": "equal",
+   "short:code-1:repeat": "equal",
+   "short:code-1:append": "equal",
+   "short:code-1:fork": "equal",
+   "short:knowledge-1:miss": "equal",
+   "short:knowledge-1:repeat": "equal",
+   "short:knowledge-1:append": "equal",
+   "short:knowledge-1:fork": "equal",
+   "short:code-3:miss": "equal",
+   "short:code-3:repeat": "equal",
+   "short:code-3:append": "equal",
+   "short:code-3:fork": "equal",
+   "30k:code-1:miss": "equal",
+   "30k:code-1:repeat": "equal",
+   "30k:code-1:append": "equal",
+   "30k:code-1:fork": "equal",
+   "30k:code-1:doc-fork": "text equal (token record truncated)"
+  }
+ },
+ "self": {
+  "C-on:short:code-1:miss=short:code-1:repeat": true,
+  "C-on:short:knowledge-1:miss=short:knowledge-1:repeat": true,
+  "C-on:short:code-3:miss=short:code-3:repeat": true,
+  "C-on:30k:code-1:miss=30k:code-1:repeat": true,
+  "B-on:short:code-1:miss=short:code-1:repeat": true
+ },
+ "hits": {
+  "B-on": {
+   "warmup:warmup:warmup": [
+    0,
+    2
+   ],
+   "short:code-1:miss": [
+    0,
+    2
+   ],
+   "short:code-1:repeat": [
+    62,
+    0
+   ],
+   "short:code-1:append": [
+    62,
+    1
+   ],
+   "short:code-1:fork": [
+    62,
+    1
+   ],
+   "short:knowledge-1:miss": [
+    0,
+    2
+   ],
+   "short:knowledge-1:repeat": [
+    46,
+    0
+   ],
+   "short:knowledge-1:append": [
+    46,
+    1
+   ],
+   "short:knowledge-1:fork": [
+    46,
+    1
+   ],
+   "short:code-3:miss": [
+    0,
+    2
+   ],
+   "short:code-3:repeat": [
+    83,
+    0
+   ],
+   "short:code-3:append": [
+    83,
+    1
+   ],
+   "short:code-3:fork": [
+    83,
+    1
+   ],
+   "30k:code-1:miss": [
+    0,
+    2
+   ],
+   "30k:code-1:repeat": [
+    30732,
+    0
+   ],
+   "30k:code-1:append": [
+    30732,
+    1
+   ],
+   "30k:code-1:fork": [
+    30732,
+    1
+   ],
+   "30k:code-1:doc-fork": [
+    0,
+    2
+   ]
+  },
+  "B-off": {
+   "warmup:warmup:warmup": [
+    0,
+    0
+   ],
+   "short:code-1:miss": [
+    0,
+    0
+   ],
+   "short:code-1:repeat": [
+    0,
+    0
+   ],
+   "short:code-1:append": [
+    0,
+    0
+   ],
+   "short:code-1:fork": [
+    0,
+    0
+   ],
+   "short:knowledge-1:miss": [
+    0,
+    0
+   ],
+   "short:knowledge-1:repeat": [
+    0,
+    0
+   ],
+   "short:knowledge-1:append": [
+    0,
+    0
+   ],
+   "short:knowledge-1:fork": [
+    0,
+    0
+   ],
+   "short:code-3:miss": [
+    0,
+    0
+   ],
+   "short:code-3:repeat": [
+    0,
+    0
+   ],
+   "short:code-3:append": [
+    0,
+    0
+   ],
+   "short:code-3:fork": [
+    0,
+    0
+   ],
+   "30k:code-1:miss": [
+    0,
+    0
+   ],
+   "30k:code-1:repeat": [
+    0,
+    0
+   ],
+   "30k:code-1:append": [
+    0,
+    0
+   ],
+   "30k:code-1:fork": [
+    0,
+    0
+   ],
+   "30k:code-1:doc-fork": [
+    0,
+    0
+   ]
+  },
+  "C-on": {
+   "warmup:warmup:warmup": [
+    0,
+    1
+   ],
+   "short:code-1:miss": [
+    0,
+    1
+   ],
+   "short:code-1:repeat": [
+    62,
+    0
+   ],
+   "short:code-1:append": [
+    62,
+    1
+   ],
+   "short:code-1:fork": [
+    62,
+    1
+   ],
+   "short:knowledge-1:miss": [
+    0,
+    1
+   ],
+   "short:knowledge-1:repeat": [
+    46,
+    0
+   ],
+   "short:knowledge-1:append": [
+    46,
+    1
+   ],
+   "short:knowledge-1:fork": [
+    46,
+    1
+   ],
+   "short:code-3:miss": [
+    0,
+    1
+   ],
+   "short:code-3:repeat": [
+    83,
+    0
+   ],
+   "short:code-3:append": [
+    83,
+    1
+   ],
+   "short:code-3:fork": [
+    83,
+    1
+   ],
+   "30k:code-1:miss": [
+    0,
+    2
+   ],
+   "30k:code-1:repeat": [
+    30732,
+    0
+   ],
+   "30k:code-1:append": [
+    30732,
+    1
+   ],
+   "30k:code-1:fork": [
+    30732,
+    1
+   ],
+   "30k:code-1:doc-fork": [
+    0,
+    2
+   ]
+  },
+  "C-off": {
+   "warmup:warmup:warmup": [
+    0,
+    0
+   ],
+   "short:code-1:miss": [
+    0,
+    0
+   ],
+   "short:code-1:repeat": [
+    0,
+    0
+   ],
+   "short:code-1:append": [
+    0,
+    0
+   ],
+   "short:code-1:fork": [
+    0,
+    0
+   ],
+   "short:knowledge-1:miss": [
+    0,
+    0
+   ],
+   "short:knowledge-1:repeat": [
+    0,
+    0
+   ],
+   "short:knowledge-1:append": [
+    0,
+    0
+   ],
+   "short:knowledge-1:fork": [
+    0,
+    0
+   ],
+   "short:code-3:miss": [
+    0,
+    0
+   ],
+   "short:code-3:repeat": [
+    0,
+    0
+   ],
+   "short:code-3:append": [
+    0,
+    0
+   ],
+   "short:code-3:fork": [
+    0,
+    0
+   ],
+   "30k:code-1:miss": [
+    0,
+    0
+   ],
+   "30k:code-1:repeat": [
+    0,
+    0
+   ],
+   "30k:code-1:append": [
+    0,
+    0
+   ],
+   "30k:code-1:fork": [
+    0,
+    0
+   ],
+   "30k:code-1:doc-fork": [
+    0,
+    0
+   ]
+  }
+ }
+}

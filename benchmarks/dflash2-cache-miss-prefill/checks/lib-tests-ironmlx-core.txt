@@ -1,0 +1,1719 @@
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/array.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/array.h:7:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/array.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/array.h:7:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/compile.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/compile.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/compile.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/compile.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/conv.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/conv.h:6:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/conv.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/conv.h:6:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/fft.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/fft.h:2:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/fft.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/fft.h:2:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/stream.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/stream.h:8:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/stream.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/stream.h:8:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/fast.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/fast.h:8:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/fast.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/fast.h:8:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/io.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/io.h:14:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/io.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/io.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/io.h:14:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/io.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/quantization.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/quantization.h:10:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/quantization.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/quantization.h:10:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/random.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/random.h:7:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from /Users/xin/workspace/perf-dflash2-cache-miss-prefill/target/release/build/mlx-sys-c70323354732901d/out/cxxbridge/sources/mlx-sys/src/bridge/random.rs.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/random.h:7:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from shim/src/array.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/array.h:7:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from shim/src/array.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/array.h:7:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from shim/src/compile.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/compile.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from shim/src/compile.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/compile.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from shim/src/conv.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/conv.h:6:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from shim/src/conv.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/conv.h:6:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from shim/src/fft.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/fft.h:2:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from shim/src/fft.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/fft.h:2:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from shim/src/transforms.cc:3:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from shim/src/transforms.cc:3:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from shim/src/stream.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/stream.h:8:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from shim/src/stream.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/stream.h:8:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from shim/src/fast.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/fast.h:8:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from shim/src/fast.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/fast.h:8:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from shim/src/prefill_d256_nax.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/prefill_d256_nax.h:4:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from shim/src/prefill_d256_nax.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/prefill_d256_nax.h:4:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: In file included from shim/src/prefill_d256_nax.cc:14:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:108:47: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   108 |   virtual bool is_equivalent(const Primitive& other) const {
+warning: mlx-sys@0.2.0:       |                                               ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:172:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   172 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:186:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   186 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:244:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   244 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:258:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   258 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:272:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   272 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:286:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   286 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:300:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   300 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:314:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   314 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:328:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   328 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:497:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   497 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:625:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   625 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:704:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   704 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:800:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   800 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:817:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   817 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:831:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   831 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:918:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   918 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:934:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   934 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:950:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   950 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:964:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   964 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:978:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   978 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1006:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1006 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1020:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1020 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1034:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1034 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1138:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1138 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1152:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1152 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1211:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1211 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1225:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1225 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1261:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1261 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1275:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1275 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1289:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1289 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1328:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1328 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1374:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1374 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1388:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1388 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1402:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1402 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1416:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1416 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1430:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1430 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1444:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1444 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1458:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1458 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1472:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1472 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1486:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1486 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1500:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1500 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1514:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1514 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1536:62: warning: unused parameter 'inputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1536 |   std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
+warning: mlx-sys@0.2.0:       |                                                              ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1612:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1612 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1796:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1796 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1878:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1878 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2018:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2018 |   DEFINE_DEFAULT_IS_EQUIVALENT();
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2032:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2032 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2046:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2046 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2060:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2060 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2074:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2074 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2303:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2303 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2344:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2344 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2361:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2361 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2400:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2400 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2414:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2414 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: 61 warnings generated.
+warning: mlx-sys@0.2.0: In file included from shim/src/prefill_masked_softmax.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/prefill_masked_softmax.h:4:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from shim/src/prefill_masked_softmax.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/prefill_masked_softmax.h:4:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: In file included from shim/src/prefill_masked_softmax.cc:13:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/fast_primitives.h:7:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:108:47: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   108 |   virtual bool is_equivalent(const Primitive& other) const {
+warning: mlx-sys@0.2.0:       |                                               ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:172:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   172 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:186:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   186 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:244:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   244 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:258:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   258 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:272:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   272 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:286:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   286 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:300:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   300 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:314:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   314 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:328:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   328 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:497:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   497 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:625:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   625 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:704:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   704 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:800:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   800 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:817:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   817 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:831:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   831 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:918:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   918 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:934:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   934 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:950:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   950 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:964:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   964 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:978:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   978 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1006:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1006 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1020:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1020 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1034:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1034 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1138:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1138 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1152:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1152 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1211:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1211 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1225:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1225 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1261:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1261 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1275:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1275 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1289:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1289 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1328:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1328 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1374:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1374 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1388:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1388 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1402:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1402 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1416:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1416 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1430:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1430 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1444:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1444 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1458:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1458 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1472:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1472 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1486:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1486 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1500:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1500 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1514:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1514 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1536:62: warning: unused parameter 'inputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1536 |   std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
+warning: mlx-sys@0.2.0:       |                                                              ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1612:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1612 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1796:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1796 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1878:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1878 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2018:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2018 |   DEFINE_DEFAULT_IS_EQUIVALENT();
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2032:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2032 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2046:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2046 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2060:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2060 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2074:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2074 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2303:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2303 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2344:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2344 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2361:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2361 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2400:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2400 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2414:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2414 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: In file included from shim/src/prefill_masked_softmax.cc:13:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:50:43: warning: unused parameter 'inputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    50 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                           ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:50:71: warning: unused parameter 'outputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    50 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:83:43: warning: unused parameter 'inputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    83 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                           ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:83:71: warning: unused parameter 'outputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    83 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:110:43: warning: unused parameter 'inputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   110 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                           ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:110:71: warning: unused parameter 'outputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   110 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:142:43: warning: unused parameter 'inputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   142 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                           ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:142:71: warning: unused parameter 'outputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   142 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:178:43: warning: unused parameter 'inputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   178 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                           ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:178:71: warning: unused parameter 'outputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   178 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:237:43: warning: unused parameter 'inputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   237 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                           ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:237:71: warning: unused parameter 'outputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   237 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:288:43: warning: unused parameter 'inputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   288 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                           ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:288:71: warning: unused parameter 'outputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   288 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:403:43: warning: unused parameter 'inputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   403 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                           ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/fast_primitives.h:403:71: warning: unused parameter 'outputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   403 |   void eval_cpu(const std::vector<array>& inputs, std::vector<array>& outputs)
+warning: mlx-sys@0.2.0:       |                                                                       ^
+warning: mlx-sys@0.2.0: 77 warnings generated.
+warning: mlx-sys@0.2.0: In file included from shim/src/prefill_qmm_mtile.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/prefill_qmm_mtile.h:4:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from shim/src/prefill_qmm_mtile.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/prefill_qmm_mtile.h:4:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: In file included from shim/src/prefill_qmm_mtile.cc:12:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:108:47: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   108 |   virtual bool is_equivalent(const Primitive& other) const {
+warning: mlx-sys@0.2.0:       |                                               ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:172:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   172 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:186:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   186 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:244:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   244 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:258:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   258 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:272:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   272 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:286:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   286 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:300:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   300 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:314:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   314 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:328:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   328 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:497:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   497 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:625:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   625 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:704:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   704 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:800:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   800 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:817:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   817 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:831:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   831 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:918:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   918 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:934:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   934 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:950:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   950 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:964:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   964 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:978:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:   978 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1006:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1006 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1020:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1020 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1034:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1034 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1138:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1138 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1152:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1152 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1211:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1211 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1225:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1225 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1261:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1261 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1275:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1275 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1289:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1289 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1328:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1328 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1374:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1374 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1388:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1388 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1402:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1402 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1416:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1416 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1430:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1430 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1444:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1444 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1458:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1458 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1472:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1472 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1486:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1486 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1500:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1500 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1514:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1514 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1536:62: warning: unused parameter 'inputs' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1536 |   std::vector<Shape> output_shapes(const std::vector<array>& inputs) override {
+warning: mlx-sys@0.2.0:       |                                                              ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1612:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1612 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1796:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1796 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:1878:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  1878 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2018:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2018 |   DEFINE_DEFAULT_IS_EQUIVALENT();
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2032:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2032 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2046:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2046 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2060:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2060 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2074:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2074 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2303:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2303 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2344:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2344 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2361:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2361 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2400:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2400 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:2414:3: warning: unused parameter 'other' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:  2414 |   DEFINE_DEFAULT_IS_EQUIVALENT()
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/primitives.h:36:39: note: expanded from macro 'DEFINE_DEFAULT_IS_EQUIVALENT'
+warning: mlx-sys@0.2.0:    36 |   bool is_equivalent(const Primitive& other) const override { \
+warning: mlx-sys@0.2.0:       |                                       ^
+warning: mlx-sys@0.2.0: 61 warnings generated.
+warning: mlx-sys@0.2.0: In file included from shim/src/io.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/io.h:14:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/io.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from shim/src/io.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/io.h:14:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/io.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from shim/src/quantization.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/quantization.h:10:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from shim/src/quantization.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/quantization.h:10:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+warning: mlx-sys@0.2.0: In file included from shim/src/random.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/random.h:7:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:10:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:36: warning: unused parameter 'ptr' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                    ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:39:48: warning: unused parameter 'size' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    39 |   virtual Buffer make_buffer(void* ptr, size_t size) {
+warning: mlx-sys@0.2.0:       |                                                ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/allocator.h:42:31: warning: unused parameter 'buffer' [-Wunused-parameter]
+warning: mlx-sys@0.2.0:    42 |   virtual void release(Buffer buffer) {}
+warning: mlx-sys@0.2.0:       |                               ^
+warning: mlx-sys@0.2.0: In file included from shim/src/random.cc:1:
+warning: mlx-sys@0.2.0: In file included from shim/include/cxx_mlx_shim/random.h:7:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/array.h:12:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/dtype.h:9:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/complex.h:5:
+warning: mlx-sys@0.2.0: In file included from /Users/xin/.local/mlx/include/mlx/types/half_types.h:32:
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:29:3: warning: definition of implicit copy assignment operator for '_MLX_BFloat16' is deprecated because it has a user-declared copy constructor [-Wdeprecated-copy]
+warning: mlx-sys@0.2.0:    29 |   _MLX_BFloat16(_MLX_BFloat16 const&) = default;
+warning: mlx-sys@0.2.0:       |   ^
+warning: mlx-sys@0.2.0: /Users/xin/.local/mlx/include/mlx/types/bf16.h:38:19: note: in implicit copy assignment operator for 'mlx::core::_MLX_BFloat16' first required here
+warning: mlx-sys@0.2.0:    38 |     return (*this = _MLX_BFloat16(x));
+warning: mlx-sys@0.2.0:       |                   ^
+warning: mlx-sys@0.2.0: 4 warnings generated.
+    Finished `release` profile [optimized] target(s) in 0.05s
+     Running unittests src/lib.rs (target/release/deps/ironmlx_core-d1a39990f397305f)
+
+running 98 tests
+test m5_profile::tests::embedded_libraries_match_the_qualified_kernels ... ok
+test m5_profile::tests::explicit_setting_overrides_profile_value ... ok
+test m5_profile::tests::generation_parses_apple_gpu_names ... ok
+test m5_profile::tests::profile_is_active_only_for_dflash2_on_g17_and_newer ... ok
+test nn::embedding::tests::runtime_count_single_token_dispatch_cost ... ignored
+test m5_profile::tests::materialized_library_is_content_addressed_and_reused ... ok
+test nn::conv::tests::conv1d_construction_from_components ... ok
+test nn::embedding::tests::quantized_embedding_decode_fast_path_rejects_unqualified_bits ... ok
+test nn::conv::tests::conv1d_forward_shape_depthwise ... ok
+test nn::embedding::tests::affine_5bit_and_6bit_lookup_and_tied_output_match_native_mlx ... ok
+test nn::embedding::tests::as_output_tied_projection ... ok
+test nn::linear::tests::non_power_of_two_affine_widths_recover_exact_input_features ... ok
+test nn::embedding::tests::fp_forward_lookup ... ok
+test nn::embedding::tests::mxfp4_lookup_and_output_match_native_mlx ... ok
+test nn::embedding::tests::mxfp8_lookup_and_output_match_native_mlx ... ok
+test nn::embedding::tests::optiq_quantized_single_token_forward_matches_dequantize_bfloat16 ... ok
+test nn::embedding::tests::quantized_2bit_single_token_forward_matches_dequantize_float32 ... ok
+test nn::embedding::tests::quantized_8bit_multi_token_forward_matches_dequantize_bfloat16 ... ok
+test nn::embedding::tests::quantized_8bit_single_token_forward_matches_dequantize_bfloat16 ... ok
+test nn::embedding::tests::quantized_multi_token_forward_matches_dequantize_float32 ... ok
+test nn::embedding::tests::quantized_single_token_forward_matches_dequantize_bfloat16 ... ok
+test sampler::tests::apply_min_p_batched_filters_below_threshold ... ok
+test sampler::tests::apply_penalties_frequency_subtracts_count_times_penalty ... ok
+test sampler::tests::apply_penalties_presence_subtracts_once_per_token ... ok
+test sampler::tests::apply_penalties_repetition_divides_seen_when_positive ... ok
+test sampler::tests::apply_penalties_short_circuit_when_no_history_needed ... ok
+test sampler::tests::apply_temperature_scales_per_row ... ok
+test sampler::tests::apply_top_k_batched_keeps_top_k_per_row ... ok
+test nn::embedding::tests::quantized_single_token_forward_matches_dequantize_float32 ... ok
+test sampler::tests::apply_top_k_batched_mixed_per_row ... ok
+test sampler::tests::apply_top_k_batched_uniform_per_row_uses_partition_fast_path ... ok
+test sampler::tests::batched_uniform_draw_is_deterministic_and_advances_once ... ok
+test sampler::tests::build_history_count_per_row_bincount ... ok
+test sampler::tests::collect_per_row_configs_defaults_and_overrides ... ok
+test sampler::tests::compact_sampling_support_falls_back_on_boundary_tie_or_missing_mass ... ok
+test sampler::tests::compact_sampling_support_matches_full_nucleus_when_boundary_is_strict ... ok
+test sampler::tests::configured_mixed_batch_keeps_greedy_row_deterministic ... ok
+test sampler::tests::greedy_picks_argmax ... ok
+test sampler::tests::is_greedy_false_when_repetition_penalty_set ... ok
+test sampler::tests::is_greedy_false_when_temperature_set ... ok
+test sampler::tests::is_greedy_ignores_sampling_filters_at_zero_temperature ... ok
+test sampler::tests::is_greedy_true_for_default ... ok
+test sampler::tests::is_pipelinable_accepts_greedy ... ok
+test sampler::tests::is_pipelinable_rejects_frequency_penalty ... ok
+test sampler::tests::is_pipelinable_rejects_presence_penalty ... ok
+test sampler::tests::is_pipelinable_rejects_repetition_penalty ... ok
+test sampler::tests::is_pipelinable_rejects_temperature ... ok
+test sampler::tests::partial_top_p_filter_matches_full_sort ... ok
+test sampler::tests::partial_top_p_filter_matches_full_sort_on_boundary_tie ... ok
+test sampler::tests::apply_top_p_batched_keeps_nucleus_first_crossing_retained ... ok
+test nn::embedding::tests::runtime_count_kernel_is_bitwise_identical ... ok
+test sampler::tests::position_keyed_sampling_is_explicit_and_versioned ... ok
+test sampler::tests::probe_argsort_inverse_permutation_identity ... ok
+test sampler::tests::probe_categorical_batched_single_key_independent_rows ... ok
+test sampler::tests::probe_slice_update_per_row_bench ... ignored
+test sampler::tests::probe_slice_update_per_row_round_trip ... ok
+test sampler::tests::probe_sort_vs_partition_vocab_151k ... ignored
+test sampler::tests::renormalize_rows_sum_to_one ... ok
+test sampler::tests::repetition_penalty_demotes_history_tokens ... ok
+test sampler::tests::sample_async_greedy_rejects_penalty ... ok
+test sampler::tests::sample_async_greedy_rejects_temperature ... ok
+test sampler::tests::sample_async_greedy_returns_lazy_array_with_correct_token ... ok
+test sampler::tests::sample_batch_3d_logits_errs ... ok
+test sampler::tests::sample_batch_all_greedy_returns_per_row_argmax ... ok
+test sampler::tests::sample_batch_all_greedy_still_uses_fast_path ... ok
+test sampler::tests::sample_batch_b1_greedy ... ok
+test sampler::tests::sample_batch_configured_fallback_no_panic_in_range ... ok
+test sampler::tests::sample_batch_mismatched_histories_errs ... ok
+test sampler::tests::sample_batch_mismatched_samplers_errs ... ok
+test sampler::tests::sample_batch_mixed_batch_uses_configured_pipeline_no_panic ... ok
+test sampler::tests::sample_batch_no_op_default_configured_pipeline_in_range ... ok
+test sampler::tests::sample_batch_zero_temperature_with_http_filters_returns_argmax ... ok
+test sampler::tests::sampling_history_is_required_only_for_effective_penalties ... ok
+test sampler::tests::position_keyed_sampling_is_batch_shape_independent ... ok
+test nn::linear::tests::fp_forward_matches_manual_matmul ... ok
+test nn::linear::tests::fp_dtype_preserved ... ok
+test weights::tests::affine_storage_rejects_inconsistent_parameter_shapes ... ok
+test weights::tests::affine_storage_rejects_invalid_dtype_and_missing_biases ... ok
+test weights::tests::affine_storage_rejects_invalid_group_and_packed_width ... ok
+test sampler::tests::temperature_zero_is_greedy ... ok
+test nn::linear::tests::fp_forward_with_bias ... ok
+test weights::tests::mxfp_storage_requires_uint8_scales_without_quant_biases ... ok
+test weights::tests::packed_columns_recover_exact_logical_width ... ok
+test sampler::tests::temperature_sample_runs ... ok
+test nn::linear::tests::mxfp4_forward_matches_native_mlx ... ok
+test sampler::tests::target_token_sampling_matches_distribution_sampling ... ok
+test nn::linear::tests::mxfp8_forward_matches_native_mlx ... ok
+test nn::linear::tests::optiq_quantized_forward_uses_independent_mode_with_affine_backend ... ok
+test nn::linear::tests::new_quant_round_trips_via_from_loader_shape ... ok
+test nn::linear::tests::quantized_2bit_forward_matches_mlx_float32 ... ok
+test nn::linear::tests::quantized_5bit_and_6bit_forward_match_mlx_bfloat16 ... ok
+test nn::linear::tests::quantized_8bit_forward_matches_mlx_bfloat16 ... ok
+test nn::norm::tests::layernorm_preserves_input_dtype_with_bf16_parameters ... ok
+test nn::norm::tests::layernorm_runs_without_panic ... ok
+test nn::norm::tests::rms_norm_gated_none_path_shape_dtype ... ok
+test nn::norm::tests::rms_norm_gated_with_gate_matches_silu_rmsnorm ... ok
+test nn::norm::tests::rmsnorm_unit_weight_normalizes ... ok
+test sampler::tests::position_keyed_sampling_honors_filters_and_position_key ... ok
+
+test result: ok. 95 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 1.77s
+
+exit=0

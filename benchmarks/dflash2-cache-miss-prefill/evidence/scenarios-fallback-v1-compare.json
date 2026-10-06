@@ -1,0 +1,264 @@
+{
+ "label": "scenarios-fallback-v1",
+ "input_sha256": "cbccdfbcd0530c26d6bd25a8ced5a0300146c27699a204ed8962f51396eecb28",
+ "failures": {},
+ "pairs": {
+  "C-on-profile-off:B-on-profile-off": {
+   "short:code-1:miss": "equal",
+   "short:code-1:repeat": "equal",
+   "short:code-1:append": "equal",
+   "short:code-1:fork": "equal",
+   "short:knowledge-1:miss": "equal",
+   "short:knowledge-1:repeat": "equal",
+   "short:knowledge-1:append": "equal",
+   "short:knowledge-1:fork": "equal"
+  },
+  "C-on-memory-limit-40g:B-on-memory-limit-40g": {
+   "short:code-1:miss": "equal",
+   "30k:code-1:miss": "equal",
+   "30k:knowledge-1:miss": "equal",
+   "short:knowledge-1:miss": "equal"
+  }
+ },
+ "self": {},
+ "hits": {
+  "B-on-profile-off": {
+   "warmup:warmup:warmup": [
+    0,
+    2
+   ],
+   "short:code-1:miss": [
+    0,
+    2
+   ],
+   "short:code-1:repeat": [
+    62,
+    0
+   ],
+   "short:code-1:append": [
+    62,
+    1
+   ],
+   "short:code-1:fork": [
+    62,
+    1
+   ],
+   "short:knowledge-1:miss": [
+    0,
+    2
+   ],
+   "short:knowledge-1:repeat": [
+    46,
+    0
+   ],
+   "short:knowledge-1:append": [
+    46,
+    1
+   ],
+   "short:knowledge-1:fork": [
+    46,
+    1
+   ]
+  },
+  "C-on-profile-off": {
+   "warmup:warmup:warmup": [
+    0,
+    2
+   ],
+   "short:code-1:miss": [
+    0,
+    2
+   ],
+   "short:code-1:repeat": [
+    62,
+    0
+   ],
+   "short:code-1:append": [
+    62,
+    1
+   ],
+   "short:code-1:fork": [
+    62,
+    1
+   ],
+   "short:knowledge-1:miss": [
+    0,
+    2
+   ],
+   "short:knowledge-1:repeat": [
+    46,
+    0
+   ],
+   "short:knowledge-1:append": [
+    46,
+    1
+   ],
+   "short:knowledge-1:fork": [
+    46,
+    1
+   ]
+  },
+  "C-on-single-prefill-off": {
+   "warmup:warmup:warmup": [
+    0,
+    2
+   ],
+   "short:code-1:miss": [
+    0,
+    2
+   ],
+   "short:code-1:repeat": [
+    62,
+    0
+   ],
+   "short:code-1:append": [
+    62,
+    1
+   ],
+   "short:code-1:fork": [
+    62,
+    1
+   ],
+   "short:knowledge-1:miss": [
+    0,
+    2
+   ],
+   "short:knowledge-1:repeat": [
+    46,
+    0
+   ],
+   "short:knowledge-1:append": [
+    46,
+    1
+   ],
+   "short:knowledge-1:fork": [
+    46,
+    1
+   ]
+  },
+  "C-on-cache-1g": {
+   "warmup:warmup:warmup": [
+    0,
+    1
+   ],
+   "short:code-1:miss": [
+    0,
+    1
+   ],
+   "short:code-1:repeat": [
+    62,
+    0
+   ],
+   "short:code-1:append": [
+    62,
+    1
+   ],
+   "short:code-1:fork": [
+    62,
+    1
+   ],
+   "short:knowledge-1:miss": [
+    0,
+    1
+   ],
+   "short:knowledge-1:repeat": [
+    46,
+    0
+   ],
+   "short:knowledge-1:append": [
+    46,
+    1
+   ],
+   "short:knowledge-1:fork": [
+    46,
+    1
+   ],
+   "30k:code-1:miss": [
+    0,
+    0
+   ],
+   "30k:code-1:repeat": [
+    0,
+    0
+   ],
+   "30k:code-1:append": [
+    0,
+    0
+   ],
+   "30k:code-1:fork": [
+    0,
+    0
+   ],
+   "30k:code-1:doc-fork": [
+    0,
+    0
+   ]
+  },
+  "B-on-memory-limit-40g": {
+   "warmup:warmup:warmup": [
+    0,
+    2
+   ],
+   "short:code-1:miss": [
+    0,
+    2
+   ],
+   "30k:code-1:miss": [
+    0,
+    2
+   ],
+   "30k:knowledge-1:miss": [
+    0,
+    2
+   ],
+   "short:knowledge-1:miss": [
+    0,
+    2
+   ]
+  },
+  "C-on-memory-limit-40g": {
+   "warmup:warmup:warmup": [
+    0,
+    1
+   ],
+   "short:code-1:miss": [
+    0,
+    1
+   ],
+   "30k:code-1:miss": [
+    0,
+    2
+   ],
+   "30k:knowledge-1:miss": [
+    0,
+    2
+   ],
+   "short:knowledge-1:miss": [
+    0,
+    1
+   ]
+  },
+  "C-on-cancel": {
+   "warmup:warmup:warmup": [
+    0,
+    1
+   ],
+   "short:code-1:miss": [
+    0,
+    1
+   ],
+   "short:code-1:repeat": [
+    62,
+    0
+   ],
+   "short:code-1:append": [
+    62,
+    1
+   ],
+   "short:code-1:fork": [
+    62,
+    1
+   ]
+  }
+ }
+}

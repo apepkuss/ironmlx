@@ -1,0 +1,5 @@
+ok: IronMLX App executable is arm64, minos 26.4, with system-only dynamic dependencies
+ok: IronMLX backend helper is arm64, minos 26.4, with system-only dynamic dependencies
+ok: iron-bench helper is arm64, minos 26.4, with system-only dynamic dependencies
+IronMLX.app static bundle verification passed
+exit=0

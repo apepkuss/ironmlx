@@ -1,0 +1,144 @@
+{
+ "label": "scenarios-docfork-v1",
+ "input_sha256": "fa84351a6e40cb9629c441d10f80d12da12a9e993d1b3fb51b429eef63256a91",
+ "failures": {},
+ "pairs": {
+  "C-on:B-on": {
+   "30k:code-1:miss": "equal",
+   "30k:code-1:repeat": "equal",
+   "30k:code-1:append": "equal",
+   "30k:code-1:fork": "equal",
+   "30k:code-1:doc-fork": "equal"
+  },
+  "C-on:B-off": {
+   "30k:code-1:miss": "equal",
+   "30k:code-1:repeat": "equal",
+   "30k:code-1:append": "equal",
+   "30k:code-1:fork": "differs at token 66 (217 vs 195)",
+   "30k:code-1:doc-fork": "equal"
+  },
+  "C-on:C-off": {
+   "30k:code-1:miss": "equal",
+   "30k:code-1:repeat": "equal",
+   "30k:code-1:append": "equal",
+   "30k:code-1:fork": "differs at token 66 (217 vs 195)",
+   "30k:code-1:doc-fork": "equal"
+  },
+  "C-off:B-off": {
+   "30k:code-1:miss": "equal",
+   "30k:code-1:repeat": "equal",
+   "30k:code-1:append": "equal",
+   "30k:code-1:fork": "equal",
+   "30k:code-1:doc-fork": "equal"
+  }
+ },
+ "self": {
+  "C-on:30k:code-1:miss=30k:code-1:repeat": true
+ },
+ "hits": {
+  "B-on": {
+   "warmup:warmup:warmup": [
+    0,
+    2
+   ],
+   "30k:code-1:miss": [
+    0,
+    2
+   ],
+   "30k:code-1:repeat": [
+    30732,
+    0
+   ],
+   "30k:code-1:append": [
+    30732,
+    1
+   ],
+   "30k:code-1:fork": [
+    30732,
+    1
+   ],
+   "30k:code-1:doc-fork": [
+    0,
+    2
+   ]
+  },
+  "B-off": {
+   "warmup:warmup:warmup": [
+    0,
+    0
+   ],
+   "30k:code-1:miss": [
+    0,
+    0
+   ],
+   "30k:code-1:repeat": [
+    0,
+    0
+   ],
+   "30k:code-1:append": [
+    0,
+    0
+   ],
+   "30k:code-1:fork": [
+    0,
+    0
+   ],
+   "30k:code-1:doc-fork": [
+    0,
+    0
+   ]
+  },
+  "C-on": {
+   "warmup:warmup:warmup": [
+    0,
+    1
+   ],
+   "30k:code-1:miss": [
+    0,
+    2
+   ],
+   "30k:code-1:repeat": [
+    30732,
+    0
+   ],
+   "30k:code-1:append": [
+    30732,
+    1
+   ],
+   "30k:code-1:fork": [
+    30732,
+    1
+   ],
+   "30k:code-1:doc-fork": [
+    0,
+    2
+   ]
+  },
+  "C-off": {
+   "warmup:warmup:warmup": [
+    0,
+    0
+   ],
+   "30k:code-1:miss": [
+    0,
+    0
+   ],
+   "30k:code-1:repeat": [
+    0,
+    0
+   ],
+   "30k:code-1:append": [
+    0,
+    0
+   ],
+   "30k:code-1:fork": [
+    0,
+    0
+   ],
+   "30k:code-1:doc-fork": [
+    0,
+    0
+   ]
+  }
+ }
+}

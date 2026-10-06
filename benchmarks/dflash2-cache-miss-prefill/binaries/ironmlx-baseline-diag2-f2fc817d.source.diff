@@ -1,0 +1,231 @@
+diff --git a/ironmlx-runtime/src/core/dflash2.rs b/ironmlx-runtime/src/core/dflash2.rs
+index 4f771299d..6361ab0ae 100644
+--- a/ironmlx-runtime/src/core/dflash2.rs
++++ b/ironmlx-runtime/src/core/dflash2.rs
+@@ -497,6 +497,8 @@ pub(crate) enum DFlash2PrefillExecution {
+ 
+ struct DFlash2PrefillContext<'a> {
+     execution: DFlash2PrefillExecution,
++    /// Use single-graph prefill when the prefix cache restores nothing.
++    cold_single_prefill: bool,
+     prefix_cache: Option<(&'a mut DFlash2PrefixCache, &'a str)>,
+     is_cancelled: Option<&'a dyn Fn() -> bool>,
+ }
+@@ -731,6 +733,7 @@ where
+             options,
+             DFlash2PrefillContext {
+                 execution: DFlash2PrefillExecution::GenerationStream,
++                cold_single_prefill: false,
+                 prefix_cache: None,
+                 is_cancelled: None,
+             },
+@@ -748,14 +751,17 @@ where
+     ) -> Result<Self> {
+         let options = execution.p2.validate()?;
+         // Single-graph prefill is qualified only with the M5 affine4 target
+-        // route and without a prefix cache (it needs the whole prompt in one
+-        // pass); otherwise the request keeps the chunked scheduler prefill.
++        // route, and it needs the whole prompt in one pass: without a prefix
++        // cache it always applies; with one it applies only to a cold miss
++        // (nothing restored). A restored prefix keeps the chunked scheduler
++        // prefill for the remainder.
+         let single_prefill = ironmlx_core::m5_profile::flag(
+             ironmlx_core::m5_profile::settings::DFLASH2_SINGLE_PREFILL,
+-        ) && prefix_cache.is_none()
+-            && model
+-                .dflash2_execution_fingerprint()
+-                .contains("experimental-m5-affine4");
++        ) && model
++            .dflash2_execution_fingerprint()
++            .contains("experimental-m5-affine4");
++        let cold_single_prefill = false && single_prefill && prefix_cache.is_some();
++        let single_prefill = single_prefill && prefix_cache.is_none();
+         let mut request = request;
+         if options.position_keyed_sampling {
+             request.sampler = request.sampler.with_position_keyed_v1();
+@@ -773,6 +779,7 @@ where
+                 } else {
+                     DFlash2PrefillExecution::SchedulerB1
+                 },
++                cold_single_prefill,
+                 prefix_cache,
+                 is_cancelled: Some(is_cancelled),
+             },
+@@ -1000,6 +1007,7 @@ where
+     ) -> Result<Self> {
+         let DFlash2PrefillContext {
+             execution: prefill_execution,
++            cold_single_prefill,
+             prefix_cache,
+             is_cancelled,
+         } = prefill;
+@@ -1023,18 +1031,23 @@ where
+         let mut position = 0_i32;
+         let mut prefix_cache_hit_tokens = 0_usize;
+         let prompt_len_i32 = i32::try_from(prompt_len).context("DFlash2 prompt is too long")?;
++        let mut phases = PrefillPhaseDiagnostic::start();
+ 
+         if let Some(cache) = prefix_cache.as_deref_mut() {
+-            if let Some(artifact) = cache.load_longest(&request.prompt_ids, prefix_fingerprint) {
++            let artifact = cache.load_longest(&request.prompt_ids, prefix_fingerprint);
++            PrefillPhaseDiagnostic::mark(&mut phases, "load", 0);
++            if let Some(artifact) = artifact {
+                 let restore_result = restore_prefix_entry_for_row(
+                     &mut target_cache,
+                     &artifact.target_cache,
+                     0,
+                     artifact.cached_len,
+-                )
+-                .and_then(|()| {
++                );
++                PrefillPhaseDiagnostic::mark(&mut phases, "restore_graph", artifact.cached_len);
++                let restore_result = restore_result.and_then(|()| {
+                     materialize_dflash2_target_cache_prefix(&target_cache, artifact.cached_len)
+                 });
++                PrefillPhaseDiagnostic::mark(&mut phases, "materialize", artifact.cached_len);
+                 match restore_result {
+                     Ok(()) => {
+                         position = artifact.cached_len;
+@@ -1054,6 +1067,14 @@ where
+                 }
+             }
+         }
++        PrefillPhaseDiagnostic::mark(&mut phases, "lookup", position);
++        // A cold miss computes the whole prompt like a request without a
++        // prefix cache; its saved artifacts come from that same pass.
++        let prefill_execution = if cold_single_prefill && position == 0 {
++            DFlash2PrefillExecution::GenerationStream
++        } else {
++            prefill_execution
++        };
+ 
+         while position < prompt_len_i32 {
+             // Experimental, default off: at each bulk chunk boundary release
+@@ -1106,6 +1127,7 @@ where
+                 .as_ref()
+                 .ok_or_else(|| anyhow!("DFlash2 prefill retained no final hidden"))?;
+             mlx::transforms::eval(&[retained, chunk_last_hidden])?;
++            PrefillPhaseDiagnostic::mark(&mut phases, "chunk", chunk_len);
+             memory_phase_diagnostic("prefill_chunk_evaluated", position + chunk_len, prompt_len);
+             ensure_dflash2_request_not_cancelled(is_cancelled)?;
+             // Dense and linear target state is materially larger than an
+@@ -1139,6 +1161,7 @@ where
+                         "DFlash2 cross-request prefix save skipped"
+                     ),
+                 }
++                PrefillPhaseDiagnostic::mark(&mut phases, "save", stop as i32);
+             }
+             position += chunk_len;
+         }
+@@ -1157,6 +1180,13 @@ where
+         // logically independent.
+         mlx::transforms::eval(&[&first_logits])?;
+         mlx::transforms::eval(&[&context_hidden])?;
++        PrefillPhaseDiagnostic::mark(&mut phases, "first_logits", 1);
++        PrefillPhaseDiagnostic::finish(
++            phases,
++            prefill_execution,
++            prompt_len,
++            prefix_cache_hit_tokens,
++        );
+         memory_phase_diagnostic("first_logits_evaluated", prompt_len_i32, prompt_len);
+         ensure_dflash2_request_not_cancelled(is_cancelled)?;
+         let prefill_us = elapsed_us(prefill_started);
+@@ -3711,6 +3741,76 @@ fn prefill_chunk_cache_reset_requested() -> bool {
+     })
+ }
+ 
++/// Diagnostic-only prefill phase timing, enabled by
++/// `IRONMLX_DIAGNOSTIC_DFLASH2_PREFILL_PHASES=1`. Reads the clock only at the
++/// prefill's existing synchronization points; adds no evaluation.
++struct PrefillPhaseDiagnostic {
++    last: Instant,
++    /// (phase, size, elapsed us, MLX active MiB, MLX cache MiB, footprint MiB)
++    phases: Vec<(&'static str, i32, u64, usize, usize, usize)>,
++}
++
++pub(crate) fn prefill_phase_diagnostic_enabled() -> bool {
++    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ENABLED.get_or_init(|| {
++        std::env::var("IRONMLX_DIAGNOSTIC_DFLASH2_PREFILL_PHASES").as_deref() == Ok("1")
++    })
++}
++
++impl PrefillPhaseDiagnostic {
++    fn start() -> Option<Self> {
++        prefill_phase_diagnostic_enabled().then(|| Self {
++            last: Instant::now(),
++            phases: Vec::new(),
++        })
++    }
++
++    fn mark(this: &mut Option<Self>, phase: &'static str, size: i32) {
++        if let Some(this) = this {
++            let now = Instant::now();
++            let us = u64::try_from((now - this.last).as_micros()).unwrap_or(u64::MAX);
++            // Counter reads only; no evaluation.
++            let memory = mlx::memory::snapshot();
++            let footprint = super::process_memory::macos_phys_footprint_bytes().unwrap_or(0);
++            this.phases.push((
++                phase,
++                size,
++                us,
++                memory.active_bytes >> 20,
++                memory.cache_bytes >> 20,
++                footprint >> 20,
++            ));
++            this.last = Instant::now();
++        }
++    }
++
++    fn finish(
++        this: Option<Self>,
++        execution: DFlash2PrefillExecution,
++        prompt_len: usize,
++        hit_tokens: usize,
++    ) {
++        if let Some(this) = this {
++            let phases = this
++                .phases
++                .iter()
++                .map(|(phase, size, us, active, cache, footprint)| {
++                    format!("{phase}:{size}:{us}:{active}:{cache}:{footprint}")
++                })
++                .collect::<Vec<_>>()
++                .join(",");
++            tracing::warn!(
++                diagnostic = "dflash2_prefill_phases",
++                execution = ?execution,
++                prompt_len,
++                hit_tokens,
++                phases,
++                "diagnostic prefill phases; not a formal measurement"
++            );
++        }
++    }
++}
++
+ fn memory_phase_diagnostic(phase: &str, position: i32, prompt_len: usize) {
+     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+     if !*ENABLED
+diff --git a/ironmlx-runtime/src/core/dflash2_actor.rs b/ironmlx-runtime/src/core/dflash2_actor.rs
+index 7a670a4ec..164abd402 100644
+--- a/ironmlx-runtime/src/core/dflash2_actor.rs
++++ b/ironmlx-runtime/src/core/dflash2_actor.rs
+@@ -1030,6 +1030,16 @@ where
+                 };
+                 let governor = crate::core::process_memory::global_process_memory_governor();
+                 let mut snapshot = governor.sample_process();
++                if super::dflash2::prefill_phase_diagnostic_enabled() {
++                    tracing::warn!(
++                        diagnostic = "dflash2_admission_pressure",
++                        level = ?snapshot.pressure_level,
++                        current_bytes = snapshot.current_usage_bytes,
++                        soft_watermark_bytes = snapshot.soft_watermark_bytes,
++                        ceiling_bytes = snapshot.effective_ceiling_bytes,
++                        "diagnostic admission memory pressure; not a formal measurement"
++                    );
++                }
+                 if snapshot.pressure_level != crate::core::process_memory::PressureLevel::Normal {
+                     let retain_ratio = match snapshot.pressure_level {
+                         crate::core::process_memory::PressureLevel::Normal => 1.0,
