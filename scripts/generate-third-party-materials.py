@@ -76,6 +76,16 @@ def verify_git_files(
     files = sorted(path for path in source_path.rglob("*") if path.is_file())
     if not files:
         raise ValueError(f"vendored source directory is empty: {source_path}")
+    available = subprocess.run(
+        ["git", "-C", str(git_repository), "cat-file", "-e", f"{commit}^{{commit}}"],
+        capture_output=True,
+        text=True,
+    )
+    if available.returncode != 0:
+        raise ValueError(
+            f"verification commit is unavailable in {git_repository}: {commit}; "
+            f"fetch the declared source commit before verification: {available.stderr.strip()}"
+        )
     tree = hashlib.sha256()
     for path in files:
         relative = path.relative_to(source_path).as_posix()
@@ -84,7 +94,10 @@ def verify_git_files(
             capture_output=True,
         )
         content = path.read_bytes()
-        if expected.returncode != 0 or expected.stdout != content:
+        if expected.returncode != 0:
+            detail = expected.stderr.decode("utf-8", errors="replace").strip()
+            raise ValueError(f"cannot read verification file {commit}:{relative}: {detail}")
+        if expected.stdout != content:
             raise ValueError(
                 f"vendored file differs from {commit}: {relative} in {source_path}"
             )

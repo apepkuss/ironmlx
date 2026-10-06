@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import importlib.util
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -193,6 +195,91 @@ class VendoredNativeSourceTests(unittest.TestCase):
     def test_repository_sources_require_a_repository_root(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported native license source prefix"):
             GENERATOR.resolve_native_source("repo:x", Path("/m"), Path("/b"))
+
+    def test_reports_missing_commit_separately_from_file_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream, _ = self.git_fixture(root)
+            with self.assertRaisesRegex(ValueError, "verification commit is unavailable"):
+                GENERATOR.verify_git_files(
+                    root / "repo/vendor/include", upstream, "0" * 40
+                )
+
+    def test_reports_missing_upstream_file_separately_from_file_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            upstream, commit = self.git_fixture(root)
+            (root / "repo/vendor/include/mlx/kernels/missing.h").write_text("missing\n")
+            with self.assertRaisesRegex(ValueError, "cannot read verification file"):
+                GENERATOR.verify_git_files(root / "repo/vendor/include", upstream, commit)
+
+
+class ReleaseMLXCheckoutTests(unittest.TestCase):
+    def fixture(self, root: Path) -> tuple[Path, Path, str, str]:
+        fork, build_commit = VendoredNativeSourceTests().git_fixture(root / "fork")
+        upstream, upstream_commit = VendoredNativeSourceTests().git_fixture(root / "upstream")
+        # Make the verification commit distinct from the build commit, as in CI.
+        subprocess.run(
+            ["git", "-C", str(upstream), "-c", "user.name=t", "-c",
+             "user.email=t@t", "commit", "--allow-empty", "-qm", "verification"],
+            check=True,
+        )
+        upstream_commit = subprocess.check_output(
+            ["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True
+        ).strip()
+        repository = root / "product"
+        scripts = repository / "scripts"
+        scripts.mkdir(parents=True)
+        shutil.copyfile(SCRIPT_PATH.parent / "checkout-release-mlx.sh", scripts / "checkout-release-mlx.sh")
+        (scripts / "release-config.sh").write_text(
+            f'IRONMLX_MLX_REPOSITORY="{fork}"\nIRONMLX_MLX_COMMIT="{build_commit}"\n'
+        )
+        manifest = repository / "compliance/native-dependencies.json"
+        manifest.parent.mkdir()
+        manifest.write_text(json.dumps({"dependencies": [
+            {"repository": str(source), "source_verification": {
+                "type": "git-files", "repository": "mlx:.", "commit": commit,
+            }}
+            for source, commit in ((fork, build_commit), (upstream, upstream_commit))
+        ]}))
+        return repository, upstream, build_commit, upstream_commit
+
+    def test_clean_shallow_checkout_includes_verification_commit_without_changing_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, _, build_commit, upstream_commit = self.fixture(root)
+            destination = root / "checkout"
+            subprocess.run(
+                ["bash", str(repository / "scripts/checkout-release-mlx.sh"), str(destination)],
+                check=True, capture_output=True, text=True,
+            )
+            def git(*args: str) -> str:
+                return subprocess.check_output(
+                    ["git", "-C", str(destination), *args], text=True
+                ).strip()
+            self.assertEqual(git("rev-parse", "HEAD"), build_commit)
+            self.assertEqual(git("rev-parse", "--is-shallow-repository"), "true")
+            self.assertEqual(git("status", "--porcelain"), "")
+            self.assertEqual(git("cat-file", "-t", upstream_commit), "commit")
+            result = GENERATOR.verify_git_files(
+                root / "upstream/repo/vendor/include", destination, upstream_commit
+            )
+            self.assertEqual(result["files"], 1)
+
+    def test_unavailable_verification_commit_fails_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repository, _, _, _ = self.fixture(root)
+            manifest = repository / "compliance/native-dependencies.json"
+            data = json.loads(manifest.read_text())
+            data["dependencies"][1]["source_verification"]["commit"] = "0" * 40
+            manifest.write_text(json.dumps(data))
+            result = subprocess.run(
+                ["bash", str(repository / "scripts/checkout-release-mlx.sh"), str(root / "checkout")],
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn("MLX checkout ready:", result.stdout)
 
 
 class SourceAttributionTests(unittest.TestCase):
