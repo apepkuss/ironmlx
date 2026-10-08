@@ -75,14 +75,13 @@ final class DashboardUIDelegate: NSObject, WKUIDelegate {
     func webView(
         _ webView: WKWebView,
         runJavaScriptConfirmPanelWithMessage message: String,
-        initiatedByFrame frame: WKFrameInfo,
-        completionHandler: @escaping @MainActor @Sendable (Bool) -> Void
-    ) {
-        presentJavaScriptConfirmation(
-            message: message,
-            in: webView,
-            completionHandler: completionHandler
-        )
+        initiatedByFrame frame: WKFrameInfo
+    ) async -> Bool {
+        await withCheckedContinuation { continuation in
+            presentJavaScriptConfirmation(message: message, in: webView) { accepted in
+                continuation.resume(returning: accepted)
+            }
+        }
     }
 
     func presentJavaScriptConfirmation(

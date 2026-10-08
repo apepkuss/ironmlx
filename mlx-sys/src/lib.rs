@@ -11,6 +11,7 @@ mod bridge;
 pub use bridge::array;
 pub use bridge::compile;
 pub use bridge::conv;
+pub use bridge::einsum;
 pub use bridge::fast;
 pub use bridge::fft;
 pub use bridge::io;

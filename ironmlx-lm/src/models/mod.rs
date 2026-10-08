@@ -27,6 +27,7 @@
 pub mod architecture;
 pub mod dflash2;
 pub mod diffusion_gemma;
+pub mod embedding_gemma2;
 pub mod gemma4;
 pub mod glm4_moe_lite;
 pub mod llama;

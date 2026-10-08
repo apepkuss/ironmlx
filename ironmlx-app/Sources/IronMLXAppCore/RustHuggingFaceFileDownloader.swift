@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 public struct ProviderModelFileDownloader: ModelFileDownloading {
-    private let huggingFace: RustHuggingFaceFileDownloader
+    private let huggingFace: any ModelFileDownloading
     private let standard: ResumableFileDownloader
 
     public init(
@@ -13,15 +13,33 @@ public struct ProviderModelFileDownloader: ModelFileDownloading {
         standard = ResumableFileDownloader(httpClient: httpClient)
     }
 
+    init(huggingFace: any ModelFileDownloading, httpClient: any ModelDownloadHTTPClient) {
+        self.huggingFace = huggingFace
+        standard = ResumableFileDownloader(httpClient: httpClient)
+    }
+
     public func download(
         _ request: ResumableDownloadRequest,
         progress: @escaping @Sendable (Int64) async -> Void
     ) async throws -> ModelValidatedFile {
         switch request.identity.provider {
         case .huggingFace:
-            try await huggingFace.download(request, progress: progress)
+            if ResumableFileDownloader.recoverableBytes(destination: request.destination, identity: request.identity) != nil {
+                return try await standard.download(request, progress: progress)
+            }
+            do {
+                return try await huggingFace.download(request, progress: progress)
+            } catch let error as RustHuggingFaceTransferError {
+                guard error.isNetworkFailure else { throw error }
+                try Task.checkCancellation()
+                // URLSession uses the macOS network configuration and TLS stack.
+                // Switch only for transport failures, retaining the pinned file identity.
+                try RustHuggingFaceFileDownloader.prepareStandardResume(request)
+                IronMLXAppLogger.info("Hugging Face transfer connection failed; switching to URLSession for \(request.identity.path)")
+                return try await standard.download(request, progress: progress)
+            }
         case .modelScope:
-            try await standard.download(request, progress: progress)
+            return try await standard.download(request, progress: progress)
         case .standalone:
             throw RustHuggingFaceTransferError.unsupportedProvider(request.identity.provider.rawValue)
         }
@@ -83,6 +101,35 @@ public struct RustHuggingFaceFileDownloader: ModelFileDownloading {
             return min(identity.expectedSize, Int64(clamping: committed))
         } catch {
             return 0
+        }
+    }
+
+    static func prepareStandardResume(_ request: ResumableDownloadRequest) throws {
+        let cache = request.destination.appendingPathExtension("hf-transfer")
+        let committed = recoverableBytes(destination: request.destination, identity: request.identity)
+        if committed > 0 {
+            let stored = try JSONDecoder().decode(RustTransferIdentity.self,
+                from: Data(contentsOf: cache.appendingPathComponent("identity.json")))
+            let folder = "models--" + request.identity.repoID.replacingOccurrences(of: "/", with: "--")
+            let source = cache.appendingPathComponent(folder).appendingPathComponent("blobs")
+                .appendingPathComponent(stored.etag).appendingPathExtension("sync.part")
+            let partial = request.destination.appendingPathExtension("partial")
+            let handle = try FileHandle(forWritingTo: source)
+            defer { try? handle.close() }
+            // The Rust cache preallocates the file and stores its committed prefix
+            // length after the payload. Retain only that prefix, without copying GBs.
+            try handle.truncate(atOffset: UInt64(committed))
+            try handle.synchronize()
+            try ModelDownloadStore.atomicWrite(request.identity, to: partial.appendingPathExtension("meta.json"))
+            if FileManager.default.fileExists(atPath: partial.path) {
+                try FileManager.default.removeItem(at: partial)
+            }
+            try FileManager.default.moveItem(at: source, to: partial)
+        }
+        for url in [cache, request.destination.appendingPathExtension("hf-transfer.lock")] {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
         }
     }
 
@@ -241,6 +288,12 @@ public enum RustHuggingFaceTransferError: LocalizedError {
     case unsupportedProvider(String)
     case processFailed(String)
     case invalidResponse(String)
+
+    var isNetworkFailure: Bool {
+        guard case let .processFailed(detail) = self else { return false }
+        return detail.range(of: "error sending request|tls handshake|connection (?:reset|refused|closed)|connect error|timed out|dns error",
+                            options: [.regularExpression, .caseInsensitive]) != nil
+    }
 
     public var errorDescription: String? {
         switch self {

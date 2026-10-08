@@ -136,6 +136,7 @@ pub struct EnginePoolState {
 pub struct EngineLoadedModelInfo {
     pub decision: Option<ironmlx_decision::DecisionSettings>,
     pub decision_metrics: Option<crate::core::decision_execution::DecisionMetricsSnapshot>,
+    pub embedding_metrics: Option<crate::core::embedding_execution::EmbeddingMetricsSnapshot>,
     pub id: String,
     pub path: String,
     pub architecture: String,
@@ -433,6 +434,7 @@ struct EngineSlotRuntimeSnapshot {
 
 #[derive(Clone)]
 pub enum EngineVariant {
+    Embedding(super::embedding_execution::EmbeddingRuntime),
     Decision(super::decision_execution::DecisionRuntime),
     Audio(super::audio_execution::AudioRuntime),
     Qwen35(AppState<Qwen35Model>),
@@ -748,6 +750,13 @@ impl EnginePoolState {
             .is_some_and(|slot| slot.model.audio.is_some()))
     }
 
+    pub async fn is_embedding_model(&self, id: &str) -> bool {
+        let slots = self.inner.slots.lock().await;
+        slots
+            .get(id)
+            .is_some_and(|slot| slot.model.capabilities.runtime_kind == "embedding")
+    }
+
     pub async fn is_decision_model(&self, requested: Option<&str>) -> Result<bool> {
         let id = self
             .inner
@@ -850,6 +859,9 @@ impl EnginePoolState {
         set_default: bool,
     ) -> Result<EngineModelControlResult> {
         validate_engine_model_config(&model)?;
+        if set_default && model.capabilities.runtime_kind == "embedding" {
+            bail!("embedding models cannot be the default generation model");
+        }
         let model_id = model.id.clone();
         let new_slot = Arc::new(EngineSlot {
             configured_context_window: super::model_capacity::configured_context_window(&model),
@@ -879,6 +891,9 @@ impl EnginePoolState {
             let mut registry = self.inner.registry.lock().await;
             registry.remove_model(&model_id);
             registry.upsert_model(model.manifest_view(), set_default || was_previous_default)?;
+            if previous_default.is_none() && model.capabilities.runtime_kind == "embedding" {
+                registry.restore_default_model(None)?;
+            }
         }
         self.inner
             .slots
@@ -917,6 +932,9 @@ impl EnginePoolState {
         pinned: Option<bool>,
     ) -> Result<EngineModelControlResult> {
         validate_engine_model_config(&model)?;
+        if set_default && model.capabilities.runtime_kind == "embedding" {
+            bail!("embedding models cannot be the default generation model");
+        }
         let model_id = model.id.clone();
         let previous_default = self
             .inner
@@ -1018,6 +1036,9 @@ impl EnginePoolState {
     }
 
     pub async fn set_default_model(&self, requested: &str) -> Result<()> {
+        if self.is_embedding_model(requested).await {
+            bail!("embedding models cannot be the default generation model");
+        }
         self.inner
             .registry
             .lock()
@@ -1073,6 +1094,10 @@ impl EnginePoolState {
                 LoadedEngineHealth::Decision { metrics, .. } => Some(*metrics),
                 _ => None,
             };
+            let embedding_metrics = match &health {
+                LoadedEngineHealth::Embedding { metrics, .. } => Some(*metrics),
+                _ => None,
+            };
             let active_kv_offload = match &health {
                 LoadedEngineHealth::Causal(snapshot) if snapshot.active_kv_offload.enabled => {
                     Some(snapshot.active_kv_offload.clone())
@@ -1081,7 +1106,8 @@ impl EnginePoolState {
                 | LoadedEngineHealth::DiffusionGemma { .. }
                 | LoadedEngineHealth::ImageGeneration { .. }
                 | LoadedEngineHealth::Audio { .. }
-                | LoadedEngineHealth::Decision { .. } => None,
+                | LoadedEngineHealth::Decision { .. }
+                | LoadedEngineHealth::Embedding { .. } => None,
             };
             let (scheduler, active_requests, queued_requests, queue_capacity) = match &health {
                 LoadedEngineHealth::Causal(snapshot) => (
@@ -1108,6 +1134,13 @@ impl EnginePoolState {
                     queued_requests,
                     queue_capacity,
                 }
+                | LoadedEngineHealth::Embedding {
+                    scheduler,
+                    active_requests,
+                    queued_requests,
+                    queue_capacity,
+                    ..
+                }
                 | LoadedEngineHealth::Decision {
                     scheduler,
                     active_requests,
@@ -1124,6 +1157,7 @@ impl EnginePoolState {
             models.push(EngineLoadedModelInfo {
                 decision: slot.model.decision,
                 decision_metrics,
+                embedding_metrics,
                 id: id.clone(),
                 path: slot.model.path.to_string_lossy().into_owned(),
                 architecture: engine.architecture().to_string(),
@@ -2027,9 +2061,11 @@ impl EngineVariant {
             Self::Glm4MoeLite(state) => state.effective_cap_max,
             Self::Llama(state) => state.effective_cap_max,
             Self::MiniCpmV46(state) => state.effective_cap_max,
-            Self::DiffusionGemma(_) | Self::QwenImage(_) | Self::Audio(_) | Self::Decision(_) => {
-                return None
-            }
+            Self::DiffusionGemma(_)
+            | Self::QwenImage(_)
+            | Self::Audio(_)
+            | Self::Decision(_)
+            | Self::Embedding(_) => return None,
         };
         (cap > 0).then_some(cap)
     }
@@ -2050,14 +2086,26 @@ impl EngineVariant {
             Self::Glm4MoeLite(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::Llama(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::MiniCpmV46(state) => state.request_execution.clear_shared_prompt_lookup().await,
-            Self::DiffusionGemma(_) | Self::QwenImage(_) | Self::Audio(_) | Self::Decision(_) => {
-                Ok(0)
-            }
+            Self::DiffusionGemma(_)
+            | Self::QwenImage(_)
+            | Self::Audio(_)
+            | Self::Decision(_)
+            | Self::Embedding(_) => Ok(0),
         }
     }
 
     fn loaded_health(&self) -> LoadedEngineHealth {
         match self {
+            Self::Embedding(state) => {
+                let (active_requests, queued_requests) = state.active_and_queued();
+                LoadedEngineHealth::Embedding {
+                    scheduler: "serial_embedding",
+                    active_requests,
+                    queued_requests,
+                    queue_capacity: super::embedding_execution::EMBEDDING_QUEUE_CAPACITY,
+                    metrics: state.metrics(),
+                }
+            }
             Self::Decision(state) => {
                 let (active_requests, queued_requests) = state.active_and_queued();
                 LoadedEngineHealth::Decision {
@@ -2136,6 +2184,7 @@ impl EngineVariant {
             Self::QwenImage(_) => "qwen_image_2_1",
             Self::Audio(_) => "indextts25",
             Self::Decision(_) => "laya_multilingual_mlx",
+            Self::Embedding(_) => "embedding_gemma2",
         }
     }
 
@@ -2153,11 +2202,16 @@ impl EngineVariant {
             Self::QwenImage(state) => state.model_weight_bytes,
             Self::Audio(state) => state.model_weight_bytes(),
             Self::Decision(state) => state.model_weight_bytes(),
+            Self::Embedding(state) => state.model_weight_bytes(),
         }
     }
 
     fn pending_requests(&self) -> usize {
         match self {
+            Self::Embedding(state) => {
+                let (active, queued) = state.active_and_queued();
+                active + queued
+            }
             Self::Decision(state) => {
                 let (active, queued) = state.active_and_queued();
                 active + queued
@@ -2199,6 +2253,7 @@ impl EngineVariant {
             Self::QwenImage(state) => state.runtime_usage.snapshot(false),
             Self::Audio(_) => Default::default(),
             Self::Decision(state) => state.usage(),
+            Self::Embedding(state) => state.usage(),
         }
     }
 }
@@ -2277,6 +2332,11 @@ async fn load_engine_variant(
     model: &EngineModelConfig,
     runtime: &EngineRuntimeOptions,
 ) -> Result<EngineVariant> {
+    if model.capabilities.runtime_kind == "embedding" {
+        return Ok(EngineVariant::Embedding(
+            super::embedding_execution::EmbeddingRuntime::load(model.path.clone()).await?,
+        ));
+    }
     if model.capabilities.runtime_kind == "decision" {
         return Ok(EngineVariant::Decision(
             super::decision_execution::DecisionRuntime::load(
@@ -2941,6 +3001,13 @@ struct EngineModelHealth {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum LoadedEngineHealth {
+    Embedding {
+        metrics: super::embedding_execution::EmbeddingMetricsSnapshot,
+        scheduler: &'static str,
+        active_requests: usize,
+        queued_requests: usize,
+        queue_capacity: usize,
+    },
     Decision {
         scheduler: &'static str,
         active_requests: usize,
@@ -2976,7 +3043,8 @@ impl LoadedEngineHealth {
             Self::DiffusionGemma { .. }
             | Self::ImageGeneration { .. }
             | Self::Audio { .. }
-            | Self::Decision { .. } => 0,
+            | Self::Decision { .. }
+            | Self::Embedding { .. } => 0,
         }
     }
 }

@@ -888,6 +888,19 @@ public struct LocalModelScanner: Sendable {
         }
     }
 
+    /// File access does not require runtime compatibility, but must resolve a managed snapshot.
+    public func downloadedSnapshotDirectory(for reference: String) -> URL? {
+        for provider in ModelRepositoryProvider.allCases {
+            if let snapshot = referencedSnapshot(provider: provider, repoID: reference),
+               (try? ModelSnapshotVerifier().verifyStructure(
+                   snapshot: snapshot, expectedProvider: provider, expectedRepoID: reference
+               )) != nil {
+                return snapshot
+            }
+        }
+        return nil
+    }
+
     public func readiness(for reference: String) -> LocalModelReadiness? {
         let direct = URL(fileURLWithPath: NSString(string: reference).expandingTildeInPath)
         if FileManager.default.fileExists(atPath: direct.path) {
@@ -1203,6 +1216,15 @@ public struct LocalModelScanner: Sendable {
 
     private func runtimeCapabilities(config: [String: Any]) -> BackendModelCapabilities {
         let modelType = normalizedString(config["model_type"]) ?? ""
+        if modelType == "embedding-gemma2" {
+            return BackendModelCapabilities(
+                runtimeKind: "embedding", supportsStreaming: false,
+                supportsVision: (config["vision_config"] as? [String: Any])?["model_type"] as? String == "gemma4_vision",
+                supportsAudio: (config["audio_config"] as? [String: Any])?["model_type"] as? String == "gemma4_audio",
+                supportsMtp: false, supportsPromptLookup: false,
+                supportsSpeculativeDecoding: false, supportsKvCache: false, supportedSamplingParameters: []
+            )
+        }
         if modelType == "laya-multilingual-mlx" {
             return BackendModelCapabilities(
                 runtimeKind: "decision",
@@ -1303,6 +1325,24 @@ public struct LocalModelScanner: Sendable {
             return true
         }
         return signalsContainAny(signals, ["vlm", "vision", "multimodal", "minicpmv"])
+    }
+
+    /// Re-evaluate older file-only snapshots against the supported text encoder contract.
+    private func isSupportedEmbeddingConfig(_ config: [String: Any]) -> Bool {
+        guard normalizedString(config["model_type"]) == "embedding-gemma2",
+              let text = config["text_config"] as? [String: Any],
+              normalizedString(text["model_type"]) == "embedding-gemma2-text",
+              normalizedString(text["dtype"]) == "bfloat16",
+              intValue(text["hidden_size"]) == 512,
+              intValue(text["hidden_size_per_layer_input"]) == 512,
+              intValue(text["num_hidden_layers"]) == 24,
+              intValue(text["embedding_dim"]) == 768,
+              stringArray(text["layer_types"]).count == 24 else { return false }
+        if let quant = (config["quantization"] ?? config["quantization_config"]) as? [String: Any] {
+            return normalizedString(quant["mode"]) == "affine"
+                && intValue(quant["bits"]) == 4 && intValue(quant["group_size"]) == 64
+        }
+        return true
     }
 
     private func unsupportedModelTypeReason(for type: String) -> String? {
@@ -1630,6 +1670,7 @@ public struct LocalModelScanner: Sendable {
         guard let json = configJSON(in: snapshot) else {
             return nil
         }
+        if normalizedString(json["model_type"]) == "embedding-gemma2" { return 8192 }
         if let value = intValue(json["max_position_embeddings"]) {
             return value
         }
@@ -1834,7 +1875,13 @@ public struct LocalModelScanner: Sendable {
         if manifest.compatibility.artifactRole == "tts" {
             capabilityType = "tts"
         }
-        if let unsupportedReason = quantization.unsupportedReason {
+        let supportedEmbedding = isSupportedEmbeddingConfig(configJSON)
+        if manifest.compatibility.downloadOnly == true && !supportedEmbedding {
+            readiness = LocalModelReadiness(
+                status: "unsupported", reasonCode: "download_only_model",
+                message: manifest.compatibility.runtimeSupportError ?? "Downloaded for file use only; this model cannot run in IronMLX."
+            )
+        } else if let unsupportedReason = quantization.unsupportedReason {
             readiness = LocalModelReadiness(
                 status: "unsupported",
                 reasonCode: "unsupported_quantization",
@@ -1842,7 +1889,7 @@ public struct LocalModelScanner: Sendable {
             )
         } else if capabilityType == "tts", manifest.compatibility.modelType == "indextts2_5", missingFiles.isEmpty {
             readiness = audioReadiness(manifest: manifest)
-        } else if let unsupportedReason = unsupportedModelTypeReason(for: capabilityType) {
+        } else if !supportedEmbedding, let unsupportedReason = unsupportedModelTypeReason(for: capabilityType) {
             readiness = LocalModelReadiness(
                 status: "unsupported",
                 reasonCode: "unsupported_model_type",

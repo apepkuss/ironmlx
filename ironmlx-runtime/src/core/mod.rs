@@ -56,3 +56,5 @@ pub mod model_capacity;
 
 pub mod audio_execution;
 pub mod decision_execution;
+
+pub mod embedding_execution;

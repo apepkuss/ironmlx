@@ -1,4 +1,5 @@
 //! Model loading, input, output, and computation contracts.
+pub mod audio_input;
 pub mod cache;
 pub mod chat_template;
 pub mod constrained;

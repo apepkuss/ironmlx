@@ -12,6 +12,7 @@ PAGES = (
     ("user-guide.md", "User guide", "用户指南"),
     ("supported-models.md", "Supported models", "支持的模型"),
     ("api.md", "HTTP API quick start", "HTTP API 快速开始"),
+    ("text-embeddings.md", "Text, image and audio embeddings", "文本、图片与音频向量 API"),
     ("dflash2-server-api.md", "DFlash2 server API", "DFlash2 服务端 API"),
     ("api-reference.md", "API reference", "API 参考"),
     ("api-compatibility-matrix.md", "API compatibility matrix", "API 兼容矩阵"),
@@ -51,19 +52,30 @@ def inline(text, source, target):
     text = re.sub(r"!\[([^]]*)\]\(([^)]+)\)", image, text)
     def link(match):
         label, target = match.group(1), match.group(2)
-        if target.endswith(".md"):
-            source_target = (source.parent / target).resolve()
+        markdown_path, separator, fragment = target.partition("#")
+        if markdown_path.endswith(".md") and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", markdown_path):
+            source_target = (source.parent / markdown_path).resolve()
             if source_target.is_relative_to(ROOT / "docs"):
                 if source_target.is_relative_to(ROOT / "docs" / "zh-CN"):
                     generated = ROOT / "website" / "zh-Hans" / "docs" / source_target.relative_to(ROOT / "docs" / "zh-CN")
                 else:
                     generated = ROOT / "website" / "docs" / source_target.relative_to(ROOT / "docs")
-                if source_target.name in {"contributing.md", "support.md"}:
+                relative_doc = source_target.relative_to(ROOT / "docs" / "zh-CN") if source_target.is_relative_to(ROOT / "docs" / "zh-CN") else source_target.relative_to(ROOT / "docs")
+                if relative_doc.as_posix() not in {filename for filename, _, _ in PAGES}:
                     target = f"https://github.com/apepkuss/ironmlx/blob/main/{source_target.relative_to(ROOT).as_posix()}"
                 else:
                     target = Path(__import__("os").path.relpath(generated.with_suffix(".html"), output_path.parent)).as_posix()
             else:
                 target = f"https://github.com/apepkuss/ironmlx/blob/main/{source_target.relative_to(ROOT).as_posix()}" if source_target.is_relative_to(ROOT) else Path(target).with_suffix(".html").as_posix()
+            if separator:
+                target += "#" + fragment
+        elif markdown_path and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", markdown_path):
+            source_target = (source.parent / markdown_path).resolve()
+            if source_target.is_relative_to(ROOT) and source_target.is_file():
+                # Repository files such as the catalogue are not website assets.
+                target = f"https://github.com/apepkuss/ironmlx/blob/main/{source_target.relative_to(ROOT).as_posix()}"
+                if separator:
+                    target += "#" + fragment
         return f'<a href="{escape(target, quote=True)}">{label}</a>'
     return re.sub(r"\[([^]]+)\]\(([^)]+)\)", link, text)
 
@@ -77,6 +89,7 @@ def render(markdown, source, target):
         else:
             lines.append(raw)
     lines, html, toc = lines, [], []
+    heading_counts = {}
     in_code = False
     list_tag = None
     table = False
@@ -115,9 +128,15 @@ def render(markdown, source, target):
             level = len(heading.group(1))
             title = inline(heading.group(2), source, target)
             if level >= 2:
-                anchor = f"section-{len(toc) + 1}"
+                # Match Markdown fragment links instead of numbered-only anchors.
+                base = re.sub(r"[^\w\- ]", "", heading.group(2).strip().lower()).replace(" ", "-")
+                occurrence = heading_counts.get(base, 0)
+                heading_counts[base] = occurrence + 1
+                anchor = base + (f"-{occurrence}" if occurrence else "")
                 toc.append((level, title, anchor))
-                html.append(f'<h{level} id="{anchor}">{title}</h{level}>')
+                legacy_anchor = f"section-{len(toc)}"
+                legacy_alias = f'<span id="{legacy_anchor}" aria-hidden="true"></span>' if legacy_anchor != anchor else ""
+                html.append(f'<h{level} id="{anchor}">{legacy_alias}{title}</h{level}>')
             else:
                 html.append(f'<h{level}>{title}</h{level}>')
             continue
@@ -198,7 +217,8 @@ def build(language, output, docs_root):
         counterpart_root = website_root / ("docs" if language == "zh" else "zh-Hans/docs")
         counterpart = counterpart_root / Path(filename).with_suffix(".html")
         switch_href = Path(__import__("os").path.relpath(counterpart, target.parent)).as_posix()
-        target.write_text(page(title, content, language, index_href, home_href, toc, switch_href), encoding="utf-8")
+        doc_index_href = Path(__import__("os").path.relpath(output, target.parent)).as_posix() + "/"
+        target.write_text(page(title, content, language, doc_index_href, home_href, toc, switch_href), encoding="utf-8")
         links.append(f'<li><a href="{target.relative_to(output).as_posix()}">{escape(title)}</a></li>')
     heading = "<h1>文档</h1>" if language == "zh" else "<h1>Documentation</h1>"
     home_href = "../../" if language == "zh" else "../"

@@ -381,7 +381,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     mtpEnabledModels: state.mtpEnabledModels,
                     dflash2EnabledModels: state.dflash2EnabledModels
                 )
-                let benchmarkModels = models.filter { $0.readiness?.isLoadable != false && $0.capabilities?.runtimeKind != "decision" }.map {
+                let benchmarkModels = models.filter { $0.readiness?.isLoadable != false && !["decision", "embedding"].contains($0.capabilities?.runtimeKind ?? "") }.map {
                     BenchmarkModel(repoID: $0.repoID, loaded: $0.loaded)
                 }
                 let json = (try? Self.jsonString(benchmarkModels)) ?? "[]"
@@ -421,6 +421,14 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         switch payload.path {
         case "/admin/api/incidents/clear":
             clearIncidentHistory(path: payload.path)
+        case "/admin/api/models/reveal":
+            guard let modelID = payload.body["model_id"]?.stringValue,
+                  let directory = scanner.downloadedSnapshotDirectory(for: modelID) else {
+                sendFetchResult(path: payload.path, jsonString: #"{"success":false,"code":"model_path_not_found"}"#)
+                return
+            }
+            NSWorkspace.shared.activateFileViewerSelecting([directory])
+            sendFetchResult(path: payload.path, jsonString: #"{"success":true}"#)
         case "/admin/api/models/load":
             if let model = payload.body["model"]?.stringValue
                 ?? payload.body["model_dir"]?.stringValue
@@ -499,7 +507,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         : #"{"success":false,"code":"download_not_active"}"#
                 case "/admin/api/models/download/resume":
                     let result = await downloadService.resumeDownload(
-                        provider: provider, repoID: repoID, token: payload.body["token"]?.stringValue
+                        provider: provider, repoID: repoID, token: payload.body["token"]?.stringValue,
+                        downloadOnly: payload.body["download_only"]?.boolValue == true
                     )
                     json = (try? Self.jsonString(result)) ?? #"{"success":false}"#
                 default:
@@ -1502,7 +1511,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 try await client.waitUntilReady()
                 await self.registerLocalModels(config: config, client: client)
                 let loadedModels = try await client.fetchLoadedModels()
-                let setDefault = Self.shouldSetDefaultWhenLoadingModel(
+                let setDefault = capabilities?.runtimeKind != "embedding" && Self.shouldSetDefaultWhenLoadingModel(
                     model,
                     config: config,
                     currentLoadedModelCount: loadedModels.count
@@ -3734,6 +3743,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         case object([String: JSONValue])
         case array([JSONValue])
         case null
+
+        var boolValue: Bool? {
+            if case let .bool(value) = self { return value }
+            return nil
+        }
 
         var stringValue: String? {
             switch self {

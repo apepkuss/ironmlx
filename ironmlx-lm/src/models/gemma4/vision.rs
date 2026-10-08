@@ -9,7 +9,7 @@ use crate::Result;
 use super::config::Gemma4VisionConfig;
 use super::ops::{gelu_approx_mul_on, rms_norm_no_scale_on};
 
-struct ClippableLinear {
+pub(crate) struct ClippableLinear {
     linear: Linear,
     input_min: Option<Array>,
     input_max: Option<Array>,
@@ -18,7 +18,7 @@ struct ClippableLinear {
 }
 
 impl ClippableLinear {
-    fn from_loader(loader: &Loader, prefix: &str, use_clipping: bool) -> Result<Self> {
+    pub(crate) fn from_loader(loader: &Loader, prefix: &str, use_clipping: bool) -> Result<Self> {
         let linear_prefix = format!("{prefix}.linear");
         let actual_prefix = if loader.contains(&format!("{linear_prefix}.weight")) {
             linear_prefix
@@ -43,7 +43,7 @@ impl ClippableLinear {
         })
     }
 
-    fn forward_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
+    pub(crate) fn forward_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
         let x = if self.input_min.is_some() || self.input_max.is_some() {
             mlx::ops::clip_on(x, self.input_min.as_ref(), self.input_max.as_ref(), target)?
         } else {
@@ -242,6 +242,7 @@ pub fn unified_position_ids_for_grid(
 
 struct VisionPatchEmbedder {
     input_proj: Linear,
+    input_dtype: Dtype,
     position_embedding_table: Array,
     hidden_size: i32,
     patch_size: i32,
@@ -252,6 +253,9 @@ impl VisionPatchEmbedder {
     fn from_loader(loader: &Loader, prefix: &str, cfg: &Gemma4VisionConfig) -> Result<Self> {
         Ok(Self {
             input_proj: Linear::from_loader(loader, &format!("{prefix}.input_proj"))?,
+            input_dtype: loader
+                .tensor(&format!("{prefix}.input_proj.weight"))?
+                .dtype(),
             position_embedding_table: loader
                 .tensor(&format!("{prefix}.position_embedding_table"))?
                 .clone(),
@@ -266,6 +270,7 @@ impl VisionPatchEmbedder {
         pixel_values: &Array,
         pos_x: &[u32],
         pos_y: &[u32],
+        embedding_numerics: bool,
         target: StreamOrDevice,
     ) -> Result<Array> {
         let shape = pixel_values.shape();
@@ -289,8 +294,12 @@ impl VisionPatchEmbedder {
         }
         let ph = h / p;
         let pw = w / p;
-        let n = ph * pw;
-        if pos_x.len() != n as usize || pos_y.len() != n as usize {
+        let real_patches = ph * pw;
+        let n = pos_x.len() as i32;
+        if n < real_patches
+            || pos_y.len() != n as usize
+            || (!embedding_numerics && n != real_patches)
+        {
             return Err(anyhow!(
                 "Gemma4Vision patch positions length mismatch: x={} y={} patches={n}",
                 pos_x.len(),
@@ -300,8 +309,19 @@ impl VisionPatchEmbedder {
 
         let patches = pixel_values.reshape_on(&[b, c, ph, p, pw, p][..], target)?;
         let patches = patches.transpose_axes_on(&[0_i32, 2, 4, 3, 5, 1][..], target)?;
-        let patches = patches.reshape_on((b, n, c * p * p), target)?;
+        let patches = patches.reshape_on((b, real_patches, c * p * p), target)?;
+        let patches = if n > real_patches {
+            let zeros = Array::zeros_on((b, n - real_patches, c * p * p), patches.dtype(), target)?;
+            mlx::ops::concatenate_on(&[&patches, &zeros], 1, target)?
+        } else {
+            patches
+        };
         let patches = &(&patches - 0.5_f32) * 2.0_f32;
+        let patches = if embedding_numerics {
+            patches.astype_on(self.input_dtype, target)?
+        } else {
+            patches
+        };
         let hidden = self.input_proj.forward_on(&patches, target)?;
 
         let pos_x_arr: Array = (pos_x, &[1_i32, n][..]).try_into()?;
@@ -334,8 +354,42 @@ impl VisionPatchEmbedder {
         .reshape_on((self.position_embedding_size, self.hidden_size), target)?;
         let x_emb = mlx::ops::take_on(&x_table, &pos_x_arr, 0, target)?;
         let y_emb = mlx::ops::take_on(&y_table, &pos_y_arr, 0, target)?;
-        Ok(&hidden + &(&x_emb + &y_emb))
+        let position = &x_emb + &y_emb;
+        let position = if n > real_patches {
+            let keep: Vec<bool> = (0..n).map(|i| i < real_patches).collect();
+            let keep: Array = (keep.as_slice(), (1, n, 1)).try_into()?;
+            let zeros = Array::zeros_on((b, n, self.hidden_size), position.dtype(), target)?;
+            mlx::ops::where_on(&keep, &position, &zeros, target)?
+        } else {
+            position
+        };
+        Ok(&hidden + &position)
     }
+}
+
+fn vision_norm_on(
+    x: &Array,
+    norm: Option<&RmsNorm>,
+    eps: f32,
+    embedding_numerics: bool,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    if !embedding_numerics {
+        return match norm {
+            Some(norm) => norm.forward_on(x, target),
+            None => rms_norm_no_scale_on(x, eps, target),
+        };
+    }
+    let fp = x.astype_on(Dtype::Float32, target)?;
+    let two: Array = (&[2_i32][..], ()).try_into()?;
+    let variance = fp.power_on(&two, target)?.mean_on(-1, true, target)?;
+    let normalized = &fp * &(&variance + eps).rsqrt_on(target)?;
+    let normalized = if let Some(norm) = norm {
+        normalized * norm.weight().astype_on(Dtype::Float32, target)?
+    } else {
+        normalized
+    };
+    Ok(normalized.astype_on(x.dtype(), target)?)
 }
 
 struct VisionAttention {
@@ -373,6 +427,7 @@ impl VisionAttention {
         x: &Array,
         rope: &RopeTables,
         mask: Option<&Array>,
+        embedding_numerics: bool,
         target: StreamOrDevice,
     ) -> Result<Array> {
         let shape = x.shape();
@@ -392,9 +447,21 @@ impl VisionAttention {
             .forward_on(x, target)?
             .reshape_on((b, seq, self.num_kv_heads, self.head_dim), target)?;
 
-        let q = self.q_norm.forward_on(&q, target)?;
-        let k = self.k_norm.forward_on(&k, target)?;
-        let v = rms_norm_no_scale_on(&v, self.rms_norm_eps, target)?;
+        let q = vision_norm_on(
+            &q,
+            Some(&self.q_norm),
+            self.rms_norm_eps,
+            embedding_numerics,
+            target,
+        )?;
+        let k = vision_norm_on(
+            &k,
+            Some(&self.k_norm),
+            self.rms_norm_eps,
+            embedding_numerics,
+            target,
+        )?;
+        let v = vision_norm_on(&v, None, self.rms_norm_eps, embedding_numerics, target)?;
         let q = apply_2d_rope_on(&q, rope, target)?;
         let k = apply_2d_rope_on(&k, rope, target)?;
 
@@ -426,10 +493,19 @@ impl VisionMlp {
         })
     }
 
-    fn forward_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
+    fn forward_on(
+        &self,
+        x: &Array,
+        embedding_numerics: bool,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
         let gate = self.gate_proj.forward_on(x, target)?;
         let up = self.up_proj.forward_on(x, target)?;
-        let act = gelu_approx_mul_on(&gate, &up, target)?;
+        let act = if embedding_numerics {
+            crate::nn::gelu_tanh(&gate, target)? * &up
+        } else {
+            gelu_approx_mul_on(&gate, &up, target)?
+        };
         self.down_proj.forward_on(&act, target)
     }
 }
@@ -476,15 +552,18 @@ impl VisionBlock {
         x: &Array,
         rope: &RopeTables,
         mask: Option<&Array>,
+        embedding_numerics: bool,
         target: StreamOrDevice,
     ) -> Result<Array> {
         let normed = self.input_layernorm.forward_on(x, target)?;
-        let attn = self.self_attn.forward_on(&normed, rope, mask, target)?;
+        let attn = self
+            .self_attn
+            .forward_on(&normed, rope, mask, embedding_numerics, target)?;
         let attn = self.post_attention_layernorm.forward_on(&attn, target)?;
         let h = x + &attn;
 
         let normed = self.pre_feedforward_layernorm.forward_on(&h, target)?;
-        let ff = self.mlp.forward_on(&normed, target)?;
+        let ff = self.mlp.forward_on(&normed, embedding_numerics, target)?;
         let ff = self.post_feedforward_layernorm.forward_on(&ff, target)?;
         Ok(&h + &ff)
     }
@@ -494,6 +573,7 @@ pub struct VisionModel {
     cfg: Gemma4VisionConfig,
     patch_embedder: VisionPatchEmbedder,
     layers: Vec<VisionBlock>,
+    embedding_numerics: bool,
     std_bias: Option<Array>,
     std_scale: Option<Array>,
 }
@@ -530,11 +610,19 @@ impl VisionModel {
         };
         Ok(Self {
             cfg,
+            embedding_numerics: false,
             patch_embedder,
             layers,
             std_bias,
             std_scale,
         })
+    }
+
+    /// Preserve the converted embedding checkpoint's BF16 rounding at every
+    /// projection, norm, activation and pooling boundary.
+    pub(crate) fn with_embedding_numerics(mut self) -> Self {
+        self.embedding_numerics = true;
+        self
     }
 
     pub fn forward_on(
@@ -554,7 +642,7 @@ impl VisionModel {
         }
         let (h, w) = (dims[2], dims[3]);
         let t0 = Instant::now();
-        let (positions, pos_x, pos_y, padding) = patch_positions(h, w, &self.cfg)?;
+        let (mut positions, mut pos_x, mut pos_y, mut padding) = patch_positions(h, w, &self.cfg)?;
         let num_real = pos_x.len() as i32;
         let max_patches = self.cfg.max_patches();
         if profile {
@@ -566,11 +654,35 @@ impl VisionModel {
             );
         }
 
+        if self.embedding_numerics {
+            positions.resize(max_patches as usize, (-1, -1));
+            pos_x.resize(max_patches as usize, 0);
+            pos_y.resize(max_patches as usize, 0);
+            padding.resize(max_patches as usize, true);
+        }
         let t0 = Instant::now();
-        let mut hidden = self
-            .patch_embedder
-            .forward_on(pixel_values, &pos_x, &pos_y, target)?;
-        let mask: Option<Array> = None;
+        let mut hidden = self.patch_embedder.forward_on(
+            pixel_values,
+            &pos_x,
+            &pos_y,
+            self.embedding_numerics,
+            target,
+        )?;
+        let mask: Option<Array> = if self.embedding_numerics {
+            let seq = padding.len();
+            let values: Vec<f32> = (0..seq)
+                .flat_map(|q| {
+                    let query_padding = padding[q];
+                    padding
+                        .iter()
+                        .map(move |k| if query_padding || *k { -1e4 } else { 0.0 })
+                })
+                .collect();
+            let mask: Array = (values.as_slice(), (1, 1, seq as i32, seq as i32)).try_into()?;
+            Some(mask.astype_on(hidden.dtype(), target)?)
+        } else {
+            None
+        };
         profile_eval("vision_patch_embed", &[&hidden], t0, profile)?;
 
         let t0 = Instant::now();
@@ -579,6 +691,7 @@ impl VisionModel {
             self.cfg.head_dim,
             self.cfg.rope_theta(),
             hidden.dtype(),
+            self.embedding_numerics,
             target,
         )?;
         let rope_arrays = rope.arrays();
@@ -586,7 +699,13 @@ impl VisionModel {
 
         let t0 = Instant::now();
         for layer in &self.layers {
-            hidden = layer.forward_on(&hidden, &rope, mask.as_ref(), target)?;
+            hidden = layer.forward_on(
+                &hidden,
+                &rope,
+                mask.as_ref(),
+                self.embedding_numerics,
+                target,
+            )?;
         }
         profile_eval("vision_layers", &[&hidden], t0, profile)?;
         let t0 = Instant::now();
@@ -666,7 +785,13 @@ impl VisionModel {
             )?;
             let hidden_2d = hidden_row.reshape_on((seq, h), target)?;
             let pooled = weights_arr.matmul_on(&hidden_2d, target)?;
-            let pooled = &pooled * (self.cfg.hidden_size as f32).sqrt();
+            let pooled = if self.embedding_numerics {
+                let pooled = pooled.astype_on(hidden.dtype(), target)?;
+                let scale: Array = (&[(self.cfg.hidden_size as f32).sqrt()][..], ()).try_into()?;
+                &pooled * &scale.astype_on(hidden.dtype(), target)?
+            } else {
+                &pooled * (self.cfg.hidden_size as f32).sqrt()
+            };
             let pooled = pooled.reshape_on((1_i32, length, h), target)?;
             rows.push(mlx::ops::indexing::slice_strided_on(
                 &pooled,
@@ -744,6 +869,7 @@ fn build_rope_tables(
     head_dim: i32,
     base: f32,
     dtype: Dtype,
+    embedding_numerics: bool,
     target: StreamOrDevice,
 ) -> Result<RopeTables> {
     let ndim = 2;
@@ -759,6 +885,33 @@ fn build_rope_tables(
     let mut cos_tables = Vec::with_capacity(ndim as usize);
     let mut sin_tables = Vec::with_capacity(ndim as usize);
     for d in 0..ndim {
+        if embedding_numerics {
+            let indexes: Array = (
+                (0..half).map(|v| v as f32).collect::<Vec<_>>().as_slice(),
+                &[half][..],
+            )
+                .try_into()?;
+            let exponents = indexes * (2.0 / channels_per_dim as f32);
+            let base_array: Array = (&[base][..], ()).try_into()?;
+            let timescale = base_array.power_on(&exponents, target)?;
+            let positions: Vec<f32> = positions
+                .iter()
+                .map(|(x, y)| if d == 0 { *x as f32 } else { *y as f32 })
+                .collect();
+            let positions: Array = (positions.as_slice(), (seq, 1)).try_into()?;
+            let angles = &positions / &timescale;
+            let cos = angles.cos_on(target)?;
+            let sin = angles.sin_on(target)?;
+            let cos = mlx::ops::concatenate_on(&[&cos, &cos], -1, target)?
+                .astype_on(dtype, target)?
+                .reshape_on((1, seq, 1, channels_per_dim), target)?;
+            let sin = mlx::ops::concatenate_on(&[&sin, &sin], -1, target)?
+                .astype_on(dtype, target)?
+                .reshape_on((1, seq, 1, channels_per_dim), target)?;
+            cos_tables.push(cos);
+            sin_tables.push(sin);
+            continue;
+        }
         let mut cos = vec![0.0_f32; (seq * channels_per_dim) as usize];
         let mut sin = vec![0.0_f32; (seq * channels_per_dim) as usize];
         for (i, (x_pos, y_pos)) in positions.iter().enumerate() {

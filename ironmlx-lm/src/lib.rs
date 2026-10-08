@@ -1,4 +1,4 @@
-//! LLM/VLM models and model-side inference operations for Apple Silicon.
+//! Language, vision and embedding models for Apple Silicon.
 //! Runtime scheduling and HTTP transport are provided by their callers.
 pub mod core;
 pub mod models;

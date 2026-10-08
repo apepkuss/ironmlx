@@ -423,6 +423,7 @@ pub struct EngineModelCapabilities {
     pub runtime_kind: &'static str,
     pub supports_streaming: bool,
     pub supports_vision: bool,
+    pub supports_audio: bool,
     pub supports_mtp: bool,
     pub supports_prompt_lookup: bool,
     pub supports_speculative_decoding: bool,
@@ -436,11 +437,20 @@ impl EngineModelCapabilities {
             runtime_kind: "image_generation",
             supports_streaming: false,
             supports_vision: false,
+            supports_audio: false,
             supports_mtp: false,
             supports_prompt_lookup: false,
             supports_speculative_decoding: false,
             supports_kv_cache: false,
             supported_sampling_parameters: &["seed", "size", "inference_steps"],
+        }
+    }
+
+    pub fn embedding() -> Self {
+        Self {
+            runtime_kind: "embedding",
+            supports_streaming: false,
+            ..Self::audio()
         }
     }
 
@@ -457,6 +467,7 @@ impl EngineModelCapabilities {
             runtime_kind: "tts",
             supports_streaming: true,
             supports_vision: false,
+            supports_audio: false,
             supports_mtp: false,
             supports_prompt_lookup: false,
             supports_speculative_decoding: false,
@@ -484,6 +495,7 @@ impl EngineModelCapabilities {
             },
             supports_streaming: true,
             supports_vision,
+            supports_audio: false,
             supports_mtp,
             supports_prompt_lookup: architecture.supports_prompt_lookup(),
             supports_speculative_decoding: supports_mtp,
@@ -544,6 +556,11 @@ impl EnginePoolConfig {
     pub(crate) fn validate_enabled_model_architectures(&self) -> Result<()> {
         for model in &self.models {
             validate_engine_model_config(model)?;
+            if model.capabilities.runtime_kind == "embedding"
+                && self.default_model.as_deref() == Some(model.id.as_str())
+            {
+                bail!("embedding models cannot be the default generation model");
+            }
         }
         Ok(())
     }
@@ -574,6 +591,28 @@ pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<
         }
         if model.capabilities != EngineModelCapabilities::audio() {
             bail!("audio model capability mismatch");
+        }
+        return Ok(());
+    }
+    if model.capabilities.runtime_kind == "embedding" {
+        ironmlx_lm::core::loader::preflight_model_metadata(&model.path)?;
+        let mut expected = EngineModelCapabilities::embedding();
+        expected.supports_vision =
+            ironmlx_lm::models::embedding_gemma2::checkpoint_supports_images(&model.path)?;
+        expected.supports_audio =
+            ironmlx_lm::models::embedding_gemma2::checkpoint_supports_audio(&model.path)?;
+        if !ironmlx_lm::models::embedding_gemma2::is_checkpoint(&model.path)?
+            || model.capabilities != expected
+            || model.default
+            || model.audio.is_some()
+            || model.decision.is_some()
+            || model.scheduler_runtime_profile.is_some()
+            || model.mtp.is_some()
+            || model.prompt_lookup.is_some()
+            || model.default_max_output_tokens.is_some()
+            || model.sampling_defaults != SamplingDefaults::default()
+        {
+            bail!("embedding models do not accept generation settings");
         }
         return Ok(());
     }

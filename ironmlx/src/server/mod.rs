@@ -32,6 +32,8 @@ pub(crate) mod api_transport;
 pub(crate) mod audio;
 pub mod chat_format;
 pub mod diffusion_gemma;
+mod embedding_audio;
+pub(crate) mod embeddings;
 pub mod engine;
 pub(crate) mod images;
 pub(crate) mod systemone;

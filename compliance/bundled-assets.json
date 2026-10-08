@@ -201,6 +201,23 @@
       "source_path": "ironmlx-audio/NOTICE.md",
       "source_url": "https://github.com/apepkuss/ironmlx",
       "usage": "Preserves upstream copyright, adaptation and license-selection notices for audio code."
+    },
+    {
+      "component": "EmbeddingGemma 2 and Gemma4 implementation MIT notice",
+      "bundled_path": "ironmlx-lm/licenses/mlx-vlm-MIT.txt",
+      "bundled_sha256": "f74c448746be3376e27dee43e2be9ec9d55f4820cd7466c603a6c7d1fd2d25b8",
+      "bundled_hash_scope": "License notice text; not a hash of adapted implementations",
+      "bundled_modifications": "Retains upstream attribution for the Rust EmbeddingGemma 2 text, vision and audio adapters. Model weights and Python are not bundled.",
+      "copyright": "Copyright © 2025 Prince Canuma",
+      "license": "MIT",
+      "license_file": "lm-mlx-vlm-MIT.txt",
+      "license_sha256": "f74c448746be3376e27dee43e2be9ec9d55f4820cd7466c603a6c7d1fd2d25b8",
+      "license_source": "ironmlx-lm/licenses/mlx-vlm-MIT.txt",
+      "repository": "https://github.com/Blaizzy/mlx-vlm",
+      "revision": "3d87e88402f307efbf68e568971aa887ee7d9ed0",
+      "source_path": "LICENSE",
+      "source_url": "https://github.com/Blaizzy/mlx-vlm/blob/3d87e88402f307efbf68e568971aa887ee7d9ed0/LICENSE",
+      "usage": "Required attribution for adapted embedding encoder implementations distributed with the server."
     }
   ],
   "schema_version": 1

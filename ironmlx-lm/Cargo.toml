@@ -6,10 +6,11 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "LLM and VLM models backed by MLX"
+description = "Language, vision and embedding models backed by MLX"
 publish = false
 
 [dependencies]
+ironmlx-audio = { path = "../ironmlx-audio" }
 clap = { version = "4", features = ["derive"], optional = true }
 ironmlx-core = { path = "../ironmlx-core" }
 mlx = { path = "../mlx" }

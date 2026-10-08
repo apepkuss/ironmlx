@@ -580,6 +580,75 @@ func appLanguageResolverMatchesSupportedMacOSPreferences(
     #expect(metrics.lastRequestUnixMs == 1_790_200_000_123)
 }
 
+@Test func backendLoadedEmbeddingModelInfoDecodesRuntimeMetrics() throws {
+    let data = Data("""
+    {
+      "id": "mlx-community/embeddinggemma-2-4bit",
+      "model": "mlx-community/embeddinggemma-2-4bit",
+      "path": "/models/embeddinggemma",
+      "architecture": "embedding_gemma2",
+      "default": false,
+      "max_position_embeddings": 8192,
+      "runtime_kind": "embedding",
+      "supports_streaming": false,
+      "supports_vision": false,
+      "supports_mtp": false,
+      "supports_prompt_lookup": false,
+      "supports_speculative_decoding": false,
+      "supports_kv_cache": false,
+      "supported_sampling_parameters": [],
+      "runtime_state": "loaded",
+      "active_requests": 0,
+      "queued_requests": 0,
+      "queue_capacity": 8,
+      "usage": {
+        "cumulative_tokens": 120,
+        "input_tokens": 120,
+        "output_tokens": 0,
+        "performance": {
+          "window_seconds": 60,
+          "completed_requests": 0
+        }
+      },
+      "embedding_metrics": {
+        "window_seconds": 60,
+        "completed_requests": 7,
+        "failed_requests": 1,
+        "recent_completed_requests": 4,
+        "latency_ms_p50": 18.5,
+        "input_tokens_per_second": 932.4,
+        "vectors_per_second": 41.2,
+        "last_request_unix_ms": 1790200000123
+      }
+    }
+    """.utf8)
+
+    let info = try JSONDecoder().decode(BackendLoadedModelInfo.self, from: data)
+    let metrics = try #require(info.embeddingMetrics)
+
+    #expect(info.capabilities.runtimeKind == "embedding")
+    #expect(metrics.windowSeconds == 60)
+    #expect(metrics.completedRequests == 7)
+    #expect(metrics.failedRequests == 1)
+    #expect(metrics.recentCompletedRequests == 4)
+    #expect(metrics.latencyMsP50 == 18.5)
+    #expect(metrics.inputTokensPerSecond == 932.4)
+    #expect(metrics.vectorsPerSecond == 41.2)
+    #expect(metrics.lastRequestUnixMs == 1_790_200_000_123)
+    let roundTrip = try JSONDecoder().decode(
+        BackendLoadedModelInfo.self,
+        from: JSONEncoder().encode(info)
+    )
+    #expect(roundTrip.embeddingMetrics == metrics)
+    var legacy = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    legacy.removeValue(forKey: "embedding_metrics")
+    let legacyInfo = try JSONDecoder().decode(
+        BackendLoadedModelInfo.self,
+        from: JSONSerialization.data(withJSONObject: legacy)
+    )
+    #expect(legacyInfo.embeddingMetrics == nil)
+}
+
 @Test func restoredModelReferencesExcludeUnloadedDefaultModel() {
     let config = AppConfig(
         defaultModel: "mlx-community/Default-4bit",

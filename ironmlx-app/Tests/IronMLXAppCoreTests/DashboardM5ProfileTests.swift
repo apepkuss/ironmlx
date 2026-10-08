@@ -297,3 +297,42 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     #expect(off[offIndex + 1] == "off")
     #expect(!arguments(existing).contains("--m5-dflash2-profile"))
 }
+
+@MainActor
+@Test func dashboardRuntimeStatusShowsEmbeddingPerformance() async throws {
+    let messages = CapturedSettingsMessages()
+    let webView = try await loadedDashboard(config: AppConfig(), messages: messages)
+    defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
+    for language in ["en", "zh"] {
+        let result = try await webView.evaluateJavaScript("""
+        (() => {
+          setLanguage('\(language)'); navigateTo('status');
+          renderRuntimeModels([{id: 'mlx-community/embeddinggemma-2-4bit', runtime_kind: 'embedding', supports_audio: true,
+            active_requests: 0, queued_requests: 0, queue_capacity: 8,
+            usage: {cumulative_tokens: 1200},
+            embedding_metrics: {window_seconds: 60, completed_requests: 7, failed_requests: 1,
+              recent_completed_requests: 4, latency_ms_p50: 18.5,
+              input_tokens_per_second: 1200, vectors_per_second: 41.2}}]);
+          const card = document.getElementById('runtime-model-health');
+          const dict = I18N[currentLang];
+          return JSON.stringify({
+            visible: document.getElementById('runtime-model-health-card').style.display !== 'none',
+            audio: card.textContent.includes(dict.catalog_audio_embedding),
+            labels: ['performance', 'completed', 'errors', 'latency', 'input_rate', 'vector_rate']
+              .every(key => card.textContent.includes(dict['runtime_embedding_' + key])),
+            generation: ['runtime_live_decode_rate', 'runtime_prefill_rate', 'runtime_ttft']
+              .some(key => card.textContent.includes(dict[key])),
+            values: card.textContent.includes('18.5') && card.textContent.includes('41.2')
+          });
+        })()
+        """) as? String
+        let data = try #require(result?.data(using: .utf8))
+        let flags = try #require(JSONSerialization.jsonObject(with: data) as? [String: Bool])
+        #expect(flags["visible"] == true)
+        #expect(flags["audio"] == true)
+        #expect(flags["labels"] == true)
+        #expect(flags["generation"] == false)
+        #expect(flags["values"] == true)
+        try await snapshot(webView, named: "runtime-embedding-\(language)")
+    }
+}

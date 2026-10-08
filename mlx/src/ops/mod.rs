@@ -17,6 +17,7 @@ pub mod cast;
 pub mod constructors;
 pub mod conv;
 pub mod cumulative;
+pub mod einsum;
 pub mod fft;
 pub mod indexing;
 pub mod matmul;

@@ -6,6 +6,10 @@
 
 使用示例见 [API 快速开始](api.md)，嵌套字段、工具、思考和 Schema 规则见[协议参考](api-reference.md)。模型相关条件见[支持模型](supported-models.md)。
 
+EmbeddingGemma 2 BF16 与 affine4 另支持 `POST /v1/embeddings` 文本、图片、音频及组合向量。
+输入、维度、编码与错误限制见[向量 API](text-embeddings.md)；下方生成协议规则适用于
+Chat Completions、Responses 和 Messages。
+
 ## 通用规则
 
 三套协议均支持同步文本、SSE、受支持的 Structured Outputs，以及依赖原生模板的客户端工具调用。

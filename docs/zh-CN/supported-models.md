@@ -10,15 +10,17 @@ OpenAI-compatible 接口调用。
 
 IronMLX App 还支持 `aac6fef/laya-multilingual-mlx` 决策模型：下载、加载与卸载、重启恢复，以及通过 App 服务端口调用兼容 TypeSafe 的 System One API。详见 [Laya 使用指南](laya-systemone-api.md)。
 
+IronMLX App 支持 `mlx-community/embeddinggemma-2-bf16` 和 `mlx-community/embeddinggemma-2-4bit`（affine4）的文本、图片、音频及组合向量推理，详见[文本、图片与音频向量 API](text-embeddings.md)。
+
 IronMLX 0.2.0 支持以下文本和视觉语言模型。请先确认模型族和所需功能，再选择适合设备内存的具体版本。
 同一模型族的不同版本、量化文件和模板可能存在兼容性差异；下表不是所有同名模型的验证清单。
 
 ## App 模型目录
 
 进入 **模型 → 模型下载**，默认打开的 **支持的模型** Tab 列出精选的具体仓库版本。
-目录收录 2026-10-03 本地清单中的全部 56 个 HuggingFace 仓库，合并为 27 个模型项。
+目录收录 58 个 HuggingFace 仓库版本，合并为 28 个模型项，包含 2026-10-07 新增的 EmbeddingGemma 2 BF16 与 affine4 编码器版本。
 包含 7 个 Qwen MTP 版本、3 个 Gemma 4 assistant 和 2 个 DFlash2 仓库；辅助模型与主模型分开展示，JonasLoos b32 与 z-lab DFlash2 也分开展示。
-新增条目标记为架构兼容、待运行验证，收录不扩大已有运行验证的范围。
+尚未完成运行验证的条目标记为架构兼容、待运行验证。两个 EmbeddingGemma 2 版本已通过文本、图片及音频向量数值和生命周期检查，验证范围不包含视频输入。
 同一模型的量化版本合并展示；所有模型的下拉框初始显示 **选择量化版本**，即使只有一个版本，也必须先选择才能下载。
 选择前不显示某一版本的仓库、大小、内存提示或验证状态，下载按钮禁用；同一页面内切换 Tab 会保留选择。
 选项同时显示量化类型和位数，例如 `Affine · 4 bit`、`OptiQ · 4 bit`；切换后同步更新仓库、大小、内存提示、验证状态及下载按钮。
@@ -67,7 +69,7 @@ IndexTTS 仍使用 App 已验证资源配置固定的版本。
 
 表中的文本和视觉生成运行时均支持 HTTP 流式响应。图片能力指理解图片，不代表生成图片或支持视频。
 Qwen Image 2.1 使用独立文生图运行时，不改变该表中“图片”的含义。
-模型列表中出现 embedding、reranker 或 ASR 信息不代表运行时受支持。TTS 仅支持已验证的 IndexTTS 2.5 配置及其独立音频运行时。
+文本、图片和音频向量推理仅支持上述两个 EmbeddingGemma 2 版本。模型列表中出现其他 embedding、reranker 或 ASR 信息不代表运行时受支持。TTS 仅支持已验证的 IndexTTS 2.5 配置及其独立音频运行时。
 
 ## 已验证的具体模型
 

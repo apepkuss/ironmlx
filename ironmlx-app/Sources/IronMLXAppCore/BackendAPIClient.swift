@@ -541,6 +541,7 @@ public struct BackendModelCapabilities: Codable, Equatable, Sendable {
     public var runtimeKind: String
     public var supportsStreaming: Bool
     public var supportsVision: Bool
+    public var supportsAudio: Bool
     public var supportsMtp: Bool
     public var supportsPromptLookup: Bool
     public var supportsSpeculativeDecoding: Bool
@@ -551,6 +552,7 @@ public struct BackendModelCapabilities: Codable, Equatable, Sendable {
         runtimeKind: String,
         supportsStreaming: Bool,
         supportsVision: Bool,
+        supportsAudio: Bool = false,
         supportsMtp: Bool,
         supportsPromptLookup: Bool,
         supportsSpeculativeDecoding: Bool,
@@ -560,6 +562,7 @@ public struct BackendModelCapabilities: Codable, Equatable, Sendable {
         self.runtimeKind = runtimeKind
         self.supportsStreaming = supportsStreaming
         self.supportsVision = supportsVision
+        self.supportsAudio = supportsAudio
         self.supportsMtp = supportsMtp
         self.supportsPromptLookup = supportsPromptLookup
         self.supportsSpeculativeDecoding = supportsSpeculativeDecoding
@@ -567,10 +570,24 @@ public struct BackendModelCapabilities: Codable, Equatable, Sendable {
         self.supportedSamplingParameters = supportedSamplingParameters
     }
 
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        runtimeKind = try values.decode(String.self, forKey: .runtimeKind)
+        supportsStreaming = try values.decode(Bool.self, forKey: .supportsStreaming)
+        supportsVision = try values.decode(Bool.self, forKey: .supportsVision)
+        supportsAudio = try values.decodeIfPresent(Bool.self, forKey: .supportsAudio) ?? false
+        supportsMtp = try values.decode(Bool.self, forKey: .supportsMtp)
+        supportsPromptLookup = try values.decode(Bool.self, forKey: .supportsPromptLookup)
+        supportsSpeculativeDecoding = try values.decode(Bool.self, forKey: .supportsSpeculativeDecoding)
+        supportsKvCache = try values.decode(Bool.self, forKey: .supportsKvCache)
+        supportedSamplingParameters = try values.decode([String].self, forKey: .supportedSamplingParameters)
+    }
+
     enum CodingKeys: String, CodingKey {
         case runtimeKind = "runtime_kind"
         case supportsStreaming = "supports_streaming"
         case supportsVision = "supports_vision"
+        case supportsAudio = "supports_audio"
         case supportsMtp = "supports_mtp"
         case supportsPromptLookup = "supports_prompt_lookup"
         case supportsSpeculativeDecoding = "supports_speculative_decoding"
@@ -704,9 +721,52 @@ public struct BackendDecisionMetrics: Codable, Equatable, Sendable {
     }
 }
 
+public struct BackendEmbeddingMetrics: Codable, Equatable, Sendable {
+    public var windowSeconds: UInt64
+    public var completedRequests: UInt64
+    public var failedRequests: UInt64
+    public var recentCompletedRequests: Int
+    public var latencyMsP50: Double?
+    public var inputTokensPerSecond: Double?
+    public var vectorsPerSecond: Double?
+    public var lastRequestUnixMs: UInt64?
+
+    public init(
+        windowSeconds: UInt64,
+        completedRequests: UInt64,
+        failedRequests: UInt64,
+        recentCompletedRequests: Int,
+        latencyMsP50: Double? = nil,
+        inputTokensPerSecond: Double? = nil,
+        vectorsPerSecond: Double? = nil,
+        lastRequestUnixMs: UInt64? = nil
+    ) {
+        self.windowSeconds = windowSeconds
+        self.completedRequests = completedRequests
+        self.failedRequests = failedRequests
+        self.recentCompletedRequests = recentCompletedRequests
+        self.latencyMsP50 = latencyMsP50
+        self.inputTokensPerSecond = inputTokensPerSecond
+        self.vectorsPerSecond = vectorsPerSecond
+        self.lastRequestUnixMs = lastRequestUnixMs
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case windowSeconds = "window_seconds"
+        case completedRequests = "completed_requests"
+        case failedRequests = "failed_requests"
+        case recentCompletedRequests = "recent_completed_requests"
+        case latencyMsP50 = "latency_ms_p50"
+        case inputTokensPerSecond = "input_tokens_per_second"
+        case vectorsPerSecond = "vectors_per_second"
+        case lastRequestUnixMs = "last_request_unix_ms"
+    }
+}
+
 public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public var decision: BackendDecisionSettings?
     public var decisionMetrics: BackendDecisionMetrics?
+    public var embeddingMetrics: BackendEmbeddingMetrics?
     public var id: String
     public var model: String
     public var path: String
@@ -733,6 +793,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         id: String,
         decision: BackendDecisionSettings? = nil,
         decisionMetrics: BackendDecisionMetrics? = nil,
+        embeddingMetrics: BackendEmbeddingMetrics? = nil,
         model: String,
         path: String,
         architecture: String,
@@ -767,6 +828,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     ) {
         self.decision = decision
         self.decisionMetrics = decisionMetrics
+        self.embeddingMetrics = embeddingMetrics
         self.id = id
         self.model = model
         self.path = path
@@ -793,6 +855,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case decision
         case decisionMetrics = "decision_metrics"
+        case embeddingMetrics = "embedding_metrics"
         case id
         case model
         case path
@@ -809,6 +872,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         case runtimeKind = "runtime_kind"
         case supportsStreaming = "supports_streaming"
         case supportsVision = "supports_vision"
+        case supportsAudio = "supports_audio"
         case supportsMtp = "supports_mtp"
         case supportsPromptLookup = "supports_prompt_lookup"
         case supportsSpeculativeDecoding = "supports_speculative_decoding"
@@ -829,6 +893,10 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         self.decisionMetrics = try container.decodeIfPresent(
             BackendDecisionMetrics.self,
             forKey: .decisionMetrics
+        )
+        self.embeddingMetrics = try container.decodeIfPresent(
+            BackendEmbeddingMetrics.self,
+            forKey: .embeddingMetrics
         )
         self.id = try container.decode(String.self, forKey: .id)
         self.model = try container.decode(String.self, forKey: .model)
@@ -856,6 +924,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
             runtimeKind: try container.decode(String.self, forKey: .runtimeKind),
             supportsStreaming: try container.decode(Bool.self, forKey: .supportsStreaming),
             supportsVision: try container.decode(Bool.self, forKey: .supportsVision),
+            supportsAudio: try container.decodeIfPresent(Bool.self, forKey: .supportsAudio) ?? false,
             supportsMtp: try container.decode(Bool.self, forKey: .supportsMtp),
             supportsPromptLookup: try container.decode(Bool.self, forKey: .supportsPromptLookup),
             supportsSpeculativeDecoding: try container.decode(
@@ -884,6 +953,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(decision, forKey: .decision)
         try container.encodeIfPresent(decisionMetrics, forKey: .decisionMetrics)
+        try container.encodeIfPresent(embeddingMetrics, forKey: .embeddingMetrics)
         try container.encode(id, forKey: .id)
         try container.encode(model, forKey: .model)
         try container.encode(path, forKey: .path)
@@ -900,6 +970,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         try container.encode(capabilities.runtimeKind, forKey: .runtimeKind)
         try container.encode(capabilities.supportsStreaming, forKey: .supportsStreaming)
         try container.encode(capabilities.supportsVision, forKey: .supportsVision)
+        try container.encode(capabilities.supportsAudio, forKey: .supportsAudio)
         try container.encode(capabilities.supportsMtp, forKey: .supportsMtp)
         try container.encode(capabilities.supportsPromptLookup, forKey: .supportsPromptLookup)
         try container.encode(

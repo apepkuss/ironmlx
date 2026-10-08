@@ -52,6 +52,22 @@
         "usage": "Identifies the supported DeepSeek Harness integration in light appearance."
       },
       {
+        "bundled_hash_scope": "License notice text; not a hash of adapted implementations",
+        "bundled_modifications": "Retains upstream attribution for the Rust EmbeddingGemma 2 text, vision and audio adapters. Model weights and Python are not bundled.",
+        "bundled_path": "ironmlx-lm/licenses/mlx-vlm-MIT.txt",
+        "bundled_sha256": "f74c448746be3376e27dee43e2be9ec9d55f4820cd7466c603a6c7d1fd2d25b8",
+        "component": "EmbeddingGemma 2 and Gemma4 implementation MIT notice",
+        "copyright": "Copyright © 2025 Prince Canuma",
+        "license": "MIT",
+        "license_file": "lm-mlx-vlm-MIT.txt",
+        "license_sha256": "f74c448746be3376e27dee43e2be9ec9d55f4820cd7466c603a6c7d1fd2d25b8",
+        "repository": "https://github.com/Blaizzy/mlx-vlm",
+        "revision": "3d87e88402f307efbf68e568971aa887ee7d9ed0",
+        "source_path": "LICENSE",
+        "source_url": "https://github.com/Blaizzy/mlx-vlm/blob/3d87e88402f307efbf68e568971aa887ee7d9ed0/LICENSE",
+        "usage": "Required attribution for adapted embedding encoder implementations distributed with the server."
+      },
+      {
         "bundled_modifications": "Wrapped the upstream PNG in SVG for local Bundle loading; artwork unchanged.",
         "bundled_path": "ironmlx-app/Sources/IronMLXAppCore/Resources/hermes-agent-logo.svg",
         "bundled_sha256": "81ee441b8ee6e4e0cf086d7606d358fa8a8ebd143fd33e206a6ad9e5705bbceb",
@@ -194,7 +210,7 @@
       }
     ],
     "manifest": "compliance/bundled-assets.json",
-    "manifest_sha256": "0ce6bba95eee40a5148a084bab7a7fb5dde7704f3e7cfebaf8095a1eee1f2182"
+    "manifest_sha256": "acf9af792598ae4d83426d3e91a290acadd723402dc773532ac14a48521956fb"
   },
   "generation": {
     "cargo_about_config": "about.toml",

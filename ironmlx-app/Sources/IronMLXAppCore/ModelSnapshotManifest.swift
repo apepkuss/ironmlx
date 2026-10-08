@@ -46,6 +46,8 @@ public struct ModelSnapshotCompatibility: Codable, Equatable, Sendable {
     public var quantizationMode: String?
     public var quantizationBits: Int?
     public var quantizationGroupSize: Int?
+    public var downloadOnly: Bool? = nil
+    public var runtimeSupportError: String? = nil
     /// Upstream dependencies; downloading this snapshot does not resolve these repositories.
     public var externalResources: [String]? = nil
 
@@ -55,6 +57,8 @@ public struct ModelSnapshotCompatibility: Codable, Equatable, Sendable {
         case quantizationMode = "quantization_mode"
         case quantizationBits = "quantization_bits"
         case quantizationGroupSize = "quantization_group_size"
+        case downloadOnly = "download_only"
+        case runtimeSupportError = "runtime_support_error"
         case externalResources = "external_resources"
     }
 }

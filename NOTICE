@@ -16,3 +16,11 @@ question rendering, and confidence calculations from laya-mlx at revision
 contributors. laya-mlx itself includes software derived from Laya by Convai
 Innovations and Laya contributors. Both are licensed under Apache-2.0.
 See https://github.com/mizorewww/laya-mlx and https://github.com/NandhaKishorM/laya.
+
+The EmbeddingGemma 2 text, vision and audio adapters in ironmlx-lm adapt
+MLX-VLM at revision 3d87e88402f307efbf68e568971aa887ee7d9ed0 under MIT.
+The Gemma4 audio feature extraction rules follow Transformers at revision
+cb33194ad6152bd9fad6305378d92db385dd7b32 under Apache-2.0.
+Model weights and upstream Python packages are not included in IronMLX.
+See https://github.com/Blaizzy/mlx-vlm and
+https://github.com/huggingface/transformers.

@@ -1028,7 +1028,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(
         dashboardHTML(
             html,
-            contains: "models.filter(m => !['block_diffusion', 'decision'].includes(m.capabilities?.runtime_kind))"
+            contains: "models.filter(m => !['block_diffusion', 'decision', 'embedding'].includes(m.capabilities?.runtime_kind))"
         )
     )
 }

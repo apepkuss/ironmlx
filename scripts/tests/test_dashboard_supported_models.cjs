@@ -89,8 +89,8 @@ test('default tab is the catalogue and keyboard navigation selects one panel', (
 
 test('catalogue lists all models without presenting assistants as chat models', () => {
   const p = page(); p.render();
-  assert.equal(p.element('catalog-model-list').buttons.length, 27);
-  assert.match(p.element('catalog-summary').textContent, /27 个模型 · 56 个版本/);
+  assert.equal(p.element('catalog-model-list').buttons.length, 28);
+  assert.match(p.element('catalog-summary').textContent, /28 个模型 · 58 个版本/);
   p.choose('gemma4-e2b-4bit', 'gemma4-e2b-4bit');
   assert.match(p.element('catalog-model-list').innerHTML, /架构兼容 · 待运行验证/);
   p.choose('dflash2-qwen38', 'dflash2-qwen38');
@@ -99,7 +99,7 @@ test('catalogue lists all models without presenting assistants as chat models', 
 
 test('every model requires a quantization choice, including single FP16 and BF16 variants', () => {
   const p = page(); p.render();
-  assert.equal((p.element('catalog-model-list').innerHTML.match(/class="catalog-row"/g) || []).length, 27);
+  assert.equal((p.element('catalog-model-list').innerHTML.match(/class="catalog-row"/g) || []).length, 28);
   const qwen35 = p.element('variant-qwen35-2b');
   assert.deepEqual(qwen35.options.map(option => option.label), ['选择量化版本', 'Affine · 4 bit', 'Affine · 5 bit', 'Affine · 6 bit', 'OptiQ · 4 bit']);
   assert.equal(qwen35.value, '');
@@ -117,7 +117,7 @@ test('every model requires a quantization choice, including single FP16 and BF16
   const firstRow = p.element('catalog-model-list').innerHTML.split('</article>')[0];
   assert.doesNotMatch(firstRow, /class="catalog-repo"|预计下载|权重预算|架构兼容/);
   assert.doesNotMatch(firstRow, /请先选择量化版本/);
-  assert.equal(p.element('catalog-model-list').selects.length, 27);
+  assert.equal(p.element('catalog-model-list').selects.length, 28);
   assert.deepEqual(p.element('variant-laya').options.map(option => option.label), ['选择量化版本', 'FP16']);
   assert.deepEqual(p.element('variant-dflash2-qwen38').options.map(option => option.label), ['选择量化版本', 'BF16']);
   p.choose('laya', 'laya');
@@ -128,7 +128,7 @@ test('every model requires a quantization choice, including single FP16 and BF16
   const distinct = structuredClone(catalog.entries.find(entry => entry.id === 'qwen38-27b-4bit'));
   distinct.id = 'different-finetune'; distinct.modelId = 'different-finetune';
   p.context.window.__IRONMLX_SUPPORTED_MODELS__.entries.push(distinct); p.render();
-  assert.equal((p.element('catalog-model-list').innerHTML.match(/class="catalog-row"/g) || []).length, 28);
+  assert.equal((p.element('catalog-model-list').innerHTML.match(/class="catalog-row"/g) || []).length, 29);
 });
 
 test('variant changes update repository, bytes, memory, status and the HF download target', () => {
@@ -167,7 +167,7 @@ test('same-bit formats stay distinct and selection survives rerenders, tabs and 
   assert.match(p.element('catalog-model-list').innerHTML, /采用 4\/8-bit 混合精度/);
   p.render();
   assert.equal(p.element('variant-qwen35-2b').value, 'qwen35-2b-optiq-4bit');
-  assert.match(p.element('catalog-summary').textContent, /27 个模型 · 56 个版本/);
+  assert.match(p.element('catalog-summary').textContent, /28 个模型 · 58 个版本/);
   p.context.switchDlSource('hf'); p.context.switchDlSource('catalog');
   p.context.refreshSupportedModelActions();
   assert.equal(p.element('variant-qwen35-2b').value, 'qwen35-2b-optiq-4bit');
@@ -278,3 +278,31 @@ test('missing catalogue gives an actionable fallback and escapes catalogue conte
   p.render(); assert.doesNotMatch(p.element('catalog-model-list').innerHTML, /<img/);
   assert.match(p.element('catalog-model-list').innerHTML, /&lt;img/);
 });
+
+test('EmbeddingGemma 2 groups BF16 and affine4 under text, image and audio embedding capabilities', () => {
+  const entries = catalog.entries.filter(entry => entry.modelId === 'embeddinggemma2');
+  assert.equal(entries.length, 2);
+  assert.deepEqual(entries.map(entry => entry.variantLabel), ['BF16', 'Affine · 4 bit']);
+  entries.forEach(entry => {
+    assert.equal(entry.category, 'embedding');
+    assert.deepEqual(entry.capabilities, ['text', 'vision', 'audio_embedding', 'embedding']);
+    assert.equal(entry.msRepo, null);
+  });
+  const p = page(); p.render(); p.choose('embeddinggemma2', 'embeddinggemma2-4bit');
+  const row = p.element('catalog-model-list').innerHTML;
+  assert.match(row, /\/v1\/embeddings/);
+  assert.match(row, /embeddinggemma-2-4bit/);
+});
+
+for (const lang of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
+  test(`embedding catalogue labels describe vectors rather than generation in ${lang}`, () => {
+    const p = page(lang);
+    vm.runInContext("catalogSelectedType = 'embedding'", p.context);
+    p.render();
+    const row = p.element('catalog-model-list').innerHTML;
+    for (const key of ['catalog_text_embedding', 'catalog_image_embedding', 'catalog_audio_embedding']) {
+      assert.ok(row.includes(p.context.t(key)), `${lang} ${key}`);
+    }
+    assert.ok(!row.includes(p.context.t('catalog_text')));
+  });
+}

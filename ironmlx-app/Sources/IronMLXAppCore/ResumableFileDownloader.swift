@@ -50,6 +50,16 @@ public struct ResumableFileDownloader: ModelFileDownloading {
         self.httpClient = httpClient
     }
 
+    static func recoverableBytes(destination: URL, identity: ModelPartialIdentity) -> Int64? {
+        let partial = destination.appendingPathExtension("partial")
+        guard let data = try? Data(contentsOf: partial.appendingPathExtension("meta.json")),
+              let stored = try? JSONDecoder().decode(ModelPartialIdentity.self, from: data),
+              sameFileIdentity(stored, identity),
+              identity.etag == nil || stored.etag == identity.etag,
+              let size = try? fileSize(partial), size >= 0, size <= identity.expectedSize else { return nil }
+        return size
+    }
+
     public func download(
         _ request: ResumableDownloadRequest,
         progress: @escaping @Sendable (Int64) async -> Void = { _ in }

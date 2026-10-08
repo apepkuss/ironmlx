@@ -153,6 +153,10 @@ jobs:
       - name: Test Dashboard recovery notifications
         run: node --test scripts/tests/test_dashboard_recovery.cjs scripts/tests/test_dashboard_model_parameters.cjs scripts/tests/test_dashboard_log_export.cjs scripts/tests/test_dashboard_download_cleanup.cjs scripts/tests/test_dashboard_supported_models.cjs
 
+      - name: Test crash recovery helper startup
+        shell: bash
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_backend_crash_helper.py -v
+
       - name: Test stable release identity gate
         shell: bash
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_verify_release_identity.py -v

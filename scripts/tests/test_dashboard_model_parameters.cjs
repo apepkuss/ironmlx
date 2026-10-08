@@ -165,3 +165,72 @@ test('decision runtime status uses persistent metrics without increasing poll fr
   assert.match(html, /const GPU_ACTIVE_POLL_MS = 500;/);
   assert.match(html, /const GPU_IDLE_POLL_MS = 1000;/);
 });
+
+test('embedding parameter save sends the alias without generation settings', () => {
+  const page = dashboard();
+  const model = page.context.window.__CURRENT_PARAM_MODEL__;
+  page.context.window.__LOCAL_MODELS__[model].capabilities.runtime_kind = 'embedding';
+  page.context.document.getElementById = id => ({ value: id === 'modal-alias-input' ? 'Search vectors' : '' });
+  vm.runInContext('saveModelParams()', page.context);
+  assert.deepEqual(JSON.parse(JSON.stringify(page.payload)), { model_id: model, alias: 'Search vectors' });
+});
+
+test('embedding cards show vector metrics in every language and retain generation cards', () => {
+  const start = html.indexOf('  const I18N =');
+  const dictionary = html.slice(start, html.indexOf('\n  };', start) + 5);
+  const translations = vm.runInNewContext(`${dictionary}\nI18N`, {});
+  const keys = ['performance', 'completed', 'completed_help', 'errors', 'errors_help',
+    'latency', 'latency_help', 'input_rate', 'input_rate_help', 'vector_rate', 'vector_rate_help',
+    'performance_window', 'performance_empty'];
+  const card = { style: {} };
+  const container = { innerHTML: '' };
+  const context = {
+    I18N: translations, currentLang: 'en', window: {}, Date,
+    DECISION_RECENT_ACTIVITY_MS: 2500,
+    runtimeActiveKvOpenModelIds: new Set(),
+    captureRuntimeActiveKvOpenState() {}, renderActiveKvIncident() {},
+    escapeAttr: String,
+    document: { getElementById(id) { return id === 'runtime-model-health-card' ? card : container; } },
+  };
+  vm.createContext(context);
+  vm.runInContext(extract('runtimeOperationalState', 'renderRuntimeModels')
+    + extract('renderRuntimeModels', 'onApiFetchResult'), context);
+  const model = { id: 'embeddinggemma-2', runtime_kind: 'embedding', supports_audio: true, queue_capacity: 8,
+    usage: { cumulative_tokens: 120, performance: { live_decode_tokens_per_second: 987.6 } },
+    embedding_metrics: { window_seconds: 60, completed_requests: 7, failed_requests: 1,
+      recent_completed_requests: 4, latency_ms_p50: 18.5, input_tokens_per_second: 1200,
+      vectors_per_second: 41.2 } };
+  for (const language of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
+    const dict = translations[language];
+    for (const key of keys) assert.ok(dict[`runtime_embedding_${key}`], `${language} ${key}`);
+    context.currentLang = language;
+    context.renderRuntimeModels([model]);
+    assert.ok(container.innerHTML.includes(dict.catalog_audio_embedding), `${language} audio capability`);
+    for (const key of ['performance', 'completed', 'errors', 'latency', 'input_rate', 'vector_rate']) {
+      assert.ok(container.innerHTML.includes(dict[`runtime_embedding_${key}`]), `${language} ${key}`);
+    }
+    assert.match(container.innerHTML, /1,200/);
+    assert.match(container.innerHTML, /41\.2/);
+    assert.match(container.innerHTML, /vec\/s/);
+    assert.doesNotMatch(container.innerHTML, /987\.6/);
+    for (const key of ['runtime_live_decode_rate', 'runtime_prefill_rate', 'runtime_ttft']) {
+      assert.ok(!container.innerHTML.includes(dict[key]), `${language} hides ${key}`);
+    }
+  }
+  context.currentLang = 'en';
+  context.renderRuntimeModels([{ ...model, supports_audio: false }]);
+  assert.ok(!container.innerHTML.includes(translations.en.catalog_audio_embedding));
+  context.renderRuntimeModels([{ ...model, embedding_metrics: { completed_requests: 0, failed_requests: 0 } }]);
+  assert.ok(container.innerHTML.includes(translations.en.runtime_embedding_performance_empty));
+  assert.doesNotMatch(container.innerHTML, /NaN|undefined/);
+  context.renderRuntimeModels([{ ...model, embedding_metrics: undefined }]);
+  assert.doesNotMatch(container.innerHTML, /NaN|undefined/);
+  context.renderRuntimeModels([{ ...model, runtime_kind: 'causal' }]);
+  assert.ok(container.innerHTML.includes(translations.en.runtime_live_decode_rate));
+  assert.ok(container.innerHTML.includes(translations.en.runtime_prefill_rate));
+  assert.ok(container.innerHTML.includes(translations.en.runtime_ttft));
+  assert.match(container.innerHTML, /987\.6/);
+  assert.equal(context.runtimeOperationalState({ runtime_kind: 'embedding', active_requests: 1 }, 10000), 'busy');
+  assert.equal(context.runtimeOperationalState({ runtime_kind: 'embedding', embedding_metrics: { last_request_unix_ms: 9000 } }, 10000), 'recent');
+  assert.equal(context.runtimeOperationalState({ runtime_kind: 'embedding', embedding_metrics: { last_request_unix_ms: 7000 } }, 10000), 'idle');
+});

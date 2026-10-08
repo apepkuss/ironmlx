@@ -16,6 +16,12 @@ curl http://127.0.0.1:9068/v1/models
 `/health` 仅表示 HTTP 服务可响应；`/healthz` 提供运行状态。App 的模型列表包括已注册但未加载的模型。
 同一 macOS 用户只能运行一个后端，启动独立 CLI 前应退出已有 App 后端。
 
+## Embedding
+
+0.2.0 源码构建可加载 EmbeddingGemma 2 BF16 或 affine4 模型，通过
+`POST /v1/embeddings` 处理文本、图片、音频及有序组合。请求示例、模型预处理、
+输出维度、容量限制与 Dashboard 性能指标见[向量 API](text-embeddings.md)。
+
 ## OpenAI Chat Completions
 
 ```bash

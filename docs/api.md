@@ -16,6 +16,13 @@ curl http://127.0.0.1:9068/v1/models
 `/health` only indicates HTTP responsiveness; `/healthz` reports runtime state. The App model list includes registered models that are not loaded.
 Only one backend may run per macOS user; exit the existing App backend before starting a separate CLI server.
 
+## Embeddings
+
+In 0.2.0 source builds, load an EmbeddingGemma 2 BF16 or affine4 model and use
+`POST /v1/embeddings` for text, images, audio or ordered combinations.
+See the [embedding API](text-embeddings.md) for requests, model preprocessing,
+output dimensions, limits and Dashboard performance metrics.
+
 ## OpenAI Chat Completions
 
 ```bash

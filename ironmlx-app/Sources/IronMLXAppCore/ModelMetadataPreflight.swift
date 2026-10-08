@@ -84,6 +84,14 @@ public enum ModelMetadataPreflightError: LocalizedError {
     case rejected(String)
     case invalidResponse(String)
 
+    /// Restrict the override to explicit runtime incompatibility, never malformed metadata.
+    static func allowsDownloadOnly(_ message: String) -> Bool {
+        message.range(
+            of: #"(?:^|Error: |\n)(?:unsupported model_type: [A-Za-z0-9_.-]+|unsupported (?:quantization|quantization_config|optiq_metadata)\.(?:mode|bits|group_size|method)\b)"#,
+            options: .regularExpression
+        ) != nil
+    }
+
     public var errorDescription: String? {
         switch self {
         case let .rejected(detail):

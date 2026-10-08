@@ -259,6 +259,7 @@ public struct ModelDownloadProgress: Equatable, Sendable {
 }
 
 public struct ModelDownloadCompletion: Codable, Equatable, Sendable {
+    public var downloadOnly: Bool? = nil
     public var success: Bool
     public var message: String?
     public var error: String?
@@ -266,6 +267,7 @@ public struct ModelDownloadCompletion: Codable, Equatable, Sendable {
     public var repoID: String?
 
     enum CodingKeys: String, CodingKey {
+        case downloadOnly = "download_only"
         case success
         case message
         case error
@@ -320,6 +322,8 @@ public struct ModelDownloadStatus: Codable, Equatable, Sendable {
     public var commitSHA: String?
     public var error: String?
     public var errorCode: String?
+    public var downloadOnly: Bool? = nil
+    public var canContinueDownload: Bool? = nil
     public var queuePosition: Int? = nil
     public var totalBytes: Int64? = nil
     public var remainingBytes: Int64? = nil
@@ -335,6 +339,8 @@ public struct ModelDownloadStatus: Codable, Equatable, Sendable {
         case commitSHA = "commit_sha"
         case error
         case errorCode = "error_code"
+        case downloadOnly = "download_only"
+        case canContinueDownload = "can_continue_download"
         case queuePosition = "queue_position"
         case totalBytes = "total_bytes"
         case remainingBytes = "remaining_bytes"
@@ -389,6 +395,7 @@ private struct ModelDownloadResumePlan {
 }
 
 private struct QueuedModelDownload: Sendable {
+    var downloadOnly: Bool
     var provider: ModelRepositoryProvider
     var repoID: String
     var token: String?
@@ -690,7 +697,8 @@ public actor ModelDownloadService {
     }
 
     public func resumeDownload(
-        provider: ModelRepositoryProvider, repoID: String, token: String? = nil
+        provider: ModelRepositoryProvider, repoID: String, token: String? = nil,
+        downloadOnly: Bool = false
     ) -> ModelDownloadStartResponse {
         let key = Self.taskKey(provider: provider, repoID: repoID)
         guard let status = statuses[key], !Self.isActiveStatus(status.status),
@@ -699,6 +707,13 @@ public actor ModelDownloadService {
             return ModelDownloadStartResponse(
                 success: false, status: "error", repoID: repoID,
                 error: "The download is still stopping or cannot be resumed.", code: "download_not_resumable"
+            )
+        }
+        if downloadOnly, status.downloadOnly != true, status.canContinueDownload != true {
+            return ModelDownloadStartResponse(
+                success: false, status: "error", repoID: repoID,
+                error: "Only a runtime incompatibility rejection can be continued as a file download.",
+                code: "download_only_not_allowed"
             )
         }
         let credential = token?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -710,7 +725,8 @@ public actor ModelDownloadService {
             )
         }
         resumeRevisions[key] = status.commitSHA
-        return enqueueDownload(provider: provider, repoID: repoID, token: effectiveToken, progress: { _ in })
+        return enqueueDownload(provider: provider, repoID: repoID, token: effectiveToken,
+                               downloadOnly: downloadOnly || status.downloadOnly == true, progress: { _ in })
     }
 
     public func deleteDownload(provider: ModelRepositoryProvider, repoID: String) -> ModelDownloadCleanupResult {
@@ -895,6 +911,7 @@ public actor ModelDownloadService {
         provider: ModelRepositoryProvider,
         repoID rawRepoID: String,
         token: String?,
+        downloadOnly: Bool = false,
         progress: @escaping @Sendable (ModelDownloadProgress) async -> Void
     ) -> ModelDownloadStartResponse {
         let repoID = rawRepoID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -936,6 +953,7 @@ public actor ModelDownloadService {
         }
         downloadTokens[key] = credential?.isEmpty == false ? credential : nil
         let request = QueuedModelDownload(
+            downloadOnly: downloadOnly || (statuses[key]?.status == ModelDownloadPhase.paused.rawValue && statuses[key]?.downloadOnly == true),
             provider: provider,
             repoID: repoID,
             token: credential?.isEmpty == false ? credential : nil,
@@ -953,7 +971,8 @@ public actor ModelDownloadService {
             phase: .queued,
             progressPct: statuses[key]?.progressPct ?? 0,
             commitSHA: resumeRevisions[key],
-            enqueuedAt: request.enqueuedAt
+            enqueuedAt: request.enqueuedAt,
+            downloadOnly: request.downloadOnly
         )
         currentReminders[key] = ModelDownloadRecoveryReminder(
             provider: provider,
@@ -1198,6 +1217,7 @@ public actor ModelDownloadService {
                     provider: request.provider,
                     repoID: request.repoID,
                     token: request.token,
+                    downloadOnly: request.downloadOnly,
                     progress: request.progress
                 )
             }
@@ -1394,6 +1414,7 @@ public actor ModelDownloadService {
         provider: ModelRepositoryProvider,
         repoID: String,
         token: String?,
+        downloadOnly: Bool,
         progress: @escaping @Sendable (ModelDownloadProgress) async -> Void
     ) async -> ModelDownloadCompletion {
         let key = Self.taskKey(provider: provider, repoID: repoID)
@@ -1425,7 +1446,7 @@ public actor ModelDownloadService {
             )
             if FileManager.default.fileExists(atPath: finalSnapshot.path) {
                 let verifier = ModelSnapshotVerifier()
-                if let manifest = try? verifier.verifyStructure(
+                if var manifest = try? verifier.verifyStructure(
                     snapshot: finalSnapshot,
                     expectedProvider: provider,
                     expectedRepoID: repoID
@@ -1436,6 +1457,18 @@ public actor ModelDownloadService {
                    record.commitSHA == repository.commitSHA,
                    record.state == .verified
                 {
+                    if manifest.compatibility.downloadOnly == true,
+                       manifest.compatibility.modelType == "embedding_gemma2",
+                       let compatibility = try? await metadataPreflight.validate(metadataDirectory: finalSnapshot),
+                       compatibility.modelType == manifest.compatibility.modelType {
+                        manifest.compatibility = ModelSnapshotCompatibility(
+                            modelType: compatibility.modelType, artifactRole: compatibility.artifactRole,
+                            quantizationMode: compatibility.quantization?.mode,
+                            quantizationBits: compatibility.quantization?.bits,
+                            quantizationGroupSize: compatibility.quantization?.groupSize
+                        )
+                        try store.writeManifest(manifest, to: finalSnapshot)
+                    }
                     if manifest.compatibility.artifactRole == "tts" {
                         try await prepareAudio(snapshot: finalSnapshot, repository: repository, token: token, key: key)
                     }
@@ -1449,7 +1482,8 @@ public actor ModelDownloadService {
                         commitSHA: repository.commitSHA
                     )
                     await telemetry.finish(outcome: "already_present")
-                    return success(repoID: repoID)
+                    statuses[key]?.downloadOnly = manifest.compatibility.downloadOnly
+                    return success(repoID: repoID, downloadOnly: manifest.compatibility.downloadOnly == true)
                 }
             }
 
@@ -1465,6 +1499,7 @@ public actor ModelDownloadService {
                 commitSHA: repository.commitSHA,
                 phase: .preflighting
             )
+            journal?.downloadOnly = downloadOnly
             try store.writeJournal(journal!)
 
             await telemetry.beginNetwork()
@@ -1522,6 +1557,7 @@ public actor ModelDownloadService {
             }
 
             let compatibility: ModelMetadataPreflightResult
+            var runtimeSupportError: String?
             do {
                 if let ttsProfile {
                     compatibility = ttsProfile.compatibility
@@ -1529,11 +1565,18 @@ public actor ModelDownloadService {
                     compatibility = try await metadataPreflight.validate(metadataDirectory: staging)
                 }
             } catch {
-                throw DownloadFailure(
-                    repoID: repoID,
-                    code: "unsupported_model_metadata",
-                    message: error.localizedDescription
-                )
+                guard downloadOnly, ModelMetadataPreflightError.allowsDownloadOnly(error.localizedDescription) else {
+                    throw DownloadFailure(
+                        repoID: repoID, code: "unsupported_model_metadata", message: error.localizedDescription
+                    )
+                }
+                let configData = try Data(contentsOf: staging.appendingPathComponent("config.json"))
+                guard let config = try JSONSerialization.jsonObject(with: configData) as? [String: Any],
+                      let modelType = config["model_type"] as? String, !modelType.isEmpty else {
+                    throw DownloadFailure(repoID: repoID, code: "repo_missing_metadata", message: "Missing model_type in config.json.")
+                }
+                compatibility = ModelMetadataPreflightResult(modelType: modelType, artifactRole: "download_only", quantization: nil)
+                runtimeSupportError = error.localizedDescription
             }
             let tokenizerPath: String
             switch compatibility.artifactRole {
@@ -1575,7 +1618,7 @@ public actor ModelDownloadService {
                 availableDiskBytes: nil,
                 physicalMemoryBytes: Int64(clamping: ProcessInfo.processInfo.physicalMemory)
             )
-            try resources.validate()
+            if runtimeSupportError == nil { try resources.validate() }
 
             let metadataBytes = try checkedTotalBytes(
                 metadata,
@@ -1702,6 +1745,8 @@ public actor ModelDownloadService {
                     quantizationMode: compatibility.quantization?.mode,
                     quantizationBits: compatibility.quantization?.bits,
                     quantizationGroupSize: compatibility.quantization?.groupSize,
+                    downloadOnly: runtimeSupportError == nil ? nil : true,
+                    runtimeSupportError: runtimeSupportError,
                     externalResources: ttsProfile?.externalResources
                 ),
                 resources: ModelSnapshotResources(
@@ -1746,6 +1791,7 @@ public actor ModelDownloadService {
                 try await prepareAudio(snapshot: finalSnapshot, repository: repository, token: token, key: key)
             }
 
+            journal?.downloadOnly = runtimeSupportError == nil ? nil : true
             journal?.phase = .completed
             journal?.updatedAt = Date()
             try store.writeJournal(journal!)
@@ -1757,8 +1803,9 @@ public actor ModelDownloadService {
                 progressPct: 100,
                 commitSHA: repository.commitSHA
             )
+            statuses[key]?.downloadOnly = runtimeSupportError == nil ? nil : true
             await telemetry.finish(outcome: "completed")
-            return success(repoID: repoID)
+            return success(repoID: repoID, downloadOnly: runtimeSupportError != nil)
         } catch is CancellationError {
             let phase: ModelDownloadPhase = pauseRequestedKeys.contains(key) ? .paused : .cancelled
             await telemetry.finish(outcome: phase.rawValue, errorCode: phase.rawValue)
@@ -1828,19 +1875,34 @@ public actor ModelDownloadService {
             return failure(message: error.localizedDescription, code: "download_interrupted", repoID: repoID)
         } catch {
             let message = error.localizedDescription
+            let code: String
+            if let networkError = error as? URLError {
+                switch networkError.code {
+                case .timedOut: code = "download_network_timeout"
+                case .secureConnectionFailed, .serverCertificateHasBadDate, .serverCertificateUntrusted,
+                     .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid:
+                    code = "download_tls_failed"
+                case .notConnectedToInternet, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+                     .networkConnectionLost, .internationalRoamingOff, .dataNotAllowed:
+                    code = "download_network_failed"
+                default: code = "download_failed"
+                }
+            } else {
+                code = "download_failed"
+            }
             let phase: ModelDownloadPhase = journal == nil ? .rejected : .interrupted
-            await telemetry.finish(outcome: phase.rawValue, errorCode: "download_failed")
-            persistFailure(&journal, phase: phase, code: "download_failed", message: message)
+            await telemetry.finish(outcome: phase.rawValue, errorCode: code)
+            persistFailure(&journal, phase: phase, code: code, message: message)
             setFailureStatus(
                 key: key,
                 provider: provider,
                 repoID: repoID,
                 journal: journal,
                 phase: phase,
-                code: "download_failed",
+                code: code,
                 message: message
             )
-            return failure(message: message, code: "download_failed", repoID: repoID)
+            return failure(message: message, code: code, repoID: repoID)
         }
     }
 
@@ -2135,6 +2197,9 @@ public actor ModelDownloadService {
         }
         switch identity.provider {
         case .huggingFace:
+            if let bytes = ResumableFileDownloader.recoverableBytes(destination: destination, identity: identity) {
+                return bytes
+            }
             guard identity.expectedSHA256.count == 64 else {
                 return 0
             }
@@ -2212,7 +2277,8 @@ public actor ModelDownloadService {
         queuePosition: Int? = nil,
         totalBytes: Int64? = nil,
         remainingBytes: Int64? = nil,
-        enqueuedAt: Date? = nil
+        enqueuedAt: Date? = nil,
+        downloadOnly: Bool? = nil
     ) {
         let existing = statuses[key]
         statuses[key] = ModelDownloadStatus(
@@ -2224,6 +2290,7 @@ public actor ModelDownloadService {
             commitSHA: commitSHA,
             error: nil,
             errorCode: nil,
+            downloadOnly: downloadOnly ?? existing?.downloadOnly,
             queuePosition: queuePosition ?? existing?.queuePosition,
             totalBytes: totalBytes ?? existing?.totalBytes,
             remainingBytes: remainingBytes ?? existing?.remainingBytes,
@@ -2256,6 +2323,8 @@ public actor ModelDownloadService {
             commitSHA: journal?.commitSHA ?? existing?.commitSHA,
             error: message,
             errorCode: code,
+            downloadOnly: existing?.downloadOnly,
+            canContinueDownload: code == "unsupported_model_metadata" && ModelMetadataPreflightError.allowsDownloadOnly(message),
             queuePosition: nil,
             totalBytes: journal?.totalBytes ?? existing?.totalBytes,
             remainingBytes: existing?.remainingBytes,
@@ -2284,8 +2353,9 @@ public actor ModelDownloadService {
         (try? ModelRepositoryLayout.repositoryName(repoID: repoID)) != nil
     }
 
-    private func success(repoID: String) -> ModelDownloadCompletion {
+    private func success(repoID: String, downloadOnly: Bool = false) -> ModelDownloadCompletion {
         ModelDownloadCompletion(
+            downloadOnly: downloadOnly ? true : nil,
             success: true,
             message: "Model \(repoID) downloaded and verified successfully.",
             error: nil,
@@ -2332,6 +2402,8 @@ public actor ModelDownloadService {
             commitSHA: journal.commitSHA,
             error: journal.error,
             errorCode: journal.errorCode,
+            downloadOnly: journal.downloadOnly,
+            canContinueDownload: journal.errorCode == "unsupported_model_metadata" && ModelMetadataPreflightError.allowsDownloadOnly(journal.error ?? ""),
             queuePosition: nil,
             totalBytes: journal.totalBytes,
             remainingBytes: max(0, journal.totalBytes - journal.progressBytes),

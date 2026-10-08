@@ -6,6 +6,10 @@ Jump to [Responses](#openai-responses), [Chat Completions](#openai-chat-completi
 
 For client integrators. The App defaults to `http://127.0.0.1:9068`; direct CLI serving defaults to port 8080. Use the actual configured endpoint.
 
+Text, image and audio embeddings use the separate [`POST /v1/embeddings` contract](text-embeddings.md).
+Loaded embedding models expose `embedding_metrics` in the App's `/healthz` model
+entries and `/admin/api/models/loaded`; see [runtime status](text-embeddings.md#runtime-status).
+
 ## Single backend instance
 
 One `ironmlx serve` backend is allowed per macOS user, regardless of arguments or port. Before MLX, metallib or model initialization, the process takes an exclusive nonblocking lock on `~/.ironmlx/run/backend.lock` until exit. Normal exit, crashes and SIGKILL release the lock; the file itself can remain and is not a liveness indicator.

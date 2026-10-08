@@ -198,6 +198,33 @@ pub fn build_engine_model_config(
         prompt_lookup,
         pinned,
     } = request;
+    if ironmlx_lm::models::embedding_gemma2::is_checkpoint(model_dir)? {
+        ironmlx_lm::core::loader::preflight_model_metadata(model_dir)?;
+        if audio.is_some()
+            || decision.is_some()
+            || max_cache_cap_override.is_some()
+            || default_max_output_tokens.is_some()
+            || mtp.is_some()
+            || prompt_lookup.is_some()
+            || sampling_defaults_override != SamplingDefaults::default()
+        {
+            return Err(ModelCapabilityError {
+                code: "model_task_mismatch",
+                message: "Embedding models do not accept audio, decision or generation settings.",
+            }
+            .into());
+        }
+        let mut config = decision_model_config(model_id, model_dir.to_path_buf(), pinned);
+        config.capabilities = EngineModelCapabilities::embedding();
+        config.capabilities.supports_vision =
+            ironmlx_lm::models::embedding_gemma2::checkpoint_supports_images(model_dir)?;
+        config.capabilities.supports_audio =
+            ironmlx_lm::models::embedding_gemma2::checkpoint_supports_audio(model_dir)?;
+        return Ok(EngineModelLoad {
+            config,
+            warning: None,
+        });
+    }
     if ironmlx_decision::is_laya_checkpoint(model_dir)? {
         if model_id != ironmlx_decision::contract::MULTILINGUAL_MODEL_ID {
             bail!("Laya must be registered under its canonical model ID");
@@ -782,6 +809,28 @@ pub fn build_engine_model_config_for_pool(
     scheduler_profile_store: Option<&SchedulerProfileStore>,
     hardware_label: &str,
 ) -> Result<crate::core::engine_pool::EngineModelConfig> {
+    if ironmlx_lm::models::embedding_gemma2::is_checkpoint(&model.path)? {
+        if model.audio.is_some()
+            || model.decision.is_some()
+            || model.scheduler_profile.is_some()
+            || model.mtp_model_dir.is_some()
+            || model.mtp_draft_tokens.is_some()
+            || model.prompt_lookup.is_some()
+        {
+            bail!("embedding models do not accept generation settings");
+        }
+        let supports_images =
+            ironmlx_lm::models::embedding_gemma2::checkpoint_supports_images(&model.path)?;
+        let mut config = decision_model_config(model.id, model.path, false);
+        config.capabilities = EngineModelCapabilities::embedding();
+        config.capabilities.supports_vision = supports_images;
+        config.capabilities.supports_audio =
+            ironmlx_lm::models::embedding_gemma2::checkpoint_supports_audio(&config.path)?;
+        config.default = model.default;
+        config.load_policy = model.load_policy;
+        super::runtime_config::validate_engine_model_config(&config)?;
+        return Ok(config);
+    }
     if ironmlx_decision::is_laya_checkpoint(&model.path)? {
         if model.id != ironmlx_decision::contract::MULTILINGUAL_MODEL_ID {
             bail!("Laya must be registered under its canonical model ID");

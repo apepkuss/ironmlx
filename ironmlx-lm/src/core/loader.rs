@@ -157,7 +157,10 @@ pub fn preflight_model_metadata(model_dir: &Path) -> Result<ModelMetadataPreflig
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| anyhow!("config.json missing model_type"))?;
 
-    let artifact_role = if is_dflash2_draft_metadata(&config_raw) {
+    let artifact_role = if model_type == "embedding_gemma2" {
+        crate::models::embedding_gemma2::validate_config(&config_raw)?;
+        "embedding"
+    } else if is_dflash2_draft_metadata(&config_raw) {
         validate_dflash2_draft_metadata(&config_raw)?;
         "dflash2_drafter"
     } else {
@@ -303,10 +306,16 @@ pub struct Loader {
 
 #[derive(Debug, Clone, Copy)]
 enum SanitizeMode {
-    Text { keep_vision_tower: bool },
+    Text {
+        keep_vision_tower: bool,
+    },
     Mtp,
     Gemma4Drafter,
     DFlash2Draft,
+    Embedding {
+        keep_vision_tower: bool,
+        keep_audio_tower: bool,
+    },
 }
 
 impl WeightSource for Loader {
@@ -382,6 +391,39 @@ impl Loader {
         Self::open_impl(model_dir, SanitizeMode::DFlash2Draft)
     }
 
+    /// Load only the text encoder, preserving converted norm weights.
+    pub fn open_embedding(model_dir: &Path) -> Result<Self> {
+        Self::open_impl(
+            model_dir,
+            SanitizeMode::Embedding {
+                keep_vision_tower: false,
+                keep_audio_tower: false,
+            },
+        )
+    }
+
+    /// Load the text and vision encoders, excluding the unused audio encoder.
+    pub fn open_image_embedding(model_dir: &Path) -> Result<Self> {
+        Self::open_impl(
+            model_dir,
+            SanitizeMode::Embedding {
+                keep_vision_tower: true,
+                keep_audio_tower: false,
+            },
+        )
+    }
+
+    /// Load supported text, vision and audio embedding components.
+    pub fn open_multimodal_embedding(model_dir: &Path) -> Result<Self> {
+        Self::open_impl(
+            model_dir,
+            SanitizeMode::Embedding {
+                keep_vision_tower: true,
+                keep_audio_tower: true,
+            },
+        )
+    }
+
     fn open_impl(model_dir: &Path, sanitize_mode: SanitizeMode) -> Result<Self> {
         let config_path = model_dir.join("config.json");
         let config_raw: serde_json::Value = serde_json::from_reader(
@@ -412,6 +454,24 @@ impl Loader {
         }
 
         match sanitize_mode {
+            SanitizeMode::Embedding {
+                keep_vision_tower,
+                keep_audio_tower,
+            } => {
+                crate::models::embedding_gemma2::validate_config(&config_raw)?;
+                tensors.retain(|key, _| {
+                    key.starts_with("language_model.")
+                        || (keep_vision_tower
+                            && (key.starts_with("vision_tower.")
+                                || key.starts_with("embed_vision.")))
+                        || (keep_audio_tower
+                            && (key.starts_with("audio_tower.") || key.starts_with("embed_audio.")))
+                });
+                tensors = tensors
+                    .into_iter()
+                    .map(|(key, value)| (normalize_quant_prefix(&key), value))
+                    .collect();
+            }
             SanitizeMode::Text { keep_vision_tower } => {
                 Self::sanitize(&mut tensors, &config_raw, keep_vision_tower)?;
             }

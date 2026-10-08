@@ -11,19 +11,23 @@ upstream clients call the OpenAI-compatible endpoints documented in the
 
 IronMLX App also supports the typed decision model `aac6fef/laya-multilingual-mlx`: download, load/unload, restart recovery and TypeSafe-compatible System One API calls on the App service port. See the [Laya guide](laya-systemone-api.md).
 
+IronMLX App supports text, image, audio and combined embeddings with `mlx-community/embeddinggemma-2-bf16` and
+`mlx-community/embeddinggemma-2-4bit` (affine4). See the [multimodal embedding API](text-embeddings.md).
+
 IronMLX 0.2.0 supports the following text and vision-language models. Check the model family and features you need, then choose a version that fits your device's memory.
 Versions, quantized files and templates within a family can differ in compatibility. This table is not a validation list for every model with a matching name.
 
 ## App model catalogue
 
 In **Models → Model Download**, the default **Supported models** tab lists curated
-repository variants. The catalogue includes all 56 HuggingFace repositories in the
-local inventory captured on 2026-10-03, grouped into 27 model rows. Quantization
+repository variants. The catalogue includes 58 HuggingFace repository variants, grouped into 28 model rows, including the
+BF16 and affine4 EmbeddingGemma 2 encoder variants added on 2026-10-07. Quantization
 variants of the same model share a row. Auxiliary artifacts have separate rows: all
 7 Qwen MTP versions, 3 Gemma 4 assistants and both DFlash2 repositories are included.
 The JonasLoos b32 DFlash2 checkpoint is distinct from the z-lab checkpoint.
-New entries are marked architecture compatible and runtime unverified; inclusion
-does not extend the existing recorded runtime-validation scope.
+Entries without runtime validation are marked architecture compatible and runtime unverified.
+The two EmbeddingGemma 2 variants have passed text/image/audio-vector numerical and lifecycle checks;
+this validation does not include video inputs.
 Every model has a **Quantization variant** selector initially showing
 **Select quantization variant**, including models with only one variant.
 Downloads stay disabled until a variant is selected; its repository, size, memory
@@ -85,7 +89,7 @@ also keeps paused tasks.
 
 All text and vision generation runtimes in the table support streaming HTTP responses. Image support means understanding images, not generating images or supporting video.
 Qwen Image 2.1 is a separate text-to-image runtime and does not change that table's meaning.
-Embedding, reranker or ASR metadata in the model list does not imply runtime support. TTS support is limited to the verified IndexTTS 2.5 profile and its separate audio runtime.
+Text, image and audio embedding support is limited to the two EmbeddingGemma 2 variants above. Other embedding, reranker or ASR metadata in the model list does not imply runtime support. TTS support is limited to the verified IndexTTS 2.5 profile and its separate audio runtime.
 
 ## Validated model versions
 

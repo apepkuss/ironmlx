@@ -6,6 +6,136 @@ import Testing
 
 private let testCommit = String(repeating: "a", count: 40)
 
+private actor FailingHuggingFaceDownloader: ModelFileDownloading {
+    let error: any Error
+    private(set) var calls = 0
+    init(_ error: any Error) { self.error = error }
+    func download(_ request: ResumableDownloadRequest,
+                  progress: @escaping @Sendable (Int64) async -> Void) async throws -> ModelValidatedFile {
+        calls += 1
+        throw error
+    }
+}
+
+private func fallbackDownloadRequest(root: URL) -> ResumableDownloadRequest {
+    ResumableDownloadRequest(
+        urlRequest: URLRequest(url: URL(string: "https://huggingface.co/org/model/resolve/\(testCommit)/model.safetensors")!),
+        identity: ModelPartialIdentity(provider: .huggingFace, repoID: "org/model", commitSHA: testCommit,
+                                       path: "model.safetensors", expectedSize: 7,
+                                       expectedSHA256: sha256(Data("weights".utf8)), etag: nil),
+        destination: root.appendingPathComponent("model.safetensors")
+    )
+}
+
+@Test(arguments: [0, 3])
+func huggingFaceNetworkFailureFallsBackAndMigratesCommittedPrefix(committed: Int) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let request = fallbackDownloadRequest(root: root)
+    let cache = request.destination.appendingPathExtension("hf-transfer")
+    let etag = request.identity.expectedSHA256
+    let source = cache.appendingPathComponent("models--org--model/blobs/\(etag).sync.part")
+    try FileManager.default.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("""
+    {"version":1,"provider":"huggingface","repo_id":"org/model","commit_sha":"\(testCommit)",
+     "path":"model.safetensors","expected_size":7,"expected_sha256":"\(etag)","etag":"\(etag)"}
+    """.utf8).write(to: cache.appendingPathComponent("identity.json"))
+    try (Data("weights".utf8) + UInt64(committed).littleEndianData).write(to: source)
+    let client = FakeModelDownloadHTTPClient()
+    client.streamResponses[request.urlRequest.url!.absoluteString] = StreamFixture(
+        data: Data("weights".utf8).dropFirst(committed), statusCode: committed == 0 ? 200 : 206,
+        headers: committed == 0 ? [:] : ["Content-Range": "bytes 3-6/7"], error: nil
+    )
+    let primary = FailingHuggingFaceDownloader(RustHuggingFaceTransferError.processFailed(
+        "Error: hf-hub Range download failed\nCaused by: error sending request\nclient error (Connect)\ntls handshake eof"
+    ))
+    let downloader = ProviderModelFileDownloader(huggingFace: primary, httpClient: client)
+    let result = try await downloader.download(request, progress: { _ in })
+    #expect(result.sha256 == request.identity.expectedSHA256)
+    #expect(try Data(contentsOf: request.destination) == Data("weights".utf8))
+    #expect(client.streamRequests.first?.range == (committed == 0 ? nil : "bytes=3-"))
+    #expect(!FileManager.default.fileExists(atPath: cache.path))
+    #expect(await primary.calls == 1)
+}
+
+@Test func huggingFaceFallbackInterruptionResumesWithoutRestartingRustTransfer() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let request = fallbackDownloadRequest(root: root)
+    let client = FakeModelDownloadHTTPClient()
+    client.streamResponses[request.urlRequest.url!.absoluteString] = StreamFixture(
+        data: Data("wei".utf8), statusCode: 200, headers: ["ETag": "stable"], error: URLError(.networkConnectionLost)
+    )
+    let primary = FailingHuggingFaceDownloader(RustHuggingFaceTransferError.processFailed("error sending request: tls handshake eof"))
+    let downloader = ProviderModelFileDownloader(huggingFace: primary, httpClient: client)
+    await #expect(throws: URLError.self) { try await downloader.download(request, progress: { _ in }) }
+    #expect(ResumableFileDownloader.recoverableBytes(destination: request.destination, identity: request.identity) == 3)
+    var changed = request.identity
+    changed.commitSHA = String(repeating: "c", count: 40)
+    #expect(ResumableFileDownloader.recoverableBytes(destination: request.destination, identity: changed) == nil)
+    client.streamResponses[request.urlRequest.url!.absoluteString] = StreamFixture(
+        data: Data("ghts".utf8), statusCode: 206, headers: ["ETag": "stable", "Content-Range": "bytes 3-6/7"], error: nil
+    )
+    let result = try await downloader.download(request, progress: { _ in })
+    #expect(result.sha256 == request.identity.expectedSHA256)
+    #expect(client.streamRequests.last?.range == "bytes=3-")
+    #expect(client.streamRequests.last?.ifRange == "stable")
+    #expect(await primary.calls == 1)
+}
+
+@Test func huggingFaceFallbackStillRejectsCorruptWeights() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let request = fallbackDownloadRequest(root: root)
+    let client = FakeModelDownloadHTTPClient()
+    client.streamResponses[request.urlRequest.url!.absoluteString] = StreamFixture(
+        data: Data("corrupt".utf8), statusCode: 200, headers: [:], error: nil
+    )
+    let primary = FailingHuggingFaceDownloader(RustHuggingFaceTransferError.processFailed("error sending request"))
+    let downloader = ProviderModelFileDownloader(huggingFace: primary, httpClient: client)
+    await #expect(throws: ResumableDownloadError.self) { try await downloader.download(request, progress: { _ in }) }
+    #expect(!FileManager.default.fileExists(atPath: request.destination.path))
+}
+
+@Test(arguments: [URLError.Code.secureConnectionFailed, .timedOut, .networkConnectionLost])
+func modelDownloadTransportFailureKeepsFileOnlyChoiceAndExplainsRecovery(networkCode: URLError.Code) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    let repoID = "org/network-download-only"
+    configureDownloadOnlyFixture(client, repoID: repoID)
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: DownloadOnlyRejectingPreflight(message: "unsupported model_type: embedding_gemma2"),
+        fileDownloader: FailingHuggingFaceDownloader(URLError(networkCode)), telemetryLogger: { _ in })
+    #expect(!(await service.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    #expect((await service.resumeDownload(provider: .huggingFace, repoID: repoID, token: nil, downloadOnly: true)).success)
+    try await waitForDownloadCondition { await service.downloadStatuses().first?.status == "interrupted" }
+    let status = try #require(await service.downloadStatuses().first)
+    #expect(status.downloadOnly == true)
+    let expected = networkCode == .secureConnectionFailed ? "download_tls_failed" : networkCode == .timedOut ? "download_network_timeout" : "download_network_failed"
+    #expect(status.errorCode == expected)
+}
+
+@Test(arguments: ["auth", "integrity", "cancellation", "protocol"])
+func huggingFaceFallbackDoesNotBypassNonNetworkFailures(fault: String) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    let error: any Error
+    switch fault {
+    case "auth": error = RustHuggingFaceTransferError.processFailed("Download endpoint returned HTTP 401.")
+    case "integrity": error = ResumableDownloadError.downloadedChecksumMismatch(expected: "a", actual: "b")
+    case "cancellation": error = CancellationError()
+    default: error = RustHuggingFaceTransferError.invalidResponse("missing completion event")
+    }
+    let downloader = ProviderModelFileDownloader(huggingFace: FailingHuggingFaceDownloader(error), httpClient: client)
+    do {
+        _ = try await downloader.download(fallbackDownloadRequest(root: root), progress: { _ in })
+        Issue.record("Non-network failure unexpectedly succeeded")
+    } catch {}
+    #expect(client.streamRequests.isEmpty)
+}
+
 @Test func urlSessionHTTPClientStreamsDelegateDataBlocksWithoutByteIteration() async throws {
     let configuration = URLSessionConfiguration.ephemeral
     configuration.protocolClasses = [ChunkedDownloadURLProtocol.self]
@@ -510,6 +640,139 @@ private let testCommit = String(repeating: "a", count: 40)
     #expect(!result.success)
     #expect(result.code == "unsupported_model_metadata")
     #expect(!client.streamRequests.contains { $0.url.hasSuffix("model.safetensors") })
+}
+
+private struct DownloadOnlyRejectingPreflight: ModelMetadataPreflighting {
+    var message = "Error: unsupported model_type: embedding_gemma2 (expected 'llama')"
+    func validate(metadataDirectory _: URL) async throws -> ModelMetadataPreflightResult {
+        throw ModelMetadataPreflightError.rejected(message)
+    }
+}
+
+private func configureDownloadOnlyFixture(_ client: FakeModelDownloadHTTPClient, repoID: String, tokenizer: Bool = true) {
+    let weights = Data("weights".utf8)
+    var files: [(path: String, data: Data, sha256: String?)] = [
+        ("config.json", Data(#"{"model_type":"embedding_gemma2"}"#.utf8), nil),
+        ("model.safetensors", weights, sha256(weights)),
+    ]
+    if tokenizer { files.append(("tokenizer.json", Data("{}".utf8), nil)) }
+    configureHuggingFace(client, repoID: repoID, files: files)
+    client.dataResponses["https://huggingface.co/api/models/\(repoID)/revision/\(testCommit)?blobs=true"] =
+        client.dataResponses["https://huggingface.co/api/models/\(repoID)?blobs=true"]
+}
+
+@Test(arguments: ["Error: unsupported model_type: embedding_gemma2 (expected 'llama')",
+                  "Error: unsupported quantization.mode `future_format`"])
+func downloadOnlyCompletesVerifiedSnapshotWithoutMakingItLoadable(message: String) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/download-only"
+    let client = FakeModelDownloadHTTPClient()
+    configureDownloadOnlyFixture(client, repoID: repoID)
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: DownloadOnlyRejectingPreflight(message: message),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(!(await service.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    #expect(client.streamRequests.isEmpty)
+    #expect(await service.downloadStatuses().first?.canContinueDownload == true)
+    #expect(await service.resumeDownload(provider: .huggingFace, repoID: repoID, downloadOnly: true).success)
+    try await waitForDownloadCondition { await service.downloadStatuses().first?.status == "completed" }
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(manifest.compatibility.downloadOnly == true)
+    #expect(manifest.compatibility.runtimeSupportError == message)
+    #expect(try Data(contentsOf: snapshot.appendingPathComponent("model.safetensors")) == Data("weights".utf8))
+    #expect(await service.downloadStatuses().first?.downloadOnly == true)
+    let scanner = LocalModelScanner(rootURL: root)
+    let model = try #require(scanner.scan().first)
+    #expect(model.readiness?.reasonCode == "download_only_model")
+    #expect(model.readiness?.isLoadable == false)
+    #expect(scanner.resolveModelPath(for: repoID) == nil)
+    #expect(scanner.downloadedSnapshotDirectory(for: repoID) == snapshot)
+    #expect(scanner.downloadedSnapshotDirectory(for: "../../invalid") == nil)
+    #expect(await service.downloadHuggingFace(repoID: repoID, token: nil).downloadOnly == true)
+}
+
+@Test(arguments: ["Invalid config.json", "Missing tokenizer", "unsupported architecture"])
+func downloadOnlyCannotOverrideMalformedOrUnclassifiedMetadata(message: String) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    configureDownloadOnlyFixture(client, repoID: "org/invalid")
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: DownloadOnlyRejectingPreflight(message: message), telemetryLogger: { _ in })
+    #expect(!(await service.downloadHuggingFace(repoID: "org/invalid", token: nil)).success)
+    let result = await service.resumeDownload(provider: .huggingFace, repoID: "org/invalid", downloadOnly: true)
+    #expect(result.code == "download_only_not_allowed")
+    #expect(client.streamRequests.isEmpty)
+}
+
+private final class DownloadOnlyCapacity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bytes: Int64 = .max
+    func value() -> Int64 { lock.withLock { bytes } }
+    func exhaust() { lock.withLock { bytes = 0 } }
+}
+
+@Test(arguments: ["checksum", "disk", "tokenizer"])
+func downloadOnlyKeepsDiskMetadataAndChecksumGates(gate: String) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/protected-download"
+    let client = FakeModelDownloadHTTPClient()
+    configureDownloadOnlyFixture(client, repoID: repoID, tokenizer: gate != "tokenizer")
+    let capacity = DownloadOnlyCapacity()
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: DownloadOnlyRejectingPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client),
+        availableCapacityProvider: { _ in capacity.value() }, telemetryLogger: { _ in })
+    #expect(!(await service.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    if gate == "checksum" {
+        client.streamResponses["https://huggingface.co/\(repoID)/resolve/\(testCommit)/model.safetensors"] =
+            StreamFixture(data: Data("damaged".utf8))
+    }
+    if gate == "disk" { capacity.exhaust() }
+    #expect(await service.resumeDownload(provider: .huggingFace, repoID: repoID, downloadOnly: true).success)
+    try await waitForDownloadCondition {
+        let queue = await service.downloadQueueSnapshot()
+        return queue.activeCount == 0 && queue.queuedCount == 0
+    }
+    let status = try #require(await service.downloadStatuses().first)
+    #expect(status.status != "completed")
+    #expect(status.errorCode == (gate == "tokenizer" ? "repo_missing_metadata" : gate == "disk" ? "insufficient_disk" : "download_interrupted"))
+    if gate == "checksum" { #expect(status.status == "corrupt") }
+    if gate != "checksum" { #expect(client.streamRequests.isEmpty) }
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    #expect(!FileManager.default.fileExists(atPath: snapshot.path))
+}
+
+@Test func downloadOnlyPausedTaskRestoresChoiceAndResumesPartialBytesAfterRestart() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/paused-download-only"
+    let client = FakeModelDownloadHTTPClient()
+    configureDownloadOnlyFixture(client, repoID: repoID)
+    let staging = try ModelDownloadStore(rootURL: root).stagingSnapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+    let partial = staging.appendingPathComponent("model.safetensors.partial")
+    try Data("wei".utf8).write(to: partial)
+    try ModelDownloadStore.atomicWrite(ModelPartialIdentity(provider: .huggingFace, repoID: repoID,
+        commitSHA: testCommit, path: "model.safetensors", expectedSize: 7,
+        expectedSHA256: sha256(Data("weights".utf8)), etag: nil), to: partial.appendingPathExtension("meta.json"))
+    var reminder = ModelDownloadRecoveryReminder(provider: .huggingFace, repoID: repoID,
+        queueOrder: 0, previousStatus: "paused", usedCredential: false)
+    reminder.pausedStatus = ModelDownloadStatus(repoID: repoID, provider: "huggingface", status: "paused",
+        progressPct: 40, commitSHA: testCommit, downloadOnly: true)
+    try ModelDownloadQueueReminderStore(rootURL: root).save([reminder])
+    client.streamResponses["https://huggingface.co/\(repoID)/resolve/\(testCommit)/model.safetensors"] =
+        StreamFixture(data: Data("ghts".utf8), statusCode: 206, headers: ["Content-Range": "bytes 3-6/7"])
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: DownloadOnlyRejectingPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(await service.resumeDownload(provider: .huggingFace, repoID: repoID).success)
+    try await waitForDownloadCondition { await service.downloadStatuses().first?.status == "completed" }
+    #expect(client.streamRequests.last?.range == "bytes=3-")
+    #expect(await service.downloadStatuses().first?.downloadOnly == true)
 }
 
 @Test func modelDownloadQueueRunsThreeTasksAndKeepsTheFourthInFIFOOrder() async throws {
@@ -1697,4 +1960,40 @@ func indexTTSDownloadRejectsInconsistentMetadataAndCorruptAuxiliary(fault: Strin
     let repository = try ModelRepositoryLayout.repositoryRoot(rootURL: root, provider: .huggingFace, repoID: repoID)
     #expect(!FileManager.default.fileExists(atPath: repository.appendingPathComponent("refs/main").path))
     #expect(!client.streamRequests.contains { $0.url.hasSuffix(".safetensors") })
+}
+
+private struct AcceptingEmbeddingMetadataPreflight: ModelMetadataPreflighting {
+    func validate(metadataDirectory _: URL) async throws -> ModelMetadataPreflightResult {
+        ModelMetadataPreflightResult(modelType: "embedding_gemma2", artifactRole: "embedding", quantization: nil)
+    }
+}
+
+@Test func embeddingDownloadRevalidatesOldFileOnlySnapshotWithoutTransferringWeights() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "mlx-community/embeddinggemma-2-bf16"
+    let client = FakeModelDownloadHTTPClient()
+    configureDownloadOnlyFixture(client, repoID: repoID)
+    let previous = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: DownloadOnlyRejectingPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(!(await previous.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    #expect(await previous.resumeDownload(provider: .huggingFace, repoID: repoID, downloadOnly: true).success)
+    try await waitForDownloadCondition { await previous.downloadStatuses().first?.status == "completed" }
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(
+        provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    let count = client.streamRequests.count
+    let verifier = ModelSnapshotVerifier()
+    let originalIntegrity = try verifier.loadIntegrityRecord(at: snapshot)
+    let current = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: AcceptingEmbeddingMetadataPreflight(), telemetryLogger: { _ in })
+    let result = await current.downloadHuggingFace(repoID: repoID, token: nil)
+    #expect(result.success)
+    #expect(result.downloadOnly != true)
+    #expect(client.streamRequests.count == count)
+    let manifest = try verifier.loadManifest(at: snapshot)
+    #expect(manifest.compatibility.artifactRole == "embedding")
+    #expect(manifest.compatibility.downloadOnly == nil)
+    #expect(manifest.compatibility.runtimeSupportError == nil)
+    #expect(try verifier.loadIntegrityRecord(at: snapshot) == originalIntegrity)
 }

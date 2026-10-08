@@ -212,6 +212,12 @@ impl ModelManager {
         if !self.pool.is_model_registered(model).await {
             return Err(AdminError::model_not_registered(model));
         }
+        if self.pool.is_embedding_model(model).await {
+            return Err(AdminError::bad_request_with_code(
+                "Embedding models cannot be the default generation model.",
+                Some("model_task_mismatch"),
+            ));
+        }
         self.pool
             .set_default_model(model)
             .await
@@ -307,6 +313,14 @@ fn parse_load_model_request(
         return Err(AdminError::model_directory_not_found(&model_dir));
     }
 
+    if request.set_default == Some(true)
+        && ironmlx_lm::models::embedding_gemma2::is_checkpoint(&model_dir).unwrap_or(false)
+    {
+        return Err(AdminError::bad_request_with_code(
+            "Embedding models cannot be the default generation model.",
+            Some("model_task_mismatch"),
+        ));
+    }
     let max_cache_cap_override = match request.max_cache_cap {
         Some(0) => return Err(AdminError::invalid_max_cache_cap()),
         value => value,
@@ -406,6 +420,16 @@ async fn app_systemone_handler(
     super::systemone::system_one_with_pool(manager.pool, body).await
 }
 
+async fn app_embeddings_handler(
+    State(manager): State<ModelManager>,
+    body: std::result::Result<
+        Json<ironmlx_runtime::core::embedding_execution::EmbeddingRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    super::embeddings::embeddings_with_pool(manager.pool, body).await
+}
+
 fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
@@ -419,6 +443,12 @@ fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Route
         .route("/v1/audio/speech", post(app_speech_handler))
         .merge(super::voices::router())
         .route("/v1/systemone", post(app_systemone_handler))
+        .route(
+            "/v1/embeddings",
+            post(app_embeddings_handler).layer(axum::extract::DefaultBodyLimit::max(
+                super::security::MAX_REQUEST_BODY_BYTES,
+            )),
+        )
         .route("/admin/api/models/loaded", get(list_loaded_handler))
         .route(
             "/admin/api/audio/execution-profile",
@@ -726,6 +756,8 @@ struct LoadedModelInfo {
     decision: Option<ironmlx_decision::DecisionSettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
     decision_metrics: Option<ironmlx_runtime::core::decision_execution::DecisionMetricsSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    embedding_metrics: Option<ironmlx_runtime::core::embedding_execution::EmbeddingMetricsSnapshot>,
     id: String,
     model: String,
     path: String,
@@ -733,6 +765,7 @@ struct LoadedModelInfo {
     runtime_kind: &'static str,
     supports_streaming: bool,
     supports_vision: bool,
+    supports_audio: bool,
     supports_mtp: bool,
     supports_prompt_lookup: bool,
     supports_speculative_decoding: bool,
@@ -779,6 +812,7 @@ impl From<EngineLoadedModelInfo> for LoadedModelInfo {
             runtime_kind: info.capabilities.runtime_kind,
             supports_streaming: info.capabilities.supports_streaming,
             supports_vision: info.capabilities.supports_vision,
+            supports_audio: info.capabilities.supports_audio,
             supports_mtp: info.capabilities.supports_mtp,
             supports_prompt_lookup: info.capabilities.supports_prompt_lookup,
             supports_speculative_decoding: info.capabilities.supports_speculative_decoding,
@@ -801,6 +835,7 @@ impl From<EngineLoadedModelInfo> for LoadedModelInfo {
             prompt_lookup: info.prompt_lookup,
             decision: info.decision,
             decision_metrics: info.decision_metrics,
+            embedding_metrics: info.embedding_metrics,
         }
     }
 }
@@ -1587,6 +1622,7 @@ mod tests {
         let mut info = EngineLoadedModelInfo {
             decision: None,
             decision_metrics: None,
+            embedding_metrics: None,
             id: "model-a".to_string(),
             path: "/models/model-a".to_string(),
             architecture: "llama".to_string(),
@@ -2784,3 +2820,7 @@ impl From<ModelManagementOutcome> for AdminModelResponse {
 #[cfg(test)]
 #[path = "laya_app_tests.rs"]
 mod laya_app_tests;
+
+#[cfg(test)]
+#[path = "embedding_app_tests.rs"]
+mod embedding_app_tests;

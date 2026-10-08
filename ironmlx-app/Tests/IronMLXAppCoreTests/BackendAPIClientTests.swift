@@ -79,3 +79,30 @@ import Testing
     let allObject = try #require(JSONSerialization.jsonObject(with: all) as? [String: Any])
     #expect(allObject["model"] == nil)
 }
+
+@Test func backendEmbeddingAudioCapabilitiesRoundTripAndAcceptLegacyResponses() throws {
+    let capabilities = BackendModelCapabilities(
+        runtimeKind: "embedding", supportsStreaming: false, supportsVision: true,
+        supportsAudio: true, supportsMtp: false, supportsPromptLookup: false,
+        supportsSpeculativeDecoding: false, supportsKvCache: false, supportedSamplingParameters: []
+    )
+    let info = BackendLoadedModelInfo(
+        id: "embeddinggemma-2", model: "embeddinggemma-2", path: "/models/embedding",
+        architecture: "embedding_gemma2", isDefault: false, maxPositionEmbeddings: 8192,
+        capabilities: capabilities
+    )
+    let encoder = JSONEncoder()
+    let decoder = JSONDecoder()
+    let data = try encoder.encode(info)
+    #expect(try decoder.decode(BackendLoadedModelInfo.self, from: data) == info)
+    var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    #expect(object["supports_audio"] as? Bool == true)
+    object.removeValue(forKey: "supports_audio")
+    let legacy = try decoder.decode(BackendLoadedModelInfo.self, from: JSONSerialization.data(withJSONObject: object))
+    #expect(legacy.capabilities.supportsAudio == false)
+    #expect(legacy.capabilities.supportsVision == true)
+    var nested = try #require(JSONSerialization.jsonObject(with: encoder.encode(capabilities)) as? [String: Any])
+    nested.removeValue(forKey: "supports_audio")
+    let nestedLegacy = try decoder.decode(BackendModelCapabilities.self, from: JSONSerialization.data(withJSONObject: nested))
+    #expect(nestedLegacy.supportsAudio == false)
+}

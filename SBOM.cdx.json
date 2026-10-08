@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:6332ed42-0187-5aae-ba46-1dffbda4874a",
+  "serialNumber": "urn:uuid:95052b74-dc65-5299-913a-49c8b7c9c79a",
   "version": 1,
   "metadata": {
     "component": {
@@ -166,6 +166,51 @@
         {
           "type": "vcs",
           "url": "https://github.com/deepseek-ai/deepseek-harness"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "bom-ref": "asset:EmbeddingGemma 2 and Gemma4 implementation MIT notice@3d87e88402f307efbf68e568971aa887ee7d9ed0",
+      "name": "EmbeddingGemma 2 and Gemma4 implementation MIT notice",
+      "version": "3d87e88402f307efbf68e568971aa887ee7d9ed0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "f74c448746be3376e27dee43e2be9ec9d55f4820cd7466c603a6c7d1fd2d25b8"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:bundled-path",
+          "value": "ironmlx-lm/licenses/mlx-vlm-MIT.txt"
+        },
+        {
+          "name": "ironmlx:source-path",
+          "value": "LICENSE"
+        },
+        {
+          "name": "ironmlx:hash-scope",
+          "value": "License notice text; not a hash of adapted implementations"
+        },
+        {
+          "name": "ironmlx:license-file",
+          "value": "lm-mlx-vlm-MIT.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/Blaizzy/mlx-vlm/blob/3d87e88402f307efbf68e568971aa887ee7d9ed0/LICENSE"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/Blaizzy/mlx-vlm"
         }
       ]
     },

@@ -249,7 +249,7 @@ public enum LocalModelBackendRegistrar {
                 _ = try await client.registerModel(
                     model: model.id,
                     modelDir: modelDir,
-                    setDefault: model.id == defaultModel,
+                    setDefault: model.id == defaultModel && capabilities?.runtimeKind != "embedding",
                     maxCacheCap: capabilities?.supportsKvCache != false
                         ? ModelLoadParameters.maxCacheCap(
                             for: model.id,

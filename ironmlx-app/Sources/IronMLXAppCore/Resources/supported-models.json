@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-03",
+  "updatedAt": "2026-10-07",
   "entries": [
     {
       "id": "qwen35-2b-4bit",
@@ -1455,6 +1455,60 @@
       "msMetadataRevision": "e64560577b733f99cef663605c3a03af3d997cb7",
       "modelId": "qwen38-27b-mtp",
       "variantLabel": "Affine · 8 bit"
+    },
+    {
+      "id": "embeddinggemma2-bf16",
+      "modelId": "embeddinggemma2",
+      "name": "EmbeddingGemma 2",
+      "parameters": "0.7B",
+      "weightFormat": "BF16",
+      "variantLabel": "BF16",
+      "weightBytes": 1488914930,
+      "downloadBytes": 1521218617,
+      "category": "embedding",
+      "capabilities": [
+        "text",
+        "vision",
+        "audio_embedding",
+        "embedding"
+      ],
+      "status": "verified",
+      "noteKey": "catalog_note_embedding",
+      "hfRepo": "mlx-community/embeddinggemma-2-bf16",
+      "msRepo": null,
+      "metadataRevision": "1a4ffddb7905d3f63486748deabe091a01fb6201",
+      "msMetadataRevision": null,
+      "evidence": [
+        "ironmlx-lm/src/models/embedding_gemma2/mod.rs",
+        "docs/text-embeddings.md"
+      ]
+    },
+    {
+      "id": "embeddinggemma2-4bit",
+      "modelId": "embeddinggemma2",
+      "name": "EmbeddingGemma 2",
+      "parameters": "0.7B",
+      "weightFormat": "Affine 4-bit",
+      "variantLabel": "Affine · 4 bit",
+      "weightBytes": 1098381958,
+      "downloadBytes": 1130721891,
+      "category": "embedding",
+      "capabilities": [
+        "text",
+        "vision",
+        "audio_embedding",
+        "embedding"
+      ],
+      "status": "verified",
+      "noteKey": "catalog_note_embedding",
+      "hfRepo": "mlx-community/embeddinggemma-2-4bit",
+      "msRepo": null,
+      "metadataRevision": "8ab839e127cb8cb305edd71fb7a02c82f2d49ab3",
+      "msMetadataRevision": null,
+      "evidence": [
+        "ironmlx-lm/src/models/embedding_gemma2/mod.rs",
+        "docs/text-embeddings.md"
+      ]
     }
   ]
 }

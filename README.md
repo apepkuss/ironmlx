@@ -28,6 +28,7 @@ Current stable release: [0.1.0](https://github.com/apepkuss/ironmlx/releases/tag
 - Provide standardized APIs compatible with mainstream clients, including
   OpenAI-compatible `/v1/chat/completions` and `/v1/responses`, plus Anthropic
   `/v1/messages`, with client-side function-call protocol support;
+- Provide text, image, audio and combined embeddings with EmbeddingGemma 2 BF16 and affine 4bit in 0.2.0 source builds; see the [embedding API](docs/text-embeddings.md);
 - Support synchronous responses, SSE streaming, Structured Outputs, and
   reasoning;
 - Provide model discovery, health checks, and runtime status APIs, including

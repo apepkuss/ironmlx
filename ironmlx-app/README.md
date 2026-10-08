@@ -55,6 +55,25 @@ The App always starts the model-manager helper first, even when no local model
 is configured; after the helper is healthy, the UI is shown and confirmed models
 continue restoring asynchronously.
 
+## Downloading incompatible models
+
+Downloads stop before weights are transferred when metadata preflight rejects the
+model. Explicit architecture or quantization-format incompatibility offers
+**Download anyway** between **View supported models** and **Delete task**.
+This choice permits file storage only: disk checks, required metadata, provider
+file identities, checksums, and publication verification remain mandatory.
+The choice survives pause/resume and restoration of paused tasks after restart.
+Completed snapshots are marked **Downloaded · Cannot run in this version** and
+cannot be loaded or selected as the default model. Model Management still allows
+file access, integrity verification, and deletion. Missing files, malformed
+metadata, and integrity failures cannot be overridden.
+
+Hugging Face transfers automatically switch to macOS URLSession after a Rust
+transport connection failure. The switch retains the identity-bound committed
+prefix, and subsequent retries resume with URLSession. Both transports require
+the pinned revision, expected size, and SHA-256 verification. Network and TLS
+failures show recovery guidance without exposing signed download URLs.
+
 ## Static verification
 
 ```bash

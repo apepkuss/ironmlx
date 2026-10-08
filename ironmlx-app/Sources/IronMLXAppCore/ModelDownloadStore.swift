@@ -38,6 +38,7 @@ public struct ModelDownloadJournal: Codable, Equatable, Sendable {
     public var currentFile: String?
     public var error: String?
     public var errorCode: String?
+    public var downloadOnly: Bool? = nil
     public var updatedAt: Date
 
     public init(
@@ -79,6 +80,7 @@ public struct ModelDownloadJournal: Codable, Equatable, Sendable {
         case currentFile = "current_file"
         case error
         case errorCode = "error_code"
+        case downloadOnly = "download_only"
         case updatedAt = "updated_at"
     }
 }

@@ -960,3 +960,47 @@ private func gemma4AssistantConfig(
     }
     """
 }
+
+@Test(arguments: [false, true], [false, true])
+func localModelScannerReevaluatesDownloadedEmbeddingGemma2(quantized: Bool, vision: Bool) throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    var config: [String: Any] = [
+        "model_type": "embedding_gemma2",
+        "text_config": ["model_type": "embedding_gemma2_text", "dtype": "bfloat16",
+                        "hidden_size": 512, "hidden_size_per_layer_input": 512,
+                        "num_hidden_layers": 24, "embedding_dim": 768,
+                        "max_position_embeddings": 262144,
+                        "layer_types": Array(repeating: "sliding_attention", count: 24)]
+    ]
+    if vision { config["vision_config"] = ["model_type": "gemma4_vision"] }
+    config["audio_config"] = ["model_type": "gemma4_audio"]
+    if quantized { config["quantization"] = ["mode": "affine", "bits": 4, "group_size": 64] }
+    let repo = "mlx-community/embeddinggemma-2-\(quantized ? "4bit" : "bf16")"
+    let snapshot = try writeVerifiedTestSnapshot(root: root, repoID: repo, files: [
+        "config.json": try JSONSerialization.data(withJSONObject: config),
+        "tokenizer.json": Data(#"{"version":"1.0"}"#.utf8),
+        "tokenizer_config.json": Data("{}".utf8),
+        "model.safetensors": Data("weights".utf8)
+    ])
+    var manifest = try ModelSnapshotVerifier().loadManifest(at: snapshot)
+    manifest.compatibility.modelType = "embedding_gemma2"
+    manifest.compatibility.artifactRole = "download_only"
+    manifest.compatibility.downloadOnly = true
+    manifest.compatibility.runtimeSupportError = "Unsupported embedding_gemma2 architecture"
+    try ModelDownloadStore(rootURL: root).writeManifest(manifest, to: snapshot)
+    let scanner = LocalModelScanner(rootURL: root)
+    let model = try #require(scanner.scan().first)
+    #expect(model.type == "embedding")
+    #expect(model.readiness?.isLoadable == true)
+    #expect(model.capabilities?.runtimeKind == "embedding")
+    #expect(model.capabilities?.supportsKvCache == false)
+    #expect(model.capabilities?.supportsVision == vision)
+    #expect(model.capabilities?.supportsAudio == true)
+    #expect(model.capabilities?.supportedSamplingParameters == [])
+    #expect(scanner.maxPositionEmbeddings(for: repo) == 8192)
+    #expect(scanner.resolveModelPath(for: repo) == snapshot.path)
+    // Newly supported architecture must never bypass the snapshot file checks.
+    try Data("changed weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+    #expect(scanner.scan().first?.readiness?.isLoadable == false)
+}

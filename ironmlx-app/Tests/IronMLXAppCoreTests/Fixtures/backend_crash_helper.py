@@ -5,9 +5,18 @@ import json
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 
 
 loaded_models = []
+
+
+class LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        # HTTPServer resolves the host name here, before listen(). A loopback
+        # test fixture needs no DNS and must not block readiness on it.
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 def bind_server(host, port, retry_timeout):
@@ -15,7 +24,7 @@ def bind_server(host, port, retry_timeout):
     reported_contention = False
     while True:
         try:
-            return ThreadingHTTPServer((host, port), Handler)
+            return LoopbackHTTPServer((host, port), Handler)
         except OSError as error:
             if error.errno != errno.EADDRINUSE or time.monotonic() >= deadline:
                 raise

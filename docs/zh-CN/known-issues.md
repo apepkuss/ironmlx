@@ -7,7 +7,7 @@
 ## 模型与 API 限制
 
 - 图片请求接受 JPEG/PNG/WebP base64 内容，不接受远程图片 URL。
-- 识别 embedding、reranker 和 ASR 元数据不代表运行时受支持。语音合成仅限文档中的 IndexTTS 2.5 配置及其独立音频运行时。
+- 文本、图片与音频向量仅支持 EmbeddingGemma 2 BF16 和 affine4，当前不支持视频向量，详见[向量 API](text-embeddings.md)。识别其他 embedding、reranker 和 ASR 元数据不代表运行时受支持。语音合成仅限文档中的 IndexTTS 2.5 配置及其独立音频运行时。
 - 决策服务仅限文档中的 Laya 模型和 System One 契约，不是通用分类或 embedding 运行时。
 - DiffusionGemma 不支持 KV cache、Prompt Lookup 或 MTP，可用采样参数也较少。
 - MTP 和辅助 drafter 取决于具体 Qwen/Gemma 模型及兼容辅助模型。DFlash2 有独立的组合限制，详见[支持模型](supported-models.md)。

@@ -430,7 +430,7 @@ impl Gemma4VisionConfig {
             ));
         }
         if let Some(params) = &self.rope_parameters {
-            if params.rope_type != "default" {
+            if !["default", "axial"].contains(&params.rope_type.as_str()) {
                 return Err(anyhow!(
                     "Gemma4VisionConfig: unsupported rope_type `{}`",
                     params.rope_type

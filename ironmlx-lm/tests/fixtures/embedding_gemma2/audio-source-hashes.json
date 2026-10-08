@@ -1,0 +1,18 @@
+{
+  "mlx_vlm": {
+    "mlx_vlm/models/base.py": "a7cfa38413bea057946c5d56c9edd34dbcceb33f6613529f5201ca2ad5b41120",
+    "mlx_vlm/models/embedding_gemma2/config.py": "9ea6a2d51c8693cfc32891e378b0f6577480ec3fd442d36b5a3d951474489c94",
+    "mlx_vlm/models/embedding_gemma2/embedding_gemma2.py": "f0a56966b3d09604192304378189f6d46d73cc24f9893fc7005391559898604c",
+    "mlx_vlm/models/embedding_gemma2/language.py": "001033b2cc50dc80c5b0ec7c1c9f1121047e054e78d5eef4143fec4095e1aa3b",
+    "mlx_vlm/models/gemma4/audio.py": "52abf133f67066d707de86963bc6b480ef71957ac6d98e3e522ece821e7cf56e",
+    "mlx_vlm/models/gemma4/config.py": "f4d1194e9f8329a37a686c273e06d13a79f4e69efd0b5474197bdf9cc2c0b954",
+    "mlx_vlm/models/gemma4/gemma4.py": "c841c07f2b236454b26d418a6e8d152fd4060c81f5df175f1a1c5d8213c76d62",
+    "mlx_vlm/models/gemma4/language.py": "1f6d82773bda18dcdeb233d509650b3e3c729e34409ebe1cadc689f6b16da54b",
+    "mlx_vlm/models/gemma4/vision.py": "0ec4a7e464736ead8b92fee5eb28aa0eaf7e562909b146b63fe54cd05c60b2d4",
+    "mlx_vlm/models/pooling.py": "8f9ed5bc9dc6f87590adafaf3580961b8e1b673136d725aa885bcd4db12af75e"
+  },
+  "transformers": {
+    "src/transformers/audio_utils.py": "eaf95e79c399cadaaa951b5984803bf1931c08e78ee112cbe5f7750306d474d4",
+    "src/transformers/models/gemma4/feature_extraction_gemma4.py": "40545340a144aad4d74c6cedb4eae5daa4efd54ae432649583e19b5d756c02c7"
+  }
+}

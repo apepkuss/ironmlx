@@ -7,6 +7,10 @@ App 默认在 `http://127.0.0.1:9068` 提供服务。直接运行 CLI 时默认�
 
 快速定位：[Responses](#openai-responses-api) · [Chat Completions](#openai-chat-completions) · [Messages](#anthropic-messages) · [图片](#图片输入) · [日志接口](#日志级别管理仅本机)
 
+文本、图片与音频向量使用独立的 [`POST /v1/embeddings` 契约](text-embeddings.md)。
+App 的 `/healthz` 模型条目及 `/admin/api/models/loaded` 为已加载的向量模型返回
+`embedding_metrics`，字段含义见[运行状态](text-embeddings.md#运行状态)。
+
 ## 后端单实例约束
 
 同一 macOS 用户只能运行一个 `ironmlx serve` 后端，不同 App、CLI 参数或监听端口

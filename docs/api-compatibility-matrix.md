@@ -6,6 +6,11 @@ For client integrators: this document describes the 0.2.0 public protocol scope.
 
 See the [API quick start](api.md), [protocol reference](api-reference.md) for nested fields, tools, reasoning and schemas, and [Supported models](supported-models.md) for model conditions.
 
+EmbeddingGemma 2 BF16 and affine4 additionally support `POST /v1/embeddings` for
+text, images, audio and combined inputs. Its input, dimensions, encoding and error limits
+are documented in the [embedding API](text-embeddings.md); the generation-specific
+rules below apply to Chat Completions, Responses and Messages.
+
 ## Shared rules
 
 All three protocols support synchronous text, SSE, supported Structured Outputs and native-template-dependent client tools.

@@ -3619,6 +3619,7 @@
   .download-task-status { color: var(--accent); }
   .download-task-status.terminal { color: var(--text-secondary); }
   .download-task-status.failed { color: var(--destructive); }
+  .download-task-error { margin-top: 7px; color: var(--destructive); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
   .download-task-progress { height: 3px; margin-top: 9px; overflow: hidden; border-radius: 2px; background: var(--border); }
   .download-task-progress-bar { height: 100%; border-radius: inherit; background: var(--accent); transition: width 0.25s ease; }
   .download-task-actions { display:flex; flex:0 0 auto; flex-wrap:wrap; gap:8px; }
@@ -5583,6 +5584,25 @@
       catalog_type_llm: "LLM / VLM · Language and vision",
       catalog_type_audio: "Audio · Speech and audio",
       catalog_type_image: "Image · Image generation",
+      catalog_embedding: "Embeddings",
+      catalog_text_embedding: "Text embeddings",
+      catalog_image_embedding: "Image embeddings",
+      catalog_audio_embedding: "Audio embeddings",
+      catalog_type_embedding: "Embedding",
+      catalog_note_embedding: "Text, image, audio and combined embeddings via /v1/embeddings; BF16 and affine 4bit. Audio: WAV/FLAC/MP3, up to 30 seconds per clip and 60 seconds per request. Video inputs are not supported.",
+      runtime_embedding_performance: "Embedding performance",
+      runtime_embedding_completed: "Completed",
+      runtime_embedding_completed_help: "Embedding requests completed since this model was loaded.",
+      runtime_embedding_errors: "Errors",
+      runtime_embedding_errors_help: "Requests rejected by or failed in the embedding runtime since loading; includes queue overflow and timeouts.",
+      runtime_embedding_latency: "P50 latency",
+      runtime_embedding_latency_help: "Median runtime queue and processing latency of completed embedding requests.",
+      runtime_embedding_input_rate: "Input throughput",
+      runtime_embedding_input_rate_help: "Median input tokens per second of processing time, including image and audio soft tokens.",
+      runtime_embedding_vector_rate: "Vector throughput",
+      runtime_embedding_vector_rate_help: "Median vectors per second of processing time; each batch item produces one vector.",
+      runtime_embedding_performance_window: "Recent embeddings · P50 · Last {seconds}s · {requests} completed",
+      runtime_embedding_performance_empty: "Embedding metrics · Complete a request to begin sampling",
       catalog_type_decision: "Decision · Typed decisions",
       catalog_type_drafter: "Drafter · Inference acceleration",
       catalog_type_other: "Other",
@@ -5872,7 +5892,22 @@
       download_cleanup_confirm: "Clear all finished download records and delete temporary data for cancelled or failed tasks. Installed models and paused, active or queued tasks are kept. Deleted data cannot be used to resume downloads.", download_cleanup_done: "Cleared {count} download records.", download_cleanup_failed: "{count} tasks could not be cleaned up. Their records were kept; retry after resolving the error.", download_cleanup_busy: "{count} tasks are still finishing. Retry shortly.",
       download_status_queued: "Queued", download_status_queued_position: "Queued · #{position}", download_status_resolving: "Resolving repository", download_status_preflighting: "Checking files and disk", download_status_downloading: "Downloading", download_status_verifying: "Verifying", download_status_publishing: "Publishing", download_status_completed: "Completed", download_status_cancelled: "Cancelled", download_status_rejected: "Rejected", download_status_interrupted: "Interrupted", download_status_corrupt: "Corrupt", download_status_failed: "Failed",
       download_recovery_title: "Previous download queue was not restored", download_recovery_copy: "Queued tasks are not resumed after restarting IronMLX. Re-add the tasks you still need.", download_readd_public: "Re-add tasks without credentials", download_readd: "Re-add", download_ignore: "Ignore", download_token_required: "Token required", download_enter_token: "Enter token", download_token_prompt: "Enter the Hugging Face token, then add the task again.", dismiss: "Dismiss",
+      download_anyway: "Download anyway",
+      download_status_download_only: "Downloaded · Cannot run in this version",
+      download_only_note: "You can download the files, but this version cannot load or run this model.",
+      download_only_completed_note: "The files are downloaded, but this version cannot load or run this model.",
+      err_download_only_model: "The files are downloaded, but this version cannot load or run this model.",
+      download_only_complete: "Model \"{name}\" downloaded. This version of IronMLX cannot run it.",
+      model_show_files: "Show model files",
+      err_download_only_not_allowed: "This task cannot be continued as a file-only download. Resolve the download error first.",
+      download_status_incompatible: "Incompatible model",
+      download_view_supported: "View supported models",
+      err_unsupported_model_architecture: "This version of IronMLX does not support the {model_type} architecture. Choose a model from Supported Models.",
+      err_unsupported_model_metadata: "This model has an unsupported architecture, quantization format, or configuration. Choose a model from Supported Models.",
       download_generic_failed: "Download failed.",
+      err_download_tls_failed: "The secure connection to the model download server failed. Check your network or proxy settings, then retry. Downloaded data is retained.",
+      err_download_network_timeout: "The model download connection timed out. Check your network or proxy settings, then retry. Downloaded data is retained.",
+      err_download_network_failed: "The model download connection was interrupted. Check your network or proxy settings, then retry. Downloaded data is retained.",
       ms_starting: "Starting download from ModelScope...",
       bench_no_prompt_size: "Select at least one pp setting before running benchmark.",
       bench_preflight: "Checking benchmark readiness...",
@@ -6146,6 +6181,25 @@
       catalog_type_llm: "LLM / VLM · 语言与视觉",
       catalog_type_audio: "Audio · 音频",
       catalog_type_image: "Image · 图片生成",
+      catalog_embedding: "向量",
+      catalog_text_embedding: "文本向量",
+      catalog_image_embedding: "图片向量",
+      catalog_audio_embedding: "音频向量",
+      catalog_type_embedding: "Embedding",
+      catalog_note_embedding: "通过 /v1/embeddings 提供文本、图片、音频及组合向量，支持 BF16 和 affine 4bit。音频支持 WAV/FLAC/MP3，单段最多 30 秒、每次请求共 60 秒；当前不支持视频输入。",
+      runtime_embedding_performance: "向量性能",
+      runtime_embedding_completed: "已完成",
+      runtime_embedding_completed_help: "自模型加载以来完成的 embedding 请求数。",
+      runtime_embedding_errors: "失败",
+      runtime_embedding_errors_help: "自模型加载以来被向量运行时拒绝或执行失败的请求数，包括队列满和超时。",
+      runtime_embedding_latency: "P50 延迟",
+      runtime_embedding_latency_help: "近期已完成请求的运行时排队与处理总耗时中位数。",
+      runtime_embedding_input_rate: "输入吞吐",
+      runtime_embedding_input_rate_help: "按处理时间计算的输入 token 吞吐中位数，包含图片和音频 soft token。",
+      runtime_embedding_vector_rate: "向量吞吐",
+      runtime_embedding_vector_rate_help: "按处理时间计算的向量吞吐中位数，批次中每条输入生成一个向量。",
+      runtime_embedding_performance_window: "近期向量请求 · P50 · 最近 {seconds} 秒 · 已完成 {requests} 次",
+      runtime_embedding_performance_empty: "向量性能 · 完成一次请求后开始采样",
       catalog_type_decision: "Decision · 决策",
       catalog_type_drafter: "Drafter · 推理加速辅助",
       catalog_type_other: "其他",
@@ -6435,7 +6489,22 @@
       download_cleanup_confirm: "清除所有已结束的下载记录，并删除取消或失败任务的临时下载数据。已安装模型及已暂停、正在下载或排队的任务会保留。删除的数据将无法用于续传。", download_cleanup_done: "已清理 {count} 条下载记录。", download_cleanup_failed: "{count} 个任务清理失败，记录已保留；处理错误后可重试。", download_cleanup_busy: "{count} 个任务仍在结束处理中，请稍后重试。",
       download_status_queued: "排队中", download_status_queued_position: "排队中 · 第 {position} 位", download_status_resolving: "解析仓库", download_status_preflighting: "检查文件与磁盘", download_status_downloading: "下载中", download_status_verifying: "校验中", download_status_publishing: "发布中", download_status_completed: "已完成", download_status_cancelled: "已取消", download_status_rejected: "已拒绝", download_status_interrupted: "已中断", download_status_corrupt: "文件损坏", download_status_failed: "失败",
       download_recovery_title: "上次下载队列未恢复", download_recovery_copy: "IronMLX 重启后不会自动恢复排队任务。请重新添加仍需下载的任务。", download_readd_public: "重新添加无需凭证的任务", download_readd: "重新添加", download_ignore: "忽略此项", download_token_required: "需要 Token", download_enter_token: "输入 Token", download_token_prompt: "请输入 Hugging Face Token，然后重新添加该任务。", dismiss: "全部忽略",
+      download_anyway: "仍然下载",
+      download_status_download_only: "已下载 · 当前不支持运行",
+      download_only_note: "可以继续下载文件，但当前版本无法加载运行该模型。",
+      download_only_completed_note: "文件已下载，但当前版本无法加载运行该模型。",
+      err_download_only_model: "文件已下载，但当前版本无法加载运行该模型。",
+      download_only_complete: "模型“{name}”已下载，当前版本的 IronMLX 不支持运行。",
+      model_show_files: "查看模型文件",
+      err_download_only_not_allowed: "该任务不能以仅下载方式继续，请先解决下载错误。",
+      download_status_incompatible: "模型不兼容",
+      download_view_supported: "查看支持模型",
+      err_unsupported_model_architecture: "当前版本的 IronMLX 不支持 {model_type} 架构，请从“支持模型”中选择其他模型。",
+      err_unsupported_model_metadata: "该模型的架构、量化格式或配置不受当前版本支持，请从“支持模型”中选择其他模型。",
       download_generic_failed: "下载失败。",
+      err_download_tls_failed: "无法与模型下载服务器建立安全连接，请检查网络或代理设置后重试。已下载的数据会保留。",
+      err_download_network_timeout: "连接模型下载服务器超时，请检查网络或代理设置后重试。已下载的数据会保留。",
+      err_download_network_failed: "模型下载网络连接中断，请检查网络或代理设置后重试。已下载的数据会保留。",
       ms_starting: "正在连接 ModelScope…",
       bench_no_prompt_size: "请至少选择一个 pp 设定后再运行基准测试。",
       bench_preflight: "正在检查基准测试准备状态…",
@@ -6709,6 +6778,25 @@
       catalog_type_llm: "LLM / VLM · 語言與視覺",
       catalog_type_audio: "Audio · 音訊",
       catalog_type_image: "Image · 圖片生成",
+      catalog_embedding: "向量",
+      catalog_text_embedding: "文字向量",
+      catalog_image_embedding: "圖片向量",
+      catalog_audio_embedding: "音訊向量",
+      catalog_type_embedding: "Embedding",
+      catalog_note_embedding: "透過 /v1/embeddings 提供文字、圖片、音訊及組合向量，支援 BF16 和 affine 4bit。音訊支援 WAV/FLAC/MP3，單段最多 30 秒、每次請求共 60 秒；目前不支援影片輸入。",
+      runtime_embedding_performance: "向量效能",
+      runtime_embedding_completed: "已完成",
+      runtime_embedding_completed_help: "自模型載入以來完成的 embedding 請求數。",
+      runtime_embedding_errors: "失敗",
+      runtime_embedding_errors_help: "自模型載入以來被向量執行環境拒絕或執行失敗的請求數，包含佇列滿和逾時。",
+      runtime_embedding_latency: "P50 延遲",
+      runtime_embedding_latency_help: "近期已完成請求的執行環境排隊與處理總耗時中位數。",
+      runtime_embedding_input_rate: "輸入吞吐",
+      runtime_embedding_input_rate_help: "依處理時間計算的輸入 token 吞吐中位數，包含圖片與音訊 soft token。",
+      runtime_embedding_vector_rate: "向量吞吐",
+      runtime_embedding_vector_rate_help: "依處理時間計算的向量吞吐中位數，批次中每筆輸入產生一個向量。",
+      runtime_embedding_performance_window: "近期向量請求 · P50 · 最近 {seconds} 秒 · 已完成 {requests} 次",
+      runtime_embedding_performance_empty: "向量效能 · 完成一次請求後開始取樣",
       catalog_type_decision: "Decision · 決策",
       catalog_type_drafter: "Drafter · 推理加速輔助",
       catalog_type_other: "其他",
@@ -6998,7 +7086,22 @@
       download_cleanup_confirm: "清除所有已結束的下載記錄，並刪除取消或失敗任務的暫存下載資料。已安裝模型及已暫停、正在下載或排隊的任務會保留。刪除的資料將無法用於續傳。", download_cleanup_done: "已清理 {count} 筆下載記錄。", download_cleanup_failed: "{count} 個任務清理失敗，記錄已保留；處理錯誤後可重試。", download_cleanup_busy: "{count} 個任務仍在結束處理中，請稍後重試。",
       download_status_queued: "排隊中", download_status_queued_position: "排隊中 · 第 {position} 位", download_status_resolving: "解析儲存庫", download_status_preflighting: "檢查檔案與磁碟", download_status_downloading: "下載中", download_status_verifying: "驗證中", download_status_publishing: "發佈中", download_status_completed: "已完成", download_status_cancelled: "已取消", download_status_rejected: "已拒絕", download_status_interrupted: "已中斷", download_status_corrupt: "檔案損壞", download_status_failed: "失敗",
       download_recovery_title: "上次下載佇列未恢復", download_recovery_copy: "IronMLX 重新啟動後不會自動恢復排隊任務。請重新加入仍需下載的任務。", download_readd_public: "重新加入無需憑證的任務", download_readd: "重新加入", download_ignore: "略過此項", download_token_required: "需要 Token", download_enter_token: "輸入 Token", download_token_prompt: "請輸入 Hugging Face Token，然後重新加入該任務。", dismiss: "全部略過",
+      download_anyway: "仍然下載",
+      download_status_download_only: "已下載 · 目前不支援執行",
+      download_only_note: "可以繼續下載檔案，但目前版本無法載入或執行此模型。",
+      download_only_completed_note: "檔案已下載，但目前版本無法載入或執行此模型。",
+      err_download_only_model: "檔案已下載，但目前版本無法載入或執行此模型。",
+      download_only_complete: "模型「{name}」已下載，目前版本的 IronMLX 不支援執行。",
+      model_show_files: "查看模型檔案",
+      err_download_only_not_allowed: "此任務無法以僅下載方式繼續，請先解決下載錯誤。",
+      download_status_incompatible: "模型不相容",
+      download_view_supported: "查看支援模型",
+      err_unsupported_model_architecture: "目前版本的 IronMLX 不支援 {model_type} 架構，請從「支援模型」中選擇其他模型。",
+      err_unsupported_model_metadata: "此模型的架構、量化格式或設定不受目前版本支援，請從「支援模型」中選擇其他模型。",
       download_generic_failed: "下載失敗。",
+      err_download_tls_failed: "無法與模型下載伺服器建立安全連線，請檢查網路或代理設定後重試。已下載的資料會保留。",
+      err_download_network_timeout: "連線模型下載伺服器逾時，請檢查網路或代理設定後重試。已下載的資料會保留。",
+      err_download_network_failed: "模型下載網路連線中斷，請檢查網路或代理設定後重試。已下載的資料會保留。",
       ms_starting: "正在連線 ModelScope…",
       bench_no_prompt_size: "請至少選擇一個 pp 設定後再執行基準測試。",
       bench_preflight: "正在檢查基準測試準備狀態…",
@@ -7275,6 +7378,25 @@
       catalog_type_llm: "LLM / VLM · 言語と視覚",
       catalog_type_audio: "Audio · 音声",
       catalog_type_image: "Image · 画像生成",
+      catalog_embedding: "埋め込み",
+      catalog_text_embedding: "テキスト埋め込み",
+      catalog_image_embedding: "画像埋め込み",
+      catalog_audio_embedding: "音声埋め込み",
+      catalog_type_embedding: "Embedding",
+      catalog_note_embedding: "/v1/embeddings によるテキスト・画像・音声と組み合わせの埋め込み。BF16 と affine 4bit に対応。音声は WAV/FLAC/MP3、1クリップ30秒、1リクエスト合計60秒まで。動画入力には未対応。",
+      runtime_embedding_performance: "埋め込み性能",
+      runtime_embedding_completed: "完了",
+      runtime_embedding_completed_help: "モデル読み込み後に完了した埋め込みリクエスト数。",
+      runtime_embedding_errors: "失敗",
+      runtime_embedding_errors_help: "埋め込みランタイムが拒否した、または失敗したリクエスト数。キュー満杯とタイムアウトを含みます。",
+      runtime_embedding_latency: "P50 レイテンシ",
+      runtime_embedding_latency_help: "直近の完了リクエストのキュー待機と処理時間の中央値。",
+      runtime_embedding_input_rate: "入力スループット",
+      runtime_embedding_input_rate_help: "処理時間あたりの入力トークン数の中央値。画像と音声の soft token を含みます。",
+      runtime_embedding_vector_rate: "ベクトルスループット",
+      runtime_embedding_vector_rate_help: "処理時間あたりのベクトル数の中央値。バッチ内の各入力が1つのベクトルを生成します。",
+      runtime_embedding_performance_window: "直近の埋め込み · P50 · 過去 {seconds} 秒 · {requests} 件完了",
+      runtime_embedding_performance_empty: "埋め込み指標 · リクエスト完了後にサンプリング開始",
       catalog_type_decision: "Decision · 意思決定",
       catalog_type_drafter: "Drafter · 推論高速化の補助",
       catalog_type_other: "その他",
@@ -7564,7 +7686,22 @@
       download_cleanup_confirm: "終了したダウンロード記録をすべて消去し、キャンセルまたは失敗したタスクの一時データを削除します。インストール済みモデルと一時停止済み・ダウンロード中・待機中のタスクは保持されます。削除したデータではダウンロードを再開できません。", download_cleanup_done: "{count} 件のダウンロード記録を整理しました。", download_cleanup_failed: "{count} 件の整理に失敗しました。記録は保持されています。エラー解決後に再試行してください。", download_cleanup_busy: "{count} 件のタスクは終了処理中です。しばらくしてから再試行してください。",
       download_status_queued: "待機中", download_status_queued_position: "待機中 · {position} 番目", download_status_resolving: "リポジトリを解析中", download_status_preflighting: "ファイルとディスクを確認中", download_status_downloading: "ダウンロード中", download_status_verifying: "検証中", download_status_publishing: "公開処理中", download_status_completed: "完了", download_status_cancelled: "キャンセル済み", download_status_rejected: "拒否", download_status_interrupted: "中断", download_status_corrupt: "破損", download_status_failed: "失敗",
       download_recovery_title: "前回のダウンロードキューは復元されませんでした", download_recovery_copy: "IronMLX の再起動後、待機中タスクは自動再開されません。必要なタスクを再追加してください。", download_readd_public: "認証不要のタスクを再追加", download_readd: "再追加", download_ignore: "無視", download_token_required: "Token が必要", download_enter_token: "Token を入力", download_token_prompt: "Hugging Face Token を入力してからタスクを再追加してください。", dismiss: "すべて閉じる",
+      download_anyway: "ダウンロードを続行",
+      download_status_download_only: "ダウンロード済み · このバージョンでは実行不可",
+      download_only_note: "ファイルはダウンロードできますが、このバージョンではモデルをロード・実行できません。",
+      download_only_completed_note: "ファイルはダウンロード済みですが、このバージョンではモデルをロード・実行できません。",
+      err_download_only_model: "ファイルはダウンロード済みですが、このバージョンではモデルをロード・実行できません。",
+      download_only_complete: "モデル「{name}」をダウンロードしました。このバージョンの IronMLX では実行できません。",
+      model_show_files: "モデルファイルを表示",
+      err_download_only_not_allowed: "このタスクはファイルのダウンロードとして続行できません。まずダウンロードエラーを解決してください。",
+      download_status_incompatible: "互換性のないモデル",
+      download_view_supported: "対応モデルを見る",
+      err_unsupported_model_architecture: "このバージョンの IronMLX は {model_type} アーキテクチャに対応していません。「対応モデル」から別のモデルを選択してください。",
+      err_unsupported_model_metadata: "このモデルのアーキテクチャ、量子化形式、または設定は現在のバージョンに対応していません。「対応モデル」から別のモデルを選択してください。",
       download_generic_failed: "ダウンロードに失敗しました。",
+      err_download_tls_failed: "モデル配信サーバーへの安全な接続に失敗しました。ネットワークやプロキシの設定を確認して再試行してください。取得済みのデータは保持されます。",
+      err_download_network_timeout: "モデル配信サーバーへの接続がタイムアウトしました。ネットワークやプロキシの設定を確認して再試行してください。取得済みのデータは保持されます。",
+      err_download_network_failed: "モデルのダウンロード接続が中断されました。ネットワークやプロキシの設定を確認して再試行してください。取得済みのデータは保持されます。",
       ms_starting: "ModelScope に接続中…",
       bench_no_prompt_size: "ベンチマークを実行する前に、少なくとも1つの pp 設定を選択してください。",
       bench_preflight: "ベンチマークの実行準備を確認中…",
@@ -7841,6 +7978,25 @@
       catalog_type_llm: "LLM / VLM · 언어 및 시각",
       catalog_type_audio: "Audio · 음성",
       catalog_type_image: "Image · 이미지 생성",
+      catalog_embedding: "임베딩",
+      catalog_text_embedding: "텍스트 임베딩",
+      catalog_image_embedding: "이미지 임베딩",
+      catalog_audio_embedding: "오디오 임베딩",
+      catalog_type_embedding: "Embedding",
+      catalog_note_embedding: "/v1/embeddings 텍스트, 이미지, 오디오 및 혼합 임베딩. BF16 및 affine 4bit 지원. 오디오는 WAV/FLAC/MP3, 클립당 30초, 요청당 총 60초까지. 비디오 입력은 지원하지 않습니다.",
+      runtime_embedding_performance: "임베딩 성능",
+      runtime_embedding_completed: "완료",
+      runtime_embedding_completed_help: "모델 로드 이후 완료된 임베딩 요청 수.",
+      runtime_embedding_errors: "실패",
+      runtime_embedding_errors_help: "임베딩 런타임에서 거부되거나 실패한 요청 수. 대기열 초과 및 시간 초과를 포함합니다.",
+      runtime_embedding_latency: "P50 지연",
+      runtime_embedding_latency_help: "최근 완료 요청의 런타임 대기 및 처리 시간 중앙값.",
+      runtime_embedding_input_rate: "입력 처리량",
+      runtime_embedding_input_rate_help: "처리 시간당 입력 토큰 수의 중앙값. 이미지 및 오디오 soft token을 포함합니다.",
+      runtime_embedding_vector_rate: "벡터 처리량",
+      runtime_embedding_vector_rate_help: "처리 시간당 벡터 수의 중앙값. 배치의 각 입력은 벡터 하나를 생성합니다.",
+      runtime_embedding_performance_window: "최근 임베딩 · P50 · 최근 {seconds}초 · {requests}건 완료",
+      runtime_embedding_performance_empty: "임베딩 지표 · 요청 완료 후 샘플링 시작",
       catalog_type_decision: "Decision · 의사 결정",
       catalog_type_drafter: "Drafter · 추론 가속 보조",
       catalog_type_other: "기타",
@@ -8130,7 +8286,22 @@
       download_cleanup_confirm: "종료된 다운로드 기록을 모두 지우고 취소되거나 실패한 작업의 임시 데이터를 삭제합니다. 설치된 모델과 일시 중지되거나 다운로드 중이거나 대기 중인 작업은 유지됩니다. 삭제된 데이터로는 다운로드를 이어받을 수 없습니다.", download_cleanup_done: "다운로드 기록 {count}개를 정리했습니다.", download_cleanup_failed: "작업 {count}개를 정리하지 못했습니다. 기록은 유지됩니다. 오류를 해결한 후 다시 시도하세요.", download_cleanup_busy: "작업 {count}개가 아직 종료 처리 중입니다. 잠시 후 다시 시도하세요.",
       download_status_queued: "대기 중", download_status_queued_position: "대기 중 · {position}번째", download_status_resolving: "저장소 확인 중", download_status_preflighting: "파일 및 디스크 확인 중", download_status_downloading: "다운로드 중", download_status_verifying: "검증 중", download_status_publishing: "게시 중", download_status_completed: "완료", download_status_cancelled: "취소됨", download_status_rejected: "거부됨", download_status_interrupted: "중단됨", download_status_corrupt: "손상됨", download_status_failed: "실패",
       download_recovery_title: "이전 다운로드 대기열이 복원되지 않았습니다", download_recovery_copy: "IronMLX 재시작 후 대기 중인 작업은 자동으로 복원되지 않습니다. 필요한 작업을 다시 추가하세요.", download_readd_public: "자격 증명 없는 작업 다시 추가", download_readd: "다시 추가", download_ignore: "이 항목 무시", download_token_required: "Token 필요", download_enter_token: "Token 입력", download_token_prompt: "Hugging Face Token을 입력한 다음 작업을 다시 추가하세요.", dismiss: "모두 무시",
+      download_anyway: "계속 다운로드",
+      download_status_download_only: "다운로드됨 · 현재 버전에서 실행 불가",
+      download_only_note: "파일은 다운로드할 수 있지만 현재 버전에서는 모델을 로드하거나 실행할 수 없습니다.",
+      download_only_completed_note: "파일은 다운로드되었지만 현재 버전에서는 모델을 로드하거나 실행할 수 없습니다.",
+      err_download_only_model: "파일은 다운로드되었지만 현재 버전에서는 모델을 로드하거나 실행할 수 없습니다.",
+      download_only_complete: "모델 \"{name}\"을 다운로드했습니다. 현재 IronMLX 버전에서는 실행할 수 없습니다.",
+      model_show_files: "모델 파일 보기",
+      err_download_only_not_allowed: "이 작업은 파일 다운로드로 계속할 수 없습니다. 먼저 다운로드 오류를 해결하세요.",
+      download_status_incompatible: "호환되지 않는 모델",
+      download_view_supported: "지원 모델 보기",
+      err_unsupported_model_architecture: "현재 IronMLX 버전은 {model_type} 아키텍처를 지원하지 않습니다. 지원 모델에서 다른 모델을 선택하세요.",
+      err_unsupported_model_metadata: "이 모델의 아키텍처, 양자화 형식 또는 설정은 현재 버전에서 지원되지 않습니다. 지원 모델에서 다른 모델을 선택하세요.",
       download_generic_failed: "다운로드에 실패했습니다.",
+      err_download_tls_failed: "모델 다운로드 서버와 보안 연결을 맺지 못했습니다. 네트워크나 프록시 설정을 확인한 후 다시 시도하세요. 다운로드한 데이터는 유지됩니다.",
+      err_download_network_timeout: "모델 다운로드 서버 연결 시간이 초과되었습니다. 네트워크나 프록시 설정을 확인한 후 다시 시도하세요. 다운로드한 데이터는 유지됩니다.",
+      err_download_network_failed: "모델 다운로드 네트워크 연결이 끊겼습니다. 네트워크나 프록시 설정을 확인한 후 다시 시도하세요. 다운로드한 데이터는 유지됩니다.",
       ms_starting: "ModelScope에 연결 중…",
       bench_no_prompt_size: "벤치마크를 실행하기 전에 pp 설정을 하나 이상 선택하세요.",
       bench_preflight: "벤치마크 실행 준비 상태 확인 중…",
@@ -9287,6 +9458,15 @@
   function localizeErrorResult(result, fallbackKey) {
     const dict = I18N[currentLang] || I18N.en;
     const rawError = String(result.error || '').trim();
+    if (result.code === 'unsupported_model_metadata') {
+      const modelType = unsupportedDownloadModelType(result);
+      return modelType
+        ? dict.err_unsupported_model_architecture.replace('{model_type}', modelType)
+        : dict.err_unsupported_model_metadata;
+    }
+    if (result.code === 'download_failed' && /tls handshake|SSL_connect|secure connection/i.test(rawError)) {
+      return dict.err_download_tls_failed;
+    }
     if (/^memory budget exceeded\b/i.test(rawError)) {
       return localizeBackendErrorMessage(rawError, fallbackKey);
     }
@@ -9664,8 +9844,12 @@
     document.getElementById('modal-model-type').value = modelTypeLabel(local);
     document.getElementById('modal-context-size').closest('.modal-field').style.display =
       capabilities.supports_kv_cache === false ? 'none' : '';
+    ['modal-max-tokens', 'modal-max-output-tokens'].forEach(id => {
+      document.getElementById(id).closest('.modal-field').style.display =
+        capabilities.runtime_kind === 'embedding' ? 'none' : '';
+    });
     document.getElementById('modal-causal-sampling-row').style.display =
-      isBlockDiffusion ? 'none' : '';
+      (isBlockDiffusion || capabilities.runtime_kind === 'embedding') ? 'none' : '';
     document.getElementById('modal-mtp-section').style.display =
       capabilities.supports_mtp === false ? 'none' : '';
     document.getElementById('modal-dflash2-section').style.display =
@@ -9812,6 +9996,14 @@
     const dict = I18N[currentLang] || I18N.en;
     const local = window.__LOCAL_MODELS__[modelId] || {};
     const capabilities = local.capabilities || {};
+    if (capabilities.runtime_kind === 'embedding') {
+      const params = { model_id: modelId, alias: document.getElementById('modal-alias-input').value };
+      if (window.webkit?.messageHandlers?.saveModelParams) {
+        window.webkit.messageHandlers.saveModelParams.postMessage(JSON.stringify(params));
+      }
+      closeParamsModal();
+      return;
+    }
     const isBlockDiffusion = capabilities.runtime_kind === 'block_diffusion'
       || local.type === 'block_diffusion_vlm';
     const contextText = document.getElementById('modal-context-size').value;
@@ -10006,8 +10198,20 @@
     return !!task && ACTIVE_DOWNLOAD_PHASES.has(task.status);
   }
 
+  // Only a backend architecture rejection makes retrying this model pointless.
+  // Other metadata failures may be resolved by a corrected repository revision.
+  function unsupportedDownloadModelType(result) {
+    if ((result.code || result.error_code) !== 'unsupported_model_metadata') return null;
+    const match = String(result.error || '').match(/\bunsupported model_type:\s*([A-Za-z0-9_.-]+)(?=\s|$|\()/);
+    return match ? match[1] : null;
+  }
+
   function downloadStatusLabel(task) {
     const dict = I18N[currentLang] || I18N.en;
+    if (task.status === 'completed' && task.download_only) return dict.download_status_download_only;
+    if (task.status === 'rejected' && task.error_code === 'unsupported_model_metadata') {
+      return dict.download_status_incompatible;
+    }
     if (task.status === 'queued' && task.queue_position) {
       return (dict.download_status_queued_position || 'Queued · #{position}')
         .replace('{position}', task.queue_position);
@@ -10046,11 +10250,20 @@
           + '" type="button" data-download-action="' + action + '" data-provider="' + escapeAttr(task.provider)
           + '" data-repo-id="' + escapeAttr(task.repo_id) + '"' + (disabled ? ' disabled' : '') + '>' + escapeAttr(label) + '</button>';
       };
+      const unsupportedArchitecture = task.status === 'rejected' && unsupportedDownloadModelType(task);
+      const canContinue = task.status === 'rejected' && task.can_continue_download === true;
       const actions = active
         ? actionButton('pause', t(task.status === 'pausing' ? 'download_status_pausing' : 'download_pause'))
         : task.status === 'completed' ? actionButton('delete', t('download_clear_record'))
-          : actionButton('resume', t(['paused', 'cancelled'].includes(task.status) ? 'download_resume' : 'download_retry'))
+          : (unsupportedArchitecture || canContinue
+            ? actionButton('catalog', t('download_view_supported'))
+            : actionButton('resume', t(['paused', 'cancelled'].includes(task.status) ? 'download_resume' : 'download_retry')))
+            + (canContinue ? actionButton('continue', t('download_anyway')) : '')
             + actionButton('delete', t('download_delete_task'));
+      const failureReason = task.status === 'completed' && task.download_only ? t('download_only_completed_note') : failed ? localizeErrorResult({
+        code: task.error_code, error: task.error, repo_id: task.repo_id
+      }, 'download_generic_failed') : '';
+      const continuationNote = canContinue ? t('download_only_note') : '';
       const detail = remaining > 0
         ? (dict.download_remaining || '{size} remaining').replace('{size}', formatVersionBytes(remaining))
         : (task.current_file || '');
@@ -10063,7 +10276,9 @@
         + (detail ? '<span>·</span><span>' + escapeAttr(detail) + '</span>' : '')
         + '</div></div>'
         + '<div class="download-task-actions">' + actions + '</div>'
-        + '</div><div class="download-task-progress"><div class="download-task-progress-bar" style="width:'
+        + '</div>' + (failureReason ? '<div class="download-task-error">' + escapeAttr(failureReason) + '</div>' : '')
+        + (continuationNote ? '<div class="download-task-error">' + escapeAttr(continuationNote) + '</div>' : '')
+        + '<div class="download-task-progress"><div class="download-task-progress-bar" style="width:'
         + pct + '%"></div></div></div>';
     }).join('');
     list.querySelectorAll('.download-task-action').forEach(function(button) {
@@ -10071,7 +10286,8 @@
         const provider = button.dataset.provider;
         const repoId = button.dataset.repoId;
         const action = button.dataset.downloadAction;
-        if (action === 'delete') deleteDownloadTask(provider, repoId);
+        if (action === 'catalog') switchDlSource('catalog');
+        else if (action === 'delete') deleteDownloadTask(provider, repoId);
         else performDownloadTaskAction(provider, repoId, action);
       });
     });
@@ -10087,7 +10303,7 @@
     });
     if (completedQueueTask) {
       downloadQueueManagedCompletions.delete(completedQueueTask.provider + ':' + completedQueueTask.repo_id);
-      const localized = (dict.model_download_complete || 'Model "{name}" downloaded successfully.')
+      const localized = (completedQueueTask.download_only ? dict.download_only_complete : dict.model_download_complete)
         .replace('{name}', completedQueueTask.repo_id || '');
       showToast(localized, 'success');
       syncModelList();
@@ -10131,16 +10347,18 @@
 
   function performDownloadTaskAction(provider, repoId, action) {
     const key = provider + ':' + repoId;
-    if (downloadTaskActionsPending.has(key) || !['pause', 'resume', 'delete'].includes(action)) return;
+    if (downloadTaskActionsPending.has(key) || !['pause', 'resume', 'delete', 'continue'].includes(action)) return;
     const task = downloadTask(provider, repoId);
     if (!task) return;
+    if (action === 'continue' && task.can_continue_download !== true) return;
     const body = { provider: provider, repo_id: repoId };
-    if (action === 'resume' && downloadResumeCredentialTarget === key) {
+    if (action === 'continue') body.download_only = true;
+    if (['resume', 'continue'].includes(action) && downloadResumeCredentialTarget === key) {
       body.token = document.getElementById('search-hf-token').value.trim() || null;
     }
     downloadTaskActionsPending.set(key, action);
     renderDownloadQueue(downloadQueueSnapshot);
-    apiPost('/admin/api/models/download/' + action, body);
+    apiPost('/admin/api/models/download/' + (action === 'continue' ? 'resume' : action), body);
   }
 
   async function deleteDownloadTask(provider, repoId) {
@@ -10180,7 +10398,7 @@
     } else if (action === 'delete') {
       onDownloadCleanupResult(jsonStr);
     } else if (!result.success) {
-      showToast(t('download_action_failed'), 'warn');
+      showToast(localizeErrorResult(result, 'download_action_failed'), 'warn');
     } else {
       if (action === 'resume') {
         downloadQueueManagedCompletions.add(key);
@@ -10281,6 +10499,7 @@
     { id: 'llm', label: 'LLM / VLM', categories: ['text', 'vision'] },
     { id: 'audio', label: 'Audio', categories: ['tts', 'audio', 'stt'] },
     { id: 'image', label: 'Image', categories: ['image'] },
+    { id: 'embedding', categories: ['embedding'] },
     { id: 'decision', label: 'Decision', categories: ['decision'] },
     { id: 'drafter', label: 'Drafter', categories: ['assistant', 'drafter'] },
     { id: 'other', categories: [] },
@@ -10317,6 +10536,7 @@
       llm: t('catalog_type_llm'),
       audio: t('catalog_type_audio'),
       image: t('catalog_type_image'),
+      embedding: t('catalog_type_embedding'),
       decision: t('catalog_type_decision'),
       drafter: t('catalog_type_drafter'),
       other: t('catalog_type_other'),
@@ -10378,6 +10598,9 @@
     }
     if (catalogPendingUpdateChecks.has(key)) {
       return { disabled: true, label: t('catalog_checking_update') };
+    }
+    if (local && local.readiness && local.readiness.reason_code === 'download_only_model') {
+      return { disabled: true, label: t('download_status_download_only') };
     }
     if (local && local.readiness && local.readiness.status !== 'ready') {
       return { disabled: false, label: t('local_model_repair'), action: 'download' };
@@ -10474,7 +10697,9 @@
       const memory = selected ? catalogMemoryHint(selected) : null;
       const memoryText = memory ? t(memory.key).replace('{size}', memory.size || '') : '';
       const features = entry.capabilities.map(function(capability) {
-        return '<span class="catalog-capability">' + escapeAttr(t(['catalog', capability].join('_'))) + '</span>';
+        const label = entry.category === 'embedding' && capability === 'text' ? 'text_embedding'
+          : entry.category === 'embedding' && capability === 'vision' ? 'image_embedding' : capability;
+        return '<span class="catalog-capability">' + escapeAttr(t(['catalog', label].join('_'))) + '</span>';
       }).join('');
       const isDrafter = ['assistant', 'drafter'].includes(entry.category);
       const noteKey = selected && selected.noteKey ? selected.noteKey : isDrafter ? entry.noteKey : null;
@@ -10663,7 +10888,7 @@
     const repoId = result.repo_id || '';
     const dict = I18N[currentLang] || I18N.en;
     if (result.success) {
-      const localized = (dict.model_download_complete || 'Model "{name}" downloaded successfully.').replace('{name}', repoId);
+      const localized = (result.download_only ? dict.download_only_complete : dict.model_download_complete).replace('{name}', repoId);
       showToast(localized, 'success');
       syncModelList();
     } else if (result.code !== 'paused') {
@@ -11790,6 +12015,7 @@
 
   function modelReadinessTitle(model) {
     const readiness = modelReadiness(model);
+    if (readiness.reason_code === 'download_only_model') return t('download_only_completed_note');
     return readiness.message || readiness.reason_code || '';
   }
 
@@ -11826,7 +12052,8 @@
     }
     const readiness = modelReadiness(model);
     if (readiness.status === 'unsupported' || readiness.status === 'incomplete') {
-      const text = readiness.status === 'incomplete' ? dict.status_incomplete : dict.status_unsupported;
+      const text = readiness.status === 'incomplete' ? dict.status_incomplete
+        : readiness.reason_code === 'download_only_model' ? dict.download_status_download_only : dict.status_unsupported;
       return { dot: readiness.status === 'incomplete' ? 'model-incomplete' : 'model-unsupported', text: text, title: readiness.status === 'incomplete' ? '' : modelReadinessTitle(model) };
     }
     let verifiedTitle = '';
@@ -12052,6 +12279,21 @@
     menu.appendChild(verifyButton);
     menu.appendChild(versionsButton);
     menu.appendChild(copyButton);
+    if (modelReadiness((window.__LOCAL_MODELS__ || {})[modelId] || {}).reason_code === 'download_only_model') {
+      const filesButton = document.createElement('button');
+      filesButton.type = 'button';
+      filesButton.setAttribute('role', 'menuitem');
+      filesButton.appendChild(createModelMoreActionIcon('versions'));
+      const filesLabel = document.createElement('span');
+      filesLabel.textContent = dict.model_show_files;
+      filesButton.appendChild(filesLabel);
+      filesButton.addEventListener('click', function(menuEvent) {
+        menuEvent.stopPropagation();
+        closeModelMoreActions();
+        apiPost('/admin/api/models/reveal', { model_id: modelId });
+      });
+      menu.appendChild(filesButton);
+    }
     menu.appendChild(deleteButton);
     document.body.appendChild(menu);
     activeModelMoreMenu = menu;
@@ -12299,7 +12541,7 @@
           + '<td class="model-status-cell" data-status-tooltip="' + escapeAttr(status.title) + '"' + (status.title ? ' tabindex="0"' : '')
           + ' onmouseenter="showModelStatusTooltip(this)" onmouseleave="hideModelTableTooltip()"'
           + ' onfocus="showModelStatusTooltip(this)" onblur="hideModelTableTooltip()"><span class="status-dot ' + status.dot + '"></span> <span class="model-status-text">' + status.text + '</span></td>'
-          + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' ' + (!isModelLoadable(m) ? 'disabled ' : '') + 'style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
+          + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' ' + (!isModelLoadable(m) || m.type === 'embedding' ? 'disabled ' : '') + 'style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
           + '<td><button class="icon-btn" title="' + escapeAttr(dict.model_param_settings) + '" aria-label="' + escapeAttr(dict.model_param_settings) + '" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
           + '<td>' + renderModelLoadActions(m, escapedSq, escaped, actionClass, actionText, isLoaded) + '</td>'
           + '<td>' + renderModelMoreActions(m, escapedSq) + '</td>';
@@ -12318,7 +12560,7 @@
     if (!profileSelect) return;
     const current = profileSelect.value;
     profileSelect.innerHTML = '<option value="">' + (dict.select_model || 'Select a model...') + '</option>';
-    models.filter(m => !['block_diffusion', 'decision'].includes(m.capabilities?.runtime_kind)).forEach(m => {
+    models.filter(m => !['block_diffusion', 'decision', 'embedding'].includes(m.capabilities?.runtime_kind)).forEach(m => {
       const opt = document.createElement('option');
       opt.value = m.id;
       opt.textContent = m.id;
@@ -14468,10 +14710,9 @@
     const activeRequests = Number(model && model.active_requests || 0);
     const queuedRequests = Number(model && model.queued_requests || 0);
     if (activeRequests > 0 || queuedRequests > 0) return 'busy';
-    if (!model || model.runtime_kind !== 'decision') return 'idle';
-    const lastRequestUnixMs = Number(
-      model.decision_metrics && model.decision_metrics.last_request_unix_ms
-    );
+    if (!model || !['decision', 'embedding'].includes(model.runtime_kind)) return 'idle';
+    const metrics = model.runtime_kind === 'embedding' ? model.embedding_metrics : model.decision_metrics;
+    const lastRequestUnixMs = Number(metrics && metrics.last_request_unix_ms);
     const recentRequestAgeMs = nowUnixMs - lastRequestUnixMs;
     return Number.isFinite(lastRequestUnixMs)
       && lastRequestUnixMs > 0
@@ -14522,6 +14763,7 @@
       const modelId = String(model.id || model.model || '');
       const isDiffusion = model.runtime_kind === 'block_diffusion';
       const isDecision = model.runtime_kind === 'decision';
+      const isEmbedding = model.runtime_kind === 'embedding';
       const activeRequests = Number(model.active_requests || 0);
       const queuedRequests = Number(model.queued_requests || 0);
       const queueCapacity = Number(model.queue_capacity || 0);
@@ -14529,6 +14771,7 @@
       const isBusy = operationalState === 'busy';
       const usage = model.usage || {};
       const decisionMetrics = model.decision_metrics || null;
+      const embeddingMetrics = model.embedding_metrics || null;
       const operationalStateClass = isBusy
         ? 'runtime-state-busy'
         : operationalState === 'recent' ? 'runtime-state-recent' : 'runtime-state-idle';
@@ -14614,7 +14857,64 @@
         );
       }
       let performanceDetails = '';
-      if (isDecision) {
+      if (isEmbedding) {
+        const completedRequests = Number(embeddingMetrics && embeddingMetrics.recent_completed_requests);
+        const windowSeconds = Number(embeddingMetrics && embeddingMetrics.window_seconds);
+        const performanceMeta = completedRequests > 0
+          ? (dict.runtime_embedding_performance_window
+              || 'Recent embeddings · P50 · Last {seconds}s · {requests} completed')
+              .replace('{seconds}', String(windowSeconds))
+              .replace('{requests}', completedRequests.toLocaleString(numberLocale))
+          : (dict.runtime_embedding_performance_empty
+              || 'Embedding metrics · Complete a request to begin sampling');
+        performanceDetails = '<div class="runtime-model-section">'
+          + '<div class="runtime-section-header"><span class="runtime-section-title">'
+          + escapeAttr(dict.runtime_embedding_performance || 'Embedding performance') + '</span>'
+          + '<span class="runtime-section-meta">' + escapeAttr(performanceMeta) + '</span></div>'
+          + '<div class="runtime-metric-rail runtime-performance-rail" aria-label="'
+          + escapeAttr(dict.runtime_embedding_performance || 'Embedding performance') + '">'
+          + metric(
+              dict.runtime_embedding_completed || 'Completed',
+              dict.runtime_embedding_completed_help || 'Embedding requests completed since this model was loaded.',
+              embeddingMetrics && embeddingMetrics.completed_requests,
+              '',
+              0,
+              true
+            )
+          + metric(
+              dict.runtime_embedding_errors || 'Errors',
+              dict.runtime_embedding_errors_help || 'Embedding requests that failed since this model was loaded.',
+              embeddingMetrics && embeddingMetrics.failed_requests,
+              '',
+              0,
+              false
+            )
+          + metric(
+              dict.runtime_embedding_latency || 'P50 latency',
+              dict.runtime_embedding_latency_help || 'Median runtime queue and processing latency of completed embedding requests.',
+              embeddingMetrics && embeddingMetrics.latency_ms_p50,
+              'ms',
+              1,
+              false
+            )
+          + metric(
+              dict.runtime_embedding_input_rate || 'Input throughput',
+              dict.runtime_embedding_input_rate_help || 'Median input tokens per second of processing time, including image and audio soft tokens.',
+              embeddingMetrics && embeddingMetrics.input_tokens_per_second,
+              'tok/s',
+              1,
+              false
+            )
+          + metric(
+              dict.runtime_embedding_vector_rate || 'Vector throughput',
+              dict.runtime_embedding_vector_rate_help || 'Median vectors per second of processing time; each batch item produces one vector.',
+              embeddingMetrics && embeddingMetrics.vectors_per_second,
+              'vec/s',
+              1,
+              false
+            )
+          + '</div></div>';
+      } else if (isDecision) {
         const completedRequests = Number(decisionMetrics && decisionMetrics.recent_completed_requests);
         const windowSeconds = Number(decisionMetrics && decisionMetrics.window_seconds);
         const performanceMeta = completedRequests > 0
@@ -14781,7 +15081,7 @@
       return '<div class="runtime-model-card">'
         + '<div class="runtime-model-header"><div class="runtime-model-identity">'
         + '<strong class="runtime-model-name">' + escapeAttr(model.id || model.model || '') + '</strong>'
-        + mtpBadge + dflash2Badge + '</div></div>'
+        + mtpBadge + dflash2Badge + (isEmbedding && model.supports_audio ? '<span class="catalog-capability">' + escapeAttr(dict.catalog_audio_embedding || 'Audio embeddings') + '</span>' : '') + '</div></div>'
         + requestDetails + dflash2Details + performanceDetails
         + '<div class="runtime-model-footer"><div class="runtime-usage-summary">'
         + usageItems.join('') + '</div>' + activeKvDetails + '</div></div>';
@@ -14916,6 +15216,9 @@
           document.getElementById('gpu-cache-val').textContent = formatMB(m.cache_mb);
           drawGpuChart();
         }
+      } else if (path === '/admin/api/models/reveal') {
+        const result = JSON.parse(jsonStr || '{}');
+        if (!result.success) showToast(localizeErrorResult(result), 'warn');
       } else if (path === '/admin/api/models/local') {
         onLocalModelsResult(jsonStr);
       } else if (path === '/admin/api/audio/execution-profile') {

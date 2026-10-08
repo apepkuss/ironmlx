@@ -27,6 +27,7 @@ Rust 推理引擎、MLX/Metal 运行时、模型管理 Dashboard，以及 OpenAI
 - 提供标准化、兼容主流客户端的 API，包括 OpenAI 兼容的
   `/v1/chat/completions`、`/v1/responses` 和 Anthropic `/v1/messages`，
   支持客户端函数工具调用协议；
+- 0.2.0 源码构建支持 EmbeddingGemma 2 BF16 与 affine 4bit 的文本、图片、音频及组合向量，详见[向量 API](docs/zh-CN/text-embeddings.md)；
 - 支持同步响应、SSE 流式输出、Structured Outputs 和 reasoning；
 - 提供模型发现、健康检查与运行状态查询 API，包括 `/healthz` 和
   `/v1/models`；

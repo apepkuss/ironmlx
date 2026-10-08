@@ -68,6 +68,7 @@ the [supported model matrix](supported-models.md).
 
 ## Choose a task
 
+- [Text, image and audio embeddings](text-embeddings.md) — EmbeddingGemma 2 BF16/affine4 input formats, limits and Dashboard vector metrics.
 - [Laya decision API](laya-systemone-api.md) — load Laya in the App and connect external TypeSafe clients.
 - [Model support matrix](supported-models.md) — architectures, validated
   versions, quantization, memory, and feature limits.

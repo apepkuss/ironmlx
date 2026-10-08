@@ -4,9 +4,13 @@ import Testing
 
 @testable import IronMLXAppCore
 
-@Test @MainActor
-func realHelperKill9RecoversOnceThenTripsBreakerAndAllowsManualRetry() async throws {
+@Test(arguments: [Duration.milliseconds(250), .seconds(3)]) @MainActor
+func realHelperKill9RecoversOnceThenTripsBreakerAndAllowsManualRetry(
+    initialPortHandoffDelay: Duration
+) async throws {
+    let startupTimeout: TimeInterval = 15
     let root = try crashRecoveryTemporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
     let modelID = "mlx-community/DiffusionGemma-Crash-Recovery-MXFP4"
     _ = try writeVerifiedTestSnapshot(
         root: root,
@@ -47,6 +51,7 @@ func realHelperKill9RecoversOnceThenTripsBreakerAndAllowsManualRetry() async thr
     )
     var launchCount = 0
     var initialPortHandoffScheduled = false
+    var portHandoffTask: Task<Void, Never>?
     let processManager = BackendProcessManager(
         configStore: configStore,
         logStore: logStore,
@@ -54,19 +59,31 @@ func realHelperKill9RecoversOnceThenTripsBreakerAndAllowsManualRetry() async thr
             launchCount += 1
             return BackendProcessLaunchPlan(
                 processURL: URL(fileURLWithPath: "/usr/bin/python3"),
-                arguments: [helperURL.path, "--port", String(port)]
+                arguments: [
+                    helperURL.path, "--port", String(port),
+                    "--bind-retry-timeout", String(startupTimeout),
+                ]
             )
         },
         processFactory: {
             if !initialPortHandoffScheduled {
                 initialPortHandoffScheduled = true
-                // Keep the reservation briefly after the helper starts. This
-                // deterministically exercises the helper's bounded bind retry
-                // and prevents the CI regression from depending on a rare
-                // bind-close-launch race.
-                Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(250))
-                    portReservation.release()
+                // Begin the handoff delay only once the helper has actually
+                // reached bind(), independently of CI process scheduling.
+                // The long-delay case exceeds the former two-second retry.
+                portHandoffTask = Task { @MainActor in
+                    defer { portReservation.release() }
+                    do {
+                        try await waitForCrashRecoveryCondition(timeout: startupTimeout) {
+                            logStore.tailText(from: .backend)
+                                .contains("helper waiting for port handoff")
+                        }
+                        try await Task.sleep(for: initialPortHandoffDelay)
+                    } catch {
+                        if !Task.isCancelled {
+                            Issue.record("Port handoff failed: \(error)")
+                        }
+                    }
                 }
             }
             return Process()
@@ -98,18 +115,26 @@ func realHelperKill9RecoversOnceThenTripsBreakerAndAllowsManualRetry() async thr
             maximumAutomaticRecoveryAttempts: 1,
             automaticRecoveryDelay: 0,
             stableWindow: 60,
-            readinessTimeout: 5
+            readinessTimeout: startupTimeout
         )
     )
     defer {
+        portHandoffTask?.cancel()
+        portReservation.release()
         if let pid = processManager.currentProcessIdentifier {
             _ = Darwin.kill(pid_t(pid), SIGKILL)
         }
     }
 
-    try await supervisor.ensureRunning()
+    do {
+        try await supervisor.ensureRunning()
+    } catch {
+        print("Crash helper startup failed: \(logStore.tailText(from: .backend))")
+        throw error
+    }
     #expect(supervisor.state == .running)
     #expect(launchCount == 1)
+    #expect(logStore.tailText(from: .backend).contains("helper waiting for port handoff"))
 
     let firstPID = try #require(processManager.currentProcessIdentifier)
     let workTask = Task {
@@ -126,7 +151,7 @@ func realHelperKill9RecoversOnceThenTripsBreakerAndAllowsManualRetry() async thr
     }
 
     #expect(Darwin.kill(pid_t(firstPID), SIGKILL) == 0)
-    try await waitForCrashRecoveryCondition(timeout: 8) {
+    try await waitForCrashRecoveryCondition(timeout: startupTimeout + 5) {
         supervisor.lastEvent?.phase == .recovered
             && processManager.currentProcessIdentifier != nil
             && processManager.currentProcessIdentifier != firstPID
@@ -168,6 +193,7 @@ func realHelperKill9RecoversOnceThenTripsBreakerAndAllowsManualRetry() async thr
     #expect(retry.success)
     #expect(supervisor.state == .running)
     #expect(launchCount == 3)
+    await supervisor.stop(intent: .userStop)
 }
 
 @Test @MainActor
@@ -237,6 +263,13 @@ private final class LoopbackPortReservation {
         let descriptor = socket(AF_INET, SOCK_STREAM, 0)
         guard descriptor >= 0 else {
             throw POSIXError(.ENOTSOCK)
+        }
+        // The helper must not inherit a second copy of the reservation; the
+        // parent's release is the sole owner of the port handoff.
+        guard fcntl(descriptor, F_SETFD, FD_CLOEXEC) == 0 else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EBADF)
+            Darwin.close(descriptor)
+            throw error
         }
 
         var address = sockaddr_in()

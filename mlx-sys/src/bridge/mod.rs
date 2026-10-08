@@ -12,6 +12,7 @@
 pub mod array;
 pub mod compile;
 pub mod conv;
+pub mod einsum;
 pub mod fast;
 pub mod fft;
 pub mod io;
