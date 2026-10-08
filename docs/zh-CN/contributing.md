@@ -24,4 +24,9 @@ git commit -s
 
 保持改动聚焦，说明行为变化；公开行为变化时同步更新英文和简体中文文档。创建 Pull Request 前，运行 README 中适用的 Rust、Swift、App Bundle、SBOM、许可证策略、依赖审计、secret 扫描和模型边界检查。不要为了通过检查而削弱发布或安全门禁。
 
+### API 契约修改
+
+新增字段需同步严格解析、协议测试、SDK 验证和两版文档。错误状态、信封、code 和 Retry-After 的变更也必须同步验证。扩展字段应明确标注，不能声称属于上游标准。真实模型结论需单独记录模型 revision、模板、量化、采样、响应模式和结果。
+验证方法见[SDK 兼容验证](building-from-source.md#sdk-兼容验证)。公共服务契约维护在[服务与管理 API](service-api.md)，协议字段及限制维护在[开发者指南](developer-guide.md#api-接入)列出的对应 API 参考中。
+
 安全漏洞请使用 [SECURITY.md](../../SECURITY.md) 私密报告，不要创建公开 issue。

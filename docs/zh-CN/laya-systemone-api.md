@@ -1,9 +1,101 @@
-# 在 IronMLX App 中使用 Laya 和 System One API
+# System One API
 
-[English](../laya-systemone-api.md)
+[English](../laya-systemone-api.md) · [API 参考](api-reference.md) · [服务与管理 API](service-api.md)
 
 IronMLX App 支持 `aac6fef/laya-multilingual-mlx` 的下载、加载、卸载与 API 服务。
 该模型处理选择（choice）、评分（score）和真假概率（noul）问题，不生成聊天文本。
+
+本文定义 Laya 的选择、评分与真假概率接口，并在后文提供 [App 配置](#使用步骤)与[独立 CLI](#可选的独立-cli)说明。App 与 EnginePool 的公共访问约定见[服务与管理 API](service-api.md)；独立 CLI 使用本页规定的认证方式。
+
+## API 端点
+
+- `POST /v1/systemone`：接受下方的[请求](#请求)，返回兼容 TypeSafe 的
+  `model`、`answers` 和 `usage` 字段，详见[响应](#响应)。
+- `GET /v1/models`：返回 `{"models":[{"name", "description", "release_date"}]}`。
+  App 模式列出已注册的决策模型，同时保留 OpenAI 的 `object`/`data` 字段；
+  独立服务模式列出已加载的 Laya 模型。`release_date` 为该检查点的
+  Hugging Face 仓库创建日期（`2026-09-19`）。
+
+`jev-latest` 等 TypeSafe 模型名不是 Laya 的别名。有认证的服务中，缺失或无效的
+Bearer 凭据返回 `401`。JSON、模型 ID、问题格式或选项 token 预算错误返回
+`422`；推理错误返回 `500`，工作线程停止返回 `503`。App 管理的服务还会在
+模型加载失败或队列已满时返回 `503`，请求超时返回 `504`。模型加载错误同时
+会显示在 App 中。
+
+## 请求
+
+```json
+{
+  "model": "aac6fef/laya-multilingual-mlx",
+  "state": {"message": "发票被重复扣款，请退款。"},
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "Which team should handle this?",
+      "criteria": {"billing": "refunds", "technical": "bugs"}
+    },
+    "refund": {
+      "type": "noul",
+      "instructions": "Is a refund requested?"
+    },
+    "urgency": {
+      "type": "score",
+      "instructions": "How urgent is this?",
+      "criteria": ["can wait", "soon", "today"]
+    }
+  }
+}
+```
+
+- `model` 标识实际加载的检查点。任何 Jev 别名都不会映射到 Laya。
+- `state` 可以是字符串、JSON 对象或 JSON 数组。所有问题针对同一份 state
+  求值。问题键不能为空，原样作为答案键返回。
+- `choice.criteria` 是有序映射，包含 1–255 个不同的非空标签，说明可为字符串、对象、数组或 `null`。
+  模型按请求中的顺序对标签评分。
+- `score.criteria` 是包含 2–10 项说明的有序数组，说明可为字符串、对象或数组，索引从零开始。
+  结构化说明在响应的 legend 中渲染为 JSON 字符串，因此 `legend`
+  始终符合 TypeSafe 的 `map<string, string>` 结构。
+- `noul.criteria` 可以提供 `true` 和 `false` 的说明；返回值为 P(true)。
+- `instructions` 为必填项，可以是字符串、对象或数组。运行时在分词前
+  以确定的方式渲染结构化值。
+
+### 输入限制
+
+`questions` 不能为空。问题与选项前缀的目标预算为 256 token，每个选项最多
+48 token，必要时进一步降低该上限。如果处理后的选项仍无法放入总计
+1,024 token 的上下文，请求会被拒绝。`state` 从右侧截断；选项不会被静默丢弃。
+
+## 响应
+
+```json
+{
+  "model": "aac6fef/laya-multilingual-mlx",
+  "answers": {
+    "department": {
+      "type": "choice", "choice": "billing", "confidence": 0.5635,
+      "probabilities": {"billing": 0.91, "technical": 0.09}
+    },
+    "refund": {"type": "noul", "noul": 0.94},
+    "urgency": {
+      "type": "score", "score": 1.32, "confidence": 0.1108,
+      "legend": {"0": "can wait", "1": "soon", "2": "today"},
+      "probabilities": {"0": 0.12, "1": 0.44, "2": 0.44}
+    }
+  },
+  "usage": {"input_tokens": 327, "output_tokens": 0}
+}
+```
+
+上述数值仅用于展示结构，并非实际测得的模型输出。`input_tokens` 统计所有
+编码后的问题与 state 序列，包括重复的 state token；本模型不生成文本，
+因此 `output_tokens` 为零。choice 和 score 的 confidence 使用参考运行时的
+归一化熵计算；score 是从零开始的评分标准索引的期望值。
+noul 在兼容 TypeSafe 的响应中仅返回概率。Laya action head 及诊断输出
+保留在内部。
+
+## 官方 SDK 客户端
+
+Python 与 JavaScript 官方 SDK 示例见[英文 API 文档](../laya-systemone-api.md#official-sdk-clients)。
 
 ## 使用步骤
 
@@ -74,28 +166,9 @@ Context Size 由模型定义，只读且不可修改。
 
 App 集成也可以通过 `GET /admin/api/models/loaded` 读取相同数据。已加载的决策模型包含
 `runtime_kind: "decision"` 和 `decision_metrics` 对象。字段契约见
-[HTTP API 参考](api-reference.md#app-决策运行时指标)。
+[服务与管理 API](service-api.md#app-决策运行时指标)。
 
-## 请求示例
+## 可选的独立 CLI
 
-```json
-{
-  "model": "aac6fef/laya-multilingual-mlx",
-  "state": "发票被重复扣款，请退款。",
-  "questions": {
-    "refund": { "type": "noul", "instructions": "是否要求退款？" }
-  }
-}
-```
-
-响应包含 `model`、`answers` 和 `usage`。完整字段定义见[决策请求协议](../laya-phase-one-contract.md)，
-Python 与 JavaScript 官方 SDK 示例见[英文 API 文档](../laya-systemone-api.md#official-sdk-clients)。
-
-同一端口的 `GET /v1/models` 保留 OpenAI 的 `object`/`data` 字段，并添加 TypeSafe 的
-`models` 数组，仅列出已注册的决策模型。`jev-latest` 等 TypeSafe 模型名不是 Laya 的别名。
-
-参数或 JSON 错误返回 `422`，推理错误返回 `500`，加载失败或队列已满返回 `503`，超时返回
-`504`。局域网认证失败返回 `401`。模型加载错误同时会显示在 App 中。
-
-开发者仍可使用独立的 `ironmlx serve-systemone` 命令；它默认使用端口 `8767`，并始终要求
-`IRONMLX_SYSTEMONE_API_KEY`。普通 App 用户不需要这一步。
+开发者仍可使用独立的 `ironmlx serve-systemone` 命令；它默认使用端口 `8767`，
+并始终要求 `IRONMLX_SYSTEMONE_API_KEY`。普通 App 用户不需要这一步。

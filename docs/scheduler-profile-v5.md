@@ -1,12 +1,12 @@
-# Scheduler Profile v5
+# Scheduler performance calibration
 
 [简体中文](zh-CN/scheduler-profile-v5.md)
 
-Scheduler Profile v5 is explicit offline calibration. It compares candidate scheduler configurations for a complete runtime context; it does not tune the request hot path automatically.
+Scheduler Profile provides explicit offline calibration. It compares candidate scheduler configurations for a complete runtime context; it does not tune the request hot path automatically.
 
 ## Usage entry point
 
-For CLI users and maintainers performing calibration. Run `ironmlx scheduler-autotune calibrate --help` for current options, then calibrate with the actual model and runtime settings. The App profile-generation entry uses the same runtime parameters. Calibration requires real models and available GPU capacity; it is not required to start serving.
+For CLI users and maintainers performing calibration. Run `ironmlx scheduler-autotune calibrate --help` for current options, then calibrate with the actual model and runtime settings. In the App, **Models → Scheduling** generates a profile using the same runtime parameters. Calibration requires real models and available GPU capacity; it is not required to start serving.
 
 ## Runtime boundaries
 

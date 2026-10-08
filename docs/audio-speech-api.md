@@ -1,6 +1,6 @@
 # Speech synthesis API
 
-[简体中文](zh-CN/audio-speech-api.md) · [TTS download and usage](tts-model-download.md)
+[简体中文](zh-CN/audio-speech-api.md) · [API reference](api-reference.md) · [Service and management API](service-api.md)
 
 The server exposes `POST /v1/audio/speech` through the model pool and the App
 model-management daemon. `ironmlx-audio` supplies native synthesis and audio IO;
@@ -8,15 +8,15 @@ model-management daemon. `ironmlx-audio` supplies native synthesis and audio IO;
 
 ## Use from IronMLX.app
 
-Download, resource preparation, loading, voice management and recovery steps are
-documented in [TTS model download and usage](tts-model-download.md). The request
+Voice configuration, resource readiness and model settings are documented in
+[Speech synthesis in the user guide](user-guide.md#speech-synthesis). The request
 and response contract remains defined on this page.
 
 ## Register local resources
 
 An audio model needs a verified source snapshot, derived reference-encoder
 resources, the fixed resource lock, WeText FST files and the UniDic-lite dictionary.
-See [the audio library](../ironmlx-audio/README.md) for the resource profile and
+See [ironmlx-audio developer reference](../ironmlx-audio/README.md) for the resource profile and
 conversion tools. Resource paths are explicit local paths. Loading validates the
 resources; the server does not download or convert them.
 

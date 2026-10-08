@@ -1,4 +1,4 @@
-# DFlash2 Server 与 CLI 支持
+# DFlash2 配置与使用
 
 [English](../dflash2-server-api.md)
 
@@ -151,7 +151,7 @@ DFlash2 actor 接入以下文本协议的同步与 SSE 路径：
 | `POST /v1/messages` | 是 | 是 | Anthropic Messages lifecycle |
 
 HTTP transport、严格字段校验、错误 envelope 与断连语义见
-[`api-reference.md`](api-reference.md) 和 [`api-compatibility-matrix.md`](api-compatibility-matrix.md)。
+[文本与视觉 API](text-vision-api.md)。
 
 ## 隔离约束
 

@@ -1,4 +1,4 @@
-# Dynamic EnginePool
+# CLI multi-model serving (EnginePool)
 
 `ironmlx serve --model-manifest` starts a runtime model pool that routes
 OpenAI and Anthropic requests by the request `model` field.

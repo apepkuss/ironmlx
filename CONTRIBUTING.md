@@ -40,5 +40,10 @@ relevant Rust, Swift, App Bundle, SBOM, license-policy, dependency-audit,
 secret-scan, and model-boundary checks described in the README before opening a
 pull request. Never weaken a release or security gate to make a check pass.
 
+### API contract changes
+
+New fields must update strict parsing, contract tests, SDK checks and both translations together. Changes to error status, envelope, code or Retry-After require matching checks. Mark extensions explicitly rather than claiming upstream-standard behavior. Record model revision, template, quantization, sampling, response mode and results separately for real-model claims.
+See [SDK compatibility checks](docs/building-from-source.md#sdk-compatibility-checks) for verification. Maintain shared service contracts in [Service and management API](docs/service-api.md) and protocol fields and limits in the corresponding API references listed in the [Developer guide](docs/developer-guide.md#api-integration).
+
 For vulnerability reports, use [SECURITY.md](SECURITY.md) instead of a public
 issue.

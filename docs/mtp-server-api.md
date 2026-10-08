@@ -1,4 +1,4 @@
-# Qwen MTP Support Matrix
+# Qwen MTP configuration and usage
 
 [简体中文](zh-CN/mtp-server-api.md)
 

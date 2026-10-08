@@ -1,6 +1,6 @@
 # Text, image and audio embeddings
 
-[简体中文](zh-CN/text-embeddings.md)
+[简体中文](zh-CN/text-embeddings.md) · [API reference](api-reference.md) · [Service and management API](service-api.md)
 
 IronMLX supports the text, vision and audio encoders in `mlx-community/embeddinggemma-2-bf16`
 and `mlx-community/embeddinggemma-2-4bit` (MLX affine, 4 bits, group size 64).

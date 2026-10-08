@@ -158,6 +158,98 @@ MODEL="$HOME/.ironmlx/models/<org>/<model>"
   --max-cache-cap 32768
 ```
 
+### 后端单实例约束
+
+同一 macOS 用户只能运行一个 `ironmlx serve` 后端，不同 App、CLI 参数或监听端口
+也不能绕过该约束。后端会在初始化 MLX、加载 metallib 或模型之前，对
+`~/.ironmlx/run/backend.lock` 获取非阻塞独占文件锁，并持有锁文件描述符直到进程
+退出。正常退出、崩溃或 `SIGKILL` 都由系统自动释放锁；锁文件本身可以保留，不应作为
+进程是否存活的判断依据。
+
+第二个后端会立即退出，并在标准错误输出稳定错误码
+`ironmlx_instance_already_running`。IronMLX App 会停止自动恢复循环，并提示用户先
+退出已有实例。
+
+## 验证修改
+
+先运行与改动相关的检查；提交 Pull Request 前运行完整 workspace 门禁：
+
+```bash
+cargo fmt --all -- --check
+cargo +nightly fmt --all -- --check
+cargo +nightly clippy --locked --all-features --workspace -- -D warnings
+cargo build --locked --release
+cargo test --locked --all-features --workspace -- --test-threads=1
+swift test --package-path ironmlx-app --configuration release --no-parallel
+```
+
+构建 App Bundle 后还应运行：
+
+```bash
+scripts/verify-app-bundle.sh dist/IronMLX.app
+scripts/verify-model-distribution-boundary.sh dist/IronMLX.app
+```
+
+如果改动影响真实模型、协议、流式输出或 App 运行时，fixture、ignored test 或仅源码检查不能替代真实验收。
+
+发布验收必须分别记录源码测试、Bundle 静态检查、签名与公证产物、Gatekeeper 检查和公开分发状态。
+
+### SDK 兼容验证
+
+| SDK | 固定版本 | 覆盖范围 |
+| --- | --- | --- |
+| OpenAI Python | `2.48.0` | Chat / Responses, SSE, tools, Structured Outputs, reasoning, 400/413/503 |
+| Anthropic Python | `0.121.0` | Messages, SSE, tools, Structured Outputs + thinking, 400/413/503 |
+
+固定 SDK 通过真实 loopback HTTP/SSE 访问 fixture server，验证客户端解析；Rust 测试独立验证生产请求和响应契约。两者不加载模型，不证明回答质量、工具选择准确率或性能。
+在仓库根目录执行：
+
+```bash
+python3 -m venv /tmp/ironmlx-api-contract-sdk
+/tmp/ironmlx-api-contract-sdk/bin/python -m pip install -r scripts/api-contract-sdk/requirements.txt
+/tmp/ironmlx-api-contract-sdk/bin/python scripts/api-contract-sdk/contract.py --fixture
+cargo test --locked --all-features -p ironmlx --lib server::
+```
+
+## 运行时开发说明
+
+### App 日志设置应用语义
+
+App 先读取后端级别，携带进程 ID 和 revision 更新过滤器，再仅保存 `log_level` 并调整自身过滤器。
+后端停止时不发送请求，保存值在下次启动时应用；启动、恢复、停止或其他设置应用过程中拒绝变更。
+响应丢失或保存失败时查询实际状态，在前提仍匹配时恢复旧级别；进程或 revision 改变、回退未确认时不会显示为成功。
+旧配置 TRACE/WARN 兼容为 ALL/WARNING；第三方依赖日志最多为 WARNING，选择 ERROR 时为 ERROR。
+App 启动 helper 时传入 `IRONMLX_LOG_LEVEL`，独立 CLI 仍可使用 `RUST_LOG`。
+
+### 原生工具模板
+
+MiniCPM-V 4.6 与 MiniCPM5 使用不同 XML 工具协议；MiniCPM5 对包含 <、& 或换行的字符串参数使用 CDATA。Gemma 内部将动态 object 投影为确定性键值条目，响应时恢复原对象；公开 Schema 和参数形状保持不变。
+
+### 运行拓扑
+
+普通因果模型的全部 HTTP 请求统一使用 SchedulerActor，包括长上下文 chunked-prefill、
+多模态、sampling 与约束解码请求；请求形态不再选择直接 GenerationStream 服务路径。
+公开请求优先级见
+[文本与视觉 API](text-vision-api.md#请求优先级)。
+
+### 流式资源释放
+
+Chat Completions、Responses 和 Anthropic Messages 的流式请求在 SSE 响应开始后
+支持客户端断连取消。HTTP response body 被丢弃时，transport 会立即发布协议无关的
+断连信号；各协议的流式编码器停止消费生成事件，也不会在已观测到断连后继续构造
+协议终止事件。
+
+| 生成路径 | 取消生效点 | 释放内容 |
+|---|---|---|
+| Scheduler（包括普通因果、MTP 与辅助 drafter 服务） | 当前模型 forward 结束后的下一次安全调度边界 | 活跃请求、调度槽、KV cache 与内存预算 |
+| DFlash2 actor | 当前 target/draft forward 结束后的下一次安全事件边界 | 请求级 target/draft cache、活动槽与内存预算 |
+| DiffusionGemma | 当前 block-diffusion 步骤结束后的下一次事件边界 | generation lane 与请求状态 |
+
+取消不会强行中断正在执行的 Metal forward；这是为了避免在设备工作未完成时破坏模型
+和 KV 状态。因此，从 TCP 断开到资源归还可能包含一个当前 forward/扩散步骤的尾延迟。
+本契约只承诺已经开始返回 SSE 的流式请求；v0.1 不承诺非流式 HTTP 请求在客户端断开
+后取消底层生成。
+
 ## MLX 故障排查
 
 | 症状 | 原因 | 处理 |

@@ -1,4 +1,6 @@
-# ironmlx-audio
+# ironmlx-audio developer reference
+
+[简体中文](README.zh-CN.md)
 
 Native audio model infrastructure for IronMLX. The crate owns PCM values,
 audio decoding/encoding, reference waveform preparation, text preparation,
@@ -257,3 +259,94 @@ cancellation during model computation, terminal reuse and output limits. Set
 `IRONMLX_SYNTHESIS_OUTPUT` to an untracked directory to save test WAV files.
 These tests do not establish HTTP behavior, subjective voice quality or an
 end-to-end latency SLA.
+
+## App resource integration
+
+The App orchestrates resource preparation and download validation; these are not
+production dependencies of the audio crate. User-facing voice configuration and
+model settings are documented in [the user guide](../docs/user-guide.md#speech-synthesis).
+
+### Repository contract
+
+The supported reference is
+[`mlx-community/IndexTTS-2.5-fp16`](https://huggingface.co/mlx-community/IndexTTS-2.5-fp16/tree/65644cd70da15309ffeb74aa03f3686bb04e3eb1):
+
+| File | Purpose |
+| --- | --- |
+| `config.json`, `config.yaml` | Model configuration |
+| `model_manifest.json`, `conversion_report.json` | Component manifest and conversion record |
+| `gpt.safetensors` | UnifiedVoice GPT |
+| `codec.safetensors` | Speech codec |
+| `s2mel.safetensors` | S2Mel |
+| `bigvgan.safetensors` | Vocoder |
+| `model.safetensors` | w2v-BERT speech frontend, not the GPT weights |
+| `multilingual_zh_ja_yue_char_del.tiktoken` | tiktoken vocabulary; no `tokenizer.json` |
+| `feat1.pt`, `feat2.pt`, `wav2vec2bert_stats.pt` | Timbre, emotion and feature statistics; extracted through fixed storage mappings without executing pickle |
+| `README.md`, `LICENSE*` | Repository documentation and licenses |
+
+Recognition requires `model_family=IndexTTS`, `model_version=2.5` and
+`format_version=1` in the manifest, cross-checked against the configuration version
+and vocabulary path. The four component filenames come from the manifest, and
+their sizes must match the remote inventory for the pinned revision. Missing
+components, vocabulary or auxiliary files are rejected before weight download so
+an incomplete snapshot is never published.
+
+The App reuses its pinned commit, SHA-256 / Git blob verification, resumable
+downloads, disk reservation, download queue, journal and atomic publication flow.
+Model files are stored under:
+
+```text
+~/.ironmlx/models/huggingface/<owner>--<repo>/snapshots/<commit>/
+```
+
+### Automatic resource preparation
+
+`.ironmlx-snapshot.json` records `model_type=indextts2_5`,
+`artifact_role=tts` and the complete download inventory. The inference resource
+profile uses pinned versions and SHA-256 checks for:
+
+- The five safetensors components, configuration and vocabulary from the main model.
+- CAMPPlus auxiliary weights and the w2v-BERT configuration, reusing the w2v-BERT weights already present in the main model.
+- Natively rebuilt timbre, emotion, statistics and CAMPPlus safetensors.
+- WeText 0.1.2 FST data, the UniDic-lite 1.0.8 dictionary, provenance records and licenses.
+
+Auxiliary download caches and prepared resources are stored under
+`~/.ironmlx/audio/indextts25/`. The App verifies pinned inputs and outputs, prepares
+them in a temporary directory, then publishes the complete directory. It does not
+modify the model snapshot or execute Python or pickle from downloaded packages.
+Resumable download caches remain available for retries, while cancellation or
+failure never publishes a ready state.
+
+Model-file integrity and inference-resource readiness are checked independently.
+Missing or changed resources are shown as not ready; the model becomes loadable
+after preparation succeeds. The native loader verifies the resources again when
+loading them.
+
+### App integration verification
+
+Ordinary regression checks do not require model files:
+
+```sh
+swift test -c release --package-path ironmlx-app
+node scripts/tests/test-dashboard-tts.mjs
+```
+
+Real download acceptance uses an isolated data directory and the Release download
+helper explicitly:
+
+```sh
+IRONMLX_TEST_DOWNLOAD_INDEXTTS=1 \
+IRONMLX_TEST_DOWNLOAD_ROOT=/absolute/path/to/isolated-data \
+IRONMLX_TEST_DOWNLOAD_BACKEND=/absolute/path/to/IronMLX.app/Contents/Helpers/ironmlx \
+swift test -c release --package-path ironmlx-app --filter indexTTSLiveDownloadUsingAppService
+```
+
+Then use the same isolated directory to verify saved App configuration, model
+loading, backend restart recovery and the WAV/PCM endpoints:
+
+```sh
+IRONMLX_TEST_DOWNLOAD_ROOT=/absolute/path/to/isolated-data \
+IRONMLX_AUDIO_APP_BUNDLE=/absolute/path/to/IronMLX.app \
+IRONMLX_AUDIO_APP_REFERENCE=/absolute/path/to/reference.wav \
+swift test -c release --package-path ironmlx-app --filter audioAppLoadsAndRestoresFromSavedConfigurationWithBundle
+```

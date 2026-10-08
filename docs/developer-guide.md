@@ -1,74 +1,91 @@
-# IronMLX Developer Guide
+# Developer guide
 
 [简体中文](zh-CN/developer-guide.md)
 
-This guide organizes source development and release work for IronMLX. User
-installation and API usage belong in the [User Guide](user-guide.md).
+Start here to develop IronMLX from source, integrate APIs, or configure CLI serving. For App installation and model management, see the [User guide](user-guide.md).
 
-## Build from source
+[Source development](#source-development) · [API integration](#api-integration) · [CLI and advanced configuration](#cli-and-advanced-configuration) · [Contribute and maintain](#contribute-and-maintain)
 
-Start with [Building from source](building-from-source.md). It documents the
-supported Apple Silicon platform, pinned MLX checkout, Rust and Xcode
-requirements, self-contained Release App build, runtime environment, and local
-serving smoke test.
+## Source development
 
-## Understand the project
+Start with [Build from source](building-from-source.md) for platform requirements,
+MLX dependencies, App and CLI builds, and the local runtime environment.
+Check [Supported models](supported-models.md) when adding or modifying a model.
 
-- `ironmlx-core` contains shared tensor and weight primitives.
-- `ironmlx-lm`, `ironmlx-image`, `ironmlx-audio`, and `ironmlx-decision`
-  contain task-specific model logic.
-- `ironmlx-runtime` owns execution, scheduling, lifecycle, and resources.
-- `ironmlx` provides the HTTP API and CLI layer.
-- `ironmlx-app` provides the macOS App and Dashboard.
+### Project structure and crate references
 
-When changing a model family or protocol, trace the complete path from the App
-or HTTP request through runtime scheduling to model execution and response
-streaming.
+| Crate | Responsibility / reference |
+| --- | --- |
+| [`ironmlx-core`](https://github.com/apepkuss/ironmlx/tree/dev/ironmlx-core) | Shared tensor and weight primitives |
+| [`ironmlx-lm`](https://github.com/apepkuss/ironmlx/tree/dev/ironmlx-lm) | Language and vision models, including [multimodal embedding encoders](text-embeddings.md) |
+| [`ironmlx-image`](https://github.com/apepkuss/ironmlx/tree/dev/ironmlx-image) | Image-generation models; see the [image API](image-generation-api.md) |
+| [`ironmlx-audio`](https://github.com/apepkuss/ironmlx/tree/dev/ironmlx-audio) | Audio models; see the [developer reference](../ironmlx-audio/README.md) |
+| [`ironmlx-decision`](https://github.com/apepkuss/ironmlx/tree/dev/ironmlx-decision) | Decision models; see the [System One API](laya-systemone-api.md) |
+| [`ironmlx-runtime`](https://github.com/apepkuss/ironmlx/tree/dev/ironmlx-runtime) | Execution, scheduling, lifecycle, and resources |
+| [`ironmlx`](https://github.com/apepkuss/ironmlx/tree/dev/ironmlx) | HTTP API and CLI |
+| [`ironmlx-app`](https://github.com/apepkuss/ironmlx/tree/dev/ironmlx-app) | macOS App and Dashboard |
+| [`iron-bench`](https://github.com/apepkuss/ironmlx/tree/dev/iron-bench) | Benchmark tooling |
 
-## Verify changes
+Crate-name links open source directories. When changing a model or protocol,
+trace the path from the App or HTTP request through runtime execution to the response.
 
-Run the checks relevant to the change, then use the full workspace gates before
-opening a pull request:
+## API integration
+
+Use the [API reference](api-reference.md) to look up all documented endpoints and choose a service and management, text and vision, embedding, speech synthesis, image generation or System One topic.
+
+### API quick start
+
+This example uses Responses with a text or vision model. For other capabilities, use the request examples in the corresponding topic linked from the API reference.
+
+Start the App and load a compatible model. The App endpoint defaults to
+`http://127.0.0.1:9068`; direct CLI serving defaults to port 8080. Use the actual
+configured endpoint. Only one backend may run per macOS user; exit the existing
+App backend before starting a separate CLI server.
+
+Check the service and discover model IDs:
 
 ```bash
-cargo fmt --all -- --check
-cargo +nightly fmt --all -- --check
-cargo +nightly clippy --locked --all-features --workspace -- -D warnings
-cargo build --locked --release
-cargo test --locked --all-features --workspace -- --test-threads=1
-swift test --package-path ironmlx-app --configuration release --no-parallel
+curl http://127.0.0.1:9068/health
+curl http://127.0.0.1:9068/healthz
+curl http://127.0.0.1:9068/v1/models
 ```
 
-For a built App Bundle, also run:
+`/health` checks HTTP responsiveness; `/healthz` reports runtime state. The App
+model list also contains registered models that are not loaded. Use the ID of
+an available model and replace `your-model-id` below:
 
 ```bash
-scripts/verify-app-bundle.sh dist/IronMLX.app
-scripts/verify-model-distribution-boundary.sh dist/IronMLX.app
+curl http://127.0.0.1:9068/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "your-model-id", "input": "Hello", "store": false, "max_output_tokens": 128, "stream": false}'
 ```
 
-Fixture, ignored, or source-only checks do not replace real model, protocol,
-streaming, and App runtime validation when those paths are affected.
+Responses is stateless: send complete history with each request. IronMLX does
+not store conversations or execute tools; the client executes tool calls.
 
-## Extend IronMLX
+See [Text and vision API](text-vision-api.md) for protocol fields and limits,
+examples, SSE events, tools, structured outputs and errors. Addresses, LAN authentication,
+health checks, model discovery and management endpoints are defined in
+[Service and management API](service-api.md). Network configuration and resource
+limits are documented in [Security boundary](security-boundary.md).
 
-- Model work: review [Supported models](supported-models.md), the relevant
-  model loader, native template, tokenizer, weight layout, and quantization
-  metadata.
-- API work: review [API reference](api-reference.md) and the [API compatibility
-  matrix](api-compatibility-matrix.md), including typed streaming events and
-  client-side tool execution boundaries.
-- Runtime work: review [Engine pool](engine-pool.md), [Scheduler profile](scheduler-profile-v5.md),
-  and the applicable cache or acceleration guide.
+## CLI and advanced configuration
 
-## Contribute and release
+| Task | Guide |
+| --- | --- |
+| Configure DFlash2 | [CLI generation, HTTP serving, and App settings](dflash2-server-api.md) |
+| Configure Qwen MTP | [Matching weights, startup parameters, and request limits](mtp-server-api.md) |
+| Serve multiple models | [CLI manifest, routing, loading, and unloading](engine-pool.md) |
+| Calibrate scheduling | [Optional offline performance calibration](scheduler-profile-v5.md) |
 
-- [Contributing](../CONTRIBUTING.md)
-- [Support](../SUPPORT.md)
-- [Security reporting](../SECURITY.md)
-- [Versioning and releases](versioning-and-releases.md)
-- [Stable release pipeline](stable-release-pipeline.md)
-- [0.2.0 release notes](release-notes/0.2.0.md)
-- [0.1.0 release notes](release-notes/0.1.0.md)
+## Contribute and maintain
 
-Release validation must distinguish source tests, static Bundle checks, signed
-and notarized artifacts, Gatekeeper checks, and public distribution.
+| Task | Entry point |
+| --- | --- |
+| Verify changes | [Rust, Swift, and App Bundle checks](building-from-source.md#verify-changes) |
+| Submit a contribution | [Contribution terms and requirements](../CONTRIBUTING.md) |
+| Investigate a problem | [Troubleshooting](troubleshooting.md) and [diagnostic export](diagnostic-bundle.md) |
+| Request support | [Reporting guidance](../SUPPORT.md) |
+| Report a vulnerability | [Private security reporting](../SECURITY.md) |
+| Understand releases | [Versions and channels](versioning-and-releases.md) |
+| Review release changes | [0.2.0 notes](release-notes/0.2.0.md) and [0.1.0 notes](release-notes/0.1.0.md) |

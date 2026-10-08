@@ -22,5 +22,3 @@ The updater compares globally increasing build numbers. RC suffixes such as `rc.
 Update checks contact the project's GitHub-hosted feed. Update downloads use the release asset URL in that feed.
 The updater verifies update signatures before installation. These network requests do not upload local models or inference conversations.
 See [Privacy](privacy.md) for network activity and [Data locations](storage-and-uninstall.md) before manually removing or replacing data.
-
-Signing keys, feed publication and failure recovery are documented in the [release pipeline](stable-release-pipeline.md).

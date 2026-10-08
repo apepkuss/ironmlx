@@ -1,6 +1,6 @@
 # 语音合成 API
 
-[English](../audio-speech-api.md) · [TTS 模型下载与使用](tts-model-download.md)
+[English](../audio-speech-api.md) · [API 参考](api-reference.md) · [服务与管理 API](service-api.md)
 
 服务器通过模型池和 App 模型管理 daemon 提供 `POST /v1/audio/speech`。
 `ironmlx-audio` 负责原生语音合成与音频 IO；`ironmlx-runtime` 负责加载、调度、
@@ -8,14 +8,14 @@
 
 ## 通过 IronMLX.app 使用
 
-下载、资源准备、加载、声音管理和故障恢复步骤见
-[TTS 模型下载与使用](tts-model-download.md)。请求与响应契约以本文为准。
+声音配置、资源就绪和模型设置见[用户指南的语音合成章节](user-guide.md#语音合成)。
+请求与响应契约以本文为准。
 
 ## 注册本地资源
 
 音频模型需要经过验证的源 snapshot、派生的参考编码器资源、固定的资源锁、
 WeText FST 文件和 UniDic-lite 字典。资源 profile 与转换工具见
-[音频库说明](../../ironmlx-audio/README.md)。资源路径均为明确的本地路径；加载时
+[ironmlx-audio 开发参考](../../ironmlx-audio/README.zh-CN.md)。资源路径均为明确的本地路径；加载时
 会进行校验，服务器不会自行下载或转换这些资源。
 
 模型池使用 `ironmlx serve --model-manifest models.json`：
@@ -119,7 +119,7 @@ PCM 流：
 输入支持 WAV（PCM 16/24/32 或 IEEE float32）、FLAC 和 MP3。服务先验证完整输入
 文件，再截取开头 15 秒作为参考。
 
-输入是一个完整 JSON 请求。自动语言选择和固定合成 profile 见音频库说明。流式
+输入是一个完整 JSON 请求。自动语言选择和固定合成 profile 见 ironmlx-audio 开发参考。流式
 粒度为完成的文本分段：每个分段必须完成语音生成、声学解码与声码器处理后，才能
 输出对应 PCM。
 

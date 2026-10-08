@@ -1,4 +1,4 @@
-# Qwen MTP 支持
+# Qwen MTP 配置与使用
 
 [English](../mtp-server-api.md)
 

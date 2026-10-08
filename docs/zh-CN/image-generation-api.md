@@ -1,6 +1,6 @@
 # 图片生成 API
 
-[English](../image-generation-api.md) · [支持的模型](supported-models.md)
+[English](../image-generation-api.md) · [API 参考](api-reference.md) · [服务与管理 API](service-api.md) · [支持的模型](supported-models.md)
 
 IronMLX 通过以下 OpenAI-compatible 接口，为
 `mlx-community/Qwen-Image-2.1-MLX-4bit` 提供文生图和单图条件编辑推理：

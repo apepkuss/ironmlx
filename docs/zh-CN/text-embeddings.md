@@ -1,6 +1,6 @@
 # 文本、图片与音频向量 API
 
-[English](../text-embeddings.md)
+[English](../text-embeddings.md) · [API 参考](api-reference.md) · [服务与管理 API](service-api.md)
 
 支持 `mlx-community/embeddinggemma-2-bf16` 与
 `mlx-community/embeddinggemma-2-4bit`（MLX affine、4 bit、group size 64）的文本、视觉和音频编码器。

@@ -166,6 +166,86 @@ To start the local server:
   --max-cache-cap 32768
 ```
 
+### Single backend instance
+
+One `ironmlx serve` backend is allowed per macOS user, regardless of arguments or port. Before MLX, metallib or model initialization, the process takes an exclusive nonblocking lock on `~/.ironmlx/run/backend.lock` until exit. Normal exit, crashes and SIGKILL release the lock; the file itself can remain and is not a liveness indicator.
+A second instance exits with `ironmlx_instance_already_running`. The App stops its automatic recovery loop and asks the user to exit the existing instance.
+
+## Verify changes
+
+Run the checks relevant to the change, then use the full workspace gates before
+opening a pull request:
+
+```bash
+cargo fmt --all -- --check
+cargo +nightly fmt --all -- --check
+cargo +nightly clippy --locked --all-features --workspace -- -D warnings
+cargo build --locked --release
+cargo test --locked --all-features --workspace -- --test-threads=1
+swift test --package-path ironmlx-app --configuration release --no-parallel
+```
+
+For a built App Bundle, also run:
+
+```bash
+scripts/verify-app-bundle.sh dist/IronMLX.app
+scripts/verify-model-distribution-boundary.sh dist/IronMLX.app
+```
+
+Fixture, ignored, or source-only checks do not replace real model, protocol,
+streaming, and App runtime validation when those paths are affected.
+
+Release validation must distinguish source tests, static Bundle checks, signed
+and notarized artifacts, Gatekeeper checks, and public distribution.
+
+### SDK compatibility checks
+
+| SDK | Pinned version | Coverage |
+| --- | --- | --- |
+| OpenAI Python | `2.48.0` | Chat / Responses, SSE, tools, Structured Outputs, reasoning, 400/413/503 |
+| Anthropic Python | `0.121.0` | Messages, SSE, tools, Structured Outputs + thinking, 400/413/503 |
+
+Pinned SDKs access a fixture server over real loopback HTTP/SSE to check client parsing; Rust tests separately cover production request/response contracts. Neither loads a model or establishes response quality, tool selection accuracy or performance.
+Run from the repository root:
+
+```bash
+python3 -m venv /tmp/ironmlx-api-contract-sdk
+/tmp/ironmlx-api-contract-sdk/bin/python -m pip install -r scripts/api-contract-sdk/requirements.txt
+/tmp/ironmlx-api-contract-sdk/bin/python scripts/api-contract-sdk/contract.py --fixture
+cargo test --locked --all-features -p ironmlx --lib server::
+```
+
+## Runtime development notes
+
+### App log-setting application
+
+The App reads the backend snapshot, updates the filter with process/revision preconditions, saves only `log_level`, then updates its own filter. While stopped, it saves the setting for the next launch without an HTTP call; startup, recovery, shutdown or another settings transaction blocks changes.
+After a lost response or save failure it queries actual state and restores the previous level only while preconditions still match. A changed process/revision or unconfirmed rollback is not displayed as success.
+Legacy TRACE/WARN map to ALL/WARNING. Third-party dependency logs are capped at WARNING, or ERROR when selected. Helper launches receive `IRONMLX_LOG_LEVEL`; independent CLI use can retain `RUST_LOG`.
+
+### Native tool templates
+
+MiniCPM-V 4.6 and MiniCPM5 use distinct XML dialects. MiniCPM5 encodes string parameters containing <, & or newlines using CDATA. Gemma internally projects dynamic objects into deterministic key/value entries and restores original objects on output; public Schema and argument shapes stay unchanged.
+
+### Runtime topology
+
+Ordinary causal HTTP requests all use SchedulerActor, including long chunked-prefill,
+multimodal, sampled and constrained requests; request shape no longer selects a
+direct GenerationStream serving path. Public request priorities are defined in the
+[text and vision API](text-vision-api.md#request-priority).
+
+### Streaming resource release
+
+Once SSE starts, dropping the HTTP response publishes a cancellation signal. Encoders stop consuming generation events and do not fabricate a terminal event after observing disconnect.
+
+| Path | Cancellation boundary | Released state |
+| --- | --- | --- |
+| Scheduler, including ordinary causal, MTP and drafter serving | Next safe scheduling boundary after the current forward | Request, slot, KV cache and budget |
+| DFlash2 | Next safe event boundary after target/draft forward | Per-request caches, slot and budget |
+| DiffusionGemma | Next event boundary after the current diffusion step | Lane and request state |
+
+Cancellation does not interrupt an in-flight Metal operation. Resource release can therefore include the remainder of that operation. Version 0.1 does not promise cancellation of underlying non-streaming generation when its client disconnects.
+
 ## MLX troubleshooting
 
 | Symptom | Cause | Resolution |

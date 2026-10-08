@@ -1,12 +1,12 @@
-# Scheduler Profile v5
+# 调度性能校准
 
-Scheduler profile v5 是显式离线校准机制。它不在请求热路径中自动调参，而是针对一个完整运行时上下文比较候选 scheduler 配置，生成只能由同一上下文加载的 profile。
+Scheduler Profile 用于显式离线校准。它不在请求热路径中自动调参，而是针对一个完整运行时上下文比较候选 scheduler 配置，生成只能由同一上下文加载的 profile。
 
 [English](../scheduler-profile-v5.md)
 
 ## 使用入口
 
-面向进行性能校准的 CLI 用户及维护者。使用 `ironmlx scheduler-autotune calibrate --help` 查看当前参数，按实际模型和运行配置执行离线校准；App 的 profile 生成入口使用同一套运行参数。校准需要真实模型及可用 GPU，不是启动服务的必需步骤。
+面向进行性能校准的 CLI 用户及维护者。使用 `ironmlx scheduler-autotune calibrate --help` 查看当前参数，按实际模型和运行配置执行离线校准；App 中的 **模型 → 调度配置** 使用同一套运行参数生成 profile。校准需要真实模型及可用 GPU，不是启动服务的必需步骤。
 
 ## 运行边界
 

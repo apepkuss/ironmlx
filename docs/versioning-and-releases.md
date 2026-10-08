@@ -39,7 +39,7 @@ same product version. Release candidates use `vX.Y.Z-rc.N` tags.
 
 ## Current hard gate
 
-`scripts/release-legal-gate.sh` checks the authorized distribution flag and required licenses, Notices, inventory and reproducible SBOM. Read `scripts/release-config.sh` for the current flag. Passing this gate does not publish anything; signing, notarization, tag identity and explicit publication remain separate checks. See [Release pipeline](stable-release-pipeline.md) for material updates.
+`scripts/release-legal-gate.sh` checks the authorized distribution flag and required licenses, Notices, inventory and reproducible SBOM. Read `scripts/release-config.sh` for the current flag. Passing this gate does not publish anything; signing, notarization, tag identity and explicit publication remain separate checks.
 
 ## Stable release identity
 
@@ -81,7 +81,7 @@ and publication never enable this mode and continue to reject RC tags.
 | Stable | `vX.Y.Z` | Stable Release |
 
 Tag pushes and manual `publish=false` build and validate only. Explicit `publish=true` enters signing, notarization and publication.
-Both require the repository update public key. Credentials, ordering, channels and recovery are documented in the [release pipeline](stable-release-pipeline.md).
+Both require the repository update public key.
 
 ## Archive content checks
 
@@ -108,5 +108,3 @@ reference Bundle is a current, clean, signed release. The stable packager retain
 identity, clean-source, legal-authorization, static Bundle, signing and Gatekeeper
 gates before invoking this archive engine. Content-only artifacts must not be
 published as approved stable releases.
-
-Credentials, signing, notarization, feeds and recovery are documented in the [release pipeline](stable-release-pipeline.md).

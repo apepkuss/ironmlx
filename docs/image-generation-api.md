@@ -1,6 +1,6 @@
 # Image generation API
 
-[简体中文](zh-CN/image-generation-api.md) · [Supported models](supported-models.md)
+[简体中文](zh-CN/image-generation-api.md) · [API reference](api-reference.md) · [Service and management API](service-api.md) · [Supported models](supported-models.md)
 
 IronMLX exposes OpenAI-compatible text-to-image generation and single-image
 conditional editing for `mlx-community/Qwen-Image-2.1-MLX-4bit` through:

@@ -1,4 +1,4 @@
-# DFlash2 server and CLI
+# DFlash2 configuration and usage
 
 [简体中文](zh-CN/dflash2-server-api.md)
 
@@ -111,7 +111,7 @@ A fixed seed promises reproducibility only within the same IronMLX/MLX versions,
 | `/v1/responses` | Both | Responses typed lifecycle |
 | `/v1/messages` | Both | Anthropic Messages lifecycle |
 
-See the [API reference](api-reference.md) and [compatibility matrix](api-compatibility-matrix.md) for strict fields, errors and disconnect behavior.
+See the [Text and vision API](text-vision-api.md) for strict fields, errors and disconnect behavior.
 
 ## Incompatible combinations
 

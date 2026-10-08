@@ -1,18 +1,31 @@
-# IronMLX
+<p align="center">
+  <img src="ironmlx-app/Packaging/AppIcon-1024.png" width="120" alt="IronMLX App icon">
+</p>
 
-[简体中文](README.zh-CN.md)
+<h1 align="center">IronMLX</h1>
 
-IronMLX is a local large-language-model inference App and service runtime for
-Apple Silicon. It packages a Rust inference engine, MLX/Metal runtime, model
-management Dashboard, and OpenAI/Anthropic-compatible HTTP APIs into a
-self-contained macOS App.
+<p align="center">
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Built_with-Rust-B7410E?logo=rust" alt="Built with Rust"></a>
+  <img src="https://img.shields.io/badge/Platform-Apple_Silicon-000000?logo=apple" alt="Apple Silicon">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue" alt="Apache License 2.0"></a>
+</p>
 
-![IronMLX Dashboard overview](docs/images/dashboard-overview.png)
+<p align="center">
+  <strong>Private AI on Apple Silicon.</strong> Power your Agents with local AI models.
+</p>
 
-The screenshot shows the local Dashboard with a running server, a loaded model,
-and the DFlash2 runtime status. Runtime metrics vary by model and hardware.
+<p align="center">
+  <a href="#install-and-run">Installation</a> ·
+  <a href="https://apepkuss.github.io/ironmlx/docs/supported-models.html">Supported Models</a> ·
+  <a href="https://apepkuss.github.io/ironmlx/docs/api-reference.html">API Reference</a> ·
+  <a href="https://apepkuss.github.io/ironmlx/docs/">Documentation</a> ·
+  <a href="https://apepkuss.github.io/ironmlx/">Website</a>
+</p>
 
-Current stable release: [0.1.0](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0)
+<p align="center">
+  <span lang="en">🇺🇸 English</span> |
+  <a href="README.zh-CN.md" lang="zh-Hans">🇨🇳 中文</a>
+</p>
 
 ## Requirements
 
@@ -21,61 +34,34 @@ Current stable release: [0.1.0](https://github.com/apepkuss/ironmlx/releases/tag
 
 ## Capabilities
 
-- Discover models from Hugging Face and ModelScope with immutable-snapshot
-  downloads, resumable transfers, and integrity verification;
-- Support multiple model architectures, with coverage continuing to expand; see
-  the [Supported model matrix](docs/supported-models.md);
-- Provide standardized APIs compatible with mainstream clients, including
-  OpenAI-compatible `/v1/chat/completions` and `/v1/responses`, plus Anthropic
-  `/v1/messages`, with client-side function-call protocol support;
-- Provide text, image, audio and combined embeddings with EmbeddingGemma 2 BF16 and affine 4bit in 0.2.0 source builds; see the [embedding API](docs/text-embeddings.md);
-- Support synchronous responses, SSE streaming, Structured Outputs, and
-  reasoning;
-- Provide model discovery, health checks, and runtime status APIs, including
-  `/healthz` and `/v1/models`;
-- Support Agent Harnesses such as Hermes Agent, oh-my-pi, and DeepSeek Harness, with integration
-  coverage continuing to expand; see the
-  [Hermes Agent integration guide](docs/hermes-agent.md) and
-  [oh-my-pi integration guide](docs/oh-my-pi.md), and
-  [DeepSeek Harness integration guide](docs/dsh.md);
-- High-throughput inference with continuous batching, paged KV/prefix caching,
-  and Prompt Lookup;
-- MTP and DFlash2 speculative decoding paths for compatible models;
-- Multi-model loading, unloading, pinning, TTL, and memory protection;
-- Support LLM/VLM and multimodal inference, depending on the model;
-- Local redacted diagnostic export with no prompt, credential, or network upload;
-- Document local-data, privacy, and model-rights boundaries;
-- Loopback by default, with optional LAN mode using HTTPS and API keys.
+- **GUI Dashboard** — Manage models, monitor service status, and adjust settings through a visual interface.
+
+- **Agent integrations** — Connect [Hermes Agent](docs/hermes-agent.md), [oh-my-pi](docs/oh-my-pi.md), and [DSH CLI / Desktop](docs/dsh.md).
+
+- **Model capabilities** — [Text and vision](docs/text-vision-api.md), [text, image and audio embeddings](docs/text-embeddings.md), [speech synthesis](docs/audio-speech-api.md), [image generation](docs/image-generation-api.md), and [decision inference](docs/laya-systemone-api.md).
+
+- **Model management** — Download models from Hugging Face or ModelScope, [import local models](docs/user-guide.md#import-a-model-already-on-this-mac), and manage multiple models.
+
+- **API compatibility** — [OpenAI- and Anthropic-compatible APIs](docs/api-reference.md) with streaming, tool-call protocols, and Structured Outputs.
+
+- **Inference optimization** — Continuous batching and KV caching, with [MTP, DFlash2, or Assistant](docs/supported-models.md) acceleration for compatible models.
+
+- **Privacy and diagnostics** — Local access by default, optional [LAN authentication](docs/security-boundary.md), and [local redacted diagnostic exports](docs/diagnostic-bundle.md).
 
 ## Install and run
 
-Download the current Apple Silicon release from the
-[GitHub Release](https://github.com/apepkuss/ironmlx/releases/tag/v0.1.0),
-open the DMG, drag `IronMLX.app` onto the `Applications` folder shortcut, eject
-the disk image, and launch IronMLX from Finder's Applications folder. If you
-use the ZIP, extract it first and open the extracted App. Then use the
-Dashboard to select and load a compatible model.
+1. **Download** — Get the Apple Silicon DMG or ZIP from [GitHub Releases](https://github.com/apepkuss/ironmlx/releases).
+2. **Install and launch** — For a DMG, drag `IronMLX.app` to `Applications`, wait for the copy to finish, eject the disk image, and launch the App from Finder. For a ZIP, extract it and open the App.
+3. **Load a model** — In Dashboard, download or import a [compatible model](docs/supported-models.md), then load it.
+4. **Connect an Agent or API client (optional)** — Follow [Agent configuration](docs/user-guide.md#agent-configuration) or the [API quick start](docs/developer-guide.md#api-quick-start). The App endpoint defaults to `http://127.0.0.1:9068`.
 
-For API clients, the App listens on `http://127.0.0.1:9068` by default. See the
-[HTTP API quick start](docs/api.md) for a first request.
-
-Developers who need to build and run IronMLX from source should follow the
-[Developer Guide](docs/developer-guide.md).
-
-## Documentation
-
-- [User Guide](docs/user-guide.md) — installation, model use, API clients,
-  agent integrations, privacy, and troubleshooting.
-- [Developer Guide](docs/developer-guide.md) — source builds, tests,
-  contributions, architecture, and release validation.
-- [Supported model matrix](docs/supported-models.md) — architectures and
-  concrete versions recorded for this release.
+> [!TIP]
+> For complete setup instructions, see the [User guide](docs/user-guide.md#install-and-start).
 
 ## License
 
-IronMLX original source code is licensed under the Apache License, Version 2.0;
-see [LICENSE](LICENSE) and [NOTICE](NOTICE). Third-party dependencies and
-bundled assets remain under their respective licenses, as listed in
-`THIRD_PARTY_NOTICES.md` and `THIRD_PARTY_LICENSES/`. Model weights are not
-licensed or redistributed by IronMLX; users are responsible for the terms of
-the upstream model repository.
+- **Source code** — IronMLX original source code is licensed under [Apache License 2.0](LICENSE); see [NOTICE](NOTICE) for attribution.
+
+- **Third-party components** — Dependencies and bundled assets retain their own licenses; see [Third-party notices](THIRD_PARTY_NOTICES.md) and [license texts](THIRD_PARTY_LICENSES/).
+
+- **Model weights** — Model weights are not licensed or redistributed by IronMLX; follow the license and usage terms of their upstream repositories.

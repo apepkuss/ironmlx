@@ -39,7 +39,7 @@ RC 使用 `vX.Y.Z-rc.N` tag。
 
 ## 当前发布硬门禁
 
-`scripts/release-legal-gate.sh` 检查已授权的分发开关和许可证、Notices、清单及可重现 SBOM。开关状态以 `scripts/release-config.sh` 为准；门禁通过不等于执行公开发布。签名、公证、tag 身份和显式发布步骤仍须通过各自检查。材料更新方法见[发布流水线](stable-release-pipeline.md)。
+`scripts/release-legal-gate.sh` 检查已授权的分发开关和许可证、Notices、清单及可重现 SBOM。开关状态以 `scripts/release-config.sh` 为准；门禁通过不等于执行公开发布。签名、公证、tag 身份和显式发布步骤仍须通过各自检查。
 
 ## 正式发布产物身份
 
@@ -77,7 +77,7 @@ Bundle 来源检查。正式打包和发布不启用此模式，继续拒绝 RC 
 | stable | `vX.Y.Z` | Stable Release |
 
 Tag push 和手动 `publish=false` 只构建和验证；显式 `publish=true` 才进入签名、公证和发布流程。
-两者都要求仓库级更新公钥。凭据、执行顺序、更新通道与失败恢复统一见[发布流水线](stable-release-pipeline.md)。
+两者都要求仓库级更新公钥。
 
 ## 归档内容检查
 
@@ -99,5 +99,3 @@ python3 scripts/release-archives.py verify dist/IronMLX.app .build/archive-check
 版本/来源元数据及内嵌法律材料。这不证明参考 Bundle 来自当前 clean 提交或已签名。
 正式打包入口仍先执行身份、clean、分发授权、静态 Bundle、签名与 Gatekeeper 门禁。
 仅内容验证产生的文件不能作为已批准的正式版发布。
-
-凭据、签名、公证、更新源与发布恢复流程统一见[发布流水线](stable-release-pipeline.md)。
