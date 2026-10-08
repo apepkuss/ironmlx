@@ -22,7 +22,8 @@ function page(lang = 'zh-Hans') {
           content = value;
           el.buttons = [...value.matchAll(/<button[^>]+data-download-action="([^"]+)"[^>]*>/g)]
             .map(match => ({ dataset: { downloadAction: match[1],
-              provider: 'huggingface', repoId: 'mlx-community/embeddinggemma-2-bf16' },
+              provider: match[0].match(/data-provider="([^"]+)"/)[1],
+              repoId: match[0].match(/data-repo-id="([^"]+)"/)[1] },
               addEventListener(_, callback) { this.click = callback; } }));
         }
       });
@@ -96,6 +97,17 @@ test('other metadata failures and disk rejection keep retry and use distinct rea
   assert.match(disk, /已拒绝/);
   assert.doesNotMatch(disk, /模型不兼容|data-download-action="catalog"/);
   assert.match(disk, /data-download-action="resume"/);
+});
+
+test('unsupported DFlash2 context layout offers explicit download-only continuation', () => {
+  const p = page();
+  const output = p.render([{ ...rejection, repo_id: 'incoai/Qwen3.6-35B-A3B-DFlash2',
+    error: 'Error: unsupported DFlash2 configuration: target_layer_ids count 8 differs from draft layer count 6' }]);
+  assert.match(output, /仍然下载/);
+  assert.match(output, /当前版本无法加载运行/);
+  assert.doesNotMatch(output, /data-download-action="resume"/);
+  p.element('download-task-list').buttons.find(button => button.dataset.downloadAction === 'continue').click();
+  assert.equal(p.requests[0][1].download_only, true);
 });
 
 test('active downloads hide stale failure details and untrusted errors cannot become markup', () => {

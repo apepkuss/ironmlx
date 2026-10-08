@@ -1575,7 +1575,14 @@ public actor ModelDownloadService {
                       let modelType = config["model_type"] as? String, !modelType.isEmpty else {
                     throw DownloadFailure(repoID: repoID, code: "repo_missing_metadata", message: "Missing model_type in config.json.")
                 }
-                compatibility = ModelMetadataPreflightResult(modelType: modelType, artifactRole: "download_only", quantization: nil)
+                // Auxiliary drafters share the target tokenizer. Keep their
+                // role when downloading for file use, without enabling them.
+                let isDFlash2Draft = (config["architectures"] as? [String])?.contains("DFlash2DraftModel") == true
+                compatibility = ModelMetadataPreflightResult(
+                    modelType: modelType,
+                    artifactRole: isDFlash2Draft ? ModelArtifactRole.dflash2Drafter : "download_only",
+                    quantization: nil
+                )
                 runtimeSupportError = error.localizedDescription
             }
             let tokenizerPath: String

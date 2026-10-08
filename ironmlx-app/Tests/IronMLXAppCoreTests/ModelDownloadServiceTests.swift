@@ -649,10 +649,13 @@ private struct DownloadOnlyRejectingPreflight: ModelMetadataPreflighting {
     }
 }
 
-private func configureDownloadOnlyFixture(_ client: FakeModelDownloadHTTPClient, repoID: String, tokenizer: Bool = true) {
+private func configureDownloadOnlyFixture(
+    _ client: FakeModelDownloadHTTPClient, repoID: String, tokenizer: Bool = true,
+    config: Data = Data(#"{"model_type":"embedding_gemma2"}"#.utf8)
+) {
     let weights = Data("weights".utf8)
     var files: [(path: String, data: Data, sha256: String?)] = [
-        ("config.json", Data(#"{"model_type":"embedding_gemma2"}"#.utf8), nil),
+        ("config.json", config, nil),
         ("model.safetensors", weights, sha256(weights)),
     ]
     if tokenizer { files.append(("tokenizer.json", Data("{}".utf8), nil)) }
@@ -693,7 +696,41 @@ func downloadOnlyCompletesVerifiedSnapshotWithoutMakingItLoadable(message: Strin
     #expect(await service.downloadHuggingFace(repoID: repoID, token: nil).downloadOnly == true)
 }
 
-@Test(arguments: ["Invalid config.json", "Missing tokenizer", "unsupported architecture"])
+@Test func downloadOnlyDFlash2DraftCompletesWithoutItsOwnTokenizer() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "incoai/Qwen3.6-35B-A3B-DFlash2"
+    let message = "Error: unsupported DFlash2 configuration: target_layer_ids count 8 differs from draft layer count 6"
+    let client = FakeModelDownloadHTTPClient()
+    let config = Data(#"{"architectures":["DFlash2DraftModel"],"model_type":"qwen3","hidden_size":2048,"num_hidden_layers":6,"num_target_layers":40,"dflash_config":{"block_size":8,"target_layer_ids":[1,6,11,16,22,27,32,37]}}"#.utf8)
+    configureDownloadOnlyFixture(client, repoID: repoID, tokenizer: false, config: config)
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: DownloadOnlyRejectingPreflight(message: message),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(!(await service.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    #expect(await service.downloadStatuses().first?.canContinueDownload == true)
+    #expect(client.streamRequests.isEmpty)
+    #expect(await service.resumeDownload(provider: .huggingFace, repoID: repoID, downloadOnly: true).success)
+    try await waitForDownloadCondition { await service.downloadStatuses().first?.status == "completed" }
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(manifest.compatibility.artifactRole == "dflash2_drafter")
+    #expect(manifest.compatibility.downloadOnly == true)
+    #expect(manifest.compatibility.runtimeSupportError == message)
+    #expect(!FileManager.default.fileExists(atPath: snapshot.appendingPathComponent("tokenizer.json").path))
+    #expect(try Data(contentsOf: snapshot.appendingPathComponent("model.safetensors")) == Data("weights".utf8))
+    let scanner = LocalModelScanner(rootURL: root)
+    #expect(scanner.readiness(for: repoID)?.reasonCode == "download_only_model")
+    #expect(scanner.resolveModelPath(for: repoID) == nil)
+    #expect(scanner.dflash2Candidates(for: repoID).isEmpty)
+    #expect(scanner.downloadedSnapshotDirectory(for: repoID) == snapshot)
+}
+
+@Test(arguments: ["Invalid config.json", "Missing tokenizer", "unsupported architecture",
+                  "Error: DFlash2 config missing integer num_target_layers",
+                  "Error: DFlash2 target_layer_ids must be unique and strictly increasing",
+                  "Error: DFlash2 target layer 40 is outside num_target_layers 40",
+                  "Error: unsupported DFlash2 configuration: target_layer_ids count 0 differs from draft layer count 6"])
 func downloadOnlyCannotOverrideMalformedOrUnclassifiedMetadata(message: String) async throws {
     let root = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }

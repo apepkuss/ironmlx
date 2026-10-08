@@ -87,7 +87,7 @@ public enum ModelMetadataPreflightError: LocalizedError {
     /// Restrict the override to explicit runtime incompatibility, never malformed metadata.
     static func allowsDownloadOnly(_ message: String) -> Bool {
         message.range(
-            of: #"(?:^|Error: |\n)(?:unsupported model_type: [A-Za-z0-9_.-]+|unsupported (?:quantization|quantization_config|optiq_metadata)\.(?:mode|bits|group_size|method)\b)"#,
+            of: #"(?:^|Error: |\n)(?:unsupported model_type: [A-Za-z0-9_.-]+|unsupported (?:quantization|quantization_config|optiq_metadata)\.(?:mode|bits|group_size|method)\b|unsupported DFlash2 configuration: target_layer_ids count [1-9][0-9]* differs from draft layer count [1-9][0-9]*(?:$|\n))"#,
             options: .regularExpression
         ) != nil
     }

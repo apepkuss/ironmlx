@@ -111,11 +111,8 @@ fn validate_dflash2_draft_metadata(config: &serde_json::Value) -> Result<()> {
         .get("target_layer_ids")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| anyhow!("DFlash2 config missing target_layer_ids"))?;
-    if target_layer_ids.len() != num_hidden_layers as usize {
-        return Err(anyhow!(
-            "DFlash2 target_layer_ids count {} does not match num_hidden_layers {num_hidden_layers}",
-            target_layer_ids.len()
-        ));
+    if target_layer_ids.is_empty() {
+        return Err(anyhow!("DFlash2 target_layer_ids must not be empty"));
     }
     let mut previous = None;
     for value in target_layer_ids {
@@ -133,6 +130,17 @@ fn validate_dflash2_draft_metadata(config: &serde_json::Value) -> Result<()> {
             ));
         }
         previous = Some(layer_id);
+    }
+
+    // The context projection can consume more target layers than there are
+    // draft decoder layers. This is valid metadata, but the current runtime
+    // only implements equal counts. Classify it after validating every ID so
+    // download-only overrides cannot hide malformed layer selections.
+    if target_layer_ids.len() != num_hidden_layers as usize {
+        return Err(anyhow!(
+            "unsupported DFlash2 configuration: target_layer_ids count {} differs from draft layer count {num_hidden_layers}",
+            target_layer_ids.len()
+        ));
     }
 
     Ok(())
@@ -1453,6 +1461,48 @@ mod tests {
         assert_eq!(result.artifact_role, "dflash2_drafter");
         assert_eq!(result.quantization, None);
         std::fs::remove_dir_all(dir).expect("cleanup preflight dir");
+    }
+
+    #[test]
+    fn metadata_preflight_classifies_independent_dflash2_context_layers() {
+        let mut config = json!({
+            "model_type": "qwen3",
+            "hidden_size": 2048,
+            "vocab_size": 248320,
+            "num_hidden_layers": 6,
+            "num_target_layers": 40,
+            "dflash_config": {
+                "block_size": 8,
+                "conv_group_size": 16,
+                "conv_kernel_size": 2,
+                "mask_token_id": 248077,
+                "selector_rank": 256,
+                "selector_top_k": 16,
+                "target_layer_ids": [1, 6, 11, 16, 22, 27, 32, 37]
+            }
+        });
+        let error = validate_dflash2_draft_metadata(&config).expect_err("unsupported runtime");
+        assert_eq!(error.to_string(), "unsupported DFlash2 configuration: target_layer_ids count 8 differs from draft layer count 6");
+
+        for ids in [
+            json!([]),
+            json!([1, 6, 11, 16, 22, 27, 32, 40]),
+            json!([1, 6, 11, 16, 22, 27, 32, 32]),
+            json!([1, 6, 11, 16, 22, 27, 37, 32]),
+            json!([1, 6, 11, 16, 22, 27, 32, "37"]),
+        ] {
+            config["dflash_config"]["target_layer_ids"] = ids;
+            let error = validate_dflash2_draft_metadata(&config).expect_err("malformed layers");
+            assert!(!error
+                .to_string()
+                .starts_with("unsupported DFlash2 configuration:"));
+        }
+        config["dflash_config"]["target_layer_ids"] = json!([1, 6, 11, 16, 22, 27, 32, 37]);
+        config.as_object_mut().unwrap().remove("num_target_layers");
+        let error = validate_dflash2_draft_metadata(&config).expect_err("missing target count");
+        assert!(!error
+            .to_string()
+            .starts_with("unsupported DFlash2 configuration:"));
     }
 
     #[test]
