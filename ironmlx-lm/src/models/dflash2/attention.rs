@@ -405,6 +405,151 @@ impl DFlash2Attention {
             .reshape_on((batch, query_len, self.num_heads * self.head_dim), target)?;
         self.o_proj.forward_on(&output, target)
     }
+
+    /// Rows at different draft-cache positions: the fused proposal projection
+    /// and `o_proj` run once for all rows; each row's context projection,
+    /// RoPE offsets, cache append and attention follow [`Self::forward_on`]
+    /// with batch 1.
+    pub(super) fn forward_ragged_on(
+        &self,
+        x: &Array,
+        contexts: &[Array],
+        masks: &[Array],
+        caches: &mut [&mut DFlash2KvCache],
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        let xshape = x.shape();
+        let xdims = xshape.as_slice();
+        let batch = usize::try_from(xdims[0])?;
+        if xdims.len() != 3
+            || contexts.len() != batch
+            || masks.len() != batch
+            || caches.len() != batch
+        {
+            return Err(anyhow!(
+                "DFlash2 ragged attention requires one context, mask and cache per row"
+            ));
+        }
+        let query_len = xdims[1];
+        let (q, proposal_k, proposal_v) = match &self.input_projections {
+            DFlash2InputProjections::Separate { q, k, v } => (
+                q.forward_on(x, target)?,
+                k.forward_on(x, target)?,
+                v.forward_on(x, target)?,
+            ),
+            DFlash2InputProjections::Fused {
+                projection,
+                q_width,
+                k_width,
+                ..
+            } => {
+                let output = projection.forward_on(x, target)?;
+                let mut parts = mlx::ops::shape::split_at_on(
+                    &output,
+                    &[*q_width, *q_width + *k_width],
+                    -1,
+                    target,
+                )?;
+                if parts.len() != 3 {
+                    return Err(anyhow!(
+                        "DFlash2 drafter fused Q/K/V returned {} parts",
+                        parts.len()
+                    ));
+                }
+                (parts.remove(0), parts.remove(0), parts.remove(0))
+            }
+        };
+        let row_of = |array: &Array, row: i32| -> Result<Array> {
+            let shape = array.shape();
+            let dims = shape.as_slice();
+            mlx::ops::indexing::slice_strided_on(
+                array,
+                &[row, 0, 0][..],
+                &[row + 1, dims[1], dims[2]][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )
+            .map_err(Into::into)
+        };
+        let mut outputs = Vec::with_capacity(batch);
+        for (row, ((context, mask), cache)) in contexts
+            .iter()
+            .zip(masks)
+            .zip(caches.iter_mut())
+            .enumerate()
+        {
+            let row_i32 = i32::try_from(row)?;
+            let context_len = context.shape().as_slice()[1];
+            let context_start = cache.processed();
+            let proposal_start = context_start
+                .checked_add(context_len)
+                .ok_or_else(|| anyhow!("DFlash2 RoPE position overflow"))?;
+            let q = row_of(&q, row_i32)?
+                .reshape_on((1, query_len, self.num_heads, self.head_dim), target)?
+                .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
+            let (context_k, context_v) = {
+                let _product_stable_qmm = crate::nn::product_stable_qmm::scope();
+                match &self.input_projections {
+                    DFlash2InputProjections::Separate { k, v, .. }
+                    | DFlash2InputProjections::Fused { k, v, .. } => (
+                        k.forward_on(context, target)?,
+                        v.forward_on(context, target)?,
+                    ),
+                }
+            };
+            let context_k = context_k
+                .reshape_on((1, context_len, self.num_kv_heads, self.head_dim), target)?
+                .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
+            let context_v = context_v
+                .reshape_on((1, context_len, self.num_kv_heads, self.head_dim), target)?
+                .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
+            let proposal_k = row_of(&proposal_k, row_i32)?
+                .reshape_on((1, query_len, self.num_kv_heads, self.head_dim), target)?
+                .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
+            let proposal_v = row_of(&proposal_v, row_i32)?
+                .reshape_on((1, query_len, self.num_kv_heads, self.head_dim), target)?
+                .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
+            let q = self.q_norm.forward_on(&q, target)?;
+            let context_k = self.k_norm.forward_on(&context_k, target)?;
+            let proposal_k = self.k_norm.forward_on(&proposal_k, target)?;
+            let rope = |array: &Array, offset: i32| {
+                mlx::fast::rope_on(
+                    array,
+                    self.head_dim,
+                    false,
+                    Some(self.rope_theta),
+                    1.0,
+                    offset,
+                    None,
+                    target,
+                )
+            };
+            let q = rope(&q, proposal_start)?;
+            let context_k = rope(&context_k, context_start)?;
+            let proposal_k = rope(&proposal_k, proposal_start)?;
+            let (cached_k, cached_v) = cache.append_on(&context_k, &context_v, target)?;
+            let keys = mlx::ops::shape::concatenate_on(&[&cached_k, &proposal_k], 2, target)?;
+            let values = mlx::ops::shape::concatenate_on(&[&cached_v, &proposal_v], 2, target)?;
+            let output = mlx::fast::scaled_dot_product_attention_on(
+                &q,
+                &keys,
+                &values,
+                self.scale,
+                "",
+                Some(mask),
+                None,
+                target,
+            )?;
+            outputs.push(
+                output
+                    .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?
+                    .reshape_on((1, query_len, self.num_heads * self.head_dim), target)?,
+            );
+        }
+        let output_refs = outputs.iter().collect::<Vec<_>>();
+        let output = mlx::ops::shape::concatenate_on(&output_refs, 0, target)?;
+        self.o_proj.forward_on(&output, target)
+    }
 }
 
 #[cfg(test)]

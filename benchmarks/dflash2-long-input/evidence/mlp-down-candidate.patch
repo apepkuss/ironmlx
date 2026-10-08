@@ -1,0 +1,21 @@
+diff --git a/mlx-sys/shim/src/prefill_qmm_mtile.cc b/mlx-sys/shim/src/prefill_qmm_mtile.cc
+index eb17489f2..4d6636016 100644
+--- a/mlx-sys/shim/src/prefill_qmm_mtile.cc
++++ b/mlx-sys/shim/src/prefill_qmm_mtile.cc
+@@ -90,11 +90,11 @@ std::optional<mlx::core::array> experimental_prefill_qmm_mtile(
+       mode != "affine" || !biases) return {};
+   const bool gate = (x.ndim() == 2 && x.shape() == mx::Shape{2048, 5120}) ||
+                     (x.ndim() == 3 && x.shape() == mx::Shape{1, 2048, 5120});
+-  const bool down = (x.ndim() == 2 && x.shape() == mx::Shape{2048, 17408}) ||
+-                    (x.ndim() == 3 && x.shape() == mx::Shape{1, 2048, 17408});
+-  const int n = down ? 5120 : 34816;
+-  const int k = down ? 17408 : 5120;
+-  if ((!gate && !down) ||
++  // Only the gate-up shape takes the M-tile kernel. The down shape
++  // ([2048, 17408] x [5120]) stays on MLX's native QMM, which is faster there.
++  const int n = 34816;
++  const int k = 5120;
++  if (!gate ||
+       x.dtype() != mx::bfloat16 || w.dtype() != mx::uint32 ||
+       scales.dtype() != mx::bfloat16 || biases->dtype() != mx::bfloat16 ||
+       w.shape() != mx::Shape{n, k / 8} || scales.shape() != mx::Shape{n, k / 64} ||

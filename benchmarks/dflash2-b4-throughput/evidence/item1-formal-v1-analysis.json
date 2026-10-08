@@ -1,0 +1,220 @@
+{
+ "label": "item1-formal-v1",
+ "input_sha256": "0e6a114e6c660d0cadd82114a4ca796bc672038d6ad850b261b5e44e69ab75ca",
+ "analyzer_sha256": "4e878af4038baaf2f1db021594314acd402a7e02aa601499245e20d39cc903b0",
+ "binaries": {
+  "A": {
+   "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-b4-throughput/binaries/ironmlx-round-baseline-4fc49e92",
+   "sha256": "4fc49e9223f62468cebae3837ed7c1867d4047821a29405903502a41e9f5b487"
+  },
+  "B": {
+   "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-b4-throughput/binaries/ironmlx-item1b-dev-8d3a42dc",
+   "sha256": "8d3a42dc8ee05cc805791a0f6acaf907f48a71bc5500f92b46630fa9a726cc65"
+  }
+ },
+ "rounds": 8,
+ "long_rounds": 4,
+ "ratios": {
+  "b4_throughput": {
+   "ratio": 1.1050488555601217,
+   "ci95": [
+    1.0880457341004652,
+    1.1137509478557641
+   ]
+  },
+  "b4_wall": {
+   "ratio": 0.9049115241162877,
+   "ci95": [
+    0.8978708084871525,
+    0.9190821249681109
+   ]
+  },
+  "b4_request_ttft": {
+   "ratio": 0.9370814455443721,
+   "ci95": [
+    0.8416950151726882,
+    1.1210346899681773
+   ]
+  },
+  "b4_request_e2e": {
+   "ratio": 0.8683060830168015,
+   "ci95": [
+    0.8609936727704426,
+    0.8830059779659388
+   ]
+  },
+  "b1_decode": {
+   "ratio": 1.0002652441416866,
+   "ci95": [
+    0.992978134780488,
+    1.0118738276273305
+   ]
+  },
+  "b1_ttft": {
+   "ratio": 1.0387769260435764,
+   "ci95": [
+    0.93711031077425,
+    1.19984817132476
+   ]
+  },
+  "b1_e2e": {
+   "ratio": 1.0002085990450498,
+   "ci95": [
+    0.9896728545140313,
+    1.007435585517712
+   ]
+  },
+  "long_ttft": {
+   "ratio": 1.0016693363960127,
+   "ci95": [
+    0.9859356576180706,
+    1.0017250727763052
+   ]
+  },
+  "long_decode": {
+   "ratio": 0.9998867251877241,
+   "ci95": [
+    0.9968936559406568,
+    1.0055013239545385
+   ]
+  },
+  "memory": {
+   "ratio": 1.0041666733565113,
+   "A_gib": 23.761574622243643,
+   "B_gib": 23.8605813421309
+  }
+ },
+ "gates": {
+  "b4_throughput": true,
+  "b4_wall": true,
+  "b4_request_ttft": true,
+  "b1_decode": true,
+  "b1_ttft": false,
+  "b1_e2e": true,
+  "long_ttft": true,
+  "memory": true
+ },
+ "all_gates": false,
+ "throughput_medians": {
+  "A": {
+   "set:code-1,code-2,code-3,knowledge-1": 111.55040597848364,
+   "set:code-3,knowledge-1,knowledge-2,knowledge-3": 98.89136154954082,
+   "set:knowledge-2,knowledge-3,code-1,code-2": 113.83725640777783
+  },
+  "B": {
+   "set:code-1,code-2,code-3,knowledge-1": 121.68914676030556,
+   "set:code-3,knowledge-1,knowledge-2,knowledge-3": 109.55559161067526,
+   "set:knowledge-2,knowledge-3,code-1,code-2": 127.1077335181749
+  }
+ },
+ "wall_medians": {
+  "A": {
+   "set:code-1,code-2,code-3,knowledge-1": 35.394204958109185,
+   "set:code-3,knowledge-1,knowledge-2,knowledge-3": 39.83162797917612,
+   "set:knowledge-2,knowledge-3,code-1,code-2": 36.46562699996866
+  },
+  "B": {
+   "set:code-1,code-2,code-3,knowledge-1": 32.44367377087474,
+   "set:code-3,knowledge-1,knowledge-2,knowledge-3": 35.95435277093202,
+   "set:knowledge-2,knowledge-3,code-1,code-2": 32.65733639593236
+  }
+ },
+ "per_round": [
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 114.96,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 100.36,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 119.78
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 120.52,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 109.59,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 127.63
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 110.39,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 98.99,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 112.88
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 121.29,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 110.48,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 126.28
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 110.68,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 97.05,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 112.28
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 122.09,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 107.45,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 126.59
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 109.07,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 96.41,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 113.16
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 119.28,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 108.66,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 127.1
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 109.32,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 98.32,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 112.88
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 120.04,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 109.52,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 125.02
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 112.82,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 98.79,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 114.51
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 122.45,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 109.49,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 127.11
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 113.05,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 100.02,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 117.03
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 122.15,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 111.28,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 129.98
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 112.42,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 100.59,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 115.8
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 123.06,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 112.38,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 128.31
+   }
+  }
+ ]
+}

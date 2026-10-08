@@ -1,0 +1,853 @@
+{
+ "rule": "scripts/run_preflight.py assess() + qualification() (revision 3)",
+ "runs": {
+  "fixed256-v1": {
+   "run_sha256": "fa70b7a74c738cf2c66a5982108573ede616afdd6ef79f9c9b79e32db38d0d7d",
+   "iron_binary": null,
+   "rows": [
+    {
+     "app": "A",
+     "id": "warmup-1",
+     "phase": "warmup",
+     "ignore_eos": false,
+     "native": 78,
+     "common": 77,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 78 != common 77"
+     ]
+    },
+    {
+     "app": "A",
+     "id": "warmup-2",
+     "phase": "warmup",
+     "ignore_eos": false,
+     "native": 66,
+     "common": 65,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 66 != common 65"
+     ]
+    },
+    {
+     "app": "A",
+     "id": "code-1",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 244,
+     "common": 244,
+     "finish": null,
+     "cached": 0,
+     "error": null,
+     "protocol_valid": false,
+     "anomalies": [
+      "missing or illegal terminal finish_reason: None",
+      "early end at 244 < 256"
+     ],
+     "fixed256_qualified": false
+    },
+    {
+     "app": "A",
+     "id": "code-2",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 251,
+     "common": 251,
+     "finish": null,
+     "cached": 0,
+     "error": null,
+     "protocol_valid": false,
+     "anomalies": [
+      "missing or illegal terminal finish_reason: None",
+      "early end at 251 < 256"
+     ],
+     "fixed256_qualified": false
+    },
+    {
+     "app": "A",
+     "id": "code-3",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 246,
+     "common": 246,
+     "finish": null,
+     "cached": 0,
+     "error": null,
+     "protocol_valid": false,
+     "anomalies": [
+      "missing or illegal terminal finish_reason: None",
+      "early end at 246 < 256"
+     ],
+     "fixed256_qualified": false
+    },
+    {
+     "app": "A",
+     "id": "knowledge-1",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 242,
+     "common": 242,
+     "finish": null,
+     "cached": 0,
+     "error": null,
+     "protocol_valid": false,
+     "anomalies": [
+      "missing or illegal terminal finish_reason: None",
+      "early end at 242 < 256"
+     ],
+     "fixed256_qualified": false
+    },
+    {
+     "app": "A",
+     "id": "knowledge-2",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 243,
+     "common": 243,
+     "finish": null,
+     "cached": 0,
+     "error": null,
+     "protocol_valid": false,
+     "anomalies": [
+      "missing or illegal terminal finish_reason: None",
+      "early end at 243 < 256"
+     ],
+     "fixed256_qualified": false
+    },
+    {
+     "app": "A",
+     "id": "knowledge-3",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 243,
+     "common": 243,
+     "finish": null,
+     "cached": 0,
+     "error": null,
+     "protocol_valid": false,
+     "anomalies": [
+      "missing or illegal terminal finish_reason: None",
+      "early end at 243 < 256"
+     ],
+     "fixed256_qualified": false
+    },
+    {
+     "app": "A",
+     "id": "probe-ok",
+     "phase": "probe",
+     "ignore_eos": false,
+     "native": 2,
+     "common": 1,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 2 != common 1"
+     ],
+     "probe_expectation_met": true
+    },
+    {
+     "app": "B",
+     "id": "warmup-1",
+     "phase": "warmup",
+     "ignore_eos": false,
+     "native": 68,
+     "common": 68,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": []
+    },
+    {
+     "app": "B",
+     "id": "warmup-2",
+     "phase": "warmup",
+     "ignore_eos": false,
+     "native": 65,
+     "common": 65,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": []
+    },
+    {
+     "app": "B",
+     "id": "code-1",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "B",
+     "id": "code-2",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "B",
+     "id": "code-3",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "B",
+     "id": "knowledge-1",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "B",
+     "id": "knowledge-2",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "B",
+     "id": "knowledge-3",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "B",
+     "id": "probe-ok",
+     "phase": "probe",
+     "ignore_eos": false,
+     "native": 1,
+     "common": 1,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "probe_expectation_met": true
+    },
+    {
+     "app": "C",
+     "id": "warmup-1",
+     "phase": "warmup",
+     "ignore_eos": false,
+     "native": 65,
+     "common": 64,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 65 != common 64"
+     ]
+    },
+    {
+     "app": "C",
+     "id": "warmup-2",
+     "phase": "warmup",
+     "ignore_eos": false,
+     "native": 66,
+     "common": 65,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 66 != common 65"
+     ]
+    },
+    {
+     "app": "C",
+     "id": "code-1",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "C",
+     "id": "code-2",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "C",
+     "id": "code-3",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "C",
+     "id": "knowledge-1",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "C",
+     "id": "knowledge-2",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "C",
+     "id": "knowledge-3",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "C",
+     "id": "probe-ok",
+     "phase": "probe",
+     "ignore_eos": false,
+     "native": 2,
+     "common": 1,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 2 != common 1"
+     ],
+     "probe_expectation_met": true
+    },
+    {
+     "app": "D",
+     "id": "warmup-1",
+     "phase": "warmup",
+     "ignore_eos": false,
+     "native": 71,
+     "common": 70,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 71 != common 70"
+     ]
+    },
+    {
+     "app": "D",
+     "id": "warmup-2",
+     "phase": "warmup",
+     "ignore_eos": false,
+     "native": 66,
+     "common": 65,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 66 != common 65"
+     ]
+    },
+    {
+     "app": "D",
+     "id": "code-1",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "D",
+     "id": "code-2",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "D",
+     "id": "code-3",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "D",
+     "id": "knowledge-1",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "D",
+     "id": "knowledge-2",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "D",
+     "id": "knowledge-3",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "D",
+     "id": "probe-ok",
+     "phase": "probe",
+     "ignore_eos": false,
+     "native": 2,
+     "common": 1,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 2 != common 1"
+     ],
+     "probe_expectation_met": true
+    }
+   ]
+  },
+  "fixed256-fix-v1": {
+   "run_sha256": "dddbd8894723bc5645b5df4479dbb3a4d2e0969fa2d8f1c21182ba782136ad67",
+   "iron_binary": {
+    "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/four-app-b1-fixed256-preflight/fix/binaries/ironmlx-fixed256-fix-84b82b06",
+    "sha256": "84b82b0651ed36aa296590fc544a92ad961c20a1db715f842318805b67e77443"
+   },
+   "rows": [
+    {
+     "app": "A",
+     "id": "warmup-1",
+     "phase": "warmup",
+     "ignore_eos": false,
+     "native": 78,
+     "common": 77,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 78 != common 77"
+     ]
+    },
+    {
+     "app": "A",
+     "id": "warmup-2",
+     "phase": "warmup",
+     "ignore_eos": false,
+     "native": 66,
+     "common": 65,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 66 != common 65"
+     ]
+    },
+    {
+     "app": "A",
+     "id": "code-1",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "A",
+     "id": "code-2",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "A",
+     "id": "code-3",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "A",
+     "id": "knowledge-1",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "A",
+     "id": "knowledge-2",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "A",
+     "id": "knowledge-3",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "A",
+     "id": "probe-ok",
+     "phase": "probe",
+     "ignore_eos": false,
+     "native": 2,
+     "common": 1,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 2 != common 1"
+     ],
+     "probe_expectation_met": true
+    },
+    {
+     "app": "A",
+     "id": "probe-ok-ignore-eos",
+     "phase": "probe",
+     "ignore_eos": true,
+     "native": 256,
+     "common": 120,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 256 != common 120"
+     ],
+     "probe_expectation_met": true
+    }
+   ]
+  },
+  "fixed256-fix-v2": {
+   "run_sha256": "ea096ac05603b725ae9b4ff4b63f28e1d43cdc8261c72853ccea1a5a90d33deb",
+   "iron_binary": {
+    "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/four-app-b1-fixed256-preflight/fix/binaries/ironmlx-fixed256-fix-8271e413",
+    "sha256": "8271e41393de7ff4ba7d7497b87f69239b539201899bf3fef9d0987f009b0ef6"
+   },
+   "rows": [
+    {
+     "app": "A",
+     "id": "warmup-1",
+     "phase": "warmup",
+     "ignore_eos": false,
+     "native": 78,
+     "common": 77,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 78 != common 77"
+     ]
+    },
+    {
+     "app": "A",
+     "id": "warmup-2",
+     "phase": "warmup",
+     "ignore_eos": false,
+     "native": 66,
+     "common": 65,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 66 != common 65"
+     ]
+    },
+    {
+     "app": "A",
+     "id": "code-1",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "A",
+     "id": "code-2",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "A",
+     "id": "code-3",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "A",
+     "id": "knowledge-1",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "A",
+     "id": "knowledge-2",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "A",
+     "id": "knowledge-3",
+     "phase": "target",
+     "ignore_eos": false,
+     "native": 256,
+     "common": 256,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [],
+     "fixed256_qualified": true
+    },
+    {
+     "app": "A",
+     "id": "probe-ok",
+     "phase": "probe",
+     "ignore_eos": false,
+     "native": 2,
+     "common": 1,
+     "finish": "stop",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 2 != common 1"
+     ],
+     "probe_expectation_met": true
+    },
+    {
+     "app": "A",
+     "id": "probe-ok-ignore-eos",
+     "phase": "probe",
+     "ignore_eos": true,
+     "native": 256,
+     "common": 120,
+     "finish": "length",
+     "cached": 0,
+     "error": null,
+     "protocol_valid": true,
+     "anomalies": [
+      "native 256 != common 120"
+     ],
+     "probe_expectation_met": true
+    }
+   ]
+  }
+ }
+}

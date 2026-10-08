@@ -92,4 +92,32 @@ impl DFlash2DecoderLayer {
         self.mlp_conv
             .finish_with_residual_on(&mlp, &kernel, residual, target)
     }
+
+    /// [`Self::forward_on`] for rows at different draft-cache positions; only
+    /// the attention core is per row.
+    pub(super) fn forward_ragged_on(
+        &self,
+        hidden: &Array,
+        contexts: &[Array],
+        masks: &[Array],
+        caches: &mut [&mut DFlash2KvCache],
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        let residual = hidden;
+        let normed = self.input_layernorm.forward_on(hidden, target)?;
+        let (normed, kernel) = self.attention_conv.prepare_on(&normed, target)?;
+        let attention = self
+            .attention
+            .forward_ragged_on(&normed, contexts, masks, caches, target)?;
+        let hidden = self
+            .attention_conv
+            .finish_with_residual_on(&attention, &kernel, residual, target)?;
+
+        let residual = &hidden;
+        let normed = self.post_attention_layernorm.forward_on(&hidden, target)?;
+        let (normed, kernel) = self.mlp_conv.prepare_on(&normed, target)?;
+        let mlp = self.mlp.forward_on(&normed, target)?;
+        self.mlp_conv
+            .finish_with_residual_on(&mlp, &kernel, residual, target)
+    }
 }

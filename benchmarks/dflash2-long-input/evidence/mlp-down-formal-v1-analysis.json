@@ -1,0 +1,1194 @@
+{
+ "label": "mlp-down-formal-v1",
+ "input_sha256": "d070988ab5ad7ee43e4b122554a17bf39d0d28dda3c37271b5969bf6911ea6b4",
+ "analyzer_sha256": "d9be4f3af7f591afec50f068b0a99494ea8cbbad5600110a4cda1463fcd92594",
+ "binaries": {
+  "A": {
+   "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-long-input/binaries/ironmlx-long-baseline-8d3a42dc",
+   "sha256": "8d3a42dc8ee05cc805791a0f6acaf907f48a71bc5500f92b46630fa9a726cc65"
+  },
+  "B": {
+   "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-long-input/binaries/mlp-down/ironmlx-mlp-down-candidate-ae9a9ef7",
+   "sha256": "ae9a9ef71c89d04350225c62c4a0aade00df0ddc853d27509933acdb45445a85"
+  }
+ },
+ "failure": null,
+ "complete": true,
+ "long_rounds": [
+  0,
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10,
+  11
+ ],
+ "short_rounds": [
+  0,
+  1,
+  2,
+  3,
+  4,
+  5
+ ],
+ "time_order": [
+  {
+   "index": 0,
+   "kind": "long",
+   "round": 0,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     44.905,
+     51.212,
+     73.73
+    ],
+    [
+     "knowledge-1",
+     49.644,
+     60.517,
+     29.34
+    ]
+   ]
+  },
+  {
+   "index": 1,
+   "kind": "long",
+   "round": 0,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     51.276,
+     57.942,
+     69.75
+    ],
+    [
+     "knowledge-1",
+     51.212,
+     62.499,
+     28.26
+    ]
+   ]
+  },
+  {
+   "index": 2,
+   "kind": "long",
+   "round": 1,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     52.13,
+     58.873,
+     68.96
+    ],
+    [
+     "knowledge-1",
+     51.799,
+     63.239,
+     27.88
+    ]
+   ]
+  },
+  {
+   "index": 3,
+   "kind": "long",
+   "round": 1,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     51.924,
+     58.694,
+     68.69
+    ],
+    [
+     "knowledge-1",
+     51.263,
+     62.722,
+     27.84
+    ]
+   ]
+  },
+  {
+   "index": 4,
+   "kind": "long",
+   "round": 2,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "knowledge-1",
+     52.4,
+     63.414,
+     28.96
+    ],
+    [
+     "code-1",
+     52.1,
+     59.189,
+     65.6
+    ]
+   ]
+  },
+  {
+   "index": 5,
+   "kind": "long",
+   "round": 2,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "knowledge-1",
+     52.413,
+     63.458,
+     28.88
+    ],
+    [
+     "code-1",
+     51.705,
+     58.809,
+     65.45
+    ]
+   ]
+  },
+  {
+   "index": 6,
+   "kind": "long",
+   "round": 3,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "knowledge-1",
+     51.918,
+     62.999,
+     28.79
+    ],
+    [
+     "code-1",
+     51.812,
+     58.923,
+     65.39
+    ]
+   ]
+  },
+  {
+   "index": 7,
+   "kind": "long",
+   "round": 3,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "knowledge-1",
+     52.46,
+     63.484,
+     28.94
+    ],
+    [
+     "code-1",
+     52.538,
+     59.657,
+     65.32
+    ]
+   ]
+  },
+  {
+   "index": 8,
+   "kind": "long",
+   "round": 4,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     52.269,
+     59.073,
+     68.35
+    ],
+    [
+     "knowledge-1",
+     51.823,
+     63.332,
+     27.72
+    ]
+   ]
+  },
+  {
+   "index": 9,
+   "kind": "long",
+   "round": 4,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     52.608,
+     59.397,
+     68.5
+    ],
+    [
+     "knowledge-1",
+     52.16,
+     63.673,
+     27.71
+    ]
+   ]
+  },
+  {
+   "index": 10,
+   "kind": "long",
+   "round": 5,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     52.84,
+     59.689,
+     67.89
+    ],
+    [
+     "knowledge-1",
+     52.571,
+     64.167,
+     27.51
+    ]
+   ]
+  },
+  {
+   "index": 11,
+   "kind": "long",
+   "round": 5,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     52.38,
+     59.214,
+     68.04
+    ],
+    [
+     "knowledge-1",
+     51.881,
+     63.453,
+     27.57
+    ]
+   ]
+  },
+  {
+   "index": 12,
+   "kind": "long",
+   "round": 6,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "knowledge-1",
+     52.887,
+     63.978,
+     28.76
+    ],
+    [
+     "code-1",
+     52.461,
+     59.616,
+     65.0
+    ]
+   ]
+  },
+  {
+   "index": 13,
+   "kind": "long",
+   "round": 6,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "knowledge-1",
+     52.366,
+     63.464,
+     28.74
+    ],
+    [
+     "code-1",
+     51.891,
+     59.013,
+     65.29
+    ]
+   ]
+  },
+  {
+   "index": 14,
+   "kind": "long",
+   "round": 7,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "knowledge-1",
+     52.381,
+     63.48,
+     28.74
+    ],
+    [
+     "code-1",
+     52.086,
+     59.243,
+     64.97
+    ]
+   ]
+  },
+  {
+   "index": 15,
+   "kind": "long",
+   "round": 7,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "knowledge-1",
+     52.94,
+     64.01,
+     28.82
+    ],
+    [
+     "code-1",
+     52.444,
+     59.585,
+     65.12
+    ]
+   ]
+  },
+  {
+   "index": 16,
+   "kind": "long",
+   "round": 8,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     52.346,
+     59.171,
+     68.14
+    ],
+    [
+     "knowledge-1",
+     52.203,
+     63.883,
+     27.31
+    ]
+   ]
+  },
+  {
+   "index": 17,
+   "kind": "long",
+   "round": 8,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     52.896,
+     59.718,
+     68.16
+    ],
+    [
+     "knowledge-1",
+     52.269,
+     63.842,
+     27.56
+    ]
+   ]
+  },
+  {
+   "index": 18,
+   "kind": "long",
+   "round": 9,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     52.876,
+     59.737,
+     67.77
+    ],
+    [
+     "knowledge-1",
+     52.527,
+     64.136,
+     27.48
+    ]
+   ]
+  },
+  {
+   "index": 19,
+   "kind": "long",
+   "round": 9,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     52.463,
+     59.288,
+     68.13
+    ],
+    [
+     "knowledge-1",
+     51.808,
+     63.366,
+     27.6
+    ]
+   ]
+  },
+  {
+   "index": 20,
+   "kind": "long",
+   "round": 10,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "knowledge-1",
+     52.649,
+     63.773,
+     28.68
+    ],
+    [
+     "code-1",
+     52.412,
+     59.544,
+     65.2
+    ]
+   ]
+  },
+  {
+   "index": 21,
+   "kind": "long",
+   "round": 10,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "knowledge-1",
+     52.469,
+     63.522,
+     28.86
+    ],
+    [
+     "code-1",
+     51.837,
+     58.97,
+     65.18
+    ]
+   ]
+  },
+  {
+   "index": 22,
+   "kind": "long",
+   "round": 11,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "knowledge-1",
+     52.347,
+     63.504,
+     28.59
+    ],
+    [
+     "code-1",
+     51.946,
+     59.078,
+     65.2
+    ]
+   ]
+  },
+  {
+   "index": 23,
+   "kind": "long",
+   "round": 11,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "knowledge-1",
+     52.611,
+     63.683,
+     28.81
+    ],
+    [
+     "code-1",
+     52.289,
+     59.403,
+     65.37
+    ]
+   ]
+  },
+  {
+   "index": 24,
+   "kind": "short",
+   "round": 0,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     0.131,
+     6.029,
+     116.16
+    ],
+    [
+     "knowledge-1",
+     0.109,
+     25.04,
+     56.92
+    ],
+    [
+     "code-3",
+     0.15,
+     5.92,
+     77.48
+    ]
+   ]
+  },
+  {
+   "index": 25,
+   "kind": "short",
+   "round": 0,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     0.135,
+     6.037,
+     116.07
+    ],
+    [
+     "knowledge-1",
+     0.147,
+     25.085,
+     56.9
+    ],
+    [
+     "code-3",
+     0.17,
+     5.946,
+     77.4
+    ]
+   ]
+  },
+  {
+   "index": 26,
+   "kind": "short",
+   "round": 1,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     0.136,
+     6.062,
+     115.59
+    ],
+    [
+     "knowledge-1",
+     0.116,
+     25.06,
+     56.89
+    ],
+    [
+     "code-3",
+     0.148,
+     5.948,
+     77.07
+    ]
+   ]
+  },
+  {
+   "index": 27,
+   "kind": "short",
+   "round": 1,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     0.135,
+     6.042,
+     115.97
+    ],
+    [
+     "knowledge-1",
+     0.137,
+     25.074,
+     56.9
+    ],
+    [
+     "code-3",
+     0.158,
+     5.936,
+     77.36
+    ]
+   ]
+  },
+  {
+   "index": 28,
+   "kind": "short",
+   "round": 2,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     0.133,
+     6.059,
+     115.59
+    ],
+    [
+     "knowledge-1",
+     0.164,
+     25.069,
+     56.98
+    ],
+    [
+     "code-3",
+     0.154,
+     5.945,
+     77.19
+    ]
+   ]
+  },
+  {
+   "index": 29,
+   "kind": "short",
+   "round": 2,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     0.135,
+     6.067,
+     115.47
+    ],
+    [
+     "knowledge-1",
+     0.114,
+     25.082,
+     56.83
+    ],
+    [
+     "code-3",
+     0.239,
+     5.996,
+     77.64
+    ]
+   ]
+  },
+  {
+   "index": 30,
+   "kind": "short",
+   "round": 3,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     0.137,
+     6.005,
+     116.73
+    ],
+    [
+     "knowledge-1",
+     0.118,
+     25.088,
+     56.83
+    ],
+    [
+     "code-3",
+     0.152,
+     5.946,
+     77.15
+    ]
+   ]
+  },
+  {
+   "index": 31,
+   "kind": "short",
+   "round": 3,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     0.14,
+     6.091,
+     115.12
+    ],
+    [
+     "knowledge-1",
+     0.117,
+     25.129,
+     56.73
+    ],
+    [
+     "code-3",
+     0.156,
+     5.934,
+     77.36
+    ]
+   ]
+  },
+  {
+   "index": 32,
+   "kind": "short",
+   "round": 4,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     0.135,
+     6.036,
+     116.07
+    ],
+    [
+     "knowledge-1",
+     0.146,
+     25.09,
+     56.89
+    ],
+    [
+     "code-3",
+     0.159,
+     5.92,
+     77.59
+    ]
+   ]
+  },
+  {
+   "index": 33,
+   "kind": "short",
+   "round": 4,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     0.133,
+     6.05,
+     115.77
+    ],
+    [
+     "knowledge-1",
+     0.142,
+     25.109,
+     56.83
+    ],
+    [
+     "code-3",
+     0.175,
+     5.95,
+     77.41
+    ]
+   ]
+  },
+  {
+   "index": 34,
+   "kind": "short",
+   "round": 5,
+   "arm": "B",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     0.139,
+     6.064,
+     115.62
+    ],
+    [
+     "knowledge-1",
+     0.109,
+     24.972,
+     57.07
+    ],
+    [
+     "code-3",
+     0.157,
+     6.045,
+     75.91
+    ]
+   ]
+  },
+  {
+   "index": 35,
+   "kind": "short",
+   "round": 5,
+   "arm": "A",
+   "valid": true,
+   "values": [
+    [
+     "code-1",
+     0.142,
+     6.027,
+     116.39
+    ],
+    [
+     "knowledge-1",
+     0.122,
+     24.966,
+     57.12
+    ],
+    [
+     "code-3",
+     0.156,
+     5.915,
+     77.62
+    ]
+   ]
+  }
+ ],
+ "ratios": {
+  "long:code-1:ttft": {
+   "ratio": 1.0099704954129431,
+   "ci95": [
+    1.0058237824880305,
+    1.0124695688808745
+   ],
+   "A_median": [
+    51.93485243750004
+   ],
+   "B_median": [
+    52.45266864550001
+   ]
+  },
+  "long:code-1:e2e": {
+   "ratio": 1.0088269078209726,
+   "ci95": [
+    1.0055103834825196,
+    1.0111522897006433
+   ],
+   "A_median": [
+    59.043069166500004
+   ],
+   "B_median": [
+    59.56423689550002
+   ]
+  },
+  "long:code-1:decode_tps": {
+   "ratio": 0.9991294412734819,
+   "ci95": [
+    0.994794291985429,
+    1.0022616556138035
+   ],
+   "A_median": [
+    66.74376834223628
+   ],
+   "B_median": [
+    66.68566397226525
+   ]
+  },
+  "long:knowledge-1:ttft": {
+   "ratio": 1.0083152735551242,
+   "ci95": [
+    1.0012525809501376,
+    1.013164219597908
+   ],
+   "A_median": [
+    52.06057427099984
+   ],
+   "B_median": [
+    52.49347218750006
+   ]
+  },
+  "long:knowledge-1:e2e": {
+   "ratio": 1.0042997133979854,
+   "ci95": [
+    1.0011847439520007,
+    1.0086558218222044
+   ],
+   "A_median": [
+    63.455101479000064
+   ],
+   "B_median": [
+    63.72794022899984
+   ]
+  },
+  "long:knowledge-1:decode_tps": {
+   "ratio": 0.9931319995192344,
+   "ci95": [
+    0.9825000894553919,
+    1.0053781892687075
+   ],
+   "A_median": [
+    28.66685510714244
+   ],
+   "B_median": [
+    28.469971132484545
+   ]
+  },
+  "long:memory": {
+   "ratio": 0.9991626674993873,
+   "ci95": [
+    0.9957899254254088,
+    1.0016366517927269
+   ],
+   "A_median": [
+    25798754956.0
+   ],
+   "B_median": [
+    25777152820.0
+   ]
+  },
+  "b4:set:code-1,code-2,code-3,knowledge-1:throughput": {
+   "ratio": 1.0003584387569446,
+   "ci95": [
+    0.9969535865835624,
+    1.013374278210144
+   ],
+   "A_median": [
+    120.45871792498923
+   ],
+   "B_median": [
+    120.5018949981054
+   ]
+  },
+  "b4:set:code-3,knowledge-1,knowledge-2,knowledge-3:throughput": {
+   "ratio": 0.999622861419499,
+   "ci95": [
+    0.9973286482267157,
+    1.0043967622393248
+   ],
+   "A_median": [
+    109.41447554463677
+   ],
+   "B_median": [
+    109.3732111246436
+   ]
+  },
+  "b4:set:knowledge-2,knowledge-3,code-1,code-2:throughput": {
+   "ratio": 0.9998029661559479,
+   "ci95": [
+    0.9954014607583829,
+    1.0042208002144568
+   ],
+   "A_median": [
+    126.75751087045298
+   ],
+   "B_median": [
+    126.7325353508237
+   ]
+  },
+  "b4:geomean:throughput": {
+   "ratio": 0.9999280397759973,
+   "ci95": [
+    0.9987256330607821,
+    1.003646450005601
+   ],
+   "A_median": [
+    120.45871792498923,
+    109.41447554463677,
+    126.75751087045298
+   ],
+   "B_median": [
+    120.5018949981054,
+    109.3732111246436,
+    126.7325353508237
+   ]
+  },
+  "b1:code-1:ttft": {
+   "ratio": 1.0032027453633363,
+   "ci95": [
+    0.987248362855166,
+    1.018236972460392
+   ],
+   "A_median": [
+    0.13476079149995712
+   ],
+   "B_median": [
+    0.13519239600009314
+   ]
+  },
+  "b1:code-1:e2e": {
+   "ratio": 1.0046856771448922,
+   "ci95": [
+    1.0007533985360826,
+    1.0100996969763714
+   ],
+   "A_median": [
+    6.032283728999801
+   ],
+   "B_median": [
+    6.0605490630002805
+   ]
+  },
+  "b1:code-1:decode_tps": {
+   "ratio": 0.9955835570383804,
+   "ci95": [
+    0.9897626929360814,
+    0.9988977461679515
+   ],
+   "A_median": [
+    116.1158477937521
+   ],
+   "B_median": [
+    115.6030287750309
+   ]
+  },
+  "b1:knowledge-1:ttft": {
+   "ratio": 1.0750700380692557,
+   "ci95": [
+    0.8476367239947712,
+    1.362935475683386
+   ],
+   "A_median": [
+    0.12033402050019504
+   ],
+   "B_median": [
+    0.12936750000017128
+   ]
+  },
+  "b1:knowledge-1:e2e": {
+   "ratio": 0.9999487618255272,
+   "ci95": [
+    0.9994522893482043,
+    1.001807099048933
+   ],
+   "A_median": [
+    25.078147562500362
+   ],
+   "B_median": [
+    25.076862604000098
+   ]
+  },
+  "b1:knowledge-1:decode_tps": {
+   "ratio": 0.9999678540852412,
+   "ci95": [
+    0.9986951099908258,
+    1.002076337037671
+   ],
+   "A_median": [
+    56.89471844815702
+   ],
+   "B_median": [
+    56.892889515387566
+   ]
+  },
+  "b1:code-3:ttft": {
+   "ratio": 0.9965480876406787,
+   "ci95": [
+    0.7775456797238381,
+    1.1102749700193177
+   ],
+   "A_median": [
+    0.15682133349992
+   ],
+   "B_median": [
+    0.15628000000060638
+   ]
+  },
+  "b1:code-3:e2e": {
+   "ratio": 1.0030788191664375,
+   "ci95": [
+    0.9956077235094277,
+    1.0135249893845177
+   ],
+   "A_median": [
+    5.92829393799957
+   ],
+   "B_median": [
+    5.9465460830001575
+   ]
+  },
+  "b1:code-3:decode_tps": {
+   "ratio": 0.9966944041004151,
+   "ci95": [
+    0.9856788999641365,
+    1.0014291492202592
+   ],
+   "A_median": [
+    77.53388244773473
+   ],
+   "B_median": [
+    77.2775867638366
+   ]
+  },
+  "b4:memory": {
+   "ratio": 1.0033545426185075,
+   "ci95": [
+    0.9930148082760853,
+    1.0147104132284734
+   ],
+   "A_median": [
+    25573295008.0
+   ],
+   "B_median": [
+    25659081716.0
+   ]
+  }
+ },
+ "correctness": {
+  "label": "mlp-down-correctness-v1",
+  "complete": true,
+  "failure": null,
+  "requests": 22,
+  "equal": 22,
+  "binaries": {
+   "A": {
+    "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-long-input/binaries/ironmlx-long-baseline-8d3a42dc",
+    "sha256": "8d3a42dc8ee05cc805791a0f6acaf907f48a71bc5500f92b46630fa9a726cc65"
+   },
+   "B": {
+    "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-long-input/binaries/mlp-down/ironmlx-mlp-down-candidate-ae9a9ef7",
+    "sha256": "ae9a9ef71c89d04350225c62c4a0aade00df0ddc853d27509933acdb45445a85"
+   }
+  }
+ },
+ "output_hashes": {
+  "requests": 138,
+  "equal": 138
+ },
+ "gates": {
+  "long:code-1:ttft": false,
+  "long:code-1:decode": true,
+  "long:code-1:e2e": false,
+  "long:knowledge-1:ttft": false,
+  "long:knowledge-1:decode": true,
+  "long:knowledge-1:e2e": false,
+  "long:memory": true,
+  "b4:set:code-1,code-2,code-3,knowledge-1:throughput": true,
+  "b4:set:code-3,knowledge-1,knowledge-2,knowledge-3:throughput": true,
+  "b4:set:knowledge-2,knowledge-3,code-1,code-2:throughput": true,
+  "b1:code-1:ttft": true,
+  "b1:code-1:e2e": true,
+  "b1:code-1:decode": true,
+  "b1:knowledge-1:ttft": false,
+  "b1:knowledge-1:e2e": true,
+  "b1:knowledge-1:decode": true,
+  "b1:code-3:ttft": true,
+  "b1:code-3:e2e": true,
+  "b1:code-3:decode": true,
+  "b4:memory": true,
+  "token_ids": true,
+  "output_hashes": true
+ },
+ "all_gates": false
+}

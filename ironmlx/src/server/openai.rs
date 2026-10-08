@@ -1682,15 +1682,40 @@ where
     M: Model + DenseVlMethods + Send + 'static,
 {
     let started_at = Instant::now();
+    let reply = match admit_request(&state, request).await {
+        Ok(reply) => reply,
+        Err(response) => return response,
+    };
+    stream_tools_admitted(
+        state,
+        reply,
+        started_at,
+        model_id,
+        prompt_tokens,
+        include_usage,
+        tool_context,
+    )
+}
+
+/// SSE forwarding of an admitted tool request's scheduler events.
+fn stream_tools_admitted<M>(
+    state: AppState<M>,
+    reply: AdmitReply,
+    started_at: Instant,
+    model_id: String,
+    prompt_tokens: u32,
+    include_usage: bool,
+    tool_context: ToolResponseContext,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let (decoder_config, constraint_options, output_format) = tool_context.decoder_config();
     let id = gen_id();
     let AdmitReply {
         request_id: _,
         mut event_rx,
-    } = match admit_request(&state, request).await {
-        Ok(reply) => reply,
-        Err(response) => return response,
-    };
+    } = reply;
     let mut performance = state.record_request_started(prompt_tokens, started_at);
     let tokenizer = state.tokenizer.clone();
     let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
@@ -1708,7 +1733,7 @@ where
         let mut completion_tokens = 0_u32;
         let mut next_call_index = 0_usize;
         let mut call_names = Vec::new();
-        let mut model_finish = "stop";
+        let mut model_finish = None;
         let mut typed_finish = None;
         let mut content = String::new();
         while let Some(event) =
@@ -1748,10 +1773,18 @@ where
                 }
             }
             if let Some(reason) = event.finish_reason {
-                model_finish = reason;
+                model_finish = Some(reason);
                 break;
             }
         }
+        let Some(model_finish) = model_finish else {
+            if !disconnect.is_cancelled() {
+                let _ = tx
+                    .send(Ok(format_sse_error(&missing_terminal_event_error())))
+                    .await;
+            }
+            return;
+        };
         let events = match decoder.finish(model_finish) {
             Ok(events) => events,
             Err(error) => {
@@ -1837,15 +1870,39 @@ where
         .await;
     }
     let started_at = Instant::now();
+    let reply = match admit_request(&state, request).await {
+        Ok(reply) => reply,
+        Err(response) => return response,
+    };
+    collect_tools_admitted(
+        state,
+        reply,
+        started_at,
+        model_id,
+        prompt_tokens,
+        tool_context,
+    )
+    .await
+}
+
+/// Non-streaming collection of an admitted tool request's scheduler events.
+async fn collect_tools_admitted<M>(
+    state: AppState<M>,
+    reply: AdmitReply,
+    started_at: Instant,
+    model_id: String,
+    prompt_tokens: u32,
+    tool_context: ToolResponseContext,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
     let (decoder_config, constraint_options, output_format) = tool_context.decoder_config();
     let id = gen_id();
     let AdmitReply {
         request_id: _,
         mut event_rx,
-    } = match admit_request(&state, request).await {
-        Ok(reply) => reply,
-        Err(response) => return response,
-    };
+    } = reply;
     let mut performance = state.record_request_started(prompt_tokens, started_at);
     let mut decoder = match GeneratedOutputDecoder::new(&state.tokenizer, Some(decoder_config)) {
         Ok(decoder) => decoder,
@@ -1857,6 +1914,7 @@ where
         finish_reason: "stop",
         completion_tokens: 0,
     };
+    let mut finished = false;
     while let Some(event) = event_rx.recv().await {
         output.completion_tokens += 1;
         performance.record_output_tokens(1);
@@ -1877,8 +1935,12 @@ where
         }
         if let Some(reason) = event.finish_reason {
             output.finish_reason = reason;
+            finished = true;
             break;
         }
+    }
+    if !finished {
+        return generation_err_to_response(missing_terminal_event_error());
     }
     let model_finish = output.finish_reason;
     if let Err(error) = finish_output_decoder(&mut decoder, &mut output, model_finish) {
@@ -1915,20 +1977,45 @@ where
     M: Model + DenseVlMethods + Send + 'static,
 {
     let started_at = Instant::now();
-    let id = gen_id();
 
     // 1. Admit request to the actor.
     let admission_result = admit_request(&state, request).await;
 
-    let AdmitReply {
-        request_id: _,
-        mut event_rx,
-    } = match admission_result {
+    let reply = match admission_result {
         Ok(reply) => reply,
         Err(resp) => {
             return resp;
         }
     };
+    stream_admitted(
+        state,
+        reply,
+        started_at,
+        model_id,
+        prompt_tokens,
+        include_usage,
+        output_format,
+    )
+}
+
+/// SSE forwarding of an admitted request's scheduler events.
+fn stream_admitted<M>(
+    state: AppState<M>,
+    reply: AdmitReply,
+    started_at: Instant,
+    model_id: String,
+    prompt_tokens: u32,
+    include_usage: bool,
+    output_format: StructuredOutputFormat,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let id = gen_id();
+    let AdmitReply {
+        request_id: _,
+        mut event_rx,
+    } = reply;
     let mut performance = state.record_request_started(prompt_tokens, started_at);
 
     // Successful admission — proceed to spawn the forwarder using `event_rx`.
@@ -1972,6 +2059,7 @@ where
         };
         let mut completion_tokens = 0_u32;
         let mut finish_reason = None;
+        let mut model_finished = false;
         let mut next_call_index = 0_usize;
         let mut call_names = Vec::new();
         let mut content = String::new();
@@ -2021,8 +2109,17 @@ where
             }
             performance.record_output_tokens(1);
             if ev.finish_reason.is_some() {
+                model_finished = true;
                 break;
             }
+        }
+        if !model_finished {
+            if !disconnect.is_cancelled() {
+                let _ = tx
+                    .send(Ok(format_sse_error(&missing_terminal_event_error())))
+                    .await;
+            }
+            return;
         }
         if let Some(reason) = finish_reason {
             if let Err(error) = output_format.validate_completion(&content, false, reason) {
@@ -2064,16 +2161,40 @@ where
     M: Model + DenseVlMethods + Send + 'static,
 {
     let started_at = Instant::now();
-    let id = gen_id();
 
     // 1. Admit.
-    let AdmitReply {
-        request_id: _,
-        mut event_rx,
-    } = match admit_request(&state, request).await {
+    let reply = match admit_request(&state, request).await {
         Ok(reply) => reply,
         Err(response) => return response,
     };
+    collect_admitted(
+        state,
+        reply,
+        started_at,
+        model_id,
+        prompt_tokens,
+        output_format,
+    )
+    .await
+}
+
+/// Non-streaming collection of an admitted request's scheduler events.
+async fn collect_admitted<M>(
+    state: AppState<M>,
+    reply: AdmitReply,
+    started_at: Instant,
+    model_id: String,
+    prompt_tokens: u32,
+    output_format: StructuredOutputFormat,
+) -> Response
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    let id = gen_id();
+    let AdmitReply {
+        request_id: _,
+        mut event_rx,
+    } = reply;
     let mut performance = state.record_request_started(prompt_tokens, started_at);
 
     // 2. Collect all committed tokens through the protocol-neutral decoder.
@@ -2112,9 +2233,7 @@ where
         }
     }
     if !finished {
-        return generation_err_to_response(anyhow::anyhow!(
-            "scheduler stream ended before a terminal event"
-        ));
+        return generation_err_to_response(missing_terminal_event_error());
     }
     if let Err(error) =
         output_format.validate_completion(&output.content, false, output.finish_reason)
@@ -2155,6 +2274,13 @@ fn format_sse_data<T: Serialize>(payload: &T) -> Bytes {
     Bytes::from(buf)
 }
 
+/// A scheduler event stream that closes without a terminal event is a failed
+/// generation (the actor drops a failed request's sender); it is never
+/// reported as a successful `stop` or `length`.
+fn missing_terminal_event_error() -> anyhow::Error {
+    anyhow::anyhow!("scheduler stream ended before a terminal event")
+}
+
 fn format_sse_error(e: &anyhow::Error) -> Bytes {
     let payload =
         serde_json::json!({"error": {"message": e.to_string(), "type": "internal_error"}});
@@ -2164,6 +2290,230 @@ fn format_sse_error(e: &anyhow::Error) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod missing_terminal_event {
+        use super::super::*;
+        use ironmlx_runtime::core::generation_types::GenerateEvent;
+        use ironmlx_runtime::core::scheduler::{RequestId, StepEvent};
+
+        /// Scheduler events closed by the producer (as the DFlash2 actor does
+        /// when a request fails), optionally after a terminal event.
+        fn admitted(tokens: usize, terminal: Option<&'static str>) -> AdmitReply {
+            let (tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let request_id = RequestId(1);
+            let mut events: Vec<_> = (0..tokens)
+                .map(|index| GenerateEvent {
+                    token: if index == 0 { 1 } else { 2 },
+                    text: String::new(),
+                    finish_reason: None,
+                })
+                .collect();
+            if let Some(reason) = terminal {
+                events.push(GenerateEvent {
+                    token: 2,
+                    text: String::new(),
+                    finish_reason: Some(reason),
+                });
+            }
+            for event in events {
+                tx.send(StepEvent {
+                    id: request_id,
+                    token: event.token,
+                    finish_reason: event.finish_reason,
+                })
+                .unwrap();
+            }
+            drop(tx);
+            AdmitReply {
+                request_id,
+                event_rx,
+            }
+        }
+
+        async fn sse_body(response: Response) -> String {
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        }
+
+        fn data_events(wire: &str) -> Vec<String> {
+            wire.lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .map(str::to_owned)
+                .collect()
+        }
+
+        #[tokio::test]
+        async fn stream_failure_after_partial_output_is_an_error_not_a_finish() {
+            let state = crate::server::responses::eof_tests::state().await;
+            let response = stream_admitted(
+                state,
+                admitted(3, None),
+                Instant::now(),
+                "eof-test".into(),
+                1,
+                true,
+                StructuredOutputFormat::Text,
+            );
+            let events = data_events(&sse_body(response).await);
+            let last = events.last().expect("SSE events");
+            let error: serde_json::Value = serde_json::from_str(last).unwrap();
+            assert_eq!(
+                error["error"]["message"],
+                "scheduler stream ended before a terminal event"
+            );
+            assert!(!events.iter().any(|event| event == "[DONE]"));
+            assert!(!events
+                .iter()
+                .any(|event| event.contains("\"finish_reason\":\"")));
+            assert!(!events.iter().any(|event| event.contains("\"usage\"")));
+        }
+
+        #[tokio::test]
+        async fn stream_length_terminal_reports_length_usage_and_done() {
+            let state = crate::server::responses::eof_tests::state().await;
+            let response = stream_admitted(
+                state,
+                admitted(3, Some("length")),
+                Instant::now(),
+                "eof-test".into(),
+                1,
+                true,
+                StructuredOutputFormat::Text,
+            );
+            let events = data_events(&sse_body(response).await);
+            assert!(events
+                .iter()
+                .any(|event| event.contains("\"finish_reason\":\"length\"")));
+            assert!(events.iter().any(|event| event.contains("\"usage\"")));
+            assert_eq!(events.last().map(String::as_str), Some("[DONE]"));
+            assert!(!events.iter().any(|event| event.contains("\"error\"")));
+        }
+
+        fn tool_context() -> ToolResponseContext {
+            ToolResponseContext {
+                dialect: ToolDialect::Qwen35,
+                definitions: vec![ToolDefinition {
+                    name: "get_weather".into(),
+                    description: None,
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"]
+                    }),
+                    strict: None,
+                }],
+                constraint_options: ToolConstraintOptions::default(),
+                output_schema: None,
+                output_format: StructuredOutputFormat::Text,
+            }
+        }
+
+        #[tokio::test]
+        async fn tool_stream_failure_after_partial_output_is_an_error_not_a_stop() {
+            let state = crate::server::responses::eof_tests::state().await;
+            let response = stream_tools_admitted(
+                state,
+                admitted(3, None),
+                Instant::now(),
+                "eof-test".into(),
+                1,
+                true,
+                tool_context(),
+            );
+            let events = data_events(&sse_body(response).await);
+            let last = events.last().expect("SSE events");
+            let error: serde_json::Value = serde_json::from_str(last).unwrap();
+            assert_eq!(
+                error["error"]["message"],
+                "scheduler stream ended before a terminal event"
+            );
+            assert!(!events.iter().any(|event| event == "[DONE]"));
+            assert!(!events
+                .iter()
+                .any(|event| event.contains("\"finish_reason\":\"")));
+            assert!(!events.iter().any(|event| event.contains("\"usage\"")));
+        }
+
+        #[tokio::test]
+        async fn tool_stream_length_terminal_reports_length_usage_and_done() {
+            let state = crate::server::responses::eof_tests::state().await;
+            let response = stream_tools_admitted(
+                state,
+                admitted(3, Some("length")),
+                Instant::now(),
+                "eof-test".into(),
+                1,
+                true,
+                tool_context(),
+            );
+            let events = data_events(&sse_body(response).await);
+            assert!(events
+                .iter()
+                .any(|event| event.contains("\"finish_reason\":\"length\"")));
+            assert_eq!(events.last().map(String::as_str), Some("[DONE]"));
+            assert!(!events.iter().any(|event| event.contains("\"error\"")));
+        }
+
+        #[tokio::test]
+        async fn tool_unary_failure_after_partial_output_is_an_error_not_a_stop() {
+            let state = crate::server::responses::eof_tests::state().await;
+            let response = collect_tools_admitted(
+                state,
+                admitted(3, None),
+                Instant::now(),
+                "eof-test".into(),
+                1,
+                tool_context(),
+            )
+            .await;
+            assert!(response.status().is_server_error());
+            let body: serde_json::Value = serde_json::from_str(&sse_body(response).await).unwrap();
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("scheduler stream ended before a terminal event"));
+            assert!(body.get("choices").is_none());
+        }
+
+        #[tokio::test]
+        async fn tool_unary_length_terminal_reports_length() {
+            let state = crate::server::responses::eof_tests::state().await;
+            let response = collect_tools_admitted(
+                state,
+                admitted(3, Some("length")),
+                Instant::now(),
+                "eof-test".into(),
+                1,
+                tool_context(),
+            )
+            .await;
+            assert!(response.status().is_success());
+            let body: serde_json::Value = serde_json::from_str(&sse_body(response).await).unwrap();
+            assert_eq!(body["choices"][0]["finish_reason"], "length");
+        }
+
+        #[tokio::test]
+        async fn unary_failure_after_partial_output_is_an_error() {
+            let state = crate::server::responses::eof_tests::state().await;
+            let response = collect_admitted(
+                state,
+                admitted(3, None),
+                Instant::now(),
+                "eof-test".into(),
+                1,
+                StructuredOutputFormat::Text,
+            )
+            .await;
+            assert!(response.status().is_server_error());
+            let body: serde_json::Value = serde_json::from_str(&sse_body(response).await).unwrap();
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("scheduler stream ended before a terminal event"));
+        }
+    }
 
     #[tokio::test]
     async fn text_only_image_is_rejected_before_data_url_decoding() {

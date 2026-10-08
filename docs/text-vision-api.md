@@ -685,6 +685,8 @@ A completed thinking channel does not guarantee a complete answer. Check Respons
 
 Streaming responses use text/event-stream. Parse SSE frames across network-chunk boundaries and assemble deltas before parsing tool JSON. Errors before streaming use the ordinary HTTP envelope; a failure after HTTP 200 is reported in protocol stream events.
 
+For Chat Completions, if the internal generation stream closes without a terminal event, the request fails instead of being reported as a normal stop. Streaming text and tool responses emit an error without a fabricated success finish reason, final usage chunk or `[DONE]`; non-streaming requests return an HTTP error. Partial content is not a successful completed response.
+
 Client disconnect cancels streaming generation at the next safe execution boundary and releases request resources; it does not interrupt an in-flight Metal operation. No terminal event is fabricated after disconnect. Cancellation of already running non-streaming generation on client disconnect is not guaranteed.
 
 ## Errors

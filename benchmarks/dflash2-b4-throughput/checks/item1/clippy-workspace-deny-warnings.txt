@@ -1,0 +1,4 @@
+    Checking ironmlx-runtime v0.2.0 (/Users/xin/workspace/perf-dflash2-b4-throughput/ironmlx-runtime)
+    Checking ironmlx v0.2.0 (/Users/xin/workspace/perf-dflash2-b4-throughput/ironmlx)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.19s
+exit=0

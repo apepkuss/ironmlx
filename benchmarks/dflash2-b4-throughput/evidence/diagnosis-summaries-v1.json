@@ -1,0 +1,746 @@
+{
+ "diag-b1-ttft-v1": {
+  "input_sha256": "54cccbf5228a7938f6766d9e4fcc5b4370d6b44cde069bb93a319242d0502e7a",
+  "binaries": {
+   "A": {
+    "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-b4-throughput/binaries/ironmlx-round-baseline-4fc49e92",
+    "sha256": "4fc49e9223f62468cebae3837ed7c1867d4047821a29405903502a41e9f5b487"
+   },
+   "B": {
+    "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-b4-throughput/binaries/ironmlx-item1b-dev-8d3a42dc",
+    "sha256": "8d3a42dc8ee05cc805791a0f6acaf907f48a71bc5500f92b46630fa9a726cc65"
+   }
+  },
+  "sessions": 12,
+  "invalid": 0,
+  "after_b4/code-1/A": {
+   "n": 9,
+   "ttft_median_ms": 118.57354175299406,
+   "prefill_median_ms": 116.704,
+   "outside_prefill_median_ms": 1.6527079791426615,
+   "ttft_all_ms": [
+    116.6,
+    118.9,
+    153.9,
+    114.9,
+    147.7,
+    118.6,
+    117.5,
+    107.7,
+    177.9
+   ]
+  },
+  "after_b4/code-1/B": {
+   "n": 9,
+   "ttft_median_ms": 118.68970794603229,
+   "prefill_median_ms": 117.118,
+   "outside_prefill_median_ms": 1.7097499880194675,
+   "ttft_all_ms": [
+    118.7,
+    111.9,
+    115.1,
+    116.7,
+    117.1,
+    174.6,
+    119.7,
+    127.1,
+    143.0
+   ]
+  },
+  "after_b4/knowledge-1/A": {
+   "n": 9,
+   "ttft_median_ms": 145.54804097861052,
+   "prefill_median_ms": 143.963,
+   "outside_prefill_median_ms": 1.5850409786105217,
+   "ttft_all_ms": [
+    174.8,
+    165.1,
+    107.7,
+    145.5,
+    148.9,
+    125.1,
+    155.3,
+    104.5,
+    109.1
+   ]
+  },
+  "after_b4/knowledge-1/B": {
+   "n": 9,
+   "ttft_median_ms": 106.59683309495449,
+   "prefill_median_ms": 104.875,
+   "outside_prefill_median_ms": 1.5954165959358164,
+   "ttft_all_ms": [
+    105.9,
+    168.4,
+    147.7,
+    105.0,
+    104.4,
+    127.3,
+    106.6,
+    104.5,
+    138.0
+   ]
+  },
+  "after_b4/code-3/A": {
+   "n": 9,
+   "ttft_median_ms": 147.87362469360232,
+   "prefill_median_ms": 146.048,
+   "outside_prefill_median_ms": 1.860374618560087,
+   "ttft_all_ms": [
+    144.1,
+    144.2,
+    147.9,
+    144.4,
+    197.4,
+    150.9,
+    154.5,
+    144.7,
+    213.2
+   ]
+  },
+  "after_b4/code-3/B": {
+   "n": 9,
+   "ttft_median_ms": 148.0715828947723,
+   "prefill_median_ms": 146.237,
+   "outside_prefill_median_ms": 1.8643330332338905,
+   "ttft_all_ms": [
+    157.4,
+    148.1,
+    146.3,
+    153.5,
+    151.1,
+    144.3,
+    143.2,
+    144.5,
+    152.5
+   ]
+  },
+  "fresh/code-1/A": {
+   "n": 9,
+   "ttft_median_ms": 116.95445887744427,
+   "prefill_median_ms": 115.205,
+   "outside_prefill_median_ms": 1.749458877444269,
+   "ttft_all_ms": [
+    194.7,
+    117.0,
+    127.6,
+    152.6,
+    154.6,
+    108.6,
+    114.3,
+    109.0,
+    107.7
+   ]
+  },
+  "fresh/code-1/B": {
+   "n": 9,
+   "ttft_median_ms": 110.94433255493641,
+   "prefill_median_ms": 109.284,
+   "outside_prefill_median_ms": 1.8059160657823128,
+   "ttft_all_ms": [
+    119.7,
+    106.7,
+    107.9,
+    112.6,
+    110.9,
+    144.6,
+    112.7,
+    108.2,
+    108.3
+   ]
+  },
+  "fresh/knowledge-1/A": {
+   "n": 9,
+   "ttft_median_ms": 106.56408406794071,
+   "prefill_median_ms": 104.746,
+   "outside_prefill_median_ms": 1.678124776244161,
+   "ttft_all_ms": [
+    138.4,
+    104.2,
+    105.1,
+    106.6,
+    138.2,
+    103.7,
+    107.1,
+    105.1,
+    134.6
+   ]
+  },
+  "fresh/knowledge-1/B": {
+   "n": 9,
+   "ttft_median_ms": 108.516541775316,
+   "prefill_median_ms": 106.952,
+   "outside_prefill_median_ms": 1.7273334586024305,
+   "ttft_all_ms": [
+    105.7,
+    108.5,
+    104.9,
+    151.6,
+    106.9,
+    106.0,
+    170.8,
+    120.1,
+    148.0
+   ]
+  },
+  "fresh/code-3/A": {
+   "n": 9,
+   "ttft_median_ms": 152.8285420499742,
+   "prefill_median_ms": 151.209,
+   "outside_prefill_median_ms": 1.8846671192347912,
+   "ttft_all_ms": [
+    149.1,
+    192.7,
+    155.5,
+    150.8,
+    143.5,
+    206.4,
+    152.8,
+    159.3,
+    152.4
+   ]
+  },
+  "fresh/code-3/B": {
+   "n": 9,
+   "ttft_median_ms": 154.52941739931703,
+   "prefill_median_ms": 152.219,
+   "outside_prefill_median_ms": 2.040624879091979,
+   "ttft_all_ms": [
+    175.3,
+    155.5,
+    145.8,
+    154.5,
+    152.9,
+    213.6,
+    146.8,
+    184.8,
+    152.8
+   ]
+  }
+ },
+ "diag-b1-ttft-item2b-v1": {
+  "input_sha256": "ca6ef4f366f6ea7e62caa229ae83a175bff1fa85fc658c5ac4d5d6fcb334eb35",
+  "binaries": {
+   "A": {
+    "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-b4-throughput/binaries/ironmlx-item1b-dev-8d3a42dc",
+    "sha256": "8d3a42dc8ee05cc805791a0f6acaf907f48a71bc5500f92b46630fa9a726cc65"
+   },
+   "B": {
+    "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-b4-throughput/binaries/ironmlx-item2b-dev-f6a40e20",
+    "sha256": "f6a40e20c5a3bed712f3fa30153611493806c142e0aea5c8a397e4572f0f3622"
+   }
+  },
+  "sessions": 12,
+  "invalid": 0,
+  "after_b4/code-1/A": {
+   "n": 9,
+   "ttft_median_ms": 122.6375000551343,
+   "prefill_median_ms": 121.057,
+   "outside_prefill_median_ms": 1.7997913551628528,
+   "ttft_all_ms": [
+    122.6,
+    152.8,
+    109.9,
+    122.7,
+    111.7,
+    110.7,
+    120.1,
+    125.1,
+    123.7
+   ]
+  },
+  "after_b4/code-1/B": {
+   "n": 9,
+   "ttft_median_ms": 123.88154165819287,
+   "prefill_median_ms": 122.691,
+   "outside_prefill_median_ms": 1.6109995513558317,
+   "ttft_all_ms": [
+    123.8,
+    159.2,
+    181.5,
+    123.9,
+    109.8,
+    116.2,
+    121.5,
+    160.6,
+    152.2
+   ]
+  },
+  "after_b4/knowledge-1/A": {
+   "n": 9,
+   "ttft_median_ms": 136.59666711464524,
+   "prefill_median_ms": 135.078,
+   "outside_prefill_median_ms": 1.5485001463294168,
+   "ttft_all_ms": [
+    151.1,
+    121.5,
+    105.1,
+    105.7,
+    149.6,
+    106.5,
+    136.6,
+    180.8,
+    140.5
+   ]
+  },
+  "after_b4/knowledge-1/B": {
+   "n": 9,
+   "ttft_median_ms": 120.29079161584377,
+   "prefill_median_ms": 118.65,
+   "outside_prefill_median_ms": 1.633082631617782,
+   "ttft_all_ms": [
+    116.8,
+    113.3,
+    120.3,
+    104.4,
+    109.2,
+    147.8,
+    150.3,
+    130.1,
+    156.6
+   ]
+  },
+  "after_b4/code-3/A": {
+   "n": 9,
+   "ttft_median_ms": 154.3579171411693,
+   "prefill_median_ms": 152.732,
+   "outside_prefill_median_ms": 1.8771667942702663,
+   "ttft_all_ms": [
+    145.3,
+    156.9,
+    156.7,
+    187.3,
+    151.2,
+    191.2,
+    144.4,
+    154.4,
+    144.3
+   ]
+  },
+  "after_b4/code-3/B": {
+   "n": 9,
+   "ttft_median_ms": 159.98358372598886,
+   "prefill_median_ms": 158.212,
+   "outside_prefill_median_ms": 1.8400829115211934,
+   "ttft_all_ms": [
+    143.9,
+    147.3,
+    156.4,
+    144.4,
+    160.0,
+    189.6,
+    160.9,
+    161.5,
+    167.1
+   ]
+  },
+  "fresh/code-1/A": {
+   "n": 9,
+   "ttft_median_ms": 115.96095794811845,
+   "prefill_median_ms": 114.179,
+   "outside_prefill_median_ms": 1.8152500494122563,
+   "ttft_all_ms": [
+    114.0,
+    107.1,
+    117.7,
+    182.7,
+    116.0,
+    108.6,
+    112.0,
+    140.6,
+    120.4
+   ]
+  },
+  "fresh/code-1/B": {
+   "n": 9,
+   "ttft_median_ms": 128.61699983477592,
+   "prefill_median_ms": 126.868,
+   "outside_prefill_median_ms": 1.7484995707571471,
+   "ttft_all_ms": [
+    141.3,
+    152.2,
+    116.1,
+    112.3,
+    103.9,
+    149.7,
+    205.0,
+    107.0,
+    128.6
+   ]
+  },
+  "fresh/knowledge-1/A": {
+   "n": 9,
+   "ttft_median_ms": 112.18916578218341,
+   "prefill_median_ms": 110.487,
+   "outside_prefill_median_ms": 1.8164997523725077,
+   "ttft_all_ms": [
+    109.4,
+    104.5,
+    144.0,
+    105.9,
+    111.1,
+    112.2,
+    182.5,
+    141.9,
+    165.8
+   ]
+  },
+  "fresh/knowledge-1/B": {
+   "n": 9,
+   "ttft_median_ms": 106.26541590318084,
+   "prefill_median_ms": 104.475,
+   "outside_prefill_median_ms": 1.724790723621851,
+   "ttft_all_ms": [
+    105.5,
+    106.2,
+    149.4,
+    135.5,
+    119.0,
+    104.8,
+    106.3,
+    106.2,
+    138.2
+   ]
+  },
+  "fresh/code-3/A": {
+   "n": 9,
+   "ttft_median_ms": 166.29112511873245,
+   "prefill_median_ms": 164.581,
+   "outside_prefill_median_ms": 1.935375069707618,
+   "ttft_all_ms": [
+    169.8,
+    194.6,
+    162.1,
+    150.7,
+    166.3,
+    144.9,
+    150.4,
+    180.9,
+    167.7
+   ]
+  },
+  "fresh/code-3/B": {
+   "n": 9,
+   "ttft_median_ms": 173.7237093038857,
+   "prefill_median_ms": 171.579,
+   "outside_prefill_median_ms": 1.979583183258768,
+   "ttft_all_ms": [
+    160.9,
+    183.2,
+    149.5,
+    144.2,
+    153.1,
+    190.8,
+    173.7,
+    194.8,
+    210.5
+   ]
+  }
+ },
+ "item2b-budget": {
+  "none": {
+   "extra_env": [],
+   "throughput": [
+    147.8,
+    150.0,
+    123.2,
+    122.2,
+    108.5,
+    119.5
+   ],
+   "wall_s": [
+    26.72,
+    27.68,
+    31.97,
+    33.97,
+    36.29,
+    33.05
+   ],
+   "tasks": [
+    [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ],
+    [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ]
+   ],
+   "median_throughput": 122.71071040555074,
+   "note": "groups ran sequentially (none, k3, k4, k5), not interleaved"
+  },
+  "k3": {
+   "extra_env": [
+    "IRONMLX_DIAGNOSTIC_DFLASH2_RAGGED_BUDGET=3"
+   ],
+   "throughput": [
+    127.3,
+    135.5,
+    118.4,
+    133.2,
+    117.8,
+    124.4
+   ],
+   "wall_s": [
+    31.01,
+    30.63,
+    33.27,
+    31.17,
+    33.44,
+    31.75
+   ],
+   "tasks": [
+    [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ],
+    [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ]
+   ],
+   "median_throughput": 125.84697581405933,
+   "note": "groups ran sequentially (none, k3, k4, k5), not interleaved"
+  },
+  "k4": {
+   "extra_env": [
+    "IRONMLX_DIAGNOSTIC_DFLASH2_RAGGED_BUDGET=4"
+   ],
+   "throughput": [
+    120.8,
+    125.8,
+    112.4,
+    123.2,
+    112.1,
+    117.7
+   ],
+   "wall_s": [
+    32.7,
+    32.98,
+    35.05,
+    33.68,
+    35.15,
+    33.54
+   ],
+   "tasks": [
+    [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ],
+    [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ]
+   ],
+   "median_throughput": 119.22595555151946,
+   "note": "groups ran sequentially (none, k3, k4, k5), not interleaved"
+  },
+  "k5": {
+   "extra_env": [
+    "IRONMLX_DIAGNOSTIC_DFLASH2_RAGGED_BUDGET=5"
+   ],
+   "throughput": [
+    118.1,
+    125.7,
+    108.1,
+    122.3,
+    107.3,
+    115.1
+   ],
+   "wall_s": [
+    33.44,
+    33.01,
+    36.43,
+    33.93,
+    36.7,
+    34.29
+   ],
+   "tasks": [
+    [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ],
+    [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ]
+   ],
+   "median_throughput": 116.58869599671272,
+   "note": "groups ran sequentially (none, k3, k4, k5), not interleaved"
+  }
+ },
+ "item2-attn-stages-v1": {
+  "per_width_median_ms": {
+   "2": {
+    "draft": 12.95,
+    "verify": 50.3,
+    "verify_attn_rows": 6.16,
+    "head": 1.64,
+    "commit": 2.12
+   },
+   "3": {
+    "draft": 14.75,
+    "verify": 75.98,
+    "verify_attn_rows": 6.48,
+    "head": 2.76,
+    "commit": 2.92
+   },
+   "4": {
+    "draft": 13.2,
+    "verify": 66.14,
+    "verify_attn_rows": 5.91,
+    "head": 2.44,
+    "commit": 3.45
+   }
+  },
+  "attn_rows_total_s": 12.484863,
+  "verify_total_s": 122.935073,
+  "scored_wall_total_s": 206.5013928329572,
+  "attn_share_of_wall": 0.06045897719488622,
+  "note": "barrier mode; per-layer syncs inflate both verify and the attention figure"
+ },
+ "ragged-acceptance-length-item1b-stages": {
+  "4": {
+   "0": 832,
+   "2": 380,
+   "7": 462,
+   "6": 136,
+   "5": 168,
+   "1": 603,
+   "4": 180,
+   "3": 199
+  },
+  "3": {
+   "0": 262,
+   "1": 210,
+   "2": 141,
+   "5": 28,
+   "7": 128,
+   "6": 34,
+   "4": 52,
+   "3": 51
+  },
+  "2": {
+   "1": 345,
+   "4": 106,
+   "0": 496,
+   "3": 178,
+   "6": 84,
+   "2": 238,
+   "5": 84,
+   "7": 443
+  }
+ }
+}

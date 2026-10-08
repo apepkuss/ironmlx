@@ -25,7 +25,7 @@ pub(super) fn closed_scheduler_stream(events: Vec<GenerateEvent>) -> AdmitReply 
     }
 }
 
-async fn state() -> AppState<SchedulerActorFakeModel> {
+pub(crate) async fn state() -> AppState<SchedulerActorFakeModel> {
     let dir = std::env::temp_dir().join(format!("ironmlx-eof-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&dir).unwrap();
     let tokenizer_path = dir.join("tokenizer.json");

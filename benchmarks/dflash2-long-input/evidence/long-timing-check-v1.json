@@ -1,0 +1,118 @@
+{
+ "plain": [
+  {
+   "session": 0,
+   "task": "code-1",
+   "ttft_s": 42.53889899980277,
+   "prefill_s": 42.508371,
+   "decode_tps": 79.68239795876148,
+   "e2e_s": 48.37459933292121,
+   "tokens": 466,
+   "peak_gib": 23.95630743354559
+  },
+  {
+   "session": 0,
+   "task": "knowledge-1",
+   "ttft_s": 43.96095841610804,
+   "prefill_s": 43.926724,
+   "decode_tps": 33.208055048371094,
+   "e2e_s": 53.56709120795131,
+   "tokens": 320,
+   "peak_gib": 23.953239858150482
+  },
+  {
+   "session": 1,
+   "task": "code-1",
+   "ttft_s": 46.186550832819194,
+   "prefill_s": 46.148360000000004,
+   "decode_tps": 74.80141230069945,
+   "e2e_s": 52.40303916716948,
+   "tokens": 466,
+   "peak_gib": 24.126046001911163
+  },
+  {
+   "session": 1,
+   "task": "knowledge-1",
+   "ttft_s": 48.67257058387622,
+   "prefill_s": 48.638103,
+   "decode_tps": 30.831774466934394,
+   "e2e_s": 59.01907016662881,
+   "tokens": 320,
+   "peak_gib": 24.14653842151165
+  }
+ ],
+ "prefill_chunks_ms": [
+  [
+   2505,
+   2873,
+   2981,
+   2942,
+   2999,
+   3039,
+   3083,
+   3132,
+   3163,
+   3328,
+   3254,
+   3319,
+   3371,
+   3432,
+   3421,
+   187
+  ],
+  [
+   2771,
+   2972,
+   2940,
+   2960,
+   3051,
+   3116,
+   3140,
+   3206,
+   3281,
+   3285,
+   3362,
+   3450,
+   3488,
+   3562,
+   3604,
+   187
+  ]
+ ],
+ "decode_tree_window_median_ms": {
+  "draft": 12.2955,
+  "verify": 53.8245,
+  "head": 1.632,
+  "commit": 9.1895
+ },
+ "decode_tree_window_emitted_mean": 3.471311475409836,
+ "decode_tree_windows": 244,
+ "prefill_stage_totals_s": {
+  "decode_layer_input": 0.096479,
+  "decode_input_norm": 0.26872,
+  "gdn_in_proj": 6.113821,
+  "gdn_conv_norm_gates": 1.249105,
+  "gdn_recurrence": 3.495135,
+  "decode_attention_path": 3.743857,
+  "decode_attention_residual": 0.340371,
+  "decode_post_attention_norm": 0.267823,
+  "mlp_gate_up": 17.012783,
+  "mlp_swiglu": 0.718504,
+  "decode_mlp_path": 9.202877,
+  "decode_layer_output": 0.343655,
+  "attn_qkv_proj": 1.913938,
+  "attn_norm_rope_cache": 0.306185,
+  "attn_sdpa": 5.592983
+ },
+ "prefill_stage_groups_share": {
+  "mlp (gate_up + swiglu + down)": 0.5315998607040792,
+  "gdn in_proj": 0.12066854541947818,
+  "attention qkv proj": 0.03777541319627532,
+  "output proj (o_proj / out_proj)": 0.07389254256029597,
+  "attention sdpa": 0.11038876067288678,
+  "gdn recurrence": 0.06898351399144788,
+  "conv / norm / rope / residual": 0.05669136345553674
+ },
+ "prefill_stage_total_s_with_barriers": 50.666236,
+ "note": "diagnostic; stage totals include one evaluation per stage boundary (barrier mode)"
+}

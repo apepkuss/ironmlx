@@ -1,0 +1,32 @@
+[
+  {
+    "id": "code-1",
+    "category": "code",
+    "prompt": "用 Python 实现函数 merge_intervals(intervals)，输入是一组可能无序、可能相交的闭区间 [start, end]，返回按 start 升序排列且已合并的区间。请给出代码、复杂度分析和两个边界测试。"
+  },
+  {
+    "id": "code-2",
+    "category": "code",
+    "prompt": "请用 TypeScript 写一个带固定容量的 LRUCache<K, V>，get 和 put 都要求均摊 O(1)。说明你选择的数据结构，并给出一个最小使用示例。"
+  },
+  {
+    "id": "code-3",
+    "category": "code",
+    "prompt": "下面的 Python 异步代码会串行执行，请修复为最多同时运行 4 个任务，并保持输出顺序与输入一致：\n\nasync def fetch_all(urls):\n    results = []\n    for url in urls:\n        results.append(await fetch(url))\n    return results\n\n请给出健壮实现，并解释异常如何传播。"
+  },
+  {
+    "id": "knowledge-1",
+    "category": "knowledge",
+    "prompt": "用普通开发者容易理解的语言说明数据库事务隔离级别中“可重复读”和“串行化”的区别，并各举一个适合采用它的业务场景。"
+  },
+  {
+    "id": "knowledge-2",
+    "category": "knowledge",
+    "prompt": "为什么 HTTP 缓存同时需要 Cache-Control、ETag 和 Vary？请用一个多语言 API 的例子说明三者如何配合。"
+  },
+  {
+    "id": "knowledge-3",
+    "category": "knowledge",
+    "prompt": "向一位熟悉编程但不了解机器学习的读者解释量化为何能降低大语言模型的内存占用，以及它可能带来的质量和性能代价。控制在 500 字以内。"
+  }
+]

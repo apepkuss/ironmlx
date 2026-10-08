@@ -1,0 +1,38 @@
+2026-10-08 local integration checks
+Base: 223bfd3f9428b254f52e7a73625e66860f3d1885
+Source feature: 7669ac046045d0195537d755da6f23775bab047e
+Worktree: /Users/xin/workspace/test-dflash2-merge-readiness/ironmlx-backend
+MLX environment: /Users/xin/.local/mlx/mlx-env.sh
+rustc 1.94.0 (4a4ef493e 2026-03-02)
+rustc nightly 1.97.0-nightly (507271bc1 2026-05-17)
+
+cargo fmt: exit 0
+cargo +nightly fmt --all -- --check: exit 0
+cargo +nightly clippy --all-features --workspace -- -D warnings: exit 0
+cargo build --release: exit 0
+Build has upstream C++ header warnings; Rust Clippy has no denied warnings.
+
+cargo test --locked --release -p ironmlx-runtime --lib qwen38_tensor_batch_reaches_output_tail_and_matches_b1 -- --ignored --nocapture --test-threads=1
+exit 0: 1 passed, 0 failed, 557 filtered out, 12.71 seconds
+tensor_tail: rows=4 tokens=256 cap=268 windows=86 tail_windows=1; all rows match B1 and end with length
+
+cargo test --locked --release -p ironmlx --lib missing_terminal_event -- --test-threads=1
+exit 0: 7 passed, 0 failed, 334 filtered out
+
+python3 scripts/verify-documentation-parity.py: exit 0
+CI-equivalent Ruby Markdown link/image-path check: exit 0
+git diff --check HEAD: exit 0
+Eight unchanged feature source files compared byte-for-byte with source worktree: equal.
+core/mod.rs additionally retains latest dev embedding_execution module; core/dflash2.rs adds only the regression test beyond the feature source.
+
+Local raw logs (retained under reports/dflash2-merge-readiness), SHA256:
+e0b59884851e12fe86cceb5533fc3dedf78c86473858a311c83710815d9fb9a1  tensor-tail-final.log
+91b815e4fd67bbd4af66f0c5802bb062c98a8bbac9991d0542aaa3ba050afacb  api-eof-tests.log
+ce95defef13a0a19dc9c17d64e93100836cc87806cf652e94f8681ad33477405  clippy-final.log
+008e3699432ae1e9a03591073ebbfd5131f0b1d316b109ec48f5bbf04736909d  build-release.log
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  fmt-final.log
+Local release binary SHA256:
+6c508aaefa8f8906cb2cabb6415d86ac9cae3811e6a9f62d5a82b2d14bd37c54  target/release/ironmlx
+
+Remote CI: check the preparation commit's GitHub Actions result; not asserted by this pre-push receipt.
+No fresh full performance suite or 32K comparison was run during merge preparation.

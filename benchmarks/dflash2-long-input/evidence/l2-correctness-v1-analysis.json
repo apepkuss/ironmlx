@@ -1,0 +1,114 @@
+{
+ "label": "l2-correctness-v1",
+ "kind": "correctness",
+ "run_sha256": "9d6fe28889947298f9c6d719c163ac7438d1a2e2a7e5bc5bcb0d8cbcae830692",
+ "protocol_sha256": "cdbad528a436eb40cf88b1638e69a75d48c4838874134c20cbce3256dbe8d2d3",
+ "binary": {
+  "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-long-input/binaries/ironmlx-long-baseline-8d3a42dc",
+  "sha256": "8d3a42dc8ee05cc805791a0f6acaf907f48a71bc5500f92b46630fa9a726cc65"
+ },
+ "comparisons": {
+  "4096": {
+   "records": [
+    2,
+    2
+   ],
+   "comparisons": [
+    {
+     "request": 0,
+     "same_prompt": true,
+     "equal": true,
+     "tokens": [
+      466,
+      466
+     ],
+     "first_divergence": null
+    },
+    {
+     "request": 1,
+     "same_prompt": true,
+     "equal": false,
+     "tokens": [
+      320,
+      285
+     ],
+     "first_divergence": 57
+    }
+   ],
+   "all_equal": false
+  },
+  "8192": {
+   "records": [
+    2,
+    2
+   ],
+   "comparisons": [
+    {
+     "request": 0,
+     "same_prompt": true,
+     "equal": true,
+     "tokens": [
+      466,
+      466
+     ],
+     "first_divergence": null
+    },
+    {
+     "request": 1,
+     "same_prompt": true,
+     "equal": false,
+     "tokens": [
+      320,
+      321
+     ],
+     "first_divergence": 57
+    }
+   ],
+   "all_equal": false
+  }
+ },
+ "finishes": {
+  "2048": [
+   [
+    "code-1",
+    "stop",
+    466,
+    "b272c4314622d0af91449712e9f99693e812f670a2cb1366a608aa8c524a529a"
+   ],
+   [
+    "knowledge-1",
+    "stop",
+    320,
+    "51e5f8fe4d8ab8310041512a43e6a00c522d427c55c8b08e5f0cface4698d254"
+   ]
+  ],
+  "4096": [
+   [
+    "code-1",
+    "stop",
+    466,
+    "b272c4314622d0af91449712e9f99693e812f670a2cb1366a608aa8c524a529a"
+   ],
+   [
+    "knowledge-1",
+    "stop",
+    285,
+    "05478c911db5c11420c4abd38448d6392524ba4435daf2e0176bee48f74263d8"
+   ]
+  ],
+  "8192": [
+   [
+    "code-1",
+    "stop",
+    466,
+    "b272c4314622d0af91449712e9f99693e812f670a2cb1366a608aa8c524a529a"
+   ],
+   [
+    "knowledge-1",
+    "stop",
+    321,
+    "850a87de3fbf654054ca5764964bec26a2dbbec9d40244a4c036b8c5579a80b8"
+   ]
+  ]
+ }
+}

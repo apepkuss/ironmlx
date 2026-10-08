@@ -1,0 +1,3070 @@
+{
+ "diag-plain-v1": {
+  "mode": "plain",
+  "binary_sha256": "4fc49e9223f62468cebae3837ed7c1867d4047821a29405903502a41e9f5b487",
+  "batches": [
+   {
+    "session": 0,
+    "kind": "warmup",
+    "tasks": [
+     "warmup-1",
+     "warmup-2",
+     "warmup-1",
+     "warmup-2"
+    ],
+    "throughput_tps": 68.85077213668076,
+    "wall_s": 4.182959625031799,
+    "tokens": 288,
+    "valid": true,
+    "step_range": [
+     0,
+     44
+    ],
+    "ttft_ms": [
+     1445.0,
+     796.9,
+     1445.1,
+     1445.3
+    ],
+    "decode_tps": [
+     28.1,
+     41.8,
+     28.1,
+     65.7
+    ],
+    "e2e_s": [
+     4.18,
+     2.43,
+     4.18,
+     2.52
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 0,
+      "windows_by_width": [
+       0,
+       0,
+       0
+      ],
+      "row_windows": 0,
+      "emitted_tokens": 0,
+      "accepted_draft_tokens": 0,
+      "single_eligible_steps": 0,
+      "groups_built": 0,
+      "groups_scattered": 0,
+      "active_groups": 0,
+      "max_width": 0,
+      "cache_build_us": 0,
+      "scatter_us": 0,
+      "window_us": 0,
+      "requests_with_ragged_windows": 0,
+      "tree_to_ragged_switches": 0,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 42,
+      "windows_by_width": [
+       32,
+       1,
+       9
+      ],
+      "row_windows": 103,
+      "emitted_tokens": 273,
+      "accepted_draft_tokens": 174,
+      "single_eligible_steps": 0,
+      "groups_built": 3,
+      "groups_scattered": 3,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 986,
+      "scatter_us": 32786,
+      "window_us": 2727724,
+      "requests_with_ragged_windows": 2,
+      "tree_to_ragged_switches": 1,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.59407901763916
+   },
+   {
+    "session": 0,
+    "kind": "scored",
+    "tasks": [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ],
+    "throughput_tps": 135.04235626206463,
+    "wall_s": 29.235271875280887,
+    "tokens": 3948,
+    "valid": true,
+    "step_range": [
+     44,
+     974
+    ],
+    "ttft_ms": [
+     496.5,
+     496.2,
+     496.4,
+     128.7
+    ],
+    "decode_tps": [
+     58.5,
+     69.5,
+     44.3,
+     48.8
+    ],
+    "e2e_s": [
+     12.21,
+     20.6,
+     10.58,
+     29.24
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 42,
+      "windows_by_width": [
+       32,
+       1,
+       9
+      ],
+      "row_windows": 103,
+      "emitted_tokens": 273,
+      "accepted_draft_tokens": 174,
+      "single_eligible_steps": 0,
+      "groups_built": 3,
+      "groups_scattered": 3,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 986,
+      "scatter_us": 32786,
+      "window_us": 2727724,
+      "requests_with_ragged_windows": 4,
+      "tree_to_ragged_switches": 1,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 326,
+      "windows_by_width": [
+       181,
+       20,
+       125
+      ],
+      "row_windows": 922,
+      "emitted_tokens": 3572,
+      "accepted_draft_tokens": 2658,
+      "single_eligible_steps": 1,
+      "groups_built": 6,
+      "groups_scattered": 6,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 2016,
+      "scatter_us": 37846,
+      "window_us": 22509723,
+      "requests_with_ragged_windows": 8,
+      "tree_to_ragged_switches": 2,
+      "ragged_to_tree_switches": 1,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.435448355972767
+   },
+   {
+    "session": 0,
+    "kind": "scored",
+    "tasks": [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    "throughput_tps": 129.56355866805782,
+    "wall_s": 32.03832962503657,
+    "tokens": 4151,
+    "valid": true,
+    "step_range": [
+     974,
+     1893
+    ],
+    "ttft_ms": [
+     470.0,
+     469.7,
+     469.8,
+     134.6
+    ],
+    "decode_tps": [
+     51.4,
+     24.4,
+     53.1,
+     58.1
+    ],
+    "e2e_s": [
+     32.04,
+     18.77,
+     13.36,
+     24.16
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 326,
+      "windows_by_width": [
+       181,
+       20,
+       125
+      ],
+      "row_windows": 922,
+      "emitted_tokens": 3572,
+      "accepted_draft_tokens": 2658,
+      "single_eligible_steps": 1,
+      "groups_built": 6,
+      "groups_scattered": 6,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 2016,
+      "scatter_us": 37846,
+      "window_us": 22509723,
+      "requests_with_ragged_windows": 8,
+      "tree_to_ragged_switches": 2,
+      "ragged_to_tree_switches": 1,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 609,
+      "windows_by_width": [
+       271,
+       78,
+       260
+      ],
+      "row_windows": 1816,
+      "emitted_tokens": 7082,
+      "accepted_draft_tokens": 5277,
+      "single_eligible_steps": 2,
+      "groups_built": 9,
+      "groups_scattered": 9,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 2770,
+      "scatter_us": 45078,
+      "window_us": 45854620,
+      "requests_with_ragged_windows": 12,
+      "tree_to_ragged_switches": 3,
+      "ragged_to_tree_switches": 2,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.41205658763647
+   },
+   {
+    "session": 0,
+    "kind": "scored",
+    "tasks": [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    "throughput_tps": 111.93523550595913,
+    "wall_s": 35.18999162502587,
+    "tokens": 3939,
+    "valid": true,
+    "step_range": [
+     1893,
+     2420
+    ],
+    "ttft_ms": [
+     508.2,
+     126.2,
+     507.9,
+     508.4
+    ],
+    "decode_tps": [
+     41.6,
+     40.5,
+     48.6,
+     25.1
+    ],
+    "e2e_s": [
+     11.26,
+     35.19,
+     33.86,
+     18.29
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 609,
+      "windows_by_width": [
+       271,
+       78,
+       260
+      ],
+      "row_windows": 1816,
+      "emitted_tokens": 7082,
+      "accepted_draft_tokens": 5277,
+      "single_eligible_steps": 2,
+      "groups_built": 9,
+      "groups_scattered": 9,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 2770,
+      "scatter_us": 45078,
+      "window_us": 45854620,
+      "requests_with_ragged_windows": 12,
+      "tree_to_ragged_switches": 3,
+      "ragged_to_tree_switches": 2,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 1058,
+      "windows_by_width": [
+       527,
+       155,
+       376
+      ],
+      "row_windows": 3023,
+      "emitted_tokens": 10940,
+      "accepted_draft_tokens": 7932,
+      "single_eligible_steps": 3,
+      "groups_built": 12,
+      "groups_scattered": 12,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 3584,
+      "scatter_us": 58618,
+      "window_us": 78625176,
+      "requests_with_ragged_windows": 16,
+      "tree_to_ragged_switches": 4,
+      "ragged_to_tree_switches": 3,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.603707045316696
+   },
+   {
+    "session": 1,
+    "kind": "warmup",
+    "tasks": [
+     "warmup-1",
+     "warmup-2",
+     "warmup-1",
+     "warmup-2"
+    ],
+    "throughput_tps": 80.82553651575833,
+    "wall_s": 3.5632302910089493,
+    "tokens": 288,
+    "valid": true,
+    "step_range": [
+     0,
+     44
+    ],
+    "ttft_ms": [
+     434.8,
+     162.1,
+     434.7,
+     435.0
+    ],
+    "decode_tps": [
+     24.6,
+     54.9,
+     24.6,
+     63.7
+    ],
+    "e2e_s": [
+     3.56,
+     1.45,
+     3.56,
+     1.56
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 0,
+      "windows_by_width": [
+       0,
+       0,
+       0
+      ],
+      "row_windows": 0,
+      "emitted_tokens": 0,
+      "accepted_draft_tokens": 0,
+      "single_eligible_steps": 0,
+      "groups_built": 0,
+      "groups_scattered": 0,
+      "active_groups": 0,
+      "max_width": 0,
+      "cache_build_us": 0,
+      "scatter_us": 0,
+      "window_us": 0,
+      "requests_with_ragged_windows": 0,
+      "tree_to_ragged_switches": 0,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 42,
+      "windows_by_width": [
+       32,
+       1,
+       9
+      ],
+      "row_windows": 103,
+      "emitted_tokens": 273,
+      "accepted_draft_tokens": 174,
+      "single_eligible_steps": 0,
+      "groups_built": 3,
+      "groups_scattered": 3,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 940,
+      "scatter_us": 3061,
+      "window_us": 3116836,
+      "requests_with_ragged_windows": 2,
+      "tree_to_ragged_switches": 1,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.26957055181265
+   },
+   {
+    "session": 1,
+    "kind": "scored",
+    "tasks": [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    "throughput_tps": 115.09001845779325,
+    "wall_s": 36.06741970870644,
+    "tokens": 4151,
+    "valid": true,
+    "step_range": [
+     44,
+     964
+    ],
+    "ttft_ms": [
+     131.4,
+     461.0,
+     461.1,
+     461.4
+    ],
+    "decode_tps": [
+     45.1,
+     21.3,
+     45.9,
+     51.5
+    ],
+    "e2e_s": [
+     36.07,
+     21.42,
+     15.38,
+     27.57
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 42,
+      "windows_by_width": [
+       32,
+       1,
+       9
+      ],
+      "row_windows": 103,
+      "emitted_tokens": 273,
+      "accepted_draft_tokens": 174,
+      "single_eligible_steps": 0,
+      "groups_built": 3,
+      "groups_scattered": 3,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 940,
+      "scatter_us": 62316,
+      "window_us": 3116836,
+      "requests_with_ragged_windows": 4,
+      "tree_to_ragged_switches": 1,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 326,
+      "windows_by_width": [
+       123,
+       59,
+       144
+      ],
+      "row_windows": 999,
+      "emitted_tokens": 3782,
+      "accepted_draft_tokens": 2790,
+      "single_eligible_steps": 1,
+      "groups_built": 6,
+      "groups_scattered": 6,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 2304,
+      "scatter_us": 71713,
+      "window_us": 29706408,
+      "requests_with_ragged_windows": 8,
+      "tree_to_ragged_switches": 2,
+      "ragged_to_tree_switches": 1,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.574685141444206
+   },
+   {
+    "session": 1,
+    "kind": "scored",
+    "tasks": [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    "throughput_tps": 102.91469782824147,
+    "wall_s": 38.274416415952146,
+    "tokens": 3939,
+    "valid": true,
+    "step_range": [
+     964,
+     1493
+    ],
+    "ttft_ms": [
+     493.4,
+     493.7,
+     129.8,
+     493.9
+    ],
+    "decode_tps": [
+     36.5,
+     37.6,
+     44.1,
+     22.5
+    ],
+    "e2e_s": [
+     12.72,
+     38.27,
+     36.88,
+     20.4
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 326,
+      "windows_by_width": [
+       123,
+       59,
+       144
+      ],
+      "row_windows": 999,
+      "emitted_tokens": 3782,
+      "accepted_draft_tokens": 2790,
+      "single_eligible_steps": 1,
+      "groups_built": 6,
+      "groups_scattered": 6,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 2304,
+      "scatter_us": 71713,
+      "window_us": 29706408,
+      "requests_with_ragged_windows": 8,
+      "tree_to_ragged_switches": 2,
+      "ragged_to_tree_switches": 1,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 774,
+      "windows_by_width": [
+       378,
+       136,
+       260
+      ],
+      "row_windows": 2204,
+      "emitted_tokens": 7634,
+      "accepted_draft_tokens": 5441,
+      "single_eligible_steps": 2,
+      "groups_built": 9,
+      "groups_scattered": 9,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 3221,
+      "scatter_us": 85045,
+      "window_us": 65440970,
+      "requests_with_ragged_windows": 12,
+      "tree_to_ragged_switches": 3,
+      "ragged_to_tree_switches": 2,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.509102910757065
+   },
+   {
+    "session": 1,
+    "kind": "scored",
+    "tasks": [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ],
+    "throughput_tps": 119.34356219112145,
+    "wall_s": 33.08096329215914,
+    "tokens": 3948,
+    "valid": true,
+    "step_range": [
+     1493,
+     2423
+    ],
+    "ttft_ms": [
+     524.0,
+     523.7,
+     523.9,
+     156.1
+    ],
+    "decode_tps": [
+     50.1,
+     60.4,
+     37.9,
+     43.1
+    ],
+    "e2e_s": [
+     14.2,
+     23.63,
+     12.31,
+     33.08
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 774,
+      "windows_by_width": [
+       378,
+       136,
+       260
+      ],
+      "row_windows": 2204,
+      "emitted_tokens": 7634,
+      "accepted_draft_tokens": 5441,
+      "single_eligible_steps": 2,
+      "groups_built": 9,
+      "groups_scattered": 9,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 3221,
+      "scatter_us": 85045,
+      "window_us": 65440970,
+      "requests_with_ragged_windows": 12,
+      "tree_to_ragged_switches": 3,
+      "ragged_to_tree_switches": 2,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 1058,
+      "windows_by_width": [
+       527,
+       155,
+       376
+      ],
+      "row_windows": 3023,
+      "emitted_tokens": 10933,
+      "accepted_draft_tokens": 7925,
+      "single_eligible_steps": 3,
+      "groups_built": 12,
+      "groups_scattered": 12,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 4081,
+      "scatter_us": 98263,
+      "window_us": 88174146,
+      "requests_with_ragged_windows": 16,
+      "tree_to_ragged_switches": 4,
+      "ragged_to_tree_switches": 3,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.763085454702377
+   }
+  ],
+  "scored_throughput_median": 117.21679032445735,
+  "scored_wall_median": 34.135477458592504
+ },
+ "diag-steplog-v1": {
+  "mode": "steplog",
+  "binary_sha256": "68969b30388f23e0e1734552a2d20da1bb12b8fce90dd25e8c3b0990f5f1b01e",
+  "batches": [
+   {
+    "session": 0,
+    "kind": "warmup",
+    "tasks": [
+     "warmup-1",
+     "warmup-2",
+     "warmup-1",
+     "warmup-2"
+    ],
+    "throughput_tps": 89.45549674606407,
+    "wall_s": 3.2194779580459,
+    "tokens": 288,
+    "valid": true,
+    "step_range": [
+     0,
+     44
+    ],
+    "ttft_ms": [
+     435.0,
+     434.7,
+     434.9,
+     164.1
+    ],
+    "decode_tps": [
+     27.7,
+     76.5,
+     27.7,
+     64.4
+    ],
+    "e2e_s": [
+     3.22,
+     1.38,
+     3.22,
+     1.29
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 0,
+      "windows_by_width": [
+       0,
+       0,
+       0
+      ],
+      "row_windows": 0,
+      "emitted_tokens": 0,
+      "accepted_draft_tokens": 0,
+      "single_eligible_steps": 0,
+      "groups_built": 0,
+      "groups_scattered": 0,
+      "active_groups": 0,
+      "max_width": 0,
+      "cache_build_us": 0,
+      "scatter_us": 0,
+      "window_us": 0,
+      "requests_with_ragged_windows": 0,
+      "tree_to_ragged_switches": 0,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 42,
+      "windows_by_width": [
+       32,
+       1,
+       9
+      ],
+      "row_windows": 103,
+      "emitted_tokens": 273,
+      "accepted_draft_tokens": 174,
+      "single_eligible_steps": 0,
+      "groups_built": 3,
+      "groups_scattered": 3,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 991,
+      "scatter_us": 1899,
+      "window_us": 2755704,
+      "requests_with_ragged_windows": 2,
+      "tree_to_ragged_switches": 1,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.775185830891132,
+    "steps": {
+     "steps": 44,
+     "total_us": 2880303,
+     "phases": {
+      "next_tokens": 2571,
+      "publish": 207,
+      "keys": 107,
+      "tensor_groups": 0,
+      "ragged": 162,
+      "ready_windows": 56865,
+      "group_scatter": 0,
+      "complete": 4353,
+      "ragged_select_scatter": 58542,
+      "ragged_reserve": 29,
+      "ragged_window": 2757282
+     },
+     "widths": {
+      "1": 1,
+      "4": 10,
+      "3": 1,
+      "2": 32
+     },
+     "notes": {
+      "tree_window_rows": 1
+     },
+     "ragged": {
+      "windows": 42,
+      "built": 3,
+      "rows": {
+       "4": 9,
+       "3": 1,
+       "2": 32
+      },
+      "cache_build_us": 991,
+      "window_us": 2755704,
+      "stages": {},
+      "emitted": 273,
+      "accepted": 174
+     },
+     "tree": {
+      "windows": {},
+      "stages": {},
+      "emitted": 0
+     }
+    }
+   },
+   {
+    "session": 0,
+    "kind": "scored",
+    "tasks": [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ],
+    "throughput_tps": 125.86787288049418,
+    "wall_s": 31.366224832832813,
+    "tokens": 3948,
+    "valid": true,
+    "step_range": [
+     44,
+     974
+    ],
+    "ttft_ms": [
+     497.2,
+     497.0,
+     497.1,
+     129.7
+    ],
+    "decode_tps": [
+     53.9,
+     64.5,
+     40.7,
+     45.4
+    ],
+    "e2e_s": [
+     13.21,
+     22.14,
+     11.49,
+     31.37
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 42,
+      "windows_by_width": [
+       32,
+       1,
+       9
+      ],
+      "row_windows": 103,
+      "emitted_tokens": 273,
+      "accepted_draft_tokens": 174,
+      "single_eligible_steps": 0,
+      "groups_built": 3,
+      "groups_scattered": 3,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 991,
+      "scatter_us": 58470,
+      "window_us": 2755704,
+      "requests_with_ragged_windows": 4,
+      "tree_to_ragged_switches": 1,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 326,
+      "windows_by_width": [
+       181,
+       20,
+       125
+      ],
+      "row_windows": 922,
+      "emitted_tokens": 3572,
+      "accepted_draft_tokens": 2658,
+      "single_eligible_steps": 1,
+      "groups_built": 6,
+      "groups_scattered": 6,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 1793,
+      "scatter_us": 63511,
+      "window_us": 23911189,
+      "requests_with_ragged_windows": 8,
+      "tree_to_ragged_switches": 2,
+      "ragged_to_tree_switches": 1,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.46021370589733,
+    "steps": {
+     "steps": 930,
+     "total_us": 30689661,
+     "phases": {
+      "next_tokens": 428340,
+      "publish": 3717,
+      "keys": 1397,
+      "tensor_groups": 0,
+      "ragged": 4966,
+      "ready_windows": 9012225,
+      "group_scatter": 26,
+      "complete": 41302,
+      "ragged_select_scatter": 5334,
+      "ragged_reserve": 26486,
+      "ragged_window": 21163776
+     },
+     "widths": {
+      "1": 645,
+      "4": 117,
+      "3": 19,
+      "2": 149
+     },
+     "notes": {
+      "tree_window_rows": 153
+     },
+     "ragged": {
+      "windows": 284,
+      "built": 3,
+      "rows": {
+       "4": 116,
+       "3": 19,
+       "2": 149
+      },
+      "cache_build_us": 802,
+      "window_us": 21155485,
+      "stages": {},
+      "emitted": 3299,
+      "accepted": 2484
+     },
+     "tree": {
+      "windows": {},
+      "stages": {},
+      "emitted": 0
+     }
+    }
+   },
+   {
+    "session": 0,
+    "kind": "scored",
+    "tasks": [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    "throughput_tps": 130.1017188058506,
+    "wall_s": 31.905804459005594,
+    "tokens": 4151,
+    "valid": true,
+    "step_range": [
+     974,
+     1893
+    ],
+    "ttft_ms": [
+     456.4,
+     456.2,
+     456.3,
+     125.0
+    ],
+    "decode_tps": [
+     51.6,
+     24.8,
+     54.0,
+     58.6
+    ],
+    "e2e_s": [
+     31.91,
+     18.46,
+     13.13,
+     23.94
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 326,
+      "windows_by_width": [
+       181,
+       20,
+       125
+      ],
+      "row_windows": 922,
+      "emitted_tokens": 3572,
+      "accepted_draft_tokens": 2658,
+      "single_eligible_steps": 1,
+      "groups_built": 6,
+      "groups_scattered": 6,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 1793,
+      "scatter_us": 63511,
+      "window_us": 23911189,
+      "requests_with_ragged_windows": 8,
+      "tree_to_ragged_switches": 2,
+      "ragged_to_tree_switches": 1,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 609,
+      "windows_by_width": [
+       271,
+       78,
+       260
+      ],
+      "row_windows": 1816,
+      "emitted_tokens": 7082,
+      "accepted_draft_tokens": 5277,
+      "single_eligible_steps": 2,
+      "groups_built": 9,
+      "groups_scattered": 9,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 2565,
+      "scatter_us": 76027,
+      "window_us": 46938402,
+      "requests_with_ragged_windows": 12,
+      "tree_to_ragged_switches": 3,
+      "ragged_to_tree_switches": 2,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.70812327414751,
+    "steps": {
+     "steps": 919,
+     "total_us": 31291236,
+     "phases": {
+      "next_tokens": 402030,
+      "publish": 3232,
+      "keys": 1154,
+      "tensor_groups": 0,
+      "ragged": 4423,
+      "ready_windows": 7737521,
+      "group_scatter": 35,
+      "complete": 42028,
+      "ragged_select_scatter": 12723,
+      "ragged_reserve": 49270,
+      "ragged_window": 23036714
+     },
+     "widths": {
+      "1": 635,
+      "4": 136,
+      "3": 58,
+      "2": 90
+     },
+     "notes": {
+      "tree_window_rows": 130
+     },
+     "ragged": {
+      "windows": 283,
+      "built": 3,
+      "rows": {
+       "4": 135,
+       "3": 58,
+       "2": 90
+      },
+      "cache_build_us": 772,
+      "window_us": 23027213,
+      "stages": {},
+      "emitted": 3510,
+      "accepted": 2619
+     },
+     "tree": {
+      "windows": {},
+      "stages": {},
+      "emitted": 0
+     }
+    }
+   },
+   {
+    "session": 0,
+    "kind": "scored",
+    "tasks": [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    "throughput_tps": 109.16884921002887,
+    "wall_s": 36.08172137476504,
+    "tokens": 3939,
+    "valid": true,
+    "step_range": [
+     1893,
+     2422
+    ],
+    "ttft_ms": [
+     497.0,
+     496.8,
+     496.9,
+     129.9
+    ],
+    "decode_tps": [
+     40.3,
+     39.9,
+     47.4,
+     24.5
+    ],
+    "e2e_s": [
+     11.59,
+     36.08,
+     34.72,
+     18.4
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 609,
+      "windows_by_width": [
+       271,
+       78,
+       260
+      ],
+      "row_windows": 1816,
+      "emitted_tokens": 7082,
+      "accepted_draft_tokens": 5277,
+      "single_eligible_steps": 2,
+      "groups_built": 9,
+      "groups_scattered": 9,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 2565,
+      "scatter_us": 76027,
+      "window_us": 46938402,
+      "requests_with_ragged_windows": 12,
+      "tree_to_ragged_switches": 3,
+      "ragged_to_tree_switches": 2,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 1058,
+      "windows_by_width": [
+       531,
+       151,
+       376
+      ],
+      "row_windows": 3019,
+      "emitted_tokens": 10937,
+      "accepted_draft_tokens": 7933,
+      "single_eligible_steps": 3,
+      "groups_built": 12,
+      "groups_scattered": 12,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 3396,
+      "scatter_us": 88279,
+      "window_us": 80396941,
+      "requests_with_ragged_windows": 16,
+      "tree_to_ragged_switches": 4,
+      "ragged_to_tree_switches": 3,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.310555458068848,
+    "steps": {
+     "steps": 529,
+     "total_us": 35458331,
+     "phases": {
+      "next_tokens": 496506,
+      "publish": 3467,
+      "keys": 2065,
+      "tensor_groups": 1,
+      "ragged": 5352,
+      "ready_windows": 1368603,
+      "group_scatter": 102,
+      "complete": 39246,
+      "ragged_select_scatter": 12815,
+      "ragged_reserve": 48405,
+      "ragged_window": 33479816
+     },
+     "widths": {
+      "1": 79,
+      "4": 117,
+      "3": 73,
+      "2": 260
+     },
+     "notes": {
+      "tree_window_rows": 23
+     },
+     "ragged": {
+      "windows": 449,
+      "built": 3,
+      "rows": {
+       "4": 116,
+       "3": 73,
+       "2": 260
+      },
+      "cache_build_us": 831,
+      "window_us": 33458539,
+      "stages": {},
+      "emitted": 3855,
+      "accepted": 2656
+     },
+     "tree": {
+      "windows": {},
+      "stages": {},
+      "emitted": 0
+     }
+    }
+   },
+   {
+    "session": 1,
+    "kind": "warmup",
+    "tasks": [
+     "warmup-1",
+     "warmup-2",
+     "warmup-1",
+     "warmup-2"
+    ],
+    "throughput_tps": 86.90941408322841,
+    "wall_s": 3.3137952089309692,
+    "tokens": 288,
+    "valid": true,
+    "step_range": [
+     0,
+     45
+    ],
+    "ttft_ms": [
+     162.0,
+     432.8,
+     433.0,
+     433.3
+    ],
+    "decode_tps": [
+     25.0,
+     72.5,
+     26.7,
+     72.5
+    ],
+    "e2e_s": [
+     3.24,
+     1.43,
+     3.31,
+     1.43
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 0,
+      "windows_by_width": [
+       0,
+       0,
+       0
+      ],
+      "row_windows": 0,
+      "emitted_tokens": 0,
+      "accepted_draft_tokens": 0,
+      "single_eligible_steps": 0,
+      "groups_built": 0,
+      "groups_scattered": 0,
+      "active_groups": 0,
+      "max_width": 0,
+      "cache_build_us": 0,
+      "scatter_us": 0,
+      "window_us": 0,
+      "requests_with_ragged_windows": 0,
+      "tree_to_ragged_switches": 0,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 40,
+      "windows_by_width": [
+       30,
+       0,
+       10
+      ],
+      "row_windows": 100,
+      "emitted_tokens": 275,
+      "accepted_draft_tokens": 178,
+      "single_eligible_steps": 1,
+      "groups_built": 2,
+      "groups_scattered": 2,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 389,
+      "scatter_us": 6468,
+      "window_us": 2783506,
+      "requests_with_ragged_windows": 4,
+      "tree_to_ragged_switches": 1,
+      "ragged_to_tree_switches": 1,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 22.639062151312828,
+    "steps": {
+     "steps": 45,
+     "total_us": 2962155,
+     "phases": {
+      "next_tokens": 2351,
+      "publish": 201,
+      "keys": 95,
+      "tensor_groups": 0,
+      "ragged": 130,
+      "ready_windows": 121894,
+      "group_scatter": 0,
+      "complete": 44256,
+      "ragged_select_scatter": 6507,
+      "ragged_reserve": 21,
+      "ragged_window": 2786517
+     },
+     "widths": {
+      "1": 4,
+      "4": 11,
+      "2": 30
+     },
+     "notes": {
+      "tree_window_rows": 2
+     },
+     "ragged": {
+      "windows": 40,
+      "built": 2,
+      "rows": {
+       "4": 10,
+       "2": 30
+      },
+      "cache_build_us": 389,
+      "window_us": 2783506,
+      "stages": {},
+      "emitted": 275,
+      "accepted": 178
+     },
+     "tree": {
+      "windows": {},
+      "stages": {},
+      "emitted": 0
+     }
+    }
+   },
+   {
+    "session": 1,
+    "kind": "scored",
+    "tasks": [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    "throughput_tps": 124.5128581584906,
+    "wall_s": 33.33792237518355,
+    "tokens": 4151,
+    "valid": true,
+    "step_range": [
+     45,
+     965
+    ],
+    "ttft_ms": [
+     132.8,
+     461.9,
+     461.7,
+     462.2
+    ],
+    "decode_tps": [
+     48.8,
+     23.5,
+     50.7,
+     56.3
+    ],
+    "e2e_s": [
+     33.34,
+     19.52,
+     13.98,
+     25.24
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 40,
+      "windows_by_width": [
+       30,
+       0,
+       10
+      ],
+      "row_windows": 100,
+      "emitted_tokens": 275,
+      "accepted_draft_tokens": 178,
+      "single_eligible_steps": 1,
+      "groups_built": 2,
+      "groups_scattered": 2,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 389,
+      "scatter_us": 6468,
+      "window_us": 2783506,
+      "requests_with_ragged_windows": 4,
+      "tree_to_ragged_switches": 1,
+      "ragged_to_tree_switches": 1,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 324,
+      "windows_by_width": [
+       121,
+       58,
+       145
+      ],
+      "row_windows": 996,
+      "emitted_tokens": 3784,
+      "accepted_draft_tokens": 2794,
+      "single_eligible_steps": 2,
+      "groups_built": 5,
+      "groups_scattered": 5,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 1145,
+      "scatter_us": 13273,
+      "window_us": 27065538,
+      "requests_with_ragged_windows": 8,
+      "tree_to_ragged_switches": 2,
+      "ragged_to_tree_switches": 2,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.625847660005093,
+    "steps": {
+     "steps": 920,
+     "total_us": 32713565,
+     "phases": {
+      "next_tokens": 471061,
+      "publish": 3793,
+      "keys": 1668,
+      "tensor_groups": 0,
+      "ragged": 4467,
+      "ready_windows": 7872280,
+      "group_scatter": 30,
+      "complete": 35133,
+      "ragged_select_scatter": 7092,
+      "ragged_reserve": 26343,
+      "ragged_window": 24289536
+     },
+     "widths": {
+      "1": 635,
+      "4": 136,
+      "3": 58,
+      "2": 91
+     },
+     "notes": {
+      "tree_window_rows": 131
+     },
+     "ragged": {
+      "windows": 284,
+      "built": 3,
+      "rows": {
+       "4": 135,
+       "3": 58,
+       "2": 91
+      },
+      "cache_build_us": 756,
+      "window_us": 24282032,
+      "stages": {},
+      "emitted": 3509,
+      "accepted": 2616
+     },
+     "tree": {
+      "windows": {},
+      "stages": {},
+      "emitted": 0
+     }
+    }
+   },
+   {
+    "session": 1,
+    "kind": "scored",
+    "tasks": [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    "throughput_tps": 106.89664869619236,
+    "wall_s": 36.84867624985054,
+    "tokens": 3939,
+    "valid": true,
+    "step_range": [
+     965,
+     1494
+    ],
+    "ttft_ms": [
+     495.6,
+     495.4,
+     495.5,
+     132.0
+    ],
+    "decode_tps": [
+     38.8,
+     39.0,
+     46.4,
+     23.7
+    ],
+    "e2e_s": [
+     12.01,
+     36.85,
+     35.48,
+     19.0
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 324,
+      "windows_by_width": [
+       121,
+       58,
+       145
+      ],
+      "row_windows": 996,
+      "emitted_tokens": 3784,
+      "accepted_draft_tokens": 2794,
+      "single_eligible_steps": 2,
+      "groups_built": 5,
+      "groups_scattered": 5,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 1145,
+      "scatter_us": 13273,
+      "window_us": 27065538,
+      "requests_with_ragged_windows": 8,
+      "tree_to_ragged_switches": 2,
+      "ragged_to_tree_switches": 2,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 773,
+      "windows_by_width": [
+       381,
+       131,
+       261
+      ],
+      "row_windows": 2199,
+      "emitted_tokens": 7639,
+      "accepted_draft_tokens": 5450,
+      "single_eligible_steps": 3,
+      "groups_built": 8,
+      "groups_scattered": 8,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 1961,
+      "scatter_us": 25537,
+      "window_us": 61170252,
+      "requests_with_ragged_windows": 12,
+      "tree_to_ragged_switches": 3,
+      "ragged_to_tree_switches": 3,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.506920725107193,
+    "steps": {
+     "steps": 529,
+     "total_us": 36187826,
+     "phases": {
+      "next_tokens": 557567,
+      "publish": 3690,
+      "keys": 2258,
+      "tensor_groups": 0,
+      "ragged": 5335,
+      "ready_windows": 1373947,
+      "group_scatter": 48,
+      "complete": 52114,
+      "ragged_select_scatter": 12802,
+      "ragged_reserve": 52056,
+      "ragged_window": 34126001
+     },
+     "widths": {
+      "1": 79,
+      "4": 117,
+      "3": 73,
+      "2": 260
+     },
+     "notes": {
+      "tree_window_rows": 23
+     },
+     "ragged": {
+      "windows": 449,
+      "built": 3,
+      "rows": {
+       "4": 116,
+       "3": 73,
+       "2": 260
+      },
+      "cache_build_us": 816,
+      "window_us": 34104714,
+      "stages": {},
+      "emitted": 3855,
+      "accepted": 2656
+     },
+     "tree": {
+      "windows": {},
+      "stages": {},
+      "emitted": 0
+     }
+    }
+   },
+   {
+    "session": 1,
+    "kind": "scored",
+    "tasks": [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ],
+    "throughput_tps": 117.59137728046274,
+    "wall_s": 33.573890291154385,
+    "tokens": 3948,
+    "valid": true,
+    "step_range": [
+     1494,
+     2424
+    ],
+    "ttft_ms": [
+     503.5,
+     503.3,
+     503.4,
+     135.7
+    ],
+    "decode_tps": [
+     49.9,
+     59.8,
+     37.8,
+     42.4
+    ],
+    "e2e_s": [
+     14.24,
+     23.84,
+     12.33,
+     33.57
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 773,
+      "windows_by_width": [
+       381,
+       131,
+       261
+      ],
+      "row_windows": 2199,
+      "emitted_tokens": 7639,
+      "accepted_draft_tokens": 5450,
+      "single_eligible_steps": 3,
+      "groups_built": 8,
+      "groups_scattered": 8,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 1961,
+      "scatter_us": 25537,
+      "window_us": 61170252,
+      "requests_with_ragged_windows": 12,
+      "tree_to_ragged_switches": 3,
+      "ragged_to_tree_switches": 3,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 1057,
+      "windows_by_width": [
+       530,
+       150,
+       377
+      ],
+      "row_windows": 3018,
+      "emitted_tokens": 10938,
+      "accepted_draft_tokens": 7934,
+      "single_eligible_steps": 4,
+      "groups_built": 11,
+      "groups_scattered": 11,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 2831,
+      "scatter_us": 37820,
+      "window_us": 84016350,
+      "requests_with_ragged_windows": 16,
+      "tree_to_ragged_switches": 4,
+      "ragged_to_tree_switches": 4,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.49157040566206,
+    "steps": {
+     "steps": 930,
+     "total_us": 32898452,
+     "phases": {
+      "next_tokens": 425468,
+      "publish": 4111,
+      "keys": 1517,
+      "tensor_groups": 0,
+      "ragged": 4462,
+      "ready_windows": 9495457,
+      "group_scatter": 17,
+      "complete": 43296,
+      "ragged_select_scatter": 12577,
+      "ragged_reserve": 55706,
+      "ragged_window": 22853596
+     },
+     "widths": {
+      "1": 645,
+      "4": 117,
+      "3": 19,
+      "2": 149
+     },
+     "notes": {
+      "tree_window_rows": 153
+     },
+     "ragged": {
+      "windows": 284,
+      "built": 3,
+      "rows": {
+       "4": 116,
+       "3": 19,
+       "2": 149
+      },
+      "cache_build_us": 870,
+      "window_us": 22846098,
+      "stages": {},
+      "emitted": 3299,
+      "accepted": 2484
+     },
+     "tree": {
+      "windows": {},
+      "stages": {},
+      "emitted": 0
+     }
+    }
+   }
+  ],
+  "scored_throughput_median": 121.05211771947667,
+  "scored_wall_median": 33.45590633316897
+ },
+ "diag-stages-v1": {
+  "mode": "stages",
+  "binary_sha256": "68969b30388f23e0e1734552a2d20da1bb12b8fce90dd25e8c3b0990f5f1b01e",
+  "batches": [
+   {
+    "session": 0,
+    "kind": "warmup",
+    "tasks": [
+     "warmup-1",
+     "warmup-2",
+     "warmup-1",
+     "warmup-2"
+    ],
+    "throughput_tps": 83.95522490741634,
+    "wall_s": 3.4303999580442905,
+    "tokens": 288,
+    "valid": true,
+    "step_range": [
+     0,
+     44
+    ],
+    "ttft_ms": [
+     447.8,
+     162.5,
+     447.8,
+     448.1
+    ],
+    "decode_tps": [
+     25.8,
+     56.9,
+     25.8,
+     67.5
+    ],
+    "e2e_s": [
+     3.43,
+     1.41,
+     3.43,
+     1.52
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 0,
+      "windows_by_width": [
+       0,
+       0,
+       0
+      ],
+      "row_windows": 0,
+      "emitted_tokens": 0,
+      "accepted_draft_tokens": 0,
+      "single_eligible_steps": 0,
+      "groups_built": 0,
+      "groups_scattered": 0,
+      "active_groups": 0,
+      "max_width": 0,
+      "cache_build_us": 0,
+      "scatter_us": 0,
+      "window_us": 0,
+      "requests_with_ragged_windows": 0,
+      "tree_to_ragged_switches": 0,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 42,
+      "windows_by_width": [
+       32,
+       1,
+       9
+      ],
+      "row_windows": 103,
+      "emitted_tokens": 273,
+      "accepted_draft_tokens": 174,
+      "single_eligible_steps": 0,
+      "groups_built": 3,
+      "groups_scattered": 3,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 51890,
+      "scatter_us": 6915,
+      "window_us": 2962518,
+      "requests_with_ragged_windows": 2,
+      "tree_to_ragged_switches": 1,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.502236366271973,
+    "steps": {
+     "steps": 44,
+     "total_us": 3068435,
+     "phases": {
+      "next_tokens": 1542,
+      "publish": 184,
+      "keys": 60,
+      "tensor_groups": 0,
+      "ragged": 108,
+      "ready_windows": 69865,
+      "group_scatter": 0,
+      "complete": 1380,
+      "ragged_select_scatter": 31502,
+      "ragged_reserve": 20,
+      "ragged_window": 2963626
+     },
+     "widths": {
+      "1": 1,
+      "4": 10,
+      "3": 1,
+      "2": 32
+     },
+     "notes": {
+      "tree_window_rows": 1
+     },
+     "ragged": {
+      "windows": 42,
+      "built": 3,
+      "rows": {
+       "4": 9,
+       "3": 1,
+       "2": 32
+      },
+      "cache_build_us": 51890,
+      "window_us": 2962518,
+      "stages": {
+       "draft": 789284,
+       "verify": 1937076,
+       "head": 81727,
+       "commit": 101325
+      },
+      "emitted": 273,
+      "accepted": 174
+     },
+     "tree": {
+      "windows": {
+       "tree": 1
+      },
+      "stages": {
+       "tree:draft": 14989,
+       "tree:verify": 40185,
+       "tree:head": 1739,
+       "tree:commit": 12859
+      },
+      "emitted": 11
+     }
+    }
+   },
+   {
+    "session": 0,
+    "kind": "scored",
+    "tasks": [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ],
+    "throughput_tps": 119.70903926665761,
+    "wall_s": 32.979965624865144,
+    "tokens": 3948,
+    "valid": true,
+    "step_range": [
+     44,
+     974
+    ],
+    "ttft_ms": [
+     505.9,
+     505.8,
+     505.6,
+     131.8
+    ],
+    "decode_tps": [
+     49.9,
+     60.4,
+     37.6,
+     43.2
+    ],
+    "e2e_s": [
+     14.23,
+     23.63,
+     12.39,
+     32.98
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 42,
+      "windows_by_width": [
+       32,
+       1,
+       9
+      ],
+      "row_windows": 103,
+      "emitted_tokens": 273,
+      "accepted_draft_tokens": 174,
+      "single_eligible_steps": 0,
+      "groups_built": 3,
+      "groups_scattered": 3,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 51890,
+      "scatter_us": 6915,
+      "window_us": 2962518,
+      "requests_with_ragged_windows": 4,
+      "tree_to_ragged_switches": 1,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 326,
+      "windows_by_width": [
+       181,
+       20,
+       125
+      ],
+      "row_windows": 922,
+      "emitted_tokens": 3572,
+      "accepted_draft_tokens": 2658,
+      "single_eligible_steps": 1,
+      "groups_built": 6,
+      "groups_scattered": 6,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 121405,
+      "scatter_us": 26441,
+      "window_us": 25711017,
+      "requests_with_ragged_windows": 8,
+      "tree_to_ragged_switches": 2,
+      "ragged_to_tree_switches": 1,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.469231605529785,
+    "steps": {
+     "steps": 930,
+     "total_us": 32333692,
+     "phases": {
+      "next_tokens": 297955,
+      "publish": 2701,
+      "keys": 817,
+      "tensor_groups": 0,
+      "ragged": 4787,
+      "ready_windows": 9216214,
+      "group_scatter": 4,
+      "complete": 3521,
+      "ragged_select_scatter": 19884,
+      "ragged_reserve": 28677,
+      "ragged_window": 22757224
+     },
+     "widths": {
+      "1": 645,
+      "4": 117,
+      "3": 19,
+      "2": 149
+     },
+     "notes": {
+      "tree_window_rows": 153
+     },
+     "ragged": {
+      "windows": 284,
+      "built": 3,
+      "rows": {
+       "4": 116,
+       "3": 19,
+       "2": 149
+      },
+      "cache_build_us": 69515,
+      "window_us": 22748499,
+      "stages": {
+       "draft": 6546369,
+       "verify": 14706537,
+       "head": 607201,
+       "commit": 809558
+      },
+      "emitted": 3299,
+      "accepted": 2484
+     },
+     "tree": {
+      "windows": {
+       "tree": 153
+      },
+      "stages": {
+       "tree:draft": 1747886,
+       "tree:verify": 6723256,
+       "tree:head": 250379,
+       "tree:commit": 478538
+      },
+      "emitted": 645
+     }
+    }
+   },
+   {
+    "session": 0,
+    "kind": "scored",
+    "tasks": [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    "throughput_tps": 122.85481758690908,
+    "wall_s": 33.78784879203886,
+    "tokens": 4151,
+    "valid": true,
+    "step_range": [
+     974,
+     1893
+    ],
+    "ttft_ms": [
+     470.6,
+     470.2,
+     470.5,
+     133.8
+    ],
+    "decode_tps": [
+     48.7,
+     23.3,
+     50.5,
+     55.3
+    ],
+    "e2e_s": [
+     33.79,
+     19.65,
+     14.04,
+     25.38
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 326,
+      "windows_by_width": [
+       181,
+       20,
+       125
+      ],
+      "row_windows": 922,
+      "emitted_tokens": 3572,
+      "accepted_draft_tokens": 2658,
+      "single_eligible_steps": 1,
+      "groups_built": 6,
+      "groups_scattered": 6,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 121405,
+      "scatter_us": 26441,
+      "window_us": 25711017,
+      "requests_with_ragged_windows": 8,
+      "tree_to_ragged_switches": 2,
+      "ragged_to_tree_switches": 1,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 609,
+      "windows_by_width": [
+       271,
+       78,
+       260
+      ],
+      "row_windows": 1816,
+      "emitted_tokens": 7082,
+      "accepted_draft_tokens": 5277,
+      "single_eligible_steps": 2,
+      "groups_built": 9,
+      "groups_scattered": 9,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 191810,
+      "scatter_us": 55591,
+      "window_us": 50266048,
+      "requests_with_ragged_windows": 12,
+      "tree_to_ragged_switches": 3,
+      "ragged_to_tree_switches": 2,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.67893323302269,
+    "steps": {
+     "steps": 919,
+     "total_us": 33169690,
+     "phases": {
+      "next_tokens": 307289,
+      "publish": 2364,
+      "keys": 718,
+      "tensor_groups": 0,
+      "ragged": 4083,
+      "ready_windows": 8222010,
+      "group_scatter": 4,
+      "complete": 4725,
+      "ragged_select_scatter": 29464,
+      "ragged_reserve": 33809,
+      "ragged_window": 24563273
+     },
+     "widths": {
+      "1": 635,
+      "4": 136,
+      "3": 58,
+      "2": 90
+     },
+     "notes": {
+      "tree_window_rows": 130
+     },
+     "ragged": {
+      "windows": 283,
+      "built": 3,
+      "rows": {
+       "4": 135,
+       "3": 58,
+       "2": 90
+      },
+      "cache_build_us": 70405,
+      "window_us": 24555031,
+      "stages": {
+       "draft": 7053653,
+       "verify": 15921916,
+       "head": 654398,
+       "commit": 846611
+      },
+      "emitted": 3510,
+      "accepted": 2619
+     },
+     "tree": {
+      "windows": {
+       "tree": 130
+      },
+      "stages": {
+       "tree:draft": 1532602,
+       "tree:verify": 5711771,
+       "tree:head": 222360,
+       "tree:commit": 686617
+      },
+      "emitted": 637
+     }
+    }
+   },
+   {
+    "session": 0,
+    "kind": "scored",
+    "tasks": [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    "throughput_tps": 103.96165427635626,
+    "wall_s": 37.88896999973804,
+    "tokens": 3939,
+    "valid": true,
+    "step_range": [
+     1893,
+     2422
+    ],
+    "ttft_ms": [
+     504.2,
+     504.1,
+     504.0,
+     131.7
+    ],
+    "decode_tps": [
+     38.1,
+     38.0,
+     45.2,
+     23.2
+    ],
+    "e2e_s": [
+     12.24,
+     37.89,
+     36.37,
+     19.38
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 609,
+      "windows_by_width": [
+       271,
+       78,
+       260
+      ],
+      "row_windows": 1816,
+      "emitted_tokens": 7082,
+      "accepted_draft_tokens": 5277,
+      "single_eligible_steps": 2,
+      "groups_built": 9,
+      "groups_scattered": 9,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 191810,
+      "scatter_us": 55591,
+      "window_us": 50266048,
+      "requests_with_ragged_windows": 12,
+      "tree_to_ragged_switches": 3,
+      "ragged_to_tree_switches": 2,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 1058,
+      "windows_by_width": [
+       531,
+       151,
+       376
+      ],
+      "row_windows": 3019,
+      "emitted_tokens": 10937,
+      "accepted_draft_tokens": 7933,
+      "single_eligible_steps": 3,
+      "groups_built": 12,
+      "groups_scattered": 12,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 264362,
+      "scatter_us": 97585,
+      "window_us": 85526377,
+      "requests_with_ragged_windows": 16,
+      "tree_to_ragged_switches": 4,
+      "ragged_to_tree_switches": 3,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.603310585021973,
+    "steps": {
+     "steps": 529,
+     "total_us": 37275802,
+     "phases": {
+      "next_tokens": 359839,
+      "publish": 2395,
+      "keys": 1071,
+      "tensor_groups": 1,
+      "ragged": 4963,
+      "ready_windows": 1527768,
+      "group_scatter": 30,
+      "complete": 5345,
+      "ragged_select_scatter": 42470,
+      "ragged_reserve": 55240,
+      "ragged_window": 35274877
+     },
+     "widths": {
+      "1": 79,
+      "4": 117,
+      "3": 73,
+      "2": 260
+     },
+     "notes": {
+      "tree_window_rows": 23
+     },
+     "ragged": {
+      "windows": 449,
+      "built": 3,
+      "rows": {
+       "4": 116,
+       "3": 73,
+       "2": 260
+      },
+      "cache_build_us": 72552,
+      "window_us": 35260329,
+      "stages": {
+       "draft": 9839381,
+       "verify": 23194548,
+       "head": 942751,
+       "commit": 1196402
+      },
+      "emitted": 3855,
+      "accepted": 2656
+     },
+     "tree": {
+      "windows": {
+       "tree": 23
+      },
+      "stages": {
+       "tree:draft": 278635,
+       "tree:verify": 1023486,
+       "tree:head": 42760,
+       "tree:commit": 162789
+      },
+      "emitted": 80
+     }
+    }
+   },
+   {
+    "session": 1,
+    "kind": "warmup",
+    "tasks": [
+     "warmup-1",
+     "warmup-2",
+     "warmup-1",
+     "warmup-2"
+    ],
+    "throughput_tps": 79.6840600754572,
+    "wall_s": 3.614273666869849,
+    "tokens": 288,
+    "valid": true,
+    "step_range": [
+     0,
+     45
+    ],
+    "ttft_ms": [
+     430.4,
+     430.5,
+     145.0,
+     430.7
+    ],
+    "decode_tps": [
+     24.2,
+     56.9,
+     22.7,
+     56.9
+    ],
+    "e2e_s": [
+     3.61,
+     1.68,
+     3.54,
+     1.68
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 0,
+      "windows_by_width": [
+       0,
+       0,
+       0
+      ],
+      "row_windows": 0,
+      "emitted_tokens": 0,
+      "accepted_draft_tokens": 0,
+      "single_eligible_steps": 0,
+      "groups_built": 0,
+      "groups_scattered": 0,
+      "active_groups": 0,
+      "max_width": 0,
+      "cache_build_us": 0,
+      "scatter_us": 0,
+      "window_us": 0,
+      "requests_with_ragged_windows": 0,
+      "tree_to_ragged_switches": 0,
+      "ragged_to_tree_switches": 0,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 40,
+      "windows_by_width": [
+       30,
+       0,
+       10
+      ],
+      "row_windows": 100,
+      "emitted_tokens": 275,
+      "accepted_draft_tokens": 178,
+      "single_eligible_steps": 1,
+      "groups_built": 2,
+      "groups_scattered": 2,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 43478,
+      "scatter_us": 12657,
+      "window_us": 3088447,
+      "requests_with_ragged_windows": 4,
+      "tree_to_ragged_switches": 1,
+      "ragged_to_tree_switches": 1,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 22.554909996688366,
+    "steps": {
+     "steps": 45,
+     "total_us": 3241722,
+     "phases": {
+      "next_tokens": 1936,
+      "publish": 151,
+      "keys": 73,
+      "tensor_groups": 0,
+      "ragged": 126,
+      "ready_windows": 134371,
+      "group_scatter": 2,
+      "complete": 2466,
+      "ragged_select_scatter": 12790,
+      "ragged_reserve": 26,
+      "ragged_window": 3089627
+     },
+     "widths": {
+      "1": 4,
+      "4": 11,
+      "2": 30
+     },
+     "notes": {
+      "tree_window_rows": 2
+     },
+     "ragged": {
+      "windows": 40,
+      "built": 2,
+      "rows": {
+       "4": 10,
+       "2": 30
+      },
+      "cache_build_us": 43478,
+      "window_us": 3088447,
+      "stages": {
+       "draft": 829828,
+       "verify": 2031383,
+       "head": 81711,
+       "commit": 100731
+      },
+      "emitted": 275,
+      "accepted": 178
+     },
+     "tree": {
+      "windows": {
+       "tree": 2
+      },
+      "stages": {
+       "tree:draft": 27171,
+       "tree:verify": 87050,
+       "tree:head": 3434,
+       "tree:commit": 16586
+      },
+      "emitted": 9
+     }
+    }
+   },
+   {
+    "session": 1,
+    "kind": "scored",
+    "tasks": [
+     "knowledge-2",
+     "knowledge-3",
+     "code-1",
+     "code-2"
+    ],
+    "throughput_tps": 118.42186785474703,
+    "wall_s": 35.052647582720965,
+    "tokens": 4151,
+    "valid": true,
+    "step_range": [
+     45,
+     965
+    ],
+    "ttft_ms": [
+     128.8,
+     467.5,
+     467.4,
+     467.9
+    ],
+    "decode_tps": [
+     46.4,
+     22.3,
+     48.3,
+     53.7
+    ],
+    "e2e_s": [
+     35.05,
+     20.47,
+     14.66,
+     26.45
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 40,
+      "windows_by_width": [
+       30,
+       0,
+       10
+      ],
+      "row_windows": 100,
+      "emitted_tokens": 275,
+      "accepted_draft_tokens": 178,
+      "single_eligible_steps": 1,
+      "groups_built": 2,
+      "groups_scattered": 2,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 43478,
+      "scatter_us": 12657,
+      "window_us": 3088447,
+      "requests_with_ragged_windows": 4,
+      "tree_to_ragged_switches": 1,
+      "ragged_to_tree_switches": 1,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 324,
+      "windows_by_width": [
+       121,
+       58,
+       145
+      ],
+      "row_windows": 996,
+      "emitted_tokens": 3784,
+      "accepted_draft_tokens": 2794,
+      "single_eligible_steps": 2,
+      "groups_built": 5,
+      "groups_scattered": 5,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 117737,
+      "scatter_us": 46134,
+      "window_us": 28682924,
+      "requests_with_ragged_windows": 8,
+      "tree_to_ragged_switches": 2,
+      "ragged_to_tree_switches": 2,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.632927894592285,
+    "steps": {
+     "steps": 920,
+     "total_us": 34451452,
+     "phases": {
+      "next_tokens": 327777,
+      "publish": 2574,
+      "keys": 742,
+      "tensor_groups": 0,
+      "ragged": 4588,
+      "ready_windows": 8417314,
+      "group_scatter": 10,
+      "complete": 4809,
+      "ragged_select_scatter": 33893,
+      "ragged_reserve": 54264,
+      "ragged_window": 25603463
+     },
+     "widths": {
+      "1": 635,
+      "4": 136,
+      "3": 58,
+      "2": 91
+     },
+     "notes": {
+      "tree_window_rows": 131
+     },
+     "ragged": {
+      "windows": 284,
+      "built": 3,
+      "rows": {
+       "4": 135,
+       "3": 58,
+       "2": 91
+      },
+      "cache_build_us": 74259,
+      "window_us": 25594477,
+      "stages": {
+       "draft": 7349308,
+       "verify": 16600141,
+       "head": 683404,
+       "commit": 878504
+      },
+      "emitted": 3509,
+      "accepted": 2616
+     },
+     "tree": {
+      "windows": {
+       "tree": 131
+      },
+      "stages": {
+       "tree:draft": 1582930,
+       "tree:verify": 5857757,
+       "tree:head": 224940,
+       "tree:commit": 680824
+      },
+      "emitted": 638
+     }
+    }
+   },
+   {
+    "session": 1,
+    "kind": "scored",
+    "tasks": [
+     "code-3",
+     "knowledge-1",
+     "knowledge-2",
+     "knowledge-3"
+    ],
+    "throughput_tps": 102.40110020901747,
+    "wall_s": 38.46638358337805,
+    "tokens": 3939,
+    "valid": true,
+    "step_range": [
+     965,
+     1494
+    ],
+    "ttft_ms": [
+     505.5,
+     505.2,
+     505.3,
+     132.0
+    ],
+    "decode_tps": [
+     36.9,
+     37.4,
+     44.5,
+     22.7
+    ],
+    "e2e_s": [
+     12.6,
+     38.47,
+     36.95,
+     19.85
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 324,
+      "windows_by_width": [
+       121,
+       58,
+       145
+      ],
+      "row_windows": 996,
+      "emitted_tokens": 3784,
+      "accepted_draft_tokens": 2794,
+      "single_eligible_steps": 2,
+      "groups_built": 5,
+      "groups_scattered": 5,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 117737,
+      "scatter_us": 46134,
+      "window_us": 28682924,
+      "requests_with_ragged_windows": 8,
+      "tree_to_ragged_switches": 2,
+      "ragged_to_tree_switches": 2,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 773,
+      "windows_by_width": [
+       381,
+       131,
+       261
+      ],
+      "row_windows": 2199,
+      "emitted_tokens": 7639,
+      "accepted_draft_tokens": 5450,
+      "single_eligible_steps": 3,
+      "groups_built": 8,
+      "groups_scattered": 8,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 195978,
+      "scatter_us": 95813,
+      "window_us": 64371188,
+      "requests_with_ragged_windows": 12,
+      "tree_to_ragged_switches": 3,
+      "ragged_to_tree_switches": 3,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.34037110954523,
+    "steps": {
+     "steps": 529,
+     "total_us": 37796077,
+     "phases": {
+      "next_tokens": 443551,
+      "publish": 2880,
+      "keys": 1627,
+      "tensor_groups": 2,
+      "ragged": 5496,
+      "ready_windows": 1529109,
+      "group_scatter": 79,
+      "complete": 5088,
+      "ragged_select_scatter": 50368,
+      "ragged_reserve": 50059,
+      "ragged_window": 35705931
+     },
+     "widths": {
+      "1": 79,
+      "4": 117,
+      "3": 73,
+      "2": 260
+     },
+     "notes": {
+      "tree_window_rows": 23
+     },
+     "ragged": {
+      "windows": 449,
+      "built": 3,
+      "rows": {
+       "4": 116,
+       "3": 73,
+       "2": 260
+      },
+      "cache_build_us": 78241,
+      "window_us": 35688264,
+      "stages": {
+       "draft": 10094957,
+       "verify": 23276337,
+       "head": 953298,
+       "commit": 1267817
+      },
+      "emitted": 3855,
+      "accepted": 2656
+     },
+     "tree": {
+      "windows": {
+       "tree": 23
+      },
+      "stages": {
+       "tree:draft": 277757,
+       "tree:verify": 1028361,
+       "tree:head": 42831,
+       "tree:commit": 159710
+      },
+      "emitted": 80
+     }
+    }
+   },
+   {
+    "session": 1,
+    "kind": "scored",
+    "tasks": [
+     "code-1",
+     "code-2",
+     "code-3",
+     "knowledge-1"
+    ],
+    "throughput_tps": 113.497426281206,
+    "wall_s": 34.78492975002155,
+    "tokens": 3948,
+    "valid": true,
+    "step_range": [
+     1494,
+     2424
+    ],
+    "ttft_ms": [
+     507.5,
+     507.7,
+     507.5,
+     130.9
+    ],
+    "decode_tps": [
+     48.1,
+     57.8,
+     36.4,
+     40.9
+    ],
+    "e2e_s": [
+     14.75,
+     24.67,
+     12.8,
+     34.78
+    ],
+    "ragged_counters": [
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 773,
+      "windows_by_width": [
+       381,
+       131,
+       261
+      ],
+      "row_windows": 2199,
+      "emitted_tokens": 7639,
+      "accepted_draft_tokens": 5450,
+      "single_eligible_steps": 3,
+      "groups_built": 8,
+      "groups_scattered": 8,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 195978,
+      "scatter_us": 95813,
+      "window_us": 64371188,
+      "requests_with_ragged_windows": 12,
+      "tree_to_ragged_switches": 3,
+      "ragged_to_tree_switches": 3,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     },
+     {
+      "enabled": true,
+      "max_width_limit": 4,
+      "windows": 1057,
+      "windows_by_width": [
+       530,
+       150,
+       377
+      ],
+      "row_windows": 3018,
+      "emitted_tokens": 10938,
+      "accepted_draft_tokens": 7934,
+      "single_eligible_steps": 4,
+      "groups_built": 11,
+      "groups_scattered": 11,
+      "active_groups": 0,
+      "max_width": 4,
+      "cache_build_us": 266903,
+      "scatter_us": 119049,
+      "window_us": 88154616,
+      "requests_with_ragged_windows": 16,
+      "tree_to_ragged_switches": 4,
+      "ragged_to_tree_switches": 4,
+      "budget_fallbacks": 0,
+      "governor_fallbacks": 0,
+      "reserved_bytes": 0
+     }
+    ],
+    "peak_gib": 23.761101722717285,
+    "steps": {
+     "steps": 930,
+     "total_us": 34115668,
+     "phases": {
+      "next_tokens": 318890,
+      "publish": 2941,
+      "keys": 863,
+      "tensor_groups": 0,
+      "ragged": 4001,
+      "ready_windows": 9936201,
+      "group_scatter": 15,
+      "complete": 4554,
+      "ragged_select_scatter": 23614,
+      "ragged_reserve": 30011,
+      "ragged_window": 23792554
+     },
+     "widths": {
+      "1": 645,
+      "4": 117,
+      "3": 19,
+      "2": 149
+     },
+     "notes": {
+      "tree_window_rows": 153
+     },
+     "ragged": {
+      "windows": 284,
+      "built": 3,
+      "rows": {
+       "4": 116,
+       "3": 19,
+       "2": 149
+      },
+      "cache_build_us": 70925,
+      "window_us": 23783428,
+      "stages": {
+       "draft": 6861488,
+       "verify": 15376986,
+       "head": 624090,
+       "commit": 840328
+      },
+      "emitted": 3299,
+      "accepted": 2484
+     },
+     "tree": {
+      "windows": {
+       "tree": 153
+      },
+      "stages": {
+       "tree:draft": 1902380,
+       "tree:verify": 7121248,
+       "tree:head": 258370,
+       "tree:commit": 617664
+      },
+      "emitted": 645
+     }
+    }
+   }
+  ],
+  "scored_throughput_median": 115.95964706797652,
+  "scored_wall_median": 34.918788666371256
+ }
+}

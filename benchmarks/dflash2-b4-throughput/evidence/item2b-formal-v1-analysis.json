@@ -1,0 +1,220 @@
+{
+ "label": "item2b-formal-v1",
+ "input_sha256": "982ea7fdfc7d0fa906c1d813ed81a4d4edc22dd941a6436f4b36bf0facaf6cef",
+ "analyzer_sha256": "4e878af4038baaf2f1db021594314acd402a7e02aa601499245e20d39cc903b0",
+ "binaries": {
+  "A": {
+   "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-b4-throughput/binaries/ironmlx-item1b-dev-8d3a42dc",
+   "sha256": "8d3a42dc8ee05cc805791a0f6acaf907f48a71bc5500f92b46630fa9a726cc65"
+  },
+  "B": {
+   "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-b4-throughput/binaries/ironmlx-item2b-dev-f6a40e20",
+   "sha256": "f6a40e20c5a3bed712f3fa30153611493806c142e0aea5c8a397e4572f0f3622"
+  }
+ },
+ "rounds": 8,
+ "long_rounds": 4,
+ "ratios": {
+  "b4_throughput": {
+   "ratio": 1.0319536341255278,
+   "ci95": [
+    1.0246004430453879,
+    1.0371130426657986
+   ]
+  },
+  "b4_wall": {
+   "ratio": 0.9690329600457604,
+   "ci95": [
+    0.96421504586385,
+    0.9759888992337925
+   ]
+  },
+  "b4_request_ttft": {
+   "ratio": 0.9929032996378316,
+   "ci95": [
+    0.8427977639205876,
+    1.1066920480661526
+   ]
+  },
+  "b4_request_e2e": {
+   "ratio": 0.9474388557940502,
+   "ci95": [
+    0.9422354445118349,
+    0.9559905415830352
+   ]
+  },
+  "b1_decode": {
+   "ratio": 1.0061228239294244,
+   "ci95": [
+    1.0023737573354028,
+    1.0087688201084963
+   ]
+  },
+  "b1_ttft": {
+   "ratio": 1.2048785754666114,
+   "ci95": [
+    1.0577271055957689,
+    1.2850679786375667
+   ]
+  },
+  "b1_e2e": {
+   "ratio": 0.9976673222309393,
+   "ci95": [
+    0.9941617032796018,
+    1.002741513527103
+   ]
+  },
+  "long_ttft": {
+   "ratio": 1.0027751940693987,
+   "ci95": [
+    0.9931193252406076,
+    1.0041871352146257
+   ]
+  },
+  "long_decode": {
+   "ratio": 1.0029104439949657,
+   "ci95": [
+    0.9705082265517107,
+    1.0154668168646919
+   ]
+  },
+  "memory": {
+   "ratio": 1.0167653508393324,
+   "A_gib": 23.64174759760499,
+   "B_gib": 24.03810979053378
+  }
+ },
+ "gates": {
+  "b4_throughput": true,
+  "b4_wall": true,
+  "b4_request_ttft": true,
+  "b1_decode": true,
+  "b1_ttft": false,
+  "b1_e2e": true,
+  "long_ttft": true,
+  "memory": true
+ },
+ "all_gates": false,
+ "throughput_medians": {
+  "A": {
+   "set:code-1,code-2,code-3,knowledge-1": 119.56744723836601,
+   "set:code-3,knowledge-1,knowledge-2,knowledge-3": 108.07573739278916,
+   "set:knowledge-2,knowledge-3,code-1,code-2": 125.50777522740144
+  },
+  "B": {
+   "set:code-1,code-2,code-3,knowledge-1": 122.27857963946686,
+   "set:code-3,knowledge-1,knowledge-2,knowledge-3": 113.6279070706828,
+   "set:knowledge-2,knowledge-3,code-1,code-2": 128.2794110534774
+  }
+ },
+ "wall_medians": {
+  "A": {
+   "set:code-1,code-2,code-3,knowledge-1": 33.019210416823626,
+   "set:code-3,knowledge-1,knowledge-2,knowledge-3": 36.446858499897644,
+   "set:knowledge-2,knowledge-3,code-1,code-2": 33.07365016685799
+  },
+  "B": {
+   "set:code-1,code-2,code-3,knowledge-1": 32.28700827108696,
+   "set:code-3,knowledge-1,knowledge-2,knowledge-3": 34.665779958013445,
+   "set:knowledge-2,knowledge-3,code-1,code-2": 32.359051208011806
+  }
+ },
+ "per_round": [
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 122.51,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 109.32,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 129.34
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 121.4,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 112.82,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 129.07
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 118.86,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 108.33,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 125.05
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 120.73,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 114.25,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 127.67
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 120.14,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 107.83,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 125.48
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 123.91,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 112.35,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 128.24
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 118.28,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 107.39,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 125.64
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 122.09,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 113.64,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 129.86
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 118.83,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 108.99,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 124.67
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 122.47,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 114.32,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 127.07
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 120.42,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 107.75,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 125.54
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 123.96,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 113.62,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 129.01
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 119.28,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 106.89,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 126.77
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 120.91,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 113.37,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 128.29
+   }
+  },
+  {
+   "A": {
+    "set:code-1,code-2,code-3,knowledge-1": 119.85,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 109.05,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 123.98
+   },
+   "B": {
+    "set:code-1,code-2,code-3,knowledge-1": 123.27,
+    "set:code-3,knowledge-1,knowledge-2,knowledge-3": 114.92,
+    "set:knowledge-2,knowledge-3,code-1,code-2": 128.27
+   }
+  }
+ ]
+}

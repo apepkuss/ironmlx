@@ -1,0 +1,53 @@
+{
+ "recorded_utc": "2026-10-07",
+ "build": "MLX_DIR=/Users/xin/.local/mlx cargo build --release -p mlx --example prefill_qmm_feasibility (source copied to mlx/examples/prefill_qmm_feasibility.rs), worktree HEAD 8e6d01bc",
+ "runs": {
+  "l1-identity-v1": {
+   "binary_sha256": "50a47c6c37ba30408b6f3a29ae15e2692fb7e7818fb960415dab3880a5f0ab3f",
+   "source_sha256": "f5f2d8f2b5bfeca887b5a94e25b23b59ef854f7fa64cc800393d066b91d9a19d"
+  },
+  "l1-wall-v1": {
+   "binary_sha256": "50a47c6c37ba30408b6f3a29ae15e2692fb7e7818fb960415dab3880a5f0ab3f",
+   "source_sha256": "f5f2d8f2b5bfeca887b5a94e25b23b59ef854f7fa64cc800393d066b91d9a19d"
+  },
+  "l1-gpu-v1": {
+   "binary_sha256": "50a47c6c37ba30408b6f3a29ae15e2692fb7e7818fb960415dab3880a5f0ab3f",
+   "source_sha256": "f5f2d8f2b5bfeca887b5a94e25b23b59ef854f7fa64cc800393d066b91d9a19d"
+  },
+  "l1-chain-v1": {
+   "binary_sha256": "5cd23fe3c3a948483b1756f8d65a99458de26cfc9ecbe52bcc83a384c6ee4a1e",
+   "source_sha256": "c2577252bcb7c87ff9f44e65842c847dbc2ebbbceee41d8935843e9523960ed6"
+  }
+ },
+ "binaries": {
+  "50a47c6c37ba30408b6f3a29ae15e2692fb7e7818fb960415dab3880a5f0ab3f": {
+   "used_by": [
+    "l1-identity-v1",
+    "l1-wall-v1",
+    "l1-gpu-v1"
+   ],
+   "source_snapshot": "benchmarks/dflash2-long-input/tools/prefill_qmm_feasibility.pre-chain.rs",
+   "source_sha256": "f5f2d8f2b5bfeca887b5a94e25b23b59ef854f7fa64cc800393d066b91d9a19d",
+   "source_matches_run_records": true,
+   "preserved": false,
+   "limitation": "Overwritten in target/ by the later chain build before it was copied. The source snapshot is reconstructed (its hash equals the hash each run recorded), but the binary cannot be reproduced byte for byte: a rebuild may differ in non-semantic bytes, so its sha256 is not guaranteed to equal the recorded one."
+  },
+  "5cd23fe3c3a948483b1756f8d65a99458de26cfc9ecbe52bcc83a384c6ee4a1e": {
+   "used_by": [
+    "l1-chain-v1",
+    "l1-chain-probe-v1 (diagnostic; hash not recorded at run time, no rebuild between the probe and l1-chain-v1)"
+   ],
+   "source_snapshot": "benchmarks/dflash2-long-input/tools/prefill_qmm_feasibility.rs",
+   "source_sha256": "c2577252bcb7c87ff9f44e65842c847dbc2ebbbceee41d8935843e9523960ed6",
+   "source_matches_run_records": true,
+   "preserved": true,
+   "copies": {
+    "reports/dflash2-long-input/binaries/prefill-qmm-feasibility-5cd23fe3": "5cd23fe3c3a948483b1756f8d65a99458de26cfc9ecbe52bcc83a384c6ee4a1e",
+    "reports/dflash2-long-input/binaries/l1-tool/prefill-qmm-feasibility-chain-5cd23fe3": "5cd23fe3c3a948483b1756f8d65a99458de26cfc9ecbe52bcc83a384c6ee4a1e"
+   }
+  }
+ },
+ "unrecorded": {
+  "l1_smoke_v1": "Smoke runs used two earlier source versions (before the single-variant capture restructure); neither source nor binary was recorded. Diagnostic only, not used for any conclusion."
+ }
+}

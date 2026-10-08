@@ -23,7 +23,7 @@ use ironmlx_runtime::core::generation_types::GenerateRequest;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 #[path = "responses_eof_tests.rs"]
-mod eof_tests;
+pub(crate) mod eof_tests;
 #[cfg(test)]
 #[path = "responses_reasoning_replay_tests.rs"]
 mod reasoning_replay_tests;

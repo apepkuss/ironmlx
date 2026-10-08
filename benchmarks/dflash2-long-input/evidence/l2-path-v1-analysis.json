@@ -1,0 +1,451 @@
+{
+ "label": "l2-path-v1",
+ "kind": "path",
+ "run_sha256": "fd417bd60474a639b393452c092e983d2f278e9f80d3cbb8345a4afafb363898",
+ "protocol_sha256": "2cb30f92cffdd3668553a44d1694243e144965d6ccd53916500be7861a427a2c",
+ "binary": {
+  "path": "/Users/xin/workspace/perf-dflash2-b4-throughput/reports/dflash2-long-input/binaries/ironmlx-long-baseline-8d3a42dc",
+  "sha256": "8d3a42dc8ee05cc805791a0f6acaf907f48a71bc5500f92b46630fa9a726cc65"
+ },
+ "path": {
+  "2048": {
+   "witnesses": {
+    "gate-up QMM BM128 active": true,
+    "down QMM BM128 active": true,
+    "2048-row BF16 D256 NAX attention active": true,
+    "realized-layout native fallback": false,
+    "masked causal softmax fallback active": false
+   },
+   "prefill": [
+    {
+     "prompt_len": 30732,
+     "phases": [
+      {
+       "phase": "lookup",
+       "size": 0,
+       "ms": 0.0
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2384.42
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2374.38
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2401.174
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2543.497
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2641.169
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2695.389
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2749.709
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2802.564
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2855.714
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2911.493
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2950.441
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 3013.691
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 3128.541
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 3211.878
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 3278.489
+      },
+      {
+       "phase": "chunk",
+       "size": 12,
+       "ms": 183.133
+      },
+      {
+       "phase": "first_logits",
+       "size": 1,
+       "ms": 6.488
+      }
+     ]
+    },
+    {
+     "prompt_len": 30732,
+     "phases": [
+      {
+       "phase": "lookup",
+       "size": 0,
+       "ms": 0.0
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2429.835
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2516.759
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2595.387
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2669.582
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2740.539
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2802.493
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2850.146
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2911.689
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2965.222
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 2994.405
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 3031.322
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 3071.015
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 3116.786
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 3385.417
+      },
+      {
+       "phase": "chunk",
+       "size": 2048,
+       "ms": 3316.793
+      },
+      {
+       "phase": "chunk",
+       "size": 12,
+       "ms": 177.223
+      },
+      {
+       "phase": "first_logits",
+       "size": 1,
+       "ms": 5.882
+      }
+     ]
+    }
+   ],
+   "rows": [
+    {
+     "task": "code-1",
+     "ttft_s": 42.1620845,
+     "server_prefill_ms": 42132.612
+    },
+    {
+     "task": "knowledge-1",
+     "ttft_s": 43.6158165,
+     "server_prefill_ms": 43580.954
+    }
+   ]
+  },
+  "4096": {
+   "witnesses": {
+    "gate-up QMM BM128 active": false,
+    "down QMM BM128 active": false,
+    "2048-row BF16 D256 NAX attention active": false,
+    "realized-layout native fallback": false,
+    "masked causal softmax fallback active": true
+   },
+   "prefill": [
+    {
+     "prompt_len": 30732,
+     "phases": [
+      {
+       "phase": "lookup",
+       "size": 0,
+       "ms": 0.0
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 5072.38
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 5554.283
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 5888.435
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 6147.685
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 6776.004
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 7306.071
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 7804.416
+      },
+      {
+       "phase": "chunk",
+       "size": 2060,
+       "ms": 3889.497
+      },
+      {
+       "phase": "first_logits",
+       "size": 1,
+       "ms": 17.117
+      }
+     ]
+    },
+    {
+     "prompt_len": 30732,
+     "phases": [
+      {
+       "phase": "lookup",
+       "size": 0,
+       "ms": 0.0
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 6062.888
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 6517.591
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 6671.251
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 7003.97
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 7308.493
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 7599.83
+      },
+      {
+       "phase": "chunk",
+       "size": 4096,
+       "ms": 8101.377
+      },
+      {
+       "phase": "chunk",
+       "size": 2060,
+       "ms": 4035.428
+      },
+      {
+       "phase": "first_logits",
+       "size": 1,
+       "ms": 10.043
+      }
+     ]
+    }
+   ],
+   "rows": [
+    {
+     "task": "code-1",
+     "ttft_s": 48.486086166999996,
+     "server_prefill_ms": 48456.132
+    },
+    {
+     "task": "knowledge-1",
+     "ttft_s": 53.34073262499999,
+     "server_prefill_ms": 53311.077
+    }
+   ]
+  },
+  "8192": {
+   "witnesses": {
+    "gate-up QMM BM128 active": false,
+    "down QMM BM128 active": false,
+    "2048-row BF16 D256 NAX attention active": false,
+    "realized-layout native fallback": false,
+    "masked causal softmax fallback active": true
+   },
+   "prefill": [
+    {
+     "prompt_len": 30732,
+     "phases": [
+      {
+       "phase": "lookup",
+       "size": 0,
+       "ms": 0.0
+      },
+      {
+       "phase": "chunk",
+       "size": 8192,
+       "ms": 13068.16
+      },
+      {
+       "phase": "chunk",
+       "size": 8192,
+       "ms": 14499.964
+      },
+      {
+       "phase": "chunk",
+       "size": 8192,
+       "ms": 15655.287
+      },
+      {
+       "phase": "chunk",
+       "size": 6156,
+       "ms": 12775.277
+      },
+      {
+       "phase": "first_logits",
+       "size": 1,
+       "ms": 5.818
+      }
+     ]
+    },
+    {
+     "prompt_len": 30732,
+     "phases": [
+      {
+       "phase": "lookup",
+       "size": 0,
+       "ms": 0.0
+      },
+      {
+       "phase": "chunk",
+       "size": 8192,
+       "ms": 13618.917
+      },
+      {
+       "phase": "chunk",
+       "size": 8192,
+       "ms": 14752.479
+      },
+      {
+       "phase": "chunk",
+       "size": 8192,
+       "ms": 16172.431
+      },
+      {
+       "phase": "chunk",
+       "size": 6156,
+       "ms": 13228.304
+      },
+      {
+       "phase": "first_logits",
+       "size": 1,
+       "ms": 5.837
+      }
+     ]
+    }
+   ],
+   "rows": [
+    {
+     "task": "code-1",
+     "ttft_s": 56.030229874999975,
+     "server_prefill_ms": 56007.218
+    },
+    {
+     "task": "knowledge-1",
+     "ttft_s": 57.814349375000006,
+     "server_prefill_ms": 57780.619
+    }
+   ]
+  }
+ }
+}

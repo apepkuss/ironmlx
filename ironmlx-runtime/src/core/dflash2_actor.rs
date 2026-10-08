@@ -18,6 +18,7 @@ use crate::core::dflash2::{
     DFlash2PrefixCache, DFlash2RaggedBatchCache, DFlash2TensorBatchCache,
     DFlash2TextGenerationStream,
 };
+use crate::core::dflash2_step_diagnostic::DFlash2StepDiagnostic;
 use crate::core::generation_types::{GenerateEvent, GenerateRequest, RequestPriority};
 use crate::core::memory_budget::BudgetState;
 use crate::core::runtime_health::DFlash2RaggedLinearCounters;
@@ -843,6 +844,8 @@ where
         let mut ragged_group = None::<DFlash2RaggedGroup>;
         let mut token_id_diagnostic =
             crate::core::dflash2_token_diagnostic::DFlash2TokenIdDiagnostic::from_env();
+        let mut step_diagnostic =
+            crate::core::dflash2_step_diagnostic::DFlash2StepDiagnostic::from_env();
         let mut pending = VecDeque::<DFlash2Command>::new();
         let mut command_channel_open = true;
 
@@ -1010,7 +1013,12 @@ where
                 let memory_charge = match reserve_dflash2_request_memory(
                     &budget_state,
                     cache_cost,
-                    required_total_tokens,
+                    crate::core::dflash2::dflash2_target_cache_tokens(
+                        request.prompt_ids.len(),
+                        request.max_new_tokens,
+                        block_size,
+                        p2_options.tree_max_nodes,
+                    ),
                     if request.priority.is_background() {
                         0
                     } else {
@@ -1179,7 +1187,12 @@ where
                     let candidate_charge = match reserve_dflash2_request_memory(
                         &budget_state,
                         cache_cost,
-                        required_total_tokens,
+                        crate::core::dflash2::dflash2_target_cache_tokens(
+                            candidate.prompt_ids.len(),
+                            candidate.max_new_tokens,
+                            block_size,
+                            p2_options.tree_max_nodes,
+                        ),
                         if candidate.priority.is_background() {
                             0
                         } else {
@@ -1329,6 +1342,7 @@ where
 
             worker_batch_count.fetch_add(1, Ordering::Relaxed);
             let batch_width = active.len();
+            DFlash2StepDiagnostic::begin(&mut step_diagnostic, batch_width);
             // With two or more active rows and the switch on, every row
             // publishes its whole committed window so rows reach window
             // boundaries together. A lone row keeps the original one token
@@ -1365,6 +1379,7 @@ where
                 }
             }
 
+            DFlash2StepDiagnostic::mark(&mut step_diagnostic, "next_tokens");
             // The stream already owns a materialized token before any draft
             // window is built. Publish it immediately so TTFT does not include
             // the following speculative draft/verify cycle.
@@ -1389,6 +1404,7 @@ where
                 }
             }
 
+            DFlash2StepDiagnostic::mark(&mut step_diagnostic, "publish");
             let mut keys = vec![None; active.len()];
             for (index, request) in active.iter().enumerate() {
                 if outcomes[index].finished || outcomes[index].failure.is_some() {
@@ -1403,6 +1419,7 @@ where
                 }
             }
 
+            DFlash2StepDiagnostic::mark(&mut step_diagnostic, "keys");
             let mut claimed = vec![false; active.len()];
             let mut group_index = 0_usize;
             while group_index < tensor_groups.len() {
@@ -1525,6 +1542,7 @@ where
                 }
             }
 
+            DFlash2StepDiagnostic::mark(&mut step_diagnostic, "tensor_groups");
             if ragged_linear_enabled && (active.len() >= 2 || ragged_group.is_some()) {
                 let candidates = keys
                     .iter()
@@ -1565,6 +1583,7 @@ where
                         }
                     }
                 }
+                DFlash2StepDiagnostic::mark(&mut step_diagnostic, "ragged_select_scatter");
                 // A new group needs a KV budget charge (and process headroom)
                 // for its batched cache before it is built; otherwise the
                 // rows keep their original path this step.
@@ -1608,6 +1627,7 @@ where
                         }
                     }
                 }
+                DFlash2StepDiagnostic::mark(&mut step_diagnostic, "ragged_reserve");
                 let runnable = ragged_group.is_some() || reservation.is_some();
                 if runnable
                     && selected.len() >= 2
@@ -1638,6 +1658,8 @@ where
                         });
                     match result {
                         Ok((cache, timing)) => {
+                            DFlash2StepDiagnostic::mark(&mut step_diagnostic, "ragged_window");
+                            DFlash2StepDiagnostic::ragged(&mut step_diagnostic, built, &timing);
                             let width = selected.len();
                             let counters = &worker_ragged_linear;
                             counters.windows.fetch_add(1, Ordering::Relaxed);
@@ -1694,6 +1716,7 @@ where
                 }
             }
 
+            DFlash2StepDiagnostic::mark(&mut step_diagnostic, "ragged");
             let mut ready = BTreeMap::new();
             for (index, key) in keys.iter().enumerate() {
                 if !claimed[index] && !outcomes[index].finished {
@@ -1713,6 +1736,17 @@ where
                     offset += chunk_width;
                     let ordinary_decode =
                         keys[indices[0]].is_some_and(|key| key.is_ordinary_decode());
+                    DFlash2StepDiagnostic::note(
+                        &mut step_diagnostic,
+                        if ordinary_decode {
+                            "ordinary_rows"
+                        } else if indices.len() >= 2 {
+                            "tensor_window_rows"
+                        } else {
+                            "tree_window_rows"
+                        },
+                        indices.len() as u64,
+                    );
                     let result = if ordinary_decode {
                         indices
                             .iter()
@@ -1758,6 +1792,7 @@ where
                 }
             }
 
+            DFlash2StepDiagnostic::mark(&mut step_diagnostic, "ready_windows");
             let mut group_index = 0_usize;
             while group_index < tensor_groups.len() {
                 let Some(positions) =
@@ -1807,6 +1842,7 @@ where
                 }
             }
 
+            DFlash2StepDiagnostic::mark(&mut step_diagnostic, "group_scatter");
             for index in (0..active.len()).rev() {
                 if !outcomes[index].finished {
                     continue;
@@ -1865,6 +1901,8 @@ where
                 worker_in_flight.fetch_sub(1, Ordering::Release);
                 worker_active.store(active.len() as u64, Ordering::Relaxed);
             }
+            DFlash2StepDiagnostic::mark(&mut step_diagnostic, "complete");
+            DFlash2StepDiagnostic::finish(&mut step_diagnostic);
         }
     });
 

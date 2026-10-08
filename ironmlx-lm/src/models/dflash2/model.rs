@@ -137,6 +137,116 @@ impl DFlash2DraftModel {
             .select_greedy_on(&proposal_hidden, &logits, &anchor, target)
     }
 
+    /// Greedy proposals for rows at different draft-cache positions (each
+    /// with its own context hidden and cache). Weight-bound work (input and
+    /// output projections, MLP, LM head, selector) runs once for all rows;
+    /// each row's context projection and attention keep the single-row path.
+    /// Returns `[B, L - 1]`.
+    pub fn propose_greedy_ragged_on<T: DFlash2Target>(
+        &self,
+        target_model: &T,
+        input_ids: &Array,
+        target_hiddens: &[&Array],
+        caches: &mut [&mut DFlash2DraftCache],
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let target = target.into();
+        let input_shape = input_ids.shape();
+        let input_dims = input_shape.as_slice();
+        if input_dims.len() != 2
+            || input_dims[1] < 2
+            || input_dims[1] > self.config.dflash_config.block_size
+        {
+            return Err(anyhow!(
+                "DFlash2 ragged proposal input must be [B,L] with 2<=L<={}, got {input_dims:?}",
+                self.config.dflash_config.block_size
+            ));
+        }
+        let batch = input_dims[0];
+        let rows = usize::try_from(batch)?;
+        if rows < 2 || target_hiddens.len() != rows || caches.len() != rows {
+            return Err(anyhow!(
+                "DFlash2 ragged proposal needs >=2 rows, one context and cache each"
+            ));
+        }
+        let expected_context = self.config.hidden_size
+            * i32::try_from(self.config.dflash_config.target_layer_ids.len())?;
+        for (row, (hidden, cache)) in target_hiddens.iter().zip(caches.iter()).enumerate() {
+            let dims = hidden.shape();
+            let dims = dims.as_slice();
+            if dims.len() != 3 || dims[0] != 1 || dims[1] <= 0 || dims[2] != expected_context {
+                return Err(anyhow!(
+                    "DFlash2 ragged row {row} target hidden must be [1,S,{expected_context}], got {dims:?}"
+                ));
+            }
+            if cache.layers.len() != self.layers.len() {
+                return Err(anyhow!(
+                    "DFlash2 ragged row {row} cache layer count mismatch"
+                ));
+            }
+            let processed = cache.layers[0].processed();
+            if cache
+                .layers
+                .iter()
+                .any(|layer| layer.processed() != processed)
+            {
+                return Err(anyhow!(
+                    "DFlash2 ragged row {row} cache layer offsets diverged"
+                ));
+            }
+        }
+        // The projections run flattened over all rows (weights read once);
+        // their rounding may differ from a single-row draft, which changes
+        // at most the proposal, never the verified tokens.
+        let _drafter_fusion = crate::nn::dflash2_drafter_fusion::scope();
+
+        let mut hidden = target_model.dflash2_embed_on(input_ids, target)?;
+        let mut contexts = Vec::with_capacity(rows);
+        let mut masks = Vec::with_capacity(rows);
+        for (target_hidden, cache) in target_hiddens.iter().zip(caches.iter()) {
+            // The context projection keeps its single-row shape (B=1, S rows).
+            contexts.push(
+                self.hidden_norm
+                    .forward_on(&self.fc.forward_on(target_hidden, target)?, target)?,
+            );
+            let context_after =
+                cache.layers[0].len_after_append(target_hidden.shape().as_slice()[1]);
+            masks.push(build_block_mask(
+                input_dims[1],
+                context_after,
+                self.config.sliding_window,
+                hidden.dtype(),
+                target,
+            )?);
+        }
+        for (index, layer) in self.layers.iter().enumerate() {
+            let mut layer_caches = caches
+                .iter_mut()
+                .map(|cache| &mut cache.layers[index])
+                .collect::<Vec<_>>();
+            hidden =
+                layer.forward_ragged_on(&hidden, &contexts, &masks, &mut layer_caches, target)?;
+        }
+        hidden = self.norm.forward_on(&hidden, target)?;
+        let proposal_hidden = mlx::ops::indexing::slice_strided_on(
+            &hidden,
+            &[0_i32, 1, 0][..],
+            &[batch, input_dims[1], self.config.hidden_size][..],
+            &[1_i32, 1, 1][..],
+            target,
+        )?;
+        let logits = target_model.dflash2_project_hidden_on(&proposal_hidden, target)?;
+        let anchor = mlx::ops::indexing::slice_strided_on(
+            input_ids,
+            &[0_i32, 0][..],
+            &[batch, 1][..],
+            &[1_i32, 1][..],
+            target,
+        )?;
+        self.selector
+            .select_greedy_on(&proposal_hidden, &logits, &anchor, target)
+    }
+
     pub fn propose_tree_on<T: DFlash2Target>(
         &self,
         target_model: &T,

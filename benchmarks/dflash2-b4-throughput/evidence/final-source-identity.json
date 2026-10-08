@@ -1,0 +1,16 @@
+{
+ "base_commit": "9f9c6580fd7ed2165adeeb3f1c76b0cf24b4e448",
+ "final_source_diff_sha256": "3c99b738b7c480395879efc2279f2a850e84e3e8aa7292e7b132d99c530e82c3",
+ "accepted_source_diff": "reports/dflash2-b4-throughput/binaries/ironmlx-item1b-dev-8d3a42dc.source.diff",
+ "differences_from_accepted_source_diff": [
+  "-index 2183f84bd..cce4716e0 100644",
+  "+index 2183f84bd..a39606261 100644",
+  "-+    } else if checks % 100 == 0 {",
+  "++    } else if checks.is_multiple_of(100) {"
+ ],
+ "final_binary_sha256": "8d3a42dc8ee05cc805791a0f6acaf907f48a71bc5500f92b46630fa9a726cc65",
+ "accepted_binary_sha256": "8d3a42dc8ee05cc805791a0f6acaf907f48a71bc5500f92b46630fa9a726cc65",
+ "build": "MLX_DIR=/Users/xin/.local/mlx cargo build --release (workspace)",
+ "note": "the only source difference from the frozen 8d3a42dc source is the clippy manual_is_multiple_of fix in a default-off diagnostic; the rebuilt binary is byte-identical",
+ "binary_identical": true
+}

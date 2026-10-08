@@ -1,0 +1,2225 @@
+{
+ "input": "reports/dflash2-long-input/results/mlp-down-formal-v1/run.json",
+ "input_sha256": "d070988ab5ad7ee43e4b122554a17bf39d0d28dda3c37271b5969bf6911ea6b4",
+ "pairs": 138,
+ "all_equal": true,
+ "token_id_diagnostic_in_formal_sessions": false,
+ "session_env_keys": [
+  "HOME",
+  "IRONMLX_LOG_LEVEL",
+  "LOGNAME",
+  "PATH",
+  "TMPDIR",
+  "USER"
+ ],
+ "detail": [
+  {
+   "kind": "long",
+   "round": 0,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    466,
+    466
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 0,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    320,
+    320
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 1,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    466,
+    466
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 1,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    320,
+    320
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 2,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    466,
+    466
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 2,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    320,
+    320
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 3,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    466,
+    466
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 3,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    320,
+    320
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 4,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    466,
+    466
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 4,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    320,
+    320
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 5,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    466,
+    466
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 5,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    320,
+    320
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 6,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    466,
+    466
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 6,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    320,
+    320
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 7,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    466,
+    466
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 7,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    320,
+    320
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 8,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    466,
+    466
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 8,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    320,
+    320
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 9,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    466,
+    466
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 9,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    320,
+    320
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 10,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    466,
+    466
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 10,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    320,
+    320
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 11,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    466,
+    466
+   ]
+  },
+  {
+   "kind": "long",
+   "round": 11,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    320,
+    320
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "b1",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1394,
+    1394
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1623,
+    1623
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "code-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1394,
+    1394
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "knowledge-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1623,
+    1623
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "knowledge-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    78,
+    78
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-1",
+   "occurrence": 2,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    78,
+    78
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    66,
+    66
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 0,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-2",
+   "occurrence": 2,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    66,
+    66
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "b1",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1394,
+    1394
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1623,
+    1623
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "code-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1394,
+    1394
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "knowledge-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1623,
+    1623
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "knowledge-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    78,
+    78
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-1",
+   "occurrence": 2,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    78,
+    78
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    66,
+    66
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 1,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-2",
+   "occurrence": 2,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    66,
+    66
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "b1",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1394,
+    1394
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1623,
+    1623
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "code-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1394,
+    1394
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "knowledge-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1623,
+    1623
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "knowledge-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    78,
+    78
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-1",
+   "occurrence": 2,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    78,
+    78
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    66,
+    66
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 2,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-2",
+   "occurrence": 2,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    66,
+    66
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "b1",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1394,
+    1394
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1623,
+    1623
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "code-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1394,
+    1394
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "knowledge-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1623,
+    1623
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "knowledge-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    78,
+    78
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-1",
+   "occurrence": 2,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    78,
+    78
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    66,
+    66
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 3,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-2",
+   "occurrence": 2,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    66,
+    66
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "b1",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1394,
+    1394
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1623,
+    1623
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "code-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1394,
+    1394
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "knowledge-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1623,
+    1623
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "knowledge-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    78,
+    78
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-1",
+   "occurrence": 2,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    78,
+    78
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    66,
+    66
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 4,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-2",
+   "occurrence": 2,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    66,
+    66
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "b1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "b1",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "b1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1394,
+    1394
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "scored:code-1,code-2,code-3,knowledge-1",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "code-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1420,
+    1420
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1623,
+    1623
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "scored:code-3,knowledge-1,knowledge-2,knowledge-3",
+   "task": "knowledge-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "code-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    686,
+    686
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "code-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1394,
+    1394
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "knowledge-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    1623,
+    1623
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "scored:knowledge-2,knowledge-3,code-1,code-2",
+   "task": "knowledge-3",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    448,
+    448
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-1",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    78,
+    78
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-1",
+   "occurrence": 2,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    78,
+    78
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-2",
+   "occurrence": 1,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    66,
+    66
+   ]
+  },
+  {
+   "kind": "short",
+   "round": 5,
+   "where": "warmup:warmup-1,warmup-2,warmup-1,warmup-2",
+   "task": "warmup-2",
+   "occurrence": 2,
+   "output_sha256_equal": true,
+   "finish_reason": [
+    "stop",
+    "stop"
+   ],
+   "completion_tokens": [
+    66,
+    66
+   ]
+  }
+ ]
+}

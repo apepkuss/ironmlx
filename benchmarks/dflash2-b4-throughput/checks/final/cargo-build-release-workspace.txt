@@ -1,0 +1,6 @@
+   Compiling ironmlx-lm v0.2.0 (/Users/xin/workspace/perf-dflash2-b4-throughput/ironmlx-lm)
+   Compiling ironmlx-image v0.2.0 (/Users/xin/workspace/perf-dflash2-b4-throughput/ironmlx-image)
+   Compiling ironmlx-runtime v0.2.0 (/Users/xin/workspace/perf-dflash2-b4-throughput/ironmlx-runtime)
+   Compiling ironmlx v0.2.0 (/Users/xin/workspace/perf-dflash2-b4-throughput/ironmlx)
+    Finished `release` profile [optimized] target(s) in 33.61s
+exit=0
