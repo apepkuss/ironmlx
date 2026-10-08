@@ -56,7 +56,7 @@ Qwen Image 受 Qwen Research License 约束，不授权商业用途。详见[模
 | --- | --- | --- | --- |
 | [EmbeddingGemma 2](https://huggingface.co/mlx-community/embeddinggemma-2-bf16) | Embedding | [文本、图片与音频向量](text-embeddings.md) | Affine [4](https://huggingface.co/mlx-community/embeddinggemma-2-4bit)-bit; [BF16](https://huggingface.co/mlx-community/embeddinggemma-2-bf16) |
 
-EmbeddingGemma 2 支持 BF16 与 Affine 4-bit，不支持视频输入。输入格式、维度与限制见[向量 API](text-embeddings.md)。
+EmbeddingGemma 2 支持 BF16 与 Affine 4-bit，不支持视频输入。输入格式、维度与限制见[Embedding API](text-embeddings.md)。
 
 ## Decision · 决策
 

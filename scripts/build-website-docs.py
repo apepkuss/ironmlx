@@ -19,7 +19,7 @@ PAGES = (
     ("api-reference.md", "API reference", "API 参考", "Find every documented endpoint and choose an API topic.", "查找全部已公开文档的端点，按能力进入 API 专题。"),
     ("service-api.md", "Service and management API", "服务与管理 API", "Look up shared access conventions, health, model discovery, and management endpoints.", "查阅公共访问约定、健康检查、模型发现与管理接口。"),
     ("text-vision-api.md", "Text and vision API", "文本与视觉 API", "Use Responses, Chat Completions, and Messages for text and image understanding.", "查阅文本与图片理解、思考、工具、结构化输出和流式协议。"),
-    ("text-embeddings.md", "Text, image and audio embeddings", "文本、图片与音频向量 API", "Create text, image, audio, and combined vectors with EmbeddingGemma 2.", "通过 EmbeddingGemma 2 生成文本、图片、音频与组合向量。"),
+    ("text-embeddings.md", "Embedding API", "Embedding API", "Create text, image, audio, and combined vectors with EmbeddingGemma 2.", "通过 EmbeddingGemma 2 生成文本、图片、音频与组合向量。"),
     ("audio-speech-api.md", "Speech synthesis API", "语音合成 API", "Generate speech and manage voices through the local API.", "通过本地 API 合成语音与管理声音配置。"),
     ("image-generation-api.md", "Image generation API", "图片生成 API", "Generate images and edit a reference image through the local API.", "通过本地 API 生成图片与编辑参考图片。"),
     ("laya-systemone-api.md", "System One API", "System One API", "Send choice, score, and true/false probability requests to Laya.", "通过 Laya 处理选择、评分与真假概率请求。"),

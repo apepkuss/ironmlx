@@ -123,7 +123,7 @@ App 自动准备语音资源。如果模型列表提示资源缺失，点击“�
 
 ## 按任务选择文档
 
-- [文本、图片与音频向量 API](text-embeddings.md)：EmbeddingGemma 2 BF16／affine4 的输入格式、限制与 Dashboard 向量指标。
+- [Embedding API](text-embeddings.md)：EmbeddingGemma 2 BF16／affine4 的输入格式、限制与 Dashboard 向量指标。
 - [Laya 决策 API](laya-systemone-api.md)：在 App 中加载 Laya，并供外部应用调用。
 - [支持的模型](supported-models.md)：具体模型、类型、权重格式、支持能力与加速类型；
 - [开发者指南](developer-guide.md)：API 快速开始、CLI 配置、源码开发与贡献入口；

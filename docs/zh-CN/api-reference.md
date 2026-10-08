@@ -10,7 +10,7 @@
 | --- | --- |
 | [服务与管理 API](service-api.md) | 公共访问约定、健康检查、模型发现与管理接口 |
 | [文本与视觉 API](text-vision-api.md) | Responses、Chat Completions、Messages；文本与图片理解、思考、工具、结构化输出 |
-| [文本、图片与音频向量 API](text-embeddings.md) | EmbeddingGemma 2 向量、组合输入、输出维度与编码 |
+| [Embedding API](text-embeddings.md) | 文本、图片、音频与组合输入；输出维度与编码 |
 | [语音合成 API](audio-speech-api.md) | 语音输出、声音配置与参考音频 |
 | [图片生成 API](image-generation-api.md) | 文生图与单图条件编辑 |
 | [System One API](laya-systemone-api.md) | Laya 的选择、评分与真假概率请求 |
@@ -27,7 +27,7 @@
 | `POST` | `/v1/responses` | Responses 推理 | App / EnginePool / CLI; 兼容模型 | [文本与视觉 API](text-vision-api.md#openai-responses-api) |
 | `POST` | `/v1/chat/completions` | Chat Completions 推理 | App / EnginePool / CLI; 兼容模型 | [文本与视觉 API](text-vision-api.md#openai-chat-completions) |
 | `POST` | `/v1/messages` | Messages 推理 | App / EnginePool / CLI; 兼容模型 | [文本与视觉 API](text-vision-api.md#anthropic-messages) |
-| `POST` | `/v1/embeddings` | 文本、图片、音频与组合向量 | App / EnginePool; EmbeddingGemma 2 | [向量 API](text-embeddings.md#调用) |
+| `POST` | `/v1/embeddings` | 文本、图片、音频与组合向量 | App / EnginePool; EmbeddingGemma 2 | [Embedding API](text-embeddings.md#调用) |
 | `POST` | `/v1/audio/speech` | 语音合成 | App / EnginePool; 音频模型 | [语音合成 API](audio-speech-api.md#请求) |
 | `GET` | `/v1/audio/voices` | 查询可用声音 | App / EnginePool; 配置声音服务 | [语音合成 API](audio-speech-api.md) |
 | `GET` | `/admin/api/audio/voices` | 查询全部声音（含禁用项） | App / EnginePool; 配置声音服务 | [语音合成 API](audio-speech-api.md) |

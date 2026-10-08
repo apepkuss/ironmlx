@@ -56,7 +56,7 @@ Qwen Image uses the Qwen Research License, which does not license commercial use
 | --- | --- | --- | --- |
 | [EmbeddingGemma 2](https://huggingface.co/mlx-community/embeddinggemma-2-bf16) | Embedding | [Text, image and audio embeddings](text-embeddings.md) | Affine [4](https://huggingface.co/mlx-community/embeddinggemma-2-4bit)-bit; [BF16](https://huggingface.co/mlx-community/embeddinggemma-2-bf16) |
 
-EmbeddingGemma 2 supports BF16 and Affine 4-bit; video inputs are unsupported. See the [embedding API](text-embeddings.md) for input formats, dimensions and limits.
+EmbeddingGemma 2 supports BF16 and Affine 4-bit; video inputs are unsupported. See the [Embedding API](text-embeddings.md) for input formats, dimensions and limits.
 
 ## Decision · Typed decisions
 

@@ -96,7 +96,7 @@ App DFlash2 discovery 返回已加载 target 的有效容量，而非 draft 模�
 `runtime_kind:embedding` 的已加载模型通过 `GET /admin/api/models/loaded` 和
 App 的 `/healthz` 模型条目返回 `embedding_metrics`，包含向量请求计数、近期延迟、
 输入 token 吞吐与向量吞吐。字段含义、统计窗口和重置行为见
-[向量 API](text-embeddings.md#运行状态)。
+[Embedding API](text-embeddings.md#运行状态)。
 
 ### 日志级别管理（仅本机）
 
@@ -134,7 +134,7 @@ App 的 `/healthz` 模型条目返回 `embedding_metrics`，包含向量请求�
 
 - [开发者指南](developer-guide.md#api-接入)：按能力选择 API，完成首次请求。
 - [文本与视觉 API](text-vision-api.md)：Responses、Chat Completions 和 Messages。
-- [向量 API](text-embeddings.md)：文本、图片、音频与组合向量。
+- [Embedding API](text-embeddings.md)：文本、图片、音频与组合向量。
 - [语音合成 API](audio-speech-api.md)：音频输出与声音管理。
 - [图片生成 API](image-generation-api.md)：文生图与单图条件编辑。
 - [System One API](laya-systemone-api.md)：选择、评分与真假概率。

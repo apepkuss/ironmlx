@@ -88,7 +88,7 @@ Loaded entries with `runtime_kind:embedding` expose `embedding_metrics` through
 `GET /admin/api/models/loaded` and the App's `/healthz` model entries. They report
 vector request counts, recent latency, input-token throughput and vector throughput.
 Field meanings, measurement windows and reset behavior are defined in the
-[embedding API](text-embeddings.md#runtime-status).
+[Embedding API](text-embeddings.md#runtime-status).
 
 ### Log-level management (loopback only)
 

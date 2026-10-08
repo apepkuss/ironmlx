@@ -117,7 +117,7 @@ def generate(catalog, language):
         else:
             headers = local(["Model", "Type", "Function", "Weight formats"], ["模型名称", "类型", "用途", "权重格式"], language)
             details = {
-                "Embedding": ("Embedding", local("Text, image and audio embeddings", "文本、图片与音频向量", language), "text-embeddings.md", "embedding API", "向量 API", "text-embeddings.md"),
+                "Embedding": ("Embedding", local("Text, image and audio embeddings", "文本、图片与音频向量", language), "text-embeddings.md", "Embedding API", "Embedding API", "text-embeddings.md"),
                 "Audio": ("Audio / TTS", local("Speech synthesis", "语音合成", language), "audio-speech-api.md", "speech API", "语音 API", "audio-speech-api.md"),
                 "Image": ("Image", local("Text-to-image / single-image editing", "文生图 / 单图编辑", language), "image-generation-api.md", "image generation API", "图片生成 API", "image-generation-api.md"),
                 "Decision": ("Decision", "System One API", "laya-systemone-api.md", "Laya guide", "Laya 使用指南", "laya-systemone-api.md"),

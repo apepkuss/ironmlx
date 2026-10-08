@@ -1,4 +1,4 @@
-# Text, image and audio embeddings
+# Embedding API
 
 [简体中文](zh-CN/text-embeddings.md) · [API reference](api-reference.md) · [Service and management API](service-api.md)
 

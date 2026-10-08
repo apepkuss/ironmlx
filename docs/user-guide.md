@@ -147,7 +147,7 @@ for the corresponding `audio.execution` fields and scheduling semantics.
 
 ## Choose a task
 
-- [Text, image and audio embeddings](text-embeddings.md) — EmbeddingGemma 2 BF16/affine4 input formats, limits and Dashboard vector metrics.
+- [Embedding API](text-embeddings.md) — EmbeddingGemma 2 BF16/affine4 input formats, limits and Dashboard vector metrics.
 - [Laya decision API](laya-systemone-api.md) — load Laya in the App and connect external TypeSafe clients.
 - [Supported models](supported-models.md) — model names, types, weight formats,
   capabilities, and acceleration options.
