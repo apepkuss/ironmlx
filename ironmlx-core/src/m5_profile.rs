@@ -35,6 +35,8 @@ pub mod settings {
     pub const PREFILL_D256_NAX_METALLIB: &str = "IRONMLX_EXPERIMENTAL_PREFILL_D256_NAX_METALLIB";
     pub const MLX_CACHE_MAX_MIB: &str = "IRONMLX_EXPERIMENTAL_MLX_CACHE_MAX_MIB";
     pub const QEMBEDDING_RUNTIME_COUNT: &str = "IRONMLX_EXPERIMENTAL_QEMBEDDING_RUNTIME_COUNT";
+    /// Wire the loaded DFlash2 weights (MLX residency sets) at serve start.
+    pub const WIRED_WEIGHTS: &str = "IRONMLX_EXPERIMENTAL_WIRED_WEIGHTS";
     /// Qwen3.6 MoE: expert-grouped gather qmv for multi-token verification.
     pub const M5_MOE_GROUPED_QMV: &str = "IRONMLX_EXPERIMENTAL_M5_MOE_GROUPED_QMV";
     /// Qwen3.6 MoE affine4: route non-expert projections through the M5
@@ -90,8 +92,19 @@ impl M5ProfileTarget {
 /// affine6/affine8) adaptive linear windows showed no measurable gain and the
 /// wide shapes that use it gained at most ~2.6% while staying slower than
 /// adaptive linear. The affine4 projections were slower. Both stay explicit
-/// experimental settings.
-const MOE_PROFILE_VALUES: &[(&str, &str)] = &[];
+/// experimental settings. The runtime-count quantized embedding has identical
+/// arithmetic and removes a Metal library compile on every new prompt length
+/// (affine4 short prompts: six-task outputs unchanged, first-use prefill
+/// spikes of 35-116 ms gone). A 512 MiB MLX buffer-cache ceiling (default
+/// 2 GiB) lowered the short-prompt serving footprint by 1.0 GiB with unchanged
+/// window costs; long-prompt prefill was not measured at this ceiling. Wired
+/// weights removed the intermittent 40-80 ms slower prefills after the idle
+/// gap between requests (0 of 48 against 6 of 24 in the paired sessions).
+const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
+    (settings::QEMBEDDING_RUNTIME_COUNT, "1"),
+    (settings::MLX_CACHE_MAX_MIB, "512"),
+    (settings::WIRED_WEIGHTS, "1"),
+];
 
 /// Default flat-tree size of the Qwen3.6 MoE profile when the option is not
 /// given explicitly. Linear windows: tree7/tree15 measured slower than linear
@@ -636,8 +649,32 @@ mod tests {
     fn moe_profile_never_inherits_dense_lane_settings() {
         let moe = Some(M5ProfileTarget::Qwen36Moe.values());
         for (name, _) in PROFILE_VALUES {
+            if *name == settings::QEMBEDDING_RUNTIME_COUNT || *name == settings::MLX_CACHE_MAX_MIB {
+                continue;
+            }
             assert_eq!(setting_with(None, moe, name), None, "{name}");
         }
+        // Shared settings with target-specific values.
+        assert_eq!(
+            setting_with(None, moe, settings::QEMBEDDING_RUNTIME_COUNT).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            setting_with(None, moe, settings::MLX_CACHE_MAX_MIB).as_deref(),
+            Some("512")
+        );
+        assert_eq!(
+            setting_with(None, moe, settings::WIRED_WEIGHTS).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            setting_with(
+                None,
+                Some(M5ProfileTarget::Qwen35Dense.values()),
+                settings::WIRED_WEIGHTS
+            ),
+            None
+        );
         // The experimental MoE settings are reported, never enabled by the
         // profile; an explicit value still applies.
         for name in [

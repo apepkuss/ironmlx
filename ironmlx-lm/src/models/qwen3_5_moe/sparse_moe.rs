@@ -641,6 +641,9 @@ impl RoutedExperts {
         // Now safe to drop source — fused tensors are materialized and the
         // lazy graph no longer holds refs into source arrays.
         drop(source);
+        // When nothing else holds the split weights their buffers land in the
+        // MLX allocator cache, sized for no later allocation; release them.
+        mlx::transforms::clear_cache();
         let fused = FusedGateUp {
             weight,
             scales,

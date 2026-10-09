@@ -1012,6 +1012,16 @@ where
     static_memory_estimate.speculative_cold_bytes = draft_loader.loaded_tensor_bytes();
     drop(draft_loader);
     mlx::clear_cache();
+    if ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::WIRED_WEIGHTS) {
+        // Keep the loaded target and draft weights GPU-resident so an idle
+        // gap between requests does not make the next prefill re-establish
+        // residency for every expert it touches.
+        let limit = mlx::memory::snapshot().active_bytes;
+        match mlx::memory::set_wired_limit(limit) {
+            Ok(previous) => tracing::info!(limit, previous, "DFlash2 weights wired"),
+            Err(error) => tracing::warn!(limit, %error, "DFlash2 weights not wired"),
+        }
+    }
 
     let model_id = single_model_id(args)?;
     let prefix_cache = resolve_dflash2_prefix_lru_cache_config(args)?;
@@ -1447,9 +1457,13 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
             }
         }
         ironmlx_lm::models::ModelArchitecture::Qwen35Moe => {
+            // MoE models hold their own Array refs. Dropping the loader before
+            // serving lets the first-forward gate/up fusion free the split
+            // expert weights instead of keeping a second resident copy.
             if let Some(family) = dflash2_family {
                 let model = ironmlx_lm::models::Qwen35MoeModel::from_loader(&loader)
                     .context("Qwen35MoeModel::from_loader")?;
+                drop(loader);
                 return serve_with_dflash2_model(
                     model,
                     family,
@@ -1464,6 +1478,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 QwenMoeServeModel::Qwen35 => {
                     let model = ironmlx_lm::models::Qwen35MoeModel::from_loader(&loader)
                         .context("Qwen35MoeModel::from_loader")?;
+                    drop(loader);
                     if let Some(mtp_config) = mtp_config.clone() {
                         serve_with_mtp_model(
                             model,
@@ -1490,6 +1505,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 QwenMoeServeModel::Qwen36 => {
                     let model = ironmlx_lm::models::Qwen36MoeModel::from_loader(&loader)
                         .context("Qwen36MoeModel::from_loader")?;
+                    drop(loader);
                     if let Some(mtp_config) = mtp_config.clone() {
                         serve_with_mtp_model(
                             model,
