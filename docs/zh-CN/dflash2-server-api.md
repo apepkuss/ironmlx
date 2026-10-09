@@ -94,7 +94,7 @@ draft 精度选项或批处理设置。
 | 项目 | 限制 |
 |---|---|
 | Target 量化配方 | Affine、group size 64、4/5/6/8 bit，且只带 mlx-community checkpoint 自带的 `mlp.gate` 与 `shared_expert_gate` 8-bit 覆盖。其他配方（包括 OptiQ）在加载时拒绝。 |
-| Draft 精度 | 仅 BF16（`--dflash2-draft-bits 0`，该 target 的默认值）。4 和 8 会被拒绝；App 只提供 BF16。 |
+| Draft 精度 | 默认在加载时把 BF16 checkpoint 量化为 affine 4-bit（group size 64，`--dflash2-draft-bits 4`）；`0` 保持 BF16；`8` 会被拒绝。App 提供 4-bit（默认）和 BF16。启动日志的 `draft_loaded_precision` 是从已加载投影层读回的实际精度。 |
 | Verify 宽度 | 所有位宽最多 8。省略 `--dflash2-block-size` 时 checkpoint 宽度被限制到 8；显式传入大于 8 的值直接报错。 |
 | 执行方式 | 仅 B1。`--max-sequences` 仍限制同时活跃的请求数，但每次 target forward 只处理一个请求：活跃请求按窗口轮流推进，不做跨请求 tensor 合批。 |
 | Tree | `--dflash2-tree-max-nodes` 取 1–15 时，对 greedy 且无约束的请求启用 flat tree。采样请求和带约束的请求（包括开启 thinking 时附带的 reasoning budget）改走线性窗口，`tree_fallback_linear_windows` 计数，服务端日志记录一次原因。 |

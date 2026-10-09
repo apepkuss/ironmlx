@@ -1,7 +1,7 @@
 use mlx::{Array, StreamOrDevice};
 
 use crate::core::Loader;
-use crate::nn::{Mlp, RmsNorm};
+use crate::nn::{Linear, Mlp, RmsNorm};
 use crate::Result;
 
 use super::attention::{DFlash2Attention, DFlash2KvCache};
@@ -19,6 +19,14 @@ pub(super) struct DFlash2DecoderLayer {
 }
 
 impl DFlash2DecoderLayer {
+    pub(super) fn projections(&self) -> Vec<&Linear> {
+        let mut out = self.attention.projections();
+        out.push(self.attention_conv.projection());
+        out.extend(self.mlp.activation_projections());
+        out.push(self.mlp_conv.projection());
+        out
+    }
+
     pub(super) fn from_loader(
         loader: &Loader,
         index: i32,

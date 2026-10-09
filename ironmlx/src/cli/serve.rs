@@ -186,8 +186,8 @@ pub struct ServeArgs {
     pub dflash2_block_size: Option<usize>,
 
     /// Runtime affine quantization for the official BF16 DFlash2 draft.
-    /// Pass 0 to keep the draft in BF16. Default: 4 for dense targets;
-    /// Qwen3.6 MoE targets support only 0 (BF16).
+    /// Pass 0 to keep the draft in BF16. Default: 4. Qwen3.6 MoE targets
+    /// support 4 and 0 (BF16) only.
     #[arg(long = "dflash2-draft-bits")]
     pub dflash2_draft_bits: Option<i32>,
 
@@ -1002,6 +1002,8 @@ where
         draft_bits,
     )
     .context("DFlash2DraftModel::from_loader")?;
+    let draft_precision =
+        super::dflash2_target::ensure_loaded_draft_precision(&draft, draft_bits_value)?;
     let checkpoint_block_size = usize::try_from(draft.config().dflash_config.block_size)
         .context("DFlash2 checkpoint block_size")?;
     family.ensure_tree_supported(&model, dflash2_tree_max_nodes(args))?;
@@ -1016,13 +1018,15 @@ where
     let (tensor_batch_requested_max_width, tensor_batch_max_width) =
         resolve_dflash2_tensor_batch_width(args, scheduler_config.b_max);
     tracing::info!(
-        "ironmlx serve: DFlash2 enabled model_dir={} target_profile={} checkpoint_block_size={} resolved_block_size={} block_size_source={} draft_bits={} tree_max_nodes={} position_keyed_sampling={} max_sequences={} tensor_batch_requested_max_width={} tensor_batch_effective_max_width={} prefix_cache_max_bytes={:?}",
+        "ironmlx serve: DFlash2 enabled model_dir={} target_profile={} checkpoint_block_size={} resolved_block_size={} block_size_source={} draft_bits={} draft_loaded_precision={} draft_projections={} tree_max_nodes={} position_keyed_sampling={} max_sequences={} tensor_batch_requested_max_width={} tensor_batch_effective_max_width={} prefix_cache_max_bytes={:?}",
         draft_dir.display(),
         model.dflash2_verify_capabilities().profile,
         block_size_resolution.checkpoint_block_size,
         block_size_resolution.block_size,
         if block_size_resolution.explicit { "explicit" } else { "auto" },
         draft_bits_value,
+        super::dflash2_target::draft_precision_label(draft_precision),
+        draft_precision.projections,
         dflash2_tree_max_nodes(args),
         args.dflash2_position_keyed_sampling,
         scheduler_config.b_max,

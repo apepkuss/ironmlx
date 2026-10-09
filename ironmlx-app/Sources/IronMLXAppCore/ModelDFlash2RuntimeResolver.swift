@@ -135,8 +135,9 @@ public enum ModelDFlash2RuntimeResolver {
         }
         let resolvedBlockSize = requestedBlockSize
             ?? min(checkpointBlockSize, ModelDFlash2Runtime.qualifiedAutomaticBlockSizeCap)
-        // Draft precision is a target qualification: Qwen3.6 MoE targets run
-        // only the original BF16 draft.
+        // Draft precision is a target qualification. Without an explicit
+        // choice the target's first option applies (4-bit for both families);
+        // Qwen3.6 MoE targets accept 4-bit and BF16 only.
         let draftBitsOptions = info?.draftBitsOptions ?? LocalModelDFlash2Info.denseDraftBitsOptions
         let draftBits: Int
         if let explicitBits = parameters?.dflash2DraftBitsExplicitValue {

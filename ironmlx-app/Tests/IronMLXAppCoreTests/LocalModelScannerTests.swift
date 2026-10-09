@@ -725,7 +725,7 @@ import Testing
         #expect(model.dflash2?.candidates.map(\.id) == ["incoai/Qwen3.6-35B-A3B-DFlash2"])
         #expect(model.dflash2?.candidates.first?.blockSize == 8)
         #expect(model.dflash2?.targetFamily == "qwen36_moe")
-        #expect(model.dflash2?.draftBitsOptions == [0])
+        #expect(model.dflash2?.draftBitsOptions == [4, 0])
     }
     // Mixed-precision coverage is a different recipe and is not qualified.
     let optiq = try #require(models.first(where: { $0.id == "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit" }))
@@ -792,7 +792,7 @@ import Testing
     }
 }
 
-@Test func dflash2RuntimeUsesOnlyQualifiedDraftPrecisionForQwen36Moe() throws {
+@Test func dflash2RuntimeDefaultsQwen36MoeToQ4DraftAndKeepsExplicitBF16() throws {
     let root = try temporaryDirectory()
     let targetID = "mlx-community/Qwen3.6-35B-A3B-6bit"
     let draftID = "incoai/Qwen3.6-35B-A3B-DFlash2"
@@ -800,17 +800,44 @@ import Testing
     _ = try writeSnapshot(root: root, repoID: draftID, configJSON: qwen36MoeDFlash2DraftConfig())
     let scanner = LocalModelScanner(rootURL: root)
     let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    let resolve = {
+        try ModelDFlash2RuntimeResolver.runtime(
+            for: targetID, useDFlash2: nil, scanner: scanner, parameterStore: parameterStore)
+    }
+    let launchedDraftBits = { (runtime: ModelDFlash2Runtime) -> String? in
+        let arguments = BackendLaunchConfiguration(
+            executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+            host: "127.0.0.1",
+            port: 9068,
+            options: BackendLaunchOptions(config: AppConfig()),
+            dflash2Runtime: runtime
+        ).arguments
+        return arguments.firstIndex(of: "--dflash2-draft-bits").map { arguments[$0 + 1] }
+    }
+
+    // No saved precision: the target default (4-bit) is resolved and launched.
     try parameterStore.save(ModelParameters(modelID: targetID, dflash2Enabled: true, dflash2ModelID: draftID))
-    let runtime = try #require(try ModelDFlash2RuntimeResolver.runtime(
-        for: targetID, useDFlash2: nil, scanner: scanner, parameterStore: parameterStore))
-    #expect(runtime.draftBits == 0)
-    #expect(runtime.blockSize == 8)
+    let automatic = try #require(try resolve())
+    #expect(automatic.draftBits == 4)
+    #expect(automatic.blockSize == 8)
+    #expect(launchedDraftBits(automatic) == "4")
+
+    // An explicit BF16 choice is kept as BF16.
+    try parameterStore.save(ModelParameters(
+        modelID: targetID, dflash2Enabled: true, dflash2ModelID: draftID, dflash2DraftBits: "0"))
+    let bf16 = try #require(try resolve())
+    #expect(bf16.draftBits == 0)
+    #expect(launchedDraftBits(bf16) == "0")
 
     try parameterStore.save(ModelParameters(
         modelID: targetID, dflash2Enabled: true, dflash2ModelID: draftID, dflash2DraftBits: "4"))
-    #expect(throws: ModelDFlash2RuntimeError.draftPrecisionNotQualified(model: targetID, bits: 4)) {
-        try ModelDFlash2RuntimeResolver.runtime(
-            for: targetID, useDFlash2: nil, scanner: scanner, parameterStore: parameterStore)
+    #expect(try #require(try resolve()).draftBits == 4)
+
+    // 8-bit is not qualified for this target.
+    try parameterStore.save(ModelParameters(
+        modelID: targetID, dflash2Enabled: true, dflash2ModelID: draftID, dflash2DraftBits: "8"))
+    #expect(throws: ModelDFlash2RuntimeError.draftPrecisionNotQualified(model: targetID, bits: 8)) {
+        try resolve()
     }
 }
 

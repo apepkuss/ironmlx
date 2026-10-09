@@ -9902,7 +9902,7 @@
     select.onchange = updateAutoBlockSizePlaceholder;
     updateAutoBlockSizePlaceholder();
     // Offer only the draft precisions this target is qualified with
-    // (Qwen3.6 MoE targets: BF16 only).
+    // (Qwen3.6 MoE targets: 4-bit by default, or BF16).
     const draftBitsOptions = Array.isArray(dflash2.draft_bits_options) && dflash2.draft_bits_options.length
       ? dflash2.draft_bits_options.map(String) : ['4', '8', '0'];
     const draftBitsLabels = { '4': '4-bit', '8': '8-bit', '0': 'BF16' };

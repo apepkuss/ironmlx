@@ -13,6 +13,16 @@ use super::layer::DFlash2DecoderLayer;
 use super::selector::DFlash2CandidateSelector;
 use super::{load_linear, DFlash2DraftTree, DFlash2Target};
 
+/// Precision of the draft projections as loaded, read from the projection
+/// objects themselves rather than from the requested option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DFlash2DraftPrecision {
+    /// Projection objects inspected (fused storage and its row views each count).
+    pub projections: usize,
+    /// Affine bits shared by every projection; `None` when all are unquantized.
+    pub bits: Option<i32>,
+}
+
 #[derive(Clone)]
 pub struct DFlash2DraftCache {
     layers: Vec<DFlash2KvCache>,
@@ -111,6 +121,29 @@ impl DFlash2DraftModel {
 
     pub fn config(&self) -> &DFlash2Config {
         &self.config
+    }
+
+    /// Precision of every projection as loaded. Norms, convolution base
+    /// kernels and selector codebooks are never quantized and are not counted.
+    /// Mixed precision is an error: runtime quantization applies to all of them.
+    pub fn projection_precision(&self) -> Result<DFlash2DraftPrecision> {
+        let mut projections = vec![&self.fc, self.selector.projection()];
+        for layer in &self.layers {
+            projections.extend(layer.projections());
+        }
+        let bits: Vec<Option<i32>> = projections
+            .iter()
+            .map(|projection| projection.quantized_parts().map(|parts| parts.bits))
+            .collect();
+        let first = bits[0];
+        anyhow::ensure!(
+            bits.iter().all(|value| *value == first),
+            "DFlash2 draft projections have mixed precision: {bits:?}"
+        );
+        Ok(DFlash2DraftPrecision {
+            projections: bits.len(),
+            bits: first,
+        })
     }
 
     pub fn make_cache(&self, initial_offset: i32) -> Result<DFlash2DraftCache> {

@@ -117,7 +117,7 @@ pub struct GenerateArgs {
 
     /// Runtime affine quantization for the official BF16 DFlash2 draft. Zero
     /// keeps BF16; 4 and 8 select the supported quantized variants. Default:
-    /// 4 for dense targets; Qwen3.6 MoE targets support only 0 (BF16).
+    /// 4. Qwen3.6 MoE targets support 4 and 0 (BF16) only.
     #[arg(long)]
     pub dflash2_draft_bits: Option<i32>,
 
@@ -332,6 +332,7 @@ where
         (draft_bits != 0).then_some(draft_bits),
     )
     .context("DFlash2DraftModel::from_loader")?;
+    let draft_precision = super::dflash2_target::ensure_loaded_draft_precision(&draft, draft_bits)?;
     let checkpoint_block_size = usize::try_from(draft.config().dflash_config.block_size)
         .context("DFlash2 checkpoint block_size")?;
     family.ensure_tree_supported(model, args.dflash2_tree_max_nodes.unwrap_or(0))?;
@@ -340,9 +341,11 @@ where
     drop(draft_loader);
     mlx::clear_cache();
     eprintln!(
-        "ironmlx generate: DFlash2 target_profile={} draft_bits={} checkpoint_block_size={} resolved_block_size={} block_size_source={}",
+        "ironmlx generate: DFlash2 target_profile={} draft_bits={} draft_loaded_precision={} draft_projections={} checkpoint_block_size={} resolved_block_size={} block_size_source={}",
         model.dflash2_verify_capabilities().profile,
         draft_bits,
+        super::dflash2_target::draft_precision_label(draft_precision),
+        draft_precision.projections,
         block_size_resolution.checkpoint_block_size,
         block_size_resolution.block_size,
         if block_size_resolution.explicit { "explicit" } else { "auto" },

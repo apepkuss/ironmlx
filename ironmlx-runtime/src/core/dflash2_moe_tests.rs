@@ -1,8 +1,12 @@
 //! Real-checkpoint Qwen3.6 MoE DFlash2 generation tests.
 //!
 //! `QWEN36_MOE_DFLASH2_TARGET` selects one target bit width and
-//! `DFLASH2_MODEL` the BF16 incoai draft. Every comparison is against the
-//! ordinary decoding of the same target checkpoint.
+//! `DFLASH2_MODEL` the BF16 incoai draft checkpoint.
+//! `QWEN36_MOE_DFLASH2_DRAFT_BITS` selects how that checkpoint is loaded:
+//! `4` (default, the production setting) quantizes it at load to affine
+//! 4-bit, `0` keeps BF16. The fixture reads the precision back from the
+//! loaded projections and fails if it differs. Every comparison is against
+//! the ordinary decoding of the same target checkpoint.
 
 use super::*;
 use crate::core::generate::GenerationStream;
@@ -20,6 +24,8 @@ const PROMPTS: [&str; 3] = [
 struct Fixture {
     target: Qwen35MoeModel,
     draft: DFlash2DraftModel,
+    /// `q4` or `bf16`, as read back from the loaded draft projections.
+    draft_label: &'static str,
     tokenizer: Tokenizer,
 }
 
@@ -34,12 +40,48 @@ fn fixture() -> Option<Fixture> {
         "target is not a qualified Qwen3.6 MoE DFlash2 recipe"
     );
     drop(target_loader);
+    let draft_bits: i32 = std::env::var("QWEN36_MOE_DFLASH2_DRAFT_BITS")
+        .map(|value| {
+            value
+                .parse()
+                .expect("QWEN36_MOE_DFLASH2_DRAFT_BITS must be 0 or 4")
+        })
+        .unwrap_or(4);
+    assert!(
+        matches!(draft_bits, 0 | 4),
+        "QWEN36_MOE_DFLASH2_DRAFT_BITS must be 0 or 4, got {draft_bits}"
+    );
     let draft_loader = Loader::open_dflash2(&draft_dir).expect("open DFlash2 draft");
-    let draft = DFlash2DraftModel::from_loader(&draft_loader, target.dflash2_target_spec(), None)
-        .expect("load BF16 DFlash2 draft");
+    let draft = DFlash2DraftModel::from_loader(
+        &draft_loader,
+        target.dflash2_target_spec(),
+        (draft_bits != 0).then_some(draft_bits),
+    )
+    .expect("load DFlash2 draft");
+    let precision = draft.projection_precision().expect("draft precision");
+    assert_eq!(
+        precision.bits,
+        (draft_bits != 0).then_some(draft_bits),
+        "loaded draft projections do not carry the requested precision"
+    );
+    let draft_label = if precision.bits == Some(4) {
+        "q4"
+    } else {
+        "bf16"
+    };
+    eprintln!(
+        "[qwen36-moe-dflash2 fixture] target={} target_bits={:?} draft={} requested_draft_bits={draft_bits} \
+         loaded_projection_bits={:?} projections={} draft_label={draft_label}",
+        target_dir.display(),
+        target.dflash2_target_bits(),
+        draft_dir.display(),
+        precision.bits,
+        precision.projections,
+    );
     Some(Fixture {
         target,
         draft,
+        draft_label,
         tokenizer,
     })
 }
@@ -97,6 +139,7 @@ fn qwen36_moe_dflash2_greedy_generation_matches_ordinary() {
         return;
     };
     let bits = fixture.target.dflash2_target_bits().expect("bits");
+    let draft = fixture.draft_label;
     let mut long_prompt = String::new();
     while fixture
         .tokenizer
@@ -146,7 +189,7 @@ fn qwen36_moe_dflash2_greedy_generation_matches_ordinary() {
             let (actual, metrics) = dflash_run(max_new_tokens, Vec::new());
             assert_eq!(
                 actual, expected,
-                "affine{bits} prompt {index} max_new_tokens={max_new_tokens} diverged"
+                "affine{bits} draft={draft} prompt {index} max_new_tokens={max_new_tokens} diverged"
             );
             assert_eq!(metrics.generated_tokens, max_new_tokens);
             assert!(
@@ -154,7 +197,7 @@ fn qwen36_moe_dflash2_greedy_generation_matches_ordinary() {
                 "no DFlash2 drafts"
             );
             eprintln!(
-                "[qwen36-moe-dflash2 affine{bits}] prompt={index} max_new={max_new_tokens} \
+                "[qwen36-moe-dflash2 affine{bits} draft={draft}] prompt={index} max_new={max_new_tokens} \
                  windows={} drafted={} accepted={} rollbacks={} ordinary_windows={} exact",
                 metrics.windows,
                 metrics.drafted_tokens,
@@ -176,7 +219,7 @@ fn qwen36_moe_dflash2_greedy_generation_matches_ordinary() {
                 let (actual_stop, stop_metrics) = dflash_run(61, vec![stop]);
                 assert_eq!(
                     actual_stop, expected_stop,
-                    "affine{bits} prompt {index} stop token {stop} diverged"
+                    "affine{bits} draft={draft} prompt {index} stop token {stop} diverged"
                 );
                 assert!(expected_stop.last().is_some_and(|event| event.0 == stop));
                 assert!(stop_metrics.generated_tokens < 61);
@@ -184,7 +227,7 @@ fn qwen36_moe_dflash2_greedy_generation_matches_ordinary() {
         }
     }
     eprintln!(
-        "[qwen36-moe-dflash2 affine{bits}] totals windows={} drafted={} accepted={} rollbacks={} ordinary_windows={}",
+        "[qwen36-moe-dflash2 affine{bits} draft={draft}] totals windows={} drafted={} accepted={} rollbacks={} ordinary_windows={}",
         totals.0, totals.1, totals.2, totals.3, totals.4
     );
     assert!(totals.3 > 0, "no rollback was exercised");
@@ -245,6 +288,7 @@ fn qwen36_moe_dflash2_exact_sampling_matches_target_distribution() {
         return;
     };
     let bits = fixture.target.dflash2_target_bits().expect("bits");
+    let draft = fixture.draft_label;
     let trials: usize = std::env::var("QWEN36_MOE_DFLASH2_SAMPLING_TRIALS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -374,7 +418,7 @@ fn qwen36_moe_dflash2_exact_sampling_matches_target_distribution() {
     }
     let (statistic, critical) = chi_square(&first, &expected[0].probabilities(), trials);
     eprintln!(
-        "[qwen36-moe-dflash2 affine{bits}] sampling trials={trials} accepted_length_histogram={accepted_lengths:?} \
+        "[qwen36-moe-dflash2 affine{bits} draft={draft}] sampling trials={trials} accepted_length_histogram={accepted_lengths:?} \
          first chi2={statistic:.2} critical(p=0.001)={critical:.2}"
     );
     assert!(
@@ -413,7 +457,7 @@ fn qwen36_moe_dflash2_exact_sampling_matches_target_distribution() {
         let (statistic, critical) =
             chi_square(&second, &expected[1].probabilities(), second_trials);
         eprintln!(
-            "[qwen36-moe-dflash2 affine{bits}] sampling second trials={second_trials} chi2={statistic:.2} critical(p=0.001)={critical:.2}"
+            "[qwen36-moe-dflash2 affine{bits} draft={draft}] sampling second trials={second_trials} chi2={statistic:.2} critical(p=0.001)={critical:.2}"
         );
         assert!(
             statistic <= critical,
@@ -524,6 +568,7 @@ fn qwen36_moe_dflash2_sampled_generation_state_matches_teacher_forced_decode() {
         return;
     };
     let bits = fixture.target.dflash2_target_bits().expect("bits");
+    let draft = fixture.draft_label;
     let model = &fixture.target;
     let sampler = Sampler::greedy()
         .with_temperature(1.0)
@@ -552,7 +597,7 @@ fn qwen36_moe_dflash2_sampled_generation_state_matches_teacher_forced_decode() {
             let events = drain(|| stream.next_token());
             let metrics = stream.metrics();
             let label = format!(
-                "affine{bits} budget={} prompt={index}",
+                "affine{bits} draft={draft} budget={} prompt={index}",
                 budget.unwrap_or("adaptive")
             );
             assert!(
@@ -641,7 +686,7 @@ fn qwen36_moe_dflash2_sampled_generation_state_matches_teacher_forced_decode() {
         None => std::env::remove_var(budget_setting),
     }
     eprintln!(
-        "[qwen36-moe-dflash2 affine{bits}] sampled totals exact_windows={} residual_corrections={} accepted={} rollbacks={}",
+        "[qwen36-moe-dflash2 affine{bits} draft={draft}] sampled totals exact_windows={} residual_corrections={} accepted={} rollbacks={}",
         totals.0, totals.1, totals.2, totals.3
     );
     assert!(
@@ -663,6 +708,7 @@ fn qwen36_moe_dflash2_tree_generation_matches_ordinary() {
         return;
     };
     let bits = fixture.target.dflash2_target_bits().expect("bits");
+    let draft = fixture.draft_label;
     let max_nodes = fixture
         .target
         .dflash2_verify_capabilities()
@@ -696,12 +742,12 @@ fn qwen36_moe_dflash2_tree_generation_matches_ordinary() {
             let (actual, metrics) = tree_run(Vec::new());
             assert_eq!(
                 actual, expected,
-                "affine{bits} tree{nodes} prompt {index} diverged"
+                "affine{bits} draft={draft} tree{nodes} prompt {index} diverged"
             );
             assert!(metrics.tree_windows > 0, "no tree window executed");
             assert_eq!(metrics.tree_fallback_linear_windows, 0);
             eprintln!(
-                "[qwen36-moe-dflash2-tree affine{bits}] prompt={index} nodes={nodes} windows={} tree_windows={} tree_nodes={} accepted={} ordinary_windows={} exact",
+                "[qwen36-moe-dflash2-tree affine{bits} draft={draft}] prompt={index} nodes={nodes} windows={} tree_windows={} tree_nodes={} accepted={} ordinary_windows={} exact",
                 metrics.windows,
                 metrics.tree_windows,
                 metrics.tree_drafted_nodes,
@@ -719,7 +765,7 @@ fn qwen36_moe_dflash2_tree_generation_matches_ordinary() {
             let (actual_stop, _) = tree_run(vec![stop]);
             assert_eq!(
                 actual_stop, expected_stop,
-                "affine{bits} tree{nodes} stop diverged"
+                "affine{bits} draft={draft} tree{nodes} stop diverged"
             );
         }
     }
@@ -750,7 +796,7 @@ fn qwen36_moe_dflash2_tree_generation_matches_ordinary() {
     assert_eq!(metrics.tree_windows, 0);
     assert!(metrics.tree_fallback_linear_windows > 0);
     eprintln!(
-        "[qwen36-moe-dflash2-tree affine{bits}] sampled request: tree_windows=0 linear_fallback_windows={}",
+        "[qwen36-moe-dflash2-tree affine{bits} draft={draft}] sampled request: tree_windows=0 linear_fallback_windows={}",
         metrics.tree_fallback_linear_windows
     );
 }

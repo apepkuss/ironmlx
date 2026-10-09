@@ -8,19 +8,22 @@ use std::path::Path;
 
 use anyhow::{anyhow, Result};
 use ironmlx_core::m5_profile::M5ProfileTarget;
-use ironmlx_lm::models::dflash2::DFlash2Target;
+use ironmlx_lm::models::dflash2::{DFlash2DraftModel, DFlash2DraftPrecision, DFlash2Target};
 use ironmlx_lm::models::ModelArchitecture;
 use ironmlx_runtime::core::dflash2::DFlash2BlockSizeResolution;
 
 /// Default runtime quantization of the BF16 draft for dense targets.
 const DENSE_DEFAULT_DRAFT_BITS: i32 = 4;
+/// Default runtime quantization of the BF16 draft for Qwen3.6 MoE targets.
+const MOE_DEFAULT_DRAFT_BITS: i32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DFlash2TargetFamily {
     /// Dense Qwen3.5-family targets (the Qwen3.8 lane and its qualification).
     Qwen35Dense,
     /// Qwen3.6-35B-A3B MoE with an exactly qualified affine recipe. The
-    /// execution scope is B1, linear proposals and the original BF16 draft.
+    /// execution scope is B1 and linear proposals, with the BF16 draft run
+    /// either quantized at load to affine 4-bit (default) or kept in BF16.
     Qwen36Moe { bits: i32 },
 }
 
@@ -64,8 +67,9 @@ impl DFlash2TargetFamily {
         }
     }
 
-    /// Resolve the draft quantization. Dense targets keep their runtime
-    /// 4-bit default; MoE targets are qualified only with the BF16 draft.
+    /// Resolve the draft quantization. Both families default to the runtime
+    /// 4-bit draft. Dense targets also accept 8 and 0; MoE targets are
+    /// qualified with 4 and 0 (BF16) only.
     pub(crate) fn resolve_draft_bits(self, requested: Option<i32>) -> Result<i32> {
         if let Some(bits) = requested {
             anyhow::ensure!(
@@ -75,10 +79,10 @@ impl DFlash2TargetFamily {
         }
         match self {
             Self::Qwen35Dense => Ok(requested.unwrap_or(DENSE_DEFAULT_DRAFT_BITS)),
-            Self::Qwen36Moe { .. } => match requested.unwrap_or(0) {
-                0 => Ok(0),
+            Self::Qwen36Moe { .. } => match requested.unwrap_or(MOE_DEFAULT_DRAFT_BITS) {
+                bits @ (0 | 4) => Ok(bits),
                 bits => Err(anyhow!(
-                    "Qwen3.6 MoE DFlash2 is qualified only with the original BF16 draft; --dflash2-draft-bits {bits} is not supported (use 0)"
+                    "Qwen3.6 MoE DFlash2 is qualified with the 4-bit (default) and BF16 drafts only; --dflash2-draft-bits {bits} is not supported (use 4 or 0)"
                 )),
             },
         }
@@ -161,6 +165,32 @@ impl DFlash2TargetFamily {
     }
 }
 
+/// Check that the loaded draft projections carry the resolved precision, so a
+/// silent fallback to BF16 (or the reverse) cannot pass as the requested
+/// configuration. Returns the inspected precision for the startup log.
+pub(crate) fn ensure_loaded_draft_precision(
+    draft: &DFlash2DraftModel,
+    draft_bits: i32,
+) -> Result<DFlash2DraftPrecision> {
+    let precision = draft.projection_precision()?;
+    let expected = (draft_bits != 0).then_some(draft_bits);
+    anyhow::ensure!(
+        precision.bits == expected,
+        "DFlash2 draft projections loaded with bits {:?}, expected {:?}",
+        precision.bits,
+        expected
+    );
+    Ok(precision)
+}
+
+/// Log label of a loaded draft precision.
+pub(crate) fn draft_precision_label(precision: DFlash2DraftPrecision) -> String {
+    match precision.bits {
+        Some(bits) => format!("affine{bits}"),
+        None => "bf16".to_owned(),
+    }
+}
+
 /// DFlash2 target family of `model_dir`, read before any model is loaded
 /// because the M5 profile must be installed first. Unreadable or unsupported
 /// targets return `None`; their admission error is reported once the model
@@ -180,12 +210,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn moe_scope_requires_bf16_draft_linear_and_stateful_sampling() {
+    fn moe_scope_defaults_to_q4_draft_and_keeps_linear_stateful_sampling() {
         let moe = DFlash2TargetFamily::Qwen36Moe { bits: 6 };
-        assert_eq!(moe.resolve_draft_bits(None).unwrap(), 0);
+        assert_eq!(moe.resolve_draft_bits(None).unwrap(), 4);
+        assert_eq!(moe.resolve_draft_bits(Some(4)).unwrap(), 4);
         assert_eq!(moe.resolve_draft_bits(Some(0)).unwrap(), 0);
-        assert!(moe.resolve_draft_bits(Some(4)).is_err());
-        assert!(moe.resolve_draft_bits(Some(8)).is_err());
+        let q8 = moe.resolve_draft_bits(Some(8)).unwrap_err().to_string();
+        assert!(
+            q8.contains("--dflash2-draft-bits 8 is not supported"),
+            "{q8}"
+        );
+        assert!(moe.resolve_draft_bits(Some(5)).is_err());
         assert!(moe.ensure_execution_scope(None, false).is_ok());
         assert!(moe.ensure_execution_scope(Some(0), false).is_ok());
         assert!(moe.ensure_execution_scope(Some(15), false).is_ok());
@@ -197,6 +232,7 @@ mod tests {
         let dense = DFlash2TargetFamily::Qwen35Dense;
         assert_eq!(dense.resolve_draft_bits(None).unwrap(), 4);
         assert_eq!(dense.resolve_draft_bits(Some(0)).unwrap(), 0);
+        assert_eq!(dense.resolve_draft_bits(Some(8)).unwrap(), 8);
         assert!(dense.resolve_draft_bits(Some(5)).is_err());
         assert!(dense.ensure_execution_scope(Some(15), true).is_ok());
         assert_eq!(dense.m5_profile_target(), M5ProfileTarget::Qwen35Dense);

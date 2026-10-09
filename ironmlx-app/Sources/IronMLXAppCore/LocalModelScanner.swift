@@ -548,8 +548,9 @@ public struct LocalMtpCandidate: Codable, Equatable, Sendable {
 
 public struct LocalModelDFlash2Info: Codable, Equatable, Sendable {
     public static let denseDraftBitsOptions = [4, 8, 0]
-    /// Qwen3.6 MoE targets are qualified only with the original BF16 draft.
-    public static let moeDraftBitsOptions = [0]
+    /// Qwen3.6 MoE targets are qualified with the BF16 draft quantized at
+    /// load to 4-bit (the default, listed first) and with BF16 itself.
+    public static let moeDraftBitsOptions = [4, 0]
 
     public var status: String
     public var enabled: Bool

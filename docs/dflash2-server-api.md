@@ -68,7 +68,7 @@ The MoE combination runs through its own target implementation and qualification
 | Item | Limit |
 | --- | --- |
 | Target recipe | Affine, group size 64, 4/5/6/8 bits, with exactly the 8-bit `mlp.gate` and `shared_expert_gate` overrides the mlx-community checkpoints ship. Other recipes (including OptiQ) are rejected at load time. |
-| Draft precision | BF16 only (`--dflash2-draft-bits 0`, the default for this target). 4 and 8 are rejected; the App offers only BF16. |
+| Draft precision | The BF16 checkpoint is quantized at load to affine 4-bit (group size 64) by default (`--dflash2-draft-bits 4`); `0` keeps it in BF16. `8` is rejected. The App offers 4-bit (default) and BF16. The startup log's `draft_loaded_precision` reports the precision read back from the loaded projections. |
 | Verify width | Up to 8 for every bit width. When `--dflash2-block-size` is omitted the checkpoint width is capped at 8; an explicit value above 8 is an error. |
 | Execution | B1 only. `--max-sequences` still bounds how many requests are active, but every target forward carries one request: active requests take turns window by window, and cross-request tensor batching is disabled. |
 | Tree | `--dflash2-tree-max-nodes` 1–15 enables the flat tree for greedy, unconstrained requests. Sampled requests and requests with a constraint (including the reasoning budget attached to thinking-enabled requests) run linear windows instead; `tree_fallback_linear_windows` counts them and the server logs the reason once. |

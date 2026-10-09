@@ -14,7 +14,7 @@ mod selector;
 mod topk;
 
 pub use config::{DFlash2Config, DFlash2TargetSpec};
-pub use model::{DFlash2DraftCache, DFlash2DraftModel, DFlash2TreeSpec};
+pub use model::{DFlash2DraftCache, DFlash2DraftModel, DFlash2DraftPrecision, DFlash2TreeSpec};
 
 use mlx::{Array, StreamOrDevice};
 

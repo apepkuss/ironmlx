@@ -17,6 +17,10 @@ pub(super) struct DFlash2CandidateSelector {
 }
 
 impl DFlash2CandidateSelector {
+    pub(super) fn projection(&self) -> &Linear {
+        &self.hidden_projection
+    }
+
     pub(super) fn from_loader(
         loader: &Loader,
         cfg: &DFlash2Config,
