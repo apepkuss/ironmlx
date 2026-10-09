@@ -773,7 +773,7 @@ impl MtpDraftPolicyKvState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct MtpDraftPolicyRegime {
+pub(crate) struct MtpDraftPolicyRegime {
     context_bucket: MtpDraftCapContextBucket,
     batch_width: usize,
     kv_state: MtpDraftPolicyKvState,
@@ -872,11 +872,16 @@ impl MtpDraftPolicyWindow {
     }
 
     fn qwen_cost_per_committed_token_us(self) -> f64 {
-        self.total_us.max(self.measured_components_us()) as f64
-            / self.committed_tokens.max(1) as f64
+        self.measured_window_us() as f64 / self.committed_tokens.max(1) as f64
     }
 
-    fn regime(self) -> MtpDraftPolicyRegime {
+    /// Wall time of the whole window: the measured total, or the sum of its
+    /// measured components when that is larger.
+    pub(crate) fn measured_window_us(self) -> u64 {
+        self.total_us.max(self.measured_components_us())
+    }
+
+    pub(crate) fn regime(self) -> MtpDraftPolicyRegime {
         MtpDraftPolicyRegime {
             context_bucket: MtpDraftCapContextBucket::for_tokens(self.context_tokens),
             batch_width: self.batch_width.max(1),
@@ -1483,6 +1488,11 @@ impl QwenMtpDraftPolicyState {
 
     pub(crate) fn uses_ordinary_decode(&self) -> bool {
         self.current_budget() == 0 && self.probe_budget.is_none()
+    }
+
+    /// Budget of the probe in progress, if any (read-only, for accounting).
+    pub(crate) fn probe_budget(&self) -> Option<usize> {
+        self.probe_budget
     }
 
     pub(crate) fn snapshot(&self) -> QwenMtpDraftPolicySnapshot {

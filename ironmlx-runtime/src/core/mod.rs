@@ -24,6 +24,7 @@ pub mod runtime_config;
 
 pub(crate) mod adaptive_admission;
 pub(crate) mod dflash2_actor;
+pub(crate) mod dflash2_budget;
 pub(crate) mod dflash2_step_diagnostic;
 pub(crate) mod dflash2_token_diagnostic;
 pub mod scheduler_actor;

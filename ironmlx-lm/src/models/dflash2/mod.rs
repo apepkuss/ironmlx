@@ -444,6 +444,12 @@ pub trait DFlash2Target: crate::core::Model {
 
     fn dflash2_execution_fingerprint(&self) -> String;
 
+    /// Whether the runtime may choose this target's linear draft budget with
+    /// the DFlash2 window-cost policy instead of the shared Qwen MTP policy.
+    fn dflash2_window_cost_budget_policy(&self) -> bool {
+        false
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn dflash2_forward_tree_on(
         &self,

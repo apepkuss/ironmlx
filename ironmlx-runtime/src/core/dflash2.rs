@@ -13,10 +13,13 @@ use mlx::{Array, StreamOrDevice};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::core::dflash2_budget::{
+    DFlash2BudgetPolicyKind, DFlash2DraftBudgetPolicy, DFlash2WindowRole,
+};
 use crate::core::generation_types::{GenerateEvent, GenerateRequest};
 use crate::core::speculative::{
     resolve_exact_deterministic_target_logits, resolve_exact_deterministic_target_tokens,
-    sample_logits_positions, ExactSamplingCounters, MtpDraftPolicyWindow, QwenMtpDraftPolicyState,
+    sample_logits_positions, ExactSamplingCounters, MtpDraftPolicyWindow,
 };
 use crate::Result;
 use ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntry;
@@ -408,6 +411,14 @@ pub struct DFlash2Metrics {
     pub draft_budget_changes: usize,
     pub current_draft_budget: usize,
     pub adaptive_acceptance_ewma: Option<f64>,
+    /// `legacy` (shared Qwen MTP policy), `window-cost`, or `fixed`.
+    pub budget_policy: &'static str,
+    /// Windows per drafted width (index 0 = ordinary windows).
+    pub budget_windows: Vec<usize>,
+    /// Measured window time per drafted width.
+    pub budget_window_us: Vec<u64>,
+    pub budget_probe_windows: usize,
+    pub budget_calibration_windows: usize,
     pub exact_sampling_windows: usize,
     pub exact_acceptance_draws: usize,
     pub exact_residual_corrections: usize,
@@ -446,6 +457,10 @@ struct DFlash2Counters {
     tree_to_ragged_switches: usize,
     ragged_to_tree_switches: usize,
     draft_budget_changes: usize,
+    budget_windows: Vec<usize>,
+    budget_window_us: Vec<u64>,
+    budget_probe_windows: usize,
+    budget_calibration_windows: usize,
     exact_sampling: ExactSamplingCounters,
     draft_build_us: u64,
     draft_schedule_us: u64,
@@ -540,7 +555,7 @@ where
     detok: DecodeStream<'m>,
     pending_context_hidden: Array,
     verify_capabilities: DFlash2VerifyCapabilities,
-    draft_policy: QwenMtpDraftPolicyState,
+    draft_policy: DFlash2DraftBudgetPolicy,
     experimental_fixed_budget: Option<usize>,
     prng_state: Array,
     block_size: usize,
@@ -1028,7 +1043,13 @@ where
                 detok: tokenizer.decode_stream(true),
                 pending_context_hidden: row_context,
                 verify_capabilities,
-                draft_policy: QwenMtpDraftPolicyState::new(max_draft_tokens),
+                draft_policy: DFlash2DraftBudgetPolicy::new(
+                    DFlash2BudgetPolicyKind::resolve(
+                        model.dflash2_window_cost_budget_policy(),
+                        options.tree_max_nodes > 0,
+                    )?,
+                    max_draft_tokens,
+                ),
                 experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
                 prng_state,
                 block_size,
@@ -1294,7 +1315,13 @@ where
             detok: tokenizer.decode_stream(true),
             pending_context_hidden: context_hidden,
             verify_capabilities,
-            draft_policy: QwenMtpDraftPolicyState::new(max_draft_tokens),
+            draft_policy: DFlash2DraftBudgetPolicy::new(
+                DFlash2BudgetPolicyKind::resolve(
+                    model.dflash2_window_cost_budget_policy(),
+                    p2_options.tree_max_nodes > 0,
+                )?,
+                max_draft_tokens,
+            ),
             experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
             prng_state,
             block_size,
@@ -1352,6 +1379,15 @@ where
             draft_budget_changes: self.counters.draft_budget_changes,
             current_draft_budget: self.current_draft_budget(),
             adaptive_acceptance_ewma: self.draft_policy.acceptance_ewma(),
+            budget_policy: if self.experimental_fixed_budget.is_some() {
+                "fixed"
+            } else {
+                self.draft_policy.kind().name()
+            },
+            budget_windows: self.counters.budget_windows.clone(),
+            budget_window_us: self.counters.budget_window_us.clone(),
+            budget_probe_windows: self.counters.budget_probe_windows,
+            budget_calibration_windows: self.counters.budget_calibration_windows,
             exact_sampling_windows: self.counters.exact_sampling.windows,
             exact_acceptance_draws: self.counters.exact_sampling.acceptance_draws,
             exact_residual_corrections: self.counters.exact_sampling.residual_corrections,
@@ -3188,10 +3224,28 @@ where
     }
 
     fn observe_adaptive_window(&mut self, window: MtpDraftPolicyWindow) {
+        let role = if self.experimental_fixed_budget.is_some() {
+            DFlash2WindowRole::Exploit
+        } else {
+            self.draft_policy.window_role()
+        };
+        let width = window.attempted_draft_tokens;
+        if self.counters.budget_windows.len() <= width {
+            self.counters.budget_windows.resize(width + 1, 0);
+            self.counters.budget_window_us.resize(width + 1, 0);
+        }
+        self.counters.budget_windows[width] += 1;
+        self.counters.budget_window_us[width] =
+            self.counters.budget_window_us[width].saturating_add(window.measured_window_us());
+        match role {
+            DFlash2WindowRole::Probe => self.counters.budget_probe_windows += 1,
+            DFlash2WindowRole::Calibrate => self.counters.budget_calibration_windows += 1,
+            DFlash2WindowRole::Exploit => {}
+        }
         if self.experimental_fixed_budget.is_some() {
             return;
         }
-        let change = self.draft_policy.observe_external_window(window);
+        let change = self.draft_policy.observe(window);
         if change.reduced || change.increased {
             self.counters.draft_budget_changes =
                 self.counters.draft_budget_changes.saturating_add(1);
@@ -3269,6 +3323,9 @@ where
             // target context produced during the probe so its original
             // positions remain contiguous with the paused draft cache; the
             // draft cache performs its own sliding eviction when resumed.
+            // The window-cost policy never settles on budget 0 (it probes a
+            // drafting window within a bounded interval), so this context stays
+            // bounded and is consumed by the next drafting window.
             i32::MAX,
             StreamOrDevice::default(),
         )?;

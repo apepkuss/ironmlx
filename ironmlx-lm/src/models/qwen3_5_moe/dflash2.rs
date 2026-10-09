@@ -162,6 +162,11 @@ impl DFlash2Target for Qwen35MoeModel {
         self.config().into()
     }
 
+    /// Qualified Qwen3.6 MoE recipes run the B1 linear window-cost policy.
+    fn dflash2_window_cost_budget_policy(&self) -> bool {
+        self.dflash2_target_bits.is_some()
+    }
+
     fn dflash2_target_cache_cost(&self) -> DFlash2TargetCacheCost {
         let cfg = self.config();
         let positive = |value: i32, field: &str| {
