@@ -81,6 +81,9 @@ DFlash2 与 MTP、Prompt Lookup 严格互斥。启用后 App 只保留一个 def
 App 的 DFlash2 模式继续公开 `GET /v1/models`，其中只包含稳定的 target ID，供 OpenAI
 compatible 客户端发现。该模式不公开动态模型管理 API；Dashboard 与菜单栏从
 `/healthz` 和持久化配置恢复 target/draft 状态，不把 draft 暴露为普通模型。
+已加载的 DFlash2 target 可以在模型列表中固定（📌）。DFlash2 服务本身不会自动卸载 target，
+因此固定只记录在 App 配置中，不调用后端；关闭 DFlash2 后，target 经引擎池带着固定重新加载，
+继续免于 TTL 自动卸载和自动释放。
 
 Dashboard 运行态展示 target/draft、block size、draft 精度、TPS、接受率、窗口数、
 回滚数、精确残差修正数和峰值内存；`/healthz` 与诊断包同时记录 tensor batch 的

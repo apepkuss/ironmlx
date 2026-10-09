@@ -59,6 +59,7 @@ Dashboard exposes the DFlash2 switch, compatible draft, block size, draft precis
 Enabling DFlash2 retains one default target and restarts the backend into the fixed target/draft actor. Disabling or changing its settings also requires a controlled restart. Validation, startup or recovery failure restores the prior configuration and model parameters, then restarts the previous path.
 
 The App retains `GET /v1/models` with the stable target ID but no dynamic model-management API. Dashboard and menu bar recover target/draft state from health and saved settings without exposing the draft as an ordinary model.
+The loaded DFlash2 target can be pinned from the model list. The DFlash2 server never unloads its target automatically, so the pin is kept in the App configuration without a backend call; when DFlash2 is turned off, the target reloads through the engine pool with the pin and stays exempt from TTL auto-unload and automatic release.
 Dashboard shows target/draft, block size, precision, TPS, acceptance rate, windows, rollbacks, residual corrections and peak memory. Health and diagnostics also include tensor width limit, observed maximum width, windows, group count and divergence splits.
 
 ## Qwen3.6 35B A3B (MoE)

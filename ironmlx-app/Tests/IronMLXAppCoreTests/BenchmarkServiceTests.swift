@@ -389,8 +389,11 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "unpin_model_tooltip"))
     #expect(dashboardHTML(html, contains: "固定加载：不会被 TTL 自动卸载，也不会参与自动释放策略。仍可手动卸载。"))
     #expect(dashboardHTML(html, contains: "已固定加载：点击取消固定，恢复 TTL 和自动释放策略。"))
-    #expect(dashboardHTML(html, contains: "pinTooltip(m.pinned)"))
-    #expect(dashboardHTML(html, contains: "pinTooltip(nowPinned)"))
+    #expect(dashboardHTML(html, contains: "pinTooltip(m.pinned, dflash2Active)"))
+    #expect(dashboardHTML(html, contains: "pinTooltip(nowPinned, pp.btn.dataset.dflash2 === '1')"))
+    #expect(dashboardHTML(html, contains: "pin_model_tooltip_dflash2"))
+    #expect(dashboardHTML(html, contains: "unpin_model_tooltip_dflash2"))
+    #expect(dashboardHTML(html, contains: "已固定加载（DFlash2）：点击取消固定；关闭 DFlash2 后将恢复 TTL 和自动释放策略。"))
     #expect(!dashboardHTML(html, contains: #"title="' + (m.pinned ? 'Unpin' : 'Pin') + '""#))
     #expect(!dashboardHTML(html, contains: "pp.btn.title = nowPinned ? 'Unpin' : 'Pin'"))
 }

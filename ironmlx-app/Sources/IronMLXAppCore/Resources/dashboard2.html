@@ -5866,6 +5866,8 @@
       action_loading: "Loading...", action_unloading: "Unloading...", action_load_model_only: "Model only", action_load_mtp: "Model + MTP", action_load_dflash2: "Model + DFlash2",
       pin_model_tooltip: "Pin loaded model: exempt from TTL auto-unload and automatic release policies. Manual unload is still available.",
       unpin_model_tooltip: "Pinned loaded model: click to unpin and restore TTL and automatic release policies.",
+      pin_model_tooltip_dflash2: "Pin DFlash2 model: a DFlash2 model is not auto-unloaded while it runs; the pin is kept and still exempts the model from TTL auto-unload and automatic release after DFlash2 is turned off. Manual unload is still available.",
+      unpin_model_tooltip_dflash2: "Pinned DFlash2 model: click to unpin. After DFlash2 is turned off, TTL and automatic release policies apply again.",
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "Compatible MTP weights are available.", mtp_badge_enabled_title: "This model is loaded with MTP acceleration.",
       mtp_acceleration: "MTP Acceleration", mtp_weights: "MTP Weights", mtp_draft_tokens: "Draft Tokens",
@@ -6463,6 +6465,8 @@
       action_loading: "加载中...", action_unloading: "卸载中...", action_load_model_only: "仅模型", action_load_mtp: "模型+MTP", action_load_dflash2: "模型+DFlash2",
       pin_model_tooltip: "固定加载：不会被 TTL 自动卸载，也不会参与自动释放策略。仍可手动卸载。",
       unpin_model_tooltip: "已固定加载：点击取消固定，恢复 TTL 和自动释放策略。",
+      pin_model_tooltip_dflash2: "固定加载（DFlash2）：DFlash2 运行期间本就不会被自动卸载；固定会被保留，关闭 DFlash2 后仍不会被 TTL 自动卸载，也不会参与自动释放策略。仍可手动卸载。",
+      unpin_model_tooltip_dflash2: "已固定加载（DFlash2）：点击取消固定；关闭 DFlash2 后将恢复 TTL 和自动释放策略。",
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "已发现兼容的 MTP 权重。", mtp_badge_enabled_title: "该模型已使用 MTP 加速加载。",
       mtp_acceleration: "MTP 加速", mtp_weights: "MTP 权重", mtp_draft_tokens: "Draft Tokens",
@@ -7060,6 +7064,8 @@
       action_loading: "載入中...", action_unloading: "卸載中...", action_load_model_only: "僅模型", action_load_mtp: "模型+MTP", action_load_dflash2: "模型+DFlash2",
       pin_model_tooltip: "固定載入：不會被 TTL 自動卸載，也不會參與自動釋放策略。仍可手動卸載。",
       unpin_model_tooltip: "已固定載入：點擊取消固定，恢復 TTL 和自動釋放策略。",
+      pin_model_tooltip_dflash2: "固定載入（DFlash2）：DFlash2 執行期間本就不會被自動卸載；固定會被保留，關閉 DFlash2 後仍不會被 TTL 自動卸載，也不會參與自動釋放策略。仍可手動卸載。",
+      unpin_model_tooltip_dflash2: "已固定載入（DFlash2）：點擊取消固定；關閉 DFlash2 後將恢復 TTL 和自動釋放策略。",
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "已發現相容的 MTP 權重。", mtp_badge_enabled_title: "此模型已使用 MTP 加速載入。",
       mtp_acceleration: "MTP 加速", mtp_weights: "MTP 權重", mtp_draft_tokens: "Draft Tokens",
@@ -7660,6 +7666,8 @@
       action_loading: "ロード中...", action_unloading: "アンロード中...", action_load_model_only: "モデルのみ", action_load_mtp: "モデル+MTP", action_load_dflash2: "モデル+DFlash2",
       pin_model_tooltip: "固定ロード：TTL 自動アンロードや自動解放の対象外になります。手動アンロードは引き続き可能です。",
       unpin_model_tooltip: "固定ロード中：クリックすると固定を解除し、TTL と自動解放の対象に戻します。",
+      pin_model_tooltip_dflash2: "固定ロード（DFlash2）：DFlash2 実行中はもともと自動アンロードされません。固定は保持され、DFlash2 をオフにした後も TTL 自動アンロードや自動解放の対象外になります。手動アンロードは引き続き可能です。",
+      unpin_model_tooltip_dflash2: "固定ロード中（DFlash2）：クリックすると固定を解除します。DFlash2 をオフにした後は TTL と自動解放の対象に戻ります。",
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "互換性のある MTP ウェイトが見つかりました。", mtp_badge_enabled_title: "このモデルは MTP アクセラレーション付きでロードされています。",
       mtp_acceleration: "MTP アクセラレーション", mtp_weights: "MTP ウェイト", mtp_draft_tokens: "Draft Tokens",
@@ -8260,6 +8268,8 @@
       action_loading: "로딩 중...", action_unloading: "언로드 중...", action_load_model_only: "모델만", action_load_mtp: "모델+MTP", action_load_dflash2: "모델+DFlash2",
       pin_model_tooltip: "고정 로드: TTL 자동 언로드와 자동 해제 정책에서 제외됩니다. 수동 언로드는 계속 사용할 수 있습니다.",
       unpin_model_tooltip: "고정 로드됨: 클릭하면 고정을 해제하고 TTL 및 자동 해제 정책을 다시 적용합니다.",
+      pin_model_tooltip_dflash2: "고정 로드(DFlash2): DFlash2 실행 중에는 원래 자동 언로드되지 않습니다. 고정은 유지되며 DFlash2를 끈 뒤에도 TTL 자동 언로드와 자동 해제 정책에서 제외됩니다. 수동 언로드는 계속 사용할 수 있습니다.",
+      unpin_model_tooltip_dflash2: "고정 로드됨(DFlash2): 클릭하면 고정을 해제합니다. DFlash2를 끈 뒤에는 TTL 및 자동 해제 정책이 다시 적용됩니다.",
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "호환되는 MTP 가중치를 찾았습니다.", mtp_badge_enabled_title: "이 모델은 MTP 가속으로 로드되었습니다.",
       mtp_acceleration: "MTP 가속", mtp_weights: "MTP 가중치", mtp_draft_tokens: "Draft Tokens",
@@ -9210,8 +9220,13 @@
     return String(value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
-  function pinTooltip(pinned) {
+  function pinTooltip(pinned, dflash2) {
     const dict = I18N[currentLang] || I18N.en;
+    if (dflash2) {
+      return pinned
+        ? (dict.unpin_model_tooltip_dflash2 || 'Pinned DFlash2 model: click to unpin. After DFlash2 is turned off, TTL and automatic release policies apply again.')
+        : (dict.pin_model_tooltip_dflash2 || 'Pin DFlash2 model: a DFlash2 model is not auto-unloaded while it runs; the pin is kept and still exempts the model from TTL auto-unload and automatic release after DFlash2 is turned off. Manual unload is still available.');
+    }
     if (pinned) {
       return dict.unpin_model_tooltip || 'Pinned loaded model: click to unpin and restore TTL and automatic release policies.';
     }
@@ -12527,6 +12542,7 @@
         const displayName = m.display_name || m.id;
         const isDefault = (m.id === defaultModel);
         const isLoaded = m.loaded;
+        const dflash2Active = !!(m.dflash2 && m.dflash2.enabled);
         const readiness = modelReadiness(m);
         const escaped = m.id.replace(/"/g, '&quot;');
         const escapedSq = m.id.replace(/'/g, "\\'");
@@ -12546,7 +12562,7 @@
           ? (dict.model_import_source_badge || 'Imported model')
           : (m.source === 'ms' ? 'ModelScope' : 'HuggingFace');
         tr.innerHTML = '<td><div class="model-name"><span class="model-source-icon"' + modelColumnTooltipAttributes(sourceTooltip) + '>' + sourceIcon + '</span><span class="model-name-text"' + modelColumnTooltipAttributes(m.id) + '>' + escapeHTML(displayName) + '</span>' + renderMtpBadge(m) + renderDFlash2Badge(m)
-          + (isLoaded && !(m.dflash2 && m.dflash2.enabled) ? ' <button class="icon-btn pin-btn' + (m.pinned ? ' pinned' : '') + '" onclick="event.stopPropagation();togglePin(\'' + escapedSq + '\', this)" data-model="' + escaped + '"' + modelColumnTooltipAttributes(pinTooltip(m.pinned)) + ' style="vertical-align:middle;padding:0 2px;font-size:13px;opacity:' + (m.pinned ? '1' : '0.4') + '">&#x1F4CC;</button>' : '')
+          + (isLoaded ? ' <button class="icon-btn pin-btn' + (m.pinned ? ' pinned' : '') + '" onclick="event.stopPropagation();togglePin(\'' + escapedSq + '\', this)" data-model="' + escaped + '"' + (dflash2Active ? ' data-dflash2="1"' : '') + modelColumnTooltipAttributes(pinTooltip(m.pinned, dflash2Active)) + ' style="vertical-align:middle;padding:0 2px;font-size:13px;opacity:' + (m.pinned ? '1' : '0.4') + '">&#x1F4CC;</button>' : '')
           + '</div></td>'
           + '<td>' + renderModelType(m) + '</td>'
           + '<td>' + renderQuantBadge(m) + '</td>'
@@ -15317,7 +15333,7 @@
           window.__PENDING_PIN__ = null;
           const nowPinned = data.pinned;
           pp.btn.classList.toggle('pinned', nowPinned);
-          pp.btn.dataset.modelTooltip = pinTooltip(nowPinned);
+          pp.btn.dataset.modelTooltip = pinTooltip(nowPinned, pp.btn.dataset.dflash2 === '1');
           if (document.getElementById('model-table-tooltip')?.__target === pp.btn) {
             showModelColumnTooltip(pp.btn);
           }
