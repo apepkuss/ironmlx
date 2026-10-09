@@ -25,6 +25,9 @@ pub const MIN_KV_CACHE_CAP_FOR_GPU_PERF: i32 =
 pub struct Qwen35MoeModel {
     text: Qwen35MoeTextModel,
     exact_batched_verify_profile: crate::models::qwen3_5::speculative::ExactBatchedVerifyProfile,
+    /// Default affine bit width when the checkpoint matches a DFlash2-qualified
+    /// Qwen3.6-35B-A3B target recipe exactly; see [`super::dflash2`].
+    pub(super) dflash2_target_bits: Option<i32>,
     /// Always Some for 35B-A3B (tie_word_embeddings=false).
     lm_head: Linear,
     /// Vision encoder; `Some` for multimodal MoE checkpoints loaded with `open_multimodal`.
@@ -113,10 +116,14 @@ impl Qwen35MoeModel {
         } else {
             None
         };
+        let dflash2_target_bits =
+            crate::models::qwen3_6_moe::qwen36_moe_dflash2_target_bits(loader.config_raw_value())
+                .ok();
         let text = Qwen35MoeTextModel::from_loader(loader, cfg)?;
         Ok(Self {
             text,
             exact_batched_verify_profile,
+            dflash2_target_bits,
             lm_head,
             vision,
         })
@@ -124,6 +131,10 @@ impl Qwen35MoeModel {
 
     pub fn config(&self) -> &Qwen35MoeConfig {
         self.text.config()
+    }
+
+    pub(crate) fn lm_head(&self) -> &Linear {
+        &self.lm_head
     }
 
     pub fn text(&self) -> &Qwen35MoeTextModel {
@@ -450,6 +461,7 @@ impl Qwen35MoeModel {
             text,
             exact_batched_verify_profile:
                 crate::models::qwen3_5::speculative::ExactBatchedVerifyProfile::Disabled,
+            dflash2_target_bits: None,
             lm_head,
             vision: None,
         }

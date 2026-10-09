@@ -358,6 +358,8 @@ private extension LocalModel {
 
 private struct DFlash2CompatibilitySignature: Equatable {
     var role: String
+    /// Target family (`qwen35_dense` or `qwen36_moe`); nil for drafts.
+    var targetFamily: String? = nil
     var hiddenSize: Int?
     var intermediateSize: Int?
     var vocabSize: Int?
@@ -372,8 +374,10 @@ private struct DFlash2CompatibilitySignature: Equatable {
         guard role == "draft", target.role == "target" else {
             return false
         }
+        // Draft and target FFN widths are unrelated (a dense draft MLP and an
+        // expert FFN), so only the shared hidden space and target geometry
+        // the draft consumes are compared.
         return hiddenSize == target.hiddenSize
-            && intermediateSize == target.intermediateSize
             && vocabSize == target.vocabSize
             && maxPositionEmbeddings == target.maxPositionEmbeddings
             && targetLayerCount == target.targetLayerCount
@@ -543,21 +547,33 @@ public struct LocalMtpCandidate: Codable, Equatable, Sendable {
 }
 
 public struct LocalModelDFlash2Info: Codable, Equatable, Sendable {
+    public static let denseDraftBitsOptions = [4, 8, 0]
+    /// Qwen3.6 MoE targets are qualified only with the original BF16 draft.
+    public static let moeDraftBitsOptions = [0]
+
     public var status: String
     public var enabled: Bool
     public var candidates: [LocalDFlash2Candidate]
     public var incompatibleCandidates: [LocalDFlash2Candidate]
+    /// `qwen35_dense` or `qwen36_moe`.
+    public var targetFamily: String?
+    /// Draft precisions the target is qualified with (0 = BF16).
+    public var draftBitsOptions: [Int]?
 
     public init(
         status: String,
         enabled: Bool = false,
         candidates: [LocalDFlash2Candidate] = [],
-        incompatibleCandidates: [LocalDFlash2Candidate] = []
+        incompatibleCandidates: [LocalDFlash2Candidate] = [],
+        targetFamily: String? = nil,
+        draftBitsOptions: [Int]? = nil
     ) {
         self.status = status
         self.enabled = enabled
         self.candidates = candidates
         self.incompatibleCandidates = incompatibleCandidates
+        self.targetFamily = targetFamily
+        self.draftBitsOptions = draftBitsOptions
     }
 
     enum CodingKeys: String, CodingKey {
@@ -565,6 +581,8 @@ public struct LocalModelDFlash2Info: Codable, Equatable, Sendable {
         case enabled
         case candidates
         case incompatibleCandidates = "incompatible_candidates"
+        case targetFamily = "target_family"
+        case draftBitsOptions = "draft_bits_options"
     }
 }
 
@@ -730,20 +748,32 @@ public struct LocalModelScanner: Sendable {
                             !compatible.contains(where: { $0.id == candidate.id })
                         }
                         .sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
+                    let family = targetSignature.targetFamily
+                    let draftBitsOptions = family == "qwen36_moe"
+                        ? LocalModelDFlash2Info.moeDraftBitsOptions
+                        : LocalModelDFlash2Info.denseDraftBitsOptions
                     if !compatible.isEmpty {
                         let enabled = dflash2EnabledModels.contains(model.id)
                         model.dflash2 = LocalModelDFlash2Info(
                             status: enabled ? "enabled" : "available",
                             enabled: enabled,
-                            candidates: compatible
+                            candidates: compatible,
+                            targetFamily: family,
+                            draftBitsOptions: draftBitsOptions
                         )
                     } else if !incompatible.isEmpty {
                         model.dflash2 = LocalModelDFlash2Info(
                             status: "incompatible",
-                            incompatibleCandidates: incompatible
+                            incompatibleCandidates: incompatible,
+                            targetFamily: family,
+                            draftBitsOptions: draftBitsOptions
                         )
                     } else {
-                        model.dflash2 = LocalModelDFlash2Info(status: "unavailable")
+                        model.dflash2 = LocalModelDFlash2Info(
+                            status: "unavailable",
+                            targetFamily: family,
+                            draftBitsOptions: draftBitsOptions
+                        )
                     }
                 }
                 return model
@@ -932,7 +962,11 @@ public struct LocalModelScanner: Sendable {
     }
 
     public func dflash2Candidates(for reference: String) -> [LocalDFlash2Candidate] {
-        scan(loadedModels: []).first(where: { $0.id == reference })?.dflash2?.candidates ?? []
+        dflash2Info(for: reference)?.candidates ?? []
+    }
+
+    public func dflash2Info(for reference: String) -> LocalModelDFlash2Info? {
+        scan(loadedModels: []).first(where: { $0.id == reference })?.dflash2
     }
 
     public func resolveDFlash2DraftPath(for reference: String) -> String? {
@@ -1394,6 +1428,9 @@ public struct LocalModelScanner: Sendable {
         }
         switch kind {
         case .base:
+            if normalizedString(config["model_type"]) == "qwen3-5-moe" {
+                return qwen36MoeDFlash2TargetSignature(config)
+            }
             guard normalizedString(config["model_type"]) == "qwen3-5",
                   let quantization = config["quantization"] as? [String: Any],
                   normalizedString(quantization["mode"]) == "affine",
@@ -1414,6 +1451,7 @@ public struct LocalModelScanner: Sendable {
             }
             return DFlash2CompatibilitySignature(
                 role: "target",
+                targetFamily: "qwen35_dense",
                 hiddenSize: hiddenSize,
                 intermediateSize: intermediateSize,
                 vocabSize: vocabSize,
@@ -1464,9 +1502,11 @@ public struct LocalModelScanner: Sendable {
             }
             let layerTypes = stringArray(config["layer_types"])
             let targetLayerIDs = intArray(dflash["target_layer_ids"])
+            // The context projection concatenates every tapped target layer,
+            // so the tap count is independent of the draft depth.
             guard layerTypes.count == numHiddenLayers,
                   layerTypes.allSatisfy({ $0 == "sliding_attention" }),
-                  targetLayerIDs.count == numHiddenLayers,
+                  !targetLayerIDs.isEmpty,
                   targetLayerIDs.allSatisfy({ (0 ..< targetLayerCount).contains($0) }),
                   zip(targetLayerIDs, targetLayerIDs.dropFirst()).allSatisfy({ $0.0 < $0.1 })
             else {
@@ -1487,6 +1527,130 @@ public struct LocalModelScanner: Sendable {
         case .mtp:
             return nil
         }
+    }
+
+    /// Qwen3.6-35B-A3B MoE targets whose architecture and per-module
+    /// quantization coverage match a DFlash2-qualified recipe exactly
+    /// (mirrors the backend `qwen36_moe_dflash2_target_bits`): affine 4/5/6/8
+    /// bits with group 64 everywhere except the 8-bit router and shared-expert
+    /// gates. Mixed-precision variants (for example OptiQ) are rejected.
+    /// Module identity (`"<layer>:gate"` or `"<layer>:shared_expert_gate"`)
+    /// of a Qwen3.6 MoE router gate quantization override, mirroring the
+    /// backend: the loader strips one leading `language_model.`, and the key
+    /// must then be exactly `model.layers.<layer>.mlp.gate` or
+    /// `.mlp.shared_expert_gate` with a canonical decimal layer below `layers`.
+    static func qwen36GateOverrideIdentity(_ key: String, layers: Int) -> String? {
+        let module = key.hasPrefix("language_model.") ? String(key.dropFirst("language_model.".count)) : key
+        guard module.hasPrefix("model.layers.") else {
+            return nil
+        }
+        let rest = module.dropFirst("model.layers.".count)
+        guard let dot = rest.firstIndex(of: ".") else {
+            return nil
+        }
+        let layer = rest[..<dot]
+        let path = rest[rest.index(after: dot)...]
+        let name: String
+        switch path {
+        case "mlp.gate": name = "gate"
+        case "mlp.shared_expert_gate": name = "shared_expert_gate"
+        default: return nil
+        }
+        guard !layer.isEmpty,
+              layer.unicodeScalars.allSatisfy({ ("0"..."9").contains($0) }),
+              layer == "0" || !layer.hasPrefix("0"),
+              let index = Int(layer),
+              index < layers
+        else {
+            return nil
+        }
+        return "\(index):\(name)"
+    }
+
+    private func qwen36MoeDFlash2TargetSignature(
+        _ config: [String: Any]
+    ) -> DFlash2CompatibilitySignature? {
+        guard (config["architectures"] as? [Any])?
+                .contains(where: { ($0 as? String) == "Qwen3_5MoeForConditionalGeneration" }) == true,
+              config["vision_config"] is [String: Any],
+              intValue(config["image_token_id"]) != nil,
+              let text = config["text_config"] as? [String: Any],
+              let quantization = config["quantization"] as? [String: Any]
+        else {
+            return nil
+        }
+        let geometry: [(String, Int)] = [
+            ("hidden_size", 2048), ("num_hidden_layers", 40), ("num_experts", 256),
+            ("num_experts_per_tok", 8), ("moe_intermediate_size", 512),
+            ("shared_expert_intermediate_size", 512), ("full_attention_interval", 4),
+            ("head_dim", 256), ("num_attention_heads", 16), ("num_key_value_heads", 2),
+            ("linear_num_key_heads", 16), ("linear_num_value_heads", 32),
+            ("linear_key_head_dim", 128), ("linear_value_head_dim", 128),
+            ("linear_conv_kernel_dim", 4), ("vocab_size", 248320),
+        ]
+        guard geometry.allSatisfy({ intValue(text[$0.0]) == $0.1 }),
+              normalizedString(text["dtype"]) == "bfloat16",
+              boolValue(text["tie_word_embeddings"]) != true
+        else {
+            return nil
+        }
+        if let mirror = config["quantization_config"] {
+            guard let mirror = mirror as? [String: Any],
+                  NSDictionary(dictionary: mirror).isEqual(to: quantization)
+            else {
+                return nil
+            }
+        }
+        guard normalizedString(quantization["mode"]) ?? "affine" == "affine",
+              intValue(quantization["group_size"]) == 64,
+              let bits = intValue(quantization["bits"]),
+              [4, 5, 6, 8].contains(bits)
+        else {
+            return nil
+        }
+        // Every router gate of every layer must carry exactly one override,
+        // identified as the backend loader identifies it (see
+        // `qwen36GateOverrideIdentity`), so aliases or out-of-range layers
+        // cannot stand in for a missing gate.
+        var gates = Set<String>()
+        for (key, value) in quantization {
+            guard let module = value as? [String: Any] else {
+                guard ["bits", "group_size", "mode"].contains(key) else {
+                    return nil
+                }
+                continue
+            }
+            guard let identity = Self.qwen36GateOverrideIdentity(key, layers: 40),
+                  intValue(module["bits"]) == 8,
+                  intValue(module["group_size"]) == 64,
+                  normalizedString(module["mode"]) ?? "affine" == "affine",
+                  module.keys.allSatisfy({ ["bits", "group_size", "mode"].contains($0) }),
+                  gates.insert(identity).inserted
+            else {
+                return nil
+            }
+        }
+        guard gates.count == 80,
+              let maxPositionEmbeddings = positiveIntValue(text["max_position_embeddings"]),
+              let rmsNormEps = finitePositiveDouble(text["rms_norm_eps"]),
+              let rope = text["rope_parameters"] as? [String: Any],
+              let ropeTheta = finitePositiveDouble(rope["rope_theta"])
+        else {
+            return nil
+        }
+        return DFlash2CompatibilitySignature(
+            role: "target",
+            targetFamily: "qwen36_moe",
+            hiddenSize: 2048,
+            intermediateSize: nil,
+            vocabSize: 248320,
+            maxPositionEmbeddings: maxPositionEmbeddings,
+            targetLayerCount: 40,
+            rmsNormEps: rmsNormEps,
+            ropeTheta: ropeTheta,
+            blockSize: nil,
+            targetLayerIDs: []
+        )
     }
 
     private func finitePositiveDouble(_ value: Any?) -> Double? {

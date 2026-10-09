@@ -993,6 +993,19 @@ fn configured_distributions(
 
 const INITIAL_SAMPLING_CANDIDATES: usize = 32;
 
+/// Total order for nucleus selection: probability descending, then token id
+/// ascending. Ties at the top-p boundary are common with BF16 logits; a total
+/// order keeps the retained support identical across the full-vocabulary and
+/// compact-candidate paths, so speculative and ordinary sampling draw from
+/// the same distribution.
+fn nucleus_order(left: &(f32, u32), right: &(f32, u32)) -> std::cmp::Ordering {
+    right
+        .0
+        .partial_cmp(&left.0)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then(left.1.cmp(&right.1))
+}
+
 fn filter_sampling_support_compact(
     probabilities: &[f32],
     indices: &[u32],
@@ -1014,12 +1027,7 @@ fn filter_sampling_support_compact(
     {
         return None;
     }
-    indexed.sort_unstable_by(|left, right| {
-        right
-            .0
-            .partial_cmp(&left.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    indexed.sort_unstable_by(nucleus_order);
     let candidate_limit = indexed.len() - 1;
     let outside_upper_bound = indexed[candidate_limit].0;
     let candidates = &indexed[..candidate_limit];
@@ -1082,12 +1090,7 @@ fn filter_sampling_support(probs: &[f32], top_p: f32, min_p: f32) -> Vec<(u32, f
         .enumerate()
         .map(|(i, &p)| (p, i as u32))
         .collect();
-    let descending = |left: &(f32, u32), right: &(f32, u32)| {
-        right
-            .0
-            .partial_cmp(&left.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    };
+    let descending = nucleus_order;
     let mut candidate_limit = INITIAL_SAMPLING_CANDIDATES.min(vocab);
     loop {
         let outside_upper_bound = if candidate_limit < vocab {
@@ -2326,6 +2329,32 @@ mod tests {
         let full = filter_sampling_support(&[0.20_f32, 0.0, 0.40, 0.10, 0.30], 0.8, 0.0);
 
         assert_eq!(compact, full);
+    }
+
+    #[test]
+    fn compact_and_full_nucleus_break_boundary_ties_by_token_id() {
+        // Tokens 5 and 1 tie at the top-p boundary; only one fits the
+        // nucleus. Both paths must keep the lower token id regardless of the
+        // candidate order they received.
+        let full_probabilities = [0.5_f32, 0.1, 0.0, 0.3, 0.0, 0.1];
+        let full = filter_sampling_support(&full_probabilities, 0.85, 0.0);
+        assert_eq!(full, vec![(0, 0.5), (1, 0.1), (3, 0.3)]);
+        for indices in [
+            [5_u32, 3, 1, 0, 2, 4],
+            [0_u32, 1, 2, 3, 4, 5],
+            [4, 2, 0, 1, 3, 5],
+        ] {
+            let probabilities = indices.map(|token| full_probabilities[token as usize]);
+            let compact = filter_sampling_support_compact(
+                &probabilities,
+                &indices,
+                0.85,
+                0.0,
+                full_probabilities.len(),
+            )
+            .expect("tie inside the compact candidates");
+            assert_eq!(compact, full, "candidate order {indices:?}");
+        }
     }
 
     #[test]

@@ -5,6 +5,7 @@
 
 mod backend_instance_lock;
 mod decide;
+mod dflash2_target;
 mod generate;
 mod hf_transfer;
 mod info;
@@ -541,7 +542,7 @@ mod tests {
                     Some(std::path::Path::new("/tmp/dflash2"))
                 );
                 assert_eq!(args.dflash2_block_size, Some(6));
-                assert_eq!(args.dflash2_draft_bits, 8);
+                assert_eq!(args.dflash2_draft_bits, Some(8));
                 assert_eq!(args.dflash2_tensor_batch_max_width, Some(6));
             }
             other => panic!("expected Serve command, got {other:?}"),

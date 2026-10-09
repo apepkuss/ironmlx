@@ -69,6 +69,8 @@ extension ModelDFlash2RuntimeError: DashboardErrorCodeProviding {
             "dflash2_block_size_incompatible"
         case .incompatibleAccelerationConfiguration:
             "dflash2_acceleration_conflict"
+        case .draftPrecisionNotQualified:
+            "dflash2_draft_precision_unsupported"
         }
     }
 }

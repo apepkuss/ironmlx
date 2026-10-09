@@ -152,61 +152,73 @@ impl DecoderLayerMoe {
         {
             // Block 1: input_layernorm + attn dispatch + residual
             let normed_in = self.input_layernorm.forward_on(x, target)?;
-            let attn = match (&self.attn, cache) {
-                (AttnPath::Full(a), Some(LayerCache::Full(kv))) => a.forward_on(
-                    &normed_in,
-                    mrope,
-                    cos,
-                    sin,
-                    full_attn_mask,
-                    linear_attn_mask,
-                    per_row_lens,
-                    Some(kv),
-                    target,
-                    layer_idx,
-                )?,
-                (AttnPath::Full(a), None) => a.forward_on(
-                    &normed_in,
-                    mrope,
-                    cos,
-                    sin,
-                    full_attn_mask,
-                    linear_attn_mask,
-                    per_row_lens,
-                    None,
-                    target,
-                    layer_idx,
-                )?,
-                (AttnPath::Linear(a), Some(LayerCache::Linear(gdc))) => a.forward_on(
-                    &normed_in,
-                    linear_attn_mask,
-                    per_row_lens,
-                    Some(gdc),
-                    target,
-                    layer_idx,
-                )?,
-                (AttnPath::Linear(a), None) => a.forward_on(
-                    &normed_in,
-                    linear_attn_mask,
-                    per_row_lens,
-                    None,
-                    target,
-                    layer_idx,
-                )?,
-                (AttnPath::Full(_), Some(LayerCache::Linear(_))) => {
-                    return Err(anyhow!(
+            let ablated = match &self.attn {
+                AttnPath::Full(_) => {
+                    super::timing_ablation::skips(super::timing_ablation::FULL_ATTENTION)
+                }
+                AttnPath::Linear(_) => {
+                    super::timing_ablation::skips(super::timing_ablation::LINEAR_ATTENTION)
+                }
+            };
+            let attn = if ablated {
+                mlx::ops::zeros_like(&normed_in)?
+            } else {
+                match (&self.attn, cache) {
+                    (AttnPath::Full(a), Some(LayerCache::Full(kv))) => a.forward_on(
+                        &normed_in,
+                        mrope,
+                        cos,
+                        sin,
+                        full_attn_mask,
+                        linear_attn_mask,
+                        per_row_lens,
+                        Some(kv),
+                        target,
+                        layer_idx,
+                    )?,
+                    (AttnPath::Full(a), None) => a.forward_on(
+                        &normed_in,
+                        mrope,
+                        cos,
+                        sin,
+                        full_attn_mask,
+                        linear_attn_mask,
+                        per_row_lens,
+                        None,
+                        target,
+                        layer_idx,
+                    )?,
+                    (AttnPath::Linear(a), Some(LayerCache::Linear(gdc))) => a.forward_on(
+                        &normed_in,
+                        linear_attn_mask,
+                        per_row_lens,
+                        Some(gdc),
+                        target,
+                        layer_idx,
+                    )?,
+                    (AttnPath::Linear(a), None) => a.forward_on(
+                        &normed_in,
+                        linear_attn_mask,
+                        per_row_lens,
+                        None,
+                        target,
+                        layer_idx,
+                    )?,
+                    (AttnPath::Full(_), Some(LayerCache::Linear(_))) => {
+                        return Err(anyhow!(
                         "DecoderLayerMoe::forward_on: Full attn layer received Linear cache (kind mismatch)"
                     ));
-                }
-                (AttnPath::Linear(_), Some(LayerCache::Full(_))) => {
-                    return Err(anyhow!(
+                    }
+                    (AttnPath::Linear(_), Some(LayerCache::Full(_))) => {
+                        return Err(anyhow!(
                         "DecoderLayerMoe::forward_on: Linear attn layer received Full cache (kind mismatch)"
                     ));
-                }
-                (_, Some(LayerCache::Mla(_))) => {
-                    return Err(anyhow!(
-                        "DecoderLayerMoe::forward_on: received Mla cache (kind mismatch)"
-                    ));
+                    }
+                    (_, Some(LayerCache::Mla(_))) => {
+                        return Err(anyhow!(
+                            "DecoderLayerMoe::forward_on: received Mla cache (kind mismatch)"
+                        ));
+                    }
                 }
             };
             let h = x + &attn;
@@ -216,6 +228,40 @@ impl DecoderLayerMoe {
             let ffn_out = self.ffn.forward_on(&normed_post, target, layer_idx)?;
             Ok(&h + &ffn_out)
         }
+    }
+
+    /// Restore this layer's attention cache to an accepted DFlash2 prefix.
+    pub(crate) fn restore_speculative_prefix_on(
+        &self,
+        cache: &mut LayerCache,
+        base: &crate::core::cache::layer::LayerCacheSnapshot,
+        accepted_len: usize,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        crate::nn::decoder_layer::restore_attn_speculative_prefix_on(
+            &self.attn,
+            cache,
+            base,
+            accepted_len,
+            target,
+        )
+    }
+
+    /// Per-row variant of [`Self::restore_speculative_prefix_on`].
+    pub(crate) fn restore_speculative_prefix_rows_on(
+        &self,
+        cache: &mut LayerCache,
+        base: &crate::core::cache::layer::LayerCacheSnapshot,
+        accepted_lens: &[usize],
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        crate::nn::decoder_layer::restore_attn_speculative_prefix_rows_on(
+            &self.attn,
+            cache,
+            base,
+            accepted_lens,
+            target,
+        )
     }
 
     /// Helper for [`super::mtp::Qwen35MoeMtp`]: MTP layers are always full attention,

@@ -21,6 +21,7 @@ pub(crate) mod m5_affine4;
 pub(crate) mod m5_attention;
 pub(crate) mod m5_tree_attention;
 pub mod mlp;
+pub mod moe_grouped_qmv;
 pub mod mrope;
 pub mod mtp;
 pub mod norm;

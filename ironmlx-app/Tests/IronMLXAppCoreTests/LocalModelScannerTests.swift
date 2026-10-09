@@ -695,6 +695,191 @@ import Testing
     #expect(model.dflash2?.incompatibleCandidates.first?.reasonCode == "dflash2_invalid_config")
 }
 
+@Test func localModelScannerAttachesEightTapDraftToQualifiedQwen36MoeTargets() throws {
+    let root = try temporaryDirectory()
+    for bits in [4, 5, 6, 8] {
+        _ = try writeSnapshot(
+            root: root,
+            repoID: "mlx-community/Qwen3.6-35B-A3B-\(bits)bit",
+            configJSON: qwen36MoeDFlash2TargetConfig(bits: bits)
+        )
+    }
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit",
+        configJSON: qwen36MoeDFlash2TargetConfig(bits: 4, extraOverride: true)
+    )
+    _ = try writeSnapshot(
+        root: root,
+        repoID: "incoai/Qwen3.6-35B-A3B-DFlash2",
+        configJSON: qwen36MoeDFlash2DraftConfig()
+    )
+
+    let scanner = LocalModelScanner(rootURL: root)
+    let models = scanner.scan()
+    for bits in [4, 5, 6, 8] {
+        let model = try #require(models.first(where: {
+            $0.id == "mlx-community/Qwen3.6-35B-A3B-\(bits)bit"
+        }))
+        #expect(model.dflash2?.status == "available")
+        #expect(model.dflash2?.candidates.map(\.id) == ["incoai/Qwen3.6-35B-A3B-DFlash2"])
+        #expect(model.dflash2?.candidates.first?.blockSize == 8)
+        #expect(model.dflash2?.targetFamily == "qwen36_moe")
+        #expect(model.dflash2?.draftBitsOptions == [0])
+    }
+    // Mixed-precision coverage is a different recipe and is not qualified.
+    let optiq = try #require(models.first(where: { $0.id == "mlx-community/Qwen3.6-35B-A3B-OptiQ-4bit" }))
+    #expect(optiq.dflash2 == nil)
+}
+
+@Test func qwen36GateOverrideIdentityMatchesBackendLoaderNormalization() {
+    let identity = { (key: String) in LocalModelScanner.qwen36GateOverrideIdentity(key, layers: 40) }
+    #expect(identity("language_model.model.layers.0.mlp.gate") == "0:gate")
+    #expect(identity("model.layers.0.mlp.gate") == "0:gate")
+    #expect(identity("language_model.model.layers.39.mlp.shared_expert_gate") == "39:shared_expert_gate")
+    for key in [
+        "language_model.model.layers.40.mlp.gate",
+        "language_model.model.layers.999.mlp.gate",
+        "language_model.model.layers.01.mlp.gate",
+        "language_model.model.layers.00.mlp.gate",
+        "language_model.model.layers.+0.mlp.gate",
+        "language_model.model.layers.-1.mlp.gate",
+        "language_model.model.layers.x.mlp.gate",
+        "language_model.model.layers..mlp.gate",
+        "language_model.language_model.model.layers.0.mlp.gate",
+        "model.language_model.layers.0.mlp.gate",
+        "language_model.model.layers.0.mlp.gate.weight",
+        "language_model.model.layers.0.mlp.experts.gate",
+        "language_model.model.layers.0.mlp.shared_expert.gate",
+        "language_model.model.layers.0.self_attn.gate",
+    ] {
+        #expect(identity(key) == nil, "\(key)")
+    }
+}
+
+@Test func qwen36MoeDFlash2TargetRequiresEveryLayerGateByModuleIdentity() throws {
+    let gate = { (layer: String) in "language_model.model.layers.\(layer).mlp.gate" }
+    let override: [String: Any] = ["group_size": 64, "bits": 8]
+    let cases: [(String, Bool, (inout [String: Any]) -> Void)] = [
+        ("plain-spelling", true, { quantization in
+            for layer in 0..<40 {
+                for module in ["gate", "shared_expert_gate"] {
+                    quantization["model.layers.\(layer).mlp.\(module)"] =
+                        quantization.removeValue(forKey: "language_model.model.layers.\(layer).mlp.\(module)")
+                }
+            }
+        }),
+        ("missing", false, { $0.removeValue(forKey: "language_model.model.layers.17.mlp.shared_expert_gate") }),
+        ("alias-of-layer-1", false, { $0.removeValue(forKey: gate("0")); $0["model.layers.1.mlp.gate"] = override }),
+        ("out-of-range", false, { $0.removeValue(forKey: gate("0")); $0[gate("999")] = override }),
+        ("non-canonical", false, { $0.removeValue(forKey: gate("0")); $0[gate("00")] = override }),
+        ("unsupported-path", false, { $0.removeValue(forKey: gate("0")); $0["language_model.model.layers.0.mlp.experts.gate"] = override }),
+        ("both-spellings", false, { $0["model.layers.0.mlp.gate"] = override }),
+    ]
+    let root = try temporaryDirectory()
+    _ = try writeSnapshot(root: root, repoID: "incoai/Qwen3.6-35B-A3B-DFlash2", configJSON: qwen36MoeDFlash2DraftConfig())
+    for (name, _, edit) in cases {
+        _ = try writeSnapshot(
+            root: root,
+            repoID: "mlx-community/Qwen3.6-35B-A3B-\(name)",
+            configJSON: qwen36MoeDFlash2TargetConfig(bits: 4, editOverrides: edit)
+        )
+    }
+    let models = LocalModelScanner(rootURL: root).scan()
+    for (name, qualified, _) in cases {
+        let model = try #require(models.first(where: { $0.id == "mlx-community/Qwen3.6-35B-A3B-\(name)" }))
+        #expect((model.dflash2?.targetFamily == "qwen36_moe") == qualified, "\(name)")
+    }
+}
+
+@Test func dflash2RuntimeUsesOnlyQualifiedDraftPrecisionForQwen36Moe() throws {
+    let root = try temporaryDirectory()
+    let targetID = "mlx-community/Qwen3.6-35B-A3B-6bit"
+    let draftID = "incoai/Qwen3.6-35B-A3B-DFlash2"
+    _ = try writeSnapshot(root: root, repoID: targetID, configJSON: qwen36MoeDFlash2TargetConfig(bits: 6))
+    _ = try writeSnapshot(root: root, repoID: draftID, configJSON: qwen36MoeDFlash2DraftConfig())
+    let scanner = LocalModelScanner(rootURL: root)
+    let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try parameterStore.save(ModelParameters(modelID: targetID, dflash2Enabled: true, dflash2ModelID: draftID))
+    let runtime = try #require(try ModelDFlash2RuntimeResolver.runtime(
+        for: targetID, useDFlash2: nil, scanner: scanner, parameterStore: parameterStore))
+    #expect(runtime.draftBits == 0)
+    #expect(runtime.blockSize == 8)
+
+    try parameterStore.save(ModelParameters(
+        modelID: targetID, dflash2Enabled: true, dflash2ModelID: draftID, dflash2DraftBits: "4"))
+    #expect(throws: ModelDFlash2RuntimeError.draftPrecisionNotQualified(model: targetID, bits: 4)) {
+        try ModelDFlash2RuntimeResolver.runtime(
+            for: targetID, useDFlash2: nil, scanner: scanner, parameterStore: parameterStore)
+    }
+}
+
+@Test func denseDFlash2TargetKeepsQuantizedDraftChoices() throws {
+    let root = try temporaryDirectory()
+    _ = try writeSnapshot(root: root, repoID: "mlx-community/Qwen3.8-27B-4bit", configJSON: dflash2TargetConfig())
+    _ = try writeSnapshot(root: root, repoID: "z-lab/Qwen3.8-27B-DFlash2", configJSON: dflash2DraftConfig(hiddenSize: 5120))
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first(where: {
+        $0.id == "mlx-community/Qwen3.8-27B-4bit"
+    }))
+    #expect(model.dflash2?.targetFamily == "qwen35_dense")
+    #expect(model.dflash2?.draftBitsOptions == [4, 8, 0])
+}
+
+private func qwen36MoeDFlash2TargetConfig(
+    bits: Int,
+    extraOverride: Bool = false,
+    editOverrides: (inout [String: Any]) -> Void = { _ in }
+) -> String {
+    var quantization: [String: Any] = ["group_size": 64, "bits": bits, "mode": "affine"]
+    for layer in 0..<40 {
+        quantization["language_model.model.layers.\(layer).mlp.gate"] = ["group_size": 64, "bits": 8]
+        quantization["language_model.model.layers.\(layer).mlp.shared_expert_gate"] = ["group_size": 64, "bits": 8]
+    }
+    if extraOverride {
+        quantization["language_model.model.layers.0.linear_attn.in_proj_qkv"] = ["group_size": 64, "bits": 8]
+    }
+    editOverrides(&quantization)
+    let config: [String: Any] = [
+        "architectures": ["Qwen3_5MoeForConditionalGeneration"],
+        "model_type": "qwen3_5_moe",
+        "image_token_id": 248056,
+        "vision_config": ["depth": 27, "hidden_size": 1152],
+        "quantization": quantization,
+        "quantization_config": quantization,
+        "text_config": [
+            "model_type": "qwen3_5_moe_text", "dtype": "bfloat16",
+            "hidden_size": 2048, "num_hidden_layers": 40, "num_experts": 256,
+            "num_experts_per_tok": 8, "moe_intermediate_size": 512,
+            "shared_expert_intermediate_size": 512, "full_attention_interval": 4,
+            "head_dim": 256, "num_attention_heads": 16, "num_key_value_heads": 2,
+            "linear_num_key_heads": 16, "linear_num_value_heads": 32,
+            "linear_key_head_dim": 128, "linear_value_head_dim": 128,
+            "linear_conv_kernel_dim": 4, "vocab_size": 248320,
+            "max_position_embeddings": 262144, "rms_norm_eps": 0.000001,
+            "tie_word_embeddings": false,
+            "rope_parameters": ["rope_type": "default", "rope_theta": 10000000, "partial_rotary_factor": 0.25],
+        ] as [String: Any],
+    ]
+    let data = try! JSONSerialization.data(withJSONObject: config)
+    return String(decoding: data, as: UTF8.self)
+}
+
+private func qwen36MoeDFlash2DraftConfig() -> String {
+    dflash2DraftConfig(hiddenSize: 2048)
+        .replacingOccurrences(of: #""intermediate_size": 17408"#, with: #""intermediate_size": 6144"#)
+        .replacingOccurrences(of: #""num_hidden_layers": 5"#, with: #""num_hidden_layers": 6"#)
+        .replacingOccurrences(of: #""num_target_layers": 64"#, with: #""num_target_layers": 40"#)
+        .replacingOccurrences(of: #""mask_token_id": 248070"#, with: #""mask_token_id": 248077"#)
+        .replacingOccurrences(
+            of: #""target_layer_ids": [5, 19, 33, 47, 61]"#,
+            with: #""target_layer_ids": [1, 6, 11, 16, 22, 27, 32, 37]"#
+        )
+        .replacingOccurrences(
+            of: "\"sliding_attention\"\n  ]",
+            with: "\"sliding_attention\",\n    \"sliding_attention\"\n  ]"
+        )
+}
+
 func temporaryDirectory() throws -> URL {
     let url = FileManager.default.temporaryDirectory
         .appendingPathComponent("ironmlx-app-tests-\(UUID().uuidString)", isDirectory: true)

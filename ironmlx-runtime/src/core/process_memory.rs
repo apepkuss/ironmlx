@@ -1266,7 +1266,7 @@ struct RusageInfoV4 {
     tail: [u64; 27],
 }
 
-pub(crate) fn macos_phys_footprint_bytes() -> Option<usize> {
+pub fn macos_phys_footprint_bytes() -> Option<usize> {
     #[cfg(target_os = "macos")]
     {
         #[link(name = "proc")]

@@ -27,7 +27,9 @@ use {
     ironmlx_runtime::core::speculative::MtpTextGenerationStream,
 };
 
+use super::dflash2_target::DFlash2TargetFamily;
 use super::KvQuantArg;
+use ironmlx_lm::models::dflash2::DFlash2Target;
 
 use ironmlx_lm::core::prompt_images::{inject_image_placeholders, NamedImage, PreparedImages};
 
@@ -114,13 +116,15 @@ pub struct GenerateArgs {
     pub dflash2_block_size: Option<usize>,
 
     /// Runtime affine quantization for the official BF16 DFlash2 draft. Zero
-    /// keeps BF16; 4 and 8 select the supported quantized variants.
-    #[arg(long, default_value_t = 4)]
-    pub dflash2_draft_bits: i32,
+    /// keeps BF16; 4 and 8 select the supported quantized variants. Default:
+    /// 4 for dense targets; Qwen3.6 MoE targets support only 0 (BF16).
+    #[arg(long)]
+    pub dflash2_draft_bits: Option<i32>,
 
     /// Maximum nodes in the DFlash2 best-first draft tree. Zero keeps the
     /// stable linear proposal path; the P2 tree is capped at 15 nodes.
-    /// Default: 15 with an active M5 DFlash2 profile, otherwise 0.
+    /// Default: 15 with an active M5 DFlash2 profile on a Qwen3.8 dense
+    /// target, otherwise 0 (including Qwen3.6 MoE targets).
     #[arg(long)]
     pub dflash2_tree_max_nodes: Option<usize>,
 
@@ -164,21 +168,18 @@ fn ensure_mtp_generation_supported(
 
 fn ensure_dflash2_generation_supported(
     architecture: ironmlx_lm::models::ModelArchitecture,
+    config_raw: &serde_json::Value,
     args: &GenerateArgs,
-) -> Result<()> {
+) -> Result<Option<DFlash2TargetFamily>> {
     if args.dflash2_model_dir.is_none() {
-        return Ok(());
+        return Ok(None);
     }
     if args.mtp_model_dir.is_some() || args.mtp_draft_tokens.is_some() {
         return Err(anyhow!(
             "--dflash2-model-dir cannot be combined with MTP arguments"
         ));
     }
-    if architecture != ironmlx_lm::models::ModelArchitecture::Qwen35Dense {
-        return Err(anyhow!(
-            "--dflash2-model-dir currently supports dense Qwen3.5 targets only"
-        ));
-    }
+    let family = DFlash2TargetFamily::detect(architecture, config_raw)?;
     if !args.images.is_empty() {
         return Err(anyhow!(
             "--dflash2-model-dir is text-only and cannot be combined with --image"
@@ -195,15 +196,17 @@ fn ensure_dflash2_generation_supported(
     {
         return Err(anyhow!("--dflash2-block-size must be in [2, 16]"));
     }
-    if !matches!(args.dflash2_draft_bits, 0 | 4 | 8) {
-        return Err(anyhow!("--dflash2-draft-bits must be one of 0, 4, or 8"));
-    }
+    family.resolve_draft_bits(args.dflash2_draft_bits)?;
+    family.ensure_execution_scope(
+        args.dflash2_tree_max_nodes,
+        args.dflash2_position_keyed_sampling,
+    )?;
     if args.dflash2_position_keyed_sampling && args.temperature <= 0.0 {
         return Err(anyhow!(
             "--dflash2-position-keyed-sampling requires --temperature greater than zero"
         ));
     }
-    Ok(())
+    Ok(Some(family))
 }
 
 fn build_sampler(args: &GenerateArgs) -> Sampler {
@@ -300,13 +303,17 @@ fn run_generation_with_model<M: Model + DenseVlMethods>(
     write_generation_events(|| stream.next_token())
 }
 
-fn run_generation_with_dflash2_model(
-    model: &ironmlx_lm::models::Qwen35Model,
+fn run_generation_with_dflash2_model<M>(
+    model: &M,
+    family: DFlash2TargetFamily,
     tokenizer: &Tokenizer,
     loader: &Loader,
     model_type: &str,
     args: &GenerateArgs,
-) -> Result<()> {
+) -> Result<()>
+where
+    M: Model + DenseVlMethods + DFlash2Target,
+{
     let request = build_generate_request(model, tokenizer, loader, model_type, args)?;
     let draft_dir = args.dflash2_model_dir.as_ref().ok_or_else(|| {
         anyhow!("run_generation_with_dflash2_model called without --dflash2-model-dir")
@@ -318,23 +325,24 @@ fn run_generation_with_dflash2_model(
         ));
     }
     let draft_loader = Loader::open_dflash2(draft_dir).context("Loader::open_dflash2")?;
-    let draft_bits = (args.dflash2_draft_bits != 0).then_some(args.dflash2_draft_bits);
+    let draft_bits = family.resolve_draft_bits(args.dflash2_draft_bits)?;
     let draft = ironmlx_lm::models::DFlash2DraftModel::from_loader(
         &draft_loader,
-        model.config(),
-        draft_bits,
+        model.dflash2_target_spec(),
+        (draft_bits != 0).then_some(draft_bits),
     )
     .context("DFlash2DraftModel::from_loader")?;
     let checkpoint_block_size = usize::try_from(draft.config().dflash_config.block_size)
         .context("DFlash2 checkpoint block_size")?;
-    let block_size_resolution = ironmlx_runtime::core::dflash2::resolve_dflash2_block_size(
-        args.dflash2_block_size,
-        checkpoint_block_size,
-    )?;
+    family.ensure_tree_supported(model, args.dflash2_tree_max_nodes.unwrap_or(0))?;
+    let block_size_resolution =
+        family.resolve_block_size(model, args.dflash2_block_size, checkpoint_block_size)?;
     drop(draft_loader);
     mlx::clear_cache();
     eprintln!(
-        "ironmlx generate: DFlash2 checkpoint_block_size={} resolved_block_size={} block_size_source={}",
+        "ironmlx generate: DFlash2 target_profile={} draft_bits={} checkpoint_block_size={} resolved_block_size={} block_size_source={}",
+        model.dflash2_verify_capabilities().profile,
+        draft_bits,
         block_size_resolution.checkpoint_block_size,
         block_size_resolution.block_size,
         if block_size_resolution.explicit { "explicit" } else { "auto" },
@@ -523,17 +531,37 @@ fn parse_m5_profile_mode(value: &str) -> Result<ironmlx_core::m5_profile::M5Prof
 }
 
 pub fn run(mut args: GenerateArgs) -> Result<()> {
-    let profile = ironmlx_core::m5_profile::install(
-        args.m5_dflash2_profile,
-        args.dflash2_model_dir.is_some(),
-    );
-    args.dflash2_tree_max_nodes
-        .get_or_insert(if profile.is_active() {
-            ironmlx_core::m5_profile::DFLASH2_TREE_MAX_NODES
-        } else {
-            0
-        });
     let model_dir = PathBuf::from(&args.model);
+    let dflash2 = args.dflash2_model_dir.is_some();
+    let family = dflash2
+        .then(|| super::dflash2_target::model_dir_dflash2_family(&model_dir))
+        .flatten();
+    let profile = ironmlx_core::m5_profile::install_for_target(
+        args.m5_dflash2_profile,
+        dflash2,
+        family
+            .map(DFlash2TargetFamily::m5_profile_target)
+            .unwrap_or(ironmlx_core::m5_profile::M5ProfileTarget::Unqualified),
+    );
+    args.dflash2_tree_max_nodes.get_or_insert(
+        family
+            .map(|family| family.default_tree_max_nodes(profile.is_active()))
+            .unwrap_or(0),
+    );
+    if dflash2 {
+        for setting in profile.hardware_ignored_settings() {
+            eprintln!(
+                "ironmlx generate: M5 tensor-unit setting {setting} ignored: the GPU is older than Apple GPU generation 17"
+            );
+        }
+        eprintln!(
+            "ironmlx generate: M5 DFlash2 profile mode={} status={} target={} effective_settings={}",
+            profile.mode.as_str(),
+            profile.status.as_str(),
+            profile.target.as_str(),
+            profile.effective_settings_summary()
+        );
+    }
     if !model_dir.exists() {
         return Err(anyhow::anyhow!(
             "--model must point to a local directory (got '{}')",
@@ -551,7 +579,8 @@ pub fn run(mut args: GenerateArgs) -> Result<()> {
         ironmlx_lm::models::ModelArchitecture::from_config_value(loader.config_raw_value())?;
     let model_type = architecture.model_type();
     ensure_mtp_generation_supported(architecture, !args.images.is_empty(), &args)?;
-    ensure_dflash2_generation_supported(architecture, &args)?;
+    let dflash2_family =
+        ensure_dflash2_generation_supported(architecture, loader.config_raw_value(), &args)?;
 
     match architecture {
         ironmlx_lm::models::ModelArchitecture::Qwen35Dense => {
@@ -562,8 +591,10 @@ pub fn run(mut args: GenerateArgs) -> Result<()> {
                 ironmlx_lm::models::Qwen35Model::from_loader(&loader)
                     .context("Qwen35Model::from_loader")?
             };
-            if args.dflash2_model_dir.is_some() {
-                run_generation_with_dflash2_model(&model, &tokenizer, &loader, model_type, &args)
+            if let Some(family) = dflash2_family {
+                run_generation_with_dflash2_model(
+                    &model, family, &tokenizer, &loader, model_type, &args,
+                )
             } else if args.mtp_model_dir.is_some() {
                 run_generation_with_mtp_model(&model, &tokenizer, &loader, model_type, &args)
             } else {
@@ -571,6 +602,13 @@ pub fn run(mut args: GenerateArgs) -> Result<()> {
             }
         }
         ironmlx_lm::models::ModelArchitecture::Qwen35Moe => {
+            if let Some(family) = dflash2_family {
+                let model = ironmlx_lm::models::Qwen35MoeModel::from_loader(&loader)
+                    .context("Qwen35MoeModel::from_loader")?;
+                return run_generation_with_dflash2_model(
+                    &model, family, &tokenizer, &loader, model_type, &args,
+                );
+            }
             if args.mtp_model_dir.is_some()
                 && ironmlx_lm::models::is_qwen36_moe_config(loader.config_raw_value())
             {
@@ -657,7 +695,7 @@ mod tests {
         assert!(default_cli.args.dflash2_model_dir.is_none());
         assert_eq!(default_cli.args.mtp_draft_tokens, None);
         assert_eq!(default_cli.args.dflash2_block_size, None);
-        assert_eq!(default_cli.args.dflash2_draft_bits, 4);
+        assert_eq!(default_cli.args.dflash2_draft_bits, None);
         assert_eq!(default_cli.args.dflash2_tree_max_nodes, None);
         assert_eq!(
             default_cli.args.m5_dflash2_profile,
@@ -701,20 +739,25 @@ mod tests {
         );
         assert!(ensure_dflash2_generation_supported(
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({}),
             &args
         )
         .is_ok());
 
         let architecture_error = ensure_dflash2_generation_supported(
             ironmlx_lm::models::ModelArchitecture::Qwen35Moe,
+            &serde_json::json!({}),
             &args,
         )
-        .expect_err("reject non-dense target");
-        assert!(architecture_error.to_string().contains("dense Qwen3.5"));
+        .expect_err("reject an unqualified MoE target");
+        assert!(architecture_error
+            .to_string()
+            .contains("qualified Qwen3.6-35B-A3B"));
 
         args.temperature = 0.8;
         assert!(ensure_dflash2_generation_supported(
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({}),
             &args,
         )
         .is_ok());
@@ -723,6 +766,7 @@ mod tests {
         args.mtp_model_dir = Some(PathBuf::from("/tmp/mtp"));
         let isolation_error = ensure_dflash2_generation_supported(
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({}),
             &args,
         )
         .expect_err("reject MTP combination");
@@ -732,6 +776,7 @@ mod tests {
         args.dflash2_block_size = Some(1);
         let block_error = ensure_dflash2_generation_supported(
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({}),
             &args,
         )
         .expect_err("reject invalid block size");
@@ -743,6 +788,7 @@ mod tests {
         args.dflash2_position_keyed_sampling = true;
         assert!(ensure_dflash2_generation_supported(
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({}),
             &args,
         )
         .is_ok());
@@ -750,6 +796,7 @@ mod tests {
         args.temperature = 0.0;
         let keyed_error = ensure_dflash2_generation_supported(
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({}),
             &args,
         )
         .expect_err("position-keyed sampling needs positive temperature");
@@ -759,9 +806,10 @@ mod tests {
 
         args.dflash2_position_keyed_sampling = false;
         args.dflash2_block_size = Some(5);
-        args.dflash2_draft_bits = 6;
+        args.dflash2_draft_bits = Some(6);
         let draft_bits_error = ensure_dflash2_generation_supported(
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({}),
             &args,
         )
         .expect_err("reject unsupported draft quantization");

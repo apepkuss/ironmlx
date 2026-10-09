@@ -13,7 +13,7 @@ mod model;
 mod selector;
 mod topk;
 
-pub use config::DFlash2Config;
+pub use config::{DFlash2Config, DFlash2TargetSpec};
 pub use model::{DFlash2DraftCache, DFlash2DraftModel, DFlash2TreeSpec};
 
 use mlx::{Array, StreamOrDevice};
@@ -223,6 +223,10 @@ pub struct DFlash2VerifyCapabilities {
     pub transactional_state_restore: bool,
     pub supported_shapes: Vec<DFlash2VerifyShape>,
     pub lane_kernel_pack: Option<DFlash2LaneKernelPack>,
+    /// Largest flat draft tree (nodes, excluding the root) whose single B1
+    /// tree verification and accepted-path commit the target certifies on
+    /// its own, independent of a lane kernel pack. Zero disables it.
+    pub flat_tree_max_nodes: usize,
 }
 
 impl DFlash2VerifyCapabilities {
@@ -247,13 +251,26 @@ impl DFlash2VerifyCapabilities {
             .as_ref()
             .map(DFlash2LaneKernelPack::stable_fingerprint)
             .unwrap_or_else(|| "none".to_owned());
+        let flat_tree = if self.flat_tree_max_nodes > 0 {
+            format!(";flat-tree={}", self.flat_tree_max_nodes)
+        } else {
+            String::new()
+        };
         format!(
-            "profile={};qmm={};attention={};state={};shapes={shapes};lane-pack={lane_pack}",
+            "profile={};qmm={};attention={};state={};shapes={shapes};lane-pack={lane_pack}{flat_tree}",
             self.profile,
             self.row_bit_exact_qmm,
             self.row_bit_exact_attention,
             self.transactional_state_restore
         )
+    }
+
+    /// Whether any multi-row (B>1) verify shape is certified. Targets that
+    /// certify only B1 must also keep prefill and proposal batching at B1.
+    pub fn certifies_batched_execution(&self) -> bool {
+        self.supported_shapes
+            .iter()
+            .any(|shape| shape.batch_width > 1)
     }
 
     pub fn max_draft_tokens(&self, batch_width: usize) -> Option<usize> {
@@ -326,6 +343,61 @@ impl DFlash2VerifyPlan {
     }
 }
 
+/// Cache geometry of a hybrid full-attention / GatedDeltaNet target. Dense
+/// and MoE Qwen3.5-family targets share this cache layout; only their FFNs
+/// differ, and FFNs hold no per-request cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DFlash2HybridCacheGeometry {
+    pub layers: usize,
+    pub full_attention_interval: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    pub linear_value_heads: usize,
+    pub linear_key_heads: usize,
+    pub linear_key_dim: usize,
+    pub linear_value_dim: usize,
+    pub linear_conv_kernel: usize,
+}
+
+impl DFlash2HybridCacheGeometry {
+    /// BF16 K/V growth per token on full-attention layers, plus fixed BF16
+    /// convolution and F32 recurrent state on linear-attention layers.
+    pub(crate) fn cache_cost(self) -> DFlash2TargetCacheCost {
+        let full_attention_layers = (1..=self.layers)
+            .filter(|layer| layer % self.full_attention_interval == 0)
+            .count();
+        let linear_attention_layers = self.layers.saturating_sub(full_attention_layers);
+        let bytes_per_token = full_attention_layers
+            .saturating_mul(self.kv_heads)
+            .saturating_mul(self.head_dim)
+            .saturating_mul(2)
+            .saturating_mul(2);
+        let conv_dim = self
+            .linear_key_dim
+            .saturating_mul(self.linear_key_heads)
+            .saturating_mul(2)
+            .saturating_add(
+                self.linear_value_dim
+                    .saturating_mul(self.linear_value_heads),
+            );
+        let conv_state_bytes = self
+            .linear_conv_kernel
+            .saturating_sub(1)
+            .saturating_mul(conv_dim)
+            .saturating_mul(2);
+        let recurrent_state_bytes = self
+            .linear_value_heads
+            .saturating_mul(self.linear_value_dim)
+            .saturating_mul(self.linear_key_dim)
+            .saturating_mul(4);
+        DFlash2TargetCacheCost {
+            bytes_per_token,
+            fixed_bytes_per_sequence: linear_attention_layers
+                .saturating_mul(conv_state_bytes.saturating_add(recurrent_state_bytes)),
+        }
+    }
+}
+
 impl DFlash2TargetCacheCost {
     pub fn request_bytes(self, token_cap: usize) -> usize {
         token_cap
@@ -363,6 +435,9 @@ impl DFlash2TargetForwardMode {
 /// captures several target layers and owns a different draft cache and
 /// proposal distribution.
 pub trait DFlash2Target: crate::core::Model {
+    /// Target fields the draft checkpoint must match.
+    fn dflash2_target_spec(&self) -> DFlash2TargetSpec;
+
     fn dflash2_target_cache_cost(&self) -> DFlash2TargetCacheCost;
 
     fn dflash2_verify_capabilities(&self) -> DFlash2VerifyCapabilities;
@@ -479,6 +554,7 @@ mod tests {
                 verify_width: 4,
             }],
             lane_kernel_pack: None,
+            flat_tree_max_nodes: 0,
         };
         let ordinary = DFlash2VerifyPlan::build(&capabilities, 7, 0).unwrap();
         assert_eq!(ordinary.execution, DFlash2VerifyExecution::OrdinaryDecode);

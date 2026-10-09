@@ -10,7 +10,10 @@
 pub mod config;
 pub mod model;
 
-pub use config::{is_qwen36_moe_config, Qwen36MoeConfig};
+pub use config::{
+    is_qwen36_moe_config, qwen36_moe_dflash2_target_bits, Qwen36MoeConfig,
+    QWEN36_MOE_DFLASH2_TARGET_BITS,
+};
 pub use model::Qwen36MoeModel;
 
 pub type Qwen36MoeTextModel = crate::models::qwen3_5_moe::Qwen35MoeTextModel;

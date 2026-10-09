@@ -70,7 +70,7 @@ fn validate_dflash2_draft_metadata(config: &serde_json::Value) -> Result<()> {
 
     let hidden_size = positive_integer(config, "hidden_size")?;
     let vocab_size = positive_integer(config, "vocab_size")?;
-    let num_hidden_layers = positive_integer(config, "num_hidden_layers")?;
+    let _num_hidden_layers = positive_integer(config, "num_hidden_layers")?;
     let num_target_layers = positive_integer(config, "num_target_layers")?;
     let dflash = config
         .get("dflash_config")
@@ -132,17 +132,8 @@ fn validate_dflash2_draft_metadata(config: &serde_json::Value) -> Result<()> {
         previous = Some(layer_id);
     }
 
-    // The context projection can consume more target layers than there are
-    // draft decoder layers. This is valid metadata, but the current runtime
-    // only implements equal counts. Classify it after validating every ID so
-    // download-only overrides cannot hide malformed layer selections.
-    if target_layer_ids.len() != num_hidden_layers as usize {
-        return Err(anyhow!(
-            "unsupported DFlash2 configuration: target_layer_ids count {} differs from draft layer count {num_hidden_layers}",
-            target_layer_ids.len()
-        ));
-    }
-
+    // The context projection concatenates every tapped target layer, so the
+    // tap count is independent of the draft depth.
     Ok(())
 }
 
@@ -1213,7 +1204,10 @@ fn load_optiq_vision_sidecar(
     Ok(())
 }
 
-fn normalize_quant_prefix(key: &str) -> String {
+/// Module path a quantization override applies to: the loader matches
+/// overrides against weight prefixes after stripping one leading
+/// `language_model.` (multimodal checkpoints store the text tower there).
+pub(crate) fn normalize_quant_prefix(key: &str) -> String {
     key.strip_prefix("language_model.")
         .unwrap_or(key)
         .to_owned()
@@ -1464,7 +1458,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_preflight_classifies_independent_dflash2_context_layers() {
+    fn metadata_preflight_accepts_independent_dflash2_context_layers() {
         let mut config = json!({
             "model_type": "qwen3",
             "hidden_size": 2048,
@@ -1481,8 +1475,7 @@ mod tests {
                 "target_layer_ids": [1, 6, 11, 16, 22, 27, 32, 37]
             }
         });
-        let error = validate_dflash2_draft_metadata(&config).expect_err("unsupported runtime");
-        assert_eq!(error.to_string(), "unsupported DFlash2 configuration: target_layer_ids count 8 differs from draft layer count 6");
+        validate_dflash2_draft_metadata(&config).expect("eight taps feeding six draft layers");
 
         for ids in [
             json!([]),

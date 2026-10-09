@@ -1345,6 +1345,10 @@ impl crate::core::model::Model for Qwen35Model {
 }
 
 impl crate::models::dflash2::DFlash2Target for Qwen35Model {
+    fn dflash2_target_spec(&self) -> crate::models::dflash2::DFlash2TargetSpec {
+        self.config().into()
+    }
+
     fn dflash2_target_cache_cost(&self) -> crate::models::dflash2::DFlash2TargetCacheCost {
         qwen35_dflash2_target_cache_cost(self.config())
     }
@@ -1401,6 +1405,8 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
             transactional_state_restore: !supported_shapes.is_empty(),
             supported_shapes,
             lane_kernel_pack: lane_pack,
+            // Dense flat trees run only through the qualified M5 lane pack.
+            flat_tree_max_nodes: 0,
         }
     }
 
@@ -1637,53 +1643,22 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
 fn qwen35_dflash2_target_cache_cost(
     cfg: &Qwen35Config,
 ) -> crate::models::dflash2::DFlash2TargetCacheCost {
-    let layer_count = usize::try_from(cfg.num_hidden_layers)
-        .expect("validated Qwen3.5 layer count must be positive");
-    let full_attention_interval = usize::try_from(cfg.full_attention_interval)
-        .expect("validated Qwen3.5 full-attention interval must be positive");
-    let full_attention_layers = (1..=layer_count)
-        .filter(|layer| layer % full_attention_interval == 0)
-        .count();
-    let linear_attention_layers = layer_count.saturating_sub(full_attention_layers);
-    let kv_heads = usize::try_from(cfg.num_key_value_heads)
-        .expect("validated Qwen3.5 KV head count must be positive");
-    let head_dim = usize::try_from(cfg.effective_head_dim())
-        .expect("validated Qwen3.5 head dimension must be positive");
-    let bytes_per_token = full_attention_layers
-        .saturating_mul(kv_heads)
-        .saturating_mul(head_dim)
-        .saturating_mul(2)
-        .saturating_mul(2);
-
-    let value_heads = usize::try_from(cfg.linear_num_value_heads)
-        .expect("validated Qwen3.5 linear value head count must be positive");
-    let key_heads = usize::try_from(cfg.linear_num_key_heads)
-        .expect("validated Qwen3.5 linear key head count must be positive");
-    let key_dim = usize::try_from(cfg.linear_key_head_dim)
-        .expect("validated Qwen3.5 linear key dimension must be positive");
-    let value_dim = usize::try_from(cfg.linear_value_head_dim)
-        .expect("validated Qwen3.5 linear value dimension must be positive");
-    let kernel_dim = usize::try_from(cfg.linear_conv_kernel_dim)
-        .expect("validated Qwen3.5 linear convolution width must be positive");
-    let conv_dim = key_dim
-        .saturating_mul(key_heads)
-        .saturating_mul(2)
-        .saturating_add(value_dim.saturating_mul(value_heads));
-    let conv_state_bytes = kernel_dim
-        .saturating_sub(1)
-        .saturating_mul(conv_dim)
-        .saturating_mul(2);
-    let recurrent_state_bytes = value_heads
-        .saturating_mul(value_dim)
-        .saturating_mul(key_dim)
-        .saturating_mul(4);
-    let fixed_bytes_per_sequence = linear_attention_layers
-        .saturating_mul(conv_state_bytes.saturating_add(recurrent_state_bytes));
-
-    crate::models::dflash2::DFlash2TargetCacheCost {
-        bytes_per_token,
-        fixed_bytes_per_sequence,
+    let positive = |value: i32, field: &str| {
+        usize::try_from(value)
+            .unwrap_or_else(|_| panic!("validated Qwen3.5 {field} must be non-negative"))
+    };
+    crate::models::dflash2::DFlash2HybridCacheGeometry {
+        layers: positive(cfg.num_hidden_layers, "layer count"),
+        full_attention_interval: positive(cfg.full_attention_interval, "full-attention interval"),
+        kv_heads: positive(cfg.num_key_value_heads, "KV head count"),
+        head_dim: positive(cfg.effective_head_dim(), "head dimension"),
+        linear_value_heads: positive(cfg.linear_num_value_heads, "linear value head count"),
+        linear_key_heads: positive(cfg.linear_num_key_heads, "linear key head count"),
+        linear_key_dim: positive(cfg.linear_key_head_dim, "linear key dimension"),
+        linear_value_dim: positive(cfg.linear_value_head_dim, "linear value dimension"),
+        linear_conv_kernel: positive(cfg.linear_conv_kernel_dim, "linear convolution width"),
     }
+    .cache_cost()
 }
 
 impl DenseVlMethods for Qwen35Model {

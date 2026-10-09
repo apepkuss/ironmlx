@@ -398,6 +398,10 @@ pub struct DFlash2Metrics {
     pub ordinary_windows: usize,
     pub tree_windows: usize,
     pub tree_drafted_nodes: usize,
+    /// Windows that ran linear DFlash2 although a tree was configured
+    /// (for example sampled or constrained requests).
+    pub tree_fallback_linear_windows: usize,
+    pub tree_fallback_reason: Option<&'static str>,
     pub ragged_linear_windows: usize,
     pub tree_to_ragged_switches: usize,
     pub ragged_to_tree_switches: usize,
@@ -428,6 +432,8 @@ pub struct DFlash2Metrics {
 #[derive(Debug, Clone, Default)]
 struct DFlash2Counters {
     windows: usize,
+    tree_fallback_linear_windows: usize,
+    tree_fallback_reason: Option<&'static str>,
     drafted_tokens: usize,
     accepted_draft_tokens: usize,
     rollback_count: usize,
@@ -1338,6 +1344,8 @@ where
             ordinary_windows: self.counters.ordinary_windows,
             tree_windows: self.counters.tree_windows,
             tree_drafted_nodes: self.counters.tree_drafted_nodes,
+            tree_fallback_linear_windows: self.counters.tree_fallback_linear_windows,
+            tree_fallback_reason: self.counters.tree_fallback_reason,
             ragged_linear_windows: self.counters.ragged_linear_windows,
             tree_to_ragged_switches: self.counters.tree_to_ragged_switches,
             ragged_to_tree_switches: self.counters.ragged_to_tree_switches,
@@ -1537,19 +1545,57 @@ where
         } else if self.tree_eligible() {
             self.fill_tree_window(current_token)
         } else {
+            if self.p2_options.tree_max_nodes > 0 {
+                if self.counters.tree_fallback_linear_windows == 0 {
+                    tracing::info!(
+                        target: "ironmlx::dflash2",
+                        reason = self.tree_ineligible_reason(),
+                        tree_max_nodes = self.p2_options.tree_max_nodes,
+                        "DFlash2 tree configured but this request runs linear windows"
+                    );
+                }
+                self.counters.tree_fallback_linear_windows += 1;
+                self.counters.tree_fallback_reason = Some(self.tree_ineligible_reason());
+            }
             self.fill_window(current_token)
         }
     }
 
     fn tree_eligible(&self) -> bool {
-        self.p2_options.tree_max_nodes > 0
-            && self.constraint.is_none()
-            && (self.request.sampler.is_greedy() || self.request.sampler.uses_position_keyed_v1())
+        if self.p2_options.tree_max_nodes == 0 || self.constraint.is_some() {
+            return false;
+        }
+        if self.target_flat_tree() {
+            // A target-certified flat tree is greedy only; sampled requests
+            // keep linear DFlash2 windows.
+            return self.request.sampler.is_greedy();
+        }
+        (self.request.sampler.is_greedy() || self.request.sampler.uses_position_keyed_v1())
             && self
                 .verify_capabilities
                 .lane_kernel_pack
                 .as_ref()
                 .is_some_and(|pack| pack.quant_bits == 4)
+    }
+
+    /// Why a configured tree does not run for this request.
+    fn tree_ineligible_reason(&self) -> &'static str {
+        if self.constraint.is_some() {
+            "constrained_request"
+        } else if self.verify_capabilities.flat_tree_max_nodes > 0 && !self.target_flat_tree() {
+            "tree_size_not_certified"
+        } else if !self.request.sampler.is_greedy() {
+            "sampled_request"
+        } else {
+            "target_not_tree_certified"
+        }
+    }
+
+    /// Whether the target itself certifies a flat tree of the configured
+    /// size, independent of a lane kernel pack.
+    fn target_flat_tree(&self) -> bool {
+        self.verify_capabilities.flat_tree_max_nodes > 0
+            && self.p2_options.tree_max_nodes <= self.verify_capabilities.flat_tree_max_nodes
     }
 
     /// Prototype diagnostic: evaluate this stream's target cache buffers
@@ -2417,8 +2463,13 @@ where
                 "experimental tf-v1 proposal requires flat-tree verification"
             );
         }
+        let target_flat_tree = self.target_flat_tree();
         let draft_len = if tf_tree_profile {
             self.p2_options.tree_max_nodes.min(15)
+        } else if target_flat_tree {
+            // The lattice depth is bounded by the draft block; the node
+            // budget is bounded by the target's certified flat tree.
+            self.block_size.saturating_sub(1)
         } else {
             self.current_draft_budget()
         }
@@ -2447,7 +2498,9 @@ where
             .draft_build_us
             .saturating_add(elapsed_us(draft_started));
         StageClock::mark(&mut stage_clock, "draft", &[])?;
-        if ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::DFLASH2_FLAT_TREE) {
+        if target_flat_tree
+            || ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::DFLASH2_FLAT_TREE)
+        {
             return self.fill_flat_tree(
                 current_token,
                 &tree,
@@ -2676,8 +2729,15 @@ where
         mut stage_clock: Option<StageClock>,
     ) -> Result<()> {
         anyhow::ensure!(
-            self.request.sampler.is_greedy() && self.experimental_fixed_budget.is_some(),
-            "experimental flat tree requires greedy sampling and fixed draft budget"
+            self.request.sampler.is_greedy()
+                && (self.experimental_fixed_budget.is_some() || self.target_flat_tree()),
+            "flat tree requires greedy sampling and a fixed or target-certified tree budget"
+        );
+        anyhow::ensure!(
+            tree.tokens.len() <= self.p2_options.tree_max_nodes,
+            "DFlash2 flat tree has {} nodes, configured maximum is {}",
+            tree.tokens.len(),
+            self.p2_options.tree_max_nodes
         );
         let history_before = self.history.len();
         let mut tokens = vec![current_token];
@@ -4025,6 +4085,10 @@ fn rate_per_second(tokens: usize, elapsed_us: u64) -> f64 {
 }
 
 #[cfg(test)]
+#[path = "dflash2_moe_tests.rs"]
+mod moe_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
@@ -4973,6 +5037,7 @@ mod tests {
                 state_layout: "test".to_owned(),
                 layer_submit_interval: 4,
             }),
+            flat_tree_max_nodes: 0,
         };
         let stable = extend_batched_q16_qualification_capabilities(capabilities.clone(), false)
             .expect("stable capabilities");

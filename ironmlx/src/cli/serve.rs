@@ -7,10 +7,12 @@ use std::time::Duration;
 use anyhow::{bail, Context};
 use clap::Args;
 
+use super::dflash2_target::DFlash2TargetFamily;
 use super::KvQuantArg;
 use crate::Result;
 use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
 use ironmlx_lm::core::vision::DenseVlMethods;
+use ironmlx_lm::models::dflash2::DFlash2Target;
 use ironmlx_runtime::core::cache::prefix_store::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE;
 use ironmlx_runtime::core::process_memory::StaticMemoryEstimate;
 use {
@@ -184,13 +186,15 @@ pub struct ServeArgs {
     pub dflash2_block_size: Option<usize>,
 
     /// Runtime affine quantization for the official BF16 DFlash2 draft.
-    /// Pass 0 to keep the draft in BF16.
-    #[arg(long = "dflash2-draft-bits", default_value_t = 4)]
-    pub dflash2_draft_bits: i32,
+    /// Pass 0 to keep the draft in BF16. Default: 4 for dense targets;
+    /// Qwen3.6 MoE targets support only 0 (BF16).
+    #[arg(long = "dflash2-draft-bits")]
+    pub dflash2_draft_bits: Option<i32>,
 
     /// Maximum nodes in the B1 best-first DFlash2 draft tree. Zero keeps the
     /// stable linear path; values up to 15 reserve target lanes for tree paths.
-    /// Default: 15 with an active M5 DFlash2 profile, otherwise 0.
+    /// Default: 15 with an active M5 DFlash2 profile on a Qwen3.8 dense
+    /// target, otherwise 0 (including Qwen3.6 MoE targets).
     #[arg(long = "dflash2-tree-max-nodes")]
     pub dflash2_tree_max_nodes: Option<usize>,
 
@@ -198,8 +202,11 @@ pub struct ServeArgs {
     /// enables the qualified M5 settings (tensor-unit affine4 kernels, flat
     /// tree, fixed draft budget, linear batching under load, prefill
     /// kernels) when the GPU supports them; each feature still falls back
-    /// when its quantization, shape or request checks do not hold. `off`
-    /// keeps the generic defaults.
+    /// when its quantization, shape or request checks do not hold. Those
+    /// settings belong to Qwen3.8 dense targets; Qwen3.6 MoE targets use
+    /// their own table, which currently turns nothing on (the startup log's
+    /// `effective_settings` shows what is on). `off` keeps the generic
+    /// defaults.
     #[arg(
         long = "m5-dflash2-profile",
         default_value = "auto",
@@ -569,14 +576,13 @@ fn resolve_serve_mtp_config(
 fn ensure_dflash2_serve_supported(
     args: &ServeArgs,
     architecture: ironmlx_lm::models::ModelArchitecture,
+    config_raw: &serde_json::Value,
     scheduler_config: SchedulerServeConfig,
-) -> Result<()> {
+) -> Result<Option<DFlash2TargetFamily>> {
     let Some(draft_dir) = args.dflash2_model_dir.as_ref() else {
-        return Ok(());
+        return Ok(None);
     };
-    if architecture != ironmlx_lm::models::ModelArchitecture::Qwen35Dense {
-        bail!("--dflash2-model-dir currently supports dense Qwen3.5 targets only");
-    }
+    let family = DFlash2TargetFamily::detect(architecture, config_raw)?;
     if !draft_dir.is_dir() {
         bail!(
             "--dflash2-model-dir must point to a local directory (got '{}')",
@@ -609,10 +615,12 @@ fn ensure_dflash2_serve_supported(
     {
         bail!("--dflash2-block-size must be in [2, 16]");
     }
-    if !matches!(args.dflash2_draft_bits, 0 | 4 | 8) {
-        bail!("--dflash2-draft-bits must be one of 0, 4, or 8");
-    }
-    Ok(())
+    family.resolve_draft_bits(args.dflash2_draft_bits)?;
+    family.ensure_execution_scope(
+        args.dflash2_tree_max_nodes,
+        args.dflash2_position_keyed_sampling,
+    )?;
+    Ok(Some(family))
 }
 
 fn parse_m5_profile_mode(value: &str) -> Result<ironmlx_core::m5_profile::M5ProfileMode, String> {
@@ -621,10 +629,21 @@ fn parse_m5_profile_mode(value: &str) -> Result<ironmlx_core::m5_profile::M5Prof
 
 /// Install the process M5 DFlash2 profile and apply its serve defaults to
 /// options that were not given explicitly.
-fn install_m5_profile(args: &mut ServeArgs, dflash2: bool) {
+fn install_m5_profile(args: &mut ServeArgs, dflash2: bool, family: Option<DFlash2TargetFamily>) {
     use ironmlx_core::m5_profile;
-    let profile = m5_profile::install(args.m5_dflash2_profile, dflash2);
-    apply_m5_profile_defaults(args, dflash2, profile.is_active());
+    let profile = m5_profile::install_for_target(
+        args.m5_dflash2_profile,
+        dflash2,
+        family
+            .map(DFlash2TargetFamily::m5_profile_target)
+            .unwrap_or(m5_profile::M5ProfileTarget::Unqualified),
+    );
+    apply_m5_profile_defaults(
+        args,
+        dflash2,
+        profile.is_active(),
+        family.unwrap_or(DFlash2TargetFamily::Qwen35Dense),
+    );
     for library in &profile.prefill_libraries {
         if let Some(error) = &library.error {
             tracing::warn!(
@@ -634,27 +653,40 @@ fn install_m5_profile(args: &mut ServeArgs, dflash2: bool) {
             );
         }
     }
+    for setting in profile.hardware_ignored_settings() {
+        tracing::warn!(
+            setting,
+            hardware_architecture = ironmlx_core::m5_profile::hardware_architecture()
+                .as_deref()
+                .unwrap_or("unknown"),
+            "M5 tensor-unit setting ignored: the GPU is older than Apple GPU generation 17"
+        );
+    }
     tracing::info!(
         mode = profile.mode.as_str(),
         status = profile.status.as_str(),
+        target = profile.target.as_str(),
         architecture = profile.architecture.as_deref().unwrap_or("unknown"),
+        effective_settings = profile.effective_settings_summary(),
         "M5 DFlash2 profile"
     );
 }
 
 /// DFlash2 serve defaults of the M5 profile for options not given
 /// explicitly: tree max nodes (15, otherwise 0) and admission deadline (0).
-fn apply_m5_profile_defaults(args: &mut ServeArgs, dflash2: bool, active: bool) {
+fn apply_m5_profile_defaults(
+    args: &mut ServeArgs,
+    dflash2: bool,
+    active: bool,
+    family: DFlash2TargetFamily,
+) {
     use ironmlx_core::m5_profile;
     if !dflash2 {
         return;
     }
-    args.dflash2_tree_max_nodes.get_or_insert(if active {
-        m5_profile::DFLASH2_TREE_MAX_NODES
-    } else {
-        0
-    });
-    if active {
+    args.dflash2_tree_max_nodes
+        .get_or_insert(family.default_tree_max_nodes(active));
+    if active && family == DFlash2TargetFamily::Qwen35Dense {
         args.admission_deadline_ms
             .get_or_insert(m5_profile::DFLASH2_ADMISSION_DEADLINE_MS);
     }
@@ -940,33 +972,41 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn serve_with_dflash2_model(
-    model: ironmlx_lm::models::Qwen35Model,
+fn serve_with_dflash2_model<M>(
+    model: M,
+    family: DFlash2TargetFamily,
     tokenizer: Tokenizer,
     args: &ServeArgs,
     scheduler_config: SchedulerServeConfig,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     mut static_memory_estimate: StaticMemoryEstimate,
-) -> Result<()> {
+) -> Result<()>
+where
+    M: ironmlx_lm::core::model::Model
+        + ironmlx_lm::core::vision::DenseVlMethods
+        + DFlash2Target
+        + Send
+        + 'static,
+{
     let draft_dir = args
         .dflash2_model_dir
         .as_ref()
         .context("DFlash2 server started without --dflash2-model-dir")?;
     let draft_loader = Loader::open_dflash2(draft_dir)
         .with_context(|| format!("Loader::open_dflash2 {}", draft_dir.display()))?;
-    let draft_bits = (args.dflash2_draft_bits != 0).then_some(args.dflash2_draft_bits);
+    let draft_bits_value = family.resolve_draft_bits(args.dflash2_draft_bits)?;
+    let draft_bits = (draft_bits_value != 0).then_some(draft_bits_value);
     let draft = ironmlx_lm::models::DFlash2DraftModel::from_loader(
         &draft_loader,
-        model.config(),
+        model.dflash2_target_spec(),
         draft_bits,
     )
     .context("DFlash2DraftModel::from_loader")?;
     let checkpoint_block_size = usize::try_from(draft.config().dflash_config.block_size)
         .context("DFlash2 checkpoint block_size")?;
-    let block_size_resolution = ironmlx_runtime::core::dflash2::resolve_dflash2_block_size(
-        args.dflash2_block_size,
-        checkpoint_block_size,
-    )?;
+    family.ensure_tree_supported(&model, dflash2_tree_max_nodes(args))?;
+    let block_size_resolution =
+        family.resolve_block_size(&model, args.dflash2_block_size, checkpoint_block_size)?;
     static_memory_estimate.speculative_cold_bytes = draft_loader.loaded_tensor_bytes();
     drop(draft_loader);
     mlx::clear_cache();
@@ -976,12 +1016,13 @@ fn serve_with_dflash2_model(
     let (tensor_batch_requested_max_width, tensor_batch_max_width) =
         resolve_dflash2_tensor_batch_width(args, scheduler_config.b_max);
     tracing::info!(
-        "ironmlx serve: DFlash2 enabled model_dir={} checkpoint_block_size={} resolved_block_size={} block_size_source={} draft_bits={} tree_max_nodes={} position_keyed_sampling={} max_sequences={} tensor_batch_requested_max_width={} tensor_batch_effective_max_width={} prefix_cache_max_bytes={:?}",
+        "ironmlx serve: DFlash2 enabled model_dir={} target_profile={} checkpoint_block_size={} resolved_block_size={} block_size_source={} draft_bits={} tree_max_nodes={} position_keyed_sampling={} max_sequences={} tensor_batch_requested_max_width={} tensor_batch_effective_max_width={} prefix_cache_max_bytes={:?}",
         draft_dir.display(),
+        model.dflash2_verify_capabilities().profile,
         block_size_resolution.checkpoint_block_size,
         block_size_resolution.block_size,
         if block_size_resolution.explicit { "explicit" } else { "auto" },
-        args.dflash2_draft_bits,
+        draft_bits_value,
         dflash2_tree_max_nodes(args),
         args.dflash2_position_keyed_sampling,
         scheduler_config.b_max,
@@ -1248,7 +1289,14 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
     )?);
     let dflash2 =
         args.model.is_some() && args.model_manifest.is_none() && args.dflash2_model_dir.is_some();
-    install_m5_profile(&mut args, dflash2);
+    let dflash2_family = dflash2
+        .then(|| {
+            args.model
+                .as_deref()
+                .and_then(|model| super::dflash2_target::model_dir_dflash2_family(Path::new(model)))
+        })
+        .flatten();
+    install_m5_profile(&mut args, dflash2, dflash2_family);
     if let Some(manifest_path) = args.model_manifest.clone() {
         return run_engine_pool(args, &manifest_path);
     }
@@ -1289,7 +1337,22 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
 
     let model_type = read_model_type(&model_dir)?;
     let architecture = ironmlx_lm::models::ModelArchitecture::from_model_type(&model_type)?;
-    ensure_dflash2_serve_supported(&args, architecture, resolved_scheduler.scheduler_config)?;
+    let dflash2_family = if args.dflash2_model_dir.is_some() {
+        let config_path = model_dir.join("config.json");
+        let config_raw: serde_json::Value = serde_json::from_reader(
+            std::fs::File::open(&config_path)
+                .with_context(|| format!("opening {}", config_path.display()))?,
+        )
+        .with_context(|| format!("parsing {}", config_path.display()))?;
+        ensure_dflash2_serve_supported(
+            &args,
+            architecture,
+            &config_raw,
+            resolved_scheduler.scheduler_config,
+        )?
+    } else {
+        None
+    };
     if resolve_prompt_lookup_config(&args)?.is_some() && !architecture.supports_prompt_lookup() {
         bail!(
             "ironmlx serve --prompt-lookup requires a causal scheduler model; `{model_type}` is not supported"
@@ -1346,9 +1409,10 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 ironmlx_lm::models::Qwen35Model::from_loader(&loader)
                     .context("Qwen35Model::from_loader")?
             };
-            if args.dflash2_model_dir.is_some() {
+            if let Some(family) = dflash2_family {
                 serve_with_dflash2_model(
                     model,
+                    family,
                     tokenizer,
                     &args,
                     scheduler_config,
@@ -1379,6 +1443,19 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
             }
         }
         ironmlx_lm::models::ModelArchitecture::Qwen35Moe => {
+            if let Some(family) = dflash2_family {
+                let model = ironmlx_lm::models::Qwen35MoeModel::from_loader(&loader)
+                    .context("Qwen35MoeModel::from_loader")?;
+                return serve_with_dflash2_model(
+                    model,
+                    family,
+                    tokenizer,
+                    &args,
+                    scheduler_config,
+                    scheduler_runtime_profile,
+                    static_memory_estimate,
+                );
+            }
             match qwen_moe_serve_model(loader.config_raw_value()) {
                 QwenMoeServeModel::Qwen35 => {
                     let model = ironmlx_lm::models::Qwen35MoeModel::from_loader(&loader)
@@ -1542,7 +1619,7 @@ mod scheduler_profile_tests {
 
     use clap::Parser;
 
-    use super::apply_m5_profile_defaults;
+    use super::{apply_m5_profile_defaults, DFlash2TargetFamily};
     use crate::cli::Command;
     use ironmlx_runtime::core::scheduler_profile_store::SchedulerProfileStore;
     use {
@@ -1643,7 +1720,7 @@ mod scheduler_profile_tests {
             mtp_draft_tokens: None,
             dflash2_model_dir: None,
             dflash2_block_size: None,
-            dflash2_draft_bits: 4,
+            dflash2_draft_bits: None,
             dflash2_tree_max_nodes: None,
             m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode::Auto,
             dflash2_position_keyed_sampling: false,
@@ -1704,6 +1781,7 @@ mod scheduler_profile_tests {
         ensure_dflash2_serve_supported(
             &args,
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({}),
             config,
         )
         .expect("valid isolated DFlash2 policy");
@@ -1713,6 +1791,7 @@ mod scheduler_profile_tests {
         ensure_dflash2_serve_supported(
             &args,
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({}),
             concurrent,
         )
         .expect("DFlash2 must accept multi-sequence mode");
@@ -1722,6 +1801,7 @@ mod scheduler_profile_tests {
         let error = ensure_dflash2_serve_supported(
             &args,
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({}),
             empty,
         )
         .expect_err("DFlash2 must reject zero max sequences");
@@ -1731,6 +1811,7 @@ mod scheduler_profile_tests {
         let error = ensure_dflash2_serve_supported(
             &args,
             ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+            &serde_json::json!({}),
             config,
         )
         .expect_err("DFlash2 must reject MTP mixing");
@@ -1741,24 +1822,29 @@ mod scheduler_profile_tests {
     #[test]
     fn m5_profile_defaults_apply_only_to_unset_dflash2_options() {
         let mut args = base_args();
-        apply_m5_profile_defaults(&mut args, true, true);
+        apply_m5_profile_defaults(&mut args, true, true, DFlash2TargetFamily::Qwen35Dense);
         assert_eq!(args.dflash2_tree_max_nodes, Some(15));
         assert_eq!(args.admission_deadline_ms, Some(0));
 
         let mut explicit = base_args();
         explicit.dflash2_tree_max_nodes = Some(0);
         explicit.admission_deadline_ms = Some(9);
-        apply_m5_profile_defaults(&mut explicit, true, true);
+        apply_m5_profile_defaults(&mut explicit, true, true, DFlash2TargetFamily::Qwen35Dense);
         assert_eq!(explicit.dflash2_tree_max_nodes, Some(0));
         assert_eq!(explicit.admission_deadline_ms, Some(9));
 
         let mut inactive = base_args();
-        apply_m5_profile_defaults(&mut inactive, true, false);
+        apply_m5_profile_defaults(&mut inactive, true, false, DFlash2TargetFamily::Qwen35Dense);
         assert_eq!(inactive.dflash2_tree_max_nodes, Some(0));
         assert_eq!(inactive.admission_deadline_ms, None);
 
         let mut not_dflash2 = base_args();
-        apply_m5_profile_defaults(&mut not_dflash2, false, true);
+        apply_m5_profile_defaults(
+            &mut not_dflash2,
+            false,
+            true,
+            DFlash2TargetFamily::Qwen35Dense,
+        );
         assert_eq!(not_dflash2.dflash2_tree_max_nodes, None);
         assert_eq!(not_dflash2.admission_deadline_ms, None);
     }

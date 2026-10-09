@@ -226,6 +226,134 @@ impl Qwen35MoeTextModel {
         self.norm.forward_on(&x, target)
     }
 
+    pub(crate) fn restore_dflash2_speculative_prefix_on(
+        &self,
+        cache: &mut [LayerCache],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+        accepted_len: usize,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        if cache.len() != self.layers.len() || snapshots.len() != self.layers.len() {
+            return Err(anyhow!(
+                "Qwen35 MoE DFlash2 restore requires {} cache layers, got cache={} snapshots={}",
+                self.layers.len(),
+                cache.len(),
+                snapshots.len()
+            ));
+        }
+        let target = target.into();
+        for ((layer, cache), snapshot) in self.layers.iter().zip(cache).zip(snapshots) {
+            layer.restore_speculative_prefix_on(cache, snapshot, accepted_len, target)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_dflash2_speculative_prefix_rows_on(
+        &self,
+        cache: &mut [LayerCache],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+        accepted_lens: &[usize],
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        if cache.len() != self.layers.len() || snapshots.len() != self.layers.len() {
+            return Err(anyhow!(
+                "Qwen35 MoE DFlash2 per-row restore requires {} cache layers, got cache={} snapshots={}",
+                self.layers.len(),
+                cache.len(),
+                snapshots.len()
+            ));
+        }
+        let target = target.into();
+        for ((layer, cache), snapshot) in self.layers.iter().zip(cache).zip(snapshots) {
+            layer.restore_speculative_prefix_rows_on(cache, snapshot, accepted_lens, target)?;
+        }
+        Ok(())
+    }
+
+    /// DFlash2-only forward that also returns the post-layer hidden states of
+    /// `target_layer_ids` (0-based layer outputs before the final norm),
+    /// concatenated on the feature axis in id order. The layer graph is the
+    /// same as [`Self::forward_on`] without masks or ragged row lengths.
+    pub(crate) fn forward_with_dflash2_taps_on(
+        &self,
+        input_ids: &Array,
+        position_ids: &Array,
+        mut cache: Option<&mut [LayerCache]>,
+        target_layer_ids: &[usize],
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Array, Array)> {
+        let target = target.into();
+        if input_ids.ndim() != 2 || input_ids.shape().as_slice()[0] <= 0 {
+            return Err(anyhow!(
+                "Qwen35 MoE DFlash2 target forward requires input_ids [B,S] with B>0, got {:?}",
+                input_ids.shape().as_slice()
+            ));
+        }
+        if target_layer_ids.is_empty() {
+            return Err(anyhow!(
+                "Qwen35 MoE DFlash2 target forward requires at least one target layer"
+            ));
+        }
+        let mut previous = None;
+        for &layer in target_layer_ids {
+            if layer >= self.layers.len() {
+                return Err(anyhow!(
+                    "Qwen35 MoE DFlash2 target layer {layer} is outside {} layers",
+                    self.layers.len()
+                ));
+            }
+            if previous.is_some_and(|prior| layer <= prior) {
+                return Err(anyhow!(
+                    "Qwen35 MoE DFlash2 target layers must be strictly increasing"
+                ));
+            }
+            previous = Some(layer);
+        }
+        if let Some(cache) = cache.as_deref() {
+            if cache.len() != self.layers.len() {
+                return Err(anyhow!(
+                    "Qwen35 MoE DFlash2 target cache has {} layers, expected {}",
+                    cache.len(),
+                    self.layers.len()
+                ));
+            }
+        }
+
+        let (cos, sin) = self.mrope.cos_sin(position_ids)?;
+        let mut x = self.embed_on(input_ids, target)?;
+        let mut captured = Vec::with_capacity(target_layer_ids.len());
+        let mut next_capture = 0_usize;
+        for (index, layer) in self.layers.iter().enumerate() {
+            let layer_cache = cache.as_deref_mut().map(|cache| &mut cache[index]);
+            x = layer.forward_on(
+                &x,
+                &self.mrope,
+                &cos,
+                &sin,
+                None,
+                None,
+                None,
+                layer_cache,
+                target,
+                index as i32,
+            )?;
+            if target_layer_ids.get(next_capture) == Some(&index) {
+                captured.push(x.clone());
+                next_capture += 1;
+            }
+        }
+        if captured.len() != target_layer_ids.len() {
+            return Err(anyhow!(
+                "Qwen35 MoE DFlash2 captured {} layers, expected {}",
+                captured.len(),
+                target_layer_ids.len()
+            ));
+        }
+        let refs = captured.iter().collect::<Vec<_>>();
+        let context_hidden = mlx::ops::shape::concatenate_on(&refs, -1, target)?;
+        Ok((self.norm.forward_on(&x, target)?, context_hidden))
+    }
+
     /// Full forward: embed → layers → final norm.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_on(

@@ -4,12 +4,11 @@ use anyhow::anyhow;
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::Loader;
-use crate::models::Qwen35Config;
 use crate::nn::{Linear, RmsNorm};
 use crate::Result;
 
 use super::attention::DFlash2KvCache;
-use super::config::DFlash2Config;
+use super::config::{DFlash2Config, DFlash2TargetSpec};
 use super::layer::DFlash2DecoderLayer;
 use super::selector::DFlash2CandidateSelector;
 use super::{load_linear, DFlash2DraftTree, DFlash2Target};
@@ -83,7 +82,7 @@ pub struct DFlash2TreeSpec {
 impl DFlash2DraftModel {
     pub fn from_loader(
         loader: &Loader,
-        target: &Qwen35Config,
+        target: impl Into<DFlash2TargetSpec>,
         draft_bits: Option<i32>,
     ) -> Result<Self> {
         if loader.quant_meta().is_some() {
@@ -92,7 +91,7 @@ impl DFlash2DraftModel {
             ));
         }
         let config = DFlash2Config::from_loader(loader)?;
-        config.ensure_target_compatible(target)?;
+        config.ensure_target_compatible(&target.into())?;
         validate_tensor_manifest(loader, &config)?;
         let mut layers = Vec::with_capacity(config.num_hidden_layers as usize);
         for index in 0..config.num_hidden_layers {
@@ -390,7 +389,9 @@ fn validate_tensor_manifest(loader: &Loader, cfg: &DFlash2Config) -> Result<()> 
     let kv = cfg.num_key_value_heads * cfg.head_dim;
     let groups = h / cfg.dflash_config.conv_group_size;
     let kernel_projection = 2 * cfg.dflash_config.conv_kernel_size * groups;
-    expected.insert("fc.weight".to_owned(), vec![h, h * cfg.num_hidden_layers]);
+    // `fc` consumes the concatenated target taps, not one vector per draft
+    // layer.
+    expected.insert("fc.weight".to_owned(), vec![h, cfg.context_width()?]);
     expected.insert("hidden_norm.weight".to_owned(), vec![h]);
     expected.insert("norm.weight".to_owned(), vec![h]);
     expected.insert(

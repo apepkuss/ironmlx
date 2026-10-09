@@ -133,6 +133,8 @@ pub struct DFlash2HealthInfo {
     pub ordinary_windows: u64,
     pub tree_windows: u64,
     pub tree_drafted_nodes: u64,
+    /// Windows that ran linear DFlash2 although a tree was configured.
+    pub tree_fallback_linear_windows: u64,
     pub draft_budget_changes: u64,
     pub current_draft_budget: usize,
     pub latest_adaptive_acceptance_ewma: f64,
@@ -182,8 +184,11 @@ pub struct M5ProfileHealth {
     pub installed: bool,
     /// `auto` or `off`.
     pub mode: Option<&'static str>,
-    /// `active`, `disabled`, `not_dflash2`, `unsupported_gpu` or `gpu_unknown`.
+    /// `active`, `disabled`, `not_dflash2`, `unsupported_gpu`, `gpu_unknown`
+    /// or `target_not_qualified`.
     pub status: Option<&'static str>,
+    /// Model family whose settings table the profile uses.
+    pub target: Option<&'static str>,
     pub architecture: Option<String>,
     /// Effective value of each profile setting (null = off).
     pub settings: Vec<M5ProfileSetting>,
@@ -212,6 +217,7 @@ impl M5ProfileHealth {
             installed: true,
             mode: Some(profile.mode.as_str()),
             status: Some(profile.status.as_str()),
+            target: Some(profile.target.as_str()),
             architecture: profile.architecture.clone(),
             settings: profile
                 .settings()
@@ -340,6 +346,7 @@ pub struct DFlash2HealthConfig {
     ordinary_windows: Arc<AtomicU64>,
     tree_windows: Arc<AtomicU64>,
     tree_drafted_nodes: Arc<AtomicU64>,
+    tree_fallback_linear_windows: Arc<AtomicU64>,
     draft_budget_changes: Arc<AtomicU64>,
     current_draft_budget: Arc<AtomicUsize>,
     latest_adaptive_acceptance_ewma_bits: Arc<AtomicU64>,
@@ -400,6 +407,7 @@ impl DFlash2HealthConfig {
             ordinary_windows: Arc::new(AtomicU64::new(0)),
             tree_windows: Arc::new(AtomicU64::new(0)),
             tree_drafted_nodes: Arc::new(AtomicU64::new(0)),
+            tree_fallback_linear_windows: Arc::new(AtomicU64::new(0)),
             draft_budget_changes: Arc::new(AtomicU64::new(0)),
             current_draft_budget: Arc::new(AtomicUsize::new(0)),
             latest_adaptive_acceptance_ewma_bits: Arc::new(AtomicU64::new(0_f64.to_bits())),
@@ -466,6 +474,7 @@ impl DFlash2HealthConfig {
         ordinary_windows: Arc<AtomicU64>,
         tree_windows: Arc<AtomicU64>,
         tree_drafted_nodes: Arc<AtomicU64>,
+        tree_fallback_linear_windows: Arc<AtomicU64>,
         draft_budget_changes: Arc<AtomicU64>,
         current_draft_budget: Arc<AtomicUsize>,
         latest_adaptive_acceptance_ewma_bits: Arc<AtomicU64>,
@@ -522,6 +531,7 @@ impl DFlash2HealthConfig {
             ordinary_windows,
             tree_windows,
             tree_drafted_nodes,
+            tree_fallback_linear_windows,
             draft_budget_changes,
             current_draft_budget,
             latest_adaptive_acceptance_ewma_bits,
@@ -582,6 +592,7 @@ impl DFlash2HealthConfig {
             ordinary_windows: self.ordinary_windows.load(Ordering::Relaxed),
             tree_windows: self.tree_windows.load(Ordering::Relaxed),
             tree_drafted_nodes: self.tree_drafted_nodes.load(Ordering::Relaxed),
+            tree_fallback_linear_windows: self.tree_fallback_linear_windows.load(Ordering::Relaxed),
             draft_budget_changes: self.draft_budget_changes.load(Ordering::Relaxed),
             current_draft_budget: self.current_draft_budget.load(Ordering::Relaxed),
             latest_adaptive_acceptance_ewma: f64::from_bits(
@@ -1732,6 +1743,7 @@ mod tests {
             ordinary_windows,
             tree_windows,
             tree_drafted_nodes,
+            Arc::new(AtomicU64::new(0)),
             draft_budget_changes,
             current_draft_budget,
             adaptive_acceptance_ewma_bits,

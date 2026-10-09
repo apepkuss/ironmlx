@@ -3,10 +3,13 @@
 
 pub mod config;
 pub mod decoder_layer;
+mod dflash2;
 pub mod model;
 pub mod mtp;
 pub mod sparse_moe;
 pub mod text_model;
+#[doc(hidden)]
+pub mod timing_ablation;
 
 pub use config::{Qwen35MoeConfig, RopeParams};
 pub use decoder_layer::{DecoderLayerMoe, DecoderLayerMoeConfig};
