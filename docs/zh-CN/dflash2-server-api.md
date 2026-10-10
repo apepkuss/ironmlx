@@ -18,9 +18,12 @@ DFlash2 当前通过独立执行路径提供三类入口：
 |---|---|
 | Target | `mlx-community/Qwen3.8-27B-4bit` 或 `mlx-community/Qwen3.8-27B-8bit` |
 | Draft | `z-lab/Qwen3.8-27B-DFlash2` |
+| Target（MoE） | `mlx-community/Qwen3.6-35B-A3B-4bit`、`-5bit`、`-6bit` 或 `-8bit` |
+| Draft（MoE） | `incoai/Qwen3.6-35B-A3B-DFlash2`（BF16） |
 
 当前范围仅包含文本生成。DFlash2 draft 不能作为普通 base model 加载，也不能用于
-图片或视频请求。Target 必须使用 affine 4-bit 或 affine 8-bit；其他量化格式和
+图片或视频请求。Qwen3.8 target 必须使用 affine 4-bit 或 affine 8-bit；Qwen3.6 35B A3B
+target 的限制见 [Qwen3.6 35B A3B（MoE）](#qwen36-35b-a3bmoe)。其他量化格式和
 非量化 target 不会被 App 标记为 DFlash2 兼容。
 
 ## 启动示例
@@ -64,8 +67,8 @@ draft checkpoint 必须同时支持所请求宽度，运行时不会隐式扩宽
 
 App 的模型扫描器把 `DFlash2DraftModel` 识别为辅助 artifact，不把它列为可独立加载的
 base model。只有同时满足后端 DFlash2 draft 配置约束，并与 target 的 hidden size、
-intermediate size、vocab、上下文长度、target 层数、RMS epsilon 和 RoPE theta 一致的
-draft，才会出现在 target 的 DFlash2 选择器中；不完整或不兼容的 artifact fail closed。
+vocab、上下文长度、target 层数、RMS epsilon 和 RoPE theta 一致的
+draft（FFN 宽度不比较，因为 draft 有自己的 FFN；target tap 数量也与 draft 层数无关），才会出现在 target 的 DFlash2 选择器中；不完整或不兼容的 artifact fail closed。
 
 Dashboard 提供 DFlash2 开关、兼容 draft 选择、block size、运行时 draft 精度和
 Tensor Batch 上限。Tensor Batch 上限留空时不下发显式参数，由后端使用默认值
@@ -78,10 +81,42 @@ DFlash2 与 MTP、Prompt Lookup 严格互斥。启用后 App 只保留一个 def
 App 的 DFlash2 模式继续公开 `GET /v1/models`，其中只包含稳定的 target ID，供 OpenAI
 compatible 客户端发现。该模式不公开动态模型管理 API；Dashboard 与菜单栏从
 `/healthz` 和持久化配置恢复 target/draft 状态，不把 draft 暴露为普通模型。
+已加载的 DFlash2 target 可以在模型列表中固定（📌）。DFlash2 服务本身不会自动卸载 target，
+因此固定只记录在 App 配置中，不调用后端；关闭 DFlash2 后，target 经引擎池带着固定重新加载，
+继续免于 TTL 自动卸载和自动释放。
 
 Dashboard 运行态展示 target/draft、block size、draft 精度、TPS、接受率、窗口数、
 回滚数、精确残差修正数和峰值内存；`/healthz` 与诊断包同时记录 tensor batch 的
 生效上限、实际最大宽度、窗口数、建组数和分歧拆分数。
+
+## Qwen3.6 35B A3B（MoE）
+
+MoE 组合使用独立的 target 实现与资格认定，不继承 Qwen3.8 的 profile、tree 默认值、
+draft 精度选项或批处理设置。
+
+| 项目 | 限制 |
+|---|---|
+| Target 量化配方 | Affine、group size 64、4/5/6/8 bit，且只带 mlx-community checkpoint 自带的 `mlp.gate` 与 `shared_expert_gate` 8-bit 覆盖。其他配方（包括 OptiQ）在加载时拒绝。 |
+| Draft 精度 | 默认在加载时把 BF16 checkpoint 量化为 affine 4-bit（group size 64，`--dflash2-draft-bits 4`）；`0` 保持 BF16；`8` 会被拒绝。App 提供 4-bit（默认）和 BF16。启动日志的 `draft_loaded_precision` 是从已加载投影层读回的实际精度。 |
+| Verify 宽度 | 所有位宽最多 8。省略 `--dflash2-block-size` 时 checkpoint 宽度被限制到 8；显式传入大于 8 的值直接报错。 |
+| 执行方式 | 仅 B1。`--max-sequences` 仍限制同时活跃的请求数，但每次 target forward 只处理一个请求：活跃请求按窗口轮流推进，不做跨请求 tensor 合批。 |
+| Tree | `--dflash2-tree-max-nodes` 取 1–15 时，对 greedy 且无约束的请求启用 flat tree。采样请求和带约束的请求（包括开启 thinking 时附带的 reasoning budget）改走线性窗口，`tree_fallback_linear_windows` 计数，服务端日志记录一次原因。 |
+| 采样 | 支持精确推测采样。该 target 拒绝 `--dflash2-position-keyed-sampling`。 |
+
+所有 greedy 结果（线性或 tree）都与同一 target 的普通解码逐 token 一致（下面的 affine4 投影变量除外）。默认使用线性窗口，
+因为在 M5 Max 上每个位宽的 tree 都比线性窗口慢。
+
+M5 profile（`--m5-dflash2-profile`）使用独立的 MoE 设置表，目前为空：没有任何 MoE 设置测出
+端到端收益，所以该 profile 不改变 MoE 执行。`status=active` 只表示该 GPU 上已安装 profile；
+实际开启了什么，以启动日志的 `effective_settings`（MoE 默认为 `none`）和
+`healthz.dflash2.m5_profile.settings` 中的非 null 值为准。`healthz.dflash2.m5_profile.target` 显示
+`qwen36-moe`；target 不在已认定配方内时 `status` 为 `target_not_qualified`；`settings` 列出两个
+需显式开启的实验变量：
+
+| 变量 | 作用 |
+|---|---|
+| `IRONMLX_EXPERIMENTAL_M5_MOE_GROUPED_QMV=1` | 同一路由专家的权重在多个 verify 行间复用（affine6/8、8 行及以上）。与普通解码逐位一致。 |
+| `IRONMLX_EXPERIMENTAL_M5_MOE_AFFINE4_PROJECTIONS=1` | affine4 target 使用 M5 tensor-unit 投影。结果确定，但与普通 MLX 解码输出不同；执行指纹显示 `projections=m5-affine4-v1`。需要真实的 Apple GPU 第 17 代及以上；其他硬件上该变量被忽略并打印警告，改走通用投影，`settings` 中显示为 null。 |
 
 ## 执行与并发语义
 

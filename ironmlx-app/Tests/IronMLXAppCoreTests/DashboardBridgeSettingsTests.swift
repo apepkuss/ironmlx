@@ -1228,6 +1228,68 @@ func dashboardRejectsModelQueryAcrossBackendRestart(restartFinished: Bool) async
     withExtendedLifetime(bridge) {}
 }
 
+/// A DFlash2-loaded target shows the pin and toggles it through the real
+/// dashboard. The DFlash2 server has no model-management API, so the pin is
+/// App state only: it must be recorded without any backend pin request (the
+/// configured port is unreachable) and refresh the recovery snapshot.
+@MainActor
+@Test func dashboardPinsDFlash2LoadedTargetWithoutBackendPinRoute() async throws {
+    let targetID = "mlx-community/Qwen3.8-27B-4bit"
+    let draftID = "z-lab/Qwen3.8-27B-DFlash2"
+    let root = try dashboardDFlash2ModelRoot(targetID: targetID, draftID: draftID)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(port: 1, defaultModel: targetID, loadedModels: [targetID]))
+    let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try parameterStore.save(ModelParameters(modelID: targetID, dflash2Enabled: true, dflash2ModelID: draftID))
+    let backend = TestRuntimeBackend(state: .running, isRunning: true)
+    let web = WKWebView()
+    let notifications = NotificationCenter()
+    let bridge = DashboardBridge(
+        webView: web, configStore: configStore, backend: backend,
+        scanner: LocalModelScanner(rootURL: root), parameterStore: parameterStore,
+        notificationCenter: notifications, modelStatusClientFactory: { _, _ in EmptyDashboardModelStatusClient() }
+    )
+    web.configuration.userContentController.add(bridge, name: "fetchAPIPost")
+    defer { web.configuration.userContentController.removeScriptMessageHandler(forName: "fetchAPIPost") }
+    let html = try #require(IronMLXAppResourceResolver.url(forResource: "dashboard2", withExtension: "html"))
+    web.loadHTMLString(try String(contentsOf: html, encoding: .utf8), baseURL: html.deletingLastPathComponent())
+    for _ in 0..<100 {
+        if (try? await web.evaluateJavaScript("typeof togglePin === 'function'")) as? Bool == true { break }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    let selector = "document.querySelector('#model-table .pin-btn[data-model=\"\(targetID)\"]')"
+    func pinButton() async throws -> [String: Any]? {
+        try await web.evaluateJavaScript("""
+            (() => { const b = \(selector); return b ? {pinned: b.classList.contains('pinned'),
+              dflash2: b.dataset.dflash2 || '', tooltip: b.dataset.modelTooltip || ''} : null; })()
+            """) as? [String: Any]
+    }
+    notifications.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+    var button: [String: Any]?
+    for _ in 0..<100 {
+        button = try await pinButton()
+        if button != nil { break }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(button?["pinned"] as? Bool == false)
+    #expect(button?["dflash2"] as? String == "1")
+    #expect((button?["tooltip"] as? String)?.contains("DFlash2") == true)
+
+    for pinned in [true, false] {
+        _ = try await web.evaluateJavaScript("togglePin('\(targetID)', \(selector))")
+        for _ in 0..<100 {
+            if (try await pinButton())?["pinned"] as? Bool == pinned { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        #expect((try await pinButton())?["pinned"] as? Bool == pinned)
+        #expect(configStore.load().pinnedModelReferences == (pinned ? [targetID] : []))
+        #expect(configStore.load().restoredModelReferences == [targetID])
+    }
+    #expect(backend.calls.filter { $0 == "refreshConfirmedSnapshot" }.count >= 2)
+    withExtendedLifetime(bridge) {}
+}
+
 private actor EmptyDashboardModelStatusClient: DashboardModelStatusFetching {
     private(set) var fetches = 0
     func fetchLoadedModels() async throws -> [BackendLoadedModelInfo] {

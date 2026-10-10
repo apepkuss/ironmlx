@@ -1457,10 +1457,16 @@ public actor ModelDownloadService {
                    record.commitSHA == repository.commitSHA,
                    record.state == .verified
                 {
+                    // A download-only snapshot becomes runnable only when the
+                    // current backend's metadata preflight accepts it; the
+                    // manifest is then rewritten from that result.
                     if manifest.compatibility.downloadOnly == true,
-                       manifest.compatibility.modelType == "embedding_gemma2",
+                       manifest.compatibility.modelType == "embedding_gemma2"
+                        || manifest.compatibility.artifactRole == ModelArtifactRole.dflash2Drafter,
                        let compatibility = try? await metadataPreflight.validate(metadataDirectory: finalSnapshot),
-                       compatibility.modelType == manifest.compatibility.modelType {
+                       compatibility.modelType == manifest.compatibility.modelType,
+                       compatibility.artifactRole == manifest.compatibility.artifactRole
+                        || manifest.compatibility.modelType == "embedding_gemma2" {
                         manifest.compatibility = ModelSnapshotCompatibility(
                             modelType: compatibility.modelType, artifactRole: compatibility.artifactRole,
                             quantizationMode: compatibility.quantization?.mode,

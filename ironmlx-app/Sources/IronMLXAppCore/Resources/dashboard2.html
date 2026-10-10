@@ -4994,7 +4994,7 @@
               <button type="button" class="profile-help-trigger" id="m5-dflash2-profile-help-trigger" aria-describedby="m5-dflash2-profile-help-tooltip" aria-label="M5 DFlash2 Profile help" data-i18n-aria-label="m5_dflash2_profile_help_label">?</button>
               <span class="profile-help-tooltip profile-help-tooltip-fixed" id="m5-dflash2-profile-help-tooltip" role="tooltip">
                 <span class="profile-help-tooltip-title" data-i18n="m5_dflash2_profile_help_title">About the M5 DFlash2 Profile</span>
-                <span class="profile-help-tooltip-body" data-i18n="m5_dflash2_profile_help_body">On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings.</span>
+                <span class="profile-help-tooltip-body" data-i18n="m5_dflash2_profile_help_body">On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings. Qwen 3.6 35B A3B currently uses the generic path.</span>
               </span>
             </span>
           </div>
@@ -5866,6 +5866,8 @@
       action_loading: "Loading...", action_unloading: "Unloading...", action_load_model_only: "Model only", action_load_mtp: "Model + MTP", action_load_dflash2: "Model + DFlash2",
       pin_model_tooltip: "Pin loaded model: exempt from TTL auto-unload and automatic release policies. Manual unload is still available.",
       unpin_model_tooltip: "Pinned loaded model: click to unpin and restore TTL and automatic release policies.",
+      pin_model_tooltip_dflash2: "Pin DFlash2 model: a DFlash2 model is not auto-unloaded while it runs; the pin is kept and still exempts the model from TTL auto-unload and automatic release after DFlash2 is turned off. Manual unload is still available.",
+      unpin_model_tooltip_dflash2: "Pinned DFlash2 model: click to unpin. After DFlash2 is turned off, TTL and automatic release policies apply again.",
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "Compatible MTP weights are available.", mtp_badge_enabled_title: "This model is loaded with MTP acceleration.",
       mtp_acceleration: "MTP Acceleration", mtp_weights: "MTP Weights", mtp_draft_tokens: "Draft Tokens",
@@ -6074,7 +6076,7 @@
       auto: "Auto",
       cache: "Cache", enable_cache: "Enable Cache", ssd_cache_dir: "SSD Cache Directory",
       active_kv_offload: "Active KV Cache Offload", active_kv_offload_desc: "Experimental. Keep a hot KV window resident and move paused active KV cache payloads to SSD for long logical MAX CONTEXT TOKENS.", active_kv_offload_help_title: "Experimental cache residency", active_kv_offload_help_body: "Moves paused active KV cache payloads to local SSD storage so new requests can run when sequence slots are full.", active_kv_offload_help_trigger: "Enabling it does not mean offload happens immediately. The system triggers it automatically when scheduling, KV residency pressure, or request park/restore requires it; it may stay idle when the system is idle or memory pressure is low.", active_kv_offload_help_applicable: "Applicable: Full Attention dense/paged, TurboQuant packed Full Attention, MLA, and GatedDelta/Linear.", active_kv_offload_help_not_applicable: "Not applicable: MTP speculative side cache.",
-      m5_dflash2_profile: "M5 DFlash2 Profile", m5_dflash2_profile_desc: "Automatically optimizes DFlash2 inference on supported devices.", m5_dflash2_profile_help_title: "About the M5 DFlash2 Profile", m5_dflash2_profile_help_body: "On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings.", m5_dflash2_profile_help_label: "M5 DFlash2 Profile help",
+      m5_dflash2_profile: "M5 DFlash2 Profile", m5_dflash2_profile_desc: "Automatically optimizes DFlash2 inference on supported devices.", m5_dflash2_profile_help_title: "About the M5 DFlash2 Profile", m5_dflash2_profile_help_body: "On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings. Qwen 3.6 35B A3B currently uses the generic path.", m5_dflash2_profile_help_label: "M5 DFlash2 Profile help",
       kv_quant: "KV Cache Compression", kv_quant_desc: "Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.", kv_quant_off: "Off", model_ttl: "Model Auto-Unload (TTL)", model_ttl_desc: "Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.", minutes: "minutes",
       advanced: "Advanced", batch_processing: "Batch Processing",
       max_sequences: "Max Sequences", max_sequences_desc: "Maximum number of concurrent parallel requests.",
@@ -6463,6 +6465,8 @@
       action_loading: "加载中...", action_unloading: "卸载中...", action_load_model_only: "仅模型", action_load_mtp: "模型+MTP", action_load_dflash2: "模型+DFlash2",
       pin_model_tooltip: "固定加载：不会被 TTL 自动卸载，也不会参与自动释放策略。仍可手动卸载。",
       unpin_model_tooltip: "已固定加载：点击取消固定，恢复 TTL 和自动释放策略。",
+      pin_model_tooltip_dflash2: "固定加载（DFlash2）：DFlash2 运行期间本就不会被自动卸载；固定会被保留，关闭 DFlash2 后仍不会被 TTL 自动卸载，也不会参与自动释放策略。仍可手动卸载。",
+      unpin_model_tooltip_dflash2: "已固定加载（DFlash2）：点击取消固定；关闭 DFlash2 后将恢复 TTL 和自动释放策略。",
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "已发现兼容的 MTP 权重。", mtp_badge_enabled_title: "该模型已使用 MTP 加速加载。",
       mtp_acceleration: "MTP 加速", mtp_weights: "MTP 权重", mtp_draft_tokens: "Draft Tokens",
@@ -6671,7 +6675,7 @@
       auto: "自动",
       cache: "缓存", enable_cache: "启用缓存", ssd_cache_dir: "SSD 缓存目录",
       active_kv_offload: "活跃 KV Cache 分层卸载", active_kv_offload_desc: "实验性能力。为长逻辑 MAX CONTEXT TOKENS 保持热 KV 窗口常驻，并将暂停中的活跃 KV Cache 写入 SSD。", active_kv_offload_help_title: "实验性缓存驻留", active_kv_offload_help_body: "当序列槽位已满时，可将暂停中的活跃 KV Cache 写入本地 SSD，让新的请求先继续运行。", active_kv_offload_help_trigger: "开启后不代表立即发生卸载。系统会在请求调度、KV 驻留压力或请求暂停/恢复需要时自动触发；空闲或内存压力较低时可能保持 idle。", active_kv_offload_help_applicable: "适用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。", active_kv_offload_help_not_applicable: "不适用：MTP speculative side cache。",
-      m5_dflash2_profile: "M5 DFlash2 优化配置", m5_dflash2_profile_desc: "在支持的设备上自动优化 DFlash2 推理。", m5_dflash2_profile_help_title: "关于 M5 DFlash2 优化配置", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新机型上，DFlash2 服务启用针对 M5 调优的内核、树式草稿和负载下的合批；各项不适用时自动回退。关闭后使用通用设置。", m5_dflash2_profile_help_label: "M5 DFlash2 优化配置说明",
+      m5_dflash2_profile: "M5 DFlash2 优化配置", m5_dflash2_profile_desc: "在支持的设备上自动优化 DFlash2 推理。", m5_dflash2_profile_help_title: "关于 M5 DFlash2 优化配置", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新机型上，DFlash2 服务启用针对 M5 调优的内核、树式草稿和负载下的合批；各项不适用时自动回退。关闭后使用通用设置。Qwen 3.6 35B A3B 目前使用通用路径。", m5_dflash2_profile_help_label: "M5 DFlash2 优化配置说明",
       kv_quant: "KV 缓存压缩", kv_quant_desc: "使用 TurboQuant 降低长上下文运行时 KV Cache 的内存占用。K3V3 更省内存，K4V4 更保守，K3V4 为推荐均衡选项。", kv_quant_off: "无压缩", model_ttl: "模型自动卸载 (TTL)", model_ttl_desc: "已加载模型闲置超过指定分钟数后自动卸载。0 = 不启用；默认模型偏好会保留。", minutes: "分钟",
       advanced: "高级", batch_processing: "批处理",
       max_sequences: "最大序列数", max_sequences_desc: "并行处理的最大并发请求数。",
@@ -7060,6 +7064,8 @@
       action_loading: "載入中...", action_unloading: "卸載中...", action_load_model_only: "僅模型", action_load_mtp: "模型+MTP", action_load_dflash2: "模型+DFlash2",
       pin_model_tooltip: "固定載入：不會被 TTL 自動卸載，也不會參與自動釋放策略。仍可手動卸載。",
       unpin_model_tooltip: "已固定載入：點擊取消固定，恢復 TTL 和自動釋放策略。",
+      pin_model_tooltip_dflash2: "固定載入（DFlash2）：DFlash2 執行期間本就不會被自動卸載；固定會被保留，關閉 DFlash2 後仍不會被 TTL 自動卸載，也不會參與自動釋放策略。仍可手動卸載。",
+      unpin_model_tooltip_dflash2: "已固定載入（DFlash2）：點擊取消固定；關閉 DFlash2 後將恢復 TTL 和自動釋放策略。",
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "已發現相容的 MTP 權重。", mtp_badge_enabled_title: "此模型已使用 MTP 加速載入。",
       mtp_acceleration: "MTP 加速", mtp_weights: "MTP 權重", mtp_draft_tokens: "Draft Tokens",
@@ -7271,7 +7277,7 @@
       auto: "自動",
       cache: "快取", enable_cache: "啟用快取", ssd_cache_dir: "SSD 快取目錄",
       active_kv_offload: "活躍 KV Cache 分層卸載", active_kv_offload_desc: "實驗性能力。為長邏輯 MAX CONTEXT TOKENS 保持熱 KV 視窗常駐，並將暫停中的活躍 KV Cache 寫入 SSD。", active_kv_offload_help_title: "實驗性快取駐留", active_kv_offload_help_body: "當序列槽位已滿時，可將暫停中的活躍 KV Cache 寫入本地 SSD，讓新的請求先繼續執行。", active_kv_offload_help_trigger: "開啟後不代表立即發生卸載。系統會在請求調度、KV 駐留壓力或請求暫停/恢復需要時自動觸發；空閒或記憶體壓力較低時可能保持 idle。", active_kv_offload_help_applicable: "適用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。", active_kv_offload_help_not_applicable: "不適用：MTP speculative side cache。",
-      m5_dflash2_profile: "M5 DFlash2 最佳化設定", m5_dflash2_profile_desc: "在支援的裝置上自動最佳化 DFlash2 推論。", m5_dflash2_profile_help_title: "關於 M5 DFlash2 最佳化設定", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新機型上，DFlash2 服務啟用針對 M5 調校的核心、樹狀草稿與負載下的合批；各項不適用時自動回退。關閉後使用通用設定。", m5_dflash2_profile_help_label: "M5 DFlash2 最佳化設定說明",
+      m5_dflash2_profile: "M5 DFlash2 最佳化設定", m5_dflash2_profile_desc: "在支援的裝置上自動最佳化 DFlash2 推論。", m5_dflash2_profile_help_title: "關於 M5 DFlash2 最佳化設定", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新機型上，DFlash2 服務啟用針對 M5 調校的核心、樹狀草稿與負載下的合批；各項不適用時自動回退。關閉後使用通用設定。Qwen 3.6 35B A3B 目前使用通用路徑。", m5_dflash2_profile_help_label: "M5 DFlash2 最佳化設定說明",
       advanced: "進階", batch_processing: "批次處理",
       max_sequences: "最大序列數", max_sequences_desc: "平行處理的最大並行請求數。",
       max_models: "最大同時載入模型數", max_models_desc: "App 同時保持載入狀態的模型數量上限。達到上限後，新模型不會自動替換舊模型；請先手動卸載暫不使用的模型，再載入新模型。",
@@ -7660,6 +7666,8 @@
       action_loading: "ロード中...", action_unloading: "アンロード中...", action_load_model_only: "モデルのみ", action_load_mtp: "モデル+MTP", action_load_dflash2: "モデル+DFlash2",
       pin_model_tooltip: "固定ロード：TTL 自動アンロードや自動解放の対象外になります。手動アンロードは引き続き可能です。",
       unpin_model_tooltip: "固定ロード中：クリックすると固定を解除し、TTL と自動解放の対象に戻します。",
+      pin_model_tooltip_dflash2: "固定ロード（DFlash2）：DFlash2 実行中はもともと自動アンロードされません。固定は保持され、DFlash2 をオフにした後も TTL 自動アンロードや自動解放の対象外になります。手動アンロードは引き続き可能です。",
+      unpin_model_tooltip_dflash2: "固定ロード中（DFlash2）：クリックすると固定を解除します。DFlash2 をオフにした後は TTL と自動解放の対象に戻ります。",
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "互換性のある MTP ウェイトが見つかりました。", mtp_badge_enabled_title: "このモデルは MTP アクセラレーション付きでロードされています。",
       mtp_acceleration: "MTP アクセラレーション", mtp_weights: "MTP ウェイト", mtp_draft_tokens: "Draft Tokens",
@@ -7871,7 +7879,7 @@
       auto: "自動",
       cache: "キャッシュ", enable_cache: "キャッシュを有効化", ssd_cache_dir: "SSDキャッシュディレクトリ",
       active_kv_offload: "Active KV Cache オフロード", active_kv_offload_desc: "実験的機能。長い論理 MAX CONTEXT TOKENS では熱い KV ウィンドウだけを常駐させ、一時停止中の Active KV Cache を SSD に書き出します。", active_kv_offload_help_title: "実験的キャッシュ常駐管理", active_kv_offload_help_body: "シーケンススロットが満杯の場合、一時停止中の Active KV Cache をローカル SSD に書き出し、新しいリクエストを先に実行できます。", active_kv_offload_help_trigger: "有効にしても、すぐにオフロードが発生するとは限りません。スケジューリング、KV 常駐圧力、またはリクエストの一時停止/復元が必要な場合に自動で発動します。アイドル時やメモリ圧力が低い場合は idle のままになることがあります。", active_kv_offload_help_applicable: "適用: Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。", active_kv_offload_help_not_applicable: "非対象: MTP speculative side cache。",
-      m5_dflash2_profile: "M5 DFlash2 プロファイル", m5_dflash2_profile_desc: "対応デバイスで DFlash2 推論を自動的に最適化します。", m5_dflash2_profile_help_title: "M5 DFlash2 プロファイルについて", m5_dflash2_profile_help_body: "Apple M5（GPU 第 17 世代）以降では、DFlash2 の提供に M5 向けに調整したカーネル、ツリー型ドラフト、負荷時のバッチ処理を使います。適用できない場合は各機能が自動でフォールバックします。オフにすると汎用設定を使います。", m5_dflash2_profile_help_label: "M5 DFlash2 プロファイルのヘルプ",
+      m5_dflash2_profile: "M5 DFlash2 プロファイル", m5_dflash2_profile_desc: "対応デバイスで DFlash2 推論を自動的に最適化します。", m5_dflash2_profile_help_title: "M5 DFlash2 プロファイルについて", m5_dflash2_profile_help_body: "Apple M5（GPU 第 17 世代）以降では、DFlash2 の提供に M5 向けに調整したカーネル、ツリー型ドラフト、負荷時のバッチ処理を使います。適用できない場合は各機能が自動でフォールバックします。オフにすると汎用設定を使います。Qwen 3.6 35B A3B は現在、汎用パスを使います。", m5_dflash2_profile_help_label: "M5 DFlash2 プロファイルのヘルプ",
       advanced: "詳細設定", batch_processing: "バッチ処理",
       max_sequences: "最大シーケンス数", max_sequences_desc: "並列処理の最大同時リクエスト数。",
       max_models: "最大同時ロードモデル数", max_models_desc: "App が同時に読み込み済みとして保持するモデル数の上限。上限に達すると新しいモデルの読み込みは拒否され、既存の読み込み済みモデルは自動的に置き換えられません。不要なモデルを手動でアンロードしてから読み込んでください。",
@@ -8260,6 +8268,8 @@
       action_loading: "로딩 중...", action_unloading: "언로드 중...", action_load_model_only: "모델만", action_load_mtp: "모델+MTP", action_load_dflash2: "모델+DFlash2",
       pin_model_tooltip: "고정 로드: TTL 자동 언로드와 자동 해제 정책에서 제외됩니다. 수동 언로드는 계속 사용할 수 있습니다.",
       unpin_model_tooltip: "고정 로드됨: 클릭하면 고정을 해제하고 TTL 및 자동 해제 정책을 다시 적용합니다.",
+      pin_model_tooltip_dflash2: "고정 로드(DFlash2): DFlash2 실행 중에는 원래 자동 언로드되지 않습니다. 고정은 유지되며 DFlash2를 끈 뒤에도 TTL 자동 언로드와 자동 해제 정책에서 제외됩니다. 수동 언로드는 계속 사용할 수 있습니다.",
+      unpin_model_tooltip_dflash2: "고정 로드됨(DFlash2): 클릭하면 고정을 해제합니다. DFlash2를 끈 뒤에는 TTL 및 자동 해제 정책이 다시 적용됩니다.",
       mtp_badge_available: "MTP", mtp_badge_enabled: "MTP",
       mtp_badge_available_title: "호환되는 MTP 가중치를 찾았습니다.", mtp_badge_enabled_title: "이 모델은 MTP 가속으로 로드되었습니다.",
       mtp_acceleration: "MTP 가속", mtp_weights: "MTP 가중치", mtp_draft_tokens: "Draft Tokens",
@@ -8471,7 +8481,7 @@
       auto: "자동",
       cache: "캐시", enable_cache: "캐시 활성화", ssd_cache_dir: "SSD 캐시 디렉토리",
       active_kv_offload: "Active KV Cache 오프로드", active_kv_offload_desc: "실험적 기능입니다. 긴 논리 MAX CONTEXT TOKENS에서는 뜨거운 KV 창만 상주시켜 두고, 일시 중지된 Active KV Cache를 SSD에 기록합니다.", active_kv_offload_help_title: "실험적 캐시 상주 관리", active_kv_offload_help_body: "시퀀스 슬롯이 가득 찼을 때 일시 중지된 Active KV Cache를 로컬 SSD에 기록하여 새 요청을 먼저 실행할 수 있습니다.", active_kv_offload_help_trigger: "켜도 즉시 오프로드가 발생하는 것은 아닙니다. 스케줄링, KV 상주 압력 또는 요청 일시 중지/복원이 필요할 때 시스템이 자동으로 트리거합니다. 유휴 상태이거나 메모리 압력이 낮으면 idle 상태로 유지될 수 있습니다.", active_kv_offload_help_applicable: "적용: Full Attention dense/paged, TurboQuant packed Full Attention, MLA, GatedDelta/Linear.", active_kv_offload_help_not_applicable: "비대상: MTP speculative side cache.",
-      m5_dflash2_profile: "M5 DFlash2 프로필", m5_dflash2_profile_desc: "지원되는 기기에서 DFlash2 추론을 자동으로 최적화합니다.", m5_dflash2_profile_help_title: "M5 DFlash2 프로필 안내", m5_dflash2_profile_help_body: "Apple M5(GPU 17세대) 이상에서는 DFlash2 서빙에 M5용으로 조정된 커널, 트리 드래프트, 부하 시 배치를 사용합니다. 적용되지 않으면 각 기능이 자동으로 폴백합니다. 끄면 일반 설정을 사용합니다.", m5_dflash2_profile_help_label: "M5 DFlash2 프로필 도움말",
+      m5_dflash2_profile: "M5 DFlash2 프로필", m5_dflash2_profile_desc: "지원되는 기기에서 DFlash2 추론을 자동으로 최적화합니다.", m5_dflash2_profile_help_title: "M5 DFlash2 프로필 안내", m5_dflash2_profile_help_body: "Apple M5(GPU 17세대) 이상에서는 DFlash2 서빙에 M5용으로 조정된 커널, 트리 드래프트, 부하 시 배치를 사용합니다. 적용되지 않으면 각 기능이 자동으로 폴백합니다. 끄면 일반 설정을 사용합니다. Qwen 3.6 35B A3B는 현재 일반 경로를 사용합니다.", m5_dflash2_profile_help_label: "M5 DFlash2 프로필 도움말",
       advanced: "고급", batch_processing: "배치 처리",
       max_sequences: "최대 시퀀스 수", max_sequences_desc: "병렬 처리의 최대 동시 요청 수.",
       max_models: "최대 동시 로드 모델 수", max_models_desc: "App 이 동시에 로드 상태로 유지하는 모델 수의 상한입니다. 상한에 도달하면 새 모델 로드는 거부되고 기존 로드 모델은 자동으로 교체되지 않습니다. 사용하지 않는 모델을 수동으로 언로드한 뒤 다시 로드하세요.",
@@ -9210,8 +9220,13 @@
     return String(value || '').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
-  function pinTooltip(pinned) {
+  function pinTooltip(pinned, dflash2) {
     const dict = I18N[currentLang] || I18N.en;
+    if (dflash2) {
+      return pinned
+        ? (dict.unpin_model_tooltip_dflash2 || 'Pinned DFlash2 model: click to unpin. After DFlash2 is turned off, TTL and automatic release policies apply again.')
+        : (dict.pin_model_tooltip_dflash2 || 'Pin DFlash2 model: a DFlash2 model is not auto-unloaded while it runs; the pin is kept and still exempts the model from TTL auto-unload and automatic release after DFlash2 is turned off. Manual unload is still available.');
+    }
     if (pinned) {
       return dict.unpin_model_tooltip || 'Pinned loaded model: click to unpin and restore TTL and automatic release policies.';
     }
@@ -9901,7 +9916,20 @@
     };
     select.onchange = updateAutoBlockSizePlaceholder;
     updateAutoBlockSizePlaceholder();
-    draftBits.value = saved.dflash2_draft_bits || '4';
+    // Offer only the draft precisions this target is qualified with
+    // (Qwen3.6 MoE targets: 4-bit by default, or BF16).
+    const draftBitsOptions = Array.isArray(dflash2.draft_bits_options) && dflash2.draft_bits_options.length
+      ? dflash2.draft_bits_options.map(String) : ['4', '8', '0'];
+    const draftBitsLabels = { '4': '4-bit', '8': '8-bit', '0': 'BF16' };
+    draftBits.innerHTML = '';
+    draftBitsOptions.forEach(value => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = draftBitsLabels[value] || value;
+      draftBits.appendChild(option);
+    });
+    const savedDraftBits = String(saved.dflash2_draft_bits || '');
+    draftBits.value = draftBitsOptions.includes(savedDraftBits) ? savedDraftBits : draftBitsOptions[0];
     tensorBatchMaxWidth.value = saved.dflash2_tensor_batch_max_width || '';
     const isIncompatible = !hasCandidates && dflash2.status === 'incompatible';
     const statusKey = isIncompatible ? 'dflash2_status_incompatible' : 'dflash2_status_unavailable';
@@ -12514,6 +12542,7 @@
         const displayName = m.display_name || m.id;
         const isDefault = (m.id === defaultModel);
         const isLoaded = m.loaded;
+        const dflash2Active = !!(m.dflash2 && m.dflash2.enabled);
         const readiness = modelReadiness(m);
         const escaped = m.id.replace(/"/g, '&quot;');
         const escapedSq = m.id.replace(/'/g, "\\'");
@@ -12533,7 +12562,7 @@
           ? (dict.model_import_source_badge || 'Imported model')
           : (m.source === 'ms' ? 'ModelScope' : 'HuggingFace');
         tr.innerHTML = '<td><div class="model-name"><span class="model-source-icon"' + modelColumnTooltipAttributes(sourceTooltip) + '>' + sourceIcon + '</span><span class="model-name-text"' + modelColumnTooltipAttributes(m.id) + '>' + escapeHTML(displayName) + '</span>' + renderMtpBadge(m) + renderDFlash2Badge(m)
-          + (isLoaded && !(m.dflash2 && m.dflash2.enabled) ? ' <button class="icon-btn pin-btn' + (m.pinned ? ' pinned' : '') + '" onclick="event.stopPropagation();togglePin(\'' + escapedSq + '\', this)" data-model="' + escaped + '"' + modelColumnTooltipAttributes(pinTooltip(m.pinned)) + ' style="vertical-align:middle;padding:0 2px;font-size:13px;opacity:' + (m.pinned ? '1' : '0.4') + '">&#x1F4CC;</button>' : '')
+          + (isLoaded ? ' <button class="icon-btn pin-btn' + (m.pinned ? ' pinned' : '') + '" onclick="event.stopPropagation();togglePin(\'' + escapedSq + '\', this)" data-model="' + escaped + '"' + (dflash2Active ? ' data-dflash2="1"' : '') + modelColumnTooltipAttributes(pinTooltip(m.pinned, dflash2Active)) + ' style="vertical-align:middle;padding:0 2px;font-size:13px;opacity:' + (m.pinned ? '1' : '0.4') + '">&#x1F4CC;</button>' : '')
           + '</div></td>'
           + '<td>' + renderModelType(m) + '</td>'
           + '<td>' + renderQuantBadge(m) + '</td>'
@@ -15304,7 +15333,7 @@
           window.__PENDING_PIN__ = null;
           const nowPinned = data.pinned;
           pp.btn.classList.toggle('pinned', nowPinned);
-          pp.btn.dataset.modelTooltip = pinTooltip(nowPinned);
+          pp.btn.dataset.modelTooltip = pinTooltip(nowPinned, pp.btn.dataset.dflash2 === '1');
           if (document.getElementById('model-table-tooltip')?.__target === pp.btn) {
             showModelColumnTooltip(pp.btn);
           }

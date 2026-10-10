@@ -27,3 +27,17 @@ pub fn snapshot() -> MemorySnapshot {
 pub fn set_cache_limit(limit: usize) -> usize {
     mlx_sys::memory::ffi::set_cache_limit(limit)
 }
+
+/// Set the wired (GPU-resident) memory limit and return the previous limit.
+/// Allocations up to the limit are kept resident through Metal residency
+/// sets. Fails when the limit exceeds the device's recommended working set.
+pub fn set_wired_limit(limit: usize) -> crate::Result<usize> {
+    Ok(mlx_sys::memory::ffi::set_wired_limit(limit)?)
+}
+
+/// Renew the residency request of the wired allocations every `interval_ms`
+/// for the rest of the process. macOS drops residency shortly after the GPU
+/// goes idle despite a standing request. Later calls are no-ops.
+pub fn start_residency_refresh(interval_ms: u32) -> crate::Result<()> {
+    Ok(mlx_sys::memory::ffi::start_residency_refresh(interval_ms)?)
+}

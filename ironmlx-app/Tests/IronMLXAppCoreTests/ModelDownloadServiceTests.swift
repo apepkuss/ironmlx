@@ -726,6 +726,67 @@ func downloadOnlyCompletesVerifiedSnapshotWithoutMakingItLoadable(message: Strin
     #expect(scanner.downloadedSnapshotDirectory(for: repoID) == snapshot)
 }
 
+private struct AcceptingDFlash2DraftPreflight: ModelMetadataPreflighting {
+    func validate(metadataDirectory _: URL) async throws -> ModelMetadataPreflightResult {
+        ModelMetadataPreflightResult(modelType: "qwen3", artifactRole: "dflash2_drafter", quantization: nil)
+    }
+}
+
+@Test func downloadOnlyDFlash2DraftBecomesRunnableAfterBackendPreflightAccepts() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "incoai/Qwen3.6-35B-A3B-DFlash2"
+    let message = "Error: unsupported DFlash2 configuration: target_layer_ids count 8 differs from draft layer count 6"
+    let client = FakeModelDownloadHTTPClient()
+    let config = Data(#"{"architectures":["DFlash2DraftModel"],"model_type":"qwen3","hidden_size":2048,"num_hidden_layers":6,"num_target_layers":40,"dflash_config":{"block_size":8,"target_layer_ids":[1,6,11,16,22,27,32,37]}}"#.utf8)
+    configureDownloadOnlyFixture(client, repoID: repoID, tokenizer: false, config: config)
+    let older = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: DownloadOnlyRejectingPreflight(message: message),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(!(await older.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    #expect(await older.resumeDownload(provider: .huggingFace, repoID: repoID, downloadOnly: true).success)
+    try await waitForDownloadCondition { await older.downloadStatuses().first?.status == "completed" }
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    #expect(try ModelSnapshotVerifier().verify(snapshot: snapshot).compatibility.downloadOnly == true)
+    let streamedBefore = client.streamRequests.count
+
+    // A newer backend accepts the metadata: the ordinary download action on
+    // the already verified snapshot re-runs the preflight and rewrites the
+    // manifest from its result, without fetching the weights again.
+    let newer = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: AcceptingDFlash2DraftPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    let result = await newer.downloadHuggingFace(repoID: repoID, token: nil)
+    #expect(result.success)
+    #expect(result.downloadOnly != true)
+    #expect(client.streamRequests.count == streamedBefore)
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(manifest.compatibility.artifactRole == "dflash2_drafter")
+    #expect(manifest.compatibility.downloadOnly == nil)
+    #expect(manifest.compatibility.runtimeSupportError == nil)
+    #expect(LocalModelScanner(rootURL: root).readiness(for: repoID)?.reasonCode != "download_only_model")
+}
+
+@Test func downloadOnlyDFlash2DraftStaysDownloadOnlyWhileBackendStillRejects() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "incoai/Qwen3.6-35B-A3B-DFlash2"
+    let message = "Error: unsupported DFlash2 configuration: target_layer_ids count 8 differs from draft layer count 6"
+    let client = FakeModelDownloadHTTPClient()
+    let config = Data(#"{"architectures":["DFlash2DraftModel"],"model_type":"qwen3","hidden_size":2048,"num_hidden_layers":6,"num_target_layers":40,"dflash_config":{"block_size":8,"target_layer_ids":[1,6,11,16,22,27,32,37]}}"#.utf8)
+    configureDownloadOnlyFixture(client, repoID: repoID, tokenizer: false, config: config)
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: DownloadOnlyRejectingPreflight(message: message),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(!(await service.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    #expect(await service.resumeDownload(provider: .huggingFace, repoID: repoID, downloadOnly: true).success)
+    try await waitForDownloadCondition { await service.downloadStatuses().first?.status == "completed" }
+    let again = await service.downloadHuggingFace(repoID: repoID, token: nil)
+    #expect(again.downloadOnly == true)
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    #expect(try ModelSnapshotVerifier().verify(snapshot: snapshot).compatibility.downloadOnly == true)
+}
+
 @Test(arguments: ["Invalid config.json", "Missing tokenizer", "unsupported architecture",
                   "Error: DFlash2 config missing integer num_target_layers",
                   "Error: DFlash2 target_layer_ids must be unique and strictly increasing",

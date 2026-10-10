@@ -42,6 +42,7 @@ public enum ModelDFlash2RuntimeError: LocalizedError, Equatable {
     case draftPathNotFound(model: String)
     case blockSizeExceedsCheckpoint(model: String, requested: Int, checkpoint: Int)
     case incompatibleAccelerationConfiguration(model: String)
+    case draftPrecisionNotQualified(model: String, bits: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -55,6 +56,9 @@ public enum ModelDFlash2RuntimeError: LocalizedError, Equatable {
             return "DFlash2 block size \(requested) exceeds \(model)'s checkpoint block size \(checkpoint)."
         case .incompatibleAccelerationConfiguration(let model):
             return "DFlash2 cannot be combined with MTP or repeated-text acceleration for \(model)."
+        case .draftPrecisionNotQualified(let model, let bits):
+            let precision = bits == 0 ? "BF16" : "\(bits)-bit"
+            return "DFlash2 draft precision \(precision) is not qualified for \(model)."
         }
     }
 }
@@ -108,7 +112,8 @@ public enum ModelDFlash2RuntimeResolver {
         guard let selected else {
             throw ModelDFlash2RuntimeError.noCompatibleDraft(model: modelID)
         }
-        let candidates = scanner.dflash2Candidates(for: modelID)
+        let info = scanner.dflash2Info(for: modelID)
+        let candidates = info?.candidates ?? []
         guard let candidate = candidates.first(where: { $0.id == selected }),
               let checkpointBlockSize = candidate.blockSize
         else {
@@ -130,6 +135,19 @@ public enum ModelDFlash2RuntimeResolver {
         }
         let resolvedBlockSize = requestedBlockSize
             ?? min(checkpointBlockSize, ModelDFlash2Runtime.qualifiedAutomaticBlockSizeCap)
+        // Draft precision is a target qualification. Without an explicit
+        // choice the target's first option applies (4-bit for both families);
+        // Qwen3.6 MoE targets accept 4-bit and BF16 only.
+        let draftBitsOptions = info?.draftBitsOptions ?? LocalModelDFlash2Info.denseDraftBitsOptions
+        let draftBits: Int
+        if let explicitBits = parameters?.dflash2DraftBitsExplicitValue {
+            guard draftBitsOptions.contains(explicitBits) else {
+                throw ModelDFlash2RuntimeError.draftPrecisionNotQualified(model: modelID, bits: explicitBits)
+            }
+            draftBits = explicitBits
+        } else {
+            draftBits = draftBitsOptions.first ?? 4
+        }
         return ModelDFlash2Runtime(
             targetModelID: modelID,
             targetModelDir: targetModelDir,
@@ -137,7 +155,7 @@ public enum ModelDFlash2RuntimeResolver {
             draftModelDir: draftModelDir,
             checkpointBlockSize: checkpointBlockSize,
             blockSize: resolvedBlockSize,
-            draftBits: parameters?.dflash2DraftBitsValue ?? 4,
+            draftBits: draftBits,
             tensorBatchMaxWidth: parameters?.dflash2TensorBatchMaxWidthValue,
             maxCacheCap: ModelLoadParameters.maxCacheCap(
                 for: modelID,

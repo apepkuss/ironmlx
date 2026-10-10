@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context};
 use serde::Deserialize;
 
 use crate::core::Loader;
-use crate::models::Qwen35Config;
+use crate::models::{Qwen35Config, Qwen35MoeConfig};
 use crate::Result;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,6 +45,44 @@ pub struct DFlash2Config {
     pub sliding_window: i32,
     pub vocab_size: i32,
     pub dflash_config: DFlash2Parameters,
+}
+
+/// Target fields a DFlash2 draft depends on, independent of whether the
+/// target is a dense or a mixture-of-experts model.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DFlash2TargetSpec {
+    pub hidden_size: i32,
+    pub vocab_size: i32,
+    pub max_position_embeddings: i32,
+    pub num_hidden_layers: i32,
+    pub rms_norm_eps: f32,
+    pub rope_theta: f32,
+}
+
+impl From<&Qwen35Config> for DFlash2TargetSpec {
+    fn from(cfg: &Qwen35Config) -> Self {
+        Self {
+            hidden_size: cfg.hidden_size,
+            vocab_size: cfg.vocab_size,
+            max_position_embeddings: cfg.max_position_embeddings,
+            num_hidden_layers: cfg.num_hidden_layers,
+            rms_norm_eps: cfg.rms_norm_eps,
+            rope_theta: cfg.rope_parameters.rope_theta,
+        }
+    }
+}
+
+impl From<&Qwen35MoeConfig> for DFlash2TargetSpec {
+    fn from(cfg: &Qwen35MoeConfig) -> Self {
+        Self {
+            hidden_size: cfg.hidden_size,
+            vocab_size: cfg.vocab_size,
+            max_position_embeddings: cfg.max_position_embeddings,
+            num_hidden_layers: cfg.num_hidden_layers,
+            rms_norm_eps: cfg.rms_norm_eps,
+            rope_theta: cfg.rope_parameters.rope_theta,
+        }
+    }
 }
 
 impl DFlash2Config {
@@ -159,12 +197,11 @@ impl DFlash2Config {
                 "DFlash2 first execution path requires one sliding_attention entry per draft layer"
             ));
         }
-        if self.dflash_config.target_layer_ids.len() != self.num_hidden_layers as usize {
-            return Err(anyhow!(
-                "DFlash2 target_layer_ids count {} must equal draft layer count {}",
-                self.dflash_config.target_layer_ids.len(),
-                self.num_hidden_layers
-            ));
+        // The context projection concatenates every tapped target layer, so
+        // the tap count is independent of the draft depth (for example eight
+        // taps feeding six draft layers).
+        if self.dflash_config.target_layer_ids.is_empty() {
+            return Err(anyhow!("DFlash2 target_layer_ids must not be empty"));
         }
         let mut previous = None;
         for &layer in &self.dflash_config.target_layer_ids {
@@ -195,7 +232,21 @@ impl DFlash2Config {
         Ok(())
     }
 
-    pub fn ensure_target_compatible(&self, target: &Qwen35Config) -> Result<()> {
+    /// Width of the `fc` context projection input: one hidden vector per
+    /// tapped target layer.
+    pub fn context_width(&self) -> Result<i32> {
+        i32::try_from(self.dflash_config.target_layer_ids.len())
+            .ok()
+            .and_then(|taps| taps.checked_mul(self.hidden_size))
+            .ok_or_else(|| anyhow!("DFlash2 context width overflows i32"))
+    }
+
+    /// Compare only the fields the draft algorithm consumes from the target:
+    /// the shared hidden space (embedding and LM head), vocabulary, position
+    /// range, tapped layer range, final-norm epsilon and RoPE base. Target FFN
+    /// widths are deliberately not compared: a dense draft MLP has no relation
+    /// to a target's dense or expert FFN width.
+    pub fn ensure_target_compatible(&self, target: &DFlash2TargetSpec) -> Result<()> {
         macro_rules! check_eq {
             ($field:ident) => {
                 if self.$field != target.$field {
@@ -209,7 +260,6 @@ impl DFlash2Config {
             };
         }
         check_eq!(hidden_size);
-        check_eq!(intermediate_size);
         check_eq!(vocab_size);
         check_eq!(max_position_embeddings);
         if self.num_target_layers != target.num_hidden_layers {
@@ -226,13 +276,11 @@ impl DFlash2Config {
                 target.rms_norm_eps
             ));
         }
-        if (self.rope_parameters.rope_theta - target.rope_parameters.rope_theta).abs()
-            > f32::EPSILON
-        {
+        if (self.rope_parameters.rope_theta - target.rope_theta).abs() > f32::EPSILON {
             return Err(anyhow!(
                 "DFlash2 target rope_theta mismatch: draft={} target={}",
                 self.rope_parameters.rope_theta,
-                target.rope_parameters.rope_theta
+                target.rope_theta
             ));
         }
         Ok(())
@@ -282,6 +330,78 @@ mod tests {
         official_config()
             .validate()
             .expect("validate official config");
+    }
+
+    fn qwen36_moe_config() -> DFlash2Config {
+        let mut cfg = official_config();
+        cfg.hidden_size = 2048;
+        cfg.intermediate_size = 6144;
+        cfg.num_hidden_layers = 6;
+        cfg.num_target_layers = 40;
+        cfg.layer_types = vec!["sliding_attention".to_owned(); 6];
+        cfg.dflash_config.mask_token_id = 248077;
+        cfg.dflash_config.target_layer_ids = vec![1, 6, 11, 16, 22, 27, 32, 37];
+        cfg
+    }
+
+    #[test]
+    fn tap_count_is_independent_of_draft_depth() {
+        let cfg = qwen36_moe_config();
+        cfg.validate().expect("eight taps feeding six draft layers");
+        assert_eq!(cfg.context_width().unwrap(), 8 * 2048);
+
+        let mut empty = qwen36_moe_config();
+        empty.dflash_config.target_layer_ids.clear();
+        assert!(empty.validate().is_err());
+        let mut out_of_range = qwen36_moe_config();
+        out_of_range.dflash_config.target_layer_ids[7] = 40;
+        assert!(out_of_range.validate().is_err());
+        let mut unordered = qwen36_moe_config();
+        unordered.dflash_config.target_layer_ids.swap(0, 1);
+        assert!(unordered.validate().is_err());
+    }
+
+    #[test]
+    fn target_compatibility_ignores_ffn_widths() {
+        let cfg = qwen36_moe_config();
+        let target = DFlash2TargetSpec {
+            hidden_size: 2048,
+            vocab_size: 248320,
+            max_position_embeddings: 262144,
+            num_hidden_layers: 40,
+            rms_norm_eps: 0.000001,
+            rope_theta: 10_000_000.0,
+        };
+        cfg.ensure_target_compatible(&target)
+            .expect("MoE target without a dense intermediate size");
+        for mismatch in [
+            DFlash2TargetSpec {
+                hidden_size: 4096,
+                ..target
+            },
+            DFlash2TargetSpec {
+                vocab_size: 151_936,
+                ..target
+            },
+            DFlash2TargetSpec {
+                num_hidden_layers: 48,
+                ..target
+            },
+            DFlash2TargetSpec {
+                max_position_embeddings: 131_072,
+                ..target
+            },
+            DFlash2TargetSpec {
+                rms_norm_eps: 0.00001,
+                ..target
+            },
+            DFlash2TargetSpec {
+                rope_theta: 1_000_000.0,
+                ..target
+            },
+        ] {
+            assert!(cfg.ensure_target_compatible(&mismatch).is_err());
+        }
     }
 
     #[test]

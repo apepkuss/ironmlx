@@ -52,7 +52,10 @@ pub use qwen3_5_moe::{
     Qwen35MoeConfig, Qwen35MoeModel, Qwen35MoeMtp, Qwen35MoeMtpConfig, Qwen35MoeTextModel,
     RopeParams as MoeRopeParams,
 };
-pub use qwen3_6_moe::{is_qwen36_moe_config, Qwen36MoeConfig, Qwen36MoeModel, Qwen36MoeTextModel};
+pub use qwen3_6_moe::{
+    is_qwen36_moe_config, qwen36_moe_dflash2_target_bits, Qwen36MoeConfig, Qwen36MoeModel,
+    Qwen36MoeTextModel,
+};
 
 // pub mod qwen3_5_vl;
 

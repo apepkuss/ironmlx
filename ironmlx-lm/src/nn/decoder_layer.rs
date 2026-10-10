@@ -243,43 +243,7 @@ impl DecoderLayer {
         accepted_len: usize,
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
-        match (&self.attn, cache, base) {
-            (AttnPath::Full(_), LayerCache::Full(cache), LayerCacheSnapshot::Full(saved)) => {
-                let accepted_len = i32::try_from(accepted_len)?;
-                anyhow::ensure!(
-                    saved.offsets().len() == cache.offsets().len(),
-                    "Full KV speculative snapshot batch {} != live batch {}",
-                    saved.offsets().len(),
-                    cache.offsets().len()
-                );
-                let mut accepted_offsets = Vec::with_capacity(saved.offsets().len());
-                for (row, (&base_offset, &live_offset)) in
-                    saved.offsets().iter().zip(cache.offsets()).enumerate()
-                {
-                    let accepted_offset =
-                        base_offset.checked_add(accepted_len).ok_or_else(|| {
-                            anyhow::anyhow!("Full KV accepted-prefix offset overflow on row {row}")
-                        })?;
-                    if accepted_offset > live_offset {
-                        anyhow::bail!(
-                            "Full KV accepted offset {accepted_offset} exceeds live offset {live_offset} on row {row}"
-                        );
-                    }
-                    accepted_offsets.push(accepted_offset);
-                }
-                cache.restore_offsets(&accepted_offsets)?;
-                Ok(())
-            }
-            (AttnPath::Linear(attn), LayerCache::Linear(cache), LayerCacheSnapshot::Linear(_)) => {
-                attn.restore_speculative_prefix_on(cache, accepted_len, target)
-            }
-            (AttnPath::Full(_), _, _) => {
-                anyhow::bail!("Full attention received incompatible speculative cache state")
-            }
-            (AttnPath::Linear(_), _, _) => {
-                anyhow::bail!("Linear attention received incompatible speculative cache state")
-            }
-        }
+        restore_attn_speculative_prefix_on(&self.attn, cache, base, accepted_len, target)
     }
 
     pub(crate) fn restore_speculative_prefix_rows_on(
@@ -289,45 +253,7 @@ impl DecoderLayer {
         accepted_lens: &[usize],
         target: impl Into<StreamOrDevice>,
     ) -> anyhow::Result<()> {
-        let target = target.into();
-        match (&self.attn, cache, base) {
-            (AttnPath::Full(_), LayerCache::Full(cache), LayerCacheSnapshot::Full(saved)) => {
-                anyhow::ensure!(
-                    saved.offsets().len() == cache.offsets().len()
-                        && accepted_lens.len() == cache.offsets().len(),
-                    "Full KV per-row speculative restore batch mismatch"
-                );
-                let accepted_offsets = saved
-                    .offsets()
-                    .iter()
-                    .zip(cache.offsets())
-                    .zip(accepted_lens)
-                    .enumerate()
-                    .map(|(row, ((&base_offset, &live_offset), &accepted_len))| {
-                        let accepted_offset = base_offset
-                            .checked_add(i32::try_from(accepted_len)?)
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "Full KV accepted-prefix offset overflow on row {row}"
-                                )
-                            })?;
-                        anyhow::ensure!(
-                            accepted_offset <= live_offset,
-                            "Full KV accepted offset {accepted_offset} exceeds live offset {live_offset} on row {row}"
-                        );
-                        Ok(accepted_offset)
-                    })
-                    .collect::<anyhow::Result<Vec<_>>>()?;
-                cache.restore_offsets(&accepted_offsets)?;
-                Ok(())
-            }
-            (AttnPath::Linear(attn), LayerCache::Linear(cache), LayerCacheSnapshot::Linear(_)) => {
-                attn.restore_speculative_prefix_rows_on(cache, accepted_lens, target)
-            }
-            _ => {
-                anyhow::bail!("DFlash2 per-row restore received incompatible cache state")
-            }
-        }
+        restore_attn_speculative_prefix_rows_on(&self.attn, cache, base, accepted_lens, target)
     }
 
     /// Pre-flight: enforce rank-3 input + last-axis matches `cfg.hidden_size`.
@@ -674,6 +600,102 @@ impl DecoderLayer {
         let normed_post = self.post_attention_layernorm.forward_on(&h, target)?;
         let mlp_out = self.mlp.forward_on(&normed_post, target)?;
         Ok(&h + &mlp_out)
+    }
+}
+
+/// Restore an attention path to an accepted speculative prefix. Shared by
+/// every decoder-layer family that owns an [`AttnPath`] (dense and MoE).
+pub(crate) fn restore_attn_speculative_prefix_on(
+    attn_path: &AttnPath,
+    cache: &mut LayerCache,
+    base: &LayerCacheSnapshot,
+    accepted_len: usize,
+    target: impl Into<StreamOrDevice>,
+) -> Result<()> {
+    match (attn_path, cache, base) {
+        (AttnPath::Full(_), LayerCache::Full(cache), LayerCacheSnapshot::Full(saved)) => {
+            let accepted_len = i32::try_from(accepted_len)?;
+            anyhow::ensure!(
+                saved.offsets().len() == cache.offsets().len(),
+                "Full KV speculative snapshot batch {} != live batch {}",
+                saved.offsets().len(),
+                cache.offsets().len()
+            );
+            let mut accepted_offsets = Vec::with_capacity(saved.offsets().len());
+            for (row, (&base_offset, &live_offset)) in
+                saved.offsets().iter().zip(cache.offsets()).enumerate()
+            {
+                let accepted_offset = base_offset.checked_add(accepted_len).ok_or_else(|| {
+                    anyhow::anyhow!("Full KV accepted-prefix offset overflow on row {row}")
+                })?;
+                if accepted_offset > live_offset {
+                    anyhow::bail!(
+                        "Full KV accepted offset {accepted_offset} exceeds live offset {live_offset} on row {row}"
+                    );
+                }
+                accepted_offsets.push(accepted_offset);
+            }
+            cache.restore_offsets(&accepted_offsets)?;
+            Ok(())
+        }
+        (AttnPath::Linear(attn), LayerCache::Linear(cache), LayerCacheSnapshot::Linear(_)) => {
+            attn.restore_speculative_prefix_on(cache, accepted_len, target)
+        }
+        (AttnPath::Full(_), _, _) => {
+            anyhow::bail!("Full attention received incompatible speculative cache state")
+        }
+        (AttnPath::Linear(_), _, _) => {
+            anyhow::bail!("Linear attention received incompatible speculative cache state")
+        }
+    }
+}
+
+/// Per-row variant of [`restore_attn_speculative_prefix_on`].
+pub(crate) fn restore_attn_speculative_prefix_rows_on(
+    attn_path: &AttnPath,
+    cache: &mut LayerCache,
+    base: &LayerCacheSnapshot,
+    accepted_lens: &[usize],
+    target: impl Into<StreamOrDevice>,
+) -> anyhow::Result<()> {
+    let target = target.into();
+    match (attn_path, cache, base) {
+        (AttnPath::Full(_), LayerCache::Full(cache), LayerCacheSnapshot::Full(saved)) => {
+            anyhow::ensure!(
+                saved.offsets().len() == cache.offsets().len()
+                    && accepted_lens.len() == cache.offsets().len(),
+                "Full KV per-row speculative restore batch mismatch"
+            );
+            let accepted_offsets = saved
+                .offsets()
+                .iter()
+                .zip(cache.offsets())
+                .zip(accepted_lens)
+                .enumerate()
+                .map(|(row, ((&base_offset, &live_offset), &accepted_len))| {
+                    let accepted_offset = base_offset
+                        .checked_add(i32::try_from(accepted_len)?)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Full KV accepted-prefix offset overflow on row {row}"
+                            )
+                        })?;
+                    anyhow::ensure!(
+                        accepted_offset <= live_offset,
+                        "Full KV accepted offset {accepted_offset} exceeds live offset {live_offset} on row {row}"
+                    );
+                    Ok(accepted_offset)
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            cache.restore_offsets(&accepted_offsets)?;
+            Ok(())
+        }
+        (AttnPath::Linear(attn), LayerCache::Linear(cache), LayerCacheSnapshot::Linear(_)) => {
+            attn.restore_speculative_prefix_rows_on(cache, accepted_lens, target)
+        }
+        _ => {
+            anyhow::bail!("DFlash2 per-row restore received incompatible cache state")
+        }
     }
 }
 

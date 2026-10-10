@@ -382,10 +382,11 @@ impl Default for MemoryGovernorConfig {
     }
 }
 
-/// Experimental, default off: `IRONMLX_EXPERIMENTAL_MLX_CACHE_MAX_MIB` raises
-/// the governor's MLX buffer-cache ceiling (default 2 GiB) so long-prefill
-/// attention score buffers (3.2 GB at 32K) can be reused between layers.
-/// Pressure levels, headroom and the ratio budget still apply.
+/// Experimental, default off: `IRONMLX_EXPERIMENTAL_MLX_CACHE_MAX_MIB` sets
+/// the governor's MLX buffer-cache ceiling (default 2 GiB): raised so
+/// long-prefill attention score buffers (3.2 GB at 32K) can be reused between
+/// layers, or lowered (not below the 512 MiB cold ceiling) to cut resident
+/// memory. Pressure levels, headroom and the ratio budget still apply.
 fn experimental_mlx_cache_max_bytes() -> Option<usize> {
     static VALUE: OnceLock<Option<usize>> = OnceLock::new();
     *VALUE.get_or_init(|| {
@@ -395,7 +396,7 @@ fn experimental_mlx_cache_max_bytes() -> Option<usize> {
         .parse::<usize>()
         .ok()
         .filter(|mib| *mib > 0)?;
-        tracing::info!(mib, "MLX cache ceiling raised");
+        tracing::info!(mib, "MLX cache ceiling set");
         mib.checked_mul(MIB)
     })
 }
@@ -1266,7 +1267,7 @@ struct RusageInfoV4 {
     tail: [u64; 27],
 }
 
-pub(crate) fn macos_phys_footprint_bytes() -> Option<usize> {
+pub fn macos_phys_footprint_bytes() -> Option<usize> {
     #[cfg(target_os = "macos")]
     {
         #[link(name = "proc")]

@@ -356,6 +356,7 @@ struct DFlash2ActorCounters {
     ordinary_windows: Arc<AtomicU64>,
     tree_windows: Arc<AtomicU64>,
     tree_drafted_nodes: Arc<AtomicU64>,
+    tree_fallback_linear_windows: Arc<AtomicU64>,
     draft_budget_changes: Arc<AtomicU64>,
     current_draft_budget: Arc<AtomicUsize>,
     latest_adaptive_acceptance_ewma_bits: Arc<AtomicU64>,
@@ -396,6 +397,10 @@ impl DFlash2ActorCounters {
             .fetch_add(metrics.tree_windows as u64, Ordering::Relaxed);
         self.tree_drafted_nodes
             .fetch_add(metrics.tree_drafted_nodes as u64, Ordering::Relaxed);
+        self.tree_fallback_linear_windows.fetch_add(
+            metrics.tree_fallback_linear_windows as u64,
+            Ordering::Relaxed,
+        );
         self.draft_budget_changes
             .fetch_add(metrics.draft_budget_changes as u64, Ordering::Relaxed);
         self.current_draft_budget
@@ -505,6 +510,9 @@ pub(crate) struct DFlash2ActorConfig {
     pub(crate) initial_draft_budget: usize,
     pub(crate) target_execution_fingerprint: String,
     pub(crate) verify_profile: String,
+    /// Whether the target certifies any B>1 execution. When false, every
+    /// request keeps B1 prefill, proposal and verify graphs.
+    pub(crate) batched_execution: bool,
 }
 
 #[derive(Clone)]
@@ -535,6 +543,7 @@ pub struct DFlash2ActorHandle {
     pub(crate) ordinary_windows: Arc<AtomicU64>,
     pub(crate) tree_windows: Arc<AtomicU64>,
     pub(crate) tree_drafted_nodes: Arc<AtomicU64>,
+    pub(crate) tree_fallback_linear_windows: Arc<AtomicU64>,
     pub(crate) draft_budget_changes: Arc<AtomicU64>,
     pub(crate) current_draft_budget: Arc<AtomicUsize>,
     pub(crate) latest_adaptive_acceptance_ewma_bits: Arc<AtomicU64>,
@@ -670,6 +679,7 @@ where
         initial_draft_budget,
         target_execution_fingerprint,
         verify_profile,
+        batched_execution,
     } = config;
     assert!(b_max > 0, "DFlash2 actor requires b_max > 0");
     assert!(
@@ -678,8 +688,9 @@ where
     );
     let capacity = admission_queue_max.saturating_add(b_max);
     let ragged_linear_max_width = b_max.min(RAGGED_LINEAR_MAX_WIDTH);
-    let ragged_linear_enabled =
-        ragged_linear_max_width >= 2 && ironmlx_core::m5_profile::flag(RAGGED_LINEAR_ENV);
+    let ragged_linear_enabled = batched_execution
+        && ragged_linear_max_width >= 2
+        && ironmlx_core::m5_profile::flag(RAGGED_LINEAR_ENV);
     if ragged_linear_enabled {
         tracing::info!(
             target: "ironmlx::dflash2",
@@ -730,6 +741,7 @@ where
     let ordinary_windows = Arc::new(AtomicU64::new(0));
     let tree_windows = Arc::new(AtomicU64::new(0));
     let tree_drafted_nodes = Arc::new(AtomicU64::new(0));
+    let tree_fallback_linear_windows = Arc::new(AtomicU64::new(0));
     let draft_budget_changes = Arc::new(AtomicU64::new(0));
     let current_draft_budget = Arc::new(AtomicUsize::new(initial_draft_budget));
     let latest_adaptive_acceptance_ewma_bits = Arc::new(AtomicU64::new(0_f64.to_bits()));
@@ -807,6 +819,7 @@ where
         ordinary_windows: Arc::clone(&ordinary_windows),
         tree_windows: Arc::clone(&tree_windows),
         tree_drafted_nodes: Arc::clone(&tree_drafted_nodes),
+        tree_fallback_linear_windows: Arc::clone(&tree_fallback_linear_windows),
         draft_budget_changes: Arc::clone(&draft_budget_changes),
         current_draft_budget: Arc::clone(&current_draft_budget),
         latest_adaptive_acceptance_ewma_bits: Arc::clone(&latest_adaptive_acceptance_ewma_bits),
@@ -1139,7 +1152,8 @@ where
                 // Prefix artifacts are request-local and may start at different
                 // offsets. Cold misses without that feature can preserve the B1
                 // prefill morphology in one equal-length B=N graph.
-                while prefix_cache.is_none()
+                while batched_execution
+                    && prefix_cache.is_none()
                     && active.len() + admission_requests.len() < b_max
                     && pending.front().is_some_and(|command| match command {
                         DFlash2Command::Admit { request, .. } => {
@@ -1933,6 +1947,7 @@ where
         ordinary_windows,
         tree_windows,
         tree_drafted_nodes,
+        tree_fallback_linear_windows,
         draft_budget_changes,
         current_draft_budget,
         latest_adaptive_acceptance_ewma_bits,

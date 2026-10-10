@@ -46,6 +46,42 @@ use crate::Result;
 /// changes route packing and can affect numerical results for short Qwen3.6
 /// MoE prefills, before any KV-cache logic runs.
 const SORTED_ROUTING_MIN_BS_K: i32 = 64;
+
+/// Diagnostic-only recorder of routed expert indices, used to measure the
+/// real expert coverage of multi-token verification. Inactive (and free)
+/// unless [`route_diagnostic::start`] was called on the current thread.
+#[doc(hidden)]
+pub mod route_diagnostic {
+    use std::cell::RefCell;
+
+    use mlx::Array;
+
+    thread_local! {
+        static ROUTES: RefCell<Option<Vec<(i32, Array)>>> = const { RefCell::new(None) };
+    }
+
+    /// Start recording on this thread, discarding earlier records.
+    pub fn start() {
+        ROUTES.with(|routes| *routes.borrow_mut() = Some(Vec::new()));
+    }
+
+    /// Stop recording and return `(layer, [tokens * k] expert ids)`.
+    pub fn take() -> crate::Result<Vec<(i32, Vec<u32>)>> {
+        let records = ROUTES.with(|routes| routes.borrow_mut().take().unwrap_or_default());
+        records
+            .into_iter()
+            .map(|(layer, inds)| Ok((layer, inds.to_vec::<u32>()?)))
+            .collect()
+    }
+
+    pub(super) fn record(layer: i32, inds: &Array) {
+        ROUTES.with(|routes| {
+            if let Some(routes) = routes.borrow_mut().as_mut() {
+                routes.push((layer, inds.clone()));
+            }
+        });
+    }
+}
 const MAX_EXACT_U32_IN_F32: i32 = 1 << 24;
 
 #[derive(Debug, Clone, Copy)]
@@ -161,6 +197,52 @@ fn request_interleaved_sort_perm(
     argsort_on(&keys, -1_i32, target).context("request-interleaved MoE route argsort")
 }
 
+/// MLX's default `gather_qmm` left indices (`arange` over the left batch
+/// elements, shaped like the left batch dims), built once per shape and
+/// reused so each call does not add an `Arange` kernel. Same values as the
+/// default, so the gather is unchanged.
+///
+/// MLX takes its sorted-routes kernel (`gather_qmm_rhs`, one row per route,
+/// at least 16 routes and 4 per expert) only when the caller passes no left
+/// indices, so such gathers (prefill) keep the default.
+fn cached_lhs_indices(
+    lhs: &Array,
+    rhs_indices: &Array,
+    weight: &Array,
+    sorted_indices: bool,
+) -> Result<Option<Array>> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static CACHE: RefCell<HashMap<Vec<i32>, Array>> = RefCell::new(HashMap::new());
+    }
+    if !crate::nn::moe_fast_path::is_armed() {
+        return Ok(None);
+    }
+    let shape = lhs.shape();
+    let dims = shape.as_slice();
+    if dims.len() < 3 {
+        return Ok(None);
+    }
+    let routes = rhs_indices.size();
+    let experts = usize::try_from(weight.shape().as_slice()[0])
+        .unwrap_or(1)
+        .max(1);
+    if sorted_indices && dims[dims.len() - 2] == 1 && routes >= 16 && routes / experts >= 4 {
+        return Ok(None);
+    }
+    let batch = dims[..dims.len() - 2].to_vec();
+    if let Some(found) = CACHE.with(|cache| cache.borrow().get(&batch).cloned()) {
+        return Ok(Some(found));
+    }
+    let count: i32 = batch.iter().product();
+    let indices = mlx::ops::constructors::arange(0.0, f64::from(count), 1.0, mlx::Dtype::Uint32)?
+        .reshape(&batch[..])?;
+    mlx::transforms::eval(&[&indices])?;
+    CACHE.with(|cache| cache.borrow_mut().insert(batch, indices.clone()));
+    Ok(Some(indices))
+}
+
 fn router_topk_scores_and_indices(
     logits: &Array,
     k: i32,
@@ -177,6 +259,18 @@ fn router_topk_scores_and_indices(
         ));
     }
     let bs = shape[0];
+    if crate::nn::moe_fast_path::is_armed()
+        && logits.dtype() == mlx::Dtype::Bfloat16
+        && num_experts % 128 == 0
+        && num_experts <= 4096
+    {
+        return Ok(mlx::quantization::router_topk_fused_on(
+            logits,
+            k,
+            norm_topk_prob,
+            target,
+        )?);
+    }
     let probs = mlx::ops::softmax_on(logits, -1_i32, /* precise */ true, target)
         .context("SparseMoeBlock: router softmax")?;
     let part_inds =
@@ -232,12 +326,26 @@ impl ExpertQuantProjection {
         target: StreamOrDevice,
         context: &'static str,
     ) -> Result<Array> {
+        if let Some(grouped) = grouped_gather(
+            lhs,
+            &self.weight,
+            &self.scales,
+            self.biases.as_ref(),
+            rhs_indices,
+            sorted_indices,
+            self.meta,
+            target,
+        ) {
+            return grouped
+                .with_context(|| format!("RoutedExperts::apply_experts: grouped {context}"));
+        }
+        let lhs_indices = cached_lhs_indices(lhs, rhs_indices, &self.weight, sorted_indices)?;
         mlx::quantization::gather_quantized_matmul_on(
             lhs,
             &self.weight,
             &self.scales,
             self.biases.as_ref(),
-            None,
+            lhs_indices.as_ref(),
             Some(rhs_indices),
             true,
             Some(self.meta.group_size),
@@ -248,6 +356,41 @@ impl ExpertQuantProjection {
         )
         .with_context(|| format!("RoutedExperts::apply_experts: {context}"))
     }
+}
+
+/// Route a sorted gather through the expert-grouped kernel when a target
+/// scope armed it and MLX would run the same rows through gather_qmv_fast.
+#[allow(clippy::too_many_arguments)]
+fn grouped_gather(
+    lhs: &Array,
+    weight: &Array,
+    scales: &Array,
+    biases: Option<&Array>,
+    rhs_indices: &Array,
+    sorted_indices: bool,
+    meta: QuantMeta,
+    target: StreamOrDevice,
+) -> Option<Result<Array>> {
+    if !sorted_indices || !crate::nn::moe_grouped_qmv::is_armed() {
+        return None;
+    }
+    let biases = biases?;
+    let k = *lhs.shape().as_slice().last()?;
+    let n = weight.shape().as_slice().get(1).copied()?;
+    let affine = meta.mode == crate::core::QuantMode::Affine;
+    if !crate::nn::moe_grouped_qmv::supported(meta.bits, meta.group_size, affine, k, n) {
+        return None;
+    }
+    Some(crate::nn::moe_grouped_qmv::forward_on(
+        lhs,
+        weight,
+        scales,
+        biases,
+        rhs_indices,
+        meta.bits,
+        meta.group_size,
+        target,
+    ))
 }
 
 enum GateUpPath {
@@ -557,6 +700,9 @@ impl RoutedExperts {
         // Now safe to drop source — fused tensors are materialized and the
         // lazy graph no longer holds refs into source arrays.
         drop(source);
+        // When nothing else holds the split weights their buffers land in the
+        // MLX allocator cache, sized for no later allocation; release them.
+        mlx::transforms::clear_cache();
         let fused = FusedGateUp {
             weight,
             scales,
@@ -583,21 +729,36 @@ impl RoutedExperts {
         match &self.gate_up {
             GateUpPath::Fused { .. } => {
                 let fused = self.fused_gate_up(target)?;
-                let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
+                let gate_up_out = match grouped_gather(
                     lhs,
                     &fused.weight,
                     &fused.scales,
                     fused.biases.as_ref(),
-                    None,
-                    Some(rhs_indices),
-                    true,
-                    Some(fused.meta.group_size),
-                    Some(fused.meta.bits),
-                    fused.meta.mode.mlx_backend_mode(),
+                    rhs_indices,
                     sorted_indices,
+                    fused.meta,
                     target,
-                )
-                .context("RoutedExperts::apply_experts: gate_up gather_qmm")?;
+                ) {
+                    Some(grouped) => {
+                        grouped.context("RoutedExperts::apply_experts: grouped gate_up gather")?
+                    }
+                    None => mlx::quantization::gather_quantized_matmul_on(
+                        lhs,
+                        &fused.weight,
+                        &fused.scales,
+                        fused.biases.as_ref(),
+                        cached_lhs_indices(lhs, rhs_indices, &fused.weight, sorted_indices)?
+                            .as_ref(),
+                        Some(rhs_indices),
+                        true,
+                        Some(fused.meta.group_size),
+                        Some(fused.meta.bits),
+                        fused.meta.mode.mlx_backend_mode(),
+                        sorted_indices,
+                        target,
+                    )
+                    .context("RoutedExperts::apply_experts: gate_up gather_qmm")?,
+                };
                 let out_shape = gate_up_out.shape();
                 let out_shape = out_shape.as_slice();
                 let i = self.moe_intermediate;
@@ -756,7 +917,12 @@ impl RoutedExperts {
         }
         let k = ivec[1];
         let bs_k = bs * k;
-        let use_sorted = bs_k >= SORTED_ROUTING_MIN_BS_K;
+        // The expert-grouped kernel needs rows grouped by expert, so it also
+        // sorts the narrower multi-token verifies it is armed for.
+        let use_sorted = bs_k >= SORTED_ROUTING_MIN_BS_K
+            || (crate::nn::moe_grouped_qmv::is_armed()
+                && bs > 1
+                && bs <= crate::nn::moe_grouped_qmv::MAX_RUN);
         let child_spans_enabled = false;
 
         let (gate_out, up_out, rhs_idx_used, sorted_flag, sort_perm_opt) =
@@ -852,21 +1018,36 @@ impl RoutedExperts {
             "glm_moe_routed_down_gather_qmm",
             options.layer_idx,
             || -> Result<(Array, bool)> {
-                let down_out_raw = mlx::quantization::gather_quantized_matmul_on(
+                let down_out_raw = match grouped_gather(
                     &act,
                     &self.down_weight,
                     &self.down_scales,
                     self.down_biases.as_ref(),
-                    None,
-                    Some(&rhs_idx_used),
-                    true,
-                    Some(self.down_meta.group_size),
-                    Some(self.down_meta.bits),
-                    self.down_meta.mode.mlx_backend_mode(),
+                    &rhs_idx_used,
                     sorted_flag,
+                    self.down_meta,
                     target,
-                )
-                .context("RoutedExperts::apply_experts: down_proj gather_qmm")?;
+                ) {
+                    Some(grouped) => {
+                        grouped.context("RoutedExperts::apply_experts: grouped down_proj gather")?
+                    }
+                    None => mlx::quantization::gather_quantized_matmul_on(
+                        &act,
+                        &self.down_weight,
+                        &self.down_scales,
+                        self.down_biases.as_ref(),
+                        cached_lhs_indices(&act, &rhs_idx_used, &self.down_weight, sorted_flag)?
+                            .as_ref(),
+                        Some(&rhs_idx_used),
+                        true,
+                        Some(self.down_meta.group_size),
+                        Some(self.down_meta.bits),
+                        self.down_meta.mode.mlx_backend_mode(),
+                        sorted_flag,
+                        target,
+                    )
+                    .context("RoutedExperts::apply_experts: down_proj gather_qmm")?,
+                };
 
                 // The sorted path can consume expert output in route-sorted order,
                 // avoiding the [BS,k,H] scatter and expanded intermediate.
@@ -990,6 +1171,12 @@ impl SparseMoeBlock {
         })
     }
 
+    /// Routed experts of this block (diagnostics and benchmarks).
+    #[doc(hidden)]
+    pub fn routed(&self) -> &RoutedExperts {
+        &self.routed
+    }
+
     /// Forward pass: `[B, S, H]` → `[B, S, H]`.
     ///
     /// Stream-targeted. Caller is responsible for passing the correct stream;
@@ -1032,6 +1219,9 @@ impl SparseMoeBlock {
     }
 
     fn forward_shared_on(&self, flat_x: &Array, target: StreamOrDevice) -> Result<Array> {
+        if super::timing_ablation::skips(super::timing_ablation::SHARED_EXPERT) {
+            return Ok(mlx::ops::zeros_like(flat_x)?);
+        }
         let shared_y = self
             .shared_expert
             .forward_on(flat_x, target)
@@ -1086,6 +1276,7 @@ impl SparseMoeBlock {
                 self.norm_topk_prob,
                 target,
             )?;
+            route_diagnostic::record(layer_idx, &inds_u32);
 
             // (3) Routed SwiGLU via the shared SwitchGLU-style combine.
             //
@@ -1095,18 +1286,23 @@ impl SparseMoeBlock {
             // k. `inds_u32` is the rhs_indices (expert id per (token, slot));
             // `scores` are the per-slot routing weights. This is the exact
             // logic previously inlined here, extracted so GLM-4 can reuse it.
-            let routed_y = self.routed.apply_experts_inner(
-                &flat_x,
-                &inds_u32,
-                &scores,
-                target,
-                RoutedApplyOptions {
-                    layer_idx,
-                    cast_output_to_expert_dtype: false,
-                    activation: RoutedActivation::SwiGlu,
-                    request_layout: Some((b, s)),
-                },
-            )?;
+            let routed_y = if super::timing_ablation::skips(super::timing_ablation::ROUTED_EXPERTS)
+            {
+                mlx::ops::zeros_like(&flat_x)?
+            } else {
+                self.routed.apply_experts_inner(
+                    &flat_x,
+                    &inds_u32,
+                    &scores,
+                    target,
+                    RoutedApplyOptions {
+                        layer_idx,
+                        cast_output_to_expert_dtype: false,
+                        activation: RoutedActivation::SwiGlu,
+                        request_layout: Some((b, s)),
+                    },
+                )?
+            };
 
             // (7) Shared expert with independent sigmoid gate.
             let shared_gated = self.forward_shared_on(&flat_x, target)?; // [BS, H]

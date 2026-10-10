@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-07",
+  "updatedAt": "2026-10-09",
   "entries": [
     {
       "id": "qwen35-2b-4bit",
@@ -1215,6 +1215,30 @@
       ],
       "msMetadataRevision": null,
       "modelId": "dflash2-qwen38-b32",
+      "variantLabel": "BF16"
+    },
+    {
+      "id": "dflash2-qwen36-35b-a3b-bf16",
+      "name": "Qwen 3.6 35B A3B DFlash2",
+      "parameters": null,
+      "weightFormat": "BF16",
+      "weightBytes": 1052513456,
+      "downloadBytes": 1052514747,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "verified",
+      "noteKey": "catalog_note_dflash",
+      "hfRepo": "incoai/Qwen3.6-35B-A3B-DFlash2",
+      "msRepo": null,
+      "metadataRevision": "51ef7b6923ad6c14cb1bb41c37a9041446496ab6",
+      "evidence": [
+        "https://huggingface.co/incoai/Qwen3.6-35B-A3B-DFlash2/tree/51ef7b6923ad6c14cb1bb41c37a9041446496ab6",
+        "docs/dflash2-server-api.md"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "dflash2-qwen36-35b-a3b",
       "variantLabel": "BF16"
     },
     {

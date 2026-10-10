@@ -2485,7 +2485,7 @@ mod tests {
             mtp_draft_tokens: None,
             dflash2_model_dir: None,
             dflash2_block_size: None,
-            dflash2_draft_bits: 4,
+            dflash2_draft_bits: None,
             dflash2_tensor_batch_max_width: None,
             dflash2_tree_max_nodes: None,
             m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode::Auto,

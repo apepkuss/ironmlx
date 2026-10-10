@@ -13,8 +13,8 @@ mod model;
 mod selector;
 mod topk;
 
-pub use config::DFlash2Config;
-pub use model::{DFlash2DraftCache, DFlash2DraftModel, DFlash2TreeSpec};
+pub use config::{DFlash2Config, DFlash2TargetSpec};
+pub use model::{DFlash2DraftCache, DFlash2DraftModel, DFlash2DraftPrecision, DFlash2TreeSpec};
 
 use mlx::{Array, StreamOrDevice};
 
@@ -70,6 +70,24 @@ fn load_linear(loader: &Loader, prefix: &str, draft_bits: Option<i32>) -> Result
 }
 
 /// Target-model output required by one DFlash2 draft/verify cycle.
+/// Identity of one loaded model for state that belongs to the loaded instance
+/// (for example measured DFlash2 window costs): it moves with the model
+/// value, is shared by its clones, and is never the identity of a later load.
+/// Holders of [`Self::downgrade`] can tell when the instance is gone.
+#[derive(Debug, Clone, Default)]
+pub struct DFlash2Instance(std::sync::Arc<()>);
+
+impl DFlash2Instance {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A handle that does not keep the instance alive.
+    pub fn downgrade(&self) -> std::sync::Weak<()> {
+        std::sync::Arc::downgrade(&self.0)
+    }
+}
+
 pub struct DFlash2TargetOutput {
     pub hidden: Array,
     pub context_hidden: Array,
@@ -223,6 +241,10 @@ pub struct DFlash2VerifyCapabilities {
     pub transactional_state_restore: bool,
     pub supported_shapes: Vec<DFlash2VerifyShape>,
     pub lane_kernel_pack: Option<DFlash2LaneKernelPack>,
+    /// Largest flat draft tree (nodes, excluding the root) whose single B1
+    /// tree verification and accepted-path commit the target certifies on
+    /// its own, independent of a lane kernel pack. Zero disables it.
+    pub flat_tree_max_nodes: usize,
 }
 
 impl DFlash2VerifyCapabilities {
@@ -247,13 +269,26 @@ impl DFlash2VerifyCapabilities {
             .as_ref()
             .map(DFlash2LaneKernelPack::stable_fingerprint)
             .unwrap_or_else(|| "none".to_owned());
+        let flat_tree = if self.flat_tree_max_nodes > 0 {
+            format!(";flat-tree={}", self.flat_tree_max_nodes)
+        } else {
+            String::new()
+        };
         format!(
-            "profile={};qmm={};attention={};state={};shapes={shapes};lane-pack={lane_pack}",
+            "profile={};qmm={};attention={};state={};shapes={shapes};lane-pack={lane_pack}{flat_tree}",
             self.profile,
             self.row_bit_exact_qmm,
             self.row_bit_exact_attention,
             self.transactional_state_restore
         )
+    }
+
+    /// Whether any multi-row (B>1) verify shape is certified. Targets that
+    /// certify only B1 must also keep prefill and proposal batching at B1.
+    pub fn certifies_batched_execution(&self) -> bool {
+        self.supported_shapes
+            .iter()
+            .any(|shape| shape.batch_width > 1)
     }
 
     pub fn max_draft_tokens(&self, batch_width: usize) -> Option<usize> {
@@ -326,6 +361,61 @@ impl DFlash2VerifyPlan {
     }
 }
 
+/// Cache geometry of a hybrid full-attention / GatedDeltaNet target. Dense
+/// and MoE Qwen3.5-family targets share this cache layout; only their FFNs
+/// differ, and FFNs hold no per-request cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DFlash2HybridCacheGeometry {
+    pub layers: usize,
+    pub full_attention_interval: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    pub linear_value_heads: usize,
+    pub linear_key_heads: usize,
+    pub linear_key_dim: usize,
+    pub linear_value_dim: usize,
+    pub linear_conv_kernel: usize,
+}
+
+impl DFlash2HybridCacheGeometry {
+    /// BF16 K/V growth per token on full-attention layers, plus fixed BF16
+    /// convolution and F32 recurrent state on linear-attention layers.
+    pub(crate) fn cache_cost(self) -> DFlash2TargetCacheCost {
+        let full_attention_layers = (1..=self.layers)
+            .filter(|layer| layer % self.full_attention_interval == 0)
+            .count();
+        let linear_attention_layers = self.layers.saturating_sub(full_attention_layers);
+        let bytes_per_token = full_attention_layers
+            .saturating_mul(self.kv_heads)
+            .saturating_mul(self.head_dim)
+            .saturating_mul(2)
+            .saturating_mul(2);
+        let conv_dim = self
+            .linear_key_dim
+            .saturating_mul(self.linear_key_heads)
+            .saturating_mul(2)
+            .saturating_add(
+                self.linear_value_dim
+                    .saturating_mul(self.linear_value_heads),
+            );
+        let conv_state_bytes = self
+            .linear_conv_kernel
+            .saturating_sub(1)
+            .saturating_mul(conv_dim)
+            .saturating_mul(2);
+        let recurrent_state_bytes = self
+            .linear_value_heads
+            .saturating_mul(self.linear_value_dim)
+            .saturating_mul(self.linear_key_dim)
+            .saturating_mul(4);
+        DFlash2TargetCacheCost {
+            bytes_per_token,
+            fixed_bytes_per_sequence: linear_attention_layers
+                .saturating_mul(conv_state_bytes.saturating_add(recurrent_state_bytes)),
+        }
+    }
+}
+
 impl DFlash2TargetCacheCost {
     pub fn request_bytes(self, token_cap: usize) -> usize {
         token_cap
@@ -363,11 +453,66 @@ impl DFlash2TargetForwardMode {
 /// captures several target layers and owns a different draft cache and
 /// proposal distribution.
 pub trait DFlash2Target: crate::core::Model {
+    /// Target fields the draft checkpoint must match.
+    fn dflash2_target_spec(&self) -> DFlash2TargetSpec;
+
     fn dflash2_target_cache_cost(&self) -> DFlash2TargetCacheCost;
 
     fn dflash2_verify_capabilities(&self) -> DFlash2VerifyCapabilities;
 
     fn dflash2_execution_fingerprint(&self) -> String;
+
+    /// Before serving, run one target forward of every reachable verify
+    /// width so kernel libraries are compiled outside scored requests.
+    fn dflash2_prewarm(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Whether drafting runs its target logit projections on the row-stable
+    /// affine4 arithmetic (`nn::rs4_qmm`) and greedy selection as one native
+    /// dispatch. Both only change draft proposals; verification decides every
+    /// committed token.
+    fn dflash2_draft_fast_paths(&self) -> bool {
+        false
+    }
+
+    /// Draft-only projection onto a fixed subset of the target vocabulary:
+    /// `(logits [.., N], token ids [N])`. `None` projects drafts onto the full
+    /// vocabulary with [`Self::dflash2_project_hidden_on`]. Verification is
+    /// unaffected; a token outside the subset is only never proposed.
+    /// `extra`: request tokens outside the subset (from
+    /// [`Self::dflash2_draft_vocab_lacks`]) projected alongside it.
+    fn dflash2_draft_vocab_project_on(
+        &self,
+        _hidden: &Array,
+        _extra: &[u32],
+        _target: StreamOrDevice,
+    ) -> anyhow::Result<Option<(Array, Array)>> {
+        Ok(None)
+    }
+
+    /// Whether drafts use a draft vocabulary that lacks `token`.
+    fn dflash2_draft_vocab_lacks(&self, _token: u32) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    /// Whether the runtime may choose this target's linear draft budget with
+    /// the DFlash2 window-cost policy instead of the shared Qwen MTP policy.
+    fn dflash2_window_cost_budget_policy(&self) -> bool {
+        false
+    }
+
+    /// Identity of this loaded target, when it keeps state across requests
+    /// keyed by the loaded instance.
+    fn dflash2_instance(&self) -> Option<&DFlash2Instance> {
+        None
+    }
+
+    /// Whether greedy drafts use [`Self::dflash2_draft_vocab_project_on`], so
+    /// the drafter records the request tokens that vocabulary lacks.
+    fn dflash2_draft_vocab_enabled(&self) -> anyhow::Result<bool> {
+        Ok(false)
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn dflash2_forward_tree_on(
@@ -479,6 +624,7 @@ mod tests {
                 verify_width: 4,
             }],
             lane_kernel_pack: None,
+            flat_tree_max_nodes: 0,
         };
         let ordinary = DFlash2VerifyPlan::build(&capabilities, 7, 0).unwrap();
         assert_eq!(ordinary.execution, DFlash2VerifyExecution::OrdinaryDecode);

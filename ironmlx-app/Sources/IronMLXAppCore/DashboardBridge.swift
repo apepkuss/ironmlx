@@ -1759,6 +1759,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             return
         }
         let config = configStore.load()
+        if let target = configuredDFlash2Target(in: config),
+           AppConfig.normalizedModelReference(model) == target {
+            setDFlash2PinnedModel(target, pinned: pinned, path: payload.path)
+            return
+        }
         Task {
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
@@ -1792,6 +1797,28 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 }
             }
         }
+    }
+
+    /// The DFlash2 server hosts a single target and has no model-management
+    /// API, so its pin is App state only: it is persisted with the loaded
+    /// target, carried by the recovery snapshot, and passed to the engine pool
+    /// when DFlash2 is turned off and the target reloads normally.
+    private func setDFlash2PinnedModel(_ target: String, pinned: Bool, path: String) {
+        updateConfig { $0.recordPinnedModel(target, pinned: pinned) }
+        backend.refreshConfirmedSnapshot()
+        let recorded = configStore.load().pinnedModelReferences.contains(target)
+        let response = PinModelBridgeResponse(
+            success: recorded == pinned,
+            status: recorded == pinned ? "ok" : "error",
+            model: target,
+            pinned: recorded,
+            loadedModels: [],
+            error: recorded == pinned ? nil : "pin state was not recorded"
+        )
+        let json = (try? Self.jsonString(response))
+            ?? #"{"success":false,"status":"error","error":"pin response encoding failed"}"#
+        sendFetchResult(path: path, jsonString: json)
+        sendScannedModels()
     }
 
     private static func loadedModelID(matching model: String, in loadedModels: [BackendLoadedModelInfo]) -> String? {

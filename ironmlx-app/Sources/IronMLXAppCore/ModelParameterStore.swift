@@ -120,7 +120,13 @@ public struct ModelParameters: Codable, Equatable, Sendable {
     }
 
     public var dflash2DraftBitsValue: Int {
-        Int(dflash2DraftBits?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 4
+        dflash2DraftBitsExplicitValue ?? 4
+    }
+
+    /// Draft precision chosen explicitly by the user, or nil for the
+    /// target's default.
+    public var dflash2DraftBitsExplicitValue: Int? {
+        Int(dflash2DraftBits?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
     }
 
     public var dflash2TensorBatchMaxWidthValue: Int? {

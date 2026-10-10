@@ -991,45 +991,52 @@ fn query_position_isolated_attention_bulk_cache_update_on(
     let (batch, heads, query_len, head_dim) = (q_dims[0], q_dims[1], q_dims[2], q_dims[3]);
     let base_offsets = cache.offsets().to_vec();
 
-    let mut rotated_queries = Vec::with_capacity(query_len as usize);
-    let mut rotated_keys = Vec::with_capacity(query_len as usize);
-    for depth in 0..query_len {
-        let query = mlx::ops::indexing::slice_strided_on(
-            queries,
-            &[0_i32, 0, depth, 0][..],
-            &[batch, heads, depth + 1, head_dim][..],
-            &[1_i32, 1, 1, 1][..],
-            target,
-        )?;
-        let key = mlx::ops::indexing::slice_strided_on(
-            keys,
-            &[0_i32, 0, depth, 0][..],
-            &[batch, key_dims[1], depth + 1, key_dims[3]][..],
-            &[1_i32, 1, 1, 1][..],
-            target,
-        )?;
-        let depth_cos = mlx::ops::indexing::slice_strided_on(
-            cos,
-            &[0_i32, depth, 0][..],
-            &[batch, depth + 1, cos_dims[2]][..],
-            &[1_i32, 1, 1][..],
-            target,
-        )?;
-        let depth_sin = mlx::ops::indexing::slice_strided_on(
-            sin,
-            &[0_i32, depth, 0][..],
-            &[batch, depth + 1, sin_dims[2]][..],
-            &[1_i32, 1, 1][..],
-            target,
-        )?;
-        let (query, key) = mrope.apply(&query, &key, &depth_cos, &depth_sin)?;
-        rotated_queries.push(query);
-        rotated_keys.push(key);
-    }
-    let query_refs = rotated_queries.iter().collect::<Vec<_>>();
-    let key_refs = rotated_keys.iter().collect::<Vec<_>>();
-    let rotated_queries = mlx::ops::shape::concatenate_on(&query_refs, 2, target)?;
-    let rotated_keys = mlx::ops::shape::concatenate_on(&key_refs, 2, target)?;
+    // MRoPE is elementwise per position, so one application over every
+    // position gives each position's single-position bits.
+    let (rotated_queries, rotated_keys) = if super::moe_fast_path::is_armed() {
+        mrope.apply(queries, keys, cos, sin)?
+    } else {
+        let mut rotated_queries = Vec::with_capacity(query_len as usize);
+        let mut rotated_keys = Vec::with_capacity(query_len as usize);
+        for depth in 0..query_len {
+            let query = mlx::ops::indexing::slice_strided_on(
+                queries,
+                &[0_i32, 0, depth, 0][..],
+                &[batch, heads, depth + 1, head_dim][..],
+                &[1_i32, 1, 1, 1][..],
+                target,
+            )?;
+            let key = mlx::ops::indexing::slice_strided_on(
+                keys,
+                &[0_i32, 0, depth, 0][..],
+                &[batch, key_dims[1], depth + 1, key_dims[3]][..],
+                &[1_i32, 1, 1, 1][..],
+                target,
+            )?;
+            let depth_cos = mlx::ops::indexing::slice_strided_on(
+                cos,
+                &[0_i32, depth, 0][..],
+                &[batch, depth + 1, cos_dims[2]][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )?;
+            let depth_sin = mlx::ops::indexing::slice_strided_on(
+                sin,
+                &[0_i32, depth, 0][..],
+                &[batch, depth + 1, sin_dims[2]][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )?;
+            let (query, key) = mrope.apply(&query, &key, &depth_cos, &depth_sin)?;
+            rotated_queries.push(query);
+            rotated_keys.push(key);
+        }
+        let query_refs = rotated_queries.iter().collect::<Vec<_>>();
+        let key_refs = rotated_keys.iter().collect::<Vec<_>>();
+        let rotated_queries = mlx::ops::shape::concatenate_on(&query_refs, 2, target)?;
+        let rotated_keys = mlx::ops::shape::concatenate_on(&key_refs, 2, target)?;
+        (rotated_queries, rotated_keys)
+    };
     let (cached_keys, cached_values) =
         cache.update_and_fetch_for_attention_on(&rotated_keys, values, per_row_lens, target)?;
 
@@ -1103,7 +1110,7 @@ fn query_position_isolated_attention_bulk_cache_update_on(
     // Experimental MLX 0.32.2 grouping, adapted from TensorFold exact_attention.
     // Keep every query in the same vector-kernel/key-partition regime as Q1.
     // Restrict to the audited B1, GQA=6, BF16 route; all other cases stay serial.
-    let grouped = super::m5_affine4::armed()
+    let dense_grouped = super::m5_affine4::armed()
         && std::env::var("IRONMLX_EXPERIMENTAL_GROUPED_VERIFY_ATTN").as_deref() == Ok("1")
         && batch == 1
         && heads == 24
@@ -1112,11 +1119,22 @@ fn query_position_isolated_attention_bulk_cache_update_on(
         && cached_keys.dtype() == mlx::Dtype::Bfloat16
         && cache.turboquant().is_none()
         && mask.is_none();
+    let moe_grouped = super::moe_fast_path::is_armed()
+        && batch == 1
+        && heads == 16
+        && key_dims[1] == 2
+        && head_dim == 256
+        && cached_keys.dtype() == mlx::Dtype::Bfloat16
+        && cache.turboquant().is_none()
+        && mask.is_none();
+    let grouped = dense_grouped || moe_grouped;
+    // GQA heads per KV head times grouped queries stay within 32 simdgroups.
+    let max_group = 32 / (heads / key_dims[1]).max(1);
     let mut outputs = Vec::with_capacity(query_len as usize);
     let mut depth = 0;
     while depth < query_len {
         let group = if grouped {
-            exact_attention_group_len(base_offsets[0] + depth + 1, query_len - depth)
+            exact_attention_group_len(base_offsets[0] + depth + 1, query_len - depth, max_group)
         } else {
             1
         };
@@ -1190,8 +1208,9 @@ fn query_position_isolated_attention_bulk_cache_update_on(
     mlx::ops::shape::concatenate_on(&output_refs, 2, target).map_err(Into::into)
 }
 
-fn exact_attention_group_len(first_key_len: i32, remaining: i32) -> i32 {
-    let group = remaining.min(5); // 6 GQA heads * 5 queries <= 32 SIMD groups.
+fn exact_attention_group_len(first_key_len: i32, remaining: i32, max_group: i32) -> i32 {
+    // GQA heads * grouped queries <= 32 SIMD groups.
+    let group = remaining.min(max_group.min(5));
     let last = first_key_len + group - 1;
     if [1024, 1025, 4096, 8193, 16384, 32769, 65536, 65537]
         .iter()
@@ -1330,7 +1349,7 @@ mod tests {
             let mut grouped = Vec::new();
             let mut depth = 0;
             while depth < 8 {
-                let group = exact_attention_group_len(prefix + depth + 1, 8 - depth);
+                let group = exact_attention_group_len(prefix + depth + 1, 8 - depth, 5);
                 grouped.push(attend(depth, group)?);
                 depth += group;
             }

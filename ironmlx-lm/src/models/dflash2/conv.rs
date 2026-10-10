@@ -19,6 +19,10 @@ pub(super) struct DFlash2GroupedConv {
 }
 
 impl DFlash2GroupedConv {
+    pub(super) fn projection(&self) -> &Linear {
+        &self.kernel_projection
+    }
+
     pub(super) fn from_loader(
         loader: &Loader,
         prefix: &str,

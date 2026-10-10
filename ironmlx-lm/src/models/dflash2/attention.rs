@@ -264,6 +264,18 @@ impl DFlash2Attention {
         })
     }
 
+    /// Every projection object, including the K/V row views of a fused Q/K/V.
+    pub(super) fn projections(&self) -> Vec<&Linear> {
+        let mut out = match &self.input_projections {
+            DFlash2InputProjections::Separate { q, k, v } => vec![q, k, v],
+            DFlash2InputProjections::Fused {
+                projection, k, v, ..
+            } => vec![projection, k, v],
+        };
+        out.push(&self.o_proj);
+        out
+    }
+
     pub(super) fn forward_on(
         &self,
         x: &Array,

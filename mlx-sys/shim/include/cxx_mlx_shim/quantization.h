@@ -15,6 +15,7 @@
 namespace cxx_mlx {
 
 using MlxArray = mlx::core::array;
+using MlxArrayVec = std::vector<mlx::core::array>;
 
 // ===== QuantizeResult (opaque) =====
 // MLX 的 quantize 返回 std::vector<array>，cxx 不支持 Vec<UniquePtr<T>>。
@@ -150,5 +151,48 @@ std::unique_ptr<MlxArray> from_fp8(
 std::unique_ptr<MlxArray> to_fp8(
     const MlxArray& x,
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+
+
+// Kernels of the qualified Qwen3.6 MoE affine4 DFlash2 target
+// (shim/src/row_stable_affine4.cc).
+
+// Row-stable affine4 matmul for 1..=8 rows (`x` [M,K] bf16). kind: 0 one
+// row, 2 MMA tile, 5 two to four rows staged once per threadgroup.
+// Arithmetic: ironmlx-lm nn::rs4_qmm.
+std::unique_ptr<MlxArray> row_stable_affine4_matmul(
+    const MlxArray& x, const MlxArray& w, const MlxArray& scales, const MlxArray& biases,
+    int32_t kind, int32_t ks, int32_t r, int32_t sgs,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// Fused unweighted RMS norm of q and k head vectors with per-tensor scales.
+std::unique_ptr<MlxArrayVec> qk_norm_fused(
+    const MlxArray& src, int32_t heads, int32_t d, int32_t q_off, int32_t k_off, float qscale,
+    float kscale, float eps, bool has_target, bool is_device_only, uint8_t device_type,
+    int32_t stream_index);
+
+// MLX product-stable affine4 qmv_fast_wide with up to `max_nv` rows per threadgroup.
+std::unique_ptr<MlxArray> qmv_fast_wide(
+    const MlxArray& x, const MlxArray& w, const MlxArray& scales, const MlxArray& biases,
+    int32_t max_nv, bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// Fused MoE router: float softmax + top-k (descending) + optional
+// normalization; returns {scores (bf16) [R,k], indices (uint32) [R,k]}.
+std::unique_ptr<MlxArrayVec> router_topk_fused(
+    const MlxArray& logits, int32_t k, bool norm,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// Fused GDN gates: returns {g (float32), beta (bf16)} for a, b [.., H].
+std::unique_ptr<MlxArrayVec> gdn_gates_fused(
+    const MlxArray& a, const MlxArray& b, const MlxArray& a_log, const MlxArray& dt_bias,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index);
+
+// DFlash2 greedy selector walk: candidates [B,L,K] (uint32), unary [B,L,K],
+// hidden [B,L,D], anchor [B] (uint32), codebooks [V,D]; returns the path [B,L].
+std::unique_ptr<MlxArray> dflash2_selector_walk(
+    const MlxArray& candidates, const MlxArray& unary, const MlxArray& hidden,
+    const MlxArray& anchor, const MlxArray& predecessor_codebook,
+    const MlxArray& successor_codebook, bool has_target, bool is_device_only, uint8_t device_type,
+    int32_t stream_index);
 
 }  // namespace cxx_mlx

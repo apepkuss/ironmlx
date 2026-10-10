@@ -48,9 +48,18 @@ def capability(entries, name, language):
     return "✓" if True in values else "—"
 
 
+# DFlash2 drafters are named after the target family; map each to its main model.
+DFLASH2_MAIN_MODELS = (("Qwen3.6-35B-A3B", "Qwen 3.6 35B A3B"), ("Qwen3.8-27B", "Qwen 3.8 27B"))
+# Target weight formats each DFlash2 main model is qualified for.
+DFLASH2_TARGET_FORMATS = {
+    "Qwen 3.8 27B": {"Affine 4-bit", "Affine 8-bit"},
+    "Qwen 3.6 35B A3B": {"Affine 4-bit", "Affine 5-bit", "Affine 6-bit", "Affine 8-bit"},
+}
+
+
 def helper_main(entry):
     if entry["noteKey"] == "catalog_note_dflash":
-        return "Qwen 3.8 27B"
+        return next(main for repo, main in DFLASH2_MAIN_MODELS if repo in entry["hfRepo"])
     return re.sub(r"\s+(MTP|Assistant)$", "", entry["name"])
 
 
@@ -61,7 +70,8 @@ def acceleration(entries, companions):
         methods.append("MTP")
     elif name.startswith("Gemma 4 ") and (name, "catalog_note_gemma_assistant") in companions:
         methods.append("Assistant")
-    if name == "Qwen 3.8 27B" and all(entry["weightFormat"] in {"Affine 4-bit", "Affine 8-bit"} for entry in entries):
+    formats = DFLASH2_TARGET_FORMATS.get(name)
+    if formats and (name, "catalog_note_dflash") in companions and any(entry["weightFormat"] in formats for entry in entries):
         methods.append("DFlash2")
     return " / ".join(methods) or "—"
 
@@ -105,7 +115,7 @@ def generate(catalog, language):
                 rows.append([repo_link(entry["name"], entry), "VLM" if entry["category"] == "vision" else "LLM", weight_links(entries), *[capability(entries, name, language) for name in ("text", "vision", "reasoning", "tools")], acceleration(entries, companions)])
             lines.append(table(headers, rows))
             lines.append(local("Images means image understanding. Tools require a compatible native template; the client executes them. Llama 3.2 supports one native custom tool call per turn.", "图片指图片理解；工具调用需要兼容的原生模板，由客户端执行。Llama 3.2 每轮支持一个原生自定义工具调用。", language))
-            lines.append(local("Acceleration requires matching auxiliary weights (see Drafter below); — means unsupported or not yet available. DFlash2 requires Qwen 3.8 27B Affine 4/8-bit, is text-only, and cannot run alongside MTP. See [MTP / Assistant](mtp-server-api.md) and [DFlash2](dflash2-server-api.md).", "加速需要匹配的辅助权重，见下方 Drafter 表；— 表示不支持或待支持。DFlash2 仅用于 Qwen 3.8 27B Affine 4/8-bit 的文本请求，与 MTP 互斥。详见 [MTP / Assistant](mtp-server-api.md) / [DFlash2](dflash2-server-api.md)。", language))
+            lines.append(local("Acceleration requires matching auxiliary weights (see Drafter below); — means unsupported or not yet available. DFlash2 requires Qwen 3.8 27B Affine 4/8-bit or Qwen 3.6 35B A3B Affine 4/5/6/8-bit (not OptiQ), is text-only, and cannot run alongside MTP. See [MTP / Assistant](mtp-server-api.md) and [DFlash2](dflash2-server-api.md).", "加速需要匹配的辅助权重，见下方 Drafter 表；— 表示不支持或待支持。DFlash2 仅用于 Qwen 3.8 27B Affine 4/8-bit 与 Qwen 3.6 35B A3B Affine 4/5/6/8-bit（不含 OptiQ）的文本请求，与 MTP 互斥。详见 [MTP / Assistant](mtp-server-api.md) / [DFlash2](dflash2-server-api.md)。", language))
         elif title == "Drafter":
             headers = local(["Model", "Type", "Matching main model", "Weight formats"], ["模型名称", "类型", "匹配主模型", "权重格式"], language)
             methods = {"catalog_note_mtp": "MTP", "catalog_note_dflash": "DFlash2", "catalog_note_gemma_assistant": "Gemma Assistant"}
@@ -113,7 +123,7 @@ def generate(catalog, language):
                 entry = entries[0]
                 rows.append([repo_link(entry["name"], entry), methods[entry["noteKey"]], cell(helper_main(entry)), weight_links(entries)])
             lines.append(table(headers, rows))
-            lines.append(local("Auxiliary models cannot run independently. DFlash2 main models require Affine 4/8-bit.", "辅助模型不能独立运行。DFlash2 主模型需为 Affine 4/8-bit。", language))
+            lines.append(local("Auxiliary models cannot run independently. DFlash2 main models require Affine 4/8-bit (Qwen 3.8 27B) or Affine 4/5/6/8-bit (Qwen 3.6 35B A3B).", "辅助模型不能独立运行。DFlash2 主模型需为 Affine 4/8-bit（Qwen 3.8 27B）或 Affine 4/5/6/8-bit（Qwen 3.6 35B A3B）。", language))
         else:
             headers = local(["Model", "Type", "Function", "Weight formats"], ["模型名称", "类型", "用途", "权重格式"], language)
             details = {

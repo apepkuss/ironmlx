@@ -589,7 +589,25 @@ impl GatedDeltaNet {
         };
 
         // Step 4: q/k rms_norm (no weight)
-        let (q_scaled, k_scaled) = {
+        let (q_scaled, k_scaled) = if super::moe_fast_path::is_armed()
+            && conv_out.dtype() == Dtype::Bfloat16
+            && self.cfg.head_k_dim == 128
+        {
+            let inv_scale = 1.0_f32 / (self.cfg.head_k_dim as f32).sqrt();
+            let (q, k) = mlx::quantization::qk_norm_fused_on(
+                &conv_out,
+                self.cfg.num_k_heads,
+                self.cfg.head_k_dim,
+                0,
+                self.cfg.key_dim(),
+                inv_scale * inv_scale,
+                inv_scale,
+                1e-6,
+                target,
+            )?;
+            let shape = (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim);
+            (q.reshape_on(shape, target)?, k.reshape_on(shape, target)?)
+        } else {
             let inv_scale = 1.0_f32 / (self.cfg.head_k_dim as f32).sqrt();
             let q_normed = mlx::fast::rms_norm_on(&q_per_head, None, 1e-6, target)?;
             let q_scaled = &q_normed * (inv_scale * inv_scale); // panic-on-err, no `?`
@@ -598,24 +616,35 @@ impl GatedDeltaNet {
             (q_scaled, k_scaled)
         };
 
-        // Step 5: compute_g = exp(-exp(A_log) * softplus(a + dt_bias))
-        // softplus stabilised: where(x > 20, x, log(1 + exp(x)))
-        let g = {
-            let x_sp = &a + &self.dt_bias;
-            let twenty: Array = (&[20.0_f32][..], ()).try_into()?;
-            let zeros = a.zeros_like()?;
-            let safe = zeros.logaddexp(&x_sp)?;
-            let cond = x_sp.greater(&twenty)?;
-            let sp = cond.where_(&x_sp, &safe)?;
-            let a_log_f32 = mlx::ops::cast::astype(&self.a_log, Dtype::Float32)?;
-            let exp_alog = a_log_f32.exp()?;
-            let neg_exp_alog = mlx::ops::binary::negative(&exp_alog)?;
-            let inner = &neg_exp_alog * &sp;
-            inner.exp()?
-        };
+        // Steps 5-6: g = exp(-exp(A_log) * softplus(a + dt_bias)), beta = sigmoid(b).
+        let (g, beta) = if super::moe_fast_path::is_armed()
+            && a.dtype() == Dtype::Bfloat16
+            && b.dtype() == Dtype::Bfloat16
+            && self.a_log.dtype() == Dtype::Bfloat16
+            && self.dt_bias.dtype() == Dtype::Bfloat16
+        {
+            mlx::quantization::gdn_gates_fused_on(&a, &b, &self.a_log, &self.dt_bias, target)?
+        } else {
+            // Step 5: compute_g = exp(-exp(A_log) * softplus(a + dt_bias))
+            // softplus stabilised: where(x > 20, x, log(1 + exp(x)))
+            let g = {
+                let x_sp = &a + &self.dt_bias;
+                let twenty: Array = (&[20.0_f32][..], ()).try_into()?;
+                let zeros = a.zeros_like()?;
+                let safe = zeros.logaddexp(&x_sp)?;
+                let cond = x_sp.greater(&twenty)?;
+                let sp = cond.where_(&x_sp, &safe)?;
+                let a_log_f32 = mlx::ops::cast::astype(&self.a_log, Dtype::Float32)?;
+                let exp_alog = a_log_f32.exp()?;
+                let neg_exp_alog = mlx::ops::binary::negative(&exp_alog)?;
+                let inner = &neg_exp_alog * &sp;
+                inner.exp()?
+            };
 
-        // Step 6: beta = sigmoid(b)
-        let beta = b.sigmoid_on(target)?;
+            // Step 6: beta = sigmoid(b)
+            let beta = b.sigmoid_on(target)?;
+            (g, beta)
+        };
         super::decoder_layer::prefill_stage(
             "gdn_conv_norm_gates",
             &[&q_scaled, &k_scaled, &v_per_head, &g, &beta],

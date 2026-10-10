@@ -171,7 +171,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     #expect(en["ariaLabel"] as? String == "M5 DFlash2 Profile help")
     #expect(en["role"] as? String == "tooltip")
     #expect(en["title"] as? String == "About the M5 DFlash2 Profile")
-    #expect(en["body"] as? String == "On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings.")
+    #expect(en["body"] as? String == "On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings. Qwen 3.6 35B A3B currently uses the generic path.")
     #expect(en["hiddenOpacity"] as? String == "0")
     #expect(en["focusOpen"] as? Bool == true)
     #expect(en["shownOpacity"] as? String == "1")
@@ -185,7 +185,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     #expect(zh["desc"] as? String == "在支持的设备上自动优化 DFlash2 推理。")
     #expect(zh["ariaLabel"] as? String == "M5 DFlash2 优化配置说明")
     #expect(zh["title"] as? String == "关于 M5 DFlash2 优化配置")
-    #expect(zh["body"] as? String == "在 Apple M5（GPU 第 17 代）及更新机型上，DFlash2 服务启用针对 M5 调优的内核、树式草稿和负载下的合批；各项不适用时自动回退。关闭后使用通用设置。")
+    #expect(zh["body"] as? String == "在 Apple M5（GPU 第 17 代）及更新机型上，DFlash2 服务启用针对 M5 调优的内核、树式草稿和负载下的合批；各项不适用时自动回退。关闭后使用通用设置。Qwen 3.6 35B A3B 目前使用通用路径。")
     try await snapshot(webView, named: "settings-m5-advanced-help-zh")
 
     // Hover opens the same tooltip; Escape closes it.

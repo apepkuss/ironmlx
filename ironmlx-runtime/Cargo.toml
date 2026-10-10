@@ -78,6 +78,16 @@ path = "src/bin/dflash2-tree-batch-diagnostic.rs"
 required-features = ["tools"]
 
 [[bin]]
+name = "dflash2-moe-bench"
+path = "src/bin/dflash2-moe-bench.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "qwen36-moe-logits-dump"
+path = "src/bin/qwen36-moe-logits-dump.rs"
+required-features = ["tools"]
+
+[[bin]]
 name = "dflash2-ragged-batch-prototype"
 path = "src/bin/dflash2-ragged-batch-prototype.rs"
 required-features = ["tools"]

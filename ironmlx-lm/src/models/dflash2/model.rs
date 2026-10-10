@@ -4,22 +4,73 @@ use anyhow::anyhow;
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use crate::core::Loader;
-use crate::models::Qwen35Config;
 use crate::nn::{Linear, RmsNorm};
 use crate::Result;
 
 use super::attention::DFlash2KvCache;
-use super::config::DFlash2Config;
+use super::config::{DFlash2Config, DFlash2TargetSpec};
 use super::layer::DFlash2DecoderLayer;
 use super::selector::DFlash2CandidateSelector;
 use super::{load_linear, DFlash2DraftTree, DFlash2Target};
 
+/// Precision of the draft projections as loaded, read from the projection
+/// objects themselves rather than from the requested option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DFlash2DraftPrecision {
+    /// Projection objects inspected (fused storage and its row views each count).
+    pub projections: usize,
+    /// Affine bits shared by every projection; `None` when all are unquantized.
+    pub bits: Option<i32>,
+}
+
 #[derive(Clone)]
 pub struct DFlash2DraftCache {
     layers: Vec<DFlash2KvCache>,
+    /// Tokens of this request outside the target's draft vocabulary, in
+    /// order of first appearance (prompt, then generated window anchors);
+    /// greedy drafts may propose them too (see
+    /// [`DFlash2Target::dflash2_draft_vocab_project_on`]).
+    extra_vocab: Vec<u32>,
+    extra_seen: std::collections::HashSet<u32>,
 }
 
+/// Most request tokens added to a draft vocabulary.
+const MAX_EXTRA_VOCAB: usize = 4096;
+
 impl DFlash2DraftCache {
+    fn from_layers(layers: Vec<DFlash2KvCache>) -> Self {
+        Self {
+            layers,
+            extra_vocab: Vec::new(),
+            extra_seen: std::collections::HashSet::new(),
+        }
+    }
+
+    /// Request tokens the target's draft vocabulary lacks, in order of first
+    /// appearance.
+    pub fn extra_vocab(&self) -> &[u32] {
+        &self.extra_vocab
+    }
+
+    /// Record request tokens (prompt or generated) that the target's draft
+    /// vocabulary lacks, so later drafts can propose them.
+    pub fn note_tokens<T: DFlash2Target>(
+        &mut self,
+        target_model: &T,
+        tokens: &[u32],
+    ) -> Result<()> {
+        for &token in tokens {
+            if self.extra_vocab.len() >= MAX_EXTRA_VOCAB {
+                break;
+            }
+            if !self.extra_seen.contains(&token) && target_model.dflash2_draft_vocab_lacks(token)? {
+                self.extra_seen.insert(token);
+                self.extra_vocab.push(token);
+            }
+        }
+        Ok(())
+    }
+
     pub fn position_signature(&self) -> Result<(i32, i32)> {
         let first = self
             .layers
@@ -53,7 +104,7 @@ impl DFlash2DraftCache {
                 .collect::<Vec<_>>();
             layers.push(DFlash2KvCache::stack_rows_on(&layer_rows, target)?);
         }
-        Ok(Self { layers })
+        Ok(Self::from_layers(layers))
     }
 
     pub fn row_on(&self, row: usize, target: StreamOrDevice) -> Result<Self> {
@@ -61,11 +112,12 @@ impl DFlash2DraftCache {
             .iter()
             .map(|layer| layer.row_on(row, target))
             .collect::<Result<Vec<_>>>()
-            .map(|layers| Self { layers })
+            .map(Self::from_layers)
     }
 }
 
 pub struct DFlash2DraftModel {
+    instance: super::DFlash2Instance,
     config: DFlash2Config,
     fc: Linear,
     hidden_norm: RmsNorm,
@@ -83,7 +135,7 @@ pub struct DFlash2TreeSpec {
 impl DFlash2DraftModel {
     pub fn from_loader(
         loader: &Loader,
-        target: &Qwen35Config,
+        target: impl Into<DFlash2TargetSpec>,
         draft_bits: Option<i32>,
     ) -> Result<Self> {
         if loader.quant_meta().is_some() {
@@ -92,7 +144,7 @@ impl DFlash2DraftModel {
             ));
         }
         let config = DFlash2Config::from_loader(loader)?;
-        config.ensure_target_compatible(target)?;
+        config.ensure_target_compatible(&target.into())?;
         validate_tensor_manifest(loader, &config)?;
         let mut layers = Vec::with_capacity(config.num_hidden_layers as usize);
         for index in 0..config.num_hidden_layers {
@@ -101,6 +153,7 @@ impl DFlash2DraftModel {
             )?);
         }
         Ok(Self {
+            instance: super::DFlash2Instance::new(),
             fc: load_linear(loader, "fc", draft_bits)?,
             hidden_norm: RmsNorm::from_loader(loader, "hidden_norm", config.rms_norm_eps)?,
             norm: RmsNorm::from_loader(loader, "norm", config.rms_norm_eps)?,
@@ -114,12 +167,67 @@ impl DFlash2DraftModel {
         &self.config
     }
 
+    /// Identity of this loaded drafter.
+    pub fn instance(&self) -> &super::DFlash2Instance {
+        &self.instance
+    }
+
+    /// Precision of every projection as loaded. Norms, convolution base
+    /// kernels and selector codebooks are never quantized and are not counted.
+    /// Mixed precision is an error: runtime quantization applies to all of them.
+    pub fn projection_precision(&self) -> Result<DFlash2DraftPrecision> {
+        let mut projections = vec![&self.fc, self.selector.projection()];
+        for layer in &self.layers {
+            projections.extend(layer.projections());
+        }
+        let bits: Vec<Option<i32>> = projections
+            .iter()
+            .map(|projection| projection.quantized_parts().map(|parts| parts.bits))
+            .collect();
+        let first = bits[0];
+        anyhow::ensure!(
+            bits.iter().all(|value| *value == first),
+            "DFlash2 draft projections have mixed precision: {bits:?}"
+        );
+        Ok(DFlash2DraftPrecision {
+            projections: bits.len(),
+            bits: first,
+        })
+    }
+
     pub fn make_cache(&self, initial_offset: i32) -> Result<DFlash2DraftCache> {
         let max_size = self.config.sliding_window - 1;
         let layers = (0..self.layers.len())
             .map(|_| DFlash2KvCache::new(max_size, initial_offset))
             .collect::<Result<Vec<_>>>()?;
-        Ok(DFlash2DraftCache { layers })
+        Ok(DFlash2DraftCache::from_layers(layers))
+    }
+
+    /// Before serving: one greedy proposal of every block length so the
+    /// drafter's kernel libraries and compiled graphs exist before scored
+    /// requests.
+    pub fn prewarm_on<T: DFlash2Target>(&self, target_model: &T) -> Result<()> {
+        let started = std::time::Instant::now();
+        let target = StreamOrDevice::default();
+        let context_dim = self.config.hidden_size
+            * i32::try_from(self.config.dflash_config.target_layer_ids.len())?;
+        let mask = self.config.dflash_config.mask_token_id;
+        for length in 2..=self.config.dflash_config.block_size {
+            let mut cache = self.make_cache(0)?;
+            let mut block = vec![1000_u32];
+            block.resize(length as usize, mask);
+            let block: Array = (&block[..], &[1_i32, length][..]).try_into()?;
+            let dtype = target_model.dflash2_embed_on(&block, target)?.dtype();
+            let context = Array::zeros((1_i32, 4_i32, context_dim), dtype)?;
+            let tokens =
+                self.propose_greedy_on(target_model, &block, &context, &mut cache, target)?;
+            mlx::transforms::eval(&[&tokens])?;
+        }
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "DFlash2 drafter prewarmed"
+        );
+        Ok(())
     }
 
     pub fn propose_greedy_on<T: DFlash2Target>(
@@ -131,10 +239,25 @@ impl DFlash2DraftModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
-        let (proposal_hidden, logits, anchor) =
+        let _native_walk = target_model
+            .dflash2_draft_fast_paths()
+            .then(super::selector::native_walk_scope);
+        self.validate_proposal(input_ids, target_hidden, cache, false)?;
+        // The window anchor (the last committed token) joins the request's
+        // draft vocabulary before this projection when the target restricts it.
+        if input_ids.shape().as_slice()[0] == 1 && target_model.dflash2_draft_vocab_enabled()? {
+            let anchor = input_ids.to_vec::<u32>()?;
+            cache.note_tokens(target_model, &anchor[..1])?;
+        }
+        let (proposal_hidden, logits, vocab_ids, anchor) =
             self.proposal_lattice_on(target_model, input_ids, target_hidden, cache, target, false)?;
-        self.selector
-            .select_greedy_on(&proposal_hidden, &logits, &anchor, target)
+        self.selector.select_greedy_on(
+            &proposal_hidden,
+            &logits,
+            vocab_ids.as_ref(),
+            &anchor,
+            target,
+        )
     }
 
     /// Greedy proposals for rows at different draft-cache positions (each
@@ -235,7 +358,8 @@ impl DFlash2DraftModel {
             &[1_i32, 1, 1][..],
             target,
         )?;
-        let logits = target_model.dflash2_project_hidden_on(&proposal_hidden, target)?;
+        let (logits, vocab_ids) =
+            draft_logits_on(target_model, &proposal_hidden, true, &[], target)?;
         let anchor = mlx::ops::indexing::slice_strided_on(
             input_ids,
             &[0_i32, 0][..],
@@ -243,8 +367,16 @@ impl DFlash2DraftModel {
             &[1_i32, 1][..],
             target,
         )?;
-        self.selector
-            .select_greedy_on(&proposal_hidden, &logits, &anchor, target)
+        let _native_walk = target_model
+            .dflash2_draft_fast_paths()
+            .then(super::selector::native_walk_scope);
+        self.selector.select_greedy_on(
+            &proposal_hidden,
+            &logits,
+            vocab_ids.as_ref(),
+            &anchor,
+            target,
+        )
     }
 
     pub fn propose_tree_on<T: DFlash2Target>(
@@ -257,7 +389,7 @@ impl DFlash2DraftModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<DFlash2DraftTree> {
         let target = target.into();
-        let (proposal_hidden, logits, anchor) =
+        let (proposal_hidden, logits, _, anchor) =
             self.proposal_lattice_on(target_model, input_ids, target_hidden, cache, target, true)?;
         self.selector.select_tree_on(
             &proposal_hidden,
@@ -269,15 +401,15 @@ impl DFlash2DraftModel {
         )
     }
 
-    fn proposal_lattice_on<T: DFlash2Target>(
+    /// Shape checks of a proposal input, before anything reads or changes the
+    /// cache.
+    fn validate_proposal(
         &self,
-        target_model: &T,
         input_ids: &Array,
         target_hidden: &Array,
-        cache: &mut DFlash2DraftCache,
-        target: StreamOrDevice,
+        cache: &DFlash2DraftCache,
         tree: bool,
-    ) -> Result<(Array, Array, Array)> {
+    ) -> Result<()> {
         let input_shape = input_ids.shape();
         let input_dims = input_shape.as_slice();
         let maximum = if tree && super::experimental_tree_profile() {
@@ -296,8 +428,6 @@ impl DFlash2DraftModel {
             ));
         }
         let batch = input_dims[0];
-        let _batch_stable_qmm = (batch > 1).then(crate::nn::batch_stable_qmm::linear_scope);
-        let _drafter_fusion = crate::nn::dflash2_drafter_fusion::scope();
         let hidden_shape = target_hidden.shape();
         let hidden_dims = hidden_shape.as_slice();
         let expected_context = self.config.hidden_size
@@ -311,7 +441,7 @@ impl DFlash2DraftModel {
                 "DFlash2 target hidden must be [B,S,{expected_context}] with B={batch}, got {hidden_dims:?}"
             ));
         }
-        if cache.layers.len() != self.layers.len() {
+        if cache.layers.is_empty() || cache.layers.len() != self.layers.len() {
             return Err(anyhow!(
                 "DFlash2 cache layer count {} != model layer count {}",
                 cache.layers.len(),
@@ -326,7 +456,26 @@ impl DFlash2DraftModel {
         {
             return Err(anyhow!("DFlash2 draft cache layer offsets diverged"));
         }
+        Ok(())
+    }
 
+    fn proposal_lattice_on<T: DFlash2Target>(
+        &self,
+        target_model: &T,
+        input_ids: &Array,
+        target_hidden: &Array,
+        cache: &mut DFlash2DraftCache,
+        target: StreamOrDevice,
+        tree: bool,
+    ) -> Result<(Array, Array, Option<Array>, Array)> {
+        self.validate_proposal(input_ids, target_hidden, cache, tree)?;
+        let input_shape = input_ids.shape();
+        let input_dims = input_shape.as_slice();
+        let batch = input_dims[0];
+        let _batch_stable_qmm = (batch > 1).then(crate::nn::batch_stable_qmm::linear_scope);
+        let _drafter_fusion = crate::nn::dflash2_drafter_fusion::scope();
+        let hidden_shape = target_hidden.shape();
+        let hidden_dims = hidden_shape.as_slice();
         let mut hidden = target_model.dflash2_embed_on(input_ids, target)?;
         let context = self
             .hidden_norm
@@ -339,8 +488,17 @@ impl DFlash2DraftModel {
             hidden.dtype(),
             target,
         )?;
+        // Hand the context projection and every layer to the GPU as soon as
+        // it is built: drafting starts while the rest of its graph is encoded.
+        let staged = target_model.dflash2_draft_fast_paths();
+        if staged {
+            mlx::transforms::async_eval(&[&context, &hidden])?;
+        }
         for (layer, layer_cache) in self.layers.iter().zip(cache.layers.iter_mut()) {
             hidden = layer.forward_on(&hidden, &context, &mask, layer_cache, target)?;
+            if staged {
+                mlx::transforms::async_eval(&[&hidden])?;
+            }
         }
         hidden = self.norm.forward_on(&hidden, target)?;
         let proposal_hidden = mlx::ops::indexing::slice_strided_on(
@@ -350,7 +508,13 @@ impl DFlash2DraftModel {
             &[1_i32, 1, 1][..],
             target,
         )?;
-        let logits = target_model.dflash2_project_hidden_on(&proposal_hidden, target)?;
+        let extra = if batch == 1 {
+            cache.extra_vocab.clone()
+        } else {
+            Vec::new()
+        };
+        let (logits, vocab_ids) =
+            draft_logits_on(target_model, &proposal_hidden, !tree, &extra, target)?;
         let anchor = mlx::ops::indexing::slice_strided_on(
             input_ids,
             &[0_i32, 0][..],
@@ -358,8 +522,34 @@ impl DFlash2DraftModel {
             &[1_i32, 1][..],
             target,
         )?;
-        Ok((proposal_hidden, logits, anchor))
+        Ok((proposal_hidden, logits, vocab_ids, anchor))
     }
+}
+
+/// Draft logits of `proposal_hidden`: on the target's draft vocabulary when
+/// `subset` and the target has one (with its token ids), else on the full
+/// vocabulary.
+fn draft_logits_on<T: DFlash2Target>(
+    target_model: &T,
+    proposal_hidden: &Array,
+    subset: bool,
+    extra: &[u32],
+    target: StreamOrDevice,
+) -> Result<(Array, Option<Array>)> {
+    let _row_stable = target_model
+        .dflash2_draft_fast_paths()
+        .then(crate::nn::rs4_qmm::scope);
+    if subset {
+        if let Some((logits, ids)) =
+            target_model.dflash2_draft_vocab_project_on(proposal_hidden, extra, target)?
+        {
+            return Ok((logits, Some(ids)));
+        }
+    }
+    Ok((
+        target_model.dflash2_project_hidden_on(proposal_hidden, target)?,
+        None,
+    ))
 }
 
 fn build_block_mask(
@@ -390,7 +580,9 @@ fn validate_tensor_manifest(loader: &Loader, cfg: &DFlash2Config) -> Result<()> 
     let kv = cfg.num_key_value_heads * cfg.head_dim;
     let groups = h / cfg.dflash_config.conv_group_size;
     let kernel_projection = 2 * cfg.dflash_config.conv_kernel_size * groups;
-    expected.insert("fc.weight".to_owned(), vec![h, h * cfg.num_hidden_layers]);
+    // `fc` consumes the concatenated target taps, not one vector per draft
+    // layer.
+    expected.insert("fc.weight".to_owned(), vec![h, cfg.context_width()?]);
     expected.insert("hidden_norm.weight".to_owned(), vec![h]);
     expected.insert("norm.weight".to_owned(), vec![h]);
     expected.insert(

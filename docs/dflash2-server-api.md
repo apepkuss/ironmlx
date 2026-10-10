@@ -18,8 +18,10 @@ Recorded validation covers:
 | --- | --- |
 | Target | `mlx-community/Qwen3.8-27B-4bit` or `mlx-community/Qwen3.8-27B-8bit` |
 | Draft | `z-lab/Qwen3.8-27B-DFlash2` |
+| Target (MoE) | `mlx-community/Qwen3.6-35B-A3B-4bit`, `-5bit`, `-6bit` or `-8bit` |
+| Draft (MoE) | `incoai/Qwen3.6-35B-A3B-DFlash2` (BF16) |
 
-Text only: no image/video requests, and the draft cannot be loaded as a normal base model. Targets must use affine 4-bit or 8-bit; other quantized or unquantized targets are not marked compatible by the App.
+Text only: no image/video requests, and the draft cannot be loaded as a normal base model. Qwen3.8 targets must use affine 4-bit or 8-bit; Qwen3.6 35B A3B targets have their own limits, described in [Qwen3.6 35B A3B (MoE)](#qwen36-35b-a3b-moe). Other quantized or unquantized targets are not marked compatible by the App.
 
 ## Startup example
 
@@ -51,13 +53,36 @@ The recorded `z-lab/Qwen3.8-27B-DFlash2` checkpoint declares block size 8, so au
 
 ## App configuration
 
-The scanner identifies `DFlash2DraftModel` as an auxiliary artifact. A draft appears in the selector only if it satisfies backend constraints and matches the target's hidden/intermediate size, vocabulary, context length, layer count, RMS epsilon and RoPE theta. Incomplete or incompatible artifacts are rejected.
+The scanner identifies `DFlash2DraftModel` as an auxiliary artifact. A draft appears in the selector only if it satisfies backend constraints and matches the target's hidden size, vocabulary, context length, layer count, RMS epsilon and RoPE theta. FFN widths are not compared because the draft has its own FFN, and the number of target taps is independent of the draft's depth. Incomplete or incompatible artifacts are rejected.
 
 Dashboard exposes the DFlash2 switch, compatible draft, block size, draft precision and Tensor Batch limit. An empty block size uses the selected checkpoint width capped at Q8. An empty tensor batch limit uses the backend default of 4. The effective tensor batch width is also bounded by Max Sequences.
 Enabling DFlash2 retains one default target and restarts the backend into the fixed target/draft actor. Disabling or changing its settings also requires a controlled restart. Validation, startup or recovery failure restores the prior configuration and model parameters, then restarts the previous path.
 
 The App retains `GET /v1/models` with the stable target ID but no dynamic model-management API. Dashboard and menu bar recover target/draft state from health and saved settings without exposing the draft as an ordinary model.
+The loaded DFlash2 target can be pinned from the model list. The DFlash2 server never unloads its target automatically, so the pin is kept in the App configuration without a backend call; when DFlash2 is turned off, the target reloads through the engine pool with the pin and stays exempt from TTL auto-unload and automatic release.
 Dashboard shows target/draft, block size, precision, TPS, acceptance rate, windows, rollbacks, residual corrections and peak memory. Health and diagnostics also include tensor width limit, observed maximum width, windows, group count and divergence splits.
+
+## Qwen3.6 35B A3B (MoE)
+
+The MoE combination runs through its own target implementation and qualification, independent of Qwen3.8. It does not inherit Qwen3.8 profiles, tree defaults, draft-precision options or batching.
+
+| Item | Limit |
+| --- | --- |
+| Target recipe | Affine, group size 64, 4/5/6/8 bits, with exactly the 8-bit `mlp.gate` and `shared_expert_gate` overrides the mlx-community checkpoints ship. Other recipes (including OptiQ) are rejected at load time. |
+| Draft precision | The BF16 checkpoint is quantized at load to affine 4-bit (group size 64) by default (`--dflash2-draft-bits 4`); `0` keeps it in BF16. `8` is rejected. The App offers 4-bit (default) and BF16. The startup log's `draft_loaded_precision` reports the precision read back from the loaded projections. |
+| Verify width | Up to 8 for every bit width. When `--dflash2-block-size` is omitted the checkpoint width is capped at 8; an explicit value above 8 is an error. |
+| Execution | B1 only. `--max-sequences` still bounds how many requests are active, but every target forward carries one request: active requests take turns window by window, and cross-request tensor batching is disabled. |
+| Tree | `--dflash2-tree-max-nodes` 1–15 enables the flat tree for greedy, unconstrained requests. Sampled requests and requests with a constraint (including the reasoning budget attached to thinking-enabled requests) run linear windows instead; `tree_fallback_linear_windows` counts them and the server logs the reason once. |
+| Sampling | Exact speculative sampling is supported. `--dflash2-position-keyed-sampling` is rejected for this target. |
+
+Every greedy result, linear or tree, is token-identical to ordinary decoding of the same target (except with the affine4 projection variable below). Linear windows are the default because the tree measured slower than linear windows at every bit width on M5 Max.
+
+The M5 profile (`--m5-dflash2-profile`) uses its own MoE table, which is currently empty: no MoE setting showed an end-to-end gain, so the profile does not change MoE execution. `status=active` only means the profile is installed for this GPU; what it turns on is the startup log's `effective_settings` (`none` for MoE by default) and the non-null values in `healthz.dflash2.m5_profile.settings`. `healthz.dflash2.m5_profile.target` reports `qwen36-moe`, `status` is `target_not_qualified` for a target outside the qualified recipes, and `settings` lists two experimental opt-in variables:
+
+| Variable | Effect |
+| --- | --- |
+| `IRONMLX_EXPERIMENTAL_M5_MOE_GROUPED_QMV=1` | Shares each routed expert's weights across verify rows (affine6/8, 8+ rows). Bit-identical to ordinary decoding. |
+| `IRONMLX_EXPERIMENTAL_M5_MOE_AFFINE4_PROJECTIONS=1` | M5 tensor-unit projections for the affine4 target. Deterministic, but output differs from ordinary MLX decoding; the execution fingerprint reports `projections=m5-affine4-v1`. Needs a real Apple GPU of generation 17 or newer: elsewhere the variable is ignored with a warning, the generic projections run, and `settings` reports it as null. |
 
 ## Execution and concurrency
 

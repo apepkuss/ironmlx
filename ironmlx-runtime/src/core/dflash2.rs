@@ -13,10 +13,13 @@ use mlx::{Array, StreamOrDevice};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::core::dflash2_budget::{
+    DFlash2BudgetPolicyKind, DFlash2DraftBudgetPolicy, DFlash2PolicyDomain, DFlash2WindowRole,
+};
 use crate::core::generation_types::{GenerateEvent, GenerateRequest};
 use crate::core::speculative::{
     resolve_exact_deterministic_target_logits, resolve_exact_deterministic_target_tokens,
-    sample_logits_positions, ExactSamplingCounters, MtpDraftPolicyWindow, QwenMtpDraftPolicyState,
+    sample_logits_positions, ExactSamplingCounters, MtpDraftPolicyWindow,
 };
 use crate::Result;
 use ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntry;
@@ -398,12 +401,24 @@ pub struct DFlash2Metrics {
     pub ordinary_windows: usize,
     pub tree_windows: usize,
     pub tree_drafted_nodes: usize,
+    /// Windows that ran linear DFlash2 although a tree was configured
+    /// (for example sampled or constrained requests).
+    pub tree_fallback_linear_windows: usize,
+    pub tree_fallback_reason: Option<&'static str>,
     pub ragged_linear_windows: usize,
     pub tree_to_ragged_switches: usize,
     pub ragged_to_tree_switches: usize,
     pub draft_budget_changes: usize,
     pub current_draft_budget: usize,
     pub adaptive_acceptance_ewma: Option<f64>,
+    /// `legacy` (shared Qwen MTP policy), `window-cost`, or `fixed`.
+    pub budget_policy: &'static str,
+    /// Windows per drafted width (index 0 = ordinary windows).
+    pub budget_windows: Vec<usize>,
+    /// Measured window time per drafted width.
+    pub budget_window_us: Vec<u64>,
+    pub budget_probe_windows: usize,
+    pub budget_calibration_windows: usize,
     pub exact_sampling_windows: usize,
     pub exact_acceptance_draws: usize,
     pub exact_residual_corrections: usize,
@@ -428,6 +443,8 @@ pub struct DFlash2Metrics {
 #[derive(Debug, Clone, Default)]
 struct DFlash2Counters {
     windows: usize,
+    tree_fallback_linear_windows: usize,
+    tree_fallback_reason: Option<&'static str>,
     drafted_tokens: usize,
     accepted_draft_tokens: usize,
     rollback_count: usize,
@@ -440,6 +457,10 @@ struct DFlash2Counters {
     tree_to_ragged_switches: usize,
     ragged_to_tree_switches: usize,
     draft_budget_changes: usize,
+    budget_windows: Vec<usize>,
+    budget_window_us: Vec<u64>,
+    budget_probe_windows: usize,
+    budget_calibration_windows: usize,
     exact_sampling: ExactSamplingCounters,
     draft_build_us: u64,
     draft_schedule_us: u64,
@@ -503,6 +524,17 @@ struct DFlash2PrefillContext<'a> {
     is_cancelled: Option<&'a dyn Fn() -> bool>,
 }
 
+/// The loaded target/drafter pair for the budget policy memory; `None` for a
+/// target without a loaded-instance identity (its streams share nothing).
+fn policy_domain<M: DFlash2Target + ?Sized>(
+    model: &M,
+    draft: &DFlash2DraftModel,
+) -> Option<DFlash2PolicyDomain> {
+    model
+        .dflash2_instance()
+        .map(|target| DFlash2PolicyDomain::new(target.downgrade(), draft.instance().downgrade()))
+}
+
 fn experimental_fixed_budget(maximum: usize) -> Result<Option<usize>> {
     let Some(raw) =
         ironmlx_core::m5_profile::setting(ironmlx_core::m5_profile::settings::DFLASH2_FIXED_BUDGET)
@@ -534,7 +566,7 @@ where
     detok: DecodeStream<'m>,
     pending_context_hidden: Array,
     verify_capabilities: DFlash2VerifyCapabilities,
-    draft_policy: QwenMtpDraftPolicyState,
+    draft_policy: DFlash2DraftBudgetPolicy,
     experimental_fixed_budget: Option<usize>,
     prng_state: Array,
     block_size: usize,
@@ -995,7 +1027,8 @@ where
                 &mut constraint,
             )?;
             commit_constraint_token(&mut constraint, first_token)?;
-            let draft_cache = draft.make_cache(initial_offset)?;
+            let mut draft_cache = draft.make_cache(initial_offset)?;
+            draft_cache.note_tokens(model, &request.prompt_ids)?;
             let mut history = request.prompt_ids.clone();
             history.push(first_token);
             let mut pending_tokens = VecDeque::new();
@@ -1022,7 +1055,14 @@ where
                 detok: tokenizer.decode_stream(true),
                 pending_context_hidden: row_context,
                 verify_capabilities,
-                draft_policy: QwenMtpDraftPolicyState::new(max_draft_tokens),
+                draft_policy: DFlash2DraftBudgetPolicy::with_memory(
+                    DFlash2BudgetPolicyKind::resolve(
+                        model.dflash2_window_cost_budget_policy(),
+                        options.tree_max_nodes > 0,
+                    )?,
+                    max_draft_tokens,
+                    policy_domain(model, draft),
+                ),
                 experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
                 prng_state,
                 block_size,
@@ -1259,7 +1299,8 @@ where
         let initial_offset = prompt_len_i32
             .checked_sub(retained_len)
             .ok_or_else(|| anyhow!("DFlash2 retained context exceeds prompt length"))?;
-        let draft_cache = draft.make_cache(initial_offset)?;
+        let mut draft_cache = draft.make_cache(initial_offset)?;
+        draft_cache.note_tokens(model, &request.prompt_ids)?;
 
         let mut history = request.prompt_ids.clone();
         history.push(first_token);
@@ -1288,7 +1329,14 @@ where
             detok: tokenizer.decode_stream(true),
             pending_context_hidden: context_hidden,
             verify_capabilities,
-            draft_policy: QwenMtpDraftPolicyState::new(max_draft_tokens),
+            draft_policy: DFlash2DraftBudgetPolicy::with_memory(
+                DFlash2BudgetPolicyKind::resolve(
+                    model.dflash2_window_cost_budget_policy(),
+                    p2_options.tree_max_nodes > 0,
+                )?,
+                max_draft_tokens,
+                policy_domain(model, draft),
+            ),
             experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
             prng_state,
             block_size,
@@ -1338,12 +1386,23 @@ where
             ordinary_windows: self.counters.ordinary_windows,
             tree_windows: self.counters.tree_windows,
             tree_drafted_nodes: self.counters.tree_drafted_nodes,
+            tree_fallback_linear_windows: self.counters.tree_fallback_linear_windows,
+            tree_fallback_reason: self.counters.tree_fallback_reason,
             ragged_linear_windows: self.counters.ragged_linear_windows,
             tree_to_ragged_switches: self.counters.tree_to_ragged_switches,
             ragged_to_tree_switches: self.counters.ragged_to_tree_switches,
             draft_budget_changes: self.counters.draft_budget_changes,
             current_draft_budget: self.current_draft_budget(),
             adaptive_acceptance_ewma: self.draft_policy.acceptance_ewma(),
+            budget_policy: if self.experimental_fixed_budget.is_some() {
+                "fixed"
+            } else {
+                self.draft_policy.kind().name()
+            },
+            budget_windows: self.counters.budget_windows.clone(),
+            budget_window_us: self.counters.budget_window_us.clone(),
+            budget_probe_windows: self.counters.budget_probe_windows,
+            budget_calibration_windows: self.counters.budget_calibration_windows,
             exact_sampling_windows: self.counters.exact_sampling.windows,
             exact_acceptance_draws: self.counters.exact_sampling.acceptance_draws,
             exact_residual_corrections: self.counters.exact_sampling.residual_corrections,
@@ -1537,19 +1596,57 @@ where
         } else if self.tree_eligible() {
             self.fill_tree_window(current_token)
         } else {
+            if self.p2_options.tree_max_nodes > 0 {
+                if self.counters.tree_fallback_linear_windows == 0 {
+                    tracing::info!(
+                        target: "ironmlx::dflash2",
+                        reason = self.tree_ineligible_reason(),
+                        tree_max_nodes = self.p2_options.tree_max_nodes,
+                        "DFlash2 tree configured but this request runs linear windows"
+                    );
+                }
+                self.counters.tree_fallback_linear_windows += 1;
+                self.counters.tree_fallback_reason = Some(self.tree_ineligible_reason());
+            }
             self.fill_window(current_token)
         }
     }
 
     fn tree_eligible(&self) -> bool {
-        self.p2_options.tree_max_nodes > 0
-            && self.constraint.is_none()
-            && (self.request.sampler.is_greedy() || self.request.sampler.uses_position_keyed_v1())
+        if self.p2_options.tree_max_nodes == 0 || self.constraint.is_some() {
+            return false;
+        }
+        if self.target_flat_tree() {
+            // A target-certified flat tree is greedy only; sampled requests
+            // keep linear DFlash2 windows.
+            return self.request.sampler.is_greedy();
+        }
+        (self.request.sampler.is_greedy() || self.request.sampler.uses_position_keyed_v1())
             && self
                 .verify_capabilities
                 .lane_kernel_pack
                 .as_ref()
                 .is_some_and(|pack| pack.quant_bits == 4)
+    }
+
+    /// Why a configured tree does not run for this request.
+    fn tree_ineligible_reason(&self) -> &'static str {
+        if self.constraint.is_some() {
+            "constrained_request"
+        } else if self.verify_capabilities.flat_tree_max_nodes > 0 && !self.target_flat_tree() {
+            "tree_size_not_certified"
+        } else if !self.request.sampler.is_greedy() {
+            "sampled_request"
+        } else {
+            "target_not_tree_certified"
+        }
+    }
+
+    /// Whether the target itself certifies a flat tree of the configured
+    /// size, independent of a lane kernel pack.
+    fn target_flat_tree(&self) -> bool {
+        self.verify_capabilities.flat_tree_max_nodes > 0
+            && self.p2_options.tree_max_nodes <= self.verify_capabilities.flat_tree_max_nodes
     }
 
     /// Prototype diagnostic: evaluate this stream's target cache buffers
@@ -2417,8 +2514,13 @@ where
                 "experimental tf-v1 proposal requires flat-tree verification"
             );
         }
+        let target_flat_tree = self.target_flat_tree();
         let draft_len = if tf_tree_profile {
             self.p2_options.tree_max_nodes.min(15)
+        } else if target_flat_tree {
+            // The lattice depth is bounded by the draft block; the node
+            // budget is bounded by the target's certified flat tree.
+            self.block_size.saturating_sub(1)
         } else {
             self.current_draft_budget()
         }
@@ -2447,7 +2549,9 @@ where
             .draft_build_us
             .saturating_add(elapsed_us(draft_started));
         StageClock::mark(&mut stage_clock, "draft", &[])?;
-        if ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::DFLASH2_FLAT_TREE) {
+        if target_flat_tree
+            || ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::DFLASH2_FLAT_TREE)
+        {
             return self.fill_flat_tree(
                 current_token,
                 &tree,
@@ -2676,8 +2780,15 @@ where
         mut stage_clock: Option<StageClock>,
     ) -> Result<()> {
         anyhow::ensure!(
-            self.request.sampler.is_greedy() && self.experimental_fixed_budget.is_some(),
-            "experimental flat tree requires greedy sampling and fixed draft budget"
+            self.request.sampler.is_greedy()
+                && (self.experimental_fixed_budget.is_some() || self.target_flat_tree()),
+            "flat tree requires greedy sampling and a fixed or target-certified tree budget"
+        );
+        anyhow::ensure!(
+            tree.tokens.len() <= self.p2_options.tree_max_nodes,
+            "DFlash2 flat tree has {} nodes, configured maximum is {}",
+            tree.tokens.len(),
+            self.p2_options.tree_max_nodes
         );
         let history_before = self.history.len();
         let mut tokens = vec![current_token];
@@ -3128,10 +3239,28 @@ where
     }
 
     fn observe_adaptive_window(&mut self, window: MtpDraftPolicyWindow) {
+        let role = if self.experimental_fixed_budget.is_some() {
+            DFlash2WindowRole::Exploit
+        } else {
+            self.draft_policy.window_role()
+        };
+        let width = window.attempted_draft_tokens;
+        if self.counters.budget_windows.len() <= width {
+            self.counters.budget_windows.resize(width + 1, 0);
+            self.counters.budget_window_us.resize(width + 1, 0);
+        }
+        self.counters.budget_windows[width] += 1;
+        self.counters.budget_window_us[width] =
+            self.counters.budget_window_us[width].saturating_add(window.measured_window_us());
+        match role {
+            DFlash2WindowRole::Probe => self.counters.budget_probe_windows += 1,
+            DFlash2WindowRole::Calibrate => self.counters.budget_calibration_windows += 1,
+            DFlash2WindowRole::Exploit => {}
+        }
         if self.experimental_fixed_budget.is_some() {
             return;
         }
-        let change = self.draft_policy.observe_external_window(window);
+        let change = self.draft_policy.observe(window);
         if change.reduced || change.increased {
             self.counters.draft_budget_changes =
                 self.counters.draft_budget_changes.saturating_add(1);
@@ -3209,6 +3338,9 @@ where
             // target context produced during the probe so its original
             // positions remain contiguous with the paused draft cache; the
             // draft cache performs its own sliding eviction when resumed.
+            // The window-cost policy never settles on budget 0 (it probes a
+            // drafting window within a bounded interval), so this context stays
+            // bounded and is consumed by the next drafting window.
             i32::MAX,
             StreamOrDevice::default(),
         )?;
@@ -4023,6 +4155,10 @@ fn rate_per_second(tokens: usize, elapsed_us: u64) -> f64 {
         tokens as f64 * 1_000_000.0 / elapsed_us as f64
     }
 }
+
+#[cfg(test)]
+#[path = "dflash2_moe_tests.rs"]
+mod moe_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4973,6 +5109,7 @@ mod tests {
                 state_layout: "test".to_owned(),
                 layer_submit_interval: 4,
             }),
+            flat_tree_max_nodes: 0,
         };
         let stable = extend_batched_q16_qualification_capabilities(capabilities.clone(), false)
             .expect("stable capabilities");

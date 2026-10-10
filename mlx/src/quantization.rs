@@ -198,6 +198,201 @@ pub fn quantized_matmul_on(
     Ok(Array::from_inner(inner))
 }
 
+/// The q and k RMS norms of a GatedDeltaNet with 128-wide heads in one
+/// dispatch, with the bits of the op-by-op path: MLX's `rms_norm` of each
+/// head vector (no weight, BF16 output) read from BF16 `src` `[..., C]` at
+/// column offsets `q_off` and `k_off`, then multiplied in float32 by `qscale`
+/// and `kscale`. Returns float32 `(q, k)` `[rows, heads, d]`.
+#[allow(clippy::too_many_arguments)]
+pub fn qk_norm_fused_on(
+    src: &Array,
+    heads: i32,
+    d: i32,
+    q_off: i32,
+    k_off: i32,
+    qscale: f32,
+    kscale: f32,
+    eps: f32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<(Array, Array)> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let v = mlx_sys::quantization::ffi::qk_norm_fused(
+        src.as_inner(),
+        heads,
+        d,
+        q_off,
+        k_off,
+        qscale,
+        kscale,
+        eps,
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
+    let qo = mlx_sys::array::ffi::split_result_at(&v, 0).map_err(Error::from)?;
+    let ko = mlx_sys::array::ffi::split_result_at(&v, 1).map_err(Error::from)?;
+    Ok((Array::from_inner(qo), Array::from_inner(ko)))
+}
+
+/// MLX's product-stable affine4 `qmv_fast_wide` kernel (the `qmv_fast`
+/// arithmetic of every row, independent of the row count) for BF16 `x`
+/// `[..., K]` against affine4/group-64 `w` `[N, K/8]`, with the rows split
+/// into the fewest threadgroups of at most `max_nv` (2..=5) equal rows.
+pub fn qmv_fast_wide_on(
+    x: &Array,
+    w: &Array,
+    scales: &Array,
+    biases: &Array,
+    max_nv: i32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = mlx_sys::quantization::ffi::qmv_fast_wide(
+        x.as_inner(),
+        w.as_inner(),
+        scales.as_inner(),
+        biases.as_inner(),
+        max_nv,
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// Greedy DFlash2 selector walk in one dispatch. For each row and position
+/// `p`, every candidate edge scores `unary + bf16(sum_d bf16(bf16(pred[d] *
+/// hidden[d]) * succ[d]))` (BF16 products summed in float, lane-strided then
+/// SIMD-reduced) against the previously chosen token (the anchor at `p = 0`);
+/// the first maximum is chosen. `candidates` `[B,L,K]` Uint32, `unary`
+/// `[B,L,K]`, `hidden` `[B,L,D]`, `anchor` `[B]` Uint32, codebooks `[V,D]`;
+/// returns `[B,L]` Uint32.
+#[allow(clippy::too_many_arguments)]
+pub fn dflash2_selector_walk_on(
+    candidates: &Array,
+    unary: &Array,
+    hidden: &Array,
+    anchor: &Array,
+    predecessor_codebook: &Array,
+    successor_codebook: &Array,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = mlx_sys::quantization::ffi::dflash2_selector_walk(
+        candidates.as_inner(),
+        unary.as_inner(),
+        hidden.as_inner(),
+        anchor.as_inner(),
+        predecessor_codebook.as_inner(),
+        successor_codebook.as_inner(),
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// The MoE router of the op-by-op path in one dispatch, with its bits: MLX's
+/// precise softmax over BF16 logits `[R, E]` (E a multiple of 128, at most
+/// 4096), the `k` largest probabilities as MLX's argpartition leaves them
+/// (ascending by probability, then expert id), and (when `norm`) each divided
+/// by their BF16 sum. Returns `(scores [R,k] BF16, indices [R,k] Uint32)`.
+pub fn router_topk_fused_on(
+    logits: &Array,
+    k: i32,
+    norm: bool,
+    target: impl Into<StreamOrDevice>,
+) -> Result<(Array, Array)> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let v = mlx_sys::quantization::ffi::router_topk_fused(
+        logits.as_inner(),
+        k,
+        norm,
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
+    let scores = mlx_sys::array::ffi::split_result_at(&v, 0).map_err(Error::from)?;
+    let inds = mlx_sys::array::ffi::split_result_at(&v, 1).map_err(Error::from)?;
+    Ok((Array::from_inner(scores), Array::from_inner(inds)))
+}
+
+/// Gated DeltaNet gates in one dispatch, with the bits of the op-by-op path
+/// (MLX's own operators, each step rounded as MLX rounds it): `g =
+/// exp(-exp(f32(a_log)) * f32(softplus(a + dt_bias)))` (float32, softplus in
+/// BF16 as `x > 20 ? x : logaddexp(0, x)`) and `beta = sigmoid(b)` (BF16), for
+/// BF16 `a`, `b` `[..., H]` and per-head `a_log`, `dt_bias` `[H]`.
+pub fn gdn_gates_fused_on(
+    a: &Array,
+    b: &Array,
+    a_log: &Array,
+    dt_bias: &Array,
+    target: impl Into<StreamOrDevice>,
+) -> Result<(Array, Array)> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let v = mlx_sys::quantization::ffi::gdn_gates_fused(
+        a.as_inner(),
+        b.as_inner(),
+        a_log.as_inner(),
+        dt_bias.as_inner(),
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
+    let g = mlx_sys::array::ffi::split_result_at(&v, 0).map_err(Error::from)?;
+    let beta = mlx_sys::array::ffi::split_result_at(&v, 1).map_err(Error::from)?;
+    Ok((Array::from_inner(g), Array::from_inner(beta)))
+}
+
+/// Row-stable affine4 (group 64, BF16) matmul of 1..=8 rows `x` `[M, K]`
+/// against `w` `[N, K/8]`, returning `[M, N]`. Each row's bits are the same
+/// at every row count and for every `kind` (0: one row, scalar; 5: two to
+/// four rows, scalar, rows staged in threadgroup memory; 2: MMA). `ks` K
+/// slices are part of the arithmetic; `r` (output rows per lane) and `sgs`
+/// (simdgroups per threadgroup) of kinds 0 and 5 are not, but must tile `N`
+/// exactly; kind 2 takes `r = sgs = 1`. Operands the kernels cannot cover
+/// return `Err`.
+#[allow(clippy::too_many_arguments)]
+pub fn row_stable_affine4_matmul_on(
+    x: &Array,
+    w: &Array,
+    scales: &Array,
+    biases: &Array,
+    kind: i32,
+    ks: i32,
+    r: i32,
+    sgs: i32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = mlx_sys::quantization::ffi::row_stable_affine4_matmul(
+        x.as_inner(),
+        w.as_inner(),
+        scales.as_inner(),
+        biases.as_inner(),
+        kind,
+        ks,
+        r,
+        sgs,
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
 /// Compute a quantized matmul while evaluating each leading batch matrix with
 /// the same matrix shape as an independent single-batch call.
 #[allow(clippy::too_many_arguments)]
