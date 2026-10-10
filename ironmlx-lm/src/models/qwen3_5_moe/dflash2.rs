@@ -10,9 +10,9 @@ use mlx::{Array, StreamOrDevice};
 
 use crate::core::cache::layer::{LayerCache, LayerCacheSnapshot};
 use crate::models::dflash2::{
-    DFlash2DraftTree, DFlash2HybridCacheGeometry, DFlash2Target, DFlash2TargetCacheCost,
-    DFlash2TargetForwardMode, DFlash2TargetOutput, DFlash2TargetSpec, DFlash2VerifyCapabilities,
-    DFlash2VerifyShape,
+    DFlash2DraftTree, DFlash2HybridCacheGeometry, DFlash2Instance, DFlash2Target,
+    DFlash2TargetCacheCost, DFlash2TargetForwardMode, DFlash2TargetOutput, DFlash2TargetSpec,
+    DFlash2VerifyCapabilities, DFlash2VerifyShape,
 };
 use crate::Result;
 
@@ -162,9 +162,77 @@ impl DFlash2Target for Qwen35MoeModel {
         self.config().into()
     }
 
+    fn dflash2_prewarm(&self) -> Result<()> {
+        if self.dflash2_target_bits.is_none() {
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        let target = StreamOrDevice::default();
+        let mut cache = self.make_cache(1, 64, crate::core::Model::cache_dtype(self))?;
+        let ids = |start: u32, len: usize| -> Result<Array> {
+            let tokens: Vec<u32> = (0..len as u32).map(|i| start + i).collect();
+            Ok((&tokens[..], &[1_i32, len as i32][..]).try_into()?)
+        };
+        let taps = [0_usize];
+        let prefill = self.dflash2_forward_target_on(
+            &ids(1000, 8)?,
+            &crate::core::model_input::build_position_ids(0, 8)?,
+            Some(&mut cache),
+            &taps,
+            DFlash2TargetForwardMode::Prefill,
+            target,
+        )?;
+        mlx::transforms::eval(&[&prefill.hidden, &prefill.context_hidden])?;
+        let base: Vec<_> = cache.iter().map(LayerCache::snapshot).collect();
+        let widths = 1..=self.dflash2_max_verify_width().max(1);
+        for width in widths {
+            for layer in cache.iter_mut() {
+                layer.begin_speculative_prefix_capture()?;
+            }
+            let mode = if width == 1 {
+                DFlash2TargetForwardMode::OrdinaryDecode
+            } else {
+                DFlash2TargetForwardMode::GreedyVerify
+            };
+            let output = self.dflash2_forward_target_on(
+                &ids(2000, width)?,
+                &crate::core::model_input::build_position_ids(8, width as i32)?,
+                Some(&mut cache),
+                &taps,
+                mode,
+                target,
+            )?;
+            let logits = self.dflash2_project_hidden_on(&output.hidden, target)?;
+            mlx::transforms::eval(&[&logits, &output.context_hidden])?;
+            for (layer, snapshot) in cache.iter_mut().zip(&base) {
+                layer.discard_speculative_prefix_capture();
+                layer.restore(snapshot)?;
+            }
+        }
+        drop(cache);
+        mlx::clear_cache();
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Qwen3.6 MoE DFlash2 kernels prewarmed"
+        );
+        Ok(())
+    }
+
+    fn dflash2_draft_fast_paths(&self) -> bool {
+        self.text().affine4_fast_paths()
+    }
+
     /// Qualified Qwen3.6 MoE recipes run the B1 linear window-cost policy.
     fn dflash2_window_cost_budget_policy(&self) -> bool {
         self.dflash2_target_bits.is_some()
+    }
+
+    fn dflash2_instance(&self) -> Option<&DFlash2Instance> {
+        Some(&self.instance)
+    }
+
+    fn dflash2_draft_vocab_enabled(&self) -> Result<bool> {
+        Ok(self.draft_vocab()?.is_some())
     }
 
     fn dflash2_target_cache_cost(&self) -> DFlash2TargetCacheCost {
@@ -393,7 +461,49 @@ impl DFlash2Target for Qwen35MoeModel {
         // Multi-position projection uses the product-stable affine kernel so
         // each row keeps the ordinary Q=1 accumulation tree.
         let _product_stable = (dims[1] > 1).then(crate::nn::product_stable_qmm::scope);
+        let _fast_paths = self
+            .text()
+            .affine4_fast_paths()
+            .then(crate::nn::moe_fast_path::scope);
         self.lm_head().forward_on(hidden, target)
+    }
+
+    fn dflash2_draft_vocab_project_on(
+        &self,
+        hidden: &Array,
+        extra: &[u32],
+        target: StreamOrDevice,
+    ) -> Result<Option<(Array, Array)>> {
+        let Some(vocab) = self.draft_vocab()? else {
+            return Ok(None);
+        };
+        let _fast_paths = crate::nn::moe_fast_path::scope();
+        vocab
+            .project_on(self.lm_head(), hidden, extra, target)
+            .map(Some)
+    }
+
+    fn dflash2_draft_vocab_lacks(&self, token: u32) -> Result<bool> {
+        Ok(self
+            .draft_vocab()?
+            .is_some_and(|vocab| !vocab.contains(token)))
+    }
+}
+
+impl Qwen35MoeModel {
+    /// The DFlash2 draft vocabulary of an affine4 target, built on first use.
+    fn draft_vocab(&self) -> Result<Option<&super::draft_vocab::DraftVocab>> {
+        if !self.text().affine4_fast_paths() {
+            return Ok(None);
+        }
+        let vocab = match self.draft_vocab.get() {
+            Some(vocab) => vocab,
+            None => {
+                let built = super::draft_vocab::DraftVocab::from_lm_head(self.lm_head())?;
+                self.draft_vocab.get_or_init(|| built)
+            }
+        };
+        Ok(vocab.as_ref())
     }
 }
 

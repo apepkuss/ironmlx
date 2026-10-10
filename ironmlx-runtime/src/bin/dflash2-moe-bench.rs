@@ -62,6 +62,10 @@ struct Args {
     /// Time the routed-expert stage of one MoE layer in isolation.
     #[arg(long)]
     moe_microbench: bool,
+    /// Drafter runtime quantization bits (0 = BF16 checkpoint). The served
+    /// Qwen3.6 MoE profile loads the drafter at 4 bits.
+    #[arg(long, default_value_t = 4)]
+    draft_bits: i32,
 }
 
 #[derive(serde::Deserialize)]
@@ -93,6 +97,16 @@ fn run_stream(
         started.elapsed().as_secs_f64(),
         finish,
     ))
+}
+
+fn thread_cpu_ms() -> f64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid out-pointer; CLOCK_THREAD_CPUTIME_ID is supported on macOS.
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as f64 * 1e3 + ts.tv_nsec as f64 / 1e6
 }
 
 fn median(mut values: Vec<f64>) -> f64 {
@@ -179,7 +193,7 @@ fn verify_curve(
     }
     // Timing attribution only: the same verifies with one component's
     // output replaced by zeros (see `timing_ablation`).
-    for width in [1_usize, 8] {
+    for width in 1_usize..=8 {
         for ablation in ["noexperts", "noshared", "noattn", "nogdn", "noall"] {
             shapes.push((format!("{ablation}-q{width}"), vec![-3]));
         }
@@ -241,6 +255,10 @@ fn verify_curve(
         ablation::set(ablation_flags);
         let tokens = &continuation[..width];
         let mut timings = Vec::new();
+        let mut phase_build = Vec::new();
+        let mut phase_encode = Vec::new();
+        let mut phase_encode_cpu = Vec::new();
+        let mut logits_hash: Option<String> = None;
         let mut coverage = None;
         for rep in 0..args.curve_reps {
             restore(&mut cache)?;
@@ -290,9 +308,28 @@ fn verify_curve(
                 )?
             };
             let logits = target.dflash2_project_hidden_on(&output.hidden, ().into())?;
+            let built = started.elapsed().as_secs_f64() * 1e3;
+            let cpu0 = thread_cpu_ms();
+            mlx::transforms::async_eval(&[&logits, &output.context_hidden])?;
+            let encoded = started.elapsed().as_secs_f64() * 1e3;
+            if rep >= 2 {
+                phase_encode_cpu.push(thread_cpu_ms() - cpu0);
+            }
             mlx::transforms::eval(&[&logits, &output.context_hidden])?;
             mlx::transforms::synchronize()?;
             let elapsed = started.elapsed().as_secs_f64() * 1e3;
+            if rep >= 2 {
+                phase_build.push(built);
+                phase_encode.push(encoded - built);
+            }
+            if rep == 0 {
+                let bits = mlx::ops::cast::astype(&logits, mlx::Dtype::Float32)?.to_vec::<f32>()?;
+                let mut hash: u64 = 1469598103934665603;
+                for v in bits {
+                    hash = (hash ^ u64::from(v.to_bits())).wrapping_mul(1099511628211);
+                }
+                logits_hash = Some(format!("{hash:016x}"));
+            }
             if rep == 1 {
                 let routes = route_diagnostic::take()?;
                 let per_layer = routes
@@ -332,12 +369,16 @@ fn verify_curve(
                 "median_ms": median(timings.clone()),
                 "min_ms": timings.iter().copied().fold(f64::INFINITY, f64::min),
                 "samples": timings.len(),
+                "build_ms": if phase_build.is_empty() { 0.0 } else { median(phase_build.clone()) },
+                "encode_ms": if phase_encode.is_empty() { 0.0 } else { median(phase_encode.clone()) },
+                "encode_cpu_ms": if phase_encode_cpu.is_empty() { 0.0 } else { median(phase_encode_cpu.clone()) },
+                "logits_hash": logits_hash,
                 "coverage": coverage,
             })
         )?;
     }
 
-    if !args.curve_shapes.is_empty() {
+    if !args.curve_shapes.is_empty() && !args.curve_shapes.iter().any(|s| s == "draft") {
         return Ok(());
     }
     // Draft proposal cost per block length and per tree budget.
@@ -544,7 +585,11 @@ fn main() -> Result<()> {
     let target_load_s = load_started.elapsed().as_secs_f64();
     let draft_started = Instant::now();
     let draft_loader = Loader::open_dflash2(&args.draft)?;
-    let draft = DFlash2DraftModel::from_loader(&draft_loader, target.dflash2_target_spec(), None)?;
+    let draft = DFlash2DraftModel::from_loader(
+        &draft_loader,
+        target.dflash2_target_spec(),
+        (args.draft_bits != 0).then_some(args.draft_bits),
+    )?;
     drop(draft_loader);
     let draft_load_s = draft_started.elapsed().as_secs_f64();
     let capabilities = target.dflash2_verify_capabilities();
@@ -736,6 +781,7 @@ fn main() -> Result<()> {
                         "metrics": metrics,
                         "grouped_expert_dispatches":
                             ironmlx_lm::nn::moe_grouped_qmv::dispatch_count() - grouped_before,
+                        "window_stages": ironmlx_runtime::core::dflash2::take_window_stage_records(),
                     })
                 )?;
                 out.flush()?;

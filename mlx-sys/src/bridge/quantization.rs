@@ -21,6 +21,7 @@ pub mod ffi {
         include!("cxx_mlx_shim/quantization.h");
 
         type MlxArray = crate::bridge::array::ffi::MlxArray;
+        type MlxArrayVec = crate::bridge::array::ffi::MlxArrayVec;
         type QuantizeResult;
 
         // ===== quantize result accessors =====
@@ -58,6 +59,79 @@ pub mod ffi {
             global_scale: *const MlxArray,
             has_dtype: bool,
             dtype_repr: u8,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        // ===== qualified Qwen3.6 MoE affine4 DFlash2 kernels (native primitives) =====
+        fn row_stable_affine4_matmul(
+            x: &MlxArray,
+            w: &MlxArray,
+            scales: &MlxArray,
+            biases: &MlxArray,
+            kind: i32,
+            ks: i32,
+            r: i32,
+            sgs: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn qk_norm_fused(
+            src: &MlxArray,
+            heads: i32,
+            d: i32,
+            q_off: i32,
+            k_off: i32,
+            qscale: f32,
+            kscale: f32,
+            eps: f32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArrayVec>>;
+        fn qmv_fast_wide(
+            x: &MlxArray,
+            w: &MlxArray,
+            scales: &MlxArray,
+            biases: &MlxArray,
+            max_nv: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn router_topk_fused(
+            logits: &MlxArray,
+            k: i32,
+            norm: bool,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArrayVec>>;
+        fn gdn_gates_fused(
+            a: &MlxArray,
+            b: &MlxArray,
+            a_log: &MlxArray,
+            dt_bias: &MlxArray,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArrayVec>>;
+        #[allow(clippy::too_many_arguments)]
+        fn dflash2_selector_walk(
+            candidates: &MlxArray,
+            unary: &MlxArray,
+            hidden: &MlxArray,
+            anchor: &MlxArray,
+            predecessor_codebook: &MlxArray,
+            successor_codebook: &MlxArray,
             has_target: bool,
             is_device_only: bool,
             device_type: u8,

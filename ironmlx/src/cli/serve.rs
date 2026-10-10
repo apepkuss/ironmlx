@@ -30,6 +30,8 @@ use {
 
 const DEFAULT_DFLASH2_TENSOR_BATCH_MAX_WIDTH: usize = 4;
 const DEFAULT_PAGED_PREFIX_CACHE_DIR: &str = "~/.ironmlx/cache/paged_prefix_cache";
+/// Interval at which the wired DFlash2 weights renew their residency request.
+const RESIDENCY_REFRESH_MS: u32 = 500;
 
 #[derive(Args, Clone, Debug)]
 pub struct ServeArgs {
@@ -1011,6 +1013,12 @@ where
         family.resolve_block_size(&model, args.dflash2_block_size, checkpoint_block_size)?;
     static_memory_estimate.speculative_cold_bytes = draft_loader.loaded_tensor_bytes();
     drop(draft_loader);
+    model.dflash2_prewarm().context("DFlash2 kernel prewarm")?;
+    if model.dflash2_window_cost_budget_policy() {
+        draft
+            .prewarm_on(&model)
+            .context("DFlash2 drafter prewarm")?;
+    }
     mlx::clear_cache();
     if ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::WIRED_WEIGHTS) {
         // Keep the loaded target and draft weights GPU-resident so an idle
@@ -1018,7 +1026,19 @@ where
         // residency for every expert it touches.
         let limit = mlx::memory::snapshot().active_bytes;
         match mlx::memory::set_wired_limit(limit) {
-            Ok(previous) => tracing::info!(limit, previous, "DFlash2 weights wired"),
+            Ok(previous) => {
+                tracing::info!(limit, previous, "DFlash2 weights wired");
+                // macOS drops the residency within seconds of GPU idleness.
+                match mlx::memory::start_residency_refresh(RESIDENCY_REFRESH_MS) {
+                    Ok(()) => tracing::info!(
+                        interval_ms = RESIDENCY_REFRESH_MS,
+                        "DFlash2 weight residency refresh started"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(%error, "DFlash2 weight residency refresh not started")
+                    }
+                }
+            }
             Err(error) => tracing::warn!(limit, %error, "DFlash2 weights not wired"),
         }
     }

@@ -197,6 +197,52 @@ fn request_interleaved_sort_perm(
     argsort_on(&keys, -1_i32, target).context("request-interleaved MoE route argsort")
 }
 
+/// MLX's default `gather_qmm` left indices (`arange` over the left batch
+/// elements, shaped like the left batch dims), built once per shape and
+/// reused so each call does not add an `Arange` kernel. Same values as the
+/// default, so the gather is unchanged.
+///
+/// MLX takes its sorted-routes kernel (`gather_qmm_rhs`, one row per route,
+/// at least 16 routes and 4 per expert) only when the caller passes no left
+/// indices, so such gathers (prefill) keep the default.
+fn cached_lhs_indices(
+    lhs: &Array,
+    rhs_indices: &Array,
+    weight: &Array,
+    sorted_indices: bool,
+) -> Result<Option<Array>> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static CACHE: RefCell<HashMap<Vec<i32>, Array>> = RefCell::new(HashMap::new());
+    }
+    if !crate::nn::moe_fast_path::is_armed() {
+        return Ok(None);
+    }
+    let shape = lhs.shape();
+    let dims = shape.as_slice();
+    if dims.len() < 3 {
+        return Ok(None);
+    }
+    let routes = rhs_indices.size();
+    let experts = usize::try_from(weight.shape().as_slice()[0])
+        .unwrap_or(1)
+        .max(1);
+    if sorted_indices && dims[dims.len() - 2] == 1 && routes >= 16 && routes / experts >= 4 {
+        return Ok(None);
+    }
+    let batch = dims[..dims.len() - 2].to_vec();
+    if let Some(found) = CACHE.with(|cache| cache.borrow().get(&batch).cloned()) {
+        return Ok(Some(found));
+    }
+    let count: i32 = batch.iter().product();
+    let indices = mlx::ops::constructors::arange(0.0, f64::from(count), 1.0, mlx::Dtype::Uint32)?
+        .reshape(&batch[..])?;
+    mlx::transforms::eval(&[&indices])?;
+    CACHE.with(|cache| cache.borrow_mut().insert(batch, indices.clone()));
+    Ok(Some(indices))
+}
+
 fn router_topk_scores_and_indices(
     logits: &Array,
     k: i32,
@@ -213,6 +259,18 @@ fn router_topk_scores_and_indices(
         ));
     }
     let bs = shape[0];
+    if crate::nn::moe_fast_path::is_armed()
+        && logits.dtype() == mlx::Dtype::Bfloat16
+        && num_experts % 128 == 0
+        && num_experts <= 4096
+    {
+        return Ok(mlx::quantization::router_topk_fused_on(
+            logits,
+            k,
+            norm_topk_prob,
+            target,
+        )?);
+    }
     let probs = mlx::ops::softmax_on(logits, -1_i32, /* precise */ true, target)
         .context("SparseMoeBlock: router softmax")?;
     let part_inds =
@@ -281,12 +339,13 @@ impl ExpertQuantProjection {
             return grouped
                 .with_context(|| format!("RoutedExperts::apply_experts: grouped {context}"));
         }
+        let lhs_indices = cached_lhs_indices(lhs, rhs_indices, &self.weight, sorted_indices)?;
         mlx::quantization::gather_quantized_matmul_on(
             lhs,
             &self.weight,
             &self.scales,
             self.biases.as_ref(),
-            None,
+            lhs_indices.as_ref(),
             Some(rhs_indices),
             true,
             Some(self.meta.group_size),
@@ -688,7 +747,8 @@ impl RoutedExperts {
                         &fused.weight,
                         &fused.scales,
                         fused.biases.as_ref(),
-                        None,
+                        cached_lhs_indices(lhs, rhs_indices, &fused.weight, sorted_indices)?
+                            .as_ref(),
                         Some(rhs_indices),
                         true,
                         Some(fused.meta.group_size),
@@ -976,7 +1036,8 @@ impl RoutedExperts {
                         &self.down_weight,
                         &self.down_scales,
                         self.down_biases.as_ref(),
-                        None,
+                        cached_lhs_indices(&act, &rhs_idx_used, &self.down_weight, sorted_flag)?
+                            .as_ref(),
                         Some(&rhs_idx_used),
                         true,
                         Some(self.down_meta.group_size),

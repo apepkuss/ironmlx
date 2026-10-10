@@ -4,6 +4,7 @@
 pub mod config;
 pub mod decoder_layer;
 mod dflash2;
+mod draft_vocab;
 pub mod model;
 pub mod mtp;
 pub mod sparse_moe;

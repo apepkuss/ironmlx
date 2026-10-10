@@ -42,6 +42,9 @@
 //! The Qwen MTP policy (`QwenMtpDraftPolicyState`) is unchanged and still
 //! serves every other DFlash2 target and execution shape.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock, Weak};
+
 use anyhow::{anyhow, Result};
 
 use super::speculative::{
@@ -117,14 +120,26 @@ pub(crate) enum DFlash2DraftBudgetPolicy {
 }
 
 impl DFlash2DraftBudgetPolicy {
+    #[cfg(test)]
     pub(crate) fn new(kind: DFlash2BudgetPolicyKind, max_draft_tokens: usize) -> Self {
+        Self::with_memory(kind, max_draft_tokens, None)
+    }
+
+    /// Policy for one stream. With a `domain`, the window-cost policy shares
+    /// what does not depend on the request with the other streams of the
+    /// same target/drafter pair (see [`DFlash2PolicyDomain`]).
+    pub(crate) fn with_memory(
+        kind: DFlash2BudgetPolicyKind,
+        max_draft_tokens: usize,
+        domain: Option<DFlash2PolicyDomain>,
+    ) -> Self {
         match kind {
             DFlash2BudgetPolicyKind::Legacy => {
                 Self::Legacy(QwenMtpDraftPolicyState::new(max_draft_tokens))
             }
-            DFlash2BudgetPolicyKind::WindowCost => {
-                Self::WindowCost(DFlash2WindowCostPolicy::new(max_draft_tokens))
-            }
+            DFlash2BudgetPolicyKind::WindowCost => Self::WindowCost(
+                DFlash2WindowCostPolicy::with_memory(max_draft_tokens, domain),
+            ),
         }
     }
 
@@ -187,6 +202,91 @@ impl DFlash2DraftBudgetPolicy {
     }
 }
 
+/// A loaded target/drafter pair. Window costs are a property of the pair,
+/// the execution regime and the hardware, not of the request, so the streams
+/// of one pair share them: a new request reuses the measured costs instead of
+/// calibrating them again. Each stream also starts its depth acceptance from a
+/// small pooled prior of the earlier streams instead of a constant.
+///
+/// The pair is the two loaded instances (`DFlash2Instance` of the target and
+/// the drafter), not their addresses: its memory lives while both instances
+/// do, a reload starts from scratch, and the memory of an unloaded pair is
+/// dropped at the next access.
+#[derive(Debug, Clone)]
+pub(crate) struct DFlash2PolicyDomain {
+    target: Weak<()>,
+    draft: Weak<()>,
+}
+
+impl DFlash2PolicyDomain {
+    pub(crate) fn new(target: Weak<()>, draft: Weak<()>) -> Self {
+        Self { target, draft }
+    }
+
+    fn is_live(&self) -> bool {
+        self.target.strong_count() > 0 && self.draft.strong_count() > 0
+    }
+
+    /// Unique among the pairs in the memory: every entry keeps weak handles
+    /// to its instances, so their allocations (and addresses) cannot be
+    /// reused while the entry exists.
+    fn key(&self) -> (usize, usize) {
+        (self.target.as_ptr() as usize, self.draft.as_ptr() as usize)
+    }
+}
+
+#[derive(Default)]
+struct PairMemory {
+    cost: HashMap<(MtpDraftPolicyRegime, usize), Vec<CostStat>>,
+    depth: HashMap<usize, Vec<DepthStat>>,
+}
+
+struct PairEntry {
+    domain: DFlash2PolicyDomain,
+    memory: PairMemory,
+}
+
+#[derive(Default)]
+struct SharedPolicyMemory {
+    pairs: HashMap<(usize, usize), PairEntry>,
+}
+
+impl SharedPolicyMemory {
+    /// The memory of a live pair, after dropping the pairs that were unloaded.
+    fn pair(&mut self, domain: &DFlash2PolicyDomain) -> Option<&mut PairMemory> {
+        self.pairs.retain(|_, entry| entry.domain.is_live());
+        if !domain.is_live() {
+            return None;
+        }
+        Some(
+            &mut self
+                .pairs
+                .entry(domain.key())
+                .or_insert_with(|| PairEntry {
+                    domain: domain.clone(),
+                    memory: PairMemory::default(),
+                })
+                .memory,
+        )
+    }
+}
+
+fn shared_memory() -> std::sync::MutexGuard<'static, SharedPolicyMemory> {
+    static MEMORY: OnceLock<Mutex<SharedPolicyMemory>> = OnceLock::new();
+    MEMORY
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Pairs held in the shared memory after dropping unloaded ones.
+#[cfg(test)]
+fn shared_pair_count() -> usize {
+    let mut memory = shared_memory();
+    memory.pairs.retain(|_, entry| entry.domain.is_live());
+    memory.pairs.len()
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct DepthStat {
     reached: f64,
@@ -225,6 +325,7 @@ pub(crate) struct DFlash2WindowCostPolicy {
     /// Budget and remaining windows of the recovery probe in progress.
     recovery_budget: usize,
     recovery_windows_left: usize,
+    domain: Option<DFlash2PolicyDomain>,
 }
 
 impl DFlash2WindowCostPolicy {
@@ -249,16 +350,46 @@ impl DFlash2WindowCostPolicy {
     /// Windows per recovery probe: one consumes the accumulated context, the
     /// rest measure the budget's steady cost.
     const RECOVERY_PROBE_WINDOWS: usize = 2;
+    /// Forgetting of the pooled depth statistics per speculative window.
+    const SHARED_DEPTH_DECAY: f64 = 0.99;
+    /// Depth-1 windows the pooled prior is worth in a new stream.
+    const SHARED_PRIOR_WINDOWS: f64 = 4.0;
 
+    #[cfg(test)]
     pub(crate) fn new(max_draft_tokens: usize) -> Self {
+        Self::with_memory(max_draft_tokens, None)
+    }
+
+    pub(crate) fn with_memory(
+        max_draft_tokens: usize,
+        domain: Option<DFlash2PolicyDomain>,
+    ) -> Self {
         let max_draft_tokens = max_draft_tokens.max(1);
+        let mut depth = vec![DepthStat::default(); max_draft_tokens];
+        if let Some(pooled) = domain.as_ref().and_then(|domain| {
+            shared_memory()
+                .pair(domain)?
+                .depth
+                .get(&max_draft_tokens)
+                .cloned()
+        }) {
+            let scale = if pooled[0].reached > Self::SHARED_PRIOR_WINDOWS {
+                Self::SHARED_PRIOR_WINDOWS / pooled[0].reached
+            } else {
+                1.0
+            };
+            for (depth, pooled) in depth.iter_mut().zip(&pooled) {
+                depth.reached = pooled.reached * scale;
+                depth.accepted = pooled.accepted * scale;
+            }
+        }
         let mut policy = Self {
             max_draft_tokens,
             current: max_draft_tokens,
             next: max_draft_tokens,
             role: DFlash2WindowRole::Calibrate,
             regime: None,
-            depth: vec![DepthStat::default(); max_draft_tokens],
+            depth,
             cost: vec![CostStat::default(); max_draft_tokens + 1],
             windows_since_probe: 0,
             probe_interval: Self::INITIAL_PROBE_INTERVAL,
@@ -269,6 +400,7 @@ impl DFlash2WindowCostPolicy {
             recovery_credit_us: 0.0,
             recovery_budget: 1,
             recovery_windows_left: 0,
+            domain,
         };
         policy.plan_next(false);
         policy
@@ -307,7 +439,17 @@ impl DFlash2WindowCostPolicy {
             // Window costs depend on the context bucket and execution shape;
             // acceptance follows the content and is kept.
             self.regime = Some(regime);
-            self.cost = vec![CostStat::default(); self.max_draft_tokens + 1];
+            self.cost = self
+                .domain
+                .as_ref()
+                .and_then(|domain| {
+                    shared_memory()
+                        .pair(domain)?
+                        .cost
+                        .get(&(regime, self.max_draft_tokens))
+                        .cloned()
+                })
+                .unwrap_or_else(|| vec![CostStat::default(); self.max_draft_tokens + 1]);
             self.windows_since_probe = 0;
             self.probe_interval = Self::INITIAL_PROBE_INTERVAL;
             self.recovery_windows_left = 0;
@@ -323,9 +465,28 @@ impl DFlash2WindowCostPolicy {
                 measured.mul_add(Self::COST_ALPHA, cost.window_us * (1.0 - Self::COST_ALPHA))
             };
             cost.samples = cost.samples.saturating_add(1);
+            let cost = *cost;
+            if let Some(domain) = &self.domain {
+                if let Some(pair) = shared_memory().pair(domain) {
+                    pair.cost
+                        .entry((regime, self.max_draft_tokens))
+                        .or_insert_with(|| vec![CostStat::default(); self.max_draft_tokens + 1])
+                        [width] = cost;
+                }
+            }
         }
         if width > 0 {
-            self.record_depths(width, window.accepted_draft_tokens.min(width));
+            let accepted = window.accepted_draft_tokens.min(width);
+            self.record_depths(width, accepted);
+            if let Some(domain) = &self.domain {
+                if let Some(pair) = shared_memory().pair(domain) {
+                    let pooled = pair
+                        .depth
+                        .entry(self.max_draft_tokens)
+                        .or_insert_with(|| vec![DepthStat::default(); self.max_draft_tokens]);
+                    Self::accumulate_depths(pooled, Self::SHARED_DEPTH_DECAY, width, accepted);
+                }
+            }
         }
         if self.current == 0 {
             if width == 0 {
@@ -347,13 +508,13 @@ impl DFlash2WindowCostPolicy {
         }
     }
 
-    fn record_depths(&mut self, width: usize, accepted: usize) {
-        for depth in &mut self.depth {
-            depth.reached *= Self::DEPTH_DECAY;
-            depth.accepted *= Self::DEPTH_DECAY;
+    fn accumulate_depths(depths: &mut [DepthStat], decay: f64, width: usize, accepted: usize) {
+        for depth in depths.iter_mut() {
+            depth.reached *= decay;
+            depth.accepted *= decay;
         }
         // Positions past the first rejection were never compared.
-        for (index, depth) in self.depth.iter_mut().enumerate().take(width) {
+        for (index, depth) in depths.iter_mut().enumerate().take(width) {
             depth.reached += 1.0;
             if index < accepted {
                 depth.accepted += 1.0;
@@ -361,6 +522,10 @@ impl DFlash2WindowCostPolicy {
                 break;
             }
         }
+    }
+
+    fn record_depths(&mut self, width: usize, accepted: usize) {
+        Self::accumulate_depths(&mut self.depth, Self::DEPTH_DECAY, width, accepted);
         let acceptance = accepted as f64 / width as f64;
         self.acceptance_ewma = Some(match self.acceptance_ewma {
             Some(previous) => acceptance.mul_add(
@@ -677,6 +842,89 @@ mod tests {
 
     fn window_cost(budgets: usize) -> DFlash2DraftBudgetPolicy {
         DFlash2DraftBudgetPolicy::new(DFlash2BudgetPolicyKind::WindowCost, budgets)
+    }
+
+    use ironmlx_lm::models::dflash2::DFlash2Instance;
+
+    fn pair(target: &DFlash2Instance, draft: &DFlash2Instance) -> Option<DFlash2PolicyDomain> {
+        Some(DFlash2PolicyDomain::new(
+            target.downgrade(),
+            draft.downgrade(),
+        ))
+    }
+
+    fn stream(domain: Option<DFlash2PolicyDomain>) -> DFlash2DraftBudgetPolicy {
+        DFlash2DraftBudgetPolicy::with_memory(DFlash2BudgetPolicyKind::WindowCost, 7, domain)
+    }
+
+    /// Whether a stream of `domain` calibrates after its first window (the
+    /// first one has no regime yet and runs at the widest budget).
+    fn calibrates(domain: Option<DFlash2PolicyDomain>, windows: usize) -> bool {
+        let mut scenario = Scenario::new(&CODE, &WINDOW_US, 3);
+        let mut policy = stream(domain);
+        let run = simulate(&mut policy, &mut scenario, windows);
+        run.roles[1..].contains(&DFlash2WindowRole::Calibrate)
+    }
+
+    #[test]
+    #[serial_test::serial(dflash2_policy_memory)]
+    fn a_new_stream_of_the_same_pair_reuses_measured_costs() {
+        let (target, draft) = (DFlash2Instance::new(), DFlash2Instance::new());
+        assert!(calibrates(pair(&target, &draft), 40));
+        // Once its regime is known every cost of the pair is already measured.
+        assert!(!calibrates(pair(&target, &draft), 40));
+        // A different pair (another target with the same drafter) starts
+        // from scratch.
+        let other = DFlash2Instance::new();
+        assert!(calibrates(pair(&other, &draft), 4));
+    }
+
+    #[test]
+    #[serial_test::serial(dflash2_policy_memory)]
+    fn the_pair_identity_moves_with_the_models() {
+        struct Loaded {
+            _weights: Vec<u8>,
+            instance: DFlash2Instance,
+        }
+        let target = Loaded {
+            _weights: vec![0; 64],
+            instance: DFlash2Instance::new(),
+        };
+        let draft = DFlash2Instance::new();
+        assert!(calibrates(pair(&target.instance, &draft), 40));
+        let moved = Box::new(target);
+        let mut held = vec![moved];
+        held.reserve(1024);
+        assert!(!calibrates(pair(&held[0].instance, &draft), 40));
+    }
+
+    #[test]
+    #[serial_test::serial(dflash2_policy_memory)]
+    fn a_reloaded_pair_calibrates_again_and_unloaded_pairs_are_dropped() {
+        let before = shared_pair_count();
+        let mut seen = std::collections::HashSet::new();
+        let mut reused = 0;
+        for _ in 0..64 {
+            // Each load measures its own costs: it never sees those of the
+            // previous load, even when the allocator hands it the same address.
+            let (target, draft) = (DFlash2Instance::new(), DFlash2Instance::new());
+            let address = (target.downgrade().as_ptr(), draft.downgrade().as_ptr());
+            reused += usize::from(!seen.insert(address));
+            assert!(calibrates(pair(&target, &draft), 40));
+            assert!(!calibrates(pair(&target, &draft), 40));
+            drop((target, draft));
+        }
+        // Unloaded pairs leave the memory, so the allocator reuses their
+        // addresses; none of those loads inherited anything (asserted above).
+        eprintln!("loads at an earlier load's addresses: {reused} of 64");
+        assert!(shared_pair_count() <= before);
+        // A stream that outlives its models no longer reads or writes the
+        // memory.
+        let (target, draft) = (DFlash2Instance::new(), DFlash2Instance::new());
+        let domain = pair(&target, &draft);
+        drop(target);
+        assert!(calibrates(domain, 40));
+        assert!(shared_pair_count() <= before);
     }
 
     #[test]

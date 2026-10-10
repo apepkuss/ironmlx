@@ -14,7 +14,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::core::dflash2_budget::{
-    DFlash2BudgetPolicyKind, DFlash2DraftBudgetPolicy, DFlash2WindowRole,
+    DFlash2BudgetPolicyKind, DFlash2DraftBudgetPolicy, DFlash2PolicyDomain, DFlash2WindowRole,
 };
 use crate::core::generation_types::{GenerateEvent, GenerateRequest};
 use crate::core::speculative::{
@@ -524,6 +524,17 @@ struct DFlash2PrefillContext<'a> {
     is_cancelled: Option<&'a dyn Fn() -> bool>,
 }
 
+/// The loaded target/drafter pair for the budget policy memory; `None` for a
+/// target without a loaded-instance identity (its streams share nothing).
+fn policy_domain<M: DFlash2Target + ?Sized>(
+    model: &M,
+    draft: &DFlash2DraftModel,
+) -> Option<DFlash2PolicyDomain> {
+    model
+        .dflash2_instance()
+        .map(|target| DFlash2PolicyDomain::new(target.downgrade(), draft.instance().downgrade()))
+}
+
 fn experimental_fixed_budget(maximum: usize) -> Result<Option<usize>> {
     let Some(raw) =
         ironmlx_core::m5_profile::setting(ironmlx_core::m5_profile::settings::DFLASH2_FIXED_BUDGET)
@@ -1016,7 +1027,8 @@ where
                 &mut constraint,
             )?;
             commit_constraint_token(&mut constraint, first_token)?;
-            let draft_cache = draft.make_cache(initial_offset)?;
+            let mut draft_cache = draft.make_cache(initial_offset)?;
+            draft_cache.note_tokens(model, &request.prompt_ids)?;
             let mut history = request.prompt_ids.clone();
             history.push(first_token);
             let mut pending_tokens = VecDeque::new();
@@ -1043,12 +1055,13 @@ where
                 detok: tokenizer.decode_stream(true),
                 pending_context_hidden: row_context,
                 verify_capabilities,
-                draft_policy: DFlash2DraftBudgetPolicy::new(
+                draft_policy: DFlash2DraftBudgetPolicy::with_memory(
                     DFlash2BudgetPolicyKind::resolve(
                         model.dflash2_window_cost_budget_policy(),
                         options.tree_max_nodes > 0,
                     )?,
                     max_draft_tokens,
+                    policy_domain(model, draft),
                 ),
                 experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
                 prng_state,
@@ -1286,7 +1299,8 @@ where
         let initial_offset = prompt_len_i32
             .checked_sub(retained_len)
             .ok_or_else(|| anyhow!("DFlash2 retained context exceeds prompt length"))?;
-        let draft_cache = draft.make_cache(initial_offset)?;
+        let mut draft_cache = draft.make_cache(initial_offset)?;
+        draft_cache.note_tokens(model, &request.prompt_ids)?;
 
         let mut history = request.prompt_ids.clone();
         history.push(first_token);
@@ -1315,12 +1329,13 @@ where
             detok: tokenizer.decode_stream(true),
             pending_context_hidden: context_hidden,
             verify_capabilities,
-            draft_policy: DFlash2DraftBudgetPolicy::new(
+            draft_policy: DFlash2DraftBudgetPolicy::with_memory(
                 DFlash2BudgetPolicyKind::resolve(
                     model.dflash2_window_cost_budget_policy(),
                     p2_options.tree_max_nodes > 0,
                 )?,
                 max_draft_tokens,
+                policy_domain(model, draft),
             ),
             experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
             prng_state,

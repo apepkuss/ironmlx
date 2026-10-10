@@ -236,6 +236,99 @@ fn qwen36_moe_dflash2_greedy_generation_matches_ordinary() {
 }
 
 /// Upper chi-square quantile by the Wilson-Hilferty approximation.
+/// Malformed draft inputs return `Err` before the drafter reads its anchor or
+/// touches the cache; a well-formed window still drafts and records an anchor
+/// the draft vocabulary lacks.
+#[test]
+#[ignore = "loads a full local Qwen3.6 MoE target and the incoai DFlash2 draft"]
+#[serial(mlx_metal)]
+fn qwen36_moe_dflash2_draft_input_errors_leave_the_cache_unchanged() {
+    let Some(fixture) = fixture() else {
+        eprintln!("skip: set QWEN36_MOE_DFLASH2_TARGET and DFLASH2_MODEL");
+        return;
+    };
+    let (target, draft) = (&fixture.target, &fixture.draft);
+    let config = draft.config();
+    let block = config.dflash_config.block_size;
+    let mask = config.dflash_config.mask_token_id;
+    let width = config.hidden_size
+        * i32::try_from(config.dflash_config.target_layer_ids.len()).expect("taps");
+    let context = |rows: i32, len: i32| {
+        Array::zeros((rows, len, width), target.hidden_dtype()).expect("context")
+    };
+    let ids = |values: &[u32], shape: &[i32]| -> Array { (values, shape).try_into().expect("ids") };
+    let mut cache = draft.make_cache(0).expect("draft cache");
+    let start = cache.position_signature().expect("signature");
+    let scalar: Array = (&[1_u32][..], ()).try_into().expect("scalar");
+    let rank3 = ids(&[1, mask, mask], &[1, 3, 1]);
+    let too_long: Vec<u32> = std::iter::once(1)
+        .chain(std::iter::repeat_n(mask, block as usize))
+        .collect();
+    let cases: Vec<(&str, Array, Array)> = vec![
+        ("scalar", scalar, context(1, 4)),
+        ("[1,0]", ids(&[], &[1, 0]), context(1, 4)),
+        ("rank 1", ids(&[1, mask, mask], &[3]), context(1, 4)),
+        ("rank 3", rank3, context(1, 4)),
+        ("length 1", ids(&[1], &[1, 1]), context(1, 4)),
+        ("too long", ids(&too_long, &[1, block + 1]), context(1, 4)),
+        (
+            "context batch",
+            ids(&[1, mask, mask], &[1, 3]),
+            context(2, 4),
+        ),
+    ];
+    for (label, input, hidden) in &cases {
+        let result =
+            draft.propose_greedy_on(target, input, hidden, &mut cache, StreamOrDevice::default());
+        assert!(result.is_err(), "{label}: accepted");
+        assert_eq!(
+            cache.position_signature().expect("signature"),
+            start,
+            "{label}"
+        );
+        assert!(cache.extra_vocab().is_empty(), "{label}");
+    }
+    let propose = |anchor: u32| {
+        let mut cache = draft.make_cache(0).expect("draft cache");
+        let input = ids(&[anchor, mask, mask, mask], &[1, 4]);
+        let proposal = draft
+            .propose_greedy_on(
+                target,
+                &input,
+                &context(1, 4),
+                &mut cache,
+                StreamOrDevice::default(),
+            )
+            .expect("proposal");
+        assert_eq!(proposal.to_vec::<u32>().expect("tokens").len(), 3);
+        cache
+    };
+    if !target.dflash2_draft_vocab_enabled().expect("vocab") {
+        // Only the affine4 target drafts on a restricted vocabulary; other
+        // targets draft on the full vocabulary and record nothing.
+        assert!(propose(248_000).extra_vocab().is_empty());
+        let mut cache = draft.make_cache(0).expect("draft cache");
+        cache
+            .note_tokens(target, &[1, 248_000])
+            .expect("prompt tokens");
+        assert!(cache.extra_vocab().is_empty());
+        return;
+    }
+    let outside = (200_000_u32..248_000)
+        .find(|&id| target.dflash2_draft_vocab_lacks(id).expect("lacks"))
+        .expect("a token outside the draft vocabulary");
+    let inside = (0_u32..1000)
+        .find(|&id| !target.dflash2_draft_vocab_lacks(id).expect("lacks"))
+        .expect("a token inside the draft vocabulary");
+    assert!(propose(inside).extra_vocab().is_empty());
+    assert_eq!(propose(outside).extra_vocab(), &[outside]);
+    let mut cache = draft.make_cache(0).expect("draft cache");
+    cache
+        .note_tokens(target, &[inside, outside, outside])
+        .expect("prompt tokens");
+    assert_eq!(cache.extra_vocab(), &[outside]);
+}
+
 fn chi_square_critical(df: f64, z: f64) -> f64 {
     let term = 1.0 - 2.0 / (9.0 * df) + z * (2.0 / (9.0 * df)).sqrt();
     df * term.powi(3)

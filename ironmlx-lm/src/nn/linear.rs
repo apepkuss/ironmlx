@@ -318,6 +318,13 @@ impl Linear {
         if let Some(shared) = &self.shared {
             return shared.forward_on(x, target);
         }
+        if super::rs4_qmm::is_armed() {
+            if let Some(parts) = self.quantized_parts() {
+                if let Some(rows) = super::rs4_qmm::route_rows(x, &parts) {
+                    return super::rs4_qmm::forward_on(x, parts, rows, target);
+                }
+            }
+        }
         if super::m5_affine4::armed() {
             if let Some(parts) = self.quantized_parts() {
                 if let Some(y) = super::m5_affine4::forward(x, parts, &self.m5_prepared, target)? {

@@ -70,6 +70,24 @@ fn load_linear(loader: &Loader, prefix: &str, draft_bits: Option<i32>) -> Result
 }
 
 /// Target-model output required by one DFlash2 draft/verify cycle.
+/// Identity of one loaded model for state that belongs to the loaded instance
+/// (for example measured DFlash2 window costs): it moves with the model
+/// value, is shared by its clones, and is never the identity of a later load.
+/// Holders of [`Self::downgrade`] can tell when the instance is gone.
+#[derive(Debug, Clone, Default)]
+pub struct DFlash2Instance(std::sync::Arc<()>);
+
+impl DFlash2Instance {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A handle that does not keep the instance alive.
+    pub fn downgrade(&self) -> std::sync::Weak<()> {
+        std::sync::Arc::downgrade(&self.0)
+    }
+}
+
 pub struct DFlash2TargetOutput {
     pub hidden: Array,
     pub context_hidden: Array,
@@ -444,10 +462,56 @@ pub trait DFlash2Target: crate::core::Model {
 
     fn dflash2_execution_fingerprint(&self) -> String;
 
+    /// Before serving, run one target forward of every reachable verify
+    /// width so kernel libraries are compiled outside scored requests.
+    fn dflash2_prewarm(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Whether drafting runs its target logit projections on the row-stable
+    /// affine4 arithmetic (`nn::rs4_qmm`) and greedy selection as one native
+    /// dispatch. Both only change draft proposals; verification decides every
+    /// committed token.
+    fn dflash2_draft_fast_paths(&self) -> bool {
+        false
+    }
+
+    /// Draft-only projection onto a fixed subset of the target vocabulary:
+    /// `(logits [.., N], token ids [N])`. `None` projects drafts onto the full
+    /// vocabulary with [`Self::dflash2_project_hidden_on`]. Verification is
+    /// unaffected; a token outside the subset is only never proposed.
+    /// `extra`: request tokens outside the subset (from
+    /// [`Self::dflash2_draft_vocab_lacks`]) projected alongside it.
+    fn dflash2_draft_vocab_project_on(
+        &self,
+        _hidden: &Array,
+        _extra: &[u32],
+        _target: StreamOrDevice,
+    ) -> anyhow::Result<Option<(Array, Array)>> {
+        Ok(None)
+    }
+
+    /// Whether drafts use a draft vocabulary that lacks `token`.
+    fn dflash2_draft_vocab_lacks(&self, _token: u32) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
     /// Whether the runtime may choose this target's linear draft budget with
     /// the DFlash2 window-cost policy instead of the shared Qwen MTP policy.
     fn dflash2_window_cost_budget_policy(&self) -> bool {
         false
+    }
+
+    /// Identity of this loaded target, when it keeps state across requests
+    /// keyed by the loaded instance.
+    fn dflash2_instance(&self) -> Option<&DFlash2Instance> {
+        None
+    }
+
+    /// Whether greedy drafts use [`Self::dflash2_draft_vocab_project_on`], so
+    /// the drafter records the request tokens that vocabulary lacks.
+    fn dflash2_draft_vocab_enabled(&self) -> anyhow::Result<bool> {
+        Ok(false)
     }
 
     #[allow(clippy::too_many_arguments)]

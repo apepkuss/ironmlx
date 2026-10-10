@@ -60,19 +60,25 @@ impl DFlash2CandidateSelector {
         }
     }
 
+    /// `logits` cover the full vocabulary, or the tokens `vocab_ids` (a draft
+    /// vocabulary) when given.
     pub(super) fn select_greedy_on(
         &self,
         hidden: &Array,
         logits: &Array,
+        vocab_ids: Option<&Array>,
         anchor_ids: &Array,
         target: StreamOrDevice,
     ) -> Result<Array> {
         let shape = logits.shape();
         let dims = shape.as_slice();
-        if dims.len() != 3 || dims[0] <= 0 || dims[2] != self.vocab_size {
+        let width = match vocab_ids {
+            Some(ids) => i32::try_from(ids.size())?,
+            None => self.vocab_size,
+        };
+        if dims.len() != 3 || dims[0] <= 0 || dims[2] != width || width < self.top_k {
             return Err(anyhow!(
-                "DFlash2 selector expected logits [B,L,{}] with B>0, got {dims:?}",
-                self.vocab_size
+                "DFlash2 selector expected logits [B,L,{width}] with B>0, got {dims:?}"
             ));
         }
         let batch = dims[0];
@@ -84,13 +90,17 @@ impl DFlash2CandidateSelector {
             let partition = mlx::ops::sort::argpartition_on(logits, -self.top_k, -1, target)?;
             mlx::ops::indexing::slice_strided_on(
                 &partition,
-                &[0_i32, 0, self.vocab_size - self.top_k][..],
-                &[batch, length, self.vocab_size][..],
+                &[0_i32, 0, width - self.top_k][..],
+                &[batch, length, width][..],
                 &[1_i32, 1, 1][..],
                 target,
             )?
         };
         let unary = mlx::ops::indexing::take_along_axis_on(logits, &candidates, -1, target)?;
+        let candidates = match vocab_ids {
+            Some(ids) => ids.take_on(&candidates, 0, target)?,
+            None => candidates,
+        };
         // Keep selector edge scores independent of the number of active rows.
         // This projection is small relative to the target LM head, while its
         // rounding can change the selected draft path and acceptance rate.
@@ -98,6 +108,29 @@ impl DFlash2CandidateSelector {
             let _product_stable_qmm = crate::nn::product_stable_qmm::scope();
             self.hidden_projection.forward_on(hidden, target)?
         };
+        if native_walk_armed()
+            && candidates.dtype() == mlx::Dtype::Uint32
+            && anchor_ids.dtype() == mlx::Dtype::Uint32
+            && [
+                &unary,
+                &hidden,
+                &self.predecessor_codebook,
+                &self.successor_codebook,
+            ]
+            .iter()
+            .all(|a| a.dtype() == mlx::Dtype::Bfloat16)
+        {
+            let anchor = anchor_ids.reshape_on((batch,), target)?;
+            return Ok(mlx::quantization::dflash2_selector_walk_on(
+                &candidates,
+                &unary,
+                &hidden,
+                &anchor,
+                &self.predecessor_codebook,
+                &self.successor_codebook,
+                target,
+            )?);
+        }
         let mut predecessor = anchor_ids.reshape_on((batch,), target)?;
         let mut path = Vec::with_capacity(length as usize);
         for position in 0..length {
@@ -444,7 +477,7 @@ mod tests {
             .expect("logits");
         let anchor: Array = (&[0_u32][..], &[1_i32][..]).try_into().expect("anchor");
         let selected = selector
-            .select_greedy_on(&hidden, &logits, &anchor, StreamOrDevice::default())
+            .select_greedy_on(&hidden, &logits, None, &anchor, StreamOrDevice::default())
             .expect("select")
             .to_vec::<u32>()
             .expect("tokens");
@@ -495,10 +528,36 @@ mod tests {
             .expect("logits");
         let anchor: Array = (&[0_u32, 0][..], &[2_i32][..]).try_into().expect("anchor");
         let selected = selector
-            .select_greedy_on(&hidden, &logits, &anchor, StreamOrDevice::default())
+            .select_greedy_on(&hidden, &logits, None, &anchor, StreamOrDevice::default())
             .expect("select")
             .to_vec::<u32>()
             .expect("tokens");
         assert_eq!(selected, vec![1, 2, 1, 2]);
     }
+}
+
+thread_local! {
+    static NATIVE_WALK: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) struct NativeWalkScope;
+
+impl Drop for NativeWalkScope {
+    fn drop(&mut self) {
+        NATIVE_WALK.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Greedy walks in this scope run as one native dispatch
+/// (`mlx::quantization::dflash2_selector_walk_on`) instead of one op chain
+/// per position. Its edge scores sum the BF16 products in float (lane-strided,
+/// then SIMD-reduced), so a path can differ from the op chain's in a near tie;
+/// the selection only proposes drafts, and verification decides every token.
+pub(super) fn native_walk_scope() -> NativeWalkScope {
+    NATIVE_WALK.with(|depth| depth.set(depth.get().saturating_add(1)));
+    NativeWalkScope
+}
+
+fn native_walk_armed() -> bool {
+    NATIVE_WALK.with(|depth| depth.get() > 0)
 }

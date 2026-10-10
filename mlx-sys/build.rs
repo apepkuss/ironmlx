@@ -81,6 +81,7 @@ fn main() {
     .file("shim/src/metal.cc")
     .file("shim/src/memory.cc")
     .file("shim/src/quantization.cc")
+    .file("shim/src/row_stable_affine4.cc")
     .file("shim/src/random.cc")
     .include("shim/include")
     .include(&include_dir)

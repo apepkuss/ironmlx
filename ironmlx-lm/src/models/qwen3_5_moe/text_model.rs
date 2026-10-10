@@ -14,12 +14,18 @@ use crate::Result;
 use super::config::Qwen35MoeConfig;
 use super::decoder_layer::{DecoderLayerMoe, DecoderLayerMoeConfig};
 
+/// Layers per staged submission of a DFlash2 verify or decode forward.
+const SUBMIT_EVERY_LAYERS: usize = 4;
+
 pub struct Qwen35MoeTextModel {
     embed_tokens: Embedding,
     layers: Vec<DecoderLayerMoe>,
     norm: RmsNorm,
     mrope: Mrope,
     cfg: Qwen35MoeConfig,
+    /// The qualified affine4 DFlash2 target: every forward runs the kernel
+    /// routes of `nn::moe_fast_path`.
+    affine4_fast_paths: bool,
 }
 
 #[cfg(test)]
@@ -122,7 +128,17 @@ impl Qwen35MoeTextModel {
             norm,
             mrope,
             cfg,
+            affine4_fast_paths: false,
         })
+    }
+
+    /// Enable the qualified affine4 DFlash2 target's kernel routes.
+    pub(crate) fn set_affine4_fast_paths(&mut self, on: bool) {
+        self.affine4_fast_paths = on;
+    }
+
+    pub(crate) fn affine4_fast_paths(&self) -> bool {
+        self.affine4_fast_paths
     }
 
     /// Test seam — accept pre-built building blocks.
@@ -141,6 +157,7 @@ impl Qwen35MoeTextModel {
             norm,
             mrope,
             cfg,
+            affine4_fast_paths: false,
         }
     }
 
@@ -187,6 +204,9 @@ impl Qwen35MoeTextModel {
                 ));
             }
         }
+        let _fast_paths = self
+            .affine4_fast_paths
+            .then(crate::nn::moe_fast_path::scope);
         let (cos, sin) = self.mrope.cos_sin(position_ids)?;
         let mut x = hidden.clone();
         match cache {
@@ -319,10 +339,18 @@ impl Qwen35MoeTextModel {
             }
         }
 
+        let _fast_paths = self
+            .affine4_fast_paths
+            .then(crate::nn::moe_fast_path::scope);
         let (cos, sin) = self.mrope.cos_sin(position_ids)?;
         let mut x = self.embed_on(input_ids, target)?;
         let mut captured = Vec::with_capacity(target_layer_ids.len());
         let mut next_capture = 0_usize;
+        // Verify and decode forwards (a few positions) hand every
+        // `SUBMIT_EVERY_LAYERS` layers to the GPU while the rest of the graph
+        // is still being built, so the GPU does not wait for the whole graph.
+        // Submission points do not change any kernel or value.
+        let staged = self.affine4_fast_paths && input_ids.shape().as_slice()[1] <= 16;
         for (index, layer) in self.layers.iter().enumerate() {
             let layer_cache = cache.as_deref_mut().map(|cache| &mut cache[index]);
             x = layer.forward_on(
@@ -337,6 +365,9 @@ impl Qwen35MoeTextModel {
                 target,
                 index as i32,
             )?;
+            if staged && (index + 1) % SUBMIT_EVERY_LAYERS == 0 && index + 1 < self.layers.len() {
+                mlx::transforms::async_eval(&[&x])?;
+            }
             if target_layer_ids.get(next_capture) == Some(&index) {
                 captured.push(x.clone());
                 next_capture += 1;

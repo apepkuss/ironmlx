@@ -30,6 +30,11 @@ pub struct Qwen35MoeModel {
     pub(super) dflash2_target_bits: Option<i32>,
     /// Always Some for 35B-A3B (tie_word_embeddings=false).
     lm_head: Linear,
+    /// DFlash2 draft projection rows of `lm_head`; built on first use by an
+    /// affine4 target (see [`super::draft_vocab`]).
+    pub(super) draft_vocab: std::sync::OnceLock<Option<super::draft_vocab::DraftVocab>>,
+    /// Identity of this loaded target for state kept across its requests.
+    pub(super) instance: crate::models::dflash2::DFlash2Instance,
     /// Vision encoder; `Some` for multimodal MoE checkpoints loaded with `open_multimodal`.
     vision: Option<VisionTower>,
 }
@@ -119,12 +124,15 @@ impl Qwen35MoeModel {
         let dflash2_target_bits =
             crate::models::qwen3_6_moe::qwen36_moe_dflash2_target_bits(loader.config_raw_value())
                 .ok();
-        let text = Qwen35MoeTextModel::from_loader(loader, cfg)?;
+        let mut text = Qwen35MoeTextModel::from_loader(loader, cfg)?;
+        text.set_affine4_fast_paths(dflash2_target_bits == Some(4));
         Ok(Self {
             text,
             exact_batched_verify_profile,
             dflash2_target_bits,
             lm_head,
+            draft_vocab: std::sync::OnceLock::new(),
+            instance: crate::models::dflash2::DFlash2Instance::new(),
             vision,
         })
     }
@@ -463,6 +471,8 @@ impl Qwen35MoeModel {
                 crate::models::qwen3_5::speculative::ExactBatchedVerifyProfile::Disabled,
             dflash2_target_bits: None,
             lm_head,
+            draft_vocab: std::sync::OnceLock::new(),
+            instance: crate::models::dflash2::DFlash2Instance::new(),
             vision: None,
         }
     }

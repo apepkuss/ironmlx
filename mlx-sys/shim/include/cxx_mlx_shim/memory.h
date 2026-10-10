@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 #include "rust/cxx.h"
 
@@ -12,6 +13,7 @@ std::size_t get_peak_memory();
 std::size_t get_memory_limit();
 std::size_t set_cache_limit(std::size_t limit);
 std::size_t set_wired_limit(std::size_t limit);
+void start_residency_refresh(std::uint32_t interval_ms);
 std::size_t get_memory_size();
 std::size_t get_max_recommended_memory();
 rust::String get_device_name();
