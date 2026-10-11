@@ -1662,3 +1662,352 @@ fn qwen36_moe_dflash2_window_cost_recovers_after_base64_on_copy() {
     let run = run_window_cost_tracked(&fixture, "base64-copy", &prompt_ids, 700, true);
     assert_recovers_on_copy_section(&fixture, &run);
 }
+
+/// Requests decoded together in ragged multi-request windows (rows at
+/// different context lengths), alternating drafting windows with one-token
+/// windows, emit the token IDs of ordinary decoding of each request alone and
+/// leave each row's committed target cache bit-identical to teacher-forced
+/// ordinary decoding; the tail rows finish on their own B1 windows.
+#[test]
+#[ignore = "loads a full local Qwen3.6 MoE target and the incoai DFlash2 draft"]
+#[serial(mlx_metal)]
+fn qwen36_moe_dflash2_ragged_windows_match_ordinary() {
+    let Some(fixture) = fixture() else {
+        eprintln!("skip: set QWEN36_MOE_DFLASH2_TARGET and DFLASH2_MODEL");
+        return;
+    };
+    let max_new_tokens = 37;
+    let prompt_ids = PROMPTS
+        .iter()
+        .map(|prompt| fixture.tokenizer.encode(prompt, false).expect("encode"))
+        .collect::<Vec<_>>();
+    let rows = prompt_ids.len();
+    let mut streams = prompt_ids
+        .iter()
+        .map(|ids| {
+            let mut stream = DFlash2TextGenerationStream::new_text_only_with_options(
+                &fixture.target,
+                &fixture.draft,
+                &fixture.tokenizer,
+                request(ids.clone(), max_new_tokens, Vec::new(), Sampler::greedy()),
+                8,
+                DFlash2P2Options::default(),
+            )
+            .expect("DFlash2 stream");
+            stream.experimental_fixed_budget = Some(2);
+            stream
+        })
+        .collect::<Vec<_>>();
+    let mut events = vec![Vec::new(); rows];
+    let mut done = vec![false; rows];
+    let mut group: Option<(Vec<usize>, DFlash2RaggedBatchCache)> = None;
+    let (mut step, mut drafting_windows, mut one_token_windows) = (0_usize, 0_usize, 0_usize);
+    fn pick<'a, 'm, M: DFlash2Target>(
+        streams: &'a mut [DFlash2TextGenerationStream<'m, M>],
+        indices: &[usize],
+    ) -> Vec<&'a mut DFlash2TextGenerationStream<'m, M>> {
+        let mut slots = streams.iter_mut().map(Some).collect::<Vec<_>>();
+        indices
+            .iter()
+            .map(|&index| slots[index].take().expect("distinct rows"))
+            .collect()
+    }
+    loop {
+        for row in 0..rows {
+            while !done[row] && !streams[row].pending_tokens.is_empty() {
+                let event = streams[row]
+                    .next_token_deferred()
+                    .expect("next token")
+                    .expect("event");
+                let finished = event.finish_reason.is_some();
+                events[row].push((
+                    event.token,
+                    event.finish_reason.map(|reason| format!("{reason:?}")),
+                ));
+                done[row] = finished;
+            }
+        }
+        let drafting = step % 3 == 0;
+        let ready = (0..rows)
+            .filter(|&row| {
+                !done[row]
+                    && if drafting {
+                        streams[row].ragged_linear_eligible()
+                    } else {
+                        streams[row].ragged_ordinary_eligible()
+                    }
+            })
+            .collect::<Vec<_>>();
+        let solo = (0..rows)
+            .filter(|&row| !done[row] && !ready.contains(&row))
+            .collect::<Vec<_>>();
+        if ready.is_empty() && solo.is_empty() {
+            break;
+        }
+        let wanted = if ready.len() >= 2 {
+            ready.clone()
+        } else {
+            Vec::new()
+        };
+        if group
+            .as_ref()
+            .is_some_and(|(members, _)| *members != wanted)
+        {
+            let (members, cache) = group.take().expect("group");
+            cache
+                .scatter_to_rows(&mut pick(&mut streams, &members))
+                .expect("scatter");
+        }
+        for &row in solo.iter().chain(if wanted.is_empty() {
+            ready.iter()
+        } else {
+            [].iter()
+        }) {
+            streams[row].fill_deferred_window_b1().expect("B1 window");
+        }
+        if !wanted.is_empty() {
+            let previous = group.take().map(|(_, cache)| cache);
+            let mut picked = pick(&mut streams, &wanted);
+            let (cache, _) = if drafting {
+                drafting_windows += 1;
+                DFlash2TextGenerationStream::fill_ragged_linear_window_bn(&mut picked, previous)
+            } else {
+                one_token_windows += 1;
+                DFlash2TextGenerationStream::fill_ragged_ordinary_window_bn(&mut picked, previous)
+            }
+            .expect("ragged window");
+            group = Some((wanted, cache));
+        }
+        step += 1;
+    }
+    if let Some((members, cache)) = group.take() {
+        cache
+            .scatter_to_rows(&mut pick(&mut streams, &members))
+            .expect("scatter");
+    }
+    assert!(drafting_windows > 0 && one_token_windows > 0);
+    for (row, ids) in prompt_ids.iter().enumerate() {
+        assert_eq!(
+            events[row],
+            greedy_ordinary(&fixture, ids, max_new_tokens),
+            "row {row} tokens differ from ordinary decoding"
+        );
+        assert_committed_cache_matches_teacher_forced(
+            &format!("ragged row {row}"),
+            &fixture.target,
+            &streams[row],
+            ids.len(),
+        );
+    }
+    eprintln!(
+        "[qwen36-moe-dflash2-ragged] rows={rows} drafting_windows={drafting_windows} one_token_windows={one_token_windows}"
+    );
+}
+
+/// First-token publication at admission, through the DFlash2 actor: a
+/// published first token and the rest of each request (alone, or admitted
+/// together) match the same request decoded by a directly driven scheduler-B1
+/// DFlash2 stream (the actor's prefill morphology); `max_tokens = 1` and a
+/// first token that is a stop token finish with one event; a receiver dropped
+/// right after admission is cancelled. A failure injected after the first
+/// token is taken
+/// fails the request through the normal completion: no event, no further
+/// window, and the admission slot and KV charge are released (the final
+/// concurrent admission fills every slot of a zero-length queue, so a leaked
+/// slot would be rejected).
+#[test]
+#[ignore = "loads a full local Qwen3.6 MoE target and the incoai DFlash2 draft"]
+#[serial(mlx_metal)]
+fn qwen36_moe_dflash2_actor_admission_first_token_lifecycle() {
+    use crate::core::dflash2_actor::FAIL_NEXT_ADMISSION_FIRST_TOKEN;
+    use crate::core::engine_state::{build_dflash2_engine, CausalEngine};
+    use crate::core::scheduler_actor::AdmitReply;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    let Some(fixture) = fixture() else {
+        eprintln!("skip: set QWEN36_MOE_DFLASH2_TARGET and DFLASH2_MODEL");
+        return;
+    };
+    let max_new_tokens = 16;
+    let prompt_ids = PROMPTS
+        .iter()
+        .map(|prompt| fixture.tokenizer.encode(prompt, false).expect("encode"))
+        .collect::<Vec<_>>();
+    let scheduler_b1 = |ids: &[u32], max_new_tokens: usize, stops: Vec<u32>| {
+        let mut stream = DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
+            &fixture.target,
+            &fixture.draft,
+            &fixture.tokenizer,
+            request(ids.to_vec(), max_new_tokens, stops, Sampler::greedy()),
+            DFlash2ExecutionOptions {
+                block_size: 8,
+                p2: DFlash2P2Options::default(),
+            },
+            None,
+            &|| false,
+        )
+        .expect("scheduler-B1 DFlash2 stream");
+        drain(|| stream.next_token())
+    };
+    let expected = prompt_ids
+        .iter()
+        .map(|ids| scheduler_b1(ids, max_new_tokens, Vec::new()))
+        .collect::<Vec<_>>();
+    let first_token = expected[0][0].0;
+    let single = scheduler_b1(&prompt_ids[0], 1, Vec::new());
+    let first_stop = scheduler_b1(&prompt_ids[0], max_new_tokens, vec![first_token]);
+    let stop = |reason: &str| Some(format!("{reason:?}"));
+    assert_eq!(single, vec![(first_token, stop("length"))]);
+    assert_eq!(first_stop, vec![(first_token, stop("stop"))]);
+
+    let rows = prompt_ids.len();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    runtime.block_on(async {
+        let state = build_dflash2_engine(
+            fixture.target,
+            fixture.draft,
+            fixture.tokenizer,
+            "dflash2-moe-admission".to_string(),
+            2048,
+            rows,
+            5,
+            1,
+            0,
+            4096,
+            8,
+            Some(4),
+            None,
+            crate::core::scheduler_resolution::default_scheduler_runtime_profile(
+                crate::core::scheduler_autotune::SchedulerAutotuneRuntimeContext::local_default(
+                    4096,
+                ),
+            ),
+            Default::default(),
+        )
+        .await
+        .expect("DFlash2 engine");
+        let admit = |ids: &[u32], max_new_tokens: usize, stops: Vec<u32>| {
+            state.request_execution.admit(request(
+                ids.to_vec(),
+                max_new_tokens,
+                stops,
+                Sampler::greedy(),
+            ))
+        };
+        async fn collect(reply: &mut AdmitReply) -> Vec<Event> {
+            let mut events = Vec::new();
+            while let Some(event) =
+                tokio::time::timeout(Duration::from_secs(120), reply.event_rx.recv())
+                    .await
+                    .expect("event timeout")
+            {
+                let finished = event.finish_reason.is_some();
+                events.push((
+                    event.token,
+                    event.finish_reason.map(|reason| format!("{reason:?}")),
+                ));
+                if finished {
+                    break;
+                }
+            }
+            events
+        }
+        async fn assert_closed(reply: &mut AdmitReply, label: &str) {
+            let next = tokio::time::timeout(Duration::from_secs(120), reply.event_rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{label}: channel not closed"));
+            assert!(
+                next.is_none(),
+                "{label}: unexpected event {:?}",
+                next.map(|e| e.token)
+            );
+        }
+        async fn assert_released(state: &CausalEngine<Qwen35MoeModel>, label: &str) {
+            tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    let health = state.health_collector.snapshot();
+                    if state.request_execution.active_and_queued() == (0, 0)
+                        && health.memory.kv_cache_active_bytes == 0
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{label}: admission or KV charge not released"));
+        }
+
+        let mut reply = admit(&prompt_ids[0], max_new_tokens, Vec::new())
+            .await
+            .unwrap_or_else(|_| panic!("admission"));
+        assert_eq!(collect(&mut reply).await, expected[0], "published request");
+        assert_closed(&mut reply, "published request").await;
+        assert_released(&state, "published request").await;
+
+        let mut reply = admit(&prompt_ids[0], 1, Vec::new())
+            .await
+            .unwrap_or_else(|_| panic!("max_tokens=1 admission"));
+        assert_eq!(collect(&mut reply).await, single, "max_tokens=1");
+        assert_closed(&mut reply, "max_tokens=1").await;
+        assert_released(&state, "max_tokens=1").await;
+
+        let mut reply = admit(&prompt_ids[0], max_new_tokens, vec![first_token])
+            .await
+            .unwrap_or_else(|_| panic!("stop admission"));
+        assert_eq!(
+            collect(&mut reply).await,
+            first_stop,
+            "first token is a stop token"
+        );
+        assert_closed(&mut reply, "first-token stop").await;
+        assert_released(&state, "first-token stop").await;
+
+        let before = state.health_collector.snapshot().dflash2;
+        FAIL_NEXT_ADMISSION_FIRST_TOKEN.store(true, Ordering::SeqCst);
+        let mut reply = admit(&prompt_ids[0], max_new_tokens, Vec::new())
+            .await
+            .unwrap_or_else(|_| panic!("failing admission"));
+        assert_closed(&mut reply, "failed first token").await;
+        assert!(
+            !FAIL_NEXT_ADMISSION_FIRST_TOKEN.load(Ordering::SeqCst),
+            "failure was not injected"
+        );
+        assert_released(&state, "failed first token").await;
+        let after = state.health_collector.snapshot().dflash2;
+        assert_eq!(
+            after.requests,
+            before.requests + 1,
+            "failed request admitted"
+        );
+        assert_eq!(after.windows, before.windows, "failed request decoded on");
+
+        let cancelled = admit(&prompt_ids[0], 2048, Vec::new())
+            .await
+            .unwrap_or_else(|_| panic!("cancelled admission"));
+        drop(cancelled);
+        assert_released(&state, "cancelled before first token").await;
+
+        let (a, b, c) = tokio::join!(
+            admit(&prompt_ids[0], max_new_tokens, Vec::new()),
+            admit(&prompt_ids[1], max_new_tokens, Vec::new()),
+            admit(&prompt_ids[2], max_new_tokens, Vec::new()),
+        );
+        let mut replies = [a, b, c]
+            .map(|reply| reply.unwrap_or_else(|_| panic!("concurrent admission (leaked slot?)")));
+        let [ra, rb, rc] = &mut replies;
+        let (ea, eb, ec) = tokio::join!(collect(ra), collect(rb), collect(rc));
+        for (row, events) in [ea, eb, ec].into_iter().enumerate() {
+            assert_eq!(events, expected[row], "concurrent row {row}");
+        }
+        drop(replies);
+        assert_released(&state, "concurrent admissions").await;
+        drop(state);
+    });
+    mlx::clear_cache();
+}

@@ -62,6 +62,16 @@ struct Args {
     /// Time the routed-expert stage of one MoE layer in isolation.
     #[arg(long)]
     moe_microbench: bool,
+    /// Instead of generation runs, time ragged multi-request target verifies
+    /// (rows = the first prompts, each at its own context length) per batch
+    /// width and verify width, with component ablations, and check every
+    /// row of an unablated batched verify against its B1 verify.
+    #[arg(long)]
+    batch_curve: bool,
+    #[arg(long, value_delimiter = ',', default_value = "1,2,4")]
+    batch_widths: Vec<usize>,
+    #[arg(long, value_delimiter = ',', default_value = "2,4,6,8")]
+    verify_widths: Vec<usize>,
     /// Drafter runtime quantization bits (0 = BF16 checkpoint). The served
     /// Qwen3.6 MoE profile loads the drafter at 4 bits.
     #[arg(long, default_value_t = 4)]
@@ -448,6 +458,259 @@ fn verify_curve(
 /// `RoutedExperts::apply_experts`, with real routing captured from a real
 /// verify of the same width, and with synthetic all-distinct and fully shared
 /// routing to measure the sensitivity to expert reuse.
+#[allow(clippy::too_many_lines)]
+fn batch_curve(
+    target: &Qwen35MoeModel,
+    draft: &DFlash2DraftModel,
+    prompts: &[Vec<u32>],
+    args: &Args,
+    out: &mut std::fs::File,
+) -> Result<()> {
+    use ironmlx_lm::core::cache::layer::{adopt_layer_cache_rows, LayerCache};
+    use ironmlx_lm::core::model_input::build_position_ids;
+    use ironmlx_lm::models::dflash2::DFlash2TargetForwardMode as Mode;
+    use ironmlx_lm::models::qwen3_5_moe::timing_ablation as ablation;
+    use ironmlx_lm::Model;
+    use mlx::Array;
+
+    let taps = draft.config().dflash_config.target_layer_ids.clone();
+    let rows = *args.batch_widths.iter().max().unwrap_or(&1);
+    anyhow::ensure!(prompts.len() >= rows, "batch curve needs {rows} prompts");
+    let max_q = *args.verify_widths.iter().max().unwrap_or(&8);
+    let cap = (prompts.iter().take(rows).map(Vec::len).max().unwrap_or(0) + 64) as i32;
+    let ids = |tokens: &[u32], batch: i32| -> Result<Array> {
+        Ok((tokens, &[batch, (tokens.len() as i32) / batch][..]).try_into()?)
+    };
+    // Prefill timing per prompt, with and without routed experts.
+    for (index, prompt) in prompts.iter().enumerate() {
+        for (label, flags) in [("full", 0), ("noexperts", ablation::ROUTED_EXPERTS)] {
+            let mut timings = Vec::new();
+            for rep in 0..args.curve_reps.min(7) {
+                let mut cache =
+                    target.make_cache(1, cap.max(prompt.len() as i32 + 8), target.cache_dtype())?;
+                ablation::set(flags);
+                mlx::transforms::synchronize()?;
+                let started = Instant::now();
+                let out = target.dflash2_forward_target_on(
+                    &ids(prompt, 1)?,
+                    &build_position_ids(0, prompt.len() as i32)?,
+                    Some(&mut cache),
+                    &taps,
+                    Mode::Prefill,
+                    ().into(),
+                )?;
+                mlx::transforms::eval(&[&out.hidden, &out.context_hidden])?;
+                mlx::transforms::synchronize()?;
+                ablation::set(0);
+                if rep >= 2 {
+                    timings.push(started.elapsed().as_secs_f64() * 1e3);
+                }
+            }
+            writeln!(
+                out,
+                "{}",
+                json!({"kind": "prefill_curve", "row": index, "tokens": prompt.len(),
+                       "ablation": label, "median_ms": median(timings.clone())})
+            )?;
+        }
+    }
+    // Per row: prefill, then a greedy continuation (realistic verify tokens);
+    // the cache is restored to the prefill state.
+    let mut caches = Vec::new();
+    let mut continuations = Vec::new();
+    for prompt in prompts.iter().take(rows) {
+        let mut cache = target.make_cache(1, cap, target.cache_dtype())?;
+        let prefill = target.dflash2_forward_target_on(
+            &ids(prompt, 1)?,
+            &build_position_ids(0, prompt.len() as i32)?,
+            Some(&mut cache),
+            &taps,
+            Mode::Prefill,
+            ().into(),
+        )?;
+        mlx::transforms::eval(&[&prefill.hidden, &prefill.context_hidden])?;
+        let base: Vec<_> = cache.iter().map(LayerCache::snapshot).collect();
+        let dims = prefill.hidden.shape();
+        let mut last = target.dflash2_project_hidden_on(
+            &mlx::ops::indexing::slice_strided(
+                &prefill.hidden,
+                &[0_i32, dims.as_slice()[1] - 1, 0][..],
+                &[1_i32, dims.as_slice()[1], dims.as_slice()[2]][..],
+                &[1_i32, 1, 1][..],
+            )?,
+            ().into(),
+        )?;
+        let mut continuation = Vec::new();
+        for step in 0..max_q {
+            let token = mlx::ops::reduction::argmax(&last, -1, false)?
+                .reshape((-1,))?
+                .to_vec::<u32>()?[0];
+            continuation.push(token);
+            let output = target.dflash2_forward_target_on(
+                &ids(&[token], 1)?,
+                &build_position_ids((prompt.len() + step) as i32, 1)?,
+                Some(&mut cache),
+                &taps,
+                Mode::OrdinaryDecode,
+                ().into(),
+            )?;
+            last = target.dflash2_project_hidden_on(&output.hidden, ().into())?;
+        }
+        for (layer, snapshot) in cache.iter_mut().zip(&base) {
+            layer.restore(snapshot)?;
+        }
+        caches.push(cache);
+        continuations.push(continuation);
+    }
+    let ablations: [(&str, u32); 6] = [
+        ("full", 0),
+        ("noexperts", ablation::ROUTED_EXPERTS),
+        ("noshared", ablation::SHARED_EXPERT),
+        ("noattn", ablation::FULL_ATTENTION),
+        ("nogdn", ablation::LINEAR_ATTENTION),
+        (
+            "noall",
+            ablation::ROUTED_EXPERTS
+                | ablation::SHARED_EXPERT
+                | ablation::FULL_ATTENTION
+                | ablation::LINEAR_ATTENTION,
+        ),
+    ];
+    // B1 reference logits per (row, Q) for the row-exactness check.
+    let mut reference: std::collections::HashMap<(usize, usize), Vec<u32>> = Default::default();
+    for &batch in &args.batch_widths {
+        for &width in &args.verify_widths {
+            // B=1 runs each row alone; B>1 builds one ragged cache of rows 0..B.
+            let groups: Vec<Vec<usize>> = if batch == 1 {
+                (0..rows).map(|row| vec![row]).collect()
+            } else {
+                vec![(0..batch).collect()]
+            };
+            for (label, flags) in ablations {
+                let mut timings = Vec::new();
+                let mut build_samples = Vec::new();
+                let mut cpu_samples = Vec::new();
+                let mut wait_cpu_samples = Vec::new();
+                let mut submit_samples = Vec::new();
+                let mut exact = None;
+                for group in &groups {
+                    let mut cache =
+                        target.make_cache(group.len() as i32, cap, target.cache_dtype())?;
+                    for (dst, &row) in group.iter().enumerate() {
+                        adopt_layer_cache_rows(&mut cache, &caches[row], dst, 0)?;
+                    }
+                    let base: Vec<_> = cache.iter().map(LayerCache::snapshot).collect();
+                    let tokens: Vec<u32> = group
+                        .iter()
+                        .flat_map(|&row| continuations[row][..width].iter().copied())
+                        .collect();
+                    let positions = group
+                        .iter()
+                        .map(|&row| build_position_ids(prompts[row].len() as i32, width as i32))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let positions =
+                        mlx::ops::shape::concatenate(&positions.iter().collect::<Vec<_>>(), 1)?;
+                    for rep in 0..args.curve_reps {
+                        for (layer, snapshot) in cache.iter_mut().zip(&base) {
+                            layer.discard_speculative_prefix_capture();
+                            layer.restore(snapshot)?;
+                        }
+                        if width > 1 {
+                            for layer in cache.iter_mut() {
+                                layer.begin_speculative_prefix_capture()?;
+                            }
+                        }
+                        ablation::set(flags);
+                        mlx::transforms::synchronize()?;
+                        let started = Instant::now();
+                        let output = {
+                            let _ragged = (group.len() > 1)
+                                .then(ironmlx_lm::nn::gated_attention::ragged_rows_scope);
+                            target.dflash2_forward_target_on(
+                                &ids(&tokens, group.len() as i32)?,
+                                &positions,
+                                Some(&mut cache),
+                                &taps,
+                                if width == 1 {
+                                    Mode::OrdinaryDecode
+                                } else {
+                                    Mode::GreedyVerify
+                                },
+                                ().into(),
+                            )?
+                        };
+                        let logits = target.dflash2_project_hidden_on(&output.hidden, ().into())?;
+                        let built_ms = started.elapsed().as_secs_f64() * 1e3;
+                        let cpu0 = thread_cpu_ms();
+                        mlx::transforms::async_eval(&[&logits, &output.context_hidden])?;
+                        let submitted_ms = started.elapsed().as_secs_f64() * 1e3;
+                        let encode_cpu = thread_cpu_ms() - cpu0;
+                        let cpu1 = thread_cpu_ms();
+                        mlx::transforms::eval(&[&logits, &output.context_hidden])?;
+                        let wait_cpu = thread_cpu_ms() - cpu1;
+                        if rep >= 2 {
+                            cpu_samples.push(encode_cpu);
+                            wait_cpu_samples.push(wait_cpu);
+                        }
+                        mlx::transforms::synchronize()?;
+                        ablation::set(0);
+                        if rep >= 2 {
+                            timings.push(started.elapsed().as_secs_f64() * 1e3);
+                            build_samples.push(built_ms);
+                            submit_samples.push(submitted_ms);
+                        }
+                        if rep == 0 && flags == 0 {
+                            let bits = mlx::ops::cast::astype(&logits, mlx::Dtype::Float32)?
+                                .to_vec::<f32>()?
+                                .into_iter()
+                                .map(f32::to_bits)
+                                .collect::<Vec<_>>();
+                            let per_row = bits.len() / group.len();
+                            for (index, &row) in group.iter().enumerate() {
+                                let row_bits =
+                                    bits[index * per_row..(index + 1) * per_row].to_vec();
+                                match reference.get(&(row, width)) {
+                                    Some(expected) => {
+                                        let same = *expected == row_bits;
+                                        exact = Some(exact.unwrap_or(true) && same);
+                                    }
+                                    None => {
+                                        reference.insert((row, width), row_bits);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for (layer, snapshot) in cache.iter_mut().zip(&base) {
+                        layer.discard_speculative_prefix_capture();
+                        layer.restore(snapshot)?;
+                    }
+                }
+                writeln!(
+                    out,
+                    "{}",
+                    json!({
+                        "kind": "batch_curve",
+                        "profile_label": args.profile_label,
+                        "batch": batch,
+                        "width": width,
+                        "ablation": label,
+                        "median_ms": median(timings.clone()),
+                        "min_ms": timings.iter().copied().fold(f64::INFINITY, f64::min),
+                        "samples": timings.len(),
+                        "rows_exact_vs_b1": exact,
+                        "build_ms": median(build_samples.clone()),
+                        "submitted_ms": median(submit_samples.clone()),
+                        "encode_cpu_ms": median(cpu_samples.clone()),
+                        "wait_cpu_ms": median(wait_cpu_samples.clone()),
+                    })
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn moe_microbench(
     target: &Qwen35MoeModel,
     draft: &DFlash2DraftModel,
@@ -612,6 +875,21 @@ fn main() -> Result<()> {
     let mut out = std::fs::File::create(&args.output)?;
     if args.moe_microbench {
         return moe_microbench(&target, &draft, &encoded[0], &args, &mut out);
+    }
+    if args.batch_curve {
+        writeln!(
+            out,
+            "{}",
+            json!({
+                "kind": "setup",
+                "profile_label": args.profile_label,
+                "m5_profile": profile.status.as_str(),
+                "fingerprint": target.dflash2_execution_fingerprint(),
+                "prompts": prompts.iter().map(|case| case.id.clone()).collect::<Vec<_>>(),
+                "prompt_tokens": encoded.iter().map(Vec::len).collect::<Vec<_>>(),
+            })
+        )?;
+        return batch_curve(&target, &draft, &encoded, &args, &mut out);
     }
     if args.verify_curve {
         let setup = json!({

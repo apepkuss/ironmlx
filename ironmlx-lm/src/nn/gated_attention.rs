@@ -469,7 +469,68 @@ impl GatedAttention {
                     };
 
                     let exact_batched_verify = super::position_stable_qmm::is_armed() && seq > 1;
-                    if ragged_rows_armed() && batch > 1 {
+                    // Ragged rows without the M5 attention route (Qwen3.6 MoE):
+                    // the bulk position-stable verify route runs each row with
+                    // its own cache offset, exactly as that row's B1 verify.
+                    let ragged_bulk =
+                        ragged_rows_armed() && batch > 1 && !super::m5_attention::enabled();
+                    if ragged_bulk && seq > 1 {
+                        anyhow::ensure!(
+                            exact_batched_verify
+                                && super::position_stable_qmm::dflash2_bulk_attention_is_armed()
+                                && mask.is_none()
+                                && kv_validity_mask.is_none()
+                                && c.turboquant().is_none()
+                                && lens_ref.iter().all(|&len| len == seq),
+                            "ragged DFlash2 rows require the bulk position-stable verify route"
+                        );
+                    }
+                    if ragged_bulk && seq == 1 {
+                        // Ragged one-token decode: one cache update for every
+                        // row, then each row attends over its own prefix with
+                        // the ordinary decode SDPA of a B1 row.
+                        anyhow::ensure!(
+                            mask.is_none()
+                                && kv_validity_mask.is_none()
+                                && c.turboquant().is_none()
+                                && lens_ref.iter().all(|&len| len == 1),
+                            "ragged DFlash2 decode rows require a plain dense cache"
+                        );
+                        let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
+                        let base = c.offsets().to_vec();
+                        let (keys, values) =
+                            c.update_and_fetch_for_attention_on(&k, &v, lens_ref, target)?;
+                        let mut rows = Vec::with_capacity(batch as usize);
+                        for row in 0..batch {
+                            let end = base[row as usize] + 1;
+                            let q_row = mlx::ops::indexing::slice_strided_on(
+                                &queries,
+                                &[row, 0, 0, 0][..],
+                                &[row + 1, h_q, 1, d][..],
+                                &[1_i32, 1, 1, 1][..],
+                                target,
+                            )?;
+                            let k_row = mlx::ops::indexing::slice_strided_on(
+                                &keys,
+                                &[row, 0, 0, 0][..],
+                                &[row + 1, h_kv, end, d][..],
+                                &[1_i32, 1, 1, 1][..],
+                                target,
+                            )?;
+                            let v_row = mlx::ops::indexing::slice_strided_on(
+                                &values,
+                                &[row, 0, 0, 0][..],
+                                &[row + 1, h_kv, end, d][..],
+                                &[1_i32, 1, 1, 1][..],
+                                target,
+                            )?;
+                            rows.push(mlx::fast::scaled_dot_product_attention_on(
+                                &q_row, &k_row, &v_row, self.scale, "causal", None, None, target,
+                            )?);
+                        }
+                        let refs = rows.iter().collect::<Vec<_>>();
+                        mlx::ops::shape::concatenate_on(&refs, 0, target)?
+                    } else if ragged_rows_armed() && batch > 1 && !ragged_bulk {
                         anyhow::ensure!(
                             super::m5_attention::enabled()
                                 && queries.dtype() == mlx::Dtype::Bfloat16
@@ -741,6 +802,11 @@ fn ragged_rows_armed() -> bool {
     RAGGED_ROWS.with(|cell| cell.get())
 }
 
+/// Whether the current thread runs target rows as ragged rows.
+pub(crate) fn ragged_rows_armed_pub() -> bool {
+    ragged_rows_armed()
+}
+
 static RAGGED_ROW_ATTENTION_CALLS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
@@ -982,8 +1048,6 @@ fn query_position_isolated_attention_bulk_cache_update_on(
     let q_dims = q_dims.as_slice();
     let key_dims = keys.shape();
     let key_dims = key_dims.as_slice();
-    let value_dims = values.shape();
-    let value_dims = value_dims.as_slice();
     let cos_dims = cos.shape();
     let cos_dims = cos_dims.as_slice();
     let sin_dims = sin.shape();
@@ -1106,6 +1170,70 @@ fn query_position_isolated_attention_bulk_cache_update_on(
         )?);
     }
 
+    if batch > 1 && ragged_rows_armed() {
+        // Ragged rows: every row attends over its own cache prefix with the
+        // B1 grouping of its own offset, so each row's output equals its B1
+        // verify bit for bit.
+        anyhow::ensure!(mask.is_none(), "ragged exact attention takes no mask");
+        let mut rows = Vec::with_capacity(batch as usize);
+        for row in 0..batch {
+            let slice_row = |array: &Array| -> Result<Array> {
+                let shape = array.shape();
+                let dims = shape.as_slice();
+                Ok(mlx::ops::indexing::slice_strided_on(
+                    array,
+                    &[row, 0, 0, 0][..],
+                    &[row + 1, dims[1], dims[2], dims[3]][..],
+                    &[1_i32, 1, 1, 1][..],
+                    target,
+                )?)
+            };
+            rows.push(exact_grouped_attention_on(
+                &slice_row(&rotated_queries)?,
+                &slice_row(&cached_keys)?,
+                &slice_row(&cached_values)?,
+                &base_offsets[row as usize..row as usize + 1],
+                None,
+                cache.turboquant().is_none(),
+                scale,
+                target,
+            )?);
+        }
+        let refs = rows.iter().collect::<Vec<_>>();
+        return mlx::ops::shape::concatenate_on(&refs, 0, target).map_err(Into::into);
+    }
+    exact_grouped_attention_on(
+        &rotated_queries,
+        &cached_keys,
+        &cached_values,
+        &base_offsets,
+        mask,
+        cache.turboquant().is_none(),
+        scale,
+        target,
+    )
+}
+
+/// Query-grouped exact attention over already-updated cache keys/values
+/// (see [`query_position_isolated_attention_bulk_cache_update_on`]).
+#[allow(clippy::too_many_arguments)]
+fn exact_grouped_attention_on(
+    rotated_queries: &Array,
+    cached_keys: &Array,
+    cached_values: &Array,
+    base_offsets: &[i32],
+    mask: Option<&Array>,
+    plain_cache: bool,
+    scale: f32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    let q_dims = rotated_queries.shape();
+    let q_dims = q_dims.as_slice();
+    let (batch, heads, query_len, head_dim) = (q_dims[0], q_dims[1], q_dims[2], q_dims[3]);
+    let key_dims = cached_keys.shape();
+    let key_dims = key_dims.as_slice();
+    let value_dims = cached_values.shape();
+    let value_dims = value_dims.as_slice();
     let mask_shape = mask.map(Array::shape);
     // Experimental MLX 0.32.2 grouping, adapted from TensorFold exact_attention.
     // Keep every query in the same vector-kernel/key-partition regime as Q1.
@@ -1117,7 +1245,7 @@ fn query_position_isolated_attention_bulk_cache_update_on(
         && key_dims[1] == 4
         && head_dim == 256
         && cached_keys.dtype() == mlx::Dtype::Bfloat16
-        && cache.turboquant().is_none()
+        && plain_cache
         && mask.is_none();
     let moe_grouped = super::moe_fast_path::is_armed()
         && batch == 1
@@ -1125,7 +1253,7 @@ fn query_position_isolated_attention_bulk_cache_update_on(
         && key_dims[1] == 2
         && head_dim == 256
         && cached_keys.dtype() == mlx::Dtype::Bfloat16
-        && cache.turboquant().is_none()
+        && plain_cache
         && mask.is_none();
     let grouped = dense_grouped || moe_grouped;
     // GQA heads per KV head times grouped queries stay within 32 simdgroups.
@@ -1139,7 +1267,7 @@ fn query_position_isolated_attention_bulk_cache_update_on(
             1
         };
         let query = mlx::ops::indexing::slice_strided_on(
-            &rotated_queries,
+            rotated_queries,
             &[0_i32, 0, depth, 0][..],
             &[batch, heads, depth + group, head_dim][..],
             &[1_i32, 1, 1, 1][..],
@@ -1151,14 +1279,14 @@ fn query_position_isolated_attention_bulk_cache_update_on(
             .max()
             .unwrap_or(0);
         let cached_key = mlx::ops::indexing::slice_strided_on(
-            &cached_keys,
+            cached_keys,
             &[0_i32, 0, 0, 0][..],
             &[batch, key_dims[1], key_end, key_dims[3]][..],
             &[1_i32, 1, 1, 1][..],
             target,
         )?;
         let cached_value = mlx::ops::indexing::slice_strided_on(
-            &cached_values,
+            cached_values,
             &[0_i32, 0, 0, 0][..],
             &[batch, value_dims[1], key_end, value_dims[3]][..],
             &[1_i32, 1, 1, 1][..],

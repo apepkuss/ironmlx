@@ -1101,10 +1101,12 @@ where
         target_execution_fingerprint,
         verify_profile,
         batched_execution,
+        tensor_batching,
     ) = {
         let guard = model.lock().await;
         let capabilities = guard.dflash2_verify_capabilities();
         let batched_execution = capabilities.certifies_batched_execution();
+        let tensor_batching = capabilities.certifies_tensor_batching();
         let initial_draft_budget = capabilities
             .max_draft_tokens(1)
             .unwrap_or(0)
@@ -1121,11 +1123,12 @@ where
             guard.dflash2_execution_fingerprint(),
             capabilities.profile,
             batched_execution,
+            tensor_batching,
         )
     };
     // A target that certifies only B1 verification also keeps request
     // prefill and cross-request tensor groups at B1.
-    let tensor_batch_max_width = if batched_execution {
+    let tensor_batch_max_width = if tensor_batching {
         tensor_batch_max_width
     } else {
         1
@@ -1169,6 +1172,7 @@ where
             target_execution_fingerprint,
             verify_profile,
             batched_execution,
+            tensor_batching,
         },
         Arc::clone(&cold_materialization_tracker),
     );

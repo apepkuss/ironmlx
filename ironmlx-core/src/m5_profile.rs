@@ -29,6 +29,17 @@ pub mod settings {
     pub const DFLASH2_FLAT_TREE: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_FLAT_TREE";
     pub const DFLASH2_TREE_PROFILE: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_TREE_PROFILE";
     pub const DFLASH2_RAGGED_LINEAR: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_RAGGED_LINEAR";
+    /// Shared draft budget of a ragged linear batch for targets whose single
+    /// requests keep an adaptive budget (Qwen3.6 MoE window-cost policy).
+    pub const DFLASH2_RAGGED_BUDGET: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_RAGGED_BUDGET";
+    /// Smallest ragged batch that decodes one token per row without drafts
+    /// (0 disables batched one-token windows).
+    pub const DFLASH2_RAGGED_ORDINARY_MIN_WIDTH: &str =
+        "IRONMLX_EXPERIMENTAL_DFLASH2_RAGGED_ORDINARY_MIN_WIDTH";
+    /// Consecutive batched one-token windows after which the next ragged
+    /// window drafts (keeps speculation measured while batched).
+    pub const DFLASH2_RAGGED_PROBE_INTERVAL: &str =
+        "IRONMLX_EXPERIMENTAL_DFLASH2_RAGGED_PROBE_INTERVAL";
     pub const PREFILL_MASKED_SOFTMAX: &str = "IRONMLX_EXPERIMENTAL_PREFILL_MASKED_SOFTMAX";
     pub const PREFILL_CHUNK_CACHE_RESET: &str = "IRONMLX_EXPERIMENTAL_PREFILL_CHUNK_CACHE_RESET";
     pub const PREFILL_QMM_MTILE_METALLIB: &str = "IRONMLX_EXPERIMENTAL_PREFILL_QMM_MTILE_METALLIB";
@@ -101,6 +112,10 @@ impl M5ProfileTarget {
 /// weights removed the intermittent 40-80 ms slower prefills after the idle
 /// gap between requests (0 of 48 against 6 of 24 in the paired sessions).
 const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
+    (settings::DFLASH2_RAGGED_LINEAR, "1"),
+    (settings::DFLASH2_RAGGED_BUDGET, "2"),
+    (settings::DFLASH2_RAGGED_ORDINARY_MIN_WIDTH, "3"),
+    (settings::DFLASH2_RAGGED_PROBE_INTERVAL, "16"),
     (settings::QEMBEDDING_RUNTIME_COUNT, "1"),
     (settings::MLX_CACHE_MAX_MIB, "512"),
     (settings::WIRED_WEIGHTS, "1"),
@@ -649,11 +664,32 @@ mod tests {
     fn moe_profile_never_inherits_dense_lane_settings() {
         let moe = Some(M5ProfileTarget::Qwen36Moe.values());
         for (name, _) in PROFILE_VALUES {
-            if *name == settings::QEMBEDDING_RUNTIME_COUNT || *name == settings::MLX_CACHE_MAX_MIB {
+            if *name == settings::QEMBEDDING_RUNTIME_COUNT
+                || *name == settings::MLX_CACHE_MAX_MIB
+                || *name == settings::DFLASH2_RAGGED_LINEAR
+            {
                 continue;
             }
             assert_eq!(setting_with(None, moe, name), None, "{name}");
         }
+        // Ragged multi-request batching is the MoE family's own setting
+        // (row-exact ragged verify and one-token windows), not inherited.
+        assert_eq!(
+            setting_with(None, moe, settings::DFLASH2_RAGGED_LINEAR).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            setting_with(None, moe, settings::DFLASH2_RAGGED_BUDGET).as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            setting_with(None, moe, settings::DFLASH2_RAGGED_ORDINARY_MIN_WIDTH).as_deref(),
+            Some("3")
+        );
+        assert_eq!(
+            setting_with(None, moe, settings::DFLASH2_RAGGED_PROBE_INTERVAL).as_deref(),
+            Some("16")
+        );
         // Shared settings with target-specific values.
         assert_eq!(
             setting_with(None, moe, settings::QEMBEDDING_RUNTIME_COUNT).as_deref(),

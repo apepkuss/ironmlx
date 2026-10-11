@@ -31,6 +31,13 @@ pub(crate) fn qwen36_moe_dflash2_max_verify_width(bits: i32) -> usize {
     }
 }
 
+/// Widest ragged verify batch: concurrent requests, each at its own cache
+/// offset, verified (or decoded one token each) in one target forward with
+/// every row on its own B1 arithmetic. Qualified by the runtime test
+/// `qwen36_moe_dflash2_ragged_windows_match_ordinary` (tokens and committed
+/// caches against ordinary decoding) and the serving parity runs.
+pub(crate) const QWEN36_MOE_DFLASH2_MAX_BATCH_WIDTH: usize = 4;
+
 /// Largest flat draft tree (nodes excluding the root, so one B1 tree verify
 /// of `nodes + 1` rows) certified per target bit width by
 /// `qwen36_moe_dflash2_tree_matches_ancestor_decode`, which compares every
@@ -80,11 +87,15 @@ impl Qwen35MoeModel {
     ) -> Result<DFlash2TargetOutput> {
         let input_shape = input_ids.shape();
         let input_dims = input_shape.as_slice();
-        if input_dims.len() != 2 || input_dims[0] != 1 || input_dims[1] <= 0 {
+        if input_dims.len() != 2 || input_dims[0] <= 0 || input_dims[1] <= 0 {
             return Err(anyhow!(
-                "Qwen3.6 MoE DFlash2 is qualified only for B1 inputs [1,S], got {input_dims:?}"
+                "Qwen3.6 MoE DFlash2 target forward requires inputs [B,S], got {input_dims:?}"
             ));
         }
+        anyhow::ensure!(
+            input_dims[0] == 1 || crate::nn::gated_attention::ragged_rows_armed_pub(),
+            "Qwen3.6 MoE DFlash2 runs B>1 target rows only as ragged rows, got {input_dims:?}"
+        );
         let verify_width = input_dims[1] as usize;
         // Verification keeps every quantized projection on the
         // product-stable route (one dispatch, ordinary Q=1 accumulation
@@ -101,8 +112,11 @@ impl Qwen35MoeModel {
         let _dflash2_bulk_attention = mode
             .requires_position_stability()
             .then(crate::nn::position_stable_qmm::dflash2_bulk_attention_scope);
-        let _product_stable_qmm =
-            (mode.is_verify() && verify_width > 1).then(crate::nn::product_stable_qmm::scope);
+        // Multi-row verify, and ragged multi-request one-token decode, keep
+        // every row's projections on the one-row qmv_fast accumulation tree.
+        let _product_stable_qmm = ((mode.is_verify() && verify_width > 1)
+            || (input_dims[0] > 1 && mode == DFlash2TargetForwardMode::OrdinaryDecode))
+            .then(crate::nn::product_stable_qmm::scope);
         // M5 MoE affine4 projections (experimental): every target forward of
         // the stream, including ordinary Q=1 decoding, uses the same
         // tensor-unit arithmetic so verify and serial decoding agree.
@@ -209,6 +223,57 @@ impl DFlash2Target for Qwen35MoeModel {
                 layer.restore(snapshot)?;
             }
         }
+        // Ragged multi-request verifies (rows at different offsets) of every
+        // certified batch and verify width, with their per-row prefix restore.
+        for batch in 2..=QWEN36_MOE_DFLASH2_MAX_BATCH_WIDTH {
+            let batch_i32 = batch as i32;
+            for width in 2..=self.dflash2_max_verify_width() {
+                let mut rows =
+                    self.make_cache(batch_i32, 64, crate::core::Model::cache_dtype(self))?;
+                for row in 0..batch {
+                    crate::core::cache::layer::adopt_layer_cache_rows(&mut rows, &cache, row, 0)?;
+                }
+                let snapshots = rows
+                    .iter()
+                    .map(LayerCache::dflash2_transaction_snapshot)
+                    .collect::<Result<Vec<_>>>()?;
+                for layer in rows.iter_mut() {
+                    layer.begin_speculative_prefix_capture()?;
+                }
+                let tokens: Vec<u32> = (0..batch * width).map(|i| 3000 + i as u32).collect();
+                let input: Array = (&tokens[..], &[batch_i32, width as i32][..]).try_into()?;
+                let positions = (0..batch)
+                    .map(|_| crate::core::model_input::build_position_ids(8, width as i32))
+                    .collect::<Result<Vec<_>>>()?;
+                let positions = mlx::ops::shape::concatenate_on(
+                    &positions.iter().collect::<Vec<_>>(),
+                    1,
+                    target,
+                )?;
+                let output = {
+                    let _ragged = crate::nn::gated_attention::ragged_rows_scope();
+                    self.dflash2_forward_target_on(
+                        &input,
+                        &positions,
+                        Some(&mut rows),
+                        &taps,
+                        DFlash2TargetForwardMode::GreedyVerify,
+                        target,
+                    )?
+                };
+                let logits = self.dflash2_project_hidden_on(&output.hidden, target)?;
+                mlx::transforms::eval(&[&logits, &output.context_hidden])?;
+                let accepted = (0..batch).map(|row| 1 + row % width).collect::<Vec<_>>();
+                self.dflash2_restore_target_prefix_rows_on(
+                    &mut rows, &snapshots, &accepted, target,
+                )?;
+                let arrays = rows
+                    .iter()
+                    .flat_map(LayerCache::diagnostic_buffers)
+                    .collect::<Vec<_>>();
+                mlx::transforms::eval(&arrays)?;
+            }
+        }
         drop(cache);
         mlx::clear_cache();
         tracing::info!(
@@ -259,12 +324,16 @@ impl DFlash2Target for Qwen35MoeModel {
     }
 
     fn dflash2_verify_capabilities(&self) -> DFlash2VerifyCapabilities {
-        // B1 only: batched MoE verification interleaves expert routes across
-        // requests and has not been qualified for this target.
-        let supported_shapes = (2..=self.dflash2_max_verify_width())
-            .map(|verify_width| DFlash2VerifyShape {
-                batch_width: 1,
-                verify_width,
+        // B>1 shapes are ragged rows only: each request keeps its own cache
+        // offset and its B1 arithmetic (per-row attention, row-stable
+        // projections, per-route expert products); equal-position tensor
+        // groups and batched prefill are not certified.
+        let supported_shapes = (1..=QWEN36_MOE_DFLASH2_MAX_BATCH_WIDTH)
+            .flat_map(|batch_width| {
+                (2..=self.dflash2_max_verify_width()).map(move |verify_width| DFlash2VerifyShape {
+                    batch_width,
+                    verify_width,
+                })
             })
             .collect::<Vec<_>>();
         let certified = !supported_shapes.is_empty();
@@ -279,7 +348,7 @@ impl DFlash2Target for Qwen35MoeModel {
                         qwen36_moe_grouped_experts_min_rows(bits).unwrap_or(0)
                     )
                 }
-                Some(bits) => format!("qwen36-moe-affine{bits}-b1-v1"),
+                Some(bits) => format!("qwen36-moe-affine{bits}-ragged-b4-v1"),
                 None => "qwen35-moe-unqualified".to_owned(),
             },
             row_bit_exact_qmm: certified,
@@ -291,6 +360,7 @@ impl DFlash2Target for Qwen35MoeModel {
                 .dflash2_target_bits
                 .map(qwen36_moe_dflash2_flat_tree_max_nodes)
                 .unwrap_or(0),
+            ragged_rows_only: true,
         }
     }
 
@@ -400,14 +470,17 @@ impl DFlash2Target for Qwen35MoeModel {
         );
         let input_shape = input_ids.shape();
         let input_dims = input_shape.as_slice();
-        if input_dims.len() == 2 && input_dims[0] == 1 && input_dims[1] > 0 {
+        if input_dims.len() == 2 && input_dims[0] > 0 && input_dims[1] > 0 {
+            let batch_width = input_dims[0] as usize;
             let verify_width = input_dims[1] as usize;
             if mode.is_verify()
                 && verify_width > 1
-                && !self.dflash2_verify_capabilities().supports(1, verify_width)
+                && !self
+                    .dflash2_verify_capabilities()
+                    .supports(batch_width, verify_width)
             {
                 return Err(anyhow!(
-                    "Qwen3.6 MoE DFlash2 verify is not qualified for B1/Q{verify_width} on this target"
+                    "Qwen3.6 MoE DFlash2 verify is not qualified for B{batch_width}/Q{verify_width} on this target"
                 ));
             }
         }
@@ -460,7 +533,7 @@ impl DFlash2Target for Qwen35MoeModel {
             .then(crate::nn::m5_affine4::scope);
         // Multi-position projection uses the product-stable affine kernel so
         // each row keeps the ordinary Q=1 accumulation tree.
-        let _product_stable = (dims[1] > 1).then(crate::nn::product_stable_qmm::scope);
+        let _product_stable = (dims[0] * dims[1] > 1).then(crate::nn::product_stable_qmm::scope);
         let _fast_paths = self
             .text()
             .affine4_fast_paths()
@@ -759,9 +832,11 @@ mod tests {
         let max_q = qwen36_moe_dflash2_max_verify_width(bits);
         assert!(max_q >= 2, "affine{bits} certifies no verify width");
         let capabilities = model.dflash2_verify_capabilities();
-        assert!(!capabilities.certifies_batched_execution());
+        assert!(capabilities.certifies_batched_execution());
+        assert!(capabilities.ragged_rows_only && !capabilities.certifies_tensor_batching());
         assert!(capabilities.supports(1, max_q) && !capabilities.supports(1, max_q + 1));
-        assert!(!capabilities.supports(2, 2));
+        assert!(capabilities.supports(QWEN36_MOE_DFLASH2_MAX_BATCH_WIDTH, max_q));
+        assert!(!capabilities.supports(QWEN36_MOE_DFLASH2_MAX_BATCH_WIDTH + 1, 2));
         let mut text_tokens = tokenizer.encode(TEXT, false).expect("encode");
         let max_context = contexts().into_iter().max().unwrap_or(8);
         while text_tokens.len() < max_context + max_q + 8 {

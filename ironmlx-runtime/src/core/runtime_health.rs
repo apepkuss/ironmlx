@@ -245,6 +245,8 @@ pub struct DFlash2RaggedLinearHealth {
     pub max_width_limit: usize,
     /// Batched windows, and windows by batch width 2/3/4.
     pub windows: u64,
+    /// Batched one-token windows (no drafts) among `windows`.
+    pub ordinary_windows: u64,
     pub windows_by_width: [u64; 3],
     /// Row windows executed inside batched windows (sum of widths).
     pub row_windows: u64,
@@ -279,6 +281,8 @@ pub struct DFlash2RaggedLinearCounters {
     pub enabled: bool,
     pub max_width_limit: usize,
     pub windows: Arc<AtomicU64>,
+    /// Batched one-token windows (no drafts), counted in `windows` too.
+    pub ordinary_windows: Arc<AtomicU64>,
     pub windows_by_width: Arc<[AtomicU64; 3]>,
     pub row_windows: Arc<AtomicU64>,
     pub emitted_tokens: Arc<AtomicU64>,
@@ -305,6 +309,7 @@ impl DFlash2RaggedLinearCounters {
             enabled: self.enabled,
             max_width_limit: self.max_width_limit,
             windows: self.windows.load(Ordering::Relaxed),
+            ordinary_windows: self.ordinary_windows.load(Ordering::Relaxed),
             windows_by_width: std::array::from_fn(|index| {
                 self.windows_by_width[index].load(Ordering::Relaxed)
             }),

@@ -1194,7 +1194,10 @@ impl SparseMoeBlock {
             ));
         }
         let (b, s, h) = (dvec[0], dvec[1], dvec[2]);
-        if crate::nn::position_stable_qmm::is_armed() && b == 1 && s > 1 {
+        if crate::nn::position_stable_qmm::is_armed()
+            && s > 1
+            && (b == 1 || crate::nn::gated_attention::ragged_rows_armed_pub())
+        {
             let _product_stable = crate::nn::product_stable_qmm::scope();
             return self.forward_unisolated_on(x, target, layer_idx);
         }

@@ -223,6 +223,42 @@ impl DFlash2DraftModel {
                 self.propose_greedy_on(target_model, &block, &context, &mut cache, target)?;
             mlx::transforms::eval(&[&tokens])?;
         }
+        // Ragged multi-request proposals of every certified batch width.
+        let max_batch = target_model
+            .dflash2_verify_capabilities()
+            .supported_shapes
+            .iter()
+            .map(|shape| shape.batch_width)
+            .max()
+            .unwrap_or(1);
+        for batch in 2..=max_batch {
+            let batch_i32 = i32::try_from(batch)?;
+            for length in 2..=self.config.dflash_config.block_size {
+                let mut caches = (0..batch)
+                    .map(|_| self.make_cache(0))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut block = Vec::new();
+                for _ in 0..batch {
+                    block.push(1000_u32);
+                    block.resize(block.len() + length as usize - 1, mask);
+                }
+                let block: Array = (&block[..], &[batch_i32, length][..]).try_into()?;
+                let dtype = target_model.dflash2_embed_on(&block, target)?.dtype();
+                let contexts = (0..batch)
+                    .map(|row| Array::zeros((1_i32, 3 + row as i32, context_dim), dtype))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let context_refs = contexts.iter().collect::<Vec<_>>();
+                let mut cache_refs = caches.iter_mut().collect::<Vec<_>>();
+                let tokens = self.propose_greedy_ragged_on(
+                    target_model,
+                    &block,
+                    &context_refs,
+                    &mut cache_refs,
+                    target,
+                )?;
+                mlx::transforms::eval(&[&tokens])?;
+            }
+        }
         tracing::info!(
             elapsed_ms = started.elapsed().as_millis() as u64,
             "DFlash2 drafter prewarmed"

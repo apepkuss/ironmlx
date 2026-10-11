@@ -41,7 +41,17 @@ where
     event_tx: mpsc::UnboundedSender<StepEvent>,
     stream: DFlash2TextGenerationStream<'m, M>,
     _memory_charge: DFlash2MemoryCharge,
+    /// Error from taking the first token for publication at admission. The
+    /// token has left the stream, so the next step fails the request through
+    /// the normal completion instead of decoding on without it.
+    admission_failure: Option<String>,
 }
+
+/// Test fault injection: fail the next admission first-token publication
+/// after the token has been taken, as a detokenizer error would.
+#[cfg(test)]
+pub(crate) static FAIL_NEXT_ADMISSION_FIRST_TOKEN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 #[derive(Default)]
 struct DFlash2StepOutcome {
@@ -466,6 +476,24 @@ impl DFlash2Command {
     }
 }
 
+fn order_admissions_shortest_first(pending: &mut VecDeque<DFlash2Command>, slots: usize) {
+    let Some(priority) = pending.front().map(DFlash2Command::priority) else {
+        return;
+    };
+    let window = pending
+        .iter()
+        .take(slots)
+        .take_while(|command| command.priority() == priority)
+        .count();
+    if window < 2 {
+        return;
+    }
+    let front = pending.make_contiguous();
+    front[..window].sort_by_key(|command| match command {
+        DFlash2Command::Admit { request, .. } => request.prompt_ids.len(),
+    });
+}
+
 fn push_pending_by_priority(pending: &mut VecDeque<DFlash2Command>, command: DFlash2Command) {
     if command.priority().is_background() {
         pending.push_back(command);
@@ -513,6 +541,9 @@ pub(crate) struct DFlash2ActorConfig {
     /// Whether the target certifies any B>1 execution. When false, every
     /// request keeps B1 prefill, proposal and verify graphs.
     pub(crate) batched_execution: bool,
+    /// Whether equal-length batched prefill and equal-position tensor groups
+    /// are certified (false for targets certified only for ragged rows).
+    pub(crate) tensor_batching: bool,
 }
 
 #[derive(Clone)]
@@ -680,6 +711,7 @@ where
         target_execution_fingerprint,
         verify_profile,
         batched_execution,
+        tensor_batching,
     } = config;
     assert!(b_max > 0, "DFlash2 actor requires b_max > 0");
     assert!(
@@ -708,6 +740,21 @@ where
         ..Default::default()
     };
     let worker_ragged_linear = ragged_linear.clone();
+    // Batched one-token windows: from this many ragged rows on, rows decode
+    // one token each per window (every row's B1 ordinary decode arithmetic);
+    // every `ragged_probe_interval` such windows the next one drafts.
+    let ragged_ordinary_min_width = ironmlx_core::m5_profile::setting(
+        ironmlx_core::m5_profile::settings::DFLASH2_RAGGED_ORDINARY_MIN_WIDTH,
+    )
+    .and_then(|raw| raw.parse::<usize>().ok())
+    .filter(|&width| width >= 2)
+    .unwrap_or(usize::MAX);
+    let ragged_probe_interval = ironmlx_core::m5_profile::setting(
+        ironmlx_core::m5_profile::settings::DFLASH2_RAGGED_PROBE_INTERVAL,
+    )
+    .and_then(|raw| raw.parse::<usize>().ok())
+    .unwrap_or(0);
+    let mut ragged_ordinary_streak = 0_usize;
     let ragged_budget_limit = std::env::var(RAGGED_BUDGET_LIMIT_ENV)
         .ok()
         .and_then(|value| value.parse::<usize>().ok());
@@ -990,6 +1037,23 @@ where
                     break;
                 }
 
+                // Requests that arrived meanwhile join this pass. Among the
+                // requests the pass can admit (same priority as the front),
+                // prefill the shortest prompt first: each first token is
+                // published right after its prefill, so the shorter prefills
+                // no longer wait behind longer ones. Every one of them is
+                // admitted in this pass, so none is starved.
+                while command_channel_open {
+                    match cmd_rx.try_recv() {
+                        Ok(command) => push_pending_by_priority(&mut pending, command),
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            command_channel_open = false;
+                            break;
+                        }
+                    }
+                }
+                order_admissions_shortest_first(&mut pending, b_max - active.len());
                 let Some(DFlash2Command::Admit { request, reply_tx }) = pending.pop_front() else {
                     break;
                 };
@@ -1152,7 +1216,7 @@ where
                 // Prefix artifacts are request-local and may start at different
                 // offsets. Cold misses without that feature can preserve the B1
                 // prefill morphology in one equal-length B=N graph.
-                while batched_execution
+                while tensor_batching
                     && prefix_cache.is_none()
                     && active.len() + admission_requests.len() < b_max
                     && pending.front().is_some_and(|command| match command {
@@ -1342,7 +1406,36 @@ where
                         event_tx,
                         stream,
                         _memory_charge: memory_charge,
+                        admission_failure: None,
                     });
+                }
+                // Publish every materialized first token as soon as its
+                // prefill is done, before the next queued prefill, so a
+                // request's first token does not wait for later admissions.
+                for request in active.iter_mut() {
+                    if !request.stream.first_token_publishable() {
+                        continue;
+                    }
+                    let published = request.stream.next_token_deferred();
+                    #[cfg(test)]
+                    let published = published.and_then(|event| {
+                        anyhow::ensure!(
+                            !FAIL_NEXT_ADMISSION_FIRST_TOKEN.swap(false, Ordering::SeqCst),
+                            "injected admission first-token failure"
+                        );
+                        Ok(event)
+                    });
+                    match published {
+                        Ok(Some(event)) => {
+                            let _ = request.event_tx.send(StepEvent {
+                                id: request.request_id,
+                                token: event.token,
+                                finish_reason: event.finish_reason,
+                            });
+                        }
+                        Ok(None) => {}
+                        Err(error) => request.admission_failure = Some(format!("{error:#}")),
+                    }
                 }
                 worker_active.store(active.len() as u64, Ordering::Relaxed);
             }
@@ -1367,9 +1460,19 @@ where
                 .collect::<Vec<_>>();
 
             for (index, request) in active.iter_mut().enumerate() {
+                if let Some(error) = request.admission_failure.take() {
+                    outcomes[index].finished = true;
+                    outcomes[index].failure = Some(error);
+                    continue;
+                }
                 if request.event_tx.is_closed() {
                     outcomes[index].cancelled = true;
                     outcomes[index].finished = true;
+                    continue;
+                }
+                // A first token published at admission leaves nothing
+                // pending; the row only needs its next window.
+                if request.stream.pending_token_count() == 0 && !request.stream.is_finished() {
                     continue;
                 }
                 loop {
@@ -1558,18 +1661,47 @@ where
 
             DFlash2StepDiagnostic::mark(&mut step_diagnostic, "tensor_groups");
             if ragged_linear_enabled && (active.len() >= 2 || ragged_group.is_some()) {
-                let candidates = keys
+                let speculative_candidates = keys
                     .iter()
                     .enumerate()
                     .filter_map(|(index, key)| {
-                        let key = (*key)?;
+                        key.as_ref()?;
+                        let stream = &active[index].stream;
                         (!claimed[index]
                             && !outcomes[index].finished
-                            && !key.is_ordinary_decode()
-                            && active[index].stream.ragged_linear_eligible())
-                        .then_some((index, key.draft_len(), key.supported_batch_widths()))
+                            && stream.ragged_linear_eligible())
+                        .then(|| {
+                            (
+                                index,
+                                stream.ragged_draft_budget().unwrap_or(0),
+                                stream.ragged_supported_batch_widths(),
+                            )
+                        })
                     })
                     .collect::<Vec<_>>();
+                let ordinary_widths = (2..=ragged_linear_max_width)
+                    .fold(0_u64, |mask, width| mask | (1_u64 << width));
+                let ordinary_candidates = keys
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, key)| {
+                        key.as_ref()?;
+                        (!claimed[index]
+                            && !outcomes[index].finished
+                            && active[index].stream.ragged_ordinary_eligible())
+                        .then_some((index, 0, ordinary_widths))
+                    })
+                    .collect::<Vec<_>>();
+                let probe_due = ragged_probe_interval > 0
+                    && ragged_ordinary_streak >= ragged_probe_interval
+                    && speculative_candidates.len() == ordinary_candidates.len();
+                let ordinary_window =
+                    ordinary_candidates.len() >= ragged_ordinary_min_width && !probe_due;
+                let candidates = if ordinary_window {
+                    ordinary_candidates
+                } else {
+                    speculative_candidates
+                };
                 if candidates.len() == 1 && active.len() > 1 {
                     worker_ragged_linear
                         .single_eligible_steps
@@ -1665,10 +1797,17 @@ where
                     let built = cache.is_none();
                     let result =
                         tensor_group_streams_mut(&mut active, &selected).and_then(|mut streams| {
-                            DFlash2TextGenerationStream::fill_ragged_linear_window_bn(
-                                &mut streams,
-                                cache,
-                            )
+                            if ordinary_window {
+                                DFlash2TextGenerationStream::fill_ragged_ordinary_window_bn(
+                                    &mut streams,
+                                    cache,
+                                )
+                            } else {
+                                DFlash2TextGenerationStream::fill_ragged_linear_window_bn(
+                                    &mut streams,
+                                    cache,
+                                )
+                            }
                         });
                     match result {
                         Ok((cache, timing)) => {
@@ -1677,6 +1816,12 @@ where
                             let width = selected.len();
                             let counters = &worker_ragged_linear;
                             counters.windows.fetch_add(1, Ordering::Relaxed);
+                            if ordinary_window {
+                                counters.ordinary_windows.fetch_add(1, Ordering::Relaxed);
+                                ragged_ordinary_streak += 1;
+                            } else {
+                                ragged_ordinary_streak = 0;
+                            }
                             counters.windows_by_width[width - 2].fetch_add(1, Ordering::Relaxed);
                             counters
                                 .row_windows

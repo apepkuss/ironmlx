@@ -245,6 +245,10 @@ pub struct DFlash2VerifyCapabilities {
     /// tree verification and accepted-path commit the target certifies on
     /// its own, independent of a lane kernel pack. Zero disables it.
     pub flat_tree_max_nodes: usize,
+    /// B>1 shapes are certified only for ragged rows (each request at its
+    /// own cache offset, run through `ragged_rows_scope`); equal-length
+    /// batched prefill and persistent equal-position tensor groups are not.
+    pub ragged_rows_only: bool,
 }
 
 impl DFlash2VerifyCapabilities {
@@ -274,8 +278,13 @@ impl DFlash2VerifyCapabilities {
         } else {
             String::new()
         };
+        let ragged = if self.ragged_rows_only {
+            ";batched=ragged-rows-only"
+        } else {
+            ""
+        };
         format!(
-            "profile={};qmm={};attention={};state={};shapes={shapes};lane-pack={lane_pack}{flat_tree}",
+            "profile={};qmm={};attention={};state={};shapes={shapes};lane-pack={lane_pack}{flat_tree}{ragged}",
             self.profile,
             self.row_bit_exact_qmm,
             self.row_bit_exact_attention,
@@ -289,6 +298,12 @@ impl DFlash2VerifyCapabilities {
         self.supported_shapes
             .iter()
             .any(|shape| shape.batch_width > 1)
+    }
+
+    /// Whether equal-length batched prefill and equal-position tensor groups
+    /// may run (B>1 certified beyond ragged rows).
+    pub fn certifies_tensor_batching(&self) -> bool {
+        self.certifies_batched_execution() && !self.ragged_rows_only
     }
 
     pub fn max_draft_tokens(&self, batch_width: usize) -> Option<usize> {
@@ -625,6 +640,7 @@ mod tests {
             }],
             lane_kernel_pack: None,
             flat_tree_max_nodes: 0,
+            ragged_rows_only: false,
         };
         let ordinary = DFlash2VerifyPlan::build(&capabilities, 7, 0).unwrap();
         assert_eq!(ordinary.execution, DFlash2VerifyExecution::OrdinaryDecode);

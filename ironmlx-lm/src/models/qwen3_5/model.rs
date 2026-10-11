@@ -1407,6 +1407,7 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
             lane_kernel_pack: lane_pack,
             // Dense flat trees run only through the qualified M5 lane pack.
             flat_tree_max_nodes: 0,
+            ragged_rows_only: false,
         }
     }
 
