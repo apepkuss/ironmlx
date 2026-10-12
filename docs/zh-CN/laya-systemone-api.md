@@ -11,6 +11,8 @@ IronMLX App 支持 `aac6fef/laya-multilingual-mlx` 的下载、加载、卸载�
 
 - `POST /v1/systemone`：接受下方的[请求](#请求)，返回兼容 TypeSafe 的
   `model`、`answers` 和 `usage` 字段，详见[响应](#响应)。
+- `POST /v1/decisions`：通过官方 OpenAI SDK 的 Decisions API 调用同一模型，使用
+  OpenAI 的请求、响应与错误格式，见 [OpenAI Decisions API](openai-decisions-api.md)。
 - `GET /v1/models`：返回 `{"models":[{"name", "description", "release_date"}]}`。
   App 模式列出已注册的决策模型，同时保留 OpenAI 的 `object`/`data` 字段；
   独立服务模式列出已加载的 Laya 模型。`release_date` 为该检查点的

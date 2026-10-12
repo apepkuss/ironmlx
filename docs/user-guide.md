@@ -149,6 +149,7 @@ for the corresponding `audio.execution` fields and scheduling semantics.
 
 - [Embedding API](text-embeddings.md) — EmbeddingGemma 2 BF16/affine4 input formats, limits and Dashboard vector metrics.
 - [Laya decision API](laya-systemone-api.md) — load Laya in the App and connect external TypeSafe clients.
+- [OpenAI Decisions API](openai-decisions-api.md) — call Laya with the official OpenAI SDK.
 - [Supported models](supported-models.md) — model names, types, weight formats,
   capabilities, and acceleration options.
 - [Developer guide](developer-guide.md) — API quick start, CLI configuration,

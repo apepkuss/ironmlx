@@ -2,9 +2,12 @@
 
 pub mod contract;
 pub mod laya;
+pub mod openai;
 
-pub use contract::{DecisionRequest, DecisionResponse, Question};
-pub use laya::Laya;
+pub use contract::{
+    DecisionRequest, DecisionResponse, Question, Scores, ScoringRequest, TokenBudgetExceeded,
+};
+pub use laya::{system_one_response, Laya};
 
 /// Recognize the supported checkpoint without allocating model weights.
 pub fn is_laya_checkpoint(dir: &std::path::Path) -> anyhow::Result<bool> {

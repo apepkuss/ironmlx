@@ -420,6 +420,13 @@ async fn app_systemone_handler(
     super::systemone::system_one_with_pool(manager.pool, body).await
 }
 
+async fn app_decisions_handler(
+    State(manager): State<ModelManager>,
+    body: std::result::Result<Json<serde_json::Value>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    super::decisions::decisions_with_pool(manager.pool, body).await
+}
+
 async fn app_embeddings_handler(
     State(manager): State<ModelManager>,
     body: std::result::Result<
@@ -443,6 +450,7 @@ fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Route
         .route("/v1/audio/speech", post(app_speech_handler))
         .merge(super::voices::router())
         .route("/v1/systemone", post(app_systemone_handler))
+        .route("/v1/decisions", post(app_decisions_handler))
         .route(
             "/v1/embeddings",
             post(app_embeddings_handler).layer(axum::extract::DefaultBodyLimit::max(

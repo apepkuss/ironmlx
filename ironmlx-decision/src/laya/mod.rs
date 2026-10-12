@@ -6,7 +6,10 @@ use std::path::Path;
 use anyhow::{bail, Result};
 use serde_json::{json, Map, Value};
 
-use crate::contract::{DecisionRequest, DecisionResponse, Question, Usage, MULTILINGUAL_MODEL_ID};
+use crate::contract::{
+    DecisionRequest, DecisionResponse, Question, Scores, ScoringRequest, Usage,
+    MULTILINGUAL_MODEL_ID,
+};
 use crate::DecisionSettings;
 use model::NativeInference;
 use prompt::{render_criterion, PromptTokenizer};
@@ -40,16 +43,32 @@ impl Laya {
         })
     }
 
+    /// System One transport: validated map-keyed questions in, TypeSafe answers out.
     pub fn predict(&self, request: &DecisionRequest) -> Result<DecisionResponse> {
-        mlx::set_default_device(self.settings.device.resolve()?);
         let questions = request.validate()?;
-        let mut answers = Map::new();
+        let scores = self.score(&ScoringRequest {
+            state: request.state.clone(),
+            questions: questions.iter().map(|(_, q)| q.clone()).collect(),
+        })?;
+        system_one_response(&questions, &scores)
+    }
+
+    /// Transport-neutral scoring shared by every public decision API.
+    pub fn score(&self, request: &ScoringRequest) -> Result<Scores> {
+        mlx::set_default_device(self.settings.device.resolve()?);
+        if request.questions.is_empty() {
+            bail!("questions must not be empty");
+        }
+        for question in &request.questions {
+            question.validate()?;
+        }
+        let mut probabilities = Vec::with_capacity(request.questions.len());
         let mut input_tokens = 0;
         let state = self.tokenizer.encode_state(&request.state)?;
-        for chunk in questions.chunks(self.settings.batch_size) {
+        for chunk in request.questions.chunks(self.settings.batch_size) {
             let prepared = chunk
                 .iter()
-                .map(|(_, question)| {
+                .map(|question| {
                     let prefix = self.tokenizer.prepare_prefix(
                         question,
                         self.model.max_len,
@@ -62,29 +81,26 @@ impl Laya {
                 })
                 .collect::<Result<Vec<_>>>()?;
             input_tokens += prepared.iter().map(|p| p.ids.len()).sum::<usize>();
-            let kinds = chunk
-                .iter()
-                .map(|(_, q)| q.kind_index())
-                .collect::<Vec<_>>();
+            let kinds = chunk.iter().map(Question::kind_index).collect::<Vec<_>>();
             let logits = self.model.logits_batch(
                 &prepared,
                 &kinds,
                 self.tokenizer.pad,
                 self.settings.pad_to_multiple,
             )?;
-            for ((name, question), logits) in chunk.iter().zip(logits) {
+            for (question, logits) in chunk.iter().zip(logits) {
+                if logits.len() != option_count(question) {
+                    bail!("{} marker count mismatch", question.kind());
+                }
                 let temperature = self.temperature(question, logits.len());
-                let probs = softmax(&logits.iter().map(|&v| v / temperature).collect::<Vec<_>>());
-                answers.insert(name.clone(), answer(question, &probs)?);
+                probabilities.push(softmax(
+                    &logits.iter().map(|&v| v / temperature).collect::<Vec<_>>(),
+                ));
             }
         }
-        Ok(DecisionResponse {
-            model: MULTILINGUAL_MODEL_ID.into(),
-            answers,
-            usage: Usage {
-                input_tokens,
-                output_tokens: 0,
-            },
+        Ok(Scores {
+            probabilities,
+            input_tokens,
         })
     }
 
@@ -115,11 +131,53 @@ fn softmax(logits: &[f32]) -> Vec<f32> {
     exp.iter().map(|x| x / sum).collect()
 }
 
-fn round4(x: f32) -> f64 {
+/// Format scores as the TypeSafe System One response.
+pub fn system_one_response(
+    questions: &[(String, Question)],
+    scores: &Scores,
+) -> Result<DecisionResponse> {
+    if questions.len() != scores.probabilities.len() {
+        bail!("decision answer count mismatch");
+    }
+    let mut answers = Map::new();
+    for ((name, question), probs) in questions.iter().zip(&scores.probabilities) {
+        answers.insert(name.clone(), answer(question, probs)?);
+    }
+    Ok(DecisionResponse {
+        model: MULTILINGUAL_MODEL_ID.into(),
+        answers,
+        usage: Usage {
+            input_tokens: scores.input_tokens,
+            output_tokens: 0,
+        },
+    })
+}
+
+/// Everything the prompt renders for a question: kind, instructions, options.
+#[cfg(test)]
+pub(crate) fn render_for_test(question: &Question) -> (String, String, Vec<String>) {
+    (
+        question.kind().to_owned(),
+        prompt::python_json(question.instructions(), true),
+        prompt::render_options(question),
+    )
+}
+
+fn option_count(question: &Question) -> usize {
+    match question {
+        Question::Choice { criteria, .. } => criteria.len(),
+        Question::Score { criteria, .. } => criteria.len(),
+        Question::Noul { .. } => 2,
+    }
+}
+
+/// Probabilities and confidence are published at four decimal places.
+pub(crate) fn round4(x: f32) -> f64 {
     ((x as f64) * 10_000.0).round() / 10_000.0
 }
 
-fn confidence(probs: &[f32]) -> f32 {
+/// Normalized-entropy confidence used by every Laya answer type.
+pub(crate) fn confidence(probs: &[f32]) -> f32 {
     if probs.len() < 2 {
         return 1.0;
     }

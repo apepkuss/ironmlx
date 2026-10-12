@@ -200,8 +200,9 @@ scripts/verify-model-distribution-boundary.sh dist/IronMLX.app
 | --- | --- | --- |
 | OpenAI Python | `2.48.0` | Chat / Responses, SSE, tools, Structured Outputs, reasoning, 400/413/503 |
 | Anthropic Python | `0.121.0` | Messages, SSE, tools, Structured Outputs + thinking, 400/413/503 |
+| OpenAI Python（Decisions） | `3.26.0` | 针对加载 Laya 的实际服务调用 `decisions.create`，见 [OpenAI Decisions API](openai-decisions-api.md#sdk-兼容性检查) |
 
-固定 SDK 通过真实 loopback HTTP/SSE 访问 fixture server，验证客户端解析；Rust 测试独立验证生产请求和响应契约。两者不加载模型，不证明回答质量、工具选择准确率或性能。
+Decisions 检查使用独立的依赖文件并进行真实 Laya 推理。其余固定 SDK 通过真实 loopback HTTP/SSE 访问 fixture server，验证客户端解析；Rust 测试独立验证生产请求和响应契约。两者不加载模型，不证明回答质量、工具选择准确率或性能。
 在仓库根目录执行：
 
 ```bash

@@ -12,6 +12,9 @@ Reference for Laya choice, score and true/false probability requests, followed b
 
 - `POST /v1/systemone`: accepts the [request](#request) below and returns
   TypeSafe-shaped `model`, `answers`, and `usage` fields. See [Response](#response).
+- `POST /v1/decisions`: the same model through the official OpenAI SDK's
+  Decisions API, with OpenAI request, response and error formats. See
+  [OpenAI Decisions API](openai-decisions-api.md).
 - `GET /v1/models`: returns `{"models":[{"name", "description", "release_date"}]}`
   with registered decision models in App mode, or the loaded Laya model in
   standalone mode. App mode also includes OpenAI `object`/`data` fields.

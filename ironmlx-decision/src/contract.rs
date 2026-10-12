@@ -1,7 +1,7 @@
-//! In-process contract shared by native inference and the later System One transport.
+//! In-process contract shared by native inference and the System One transport.
 
 use anyhow::{bail, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 
 pub const MULTILINGUAL_MODEL_ID: &str = "aac6fef/laya-multilingual-mlx";
@@ -46,7 +46,10 @@ impl DecisionRequest {
 pub enum Question {
     Choice {
         instructions: Value,
-        criteria: Map<String, Value>,
+        /// Ordered `(prompt label, description)` pairs. System One sends a map;
+        /// other transports may repeat label text for distinct typed values.
+        #[serde(deserialize_with = "ordered_criteria")]
+        criteria: Vec<(String, Value)>,
     },
     Score {
         instructions: Value,
@@ -121,6 +124,43 @@ impl Question {
     }
 }
 
+fn ordered_criteria<'de, D>(deserializer: D) -> Result<Vec<(String, Value)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Map::<String, Value>::deserialize(deserializer)?
+        .into_iter()
+        .collect())
+}
+
+/// Validated questions scored against one shared state, independent of the
+/// public transport that produced them.
+#[derive(Debug, Clone)]
+pub struct ScoringRequest {
+    pub state: Value,
+    pub questions: Vec<Question>,
+}
+
+/// Per-question option probabilities in request order, plus the encoder
+/// tokens actually evaluated.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Scores {
+    pub probabilities: Vec<Vec<f32>>,
+    pub input_tokens: usize,
+}
+
+/// Question options cannot fit the checkpoint's token budget.
+#[derive(Debug, Clone, Copy)]
+pub struct TokenBudgetExceeded;
+
+impl std::fmt::Display for TokenBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("question options exceed the Laya token budget")
+    }
+}
+
+impl std::error::Error for TokenBudgetExceeded {}
+
 fn validate_entry(value: &Value, field: &str, allow_null: bool) -> Result<()> {
     if matches!(value, Value::String(_) | Value::Object(_) | Value::Array(_))
         || (allow_null && value.is_null())
@@ -165,7 +205,10 @@ mod tests {
         match &parsed[0].1 {
             Question::Choice { criteria, .. } => {
                 assert_eq!(
-                    criteria.keys().map(String::as_str).collect::<Vec<_>>(),
+                    criteria
+                        .iter()
+                        .map(|(label, _)| label.as_str())
+                        .collect::<Vec<_>>(),
                     ["billing", "sales"]
                 );
             }

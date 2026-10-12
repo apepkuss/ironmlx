@@ -10,7 +10,7 @@ The App defaults to `http://127.0.0.1:9068`; independent CLI serving defaults to
 
 LAN uses `https://<selected-ip>:<port>` and `Authorization: Bearer <API-Key>` on every route, including health checks. Trust the App-exported CA. JSON requests use `Content-Type: application/json`; image editing uses multipart data. See [Security boundary](security-boundary.md) for configuration and resource limits.
 
-Standalone `ironmlx serve-systemone` uses its own port and authentication rules: `/v1/*` requires an API key even on loopback, while `/healthz` needs no credentials. See [System One API](laya-systemone-api.md#optional-standalone-cli). Missing or invalid LAN credentials return 401; error formats are defined by the corresponding endpoint.
+Standalone `ironmlx serve-systemone` uses its own port and authentication rules: `/v1/*`, including `/v1/systemone` and `/v1/decisions`, requires an API key even on loopback, while `/healthz` needs no credentials. See [System One API](laya-systemone-api.md#optional-standalone-cli). Missing or invalid LAN credentials return 401; error formats are defined by the corresponding endpoint.
 
 ## Service and management endpoints
 

@@ -10,7 +10,7 @@ App 默认地址为 `http://127.0.0.1:9068`，独立 CLI 默认端口为 8080，
 
 LAN 使用 `https://<selected-ip>:<port>`，所有路由（包括健康检查）都必须带 `Authorization: Bearer <API-Key>`，并信任 App 导出的 CA。JSON 请求使用 `Content-Type: application/json`；图片编辑使用 multipart 数据。配置与资源限制见[安全边界](security-boundary.md)。
 
-独立的 `ironmlx serve-systemone` 使用单独的端口与认证规则：`/v1/*` 在本机也要求 API Key，`/healthz` 无需凭据。见 [System One API](laya-systemone-api.md#可选的独立-cli)。LAN 凭据缺失或无效返回 401；错误格式由对应端点定义。
+独立的 `ironmlx serve-systemone` 使用单独的端口与认证规则：`/v1/*`（包括 `/v1/systemone` 与 `/v1/decisions`）在本机也要求 API Key，`/healthz` 无需凭据。见 [System One API](laya-systemone-api.md#可选的独立-cli)。LAN 凭据缺失或无效返回 401；错误格式由对应端点定义。
 
 ## 服务与管理端点
 

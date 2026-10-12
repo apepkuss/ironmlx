@@ -1,10 +1,10 @@
 use std::{cell::RefCell, collections::VecDeque};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, Result};
 use serde_json::Value;
 use tokenizers::Tokenizer;
 
-use crate::contract::Question;
+use crate::contract::{Question, TokenBudgetExceeded};
 
 pub(super) struct PromptTokenizer {
     backend: Tokenizer,
@@ -126,7 +126,7 @@ impl PromptTokenizer {
         }
         ids.push(self.sep);
         if ids.len() + 1 > max_len || markers.iter().any(|&m| m >= max_len) {
-            bail!("question options exceed the Laya token budget");
+            return Err(TokenBudgetExceeded.into());
         }
         let prepared = PreparedQuestion { ids, markers };
         if cache_prompts {
@@ -161,7 +161,7 @@ impl PromptTokenizer {
     }
 }
 
-fn render_options(question: &Question) -> Vec<String> {
+pub(super) fn render_options(question: &Question) -> Vec<String> {
     match question {
         Question::Choice { criteria, .. } => criteria
             .iter()
@@ -203,7 +203,7 @@ pub(super) fn render_criterion(value: &Value) -> String {
 }
 
 /// Python `json.dumps` formatting used by the upstream prompt path.
-fn python_json(value: &Value, ascii: bool) -> String {
+pub(super) fn python_json(value: &Value, ascii: bool) -> String {
     match value {
         Value::Null => "null".into(),
         Value::Bool(b) => if *b { "true" } else { "false" }.into(),

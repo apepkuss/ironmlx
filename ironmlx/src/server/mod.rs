@@ -31,6 +31,7 @@ pub(crate) mod api_error;
 pub(crate) mod api_transport;
 pub(crate) mod audio;
 pub mod chat_format;
+pub(crate) mod decisions;
 pub mod diffusion_gemma;
 mod embedding_audio;
 pub(crate) mod embeddings;

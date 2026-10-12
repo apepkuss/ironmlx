@@ -204,8 +204,9 @@ and notarized artifacts, Gatekeeper checks, and public distribution.
 | --- | --- | --- |
 | OpenAI Python | `2.48.0` | Chat / Responses, SSE, tools, Structured Outputs, reasoning, 400/413/503 |
 | Anthropic Python | `0.121.0` | Messages, SSE, tools, Structured Outputs + thinking, 400/413/503 |
+| OpenAI Python (Decisions) | `3.26.0` | `decisions.create` against a live server with the Laya model; see [OpenAI Decisions API](openai-decisions-api.md#sdk-compatibility-check) |
 
-Pinned SDKs access a fixture server over real loopback HTTP/SSE to check client parsing; Rust tests separately cover production request/response contracts. Neither loads a model or establishes response quality, tool selection accuracy or performance.
+The Decisions check uses its own requirements file and real Laya inference. The other pinned SDKs access a fixture server over real loopback HTTP/SSE to check client parsing; Rust tests separately cover production request/response contracts. Neither loads a model or establishes response quality, tool selection accuracy or performance.
 Run from the repository root:
 
 ```bash

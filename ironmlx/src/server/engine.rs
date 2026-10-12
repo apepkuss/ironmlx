@@ -335,6 +335,7 @@ pub(crate) fn engine_pool_router() -> Router<EnginePoolState> {
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/audio/speech", post(super::audio::speech))
         .route("/v1/systemone", post(super::systemone::system_one))
+        .route("/v1/decisions", post(super::decisions::decisions))
         .route(
             "/v1/embeddings",
             post(super::embeddings::embeddings).layer(axum::extract::DefaultBodyLimit::max(

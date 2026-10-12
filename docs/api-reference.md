@@ -14,6 +14,7 @@ Choose an API topic by capability or look up a specific route in the endpoint in
 | [Speech synthesis API](audio-speech-api.md) | Speech output, voice profiles and reference recordings |
 | [Image generation API](image-generation-api.md) | Text-to-image generation and single-image conditional editing |
 | [System One API](laya-systemone-api.md) | Laya choice, score and true/false probability requests |
+| [OpenAI Decisions API](openai-decisions-api.md) | Laya predicate, choice and score answers through the official OpenAI SDK |
 
 ## Endpoint index
 
@@ -38,6 +39,7 @@ Availability depends on the serving mode and configured compatible models. This 
 | `POST` | `/v1/images/generations` | Text-to-image generation | App / EnginePool; image model | [Image generation API](image-generation-api.md) |
 | `POST` | `/v1/images/edits` | Single-image conditional editing | App / EnginePool; image model | [Image generation API](image-generation-api.md) |
 | `POST` | `/v1/systemone` | Typed decision inference | App / EnginePool / System One CLI; decision model | [System One API](laya-systemone-api.md#endpoints) |
+| `POST` | `/v1/decisions` | OpenAI Decisions inference | App / EnginePool / System One CLI; decision model | [OpenAI Decisions API](openai-decisions-api.md#request) |
 | `POST` | `/v1/models/{model_id}/load` | Load a model | EnginePool | [EnginePool control](engine-pool.md#http-apis) |
 | `POST` | `/v1/models/{model_id}/unload` | Unload a model | EnginePool | [EnginePool control](engine-pool.md#http-apis) |
 | `GET` | `/admin/api/models/loaded` | Loaded models and metrics | App | [Service and management API](service-api.md#management-endpoints) |

@@ -8,12 +8,18 @@ use anyhow::{bail, Context, Result};
 use axum::{
     extract::{rejection::JsonRejection, State},
     http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use clap::Args;
-use ironmlx_decision::{DecisionRequest, DecisionResponse, Laya};
+use ironmlx_decision::{
+    openai::parse_request, system_one_response, DecisionRequest, DecisionResponse, Laya, Scores,
+    ScoringRequest, TokenBudgetExceeded,
+};
 use serde_json::{json, Value};
+
+use crate::server::api_error::{ApiError, ApiProtocol};
 use tokio::sync::{mpsc, oneshot};
 
 const MODEL_ID: &str = "aac6fef/laya-multilingual-mlx";
@@ -32,8 +38,8 @@ pub struct ServeSystemoneArgs {
 }
 
 struct Work {
-    request: DecisionRequest,
-    reply: oneshot::Sender<Result<DecisionResponse, String>>,
+    request: ScoringRequest,
+    reply: oneshot::Sender<anyhow::Result<Scores>>,
 }
 
 #[derive(Clone)]
@@ -65,10 +71,7 @@ pub fn run(args: ServeSystemoneArgs) -> Result<()> {
                 }
             };
             while let Some(work) = receiver.blocking_recv() {
-                let result = model
-                    .predict(&work.request)
-                    .map_err(|error| format!("{error:#}"));
-                let _ = work.reply.send(result);
+                let _ = work.reply.send(model.score(&work.request));
             }
         })
         .context("starting Laya inference worker")?;
@@ -103,6 +106,7 @@ fn router(state: ApiState) -> Router {
         .route("/healthz", get(|| async { Json(json!({"status":"ok"})) }))
         .route("/v1/models", get(models))
         .route("/v1/systemone", post(system_one))
+        .route("/v1/decisions", post(decisions))
         .with_state(state)
 }
 
@@ -146,33 +150,112 @@ async fn system_one(
     }
     let Json(request) =
         body.map_err(|failure| api_error(StatusCode::UNPROCESSABLE_ENTITY, &failure.body_text()))?;
-    request
+    let questions = request
         .validate()
         .map_err(|failure| api_error(StatusCode::UNPROCESSABLE_ENTITY, &failure.to_string()))?;
+    let scoring = ScoringRequest {
+        state: request.state,
+        questions: questions.iter().map(|(_, q)| q.clone()).collect(),
+    };
+    match score(&state, scoring).await {
+        Ok(scores) => system_one_response(&questions, &scores)
+            .map(Json)
+            .map_err(|_| {
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "decision inference failed",
+                )
+            }),
+        Err(WorkFailure::TokenBudget(message)) => {
+            Err(api_error(StatusCode::UNPROCESSABLE_ENTITY, &message))
+        }
+        Err(WorkFailure::Inference) => Err(api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "decision inference failed",
+        )),
+        Err(WorkFailure::Unavailable) => Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "decision worker unavailable",
+        )),
+    }
+}
+
+enum WorkFailure {
+    TokenBudget(String),
+    Inference,
+    Unavailable,
+}
+
+async fn score(state: &ApiState, request: ScoringRequest) -> Result<Scores, WorkFailure> {
     let (reply, result) = oneshot::channel();
     state
         .worker
         .send(Work { request, reply })
         .await
-        .map_err(|_| {
-            api_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "decision worker unavailable",
-            )
-        })?;
+        .map_err(|_| WorkFailure::Unavailable)?;
     match result.await {
-        Ok(Ok(response)) => Ok(Json(response)),
-        Ok(Err(message)) if message.contains("question options exceed") => {
-            Err(api_error(StatusCode::UNPROCESSABLE_ENTITY, &message))
+        Ok(Ok(scores)) => Ok(scores),
+        Ok(Err(error)) if error.is::<TokenBudgetExceeded>() => {
+            Err(WorkFailure::TokenBudget(error.to_string()))
         }
-        Ok(Err(_)) => Err(api_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "decision inference failed",
-        )),
-        Err(_) => Err(api_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "decision worker unavailable",
-        )),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %format!("{error:#}"), "decision inference failed");
+            Err(WorkFailure::Inference)
+        }
+        Err(_) => Err(WorkFailure::Unavailable),
+    }
+}
+
+/// OpenAI Decisions API with the same key and worker as System One.
+async fn decisions(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let result = async {
+        if !authorized(&headers, &state.key) {
+            return Err(ApiError::from_status(
+                StatusCode::UNAUTHORIZED,
+                "auth_invalid",
+                "A valid Bearer API key is required.",
+            ));
+        }
+        let Json(body) = body.map_err(crate::server::decisions::json_rejection)?;
+        let prepared = parse_request(&body).map_err(crate::server::decisions::input_error)?;
+        if prepared.model != MODEL_ID {
+            return Err(ApiError::from_status(
+                StatusCode::NOT_FOUND,
+                "model_not_found",
+                format!(
+                    "model `{}` is not served here; use `{MODEL_ID}`",
+                    prepared.model
+                ),
+            )
+            .with_param(Some("model".to_owned())));
+        }
+        let scores =
+            score(&state, prepared.scoring.clone())
+                .await
+                .map_err(|failure| match failure {
+                    WorkFailure::TokenBudget(message) => {
+                        crate::server::decisions::token_budget_error(message)
+                    }
+                    WorkFailure::Inference => {
+                        ApiError::internal("decision_inference_failed", "decision inference failed")
+                    }
+                    WorkFailure::Unavailable => ApiError::service_unavailable(
+                        "decision_worker_unavailable",
+                        "decision worker unavailable",
+                    ),
+                })?;
+        prepared.response(&scores).map_err(|_| {
+            ApiError::internal("decision_inference_failed", "decision inference failed")
+        })
+    }
+    .await;
+    match result {
+        Ok(decision) => Json(decision).into_response(),
+        Err(error) => error.into_response(ApiProtocol::OpenAi),
     }
 }
 
@@ -244,17 +327,11 @@ mod tests {
 
         let worker = tokio::spawn(async move {
             let work = receiver.recv().await.unwrap();
-            assert_eq!(work.request.model, MODEL_ID);
-            let mut answers = serde_json::Map::new();
-            answers.insert("q".into(), json!({"type":"noul","noul":0.75}));
+            assert_eq!(work.request.state, json!("x"));
             work.reply
-                .send(Ok(DecisionResponse {
-                    model: MODEL_ID.into(),
-                    answers,
-                    usage: ironmlx_decision::contract::Usage {
-                        input_tokens: 9,
-                        output_tokens: 0,
-                    },
+                .send(Ok(Scores {
+                    probabilities: vec![vec![0.25, 0.75]],
+                    input_tokens: 9,
                 }))
                 .unwrap();
         });
@@ -271,5 +348,146 @@ mod tests {
                 .unwrap();
         assert_eq!(body["answers"]["q"]["noul"], 0.75);
         assert_eq!(body["usage"]["input_tokens"], 9);
+    }
+
+    async fn post_decisions(app: &Router, key: Option<&str>, body: Value) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/v1/decisions")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(key) = key {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {key}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn decisions_authenticate_validate_and_share_the_worker() {
+        let (state, mut receiver) = test_state();
+        let app = router(state);
+        let request = json!({"model": MODEL_ID, "input": "x", "questions": [
+            {"type": "predicate", "instructions": "Yes?"},
+            {"type": "choice", "name": "flag", "instructions": "Which?",
+             "choices": [{"value": true}, {"value": "true"}]}
+        ]});
+        for key in [None, Some("wrong")] {
+            let (status, body) = post_decisions(&app, key, request.clone()).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(body["error"]["type"], "authentication_error");
+            assert_eq!(body["error"]["code"], "auth_invalid");
+        }
+        let mut wrong_model = request.clone();
+        wrong_model["model"] = json!("gpt-6-luna");
+        let (status, body) = post_decisions(&app, Some("test-key"), wrong_model).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "model_not_found");
+        let (status, body) = post_decisions(
+            &app,
+            Some("test-key"),
+            json!({"model": MODEL_ID, "input": [{"role": "user", "content": [
+                {"type": "input_image", "image_url": "data:image/png;base64,AA=="}]}],
+                "questions": [{"type": "predicate", "instructions": "?"}]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "unsupported_value");
+        assert_eq!(body["error"]["param"], "input[0].content[0].type");
+        assert!(receiver.try_recv().is_err());
+
+        let worker = tokio::spawn(async move {
+            let work = receiver.recv().await.unwrap();
+            assert_eq!(work.request.state, json!("x"));
+            assert_eq!(work.request.questions.len(), 2);
+            work.reply
+                .send(Ok(Scores {
+                    probabilities: vec![vec![0.4, 0.6], vec![0.7, 0.3]],
+                    input_tokens: 21,
+                }))
+                .unwrap();
+            let work = receiver.recv().await.unwrap();
+            work.reply.send(Err(TokenBudgetExceeded.into())).unwrap();
+        });
+        let (status, body) = post_decisions(&app, Some("test-key"), request.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["model"], MODEL_ID);
+        assert_eq!(
+            body["answers"][0],
+            json!({"type": "predicate", "name": null, "probability": 0.6})
+        );
+        assert_eq!(body["answers"][1]["choice"], json!(true));
+        assert_eq!(body["answers"][1]["name"], "flag");
+        assert_eq!(body["usage"]["total_tokens"], 21);
+        let (status, body) = post_decisions(&app, Some("test-key"), request).await;
+        worker.await.unwrap();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "question_token_budget_exceeded");
+    }
+
+    async fn post_raw(
+        app: &Router,
+        path: &str,
+        key: Option<&str>,
+        body: String,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(key) = key {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {key}"));
+        }
+        let response = app
+            .clone()
+            .oneshot(builder.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn decisions_distinguish_oversized_bodies_from_invalid_json() {
+        let (state, mut receiver) = test_state();
+        let app = router(state);
+        let oversized = json!({"model": MODEL_ID, "input": "x".repeat(2 * 1024 * 1024 + 1),
+            "questions": [{"type": "predicate", "instructions": "?"}]})
+        .to_string();
+        let (status, body) =
+            post_raw(&app, "/v1/decisions", Some("test-key"), oversized.clone()).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], "request_body_too_large");
+        let (status, body) = post_raw(&app, "/v1/decisions", None, oversized).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        let (status, body) = post_raw(
+            &app,
+            "/v1/decisions",
+            Some("test-key"),
+            "{\"model\":".into(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["code"], "invalid_json");
+        // System One keeps its existing 422 contract for both cases.
+        let oversized = json!({"model": MODEL_ID, "state": "x".repeat(2 * 1024 * 1024 + 1),
+            "questions": {"q": {"type": "noul", "instructions": "?"}}})
+        .to_string();
+        let (status, body) = post_raw(&app, "/v1/systemone", Some("test-key"), oversized).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["detail"].is_string());
+        assert!(receiver.try_recv().is_err());
     }
 }

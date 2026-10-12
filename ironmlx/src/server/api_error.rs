@@ -91,6 +91,11 @@ impl ApiError {
         }
     }
 
+    pub(crate) fn with_param(mut self, param: Option<String>) -> Self {
+        self.param = param;
+        self
+    }
+
     pub(crate) fn invalid_request(code: &'static str, message: impl Into<String>) -> Self {
         Self::from_status(StatusCode::BAD_REQUEST, code, message)
     }
@@ -399,6 +404,7 @@ mod tests {
             ApiProtocol::OpenAi
         );
         assert_eq!(ApiProtocol::from_path("/v1/responses"), ApiProtocol::OpenAi);
+        assert_eq!(ApiProtocol::from_path("/v1/decisions"), ApiProtocol::OpenAi);
     }
 
     #[tokio::test]

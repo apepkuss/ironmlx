@@ -14,6 +14,7 @@
 | [语音合成 API](audio-speech-api.md) | 语音输出、声音配置与参考音频 |
 | [图片生成 API](image-generation-api.md) | 文生图与单图条件编辑 |
 | [System One API](laya-systemone-api.md) | Laya 的选择、评分与真假概率请求 |
+| [OpenAI Decisions API](openai-decisions-api.md) | 通过官方 OpenAI SDK 获取 Laya 的 predicate、choice 与 score 答案 |
 
 ## 端点索引
 
@@ -38,6 +39,7 @@
 | `POST` | `/v1/images/generations` | 文生图 | App / EnginePool; 图片模型 | [图片生成 API](image-generation-api.md) |
 | `POST` | `/v1/images/edits` | 单图条件编辑 | App / EnginePool; 图片模型 | [图片生成 API](image-generation-api.md) |
 | `POST` | `/v1/systemone` | 结构化决策 | App / EnginePool / System One CLI; 决策模型 | [System One API](laya-systemone-api.md#api-端点) |
+| `POST` | `/v1/decisions` | OpenAI Decisions 推理 | App / EnginePool / System One CLI; 决策模型 | [OpenAI Decisions API](openai-decisions-api.md#请求) |
 | `POST` | `/v1/models/{model_id}/load` | 加载模型 | EnginePool | [EnginePool 控制接口](engine-pool.md) |
 | `POST` | `/v1/models/{model_id}/unload` | 卸载模型 | EnginePool | [EnginePool 控制接口](engine-pool.md) |
 | `GET` | `/admin/api/models/loaded` | 已加载模型与指标 | App | [服务与管理 API](service-api.md#管理接口) |

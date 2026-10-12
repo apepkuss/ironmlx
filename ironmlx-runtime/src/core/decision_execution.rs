@@ -1,6 +1,9 @@
 //! Worker-owned MLX decision inference using the shared model lifecycle.
 use super::{engine_pool::EngineLease, process_memory::global_process_memory_governor};
-use ironmlx_decision::{DecisionRequest, DecisionResponse, Laya};
+use ironmlx_decision::{
+    system_one_response, DecisionRequest, DecisionResponse, Laya, Scores, ScoringRequest,
+    TokenBudgetExceeded,
+};
 use serde::Serialize;
 use std::{
     collections::VecDeque,
@@ -180,6 +183,11 @@ pub enum DecisionExecutionError {
     #[error("{0}")]
     InvalidInput(String),
     #[error("{0}")]
+    TokenBudgetExceeded(String),
+    /// The process memory governor declined the inference reservation.
+    #[error("{0}")]
+    MemoryUnavailable(String),
+    #[error("{0}")]
     Inference(String),
 }
 
@@ -201,9 +209,10 @@ impl Drop for Active {
     }
 }
 type Reply = Result<DecisionResponse, DecisionExecutionError>;
+type ScoreReply = Result<Scores, DecisionExecutionError>;
 struct Job {
-    request: DecisionRequest,
-    reply: oneshot::Sender<Reply>,
+    request: ScoringRequest,
+    reply: oneshot::Sender<ScoreReply>,
     started: Instant,
     metrics_recorded: Arc<AtomicBool>,
     _pending: Pending,
@@ -278,7 +287,7 @@ impl DecisionRuntime {
                                 }
                                 worker_counts.active.fetch_add(1, Ordering::SeqCst);
                                 let _active = Active(worker_counts.clone());
-                                let result = (|| -> Reply {
+                                let result = (|| -> ScoreReply {
                                     let governor = global_process_memory_governor();
                                     let _memory = governor
                                         .try_reserve(
@@ -291,11 +300,13 @@ impl DecisionRuntime {
                                             "Laya inference",
                                         )
                                         .map_err(|e| {
-                                            DecisionExecutionError::Inference(e.to_string())
+                                            DecisionExecutionError::MemoryUnavailable(e.to_string())
                                         })?;
-                                    let result = model.predict(&job.request).map_err(|e| {
-                                        if e.to_string().contains("question options exceed") {
-                                            DecisionExecutionError::InvalidInput(e.to_string())
+                                    let result = model.score(&job.request).map_err(|e| {
+                                        if e.is::<TokenBudgetExceeded>() {
+                                            DecisionExecutionError::TokenBudgetExceeded(
+                                                e.to_string(),
+                                            )
                                         } else {
                                             DecisionExecutionError::Inference(e.to_string())
                                         }
@@ -306,8 +317,8 @@ impl DecisionRuntime {
                                     result
                                 })();
                                 match &result {
-                                    Ok(response) => {
-                                        let input_tokens = response.usage.input_tokens as u64;
+                                    Ok(scores) => {
+                                        let input_tokens = scores.input_tokens as u64;
                                         worker_usage.record_input_tokens(input_tokens);
                                         if !job.metrics_recorded.swap(true, Ordering::SeqCst) {
                                             worker_metrics.record_success(
@@ -368,15 +379,36 @@ impl DecisionRuntime {
         self.inner.metrics.snapshot()
     }
 
+    /// System One transport on the shared worker.
     pub async fn predict(&self, request: DecisionRequest, lease: EngineLease) -> Reply {
+        let questions = match request.validate() {
+            Ok(questions) => questions,
+            Err(error) => {
+                self.inner.metrics.record_failure();
+                return Err(DecisionExecutionError::InvalidInput(error.to_string()));
+            }
+        };
+        let scoring = ScoringRequest {
+            state: request.state,
+            questions: questions.iter().map(|(_, q)| q.clone()).collect(),
+        };
+        let scores = self.score(scoring, lease).await?;
+        system_one_response(&questions, &scores)
+            .map_err(|error| DecisionExecutionError::Inference(error.to_string()))
+    }
+
+    /// Score validated questions on the worker that owns `lease`.
+    pub async fn score(&self, request: ScoringRequest, lease: EngineLease) -> ScoreReply {
         if !matches!(lease.engine(), super::engine_pool::EngineVariant::Decision(runtime) if Arc::ptr_eq(&self.inner, &runtime.inner))
         {
             self.inner.metrics.record_failure();
             return Err(DecisionExecutionError::WrongEngine);
         }
-        if let Err(error) = request.validate() {
+        if request.questions.is_empty() {
             self.inner.metrics.record_failure();
-            return Err(DecisionExecutionError::InvalidInput(error.to_string()));
+            return Err(DecisionExecutionError::InvalidInput(
+                "questions must not be empty".into(),
+            ));
         }
         let (reply, result) = oneshot::channel();
         let metrics_recorded = Arc::new(AtomicBool::new(false));

@@ -75,14 +75,15 @@ pub(super) async fn system_one_with_pool(
         Ok(response) => Json(response).into_response(),
         Err(e) => {
             let status = match &e {
-                DecisionExecutionError::InvalidInput(_) | DecisionExecutionError::WrongEngine => {
-                    StatusCode::UNPROCESSABLE_ENTITY
-                }
+                DecisionExecutionError::InvalidInput(_)
+                | DecisionExecutionError::TokenBudgetExceeded(_)
+                | DecisionExecutionError::WrongEngine => StatusCode::UNPROCESSABLE_ENTITY,
                 DecisionExecutionError::QueueFull | DecisionExecutionError::WorkerStopped => {
                     StatusCode::SERVICE_UNAVAILABLE
                 }
                 DecisionExecutionError::Timeout => StatusCode::GATEWAY_TIMEOUT,
-                DecisionExecutionError::Inference(_) => StatusCode::INTERNAL_SERVER_ERROR,
+                DecisionExecutionError::Inference(_)
+                | DecisionExecutionError::MemoryUnavailable(_) => StatusCode::INTERNAL_SERVER_ERROR,
             };
             error(status, e)
         }
