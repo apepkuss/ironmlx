@@ -57,6 +57,15 @@ from the UTF-8 Mermaid block with leading/trailing whitespace stripped. When
 changing a diagram, render and verify the updated Mermaid source, then save the
 SVG under its new hash; the build rejects diagrams without a matching asset.
 
+Benchmark pages live under `docs/benchmarks/` (Chinese sources under
+`docs/zh-CN/benchmarks/`) and form the Benchmarks group after Getting started.
+Results tables stay in Markdown. A line `<!-- benchmark:<figure> <id> -->`, where
+the figure is `kpis`, `scatter`, or `timeline`, places a chart rendered by
+`assets/benchmarks/benchmarks.js` from the data registered in
+`assets/benchmarks/<id>.js`; only pages with such a line load the chart assets,
+and the build rejects a figure whose data file is missing. Data files are
+generated from a completed benchmark run's analysis and are not edited by hand.
+
 `docs.css` contains the responsive documentation layout. `docs.js` provides local
 full-text search (loaded on demand), keyboard navigation, code highlighting and
 copying, and the current-section indicator. Search needs no external service or

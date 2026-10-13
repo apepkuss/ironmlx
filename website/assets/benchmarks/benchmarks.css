@@ -1,0 +1,252 @@
+/* Benchmark figures inside documentation pages (layered on styles.css and docs.css tokens). */
+.docs-benchmark-page {
+  --viz-grid: var(--line);
+  --viz-focus: var(--blue);
+  --viz-other: #9aa3b2;
+  --viz-other-soft: rgb(154 163 178 / 22%);
+  --viz-focus-soft: rgb(0 107 214 / 14%);
+}
+
+html[data-theme="dark"] .docs-benchmark-page {
+  --viz-other: #7d8899;
+  --viz-other-soft: rgb(125 136 153 / 24%);
+  --viz-focus-soft: rgb(99 173 255 / 16%);
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme="system"] .docs-benchmark-page {
+    --viz-other: #7d8899;
+    --viz-other-soft: rgb(125 136 153 / 24%);
+    --viz-focus-soft: rgb(99 173 255 / 16%);
+  }
+}
+
+.bench-kpis {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin: 24px 0;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--line);
+}
+
+.bench-kpi {
+  padding: 16px 16px 18px;
+  background: var(--surface);
+}
+
+.bench-kpi-value {
+  display: block;
+  color: var(--ink);
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.bench-kpi-value small {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.bench-kpi-label {
+  display: block;
+  margin-top: 6px;
+  color: var(--doc-text);
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+
+.bench-kpi-rank {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.bench-kpi-rank.lead {
+  border-color: var(--badge-border);
+  background: var(--badge-bg);
+  color: var(--badge-ink);
+}
+
+.bench-panel {
+  position: relative;
+  margin: 18px 0 22px;
+  padding: 18px 18px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.bench-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  margin: 0 0 10px;
+  color: var(--doc-text);
+  font-size: 13px;
+}
+
+.bench-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.key-dot,
+.key-tick {
+  display: inline-block;
+  flex: 0 0 auto;
+}
+
+.key-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--viz-other);
+}
+
+.key-dot.focus {
+  background: var(--viz-focus);
+}
+
+.key-tick {
+  width: 2px;
+  height: 12px;
+  border-radius: 1px;
+  background: var(--ink);
+}
+
+.bench-chart {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.bench-chart svg {
+  display: block;
+  width: 100%;
+  min-width: 640px;
+  height: auto;
+}
+
+.bench-chart text {
+  fill: var(--muted);
+  font: 12px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+}
+
+.bench-chart .label-strong {
+  fill: var(--ink);
+  font-weight: 600;
+}
+
+.bench-chart .label-focus {
+  fill: var(--ink);
+  font-weight: 700;
+}
+
+.bench-chart .axis-title {
+  fill: var(--doc-text);
+  font-weight: 600;
+}
+
+.bench-chart .grid {
+  stroke: var(--viz-grid);
+  stroke-width: 1;
+}
+
+.bench-chart .whisker {
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.bench-chart .hit {
+  fill: transparent;
+}
+
+.bench-chart .mark-focus {
+  fill: var(--viz-focus);
+  stroke: var(--viz-focus);
+}
+
+.bench-chart .mark-other {
+  fill: var(--viz-other);
+  stroke: var(--viz-other);
+}
+
+.bench-chart .ring {
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+
+.bench-chart .span-focus {
+  fill: var(--viz-focus-soft);
+}
+
+.bench-chart .span-other {
+  fill: var(--viz-other-soft);
+}
+
+.bench-chart .tick-mark {
+  stroke: var(--ink);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.bench-tooltip {
+  position: absolute;
+  z-index: 5;
+  min-width: 180px;
+  max-width: 280px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 12px 30px var(--image-shadow);
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.45;
+  pointer-events: none;
+}
+
+.bench-tooltip[hidden] {
+  display: none;
+}
+
+.bench-tooltip strong {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+
+.bench-tooltip .tip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  color: var(--doc-text);
+}
+
+.bench-tooltip .tip-row b {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+@media (max-width: 420px) {
+  .bench-kpis {
+    grid-template-columns: 1fr;
+  }
+
+  .bench-panel {
+    padding: 14px 10px 10px;
+  }
+}
