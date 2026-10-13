@@ -16,6 +16,7 @@ PAGES = (
     ("user-guide.md", "User guide", "用户指南", "Install the app, import a model, and make your first request.", "安装应用、导入模型，完成第一次请求。"),
     ("developer-guide.md", "Developer guide", "开发者指南", "Find API examples, CLI configuration, and source development resources.", "查找 API 示例、CLI 配置与源码开发入口。"),
     ("supported-models.md", "Supported models", "支持的模型", "Compare model names, weight formats, and capabilities.", "对照具体模型、权重格式与支持能力。"),
+    ("benchmarks/qwen38-dense-b4.md", "Qwen3.8 27B B4 concurrency performance comparison", "Qwen3.8 27B B4 并发性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold when four requests arrive together.", "四个请求同时到达时，对比 IronMLX 与 oMLX、Splash、TensorFold。"),
     ("api-reference.md", "API reference", "API 参考", "Find every documented endpoint and choose an API topic.", "查找全部已公开文档的端点，按能力进入 API 专题。"),
     ("service-api.md", "Service and management API", "服务与管理 API", "Look up shared access conventions, health, model discovery, and management endpoints.", "查阅公共访问约定、健康检查、模型发现与管理接口。"),
     ("text-vision-api.md", "Text and vision API", "文本与视觉 API", "Use Responses, Chat Completions, and Messages for text and image understanding.", "查阅文本与图片理解、思考、工具、结构化输出和流式协议。"),
@@ -50,12 +51,13 @@ PAGES = (
 )
 GROUPS = (
     ("start", "Getting started", "开始使用", "Everything you need for your first local inference.", "从安装到首次请求，开始本地推理。", PAGES[:3]),
-    ("api", "Development & API", "开发与 API", "Integrate APIs, build from source, and contribute to IronMLX.", "接入 API、从源码构建与参与 IronMLX 开发。", PAGES[3:14]),
-    ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[14:17]),
-    ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[17:21]),
-    ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[21:27]),
-    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[27:30]),
-    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[30:]),
+    ("benchmarks", "Benchmarks", "性能对比", "Measured comparisons with other local inference applications on the same Mac.", "在同一台 Mac 上与其他本地推理应用的实测对比。", PAGES[3:4]),
+    ("api", "Development & API", "开发与 API", "Integrate APIs, build from source, and contribute to IronMLX.", "接入 API、从源码构建与参与 IronMLX 开发。", PAGES[4:15]),
+    ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[15:18]),
+    ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[18:22]),
+    ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[22:28]),
+    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[28:31]),
+    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[31:]),
 )
 PAGE_MAP = {entry[0]: entry for entry in PAGES}
 GROUP_MAP = {entry[0]: group for group in GROUPS for entry in group[5]}
@@ -72,6 +74,12 @@ SOURCE_OVERRIDES = {
     "contributing.md": {"en": "CONTRIBUTING.md", "zh": "docs/zh-CN/contributing.md"},
     "security.md": {"en": "SECURITY.md", "zh": "docs/zh-CN/security.md"},
 }
+
+
+# <!-- benchmark:<figure> <id> --> on its own line places a chart rendered by assets/benchmarks/benchmarks.js
+# from the data registered in assets/benchmarks/<id>.js.
+BENCHMARK_FIGURE = re.compile(r"<!--\s*benchmark:(kpis|scatter|timeline)\s+([a-z0-9-]+)\s*-->")
+BENCHMARK_ID = re.compile(r'data-benchmark-id="([a-z0-9-]+)"')
 
 
 def source_path(filename, language):
@@ -220,6 +228,14 @@ def render(markdown, source, target):
         line = raw.rstrip()
         # The header already switches language while preserving the current page.
         if not in_code:
+            figure = BENCHMARK_FIGURE.fullmatch(line.strip())
+            if figure:
+                flush_paragraph()
+                flush_quote()
+                close_list()
+                close_table()
+                html.append(f'<div class="bench-figure" data-benchmark="{figure.group(1)}" data-benchmark-id="{figure.group(2)}"></div>')
+                continue
             if re.fullmatch(r"<!--.*-->", line.strip()):
                 continue
             line = re.sub(r"^\[(?:English|简体中文|中文)\]\([^)]+\.md\)(?:\s*·\s*)?", "", line)
@@ -323,6 +339,7 @@ def icon(name):
         "maintenance": '<path d="M14 6a5 5 0 0 0-6 6L3 17a3 3 0 0 0 4 4l5-5a5 5 0 0 0 6-6l-4 2-2-2 2-4Z"/>',
         "releases": '<path d="M5 4h10l4 4v12H5V4Zm10 0v5h4M8 13h8m-8 4h5"/>',
         "security": '<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Zm-4 9 3 3 5-6"/>',
+        "benchmarks": '<path d="M4 20h16M7 16v-4m5 4V6m5 10v-7"/>',
         "search": '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
         "arrow": '<path d="M4 12h16m-6-6 6 6-6 6"/>',
         "menu": '<path d="M4 6h16M4 12h16M4 18h16"/>',
@@ -403,6 +420,16 @@ def page(title, content, language, output, target, toc=(), current=None):
     body_class = "docs-page docs-models-page" if current == "supported-models.md" else "docs-page"
     if current == "api-reference.md":
         body_class += " docs-api-reference-page"
+    benchmark_assets = ""
+    benchmark_ids = sorted(set(BENCHMARK_ID.findall(content)))
+    if benchmark_ids:
+        for benchmark in benchmark_ids:
+            if not (WEBSITE / "assets" / "benchmarks" / f"{benchmark}.js").is_file():
+                raise ValueError(f"missing benchmark data: website/assets/benchmarks/{benchmark}.js")
+        body_class += " docs-benchmark-page"
+        benchmark_assets = f'<link rel="stylesheet" href="{home}assets/benchmarks/benchmarks.css">' + "".join(
+            f'<script src="{home}assets/benchmarks/{benchmark}.js" defer></script>' for benchmark in benchmark_ids
+        ) + f'<script src="{home}assets/benchmarks/benchmarks.js" defer></script>'
     return f'''<!doctype html>
 <html lang="{lang_name}" data-theme="system">
 <head>
@@ -410,7 +437,7 @@ def page(title, content, language, output, target, toc=(), current=None):
 <meta name="color-scheme" content="light dark"><meta name="description" content="{escape(title, quote=True)} — IronMLX documentation">
 <link rel="icon" href="{home}assets/favicon.png"><title>{escape(title)} — IronMLX</title>
 <script src="{home}theme.js"></script><link rel="stylesheet" href="{home}styles.css"><link rel="stylesheet" href="{home}docs.css">
-<script src="{home}docs.js" defer></script>
+<script src="{home}docs.js" defer></script>{benchmark_assets}
 </head>
 <body class="{body_class}" data-doc-language="{language}" data-search-index="{search_index}">
 <a class="skip-link" href="#doc-main">{skip}</a>
