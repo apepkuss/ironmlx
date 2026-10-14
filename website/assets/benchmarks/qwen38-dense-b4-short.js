@@ -1,6 +1,6 @@
 window.IRONMLX_BENCHMARKS = window.IRONMLX_BENCHMARKS || {};
-window.IRONMLX_BENCHMARKS["qwen38-dense-b4"] = {
- "id": "qwen38-dense-b4",
+window.IRONMLX_BENCHMARKS["qwen38-dense-b4-short"] = {
+ "id": "qwen38-dense-b4-short",
  "run_utc": [
   "2026-10-13T04:04:15Z",
   "2026-10-13T07:25:18Z"
