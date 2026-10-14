@@ -2,9 +2,17 @@
 
 [English](../../benchmarks/qwen36-moe-b4-short.md)
 
+> [!NOTE]
+> 短 prompt 性能对比测试系列：
+>
+> - Qwen3.6 35B A3B B4 并发
+> - [Qwen3.6 35B A3B B1 单请求](qwen36-moe-b1-short.md)
+> - [Qwen3.8 27B B1 单请求](qwen38-dense-b1-short.md)
+> - [Qwen3.8 27B B4 并发](qwen38-dense-b4-short.md)
+
 B4 并发性能对比验证的目的是，通过与当前 Apple Silicon 平台最优秀推理应用的对比，一方面，帮助开发者定位 IronMLX 的优势和劣势，为后续优化提供方向；另一方面，让用户更了解 IronMLX 实际表现，判断是否适合他们的使用场景。
 
-本页针对 Qwen3.6-35B-A3B 混合专家（MoE）模型；Qwen3.8-27B 稠密模型的结果见[Qwen3.8 27B B4 短 prompt 并发性能对比](qwen38-dense-b4-short.md)。所有请求都使用短 prompt（输入 40–83 token），输出固定为 256 token；本页结论只适用于这种负载。参与本次并发性能对比的本地推理应用有 oMLX、Splash、TensorFold 和 IronMLX。各应用的具体信息见[参测应用与配置](#参测应用与配置)。关于本次性能对比验证的环境搭建、测试方法等信息，请详见[方法](#方法)。
+本页针对 Qwen3.6-35B-A3B 混合专家（MoE）模型，四个请求同时到达服务。所有请求都使用短 prompt（输入 40–83 token），输出固定为 256 token；本页结论只适用于这种负载。参与本次并发性能对比的本地推理应用有 oMLX、Splash、TensorFold 和 IronMLX。各应用的具体信息见[参测应用与配置](#参测应用与配置)。关于本次性能对比验证的环境搭建、测试方法等信息，请详见[方法](#方法)。
 
 ## 结论
 

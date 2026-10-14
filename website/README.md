@@ -71,7 +71,10 @@ outside the default axes. A data file with `mode: "b1"` (one request at a time)
 shows time to first token, decode speed, completion time, and memory in the
 `kpis` cards and plots decode speed against time to first token in the
 `scatter` chart; the `timeline` figure applies to B4 data only. `kpi_digits`
-(decimal places per card key) overrides a card's default precision.
+(decimal places per card key) overrides a card's default precision. Each
+benchmark page opens with a note listing the series: the current page first
+without a link, then the same model's other workload, then the other model's B1
+and B4 pages. List items inside a `> [!NOTE]` callout render as a list.
 
 `docs.css` contains the responsive documentation layout. `docs.js` provides local
 full-text search (loaded on demand), keyboard navigation, code highlighting and
