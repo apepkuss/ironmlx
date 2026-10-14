@@ -71,10 +71,14 @@ outside the default axes. A data file with `mode: "b1"` (one request at a time)
 shows time to first token, decode speed, completion time, and memory in the
 `kpis` cards and plots decode speed against time to first token in the
 `scatter` chart; the `timeline` figure applies to B4 data only. `kpi_digits`
-(decimal places per card key) overrides a card's default precision. Each
+(decimal places per card key) overrides a card's default precision, and
+`ttft_unit: "s"` shows first-token values (stored in ms) in seconds on the cards
+and the scatter axis, for long-prompt pages whose first tokens take seconds. Each
 benchmark page opens with a note listing the series: the current page first
 without a link, then the same model's other workload, then the other model's B1
-and B4 pages. List items inside a `> [!NOTE]` callout render as a list.
+and B4 pages. The long-prompt page (`qwen36-moe-b1-30k`) lists its own series
+and links the short-prompt pages from that note. List items inside a
+`> [!NOTE]` callout render as a list.
 
 `docs.css` contains the responsive documentation layout. `docs.js` provides local
 full-text search (loaded on demand), keyboard navigation, code highlighting and
