@@ -52,6 +52,21 @@ impl DecoderLayerMoe {
         cfg: DecoderLayerMoeConfig,
         kind: AttnKind,
     ) -> Result<Self> {
+        Self::from_loader_with_projections(loader, prefix, cfg, kind, false)
+    }
+
+    /// `fuse_projections` loads the attention input projections and the
+    /// shared-expert gate/up as single fused quantized matrices with row
+    /// views (no duplicate weights; each output row keeps its own
+    /// accumulation tree), the form the M5 affine4 route and the shared
+    /// weight layout use.
+    pub(crate) fn from_loader_with_projections(
+        loader: &Loader,
+        prefix: &str,
+        cfg: DecoderLayerMoeConfig,
+        kind: AttnKind,
+        fuse_projections: bool,
+    ) -> Result<Self> {
         let input_layernorm = RmsNorm::from_loader(
             loader,
             &format!("{prefix}.input_layernorm"),
@@ -59,33 +74,37 @@ impl DecoderLayerMoe {
         )?;
         let attn = match kind {
             AttnKind::Full => {
-                let ga = GatedAttention::from_loader(
-                    loader,
-                    &format!("{prefix}.self_attn"),
-                    GatedAttentionConfig {
-                        num_heads: cfg.num_heads,
-                        num_kv_heads: cfg.num_kv_heads,
-                        head_dim: cfg.head_dim,
-                        rms_norm_eps: cfg.rms_norm_eps,
-                        attention_bias: cfg.attention_bias,
-                    },
-                )?;
+                let attention_cfg = GatedAttentionConfig {
+                    num_heads: cfg.num_heads,
+                    num_kv_heads: cfg.num_kv_heads,
+                    head_dim: cfg.head_dim,
+                    rms_norm_eps: cfg.rms_norm_eps,
+                    attention_bias: cfg.attention_bias,
+                };
+                let attention_prefix = format!("{prefix}.self_attn");
+                let ga = if fuse_projections {
+                    GatedAttention::from_loader_dflash2(loader, &attention_prefix, attention_cfg)?
+                } else {
+                    GatedAttention::from_loader(loader, &attention_prefix, attention_cfg)?
+                };
                 AttnPath::Full(Box::new(ga))
             }
             AttnKind::Linear => {
-                let gdn = GatedDeltaNet::from_loader(
-                    loader,
-                    &format!("{prefix}.linear_attn"),
-                    GatedDeltaNetConfig {
-                        hidden_size: cfg.hidden_size,
-                        num_v_heads: cfg.linear_num_value_heads,
-                        num_k_heads: cfg.linear_num_key_heads,
-                        head_k_dim: cfg.linear_key_head_dim,
-                        head_v_dim: cfg.linear_value_head_dim,
-                        conv_kernel_size: cfg.linear_conv_kernel_dim,
-                        rms_norm_eps: cfg.rms_norm_eps,
-                    },
-                )?;
+                let gdn_cfg = GatedDeltaNetConfig {
+                    hidden_size: cfg.hidden_size,
+                    num_v_heads: cfg.linear_num_value_heads,
+                    num_k_heads: cfg.linear_num_key_heads,
+                    head_k_dim: cfg.linear_key_head_dim,
+                    head_v_dim: cfg.linear_value_head_dim,
+                    conv_kernel_size: cfg.linear_conv_kernel_dim,
+                    rms_norm_eps: cfg.rms_norm_eps,
+                };
+                let gdn_prefix = format!("{prefix}.linear_attn");
+                let gdn = if fuse_projections {
+                    GatedDeltaNet::from_loader_dflash2(loader, &gdn_prefix, gdn_cfg)?
+                } else {
+                    GatedDeltaNet::from_loader(loader, &gdn_prefix, gdn_cfg)?
+                };
                 AttnPath::Linear(Box::new(gdn))
             }
         };
@@ -94,11 +113,12 @@ impl DecoderLayerMoe {
             &format!("{prefix}.post_attention_layernorm"),
             cfg.rms_norm_eps,
         )?;
-        let ffn = SparseMoeBlock::from_loader(
+        let ffn = SparseMoeBlock::from_loader_with_projections(
             loader,
             &format!("{prefix}.mlp"),
             cfg.num_experts_per_tok,
             cfg.norm_topk_prob,
+            fuse_projections,
         )?;
         Ok(Self {
             input_layernorm,
@@ -111,6 +131,28 @@ impl DecoderLayerMoe {
 
     pub fn config(&self) -> &DecoderLayerMoeConfig {
         &self.cfg
+    }
+
+    /// Dense projections applied to activations (fused storage when fused):
+    /// the attention projections and the shared expert. Router gates and
+    /// routed experts are not included.
+    pub(crate) fn activation_projections(&self) -> Vec<&crate::nn::linear::Linear> {
+        let mut out = match &self.attn {
+            AttnPath::Full(attention) => attention.activation_projections(),
+            AttnPath::Linear(linear) => linear.activation_projections(),
+        };
+        out.extend(self.ffn.shared_expert_projections());
+        out
+    }
+
+    /// Single-resident affine4 layout for this layer's dense projections
+    /// (see `nn::shared_weight_layout`). Returns the number of stores.
+    pub(crate) fn share_weight_layout(&mut self) -> Result<usize> {
+        let attention = match &mut self.attn {
+            AttnPath::Full(attention) => attention.share_weight_layout()?,
+            AttnPath::Linear(linear) => linear.share_weight_layout()?,
+        };
+        Ok(attention + self.ffn.share_shared_expert_layout()?)
     }
 
     pub fn kind(&self) -> AttnKind {

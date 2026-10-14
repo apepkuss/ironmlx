@@ -148,10 +148,7 @@ impl Qwen35MoeModel {
     /// tensor units of a real Apple GPU of generation 17 or newer; elsewhere
     /// the product-stable projections run and the fingerprint says so.
     fn m5_affine4_projections(&self) -> bool {
-        self.dflash2_target_bits == Some(4)
-            && ironmlx_core::m5_profile::tensor_unit_flag(
-                ironmlx_core::m5_profile::settings::M5_MOE_AFFINE4_PROJECTIONS,
-            )
+        super::model::m5_affine4_projections_requested(self.dflash2_target_bits)
     }
 
     /// Whether a verify of `rows` target rows runs the M5 expert-grouped
@@ -528,9 +525,7 @@ impl DFlash2Target for Qwen35MoeModel {
                 "Qwen3.6 MoE DFlash2 projection requires [B,S,H] with B>0, got {dims:?}"
             ));
         }
-        let _m5_affine4 = self
-            .m5_affine4_projections()
-            .then(crate::nn::m5_affine4::scope);
+        let _m5_affine4 = self.m5_affine4_head().then(crate::nn::m5_affine4::scope);
         // Multi-position projection uses the product-stable affine kernel so
         // each row keeps the ordinary Q=1 accumulation tree.
         let _product_stable = (dims[0] * dims[1] > 1).then(crate::nn::product_stable_qmm::scope);

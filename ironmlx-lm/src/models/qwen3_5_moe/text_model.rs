@@ -79,6 +79,15 @@ fn slice_last_hidden(hidden: &Array, row: i32, pos: i32, target: StreamOrDevice)
 
 impl Qwen35MoeTextModel {
     pub fn from_loader(loader: &Loader, cfg: Qwen35MoeConfig) -> Result<Self> {
+        Self::from_loader_with_projections(loader, cfg, false)
+    }
+
+    /// `fuse_projections`: see [`DecoderLayerMoe::from_loader_with_projections`].
+    pub(crate) fn from_loader_with_projections(
+        loader: &Loader,
+        cfg: Qwen35MoeConfig,
+        fuse_projections: bool,
+    ) -> Result<Self> {
         let embed_tokens = Embedding::from_loader(loader, "model.embed_tokens")?;
 
         let head_dim = cfg.effective_head_dim();
@@ -114,11 +123,12 @@ impl Qwen35MoeTextModel {
                 norm_topk_prob: cfg.norm_topk_prob,
             };
             let kind = cfg.layer_kind(i);
-            layers.push(DecoderLayerMoe::from_loader(
+            layers.push(DecoderLayerMoe::from_loader_with_projections(
                 loader,
                 &format!("model.layers.{i}"),
                 layer_cfg,
                 kind,
+                fuse_projections,
             )?);
         }
         let norm = RmsNorm::from_loader(loader, "model.norm", cfg.rms_norm_eps)?;
@@ -130,6 +140,24 @@ impl Qwen35MoeTextModel {
             cfg,
             affine4_fast_paths: false,
         })
+    }
+
+    /// Dense activation projections of every layer (attention and shared
+    /// expert), for the M5 affine4 pre-compilation.
+    pub(crate) fn activation_projections(&self) -> Vec<&crate::nn::linear::Linear> {
+        self.layers
+            .iter()
+            .flat_map(|layer| layer.activation_projections())
+            .collect()
+    }
+
+    /// Single-resident affine4 layout for every layer's dense projections.
+    pub(crate) fn share_weight_layout(&mut self) -> Result<usize> {
+        let mut stores = 0;
+        for layer in &mut self.layers {
+            stores += layer.share_weight_layout()?;
+        }
+        Ok(stores)
     }
 
     /// Enable the qualified affine4 DFlash2 target's kernel routes.

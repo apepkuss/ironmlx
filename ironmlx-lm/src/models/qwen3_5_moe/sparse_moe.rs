@@ -1151,12 +1151,35 @@ impl SparseMoeBlock {
         num_experts_per_tok: i32,
         norm_topk_prob: bool,
     ) -> Result<Self> {
+        Self::from_loader_with_projections(
+            loader,
+            prefix,
+            num_experts_per_tok,
+            norm_topk_prob,
+            false,
+        )
+    }
+
+    /// `fuse_projections` loads the shared expert's gate/up as one fused
+    /// quantized matrix with row views.
+    pub(crate) fn from_loader_with_projections(
+        loader: &Loader,
+        prefix: &str,
+        num_experts_per_tok: i32,
+        norm_topk_prob: bool,
+        fuse_projections: bool,
+    ) -> Result<Self> {
         let router_gate = Linear::from_loader(loader, &format!("{prefix}.gate"))
             .context("SparseMoeBlock: loading router gate")?;
         let routed = RoutedExperts::from_loader(loader, &format!("{prefix}.switch_mlp"))
             .context("SparseMoeBlock: loading routed experts")?;
-        let shared_expert = Mlp::from_loader(loader, &format!("{prefix}.shared_expert"))
-            .context("SparseMoeBlock: loading shared_expert")?;
+        let shared_prefix = format!("{prefix}.shared_expert");
+        let shared_expert = if fuse_projections {
+            Mlp::from_loader_dflash2(loader, &shared_prefix)
+        } else {
+            Mlp::from_loader(loader, &shared_prefix)
+        }
+        .context("SparseMoeBlock: loading shared_expert")?;
         let shared_expert_gate =
             Linear::from_loader(loader, &format!("{prefix}.shared_expert_gate"))
                 .context("SparseMoeBlock: loading shared_expert_gate")?;
@@ -1169,6 +1192,16 @@ impl SparseMoeBlock {
             num_experts_per_tok,
             norm_topk_prob,
         })
+    }
+
+    /// The shared expert's projections (fused storage when fused).
+    pub(crate) fn shared_expert_projections(&self) -> Vec<&crate::nn::linear::Linear> {
+        self.shared_expert.activation_projections()
+    }
+
+    /// Single-resident affine4 layout for the shared expert's projections.
+    pub(crate) fn share_shared_expert_layout(&mut self) -> Result<usize> {
+        self.shared_expert.share_weight_layout()
     }
 
     /// Routed experts of this block (diagnostics and benchmarks).
