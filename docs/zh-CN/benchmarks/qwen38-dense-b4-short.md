@@ -1,16 +1,16 @@
-# Qwen3.8 27B B4 并发性能对比
+# Qwen3.8 27B B4 短 prompt 并发性能对比
 
-[English](../../benchmarks/qwen38-dense-b4.md)
+[English](../../benchmarks/qwen38-dense-b4-short.md)
 
 B4 并发性能对比验证的目的是，通过与当前 Apple Silicon 平台最优秀推理应用的对比，一方面，帮助开发者定位 IronMLX 的优势和劣势，为后续优化提供方向；另一方面，让用户更了解 IronMLX 实际表现，判断是否适合他们的使用场景。
 
-参与本次并发性能对比的本地推理应用有 oMLX、Splash、TensorFold 和 IronMLX。各应用的具体信息见[参测应用与配置](#参测应用与配置)。关于本次性能对比验证的环境搭建、测试方法等信息，请详见[方法](#方法)。
+本页针对 Qwen3.8-27B 稠密模型；Qwen3.6-35B-A3B 混合专家（MoE）模型的结果见[Qwen3.6 35B A3B B4 短 prompt 并发性能对比](qwen36-moe-b4-short.md)。所有请求都使用短 prompt（输入 40–83 token），输出固定为 256 token；本页结论只适用于这种负载。参与本次并发性能对比的本地推理应用有 oMLX、Splash、TensorFold 和 IronMLX。各应用的具体信息见[参测应用与配置](#参测应用与配置)。关于本次性能对比验证的环境搭建、测试方法等信息，请详见[方法](#方法)。
 
 ## 结论
 
-B4 并发性能对比验证中，综合验证所得数据，IronMLX 的总体性能表现如下：
+短 prompt B4 并发性能对比验证中，综合验证所得数据，IronMLX 的总体性能表现如下：
 
-<!-- benchmark:kpis qwen38-dense-b4 -->
+<!-- benchmark:kpis qwen38-dense-b4-short -->
 
 - **首字最快。** 看到第一个字的等待时间中位数为 251 ms，四轮都第一；第二名 TensorFold 0.6.6 为 276 ms。
 - **最慢请求的首字也最快。** 四个请求中最慢的一个在 430 ms 出现第一个字，四轮都第一；TensorFold 0.6.6 为 441 ms。
@@ -21,7 +21,7 @@ B4 并发性能对比验证中，综合验证所得数据，IronMLX 的总体性
 
 整批吞吐是四个请求的输出 token 总数除以整批完成时间（从最早发出请求到最后一个请求结束），反映服务在并发负载下的总处理能力；首字时间（TTFT）是从发出请求到收到第一个输出内容的时间，反映用户感知到的响应延迟。图中越靠右下表现越好。
 
-<!-- benchmark:scatter qwen38-dense-b4 -->
+<!-- benchmark:scatter qwen38-dense-b4-short -->
 
 > [!NOTE]
 > TensorFold 1.0.5：按其 [1.0.5 文档](https://github.com/ashhart/TensorFold/blob/v1.0.5/README.md#exact-decoding)，原生引擎对 Qwen3.8-27B 不支持并发处理。
@@ -50,7 +50,7 @@ B4 并发性能对比验证中，综合验证所得数据，IronMLX 的总体性
 
 下图展示四个请求同时发出后，每个请求的首字时间和完成时间，用于观察各应用在并发负载下如何安排四个请求的处理。横轴是从发出请求起经过的时间；竖线表示请求收到第一个输出内容的时间，圆点表示请求完成的时间。图中数值的取法是：在每个批次内，把四个请求的首字时间和完成时间分别按先后排序，再对 12 个批次同一位次的数值取中位数。因此竖线和圆点是分别排序的，同一位次的竖线和圆点不一定属于同一个请求。
 
-<!-- benchmark:timeline qwen38-dense-b4 -->
+<!-- benchmark:timeline qwen38-dense-b4-short -->
 
 > [!NOTE]
 > TensorFold 1.0.5：按其 [1.0.5 文档](https://github.com/ashhart/TensorFold/blob/v1.0.5/README.md#exact-decoding)，原生引擎对 Qwen3.8-27B 不支持并发处理。

@@ -65,6 +65,9 @@ the figure is `kpis`, `scatter`, or `timeline`, places a chart rendered by
 `assets/benchmarks/<id>.js`; only pages with such a line load the chart assets,
 and the build rejects a figure whose data file is missing. Data files are
 generated from a completed benchmark run's analysis and are not edited by hand.
+A data file may set `scatter.x` and `scatter.y` (`[min, max, step]`) and
+`scatter.placement` (label offsets per application key) when its values fall
+outside the default axes.
 
 `docs.css` contains the responsive documentation layout. `docs.js` provides local
 full-text search (loaded on demand), keyboard navigation, code highlighting and

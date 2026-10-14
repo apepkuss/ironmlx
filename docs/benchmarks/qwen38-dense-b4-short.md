@@ -1,16 +1,16 @@
-# Qwen3.8 27B B4 concurrency performance comparison
+# Qwen3.8 27B B4 concurrency performance comparison (short prompts)
 
-[简体中文](../zh-CN/benchmarks/qwen38-dense-b4.md)
+[简体中文](../zh-CN/benchmarks/qwen38-dense-b4-short.md)
 
 The B4 concurrency comparison benchmarks IronMLX against the leading inference applications on Apple Silicon today. It has two purposes: to help developers identify IronMLX's strengths and weaknesses and set the direction for further optimization, and to show users how IronMLX actually performs so they can judge whether it fits their use case.
 
-The local inference applications in this comparison are oMLX, Splash, TensorFold, and IronMLX. See [Applications and configuration](#applications-and-configuration) for details on each. For the test environment setup, test method, and other details, see [Method](#method).
+This page covers the dense Qwen3.8-27B model; for the Qwen3.6-35B-A3B mixture-of-experts model, see [Qwen3.6 35B A3B B4 concurrency performance comparison (short prompts)](qwen36-moe-b4-short.md). All requests use short prompts (40–83 input tokens) with a fixed 256-token output, and the conclusions on this page apply to this workload only. The local inference applications in this comparison are oMLX, Splash, TensorFold, and IronMLX. See [Applications and configuration](#applications-and-configuration) for details on each. For the test environment setup, test method, and other details, see [Method](#method).
 
 ## Summary
 
-Based on all data collected in the B4 concurrency comparison, IronMLX's overall performance is as follows:
+Based on all data collected in the short-prompt B4 concurrency comparison, IronMLX's overall performance is as follows:
 
-<!-- benchmark:kpis qwen38-dense-b4 -->
+<!-- benchmark:kpis qwen38-dense-b4-short -->
 
 - **Fastest first token.** The median wait for the first words is 251 ms, first in all four rounds; TensorFold 0.6.6 follows at 276 ms.
 - **Fastest first token for the slowest request too.** The slowest of the four requests shows its first words after 430 ms, first in all four rounds; TensorFold 0.6.6 follows at 441 ms.
@@ -21,7 +21,7 @@ Based on all data collected in the B4 concurrency comparison, IronMLX's overall 
 
 Batch throughput is the total output tokens of the four requests divided by the batch completion time (from the first request sent to the last request finished), and reflects the server's total capacity under concurrent load. Time to first token (TTFT) is the time from sending a request to receiving its first output, and reflects the response latency users perceive. Points toward the lower right are better.
 
-<!-- benchmark:scatter qwen38-dense-b4 -->
+<!-- benchmark:scatter qwen38-dense-b4-short -->
 
 > [!NOTE]
 > TensorFold 1.0.5: according to its [1.0.5 documentation](https://github.com/ashhart/TensorFold/blob/v1.0.5/README.md#exact-decoding), the native engine does not process concurrent requests for Qwen3.8-27B.
@@ -50,7 +50,7 @@ The table below lists the results of each application (TensorFold appears as two
 
 The chart below shows, for four requests sent at the same moment, when each request receives its first output and when it completes, to show how each application schedules the four requests under concurrent load. The horizontal axis is the time since the requests were sent; ticks mark when a request receives its first output, and dots mark when a request completes. In each batch, the four first-token times and the four completion times are sorted separately from earliest to latest, and each position shows the median of that position over 12 batches. Ticks and dots are therefore sorted independently, and a tick and a dot at the same position do not necessarily belong to the same request.
 
-<!-- benchmark:timeline qwen38-dense-b4 -->
+<!-- benchmark:timeline qwen38-dense-b4-short -->
 
 > [!NOTE]
 > TensorFold 1.0.5: according to its [1.0.5 documentation](https://github.com/ashhart/TensorFold/blob/v1.0.5/README.md#exact-decoding), the native engine does not process concurrent requests for Qwen3.8-27B.
