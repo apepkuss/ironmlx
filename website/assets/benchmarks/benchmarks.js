@@ -1,6 +1,7 @@
 // Benchmark figures for documentation pages. The build replaces
 // <!-- benchmark:<figure> <id> --> with <div data-benchmark="<figure>" data-benchmark-id="<id>">
 // and loads assets/benchmarks/<id>.js, which registers window.IRONMLX_BENCHMARKS[<id>].
+// A data set with mode "b1" (single requests) uses the B1 metrics for the cards and the scatter axes.
 (() => {
   const registry = window.IRONMLX_BENCHMARKS || {};
   const zh = document.documentElement.lang.startsWith("zh");
@@ -29,6 +30,18 @@
       ["throughput_tps", "四个请求的整批吞吐", "tok/s", 1, "max"],
       ["memory_gib", "服务时内存峰值", "GiB", 1, "min"],
     ],
+    b1: {
+      kpis: [
+        ["ttft_ms", "首字时间", "ms", 0, "min"],
+        ["decode_tps", "解码速度", "tok/s", 1, "max"],
+        ["e2e_s", "完成时间", "s", 2, "min"],
+        ["memory_gib", "服务时内存峰值", "GiB", 1, "min"],
+      ],
+      throughput: "解码速度（tok/s）",
+      ttftMedian: "首字时间（ms）",
+      tipThroughput: "解码速度",
+      tipTtft: "首字时间",
+    },
     rank: (r, n) => `${n} 个中第 ${r}`,
     firstIn: (k, n) => (k === n ? `${n} 轮都第一` : `${n} 轮中 ${k} 轮第一`),
     tied: (r, name, rounds) => `与 ${name} 并列第 ${r}（四轮 ${rounds}）`,
@@ -57,6 +70,18 @@
       ["throughput_tps", "Throughput for four requests together", "tok/s", 1, "max"],
       ["memory_gib", "Peak memory while serving", "GiB", 1, "min"],
     ],
+    b1: {
+      kpis: [
+        ["ttft_ms", "Time to first token", "ms", 0, "min"],
+        ["decode_tps", "Decode speed", "tok/s", 1, "max"],
+        ["e2e_s", "Completion time", "s", 2, "min"],
+        ["memory_gib", "Peak memory while serving", "GiB", 1, "min"],
+      ],
+      throughput: "Decode speed (tok/s)",
+      ttftMedian: "Time to first token (ms)",
+      tipThroughput: "Decode speed",
+      tipTtft: "Time to first token",
+    },
     rank: (r, n) => `#${r} of ${n}`,
     firstIn: (k, n) => (k === n ? `first in all ${n} rounds` : `first in ${k} of ${n} rounds`),
     tied: (r, name, rounds) => `Tied #${r} with ${name} (${rounds} in rounds)`,
@@ -90,6 +115,10 @@
   };
 
   const kind = (app) => (app.key === FOCUS ? "focus" : "other");
+  // Labels and metric keys for a data set: B4 (default) or B1.
+  const metrics = (data) => (data.mode === "b1"
+    ? { ...T, ...T.b1, x: "decode_tps", y: "ttft_ms" }
+    : { ...T, x: "throughput_tps", y: "ttft_median_ms" });
   const tipRow = (label, value) => `<div class="tip-row"><span>${label}</span><b>${value}</b></div>`;
 
   const tooltip = (panel) => {
@@ -116,10 +145,11 @@
 
   // Headline cards for IronMLX: value, rank by the four-round median, and how the rounds split.
   const kpis = (host, data) => {
+    const M = metrics(data);
     const n = data.apps.length;
-    const rounds = Object.keys(data.round_ranks.throughput_tps).length;
+    const rounds = Object.keys(data.round_ranks[M.kpis[0][0]]).length;
     const grid = html("div", "bench-kpis");
-    T.kpis.forEach(([key, label, unit, digits, best]) => {
+    M.kpis.forEach(([key, label, unit, digits, best]) => {
       const focus = data.apps.find((a) => a.key === FOCUS);
       const sorted = [...data.apps].sort((a, b) => (best === "max" ? b[key].median - a[key].median : a[key].median - b[key].median));
       const rank = sorted.indexOf(focus) + 1;
@@ -150,6 +180,7 @@
   // Throughput vs. time to first token: one point per configuration with four-round ranges.
   // A data set may set its own axes ([min, max, step]) and label offsets in `scatter`.
   const scatter = (host, data) => {
+    const M = metrics(data);
     const axes = data.scatter || {};
     host.classList.add("bench-panel");
     host.appendChild(legend([`<i class="key-dot focus"></i>${T.focus}`, `<i class="key-dot"></i>${T.others}`, T.ranges, T.lowerRight]));
@@ -160,7 +191,7 @@
     const [y0, y1, yStep] = axes.y || [100, 700, 100];
     const sx = (v) => m.l + (v - x0) / (x1 - x0) * (W - m.l - m.r);
     const sy = (v) => H - m.b - (v - y0) / (y1 - y0) * (H - m.t - m.b);
-    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${T.throughput} / ${T.ttftMedian}` });
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${M.throughput} / ${M.ttftMedian}` });
     for (let v = y0; v <= y1; v += yStep) {
       el("line", { x1: m.l, x2: W - m.r, y1: sy(v), y2: sy(v), class: "grid" }, svg);
       text(svg, m.l - 10, sy(v) + 4, fmt(v, 0), { "text-anchor": "end" });
@@ -169,12 +200,12 @@
       el("line", { x1: sx(v), x2: sx(v), y1: m.t, y2: H - m.b, class: "grid" }, svg);
       text(svg, sx(v), H - m.b + 20, fmt(v, 0), { "text-anchor": "middle" });
     }
-    text(svg, (m.l + W - m.r) / 2, H - 12, T.throughput, { "text-anchor": "middle", class: "axis-title" });
-    text(svg, 14, m.t - 14, T.ttftMedian, { class: "axis-title" });
+    text(svg, (m.l + W - m.r) / 2, H - 12, M.throughput, { "text-anchor": "middle", class: "axis-title" });
+    text(svg, 14, m.t - 14, M.ttftMedian, { class: "axis-title" });
     const tip = tooltip(host);
     const placement = { A: [-14, -12, "end"], ...(axes.placement || {}) };
     data.apps.filter((a) => a.key !== FOCUS).concat(data.apps.filter((a) => a.key === FOCUS)).forEach((app) => {
-      const tp = app.throughput_tps, tt = app.ttft_median_ms;
+      const tp = app[M.x], tt = app[M.y];
       const g = el("g", {}, svg);
       const off = tt.median > y1;
       const cx = sx(tp.median), cy = off ? m.t : sy(tt.median);
@@ -190,9 +221,9 @@
       if (off) text(g, cx + dx, cy + 18, T.offScale(fmt(tt.median / 1000, 1)), { "text-anchor": anchor });
       const hit = el("circle", { cx, cy, r: 16, class: "hit" }, g);
       const content = `<strong>${app.name}</strong>`
-        + tipRow(T.tipThroughput, `${fmt(tp.median, 1)} tok/s`)
+        + tipRow(M.tipThroughput, `${fmt(tp.median, 1)} tok/s`)
         + tipRow(T.tipRange, `${fmt(tp.range[0], 1)}–${fmt(tp.range[1], 1)}`)
-        + tipRow(T.tipTtft, `${fmt(tt.median, 0)} ms`)
+        + tipRow(M.tipTtft, `${fmt(tt.median, 0)} ms`)
         + tipRow(T.tipRange, `${fmt(tt.range[0], 0)}–${fmt(tt.range[1], 0)}`);
       hit.addEventListener("mousemove", (e) => tip.show(content, e));
       hit.addEventListener("mouseleave", () => tip.hide());
