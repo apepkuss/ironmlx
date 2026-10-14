@@ -70,7 +70,8 @@ A data file may set `scatter.x` and `scatter.y` (`[min, max, step]`) and
 outside the default axes. A data file with `mode: "b1"` (one request at a time)
 shows time to first token, decode speed, completion time, and memory in the
 `kpis` cards and plots decode speed against time to first token in the
-`scatter` chart; the `timeline` figure applies to B4 data only.
+`scatter` chart; the `timeline` figure applies to B4 data only. `kpi_digits`
+(decimal places per card key) overrides a card's default precision.
 
 `docs.css` contains the responsive documentation layout. `docs.js` provides local
 full-text search (loaded on demand), keyboard navigation, code highlighting and

@@ -18,6 +18,7 @@ PAGES = (
     ("supported-models.md", "Supported models", "支持的模型", "Compare model names, weight formats, and capabilities.", "对照具体模型、权重格式与支持能力。"),
     ("benchmarks/qwen38-dense-b1-short.md", "Qwen3.8 27B B1 single-request performance comparison (short prompts)", "Qwen3.8 27B B1 短 prompt 单请求性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold when one short-prompt request is served at a time.", "每次处理一个短 prompt 请求时，对比 IronMLX 与 oMLX、Splash、TensorFold。"),
     ("benchmarks/qwen38-dense-b4-short.md", "Qwen3.8 27B B4 concurrency performance comparison (short prompts)", "Qwen3.8 27B B4 短 prompt 并发性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold when four short-prompt requests arrive together.", "四个短 prompt 请求同时到达时，对比 IronMLX 与 oMLX、Splash、TensorFold。"),
+    ("benchmarks/qwen36-moe-b1-short.md", "Qwen3.6 35B A3B B1 single-request performance comparison (short prompts)", "Qwen3.6 35B A3B B1 短 prompt 单请求性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold on a mixture-of-experts model when one short-prompt request is served at a time.", "每次处理一个短 prompt 请求时，在混合专家模型上对比 IronMLX 与 oMLX、Splash、TensorFold。"),
     ("benchmarks/qwen36-moe-b4-short.md", "Qwen3.6 35B A3B B4 concurrency performance comparison (short prompts)", "Qwen3.6 35B A3B B4 短 prompt 并发性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold on a mixture-of-experts model when four short-prompt requests arrive together.", "四个短 prompt 请求同时到达时，在混合专家模型上对比 IronMLX 与 oMLX、Splash、TensorFold。"),
     ("api-reference.md", "API reference", "API 参考", "Find every documented endpoint and choose an API topic.", "查找全部已公开文档的端点，按能力进入 API 专题。"),
     ("service-api.md", "Service and management API", "服务与管理 API", "Look up shared access conventions, health, model discovery, and management endpoints.", "查阅公共访问约定、健康检查、模型发现与管理接口。"),
@@ -53,13 +54,13 @@ PAGES = (
 )
 GROUPS = (
     ("start", "Getting started", "开始使用", "Everything you need for your first local inference.", "从安装到首次请求，开始本地推理。", PAGES[:3]),
-    ("benchmarks", "Benchmarks", "性能对比", "Measured comparisons with other local inference applications on the same Mac.", "在同一台 Mac 上与其他本地推理应用的实测对比。", PAGES[3:6]),
-    ("api", "Development & API", "开发与 API", "Integrate APIs, build from source, and contribute to IronMLX.", "接入 API、从源码构建与参与 IronMLX 开发。", PAGES[6:17]),
-    ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[17:20]),
-    ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[20:24]),
-    ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[24:30]),
-    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[30:33]),
-    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[33:]),
+    ("benchmarks", "Benchmarks", "性能对比", "Measured comparisons with other local inference applications on the same Mac.", "在同一台 Mac 上与其他本地推理应用的实测对比。", PAGES[3:7]),
+    ("api", "Development & API", "开发与 API", "Integrate APIs, build from source, and contribute to IronMLX.", "接入 API、从源码构建与参与 IronMLX 开发。", PAGES[7:18]),
+    ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[18:21]),
+    ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[21:25]),
+    ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[25:31]),
+    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[31:34]),
+    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[34:]),
 )
 PAGE_MAP = {entry[0]: entry for entry in PAGES}
 GROUP_MAP = {entry[0]: group for group in GROUPS for entry in group[5]}
@@ -191,7 +192,16 @@ def render(markdown, source, target):
             if marker:
                 kind = "warning" if marker.group(1).upper() in {"WARNING", "CAUTION"} else "note"
                 content = content[marker.end():]
-            html.append(f'<blockquote class="callout callout-{kind}">{inline(content, source, target)}</blockquote>')
+            # A callout whose lines include list items keeps its text and renders the items as a list.
+            items = [re.match(r"[-*+]\s+(.+)$", line) for line in quote]
+            if any(items):
+                text = re.sub(r"^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]\s*", "",
+                              " ".join(line for line, item in zip(quote, items) if not item and line), flags=re.I)
+                listed = "".join(f"<li>{inline(item.group(1), source, target)}</li>" for item in items if item)
+                body = (f"<p>{inline(text, source, target)}</p>" if text else "") + f"<ul>{listed}</ul>"
+                html.append(f'<blockquote class="callout callout-{kind}">{body}</blockquote>')
+            else:
+                html.append(f'<blockquote class="callout callout-{kind}">{inline(content, source, target)}</blockquote>')
             quote.clear()
 
     def flush_code():

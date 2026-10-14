@@ -149,7 +149,8 @@
     const n = data.apps.length;
     const rounds = Object.keys(data.round_ranks[M.kpis[0][0]]).length;
     const grid = html("div", "bench-kpis");
-    M.kpis.forEach(([key, label, unit, digits, best]) => {
+    M.kpis.forEach(([key, label, unit, defaultDigits, best]) => {
+      const digits = (data.kpi_digits || {})[key] ?? defaultDigits;
       const focus = data.apps.find((a) => a.key === FOCUS);
       const sorted = [...data.apps].sort((a, b) => (best === "max" ? b[key].median - a[key].median : a[key].median - b[key].median));
       const rank = sorted.indexOf(focus) + 1;
