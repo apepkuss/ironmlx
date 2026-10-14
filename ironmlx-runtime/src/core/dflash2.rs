@@ -2033,6 +2033,9 @@ where
         if let Some(reference) = reference {
             record_ragged_draft_check(&reference, &draft_tokens_arr)?;
         }
+        // Submit the draft now: the GPU drafts while the host builds the
+        // verify graph, instead of idling until its first segment.
+        mlx::transforms::async_eval(&[&draft_tokens_arr])?;
         StageClock::mark(&mut stage_clock, "draft", &[&draft_tokens_arr])?;
 
         // Batched target verify with per-row positions.
@@ -2111,6 +2114,18 @@ where
                 i32::try_from(len)?,
                 target,
             )?);
+        }
+        // Submit the per-row restore now: it runs while the host finishes this
+        // window and builds the next draft, instead of waiting for the next
+        // verify's first segment.
+        {
+            let mut pending: Vec<&Array> = batch_cache
+                .target
+                .iter()
+                .flat_map(LayerCache::state_arrays)
+                .collect();
+            pending.extend(contexts.iter());
+            mlx::transforms::async_eval(&pending)?;
         }
         if stage_clock.is_some() {
             let mut arrays: Vec<&Array> = batch_cache
