@@ -2,9 +2,17 @@
 
 [简体中文](../zh-CN/benchmarks/qwen38-dense-b1-short.md)
 
+> [!NOTE]
+> Short-prompt performance comparison series:
+>
+> - Qwen3.8 27B B1 single request
+> - [Qwen3.8 27B B4 concurrency](qwen38-dense-b4-short.md)
+> - [Qwen3.6 35B A3B B1 single request](qwen36-moe-b1-short.md)
+> - [Qwen3.6 35B A3B B4 concurrency](qwen36-moe-b4-short.md)
+
 The B1 single-request comparison benchmarks IronMLX against the leading inference applications on Apple Silicon today. It has two purposes: to help developers identify IronMLX's strengths and weaknesses and set the direction for further optimization, and to show users how IronMLX actually performs so they can judge whether it fits their use case.
 
-This page covers the dense Qwen3.8-27B model with one request at a time; for four requests arriving together, see [Qwen3.8 27B B4 concurrency performance comparison (short prompts)](qwen38-dense-b4-short.md). All requests use short prompts (40–83 input tokens) with a fixed 256-token output, and the conclusions on this page apply to this workload only. The local inference applications in this comparison are oMLX, Splash, TensorFold, and IronMLX. See [Applications and configuration](#applications-and-configuration) for details on each. For the test environment setup, test method, and other details, see [Method](#method).
+This page covers the dense Qwen3.8-27B model with one request at a time. All requests use short prompts (40–83 input tokens) with a fixed 256-token output, and the conclusions on this page apply to this workload only. The local inference applications in this comparison are oMLX, Splash, TensorFold, and IronMLX. See [Applications and configuration](#applications-and-configuration) for details on each. For the test environment setup, test method, and other details, see [Method](#method).
 
 ## Summary
 
