@@ -67,7 +67,10 @@ and the build rejects a figure whose data file is missing. Data files are
 generated from a completed benchmark run's analysis and are not edited by hand.
 A data file may set `scatter.x` and `scatter.y` (`[min, max, step]`) and
 `scatter.placement` (label offsets per application key) when its values fall
-outside the default axes.
+outside the default axes. A data file with `mode: "b1"` (one request at a time)
+shows time to first token, decode speed, completion time, and memory in the
+`kpis` cards and plots decode speed against time to first token in the
+`scatter` chart; the `timeline` figure applies to B4 data only.
 
 `docs.css` contains the responsive documentation layout. `docs.js` provides local
 full-text search (loaded on demand), keyboard navigation, code highlighting and

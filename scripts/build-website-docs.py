@@ -16,6 +16,7 @@ PAGES = (
     ("user-guide.md", "User guide", "用户指南", "Install the app, import a model, and make your first request.", "安装应用、导入模型，完成第一次请求。"),
     ("developer-guide.md", "Developer guide", "开发者指南", "Find API examples, CLI configuration, and source development resources.", "查找 API 示例、CLI 配置与源码开发入口。"),
     ("supported-models.md", "Supported models", "支持的模型", "Compare model names, weight formats, and capabilities.", "对照具体模型、权重格式与支持能力。"),
+    ("benchmarks/qwen38-dense-b1-short.md", "Qwen3.8 27B B1 single-request performance comparison (short prompts)", "Qwen3.8 27B B1 短 prompt 单请求性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold when one short-prompt request is served at a time.", "每次处理一个短 prompt 请求时，对比 IronMLX 与 oMLX、Splash、TensorFold。"),
     ("benchmarks/qwen38-dense-b4-short.md", "Qwen3.8 27B B4 concurrency performance comparison (short prompts)", "Qwen3.8 27B B4 短 prompt 并发性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold when four short-prompt requests arrive together.", "四个短 prompt 请求同时到达时，对比 IronMLX 与 oMLX、Splash、TensorFold。"),
     ("benchmarks/qwen36-moe-b4-short.md", "Qwen3.6 35B A3B B4 concurrency performance comparison (short prompts)", "Qwen3.6 35B A3B B4 短 prompt 并发性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold on a mixture-of-experts model when four short-prompt requests arrive together.", "四个短 prompt 请求同时到达时，在混合专家模型上对比 IronMLX 与 oMLX、Splash、TensorFold。"),
     ("api-reference.md", "API reference", "API 参考", "Find every documented endpoint and choose an API topic.", "查找全部已公开文档的端点，按能力进入 API 专题。"),
@@ -52,13 +53,13 @@ PAGES = (
 )
 GROUPS = (
     ("start", "Getting started", "开始使用", "Everything you need for your first local inference.", "从安装到首次请求，开始本地推理。", PAGES[:3]),
-    ("benchmarks", "Benchmarks", "性能对比", "Measured comparisons with other local inference applications on the same Mac.", "在同一台 Mac 上与其他本地推理应用的实测对比。", PAGES[3:5]),
-    ("api", "Development & API", "开发与 API", "Integrate APIs, build from source, and contribute to IronMLX.", "接入 API、从源码构建与参与 IronMLX 开发。", PAGES[5:16]),
-    ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[16:19]),
-    ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[19:23]),
-    ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[23:29]),
-    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[29:32]),
-    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[32:]),
+    ("benchmarks", "Benchmarks", "性能对比", "Measured comparisons with other local inference applications on the same Mac.", "在同一台 Mac 上与其他本地推理应用的实测对比。", PAGES[3:6]),
+    ("api", "Development & API", "开发与 API", "Integrate APIs, build from source, and contribute to IronMLX.", "接入 API、从源码构建与参与 IronMLX 开发。", PAGES[6:17]),
+    ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[17:20]),
+    ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[20:24]),
+    ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[24:30]),
+    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[30:33]),
+    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[33:]),
 )
 PAGE_MAP = {entry[0]: entry for entry in PAGES}
 GROUP_MAP = {entry[0]: group for group in GROUPS for entry in group[5]}
