@@ -2,6 +2,7 @@
 // <!-- benchmark:<figure> <id> --> with <div data-benchmark="<figure>" data-benchmark-id="<id>">
 // and loads assets/benchmarks/<id>.js, which registers window.IRONMLX_BENCHMARKS[<id>].
 // A data set with mode "b1" (single requests) uses the B1 metrics for the cards and the scatter axes.
+// A data set with ttft_unit "s" keeps its first-token values in ms but shows them in seconds.
 (() => {
   const registry = window.IRONMLX_BENCHMARKS || {};
   const zh = document.documentElement.lang.startsWith("zh");
@@ -39,6 +40,7 @@
       ],
       throughput: "解码速度（tok/s）",
       ttftMedian: "首字时间（ms）",
+      ttftSeconds: "首字时间（s）",
       tipThroughput: "解码速度",
       tipTtft: "首字时间",
     },
@@ -79,6 +81,7 @@
       ],
       throughput: "Decode speed (tok/s)",
       ttftMedian: "Time to first token (ms)",
+      ttftSeconds: "Time to first token (s)",
       tipThroughput: "Decode speed",
       tipTtft: "Time to first token",
     },
@@ -117,8 +120,10 @@
   const kind = (app) => (app.key === FOCUS ? "focus" : "other");
   // Labels and metric keys for a data set: B4 (default) or B1.
   const metrics = (data) => (data.mode === "b1"
-    ? { ...T, ...T.b1, x: "decode_tps", y: "ttft_ms" }
+    ? { ...T, ...T.b1, x: "decode_tps", y: "ttft_ms", ...(data.ttft_unit === "s" ? { ttftMedian: T.b1.ttftSeconds } : {}) }
     : { ...T, x: "throughput_tps", y: "ttft_median_ms" });
+  // Display scale and unit of a card or axis: first-token values in seconds when the data set asks for it.
+  const shown = (data, key, unit) => (data.ttft_unit === "s" && key.startsWith("ttft") ? [0.001, "s"] : [1, unit]);
   const tipRow = (label, value) => `<div class="tip-row"><span>${label}</span><b>${value}</b></div>`;
 
   const tooltip = (panel) => {
@@ -149,8 +154,9 @@
     const n = data.apps.length;
     const rounds = Object.keys(data.round_ranks[M.kpis[0][0]]).length;
     const grid = html("div", "bench-kpis");
-    M.kpis.forEach(([key, label, unit, defaultDigits, best]) => {
+    M.kpis.forEach(([key, label, baseUnit, defaultDigits, best]) => {
       const digits = (data.kpi_digits || {})[key] ?? defaultDigits;
+      const [scale, unit] = shown(data, key, baseUnit);
       const focus = data.apps.find((a) => a.key === FOCUS);
       const sorted = [...data.apps].sort((a, b) => (best === "max" ? b[key].median - a[key].median : a[key].median - b[key].median));
       const rank = sorted.indexOf(focus) + 1;
@@ -173,7 +179,7 @@
         const gap = best === "max" ? T.lower(pct) : unit === "GiB" ? T.more(pct) : T.slower(pct);
         note = `${T.rank(rank, n)} · ${gap}`;
       }
-      grid.appendChild(html("div", "bench-kpi", `<span class="bench-kpi-value">${fmt(focus[key].median, digits)}<small>${unit}</small></span><span class="bench-kpi-label">${label}</span><span class="bench-kpi-rank${lead ? " lead" : ""}">${note}</span>`));
+      grid.appendChild(html("div", "bench-kpi", `<span class="bench-kpi-value">${fmt(focus[key].median * scale, digits)}<small>${unit}</small></span><span class="bench-kpi-label">${label}</span><span class="bench-kpi-rank${lead ? " lead" : ""}">${note}</span>`));
     });
     host.appendChild(grid);
   };
@@ -205,8 +211,12 @@
     text(svg, 14, m.t - 14, M.ttftMedian, { class: "axis-title" });
     const tip = tooltip(host);
     const placement = { A: [-14, -12, "end"], ...(axes.placement || {}) };
+    const [ys, yUnit] = shown(data, M.y, "ms");
+    const yDigits = ys === 1 ? 0 : 2;
     data.apps.filter((a) => a.key !== FOCUS).concat(data.apps.filter((a) => a.key === FOCUS)).forEach((app) => {
-      const tp = app[M.x], tt = app[M.y];
+      const tp = app[M.x];
+      const raw = app[M.y];
+      const tt = { median: raw.median * ys, range: raw.range.map((v) => v * ys) };
       const g = el("g", {}, svg);
       const off = tt.median > y1;
       const cx = sx(tp.median), cy = off ? m.t : sy(tt.median);
@@ -219,13 +229,13 @@
       }
       const [dx, dy, anchor] = placement[app.key] || [12, 4, "start"];
       text(g, cx + dx, cy + dy, app.name, { "text-anchor": anchor, class: app.key === FOCUS ? "label-focus" : "label-strong" });
-      if (off) text(g, cx + dx, cy + 18, T.offScale(fmt(tt.median / 1000, 1)), { "text-anchor": anchor });
+      if (off) text(g, cx + dx, cy + 18, T.offScale(fmt(raw.median / 1000, 1)), { "text-anchor": anchor });
       const hit = el("circle", { cx, cy, r: 16, class: "hit" }, g);
       const content = `<strong>${app.name}</strong>`
         + tipRow(M.tipThroughput, `${fmt(tp.median, 1)} tok/s`)
         + tipRow(T.tipRange, `${fmt(tp.range[0], 1)}–${fmt(tp.range[1], 1)}`)
-        + tipRow(M.tipTtft, `${fmt(tt.median, 0)} ms`)
-        + tipRow(T.tipRange, `${fmt(tt.range[0], 0)}–${fmt(tt.range[1], 0)}`);
+        + tipRow(M.tipTtft, `${fmt(tt.median, yDigits)} ${yUnit}`)
+        + tipRow(T.tipRange, `${fmt(tt.range[0], yDigits)}–${fmt(tt.range[1], yDigits)}`);
       hit.addEventListener("mousemove", (e) => tip.show(content, e));
       hit.addEventListener("mouseleave", () => tip.hide());
     });
