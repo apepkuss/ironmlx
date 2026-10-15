@@ -59,32 +59,6 @@ fn ragged_fast_arithmetic() -> bool {
     )
 }
 
-/// Verify forwards with fewer rows run the native projections (M5 profile
-/// setting `M5_MIN_ROWS`). Only honoured with both layouts resident (shared
-/// weight layout off); a shared single layout would convert on every switch.
-fn m5_min_rows() -> usize {
-    static ROWS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *ROWS.get_or_init(|| {
-        if crate::nn::shared_weight_layout::requested() {
-            return 0;
-        }
-        ironmlx_core::m5_profile::setting(ironmlx_core::m5_profile::settings::M5_MIN_ROWS)
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(0)
-    })
-}
-
-/// Verify forwards with fewer rows keep the gather experts (M5 profile
-/// setting `MOE_TILE_MIN_ROWS`).
-fn tile_min_rows() -> usize {
-    static ROWS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *ROWS.get_or_init(|| {
-        ironmlx_core::m5_profile::setting(ironmlx_core::m5_profile::settings::MOE_TILE_MIN_ROWS)
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(0)
-    })
-}
-
 /// Whether the explicit experimental setting arms the expert-grouped gather
 /// qmv for multi-token verification (not part of the M5 MoE profile).
 fn m5_grouped_experts() -> bool {
@@ -155,22 +129,18 @@ impl Qwen35MoeModel {
             && ((mode.is_verify() && verify_width > 1)
                 || (input_dims[0] > 1 && mode == DFlash2TargetForwardMode::OrdinaryDecode)))
             .then(crate::nn::product_stable_qmm::scope);
-        // M5 MoE affine4 projections: prefill, ordinary decoding and verifies
-        // of at least `M5_MIN_ROWS` rows use the tensor-unit route; narrower
-        // verifies keep the native projections (bounded-error difference
-        // between the two routes, as for the relaxed ragged rows).
-        let narrow_verify =
-            mode.is_verify() && input_dims[0] as usize * verify_width < m5_min_rows();
-        let _m5_affine4 =
-            (self.m5_affine4_projections() && !narrow_verify).then(crate::nn::m5_affine4::scope);
+        // M5 MoE affine4 projections (experimental): every target forward of
+        // the stream, including ordinary Q=1 decoding, uses the same
+        // tensor-unit arithmetic so verify and serial decoding agree.
+        let _m5_affine4 = self
+            .m5_affine4_projections()
+            .then(crate::nn::m5_affine4::scope);
         // M5 MoE route: rows of every expert share one weight stream while
         // each row keeps the MLX gather_qmv_fast arithmetic.
         let _grouped_experts = (mode.is_verify() && self.m5_grouped_route(verify_width))
             .then(crate::nn::moe_grouped_qmv::scope);
-        let _tile_experts = (mode.is_verify()
-            && crate::nn::moe_tile_experts::requested()
-            && input_dims[0] as usize * verify_width >= tile_min_rows())
-        .then(crate::nn::moe_tile_experts::scope);
+        let _tile_experts = (mode.is_verify() && crate::nn::moe_tile_experts::requested())
+            .then(crate::nn::moe_tile_experts::scope);
         let (hidden, context_hidden) = self.text().forward_with_dflash2_taps_on(
             input_ids,
             position_ids,
