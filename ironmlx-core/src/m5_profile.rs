@@ -66,7 +66,8 @@ pub mod settings {
     /// GatedDelta speculative commit: replay only each row's accepted steps,
     /// state only.
     pub const GDN_COMMIT_KERNEL: &str = "IRONMLX_EXPERIMENTAL_GDN_COMMIT_KERNEL";
-    /// DFlash2 drafter projections on the M5 affine4 route.
+    /// DFlash2 drafter projections of ragged multi-request drafts on the M5
+    /// affine4 route (single-request drafts keep the native projections).
     pub const DFLASH2_DRAFT_M5: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_DRAFT_M5";
     /// Ragged drafts with the row-independent work batched across rows
     /// (context projections, norm + RoPE, attention).
@@ -80,6 +81,12 @@ pub mod settings {
     /// Fixed draft budget of a request that ran ragged windows and is left
     /// decoding alone; 0 keeps its adaptive single-request policy.
     pub const DFLASH2_RAGGED_SOLO_BUDGET: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_RAGGED_SOLO_BUDGET";
+    /// Qwen3.6 MoE DFlash2 verifies with fewer rows than this keep the native
+    /// projections (needs the shared weight layout off).
+    pub const M5_MIN_ROWS: &str = "IRONMLX_EXPERIMENTAL_M5_MIN_ROWS";
+    /// Qwen3.6 MoE verify forwards with fewer rows than this keep the gather
+    /// experts instead of expert tiles.
+    pub const MOE_TILE_MIN_ROWS: &str = "IRONMLX_EXPERIMENTAL_MOE_TILE_MIN_ROWS";
 }
 
 /// Model family a DFlash2 profile is qualified for. Each family carries its
@@ -145,10 +152,22 @@ impl M5ProfileTarget {
 /// request left alone at the end of a batch keeps the ragged budget instead
 /// of calibrating the single-request policy (whose budget-0 calibration
 /// windows are one-token windows): two interleaved rounds 367.7/365.7 tok/s
-/// against 362.8/364.0 for the adaptive policy.
-/// Four-app B4 short prompts (same session flow, single round): 362.0 tok/s
-/// against 310 for the previous profile; teacher-forced flips 1.2-2.3% of
-/// positions, all within a reference margin of 0.63.
+/// against 362.8/364.0 for the adaptive policy. Four-app B4 thermal round:
+/// 364.97 tok/s against 346.3 for Splash 1.3.0; teacher-forced flips
+/// 1.2-2.3% of positions, all within a reference margin of 0.63.
+///
+/// A single request's narrow verifies keep the native routes: both projection
+/// layouts stay resident (no shared weight layout, +0.7 GiB), verifies of
+/// fewer than 4 rows run the native projections and the gather experts, and
+/// single-request drafts the native drafter projections. The tensor-unit
+/// kernels pad to 16-row tiles, the expert tiles group per expert and the M5
+/// drafter adds host encoding hidden by nothing in a single request, so these
+/// cost more than the native kernels for narrow windows. Prefill, ordinary
+/// decoding and every multi-request window keep the M5 routes (B4 outputs
+/// unchanged). B1 window cost at draft budget 1/2: 8.7/10.1 ms against
+/// 10.4/11.4 ms with every route on (rc.2: 8.5/9.9); six tasks paired with
+/// rc.2 in one sitting, summed E2E 7.41-7.47 s against 7.45-7.52 s (every
+/// route on: 7.75-8.02 s).
 const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
     (settings::DFLASH2_RAGGED_LINEAR, "1"),
     (settings::DFLASH2_RAGGED_BUDGET, "3"),
@@ -156,11 +175,11 @@ const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
     (settings::DFLASH2_RAGGED_TAIL, "1"),
     (settings::DFLASH2_GPU_COMMIT, "1"),
     (settings::DFLASH2_RAGGED_SOLO_BUDGET, "3"),
+    (settings::M5_MIN_ROWS, "4"),
+    (settings::MOE_TILE_MIN_ROWS, "4"),
     (settings::DFLASH2_DRAFT_M5, "1"),
     (settings::DFLASH2_DRAFT_BATCHED, "1"),
     (settings::M5_MOE_AFFINE4_PROJECTIONS, "1"),
-    (settings::M5_MOE_HEAD, "1"),
-    (settings::M5_SHARED_WEIGHT_LAYOUT, "1"),
     (settings::M5_PRECOMPILE, "1"),
     (settings::MOE_TILE_EXPERTS, "1"),
     (settings::GDN_COMMIT_KERNEL, "1"),
@@ -715,7 +734,6 @@ mod tests {
             if *name == settings::QEMBEDDING_RUNTIME_COUNT
                 || *name == settings::MLX_CACHE_MAX_MIB
                 || *name == settings::DFLASH2_RAGGED_LINEAR
-                || *name == settings::M5_SHARED_WEIGHT_LAYOUT
                 || *name == settings::M5_PRECOMPILE
             {
                 continue;
@@ -736,6 +754,15 @@ mod tests {
             setting_with(None, moe, settings::DFLASH2_RAGGED_SOLO_BUDGET).as_deref(),
             Some("3")
         );
+        // Narrow forwards keep the native routes, with both layouts resident.
+        assert_eq!(
+            setting_with(None, moe, settings::M5_MIN_ROWS).as_deref(),
+            Some("4")
+        );
+        assert_eq!(
+            setting_with(None, moe, settings::MOE_TILE_MIN_ROWS).as_deref(),
+            Some("4")
+        );
         // Fully speculative: no batched one-token windows, no probes.
         for name in [
             settings::DFLASH2_RAGGED_ORDINARY_MIN_WIDTH,
@@ -750,8 +777,6 @@ mod tests {
             settings::DFLASH2_DRAFT_M5,
             settings::DFLASH2_DRAFT_BATCHED,
             settings::M5_MOE_AFFINE4_PROJECTIONS,
-            settings::M5_MOE_HEAD,
-            settings::M5_SHARED_WEIGHT_LAYOUT,
             settings::M5_PRECOMPILE,
             settings::MOE_TILE_EXPERTS,
             settings::GDN_COMMIT_KERNEL,

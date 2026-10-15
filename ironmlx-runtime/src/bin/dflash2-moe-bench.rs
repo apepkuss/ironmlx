@@ -276,6 +276,7 @@ fn verify_curve(
         let mut phase_build = Vec::new();
         let mut phase_encode = Vec::new();
         let mut phase_encode_cpu = Vec::new();
+        let mut phase_build_cpu = Vec::new();
         let mut logits_hash: Option<String> = None;
         let mut coverage = None;
         for rep in 0..args.curve_reps {
@@ -288,6 +289,7 @@ fn verify_curve(
             }
             mlx::transforms::synchronize()?;
             let started = Instant::now();
+            let build_cpu0 = thread_cpu_ms();
             let output = if plain {
                 let hidden = Model::forward_text_hidden(
                     target,
@@ -328,6 +330,9 @@ fn verify_curve(
             let logits = target.dflash2_project_hidden_on(&output.hidden, ().into())?;
             let built = started.elapsed().as_secs_f64() * 1e3;
             let cpu0 = thread_cpu_ms();
+            if rep >= 2 {
+                phase_build_cpu.push(cpu0 - build_cpu0);
+            }
             mlx::transforms::async_eval(&[&logits, &output.context_hidden])?;
             let encoded = started.elapsed().as_secs_f64() * 1e3;
             if rep >= 2 {
@@ -390,6 +395,7 @@ fn verify_curve(
                 "build_ms": if phase_build.is_empty() { 0.0 } else { median(phase_build.clone()) },
                 "encode_ms": if phase_encode.is_empty() { 0.0 } else { median(phase_encode.clone()) },
                 "encode_cpu_ms": if phase_encode_cpu.is_empty() { 0.0 } else { median(phase_encode_cpu.clone()) },
+                "build_cpu_ms": if phase_build_cpu.is_empty() { 0.0 } else { median(phase_build_cpu.clone()) },
                 "logits_hash": logits_hash,
                 "coverage": coverage,
             })

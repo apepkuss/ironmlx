@@ -275,10 +275,10 @@ impl DFlash2DraftModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
-        // The draft's affine4 projections on the M5 route (profile setting).
-        let _m5_draft =
-            ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::DFLASH2_DRAFT_M5)
-                .then(crate::nn::m5_affine4::scope);
+        // Single-request drafts keep the native projections: their GPU time
+        // is hidden behind the verify build, so the M5 route's extra host
+        // encoding only lengthens the window (B1 windows 0.4-0.5 ms longer
+        // at every budget). Ragged drafts take the M5 route (profile setting).
         let _native_walk = target_model
             .dflash2_draft_fast_paths()
             .then(super::selector::native_walk_scope);
