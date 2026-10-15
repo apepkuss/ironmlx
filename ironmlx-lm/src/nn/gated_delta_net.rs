@@ -386,8 +386,11 @@ impl GatedDeltaNet {
             && ((super::position_stable_qmm::exact_affine8_b4_q2_is_armed() && seq == 2)
                 || tree.is_some());
         let ((qkv, z), (b, a)) = {
-            let _stable_linear = capture_active.then(super::position_stable_linear::scope);
-            let _stable_qmm = capture_active.then(super::position_stable_qmm::scope);
+            // Relaxed ragged rows replay from the captured inputs themselves,
+            // so their projections need not reproduce B1 decode bits.
+            let isolate = capture_active && !super::position_stable_qmm::relaxed_ragged_is_armed();
+            let _stable_linear = isolate.then(super::position_stable_linear::scope);
+            let _stable_qmm = isolate.then(super::position_stable_qmm::scope);
 
             // Step 1a: in_proj_qkv + in_proj_z, then mask-zero qkv at pad
             // positions. The mask multiply stays bundled with qkv projection
@@ -480,6 +483,18 @@ impl GatedDeltaNet {
         };
 
         super::decoder_layer::prefill_stage("gdn_in_proj", &[&qkv, &z, &b, &a])?;
+        if crate::models::qwen3_5_moe::timing_ablation::skips(
+            crate::models::qwen3_5_moe::timing_ablation::GDN_CORE,
+        ) {
+            // Timing attribution only: zeros that still depend on every input
+            // projection, then the output projection.
+            let keep = mlx::ops::reduction::sum_on(&qkv, -1, true, target)?;
+            let keep = &keep + &mlx::ops::reduction::sum_on(&b, -1, true, target)?;
+            let keep = &keep + &mlx::ops::reduction::sum_on(&a, -1, true, target)?;
+            let zero_z = mlx::ops::zeros_like(&z)?;
+            let normed = &(&z * &zero_z) + &(&keep * &mlx::ops::zeros_like(&keep)?);
+            return self.out_proj.forward_on(&normed, target);
+        }
         // Step 2a: prepend conv_state
         let conv_input = {
             match cache.as_mut() {
@@ -976,49 +991,83 @@ impl GatedDeltaNet {
                 accepted_mask
             };
             cache.restore(&capture.base)?;
-            let kernel = self
-                .kernel_masked
-                .get_or_init(|| build_gated_delta_kernel(true).expect("build masked kernel"));
-            let t_arr: Array = (&[sequence_i32][..], ()).try_into()?;
-            let mut outputs = kernel
-                .dispatch_builder()
-                .inputs(&[
-                    &capture.q,
-                    &capture.k,
-                    &capture.v,
-                    &capture.g,
-                    &capture.beta,
-                    cache.recurrent_state(),
-                    &t_arr,
-                    &replay_mask,
-                ])
-                .output_shapes(&[
-                    Shape::from((
-                        batch,
-                        sequence_i32,
-                        self.cfg.num_v_heads,
-                        self.cfg.head_v_dim,
-                    )),
-                    Shape::from((
+            let new_state = if capture.mask.is_none() && commit_kernel_requested() {
+                let counts = accepted_lens
+                    .iter()
+                    .map(|&accepted| i32::try_from(accepted))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let counts: Array = (&counts[..], &[batch][..]).try_into()?;
+                commit_kernel()
+                    .dispatch_builder()
+                    .inputs(&[
+                        &capture.k,
+                        &capture.v,
+                        &capture.g,
+                        &capture.beta,
+                        cache.recurrent_state(),
+                        &counts,
+                    ])
+                    .output_shapes(&[Shape::from((
                         batch,
                         self.cfg.num_v_heads,
                         self.cfg.head_v_dim,
                         self.cfg.head_k_dim,
-                    )),
-                ])
-                .output_dtypes(&[capture.q.dtype(), Dtype::Float32])
-                .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
-                .threadgroup(32, 4, 1)
-                .template_int("Dk", self.cfg.head_k_dim)
-                .template_int("Dv", self.cfg.head_v_dim)
-                .template_int("Hk", self.cfg.num_k_heads)
-                .template_int("Hv", self.cfg.num_v_heads)
-                .template_dtype("InT", capture.q.dtype())
-                .template_dtype("StT", Dtype::Float32)
-                .stream(target)
-                .dispatch()?;
-            let _unused_output = outputs.take_at(0)?;
-            let new_state = outputs.take_at(0)?;
+                    ))])
+                    .output_dtypes(&[Dtype::Float32])
+                    .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
+                    .threadgroup(32, 4, 1)
+                    .template_int("Dk", self.cfg.head_k_dim)
+                    .template_int("Dv", self.cfg.head_v_dim)
+                    .template_int("Hk", self.cfg.num_k_heads)
+                    .template_int("Hv", self.cfg.num_v_heads)
+                    .stream(target)
+                    .dispatch()?
+                    .take_at(0)?
+            } else {
+                let kernel = self
+                    .kernel_masked
+                    .get_or_init(|| build_gated_delta_kernel(true).expect("build masked kernel"));
+                let t_arr: Array = (&[sequence_i32][..], ()).try_into()?;
+                let mut outputs = kernel
+                    .dispatch_builder()
+                    .inputs(&[
+                        &capture.q,
+                        &capture.k,
+                        &capture.v,
+                        &capture.g,
+                        &capture.beta,
+                        cache.recurrent_state(),
+                        &t_arr,
+                        &replay_mask,
+                    ])
+                    .output_shapes(&[
+                        Shape::from((
+                            batch,
+                            sequence_i32,
+                            self.cfg.num_v_heads,
+                            self.cfg.head_v_dim,
+                        )),
+                        Shape::from((
+                            batch,
+                            self.cfg.num_v_heads,
+                            self.cfg.head_v_dim,
+                            self.cfg.head_k_dim,
+                        )),
+                    ])
+                    .output_dtypes(&[capture.q.dtype(), Dtype::Float32])
+                    .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
+                    .threadgroup(32, 4, 1)
+                    .template_int("Dk", self.cfg.head_k_dim)
+                    .template_int("Dv", self.cfg.head_v_dim)
+                    .template_int("Hk", self.cfg.num_k_heads)
+                    .template_int("Hv", self.cfg.num_v_heads)
+                    .template_dtype("InT", capture.q.dtype())
+                    .template_dtype("StT", Dtype::Float32)
+                    .stream(target)
+                    .dispatch()?;
+                let _unused_output = outputs.take_at(0)?;
+                outputs.take_at(0)?
+            };
 
             let keep = self.cfg.conv_kernel_size - 1;
             let conv_dims = capture.conv_input.shape();
@@ -1059,6 +1108,88 @@ impl GatedDeltaNet {
             )?;
         }
         Ok(())
+    }
+
+    /// Device half of a per-row speculative commit: the recurrent state
+    /// replayed for each row's accepted steps (`counts` `[B]` int32 on the
+    /// GPU) and the conv state taken at each row's accepted offset. The
+    /// offsets advance in [`Self::finish_speculative_rows_host`]. Returns
+    /// false, leaving the capture in place, when it needs the host path.
+    pub(crate) fn commit_speculative_rows_device_on(
+        &self,
+        cache: &mut GatedDeltaCache,
+        counts: &Array,
+        target: StreamOrDevice,
+    ) -> Result<bool> {
+        let capture = cache.take_speculative_replay()?;
+        let sequence = usize::try_from(capture.q.shape().as_slice()[1])?;
+        let batch = i32::try_from(cache.offsets().len())?;
+        if capture.mask.is_some()
+            || capture.prefix_states.len() == sequence
+            || counts.size() != usize::try_from(batch)?
+        {
+            cache.put_speculative_replay(capture);
+            return Ok(false);
+        }
+        cache.restore(&capture.base)?;
+        let new_state = commit_kernel()
+            .dispatch_builder()
+            .inputs(&[
+                &capture.k,
+                &capture.v,
+                &capture.g,
+                &capture.beta,
+                cache.recurrent_state(),
+                counts,
+            ])
+            .output_shapes(&[Shape::from((
+                batch,
+                self.cfg.num_v_heads,
+                self.cfg.head_v_dim,
+                self.cfg.head_k_dim,
+            ))])
+            .output_dtypes(&[Dtype::Float32])
+            .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
+            .threadgroup(32, 4, 1)
+            .template_int("Dk", self.cfg.head_k_dim)
+            .template_int("Dv", self.cfg.head_v_dim)
+            .template_int("Hk", self.cfg.num_k_heads)
+            .template_int("Hv", self.cfg.num_v_heads)
+            .stream(target)
+            .dispatch()?
+            .take_at(0)?;
+        let keep = self.cfg.conv_kernel_size - 1;
+        let conv_dims = capture.conv_input.shape();
+        let conv_dims = conv_dims.as_slice();
+        let new_conv_state = conv_gather_kernel()
+            .dispatch_builder()
+            .inputs(&[&capture.conv_input, counts])
+            .output_shapes(&[Shape::from((batch, keep, conv_dims[2]))])
+            .output_dtypes(&[capture.conv_input.dtype()])
+            .grid(conv_dims[2], keep, batch)
+            .threadgroup(256.min(conv_dims[2]), 1, 1)
+            .template_int("L", conv_dims[1])
+            .template_int("C", conv_dims[2])
+            .template_int("KEEP", keep)
+            .stream(target)
+            .dispatch()?
+            .take_at(0)?;
+        cache.update_conv(new_conv_state);
+        cache.update_recurrent(new_state);
+        Ok(true)
+    }
+
+    /// Host half of [`Self::commit_speculative_rows_device_on`].
+    pub(crate) fn finish_speculative_rows_host(
+        &self,
+        cache: &mut GatedDeltaCache,
+        accepted_lens: &[usize],
+    ) -> Result<()> {
+        let advances = accepted_lens
+            .iter()
+            .map(|&accepted| i32::try_from(accepted))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        cache.advance(&advances)
     }
 
     fn replay_captured_prefix_row_on(
@@ -1339,6 +1470,91 @@ fn slice_sequence_prefix_on(array: &Array, length: i32, target: StreamOrDevice) 
 /// `T` is passed as a 0-dim int32 array, which MLX treats as `device const
 /// int32_t& T` — usable directly as an integer in the shader (e.g.
 /// `for (int t = 0; t < T; ++t)`).
+/// Conv state at each row's accepted offset: `out[b, i, c] =
+/// conv_input[b, counts[b] + i, c]` for `i < KEEP`.
+fn conv_gather_kernel() -> &'static MetalKernel {
+    static KERNEL: std::sync::OnceLock<MetalKernel> = std::sync::OnceLock::new();
+    KERNEL.get_or_init(|| {
+        MetalKernel::builder("ironmlx_gated_delta_conv_gather_v1")
+            .inputs(&["conv_input", "counts"])
+            .outputs(&["conv_out"])
+            .source(
+                r#"
+        const uint c = thread_position_in_grid.x;
+        const uint i = thread_position_in_grid.y;
+        const uint b = thread_position_in_grid.z;
+        if (c >= C) return;
+        const uint src = uint(counts[b]) + i;
+        conv_out[(ulong(b) * KEEP + i) * C + c] = conv_input[(ulong(b) * L + src) * C + c];
+        "#,
+            )
+            .ensure_row_contiguous(true)
+            .build()
+            .expect("build GDN conv gather kernel")
+    })
+}
+
+/// M5 profile setting `GDN_COMMIT_KERNEL`.
+fn commit_kernel_requested() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::GDN_COMMIT_KERNEL)
+    })
+}
+
+/// Speculative commit: each row replays only its `counts[b]` accepted steps
+/// from the pre-verify state and emits the new state (no outputs). The state
+/// arithmetic per step is the recurrent kernel's.
+fn commit_kernel() -> &'static MetalKernel {
+    static KERNEL: std::sync::OnceLock<MetalKernel> = std::sync::OnceLock::new();
+    KERNEL.get_or_init(|| {
+        MetalKernel::builder("ironmlx_gated_delta_commit_v2")
+            .inputs(&["k", "v", "g", "beta", "state_in", "counts"])
+            .outputs(&["state_out"])
+            .source(
+                r#"
+        auto n = thread_position_in_grid.z;
+        const int T = k_shape[1];
+        auto b_idx = n / Hv;
+        auto hv_idx = n % Hv;
+        auto hk_idx = hv_idx / (Hv / Hk);
+        constexpr int n_per_t = Dk / 32;
+        auto k_ = k + b_idx * T * Hk * Dk + hk_idx * Dk;
+        auto v_ = v + b_idx * T * Hv * Dv + hv_idx * Dv;
+        auto dk_idx = thread_position_in_threadgroup.x;
+        auto dv_idx = thread_position_in_grid.y;
+        auto i_state = state_in + (n * Dv + dv_idx) * Dk;
+        auto o_state = state_out + (n * Dv + dv_idx) * Dk;
+        float state[n_per_t];
+        for (int i = 0; i < n_per_t; ++i) state[i] = static_cast<float>(i_state[n_per_t * dk_idx + i]);
+        auto g_ = g + b_idx * T * Hv;
+        auto beta_ = beta + b_idx * T * Hv;
+        const int count = counts[b_idx];
+        for (int t = 0; t < count; ++t) {
+          float kv_mem = 0.0f;
+          float kk[n_per_t];
+          for (int i = 0; i < n_per_t; ++i) {
+            kk[i] = static_cast<float>(k_[n_per_t * dk_idx + i]);
+            state[i] = state[i] * g_[hv_idx];
+            kv_mem += state[i] * kk[i];
+          }
+          kv_mem = simd_sum(kv_mem);
+          auto delta = (v_[dv_idx] - kv_mem) * beta_[hv_idx];
+          for (int i = 0; i < n_per_t; ++i) state[i] = state[i] + kk[i] * delta;
+          k_ += Hk * Dk;
+          v_ += Hv * Dv;
+          g_ += Hv;
+          beta_ += Hv;
+        }
+        for (int i = 0; i < n_per_t; ++i) o_state[n_per_t * dk_idx + i] = state[i];
+        "#,
+            )
+            .ensure_row_contiguous(true)
+            .build()
+            .expect("build GDN commit kernel")
+    })
+}
+
 pub(crate) fn build_gated_delta_kernel(masked: bool) -> Result<MetalKernel> {
     build_gated_delta_kernel_impl(masked, false, true)
 }

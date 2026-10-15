@@ -296,6 +296,52 @@ impl Qwen35MoeTextModel {
         Ok(())
     }
 
+    /// Device half of the per-row commit for every layer (see the decoder
+    /// layer); one flag per layer.
+    pub(crate) fn commit_dflash2_rows_device_on(
+        &self,
+        cache: &mut [LayerCache],
+        counts: &Array,
+        target: StreamOrDevice,
+    ) -> Result<Vec<bool>> {
+        anyhow::ensure!(
+            cache.len() == self.layers.len(),
+            "DFlash2 commit cache layer count"
+        );
+        self.layers
+            .iter()
+            .zip(cache.iter_mut())
+            .map(|(layer, cache)| layer.commit_speculative_rows_device_on(cache, counts, target))
+            .collect()
+    }
+
+    /// Host half of the per-row commit.
+    pub(crate) fn finish_dflash2_rows_host_on(
+        &self,
+        cache: &mut [LayerCache],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+        accepted_lens: &[usize],
+        device_done: &[bool],
+        target: StreamOrDevice,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            cache.len() == self.layers.len()
+                && snapshots.len() == self.layers.len()
+                && device_done.len() == self.layers.len(),
+            "DFlash2 commit layer count"
+        );
+        for (((layer, cache), snapshot), &done) in self
+            .layers
+            .iter()
+            .zip(cache.iter_mut())
+            .zip(snapshots)
+            .zip(device_done)
+        {
+            layer.finish_speculative_rows_host_on(cache, snapshot, accepted_lens, done, target)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn restore_dflash2_speculative_prefix_rows_on(
         &self,
         cache: &mut [LayerCache],

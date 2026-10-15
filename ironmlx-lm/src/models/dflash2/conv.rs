@@ -182,8 +182,6 @@ impl DFlash2GroupedConv {
             .output_dtypes(&[hidden.dtype()])
             .grid(total, 1, 1)
             .threadgroup(total.min(256), 1, 1)
-            .template_int("BATCH", batch)
-            .template_int("LENGTH", length)
             .template_int("HIDDEN", hidden_size)
             .template_int("KERNEL", self.kernel_size)
             .template_int("GROUP_SIZE", self.group_size)
@@ -268,7 +266,11 @@ fn grouped_conv_kernel(add_residual: bool) -> Result<&'static MetalKernel> {
     let source = format!(
         r#"
         uint gid = thread_position_in_grid.x;
-        constexpr int TOTAL = BATCH * LENGTH * HIDDEN;
+        // Batch and length at run time: one compiled kernel for every
+        // ragged group width and draft length.
+        const int BATCH = hidden_shape[0];
+        const int LENGTH = hidden_shape[1];
+        const int TOTAL = BATCH * LENGTH * HIDDEN;
         if (int(gid) >= TOTAL) {{ return; }}
 
         int hidden_index = int(gid) % HIDDEN;
@@ -295,9 +297,9 @@ fn grouped_conv_kernel(add_residual: bool) -> Result<&'static MetalKernel> {
         &["hidden", "dynamic", "base_kernel"]
     };
     let kernel = MetalKernel::builder(if add_residual {
-        "ironmlx_dflash2_grouped_conv_residual_v1"
+        "ironmlx_dflash2_grouped_conv_residual_v2"
     } else {
-        "ironmlx_dflash2_grouped_conv_v1"
+        "ironmlx_dflash2_grouped_conv_v2"
     })
     .inputs(inputs)
     .outputs(&["out"])

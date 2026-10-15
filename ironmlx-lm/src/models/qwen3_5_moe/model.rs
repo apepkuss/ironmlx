@@ -176,7 +176,8 @@ impl Qwen35MoeModel {
     /// shared weight layout (see [`Self::enable_shared_weight_layout`]).
     pub(crate) fn m5_affine4_head(&self) -> bool {
         m5_affine4_projections_requested(self.dflash2_target_bits)
-            && !crate::nn::shared_weight_layout::requested()
+            && (!crate::nn::shared_weight_layout::requested()
+                || ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::M5_MOE_HEAD))
     }
 
     /// Experimental (`IRONMLX_EXPERIMENTAL_M5_PRECOMPILE=1`): before serving,

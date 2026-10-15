@@ -32,6 +32,10 @@ impl DFlash2KvCache {
         })
     }
 
+    pub(super) fn max_size(&self) -> i32 {
+        self.max_size
+    }
+
     pub(super) fn len(&self) -> i32 {
         self.keys
             .as_ref()
@@ -471,6 +475,22 @@ impl DFlash2Attention {
                 (parts.remove(0), parts.remove(0), parts.remove(0))
             }
         };
+        if draft_batched_requested()
+            && contexts
+                .iter()
+                .all(|context| context.ndim() == 3 && context.shape().as_slice()[1] > 0)
+        {
+            return self.forward_ragged_batched_on(
+                &q,
+                &proposal_k,
+                &proposal_v,
+                query_len,
+                contexts,
+                masks,
+                caches,
+                target,
+            );
+        }
         let row_of = |array: &Array, row: i32| -> Result<Array> {
             let shape = array.shape();
             let dims = shape.as_slice();
@@ -562,6 +582,338 @@ impl DFlash2Attention {
         let output = mlx::ops::shape::concatenate_on(&output_refs, 0, target)?;
         self.o_proj.forward_on(&output, target)
     }
+
+    /// Ragged attention with the row-independent work batched: one context
+    /// K/V projection for every row's new context, and q, proposal k and
+    /// context k normalized and rotated in one dispatch each at their own
+    /// positions; each row then appends its cache and attends as before.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_ragged_batched_on(
+        &self,
+        q: &Array,
+        proposal_k: &Array,
+        proposal_v: &Array,
+        query_len: i32,
+        contexts: &[Array],
+        masks: &[Array],
+        caches: &mut [&mut DFlash2KvCache],
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        let batch = i32::try_from(contexts.len())?;
+        let (hq, hkv, d) = (self.num_heads, self.num_kv_heads, self.head_dim);
+        let mut q_pos = Vec::with_capacity(usize::try_from(batch * query_len)?);
+        let mut ctx_pos = Vec::new();
+        let mut ctx_lens = Vec::with_capacity(contexts.len());
+        for (context, cache) in contexts.iter().zip(caches.iter()) {
+            let context_len = context.shape().as_slice()[1];
+            let context_start = cache.processed();
+            let proposal_start = context_start
+                .checked_add(context_len)
+                .ok_or_else(|| anyhow!("DFlash2 RoPE position overflow"))?;
+            q_pos.extend(proposal_start..proposal_start + query_len);
+            ctx_pos.extend(context_start..context_start + context_len);
+            ctx_lens.push(context_len);
+        }
+        let total_ctx: i32 = ctx_lens.iter().sum();
+        let q_pos: Array = (&q_pos[..], &[batch * query_len][..]).try_into()?;
+        let ctx_pos: Array = (&ctx_pos[..], &[total_ctx][..]).try_into()?;
+        let q_all = norm_rope_on(
+            &q.reshape_on((batch * query_len, hq, d), target)?,
+            self.q_norm.weight(),
+            self.q_norm.eps(),
+            &q_pos,
+            self.rope_theta,
+            target,
+        )?;
+        let pk_all = norm_rope_on(
+            &proposal_k.reshape_on((batch * query_len, hkv, d), target)?,
+            self.k_norm.weight(),
+            self.k_norm.eps(),
+            &q_pos,
+            self.rope_theta,
+            target,
+        )?;
+        let pv_all = proposal_v.reshape_on((batch * query_len, hkv, d), target)?;
+        let context_refs = contexts.iter().collect::<Vec<_>>();
+        let ctx = mlx::ops::shape::concatenate_on(&context_refs, 1, target)?;
+        let (ck, cv) = {
+            let _product_stable_qmm = crate::nn::product_stable_qmm::scope();
+            match &self.input_projections {
+                DFlash2InputProjections::Separate { k, v, .. }
+                | DFlash2InputProjections::Fused { k, v, .. } => {
+                    (k.forward_on(&ctx, target)?, v.forward_on(&ctx, target)?)
+                }
+            }
+        };
+        let ck_all = norm_rope_on(
+            &ck.reshape_on((total_ctx, hkv, d), target)?,
+            self.k_norm.weight(),
+            self.k_norm.eps(),
+            &ctx_pos,
+            self.rope_theta,
+            target,
+        )?;
+        let cv_all = cv.reshape_on((total_ctx, hkv, d), target)?;
+        // Rows [start, start + len) of a [N, H, D] array as [1, H, len, D].
+        let rows = |array: &Array, start: i32, len: i32, heads: i32| -> Result<Array> {
+            Ok(mlx::ops::indexing::slice_strided_on(
+                array,
+                &[start, 0, 0][..],
+                &[start + len, heads, d][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )?
+            .reshape_on((1, len, heads, d), target)?
+            .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?)
+        };
+        // One fused attention dispatch for every row when all keys sit inside
+        // the sliding window (no key is masked).
+        let fused = contexts.len() <= 4
+            && d == 128
+            && q.dtype() == mlx::Dtype::Bfloat16
+            && caches
+                .iter()
+                .zip(&ctx_lens)
+                .all(|(cache, &len)| cache.len() + len + query_len <= cache.max_size());
+        if fused {
+            let mut ctx_off = 0_i32;
+            let mut row_caches = Vec::with_capacity(contexts.len());
+            for (row, cache) in caches.iter_mut().enumerate() {
+                let len = ctx_lens[row];
+                let ck_r = rows(&ck_all, ctx_off, len, hkv)?;
+                let cv_r = rows(&cv_all, ctx_off, len, hkv)?;
+                ctx_off += len;
+                row_caches.push(cache.append_on(&ck_r, &cv_r, target)?);
+            }
+            let output = ragged_draft_attention_on(
+                &q_all,
+                &pk_all,
+                &pv_all,
+                &row_caches,
+                query_len,
+                self.scale,
+                target,
+            )?
+            .reshape_on((batch, query_len, hq * d), target)?;
+            return self.o_proj.forward_on(&output, target);
+        }
+        let mut outputs = Vec::with_capacity(contexts.len());
+        let mut ctx_off = 0_i32;
+        for (row, (mask, cache)) in masks.iter().zip(caches.iter_mut()).enumerate() {
+            let row_i32 = i32::try_from(row)?;
+            let len = ctx_lens[row];
+            let q_r = rows(&q_all, row_i32 * query_len, query_len, hq)?;
+            let pk_r = rows(&pk_all, row_i32 * query_len, query_len, hkv)?;
+            let pv_r = rows(&pv_all, row_i32 * query_len, query_len, hkv)?;
+            let ck_r = rows(&ck_all, ctx_off, len, hkv)?;
+            let cv_r = rows(&cv_all, ctx_off, len, hkv)?;
+            ctx_off += len;
+            let (cached_k, cached_v) = cache.append_on(&ck_r, &cv_r, target)?;
+            let keys = mlx::ops::shape::concatenate_on(&[&cached_k, &pk_r], 2, target)?;
+            let values = mlx::ops::shape::concatenate_on(&[&cached_v, &pv_r], 2, target)?;
+            let output = mlx::fast::scaled_dot_product_attention_on(
+                &q_r,
+                &keys,
+                &values,
+                self.scale,
+                "",
+                Some(mask),
+                None,
+                target,
+            )?;
+            outputs.push(
+                output
+                    .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?
+                    .reshape_on((1, query_len, hq * d), target)?,
+            );
+        }
+        let output_refs = outputs.iter().collect::<Vec<_>>();
+        let output = mlx::ops::shape::concatenate_on(&output_refs, 0, target)?;
+        self.o_proj.forward_on(&output, target)
+    }
+}
+
+/// Attention of every ragged draft row in one dispatch: `q` `[B*Lq, Hq, D]`,
+/// proposal `pk`/`pv` `[B*Lq, Hkv, D]`, and each row's cache `(k, v)`
+/// `[1, Hkv, P_r, D]` (context included). Returns `[B*Lq, Hq, D]` bf16. No key
+/// is masked (callers keep keys inside the sliding window).
+fn ragged_draft_attention_on(
+    q: &Array,
+    pk: &Array,
+    pv: &Array,
+    row_caches: &[(Array, Array)],
+    query_len: i32,
+    scale: f32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    static KERNEL: std::sync::OnceLock<mlx::MetalKernel> = std::sync::OnceLock::new();
+    let kernel = KERNEL.get_or_init(|| {
+        mlx::MetalKernel::builder("ironmlx_dflash2_ragged_attention_v1")
+            .inputs(&["q", "pk", "pv", "k0", "v0", "k1", "v1", "k2", "v2", "k3", "v3", "params"])
+            .outputs(&["out"])
+            .source(
+                r#"
+  const uint lane = thread_index_in_simdgroup;
+  const uint h = thread_position_in_grid.y;
+  const uint ri = thread_position_in_grid.z;
+  const uint r = ri / LQ;
+  const uint hk = h / (HQ / HKV);
+  const device bfloat* ck;
+  const device bfloat* cv;
+  int P;
+  if (r == 0) { ck = (const device bfloat*)k0; cv = (const device bfloat*)v0; P = k0_shape[2]; }
+  else if (r == 1) { ck = (const device bfloat*)k1; cv = (const device bfloat*)v1; P = k1_shape[2]; }
+  else if (r == 2) { ck = (const device bfloat*)k2; cv = (const device bfloat*)v2; P = k2_shape[2]; }
+  else { ck = (const device bfloat*)k3; cv = (const device bfloat*)v3; P = k3_shape[2]; }
+  const float sc = params[0];
+  const device bfloat* qp = (const device bfloat*)q + (ulong(ri) * HQ + h) * D + lane * 4;
+  float qv[4];
+  for (uint j = 0; j < 4; ++j) qv[j] = float(qp[j]) * sc;
+  float m = -INFINITY;
+  float l = 0.0f;
+  float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  auto step = [&](const device bfloat* kr, const device bfloat* vr) {
+    float d = 0.0f;
+    for (uint j = 0; j < 4; ++j) d += qv[j] * float(kr[j]);
+    d = simd_sum(d);
+    const float nm = max(m, d);
+    const float a = metal::exp(m - nm);
+    const float b = metal::exp(d - nm);
+    l = l * a + b;
+    for (uint j = 0; j < 4; ++j) acc[j] = acc[j] * a + b * float(vr[j]);
+    m = nm;
+  };
+  const ulong head = ulong(hk) * ulong(P) * D;
+  for (int n = 0; n < P; ++n) {
+    const ulong o = head + ulong(n) * D + lane * 4;
+    step(ck + o, cv + o);
+  }
+  for (uint n = 0; n < LQ; ++n) {
+    const ulong o = (ulong(r * LQ + n) * HKV + hk) * D + lane * 4;
+    step((const device bfloat*)pk + o, (const device bfloat*)pv + o);
+  }
+  device bfloat* op = (device bfloat*)out + (ulong(ri) * HQ + h) * D + lane * 4;
+  for (uint j = 0; j < 4; ++j) op[j] = bfloat(acc[j] / l);
+"#,
+            )
+            .build()
+            .expect("build DFlash2 ragged attention kernel")
+    });
+    let qs = q.shape();
+    let &[n, hq, d] = qs.as_slice() else {
+        return Err(anyhow!("ragged draft attention q must be [N, Hq, D]"));
+    };
+    let hkv = pk.shape().as_slice()[1];
+    anyhow::ensure!(
+        (1..=4).contains(&row_caches.len()) && d == 128 && n == query_len * row_caches.len() as i32,
+        "ragged draft attention supports 1..=4 rows of D=128"
+    );
+    let params: Array = (&[scale][..], &[1_i32][..]).try_into()?;
+    let pick = |i: usize| &row_caches[i.min(row_caches.len() - 1)];
+    let mut inputs: Vec<&Array> = vec![q, pk, pv];
+    for i in 0..4 {
+        let (k, v) = pick(i);
+        inputs.push(k);
+        inputs.push(v);
+    }
+    inputs.push(&params);
+    Ok(kernel
+        .dispatch_builder()
+        .inputs(&inputs)
+        .output_shapes(&[mlx::Shape::from(&[n, hq, d][..])])
+        .output_dtypes(&[mlx::Dtype::Bfloat16])
+        .grid(32, hq, n)
+        .threadgroup(32, 1, 1)
+        .template_int("LQ", query_len)
+        .template_int("HQ", hq)
+        .template_int("HKV", hkv)
+        .template_int("D", d)
+        .stream(target)
+        .dispatch()?
+        .take_at(0)?)
+}
+
+/// M5 profile setting `DFLASH2_DRAFT_BATCHED`.
+fn draft_batched_requested() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::DFLASH2_DRAFT_BATCHED)
+    })
+}
+
+/// Per-head RMSNorm (weight `[D]`) then non-traditional RoPE at each token's
+/// own position, for `x` `[N, H, D]` bf16 and `positions` `[N]` int32. The
+/// norm output is rounded to bf16 before the rotation, as the two-op path.
+fn norm_rope_on(
+    x: &Array,
+    weight: &Array,
+    eps: f32,
+    positions: &Array,
+    theta: f32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    static KERNEL: std::sync::OnceLock<mlx::MetalKernel> = std::sync::OnceLock::new();
+    let kernel = KERNEL.get_or_init(|| {
+        mlx::MetalKernel::builder("ironmlx_dflash2_norm_rope_v1")
+            .inputs(&["x", "w", "pos", "params"])
+            .outputs(&["y"])
+            .source(
+                r#"
+  constexpr uint J = D / 32;
+  const uint lane = thread_position_in_grid.x;
+  const uint h = thread_position_in_grid.y;
+  const uint n = thread_position_in_grid.z;
+  const ulong base = (ulong(n) * HH + h) * D;
+  float v[J];
+  float ss = 0.0f;
+  for (uint j = 0; j < J; ++j) {
+    v[j] = float(x[base + lane + 32 * j]);
+    ss += v[j] * v[j];
+  }
+  ss = simd_sum(ss);
+  const float inv = metal::rsqrt(ss / float(D) + params[0]);
+  for (uint j = 0; j < J; ++j) v[j] = float(bfloat(v[j] * inv * float(w[lane + 32 * j])));
+  const float p = float(pos[n]);
+  const float log2_theta = metal::log2(params[1]);
+  for (uint j = 0; j < J / 2; ++j) {
+    const uint i = lane + 32 * j;
+    const float inv_freq = metal::exp2(-(2.0f * float(i) / float(D)) * log2_theta);
+    const float ang = p * inv_freq;
+    const float c = metal::cos(ang);
+    const float s = metal::sin(ang);
+    const float a = v[j];
+    const float b = v[j + J / 2];
+    y[base + i] = bfloat(a * c - b * s);
+    y[base + i + D / 2] = bfloat(a * s + b * c);
+  }
+"#,
+            )
+            .build()
+            .expect("build DFlash2 norm+rope kernel")
+    });
+    let shape = x.shape();
+    let &[n, heads, d] = shape.as_slice() else {
+        return Err(anyhow!(
+            "norm_rope expects [N, H, D], got {:?}",
+            shape.as_slice()
+        ));
+    };
+    if d % 64 != 0 || x.dtype() != mlx::Dtype::Bfloat16 {
+        return Err(anyhow!("norm_rope expects bf16 with D a multiple of 64"));
+    }
+    let params: Array = (&[eps, theta][..], &[2_i32][..]).try_into()?;
+    Ok(kernel
+        .dispatch_builder()
+        .inputs(&[x, weight, positions, &params])
+        .output_shapes(&[mlx::Shape::from(&[n, heads, d][..])])
+        .output_dtypes(&[mlx::Dtype::Bfloat16])
+        .grid(32, heads, n)
+        .threadgroup(32, 1, 1)
+        .template_int("D", d)
+        .template_int("HH", heads)
+        .stream(target)
+        .dispatch()?
+        .take_at(0)?)
 }
 
 #[cfg(test)]

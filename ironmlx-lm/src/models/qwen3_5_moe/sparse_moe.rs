@@ -1135,6 +1135,11 @@ pub struct SparseMoeBlock {
     num_experts_per_tok: i32,
     /// Whether selected expert scores are renormalized across top-k.
     norm_topk_prob: bool,
+    /// Experimental expert-tile route: the shared expert's gate, up and down
+    /// in MLX's affine layout (`nn::moe_tile_experts`).
+    tile_shared: Option<[ExpertQuantProjection; 3]>,
+    /// Router rows followed by the shared expert gate's row (tile route).
+    tile_router: Option<Linear>,
 }
 
 impl SparseMoeBlock {
@@ -1184,6 +1189,23 @@ impl SparseMoeBlock {
             Linear::from_loader(loader, &format!("{prefix}.shared_expert_gate"))
                 .context("SparseMoeBlock: loading shared_expert_gate")?;
 
+        let tile_router = if crate::nn::moe_tile_experts::requested() {
+            Some(Linear::fuse_quantized_outputs(
+                &[&router_gate, &shared_expert_gate],
+                "SparseMoeBlock: tile router",
+            )?)
+        } else {
+            None
+        };
+        let tile_shared = if crate::nn::moe_tile_experts::requested() {
+            let load = |name: &'static str| {
+                RoutedExperts::load_projection(loader, &format!("{shared_prefix}.{name}"), name)
+            };
+            Some([load("gate_proj")?, load("up_proj")?, load("down_proj")?])
+        } else {
+            None
+        };
+
         Ok(Self {
             router_gate,
             routed,
@@ -1191,6 +1213,8 @@ impl SparseMoeBlock {
             shared_expert_gate,
             num_experts_per_tok,
             norm_topk_prob,
+            tile_shared,
+            tile_router,
         })
     }
 
@@ -1272,6 +1296,68 @@ impl SparseMoeBlock {
         Ok(&shared_y * &gate)
     }
 
+    /// Experimental expert-tile route for narrow batches; `None` when it does
+    /// not apply (flag off, wide batch, or weights it cannot read).
+    fn forward_tile_experts(
+        &self,
+        flat_x: &Array,
+        inds: &Array,
+        scores: &Array,
+        gate: &Array,
+        target: StreamOrDevice,
+    ) -> Result<Option<Array>> {
+        let Some([sg, su, sd]) = &self.tile_shared else {
+            return Ok(None);
+        };
+        let tokens = flat_x.shape().as_slice()[0];
+        if tokens > crate::nn::moe_tile_experts::MAX_TOKENS
+            || flat_x.dtype() != mlx::Dtype::Bfloat16
+            || !matches!(self.routed.gate_up, GateUpPath::Fused { .. })
+        {
+            return Ok(None);
+        }
+        let fused = self.routed.fused_gate_up(target)?;
+        let affine4 = |m: &QuantMeta| {
+            m.bits == 4 && m.group_size == 64 && m.mode == crate::core::QuantMode::Affine
+        };
+        let (Some(gu_b), Some(d_b), Some(sg_b), Some(su_b), Some(sd_b)) = (
+            fused.biases.as_ref(),
+            self.routed.down_biases.as_ref(),
+            sg.biases.as_ref(),
+            su.biases.as_ref(),
+            sd.biases.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        if ![
+            &fused.meta,
+            &self.routed.down_meta,
+            &sg.meta,
+            &su.meta,
+            &sd.meta,
+        ]
+        .into_iter()
+        .all(affine4)
+        {
+            return Ok(None);
+        }
+        use crate::nn::moe_tile_experts::{Quant, Weights};
+        let q = |weight, scales, biases| Quant {
+            weight,
+            scales,
+            biases,
+        };
+        let weights = Weights {
+            gate_up: q(&fused.weight, &fused.scales, gu_b),
+            down: q(&self.routed.down_weight, &self.routed.down_scales, d_b),
+            shared_gate: q(&sg.weight, &sg.scales, sg_b),
+            shared_up: q(&su.weight, &su.scales, su_b),
+            shared_down: q(&sd.weight, &sd.scales, sd_b),
+        };
+        crate::nn::moe_tile_experts::forward_on(flat_x, inds, scores, gate, &weights, target)
+            .map(Some)
+    }
+
     fn forward_unisolated_on(
         &self,
         x: &Array,
@@ -1295,7 +1381,30 @@ impl SparseMoeBlock {
             let _ = layer_idx;
 
             // (1) Router: Linear -> [BS, E], then top-k expert selection.
-            let logits = self.router_gate.forward_on(&flat_x, target)?; // [BS, E]
+            // The tile route computes the shared expert's gate logit in the
+            // same projection (row E).
+            let tile_route = self.tile_router.is_some()
+                && crate::nn::moe_tile_experts::armed()
+                && bs <= crate::nn::moe_tile_experts::MAX_TOKENS
+                && x.dtype() == mlx::Dtype::Bfloat16;
+            let (logits, shared_gate) = if tile_route {
+                let all = self
+                    .tile_router
+                    .as_ref()
+                    .expect("checked tile router")
+                    .forward_on(&flat_x, target)?; // [BS, E + 1]
+                let logits = slice_on(&all, vec![0, 0], vec![bs, num_experts], target)?;
+                let gate = slice_on(
+                    &all,
+                    vec![0, num_experts],
+                    vec![bs, num_experts + 1],
+                    target,
+                )?
+                .sigmoid_on(target)?;
+                (logits, Some(gate))
+            } else {
+                (self.router_gate.forward_on(&flat_x, target)?, None)
+            };
 
             // (2) Top-k selection via argpartition, plus score normalization
             // matching `norm_topk_prob`.
@@ -1313,6 +1422,20 @@ impl SparseMoeBlock {
                 target,
             )?;
             route_diagnostic::record(layer_idx, &inds_u32);
+            if super::timing_ablation::skips(super::timing_ablation::ROUTED_EXPERTS)
+                && shared_gate.is_some()
+            {
+                return Ok(mlx::ops::zeros_like(x)?);
+            }
+            if let Some(out) = shared_gate
+                .as_ref()
+                .map(|gate| self.forward_tile_experts(&flat_x, &inds_u32, &scores, gate, target))
+                .transpose()?
+                .flatten()
+            {
+                return mlx::ops::shape::reshape(&out, [b, s, h])
+                    .context("SparseMoeBlock: reshape [BS,H] → [B,S,H]");
+            }
 
             // (3) Routed SwiGLU via the shared SwitchGLU-style combine.
             //

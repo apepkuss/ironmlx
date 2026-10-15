@@ -60,6 +60,31 @@ pub(crate) fn dflash2_bulk_attention_is_armed() -> bool {
     DFLASH2_BULK_ATTENTION_DEPTH.with(|depth| depth.get() > 0)
 }
 
+thread_local! {
+    static RELAXED_RAGGED_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Relaxed arithmetic for ragged multi-request rows: projections run on
+/// MLX's ordinary batched kernels and each row attends with one causal SDPA,
+/// so a row's values are not bit-identical to its B1 decode (B1 forwards
+/// never arm this scope).
+pub(crate) struct RelaxedRaggedScope;
+
+impl Drop for RelaxedRaggedScope {
+    fn drop(&mut self) {
+        RELAXED_RAGGED_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+pub(crate) fn relaxed_ragged_scope() -> RelaxedRaggedScope {
+    RELAXED_RAGGED_DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+    RelaxedRaggedScope
+}
+
+pub(crate) fn relaxed_ragged_is_armed() -> bool {
+    RELAXED_RAGGED_DEPTH.with(|depth| depth.get() > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

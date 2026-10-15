@@ -72,6 +72,14 @@ struct Args {
     batch_widths: Vec<usize>,
     #[arg(long, value_delimiter = ',', default_value = "2,4,6,8")]
     verify_widths: Vec<usize>,
+    /// With --batch-curve: instead of the verify curve, time consecutive
+    /// one-token decode steps per batch width, synchronous (token read back
+    /// each step) and pipelined (next step built from the lazy argmax while
+    /// the previous step runs).
+    #[arg(long)]
+    pipeline_curve: bool,
+    #[arg(long, default_value_t = 48)]
+    pipeline_steps: usize,
     /// Drafter runtime quantization bits (0 = BF16 checkpoint). The served
     /// Qwen3.6 MoE profile loads the drafter at 4 bits.
     #[arg(long, default_value_t = 4)]
@@ -562,8 +570,14 @@ fn batch_curve(
         caches.push(cache);
         continuations.push(continuation);
     }
-    let ablations: [(&str, u32); 6] = [
+    if args.pipeline_curve {
+        return pipeline_curve(target, prompts, &caches, &taps, cap, args, out);
+    }
+    let ablations: [(&str, u32); 9] = [
         ("full", 0),
+        ("nogdncore", ablation::GDN_CORE),
+        ("noattncore", ablation::ATTN_CORE),
+        ("nolmhead", ablation::LM_HEAD),
         ("noexperts", ablation::ROUTED_EXPERTS),
         ("noshared", ablation::SHARED_EXPERT),
         ("noattn", ablation::FULL_ATTENTION),
@@ -577,7 +591,7 @@ fn batch_curve(
         ),
     ];
     // B1 reference logits per (row, Q) for the row-exactness check.
-    let mut reference: std::collections::HashMap<(usize, usize), Vec<u32>> = Default::default();
+    let mut reference: std::collections::HashMap<(usize, usize), Vec<f32>> = Default::default();
     for &batch in &args.batch_widths {
         for &width in &args.verify_widths {
             // B=1 runs each row alone; B>1 builds one ragged cache of rows 0..B.
@@ -590,9 +604,11 @@ fn batch_curve(
                 let mut timings = Vec::new();
                 let mut build_samples = Vec::new();
                 let mut cpu_samples = Vec::new();
+                let mut build_cpu_samples = Vec::new();
                 let mut wait_cpu_samples = Vec::new();
                 let mut submit_samples = Vec::new();
                 let mut exact = None;
+                let mut max_abs_diff = None::<f32>;
                 for group in &groups {
                     let mut cache =
                         target.make_cache(group.len() as i32, cap, target.cache_dtype())?;
@@ -623,6 +639,7 @@ fn batch_curve(
                         ablation::set(flags);
                         mlx::transforms::synchronize()?;
                         let started = Instant::now();
+                        let build_cpu0 = thread_cpu_ms();
                         let output = {
                             let _ragged = (group.len() > 1)
                                 .then(ironmlx_lm::nn::gated_attention::ragged_rows_scope);
@@ -639,8 +656,13 @@ fn batch_curve(
                                 ().into(),
                             )?
                         };
-                        let logits = target.dflash2_project_hidden_on(&output.hidden, ().into())?;
+                        let logits = if flags & ablation::LM_HEAD != 0 {
+                            output.hidden.clone()
+                        } else {
+                            target.dflash2_project_hidden_on(&output.hidden, ().into())?
+                        };
                         let built_ms = started.elapsed().as_secs_f64() * 1e3;
+                        let build_cpu = thread_cpu_ms() - build_cpu0;
                         let cpu0 = thread_cpu_ms();
                         mlx::transforms::async_eval(&[&logits, &output.context_hidden])?;
                         let submitted_ms = started.elapsed().as_secs_f64() * 1e3;
@@ -649,6 +671,7 @@ fn batch_curve(
                         mlx::transforms::eval(&[&logits, &output.context_hidden])?;
                         let wait_cpu = thread_cpu_ms() - cpu1;
                         if rep >= 2 {
+                            build_cpu_samples.push(build_cpu);
                             cpu_samples.push(encode_cpu);
                             wait_cpu_samples.push(wait_cpu);
                         }
@@ -660,22 +683,28 @@ fn batch_curve(
                             submit_samples.push(submitted_ms);
                         }
                         if rep == 0 && flags == 0 {
-                            let bits = mlx::ops::cast::astype(&logits, mlx::Dtype::Float32)?
-                                .to_vec::<f32>()?
-                                .into_iter()
-                                .map(f32::to_bits)
-                                .collect::<Vec<_>>();
-                            let per_row = bits.len() / group.len();
+                            let values = mlx::ops::cast::astype(&logits, mlx::Dtype::Float32)?
+                                .to_vec::<f32>()?;
+                            let per_row = values.len() / group.len();
                             for (index, &row) in group.iter().enumerate() {
-                                let row_bits =
-                                    bits[index * per_row..(index + 1) * per_row].to_vec();
+                                let row_values =
+                                    values[index * per_row..(index + 1) * per_row].to_vec();
                                 match reference.get(&(row, width)) {
                                     Some(expected) => {
-                                        let same = *expected == row_bits;
+                                        let same = expected
+                                            .iter()
+                                            .zip(&row_values)
+                                            .all(|(a, b)| a.to_bits() == b.to_bits());
                                         exact = Some(exact.unwrap_or(true) && same);
+                                        let diff = expected
+                                            .iter()
+                                            .zip(&row_values)
+                                            .map(|(a, b)| (a - b).abs())
+                                            .fold(0.0_f32, f32::max);
+                                        max_abs_diff = Some(max_abs_diff.unwrap_or(0.0).max(diff));
                                     }
                                     None => {
-                                        reference.insert((row, width), row_bits);
+                                        reference.insert((row, width), row_values);
                                     }
                                 }
                             }
@@ -699,13 +728,105 @@ fn batch_curve(
                         "min_ms": timings.iter().copied().fold(f64::INFINITY, f64::min),
                         "samples": timings.len(),
                         "rows_exact_vs_b1": exact,
+                        "rows_max_abs_logit_diff_vs_b1": max_abs_diff,
                         "build_ms": median(build_samples.clone()),
                         "submitted_ms": median(submit_samples.clone()),
                         "encode_cpu_ms": median(cpu_samples.clone()),
+                        "build_cpu_ms": median(build_cpu_samples.clone()),
                         "wait_cpu_ms": median(wait_cpu_samples.clone()),
                     })
                 )?;
             }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pipeline_curve(
+    target: &Qwen35MoeModel,
+    prompts: &[Vec<u32>],
+    caches: &[Vec<ironmlx_lm::core::cache::layer::LayerCache>],
+    taps: &[usize],
+    cap: i32,
+    args: &Args,
+    out: &mut std::fs::File,
+) -> Result<()> {
+    use ironmlx_lm::core::cache::layer::adopt_layer_cache_rows;
+    use ironmlx_lm::core::model_input::build_position_ids;
+    use ironmlx_lm::models::dflash2::DFlash2TargetForwardMode as Mode;
+    use ironmlx_lm::Model;
+    use mlx::Array;
+
+    let steps = args.pipeline_steps;
+    anyhow::ensure!(
+        prompts
+            .iter()
+            .take(caches.len())
+            .all(|p| p.len() + steps < cap as usize),
+        "pipeline steps exceed the cache capacity"
+    );
+    for &batch in &args.batch_widths {
+        for pipelined in [false, true] {
+            let mut per_step = Vec::new();
+            for rep in 0..args.curve_reps.min(4) {
+                let mut cache = target.make_cache(batch as i32, cap, target.cache_dtype())?;
+                for (row, source) in caches.iter().take(batch).enumerate() {
+                    adopt_layer_cache_rows(&mut cache, source, row, 0)?;
+                }
+                let first: Vec<u32> = (0..batch).map(|row| prompts[row][0]).collect();
+                let mut input: Array = (&first[..], &[batch as i32, 1][..]).try_into()?;
+                let mut emitted: Vec<Array> = Vec::new();
+                mlx::transforms::synchronize()?;
+                let started = Instant::now();
+                for step in 0..steps {
+                    let positions = (0..batch)
+                        .map(|row| build_position_ids((prompts[row].len() + step) as i32, 1))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let positions =
+                        mlx::ops::shape::concatenate(&positions.iter().collect::<Vec<_>>(), 1)?;
+                    let output = {
+                        let _ragged =
+                            (batch > 1).then(ironmlx_lm::nn::gated_attention::ragged_rows_scope);
+                        target.dflash2_forward_target_on(
+                            &input,
+                            &positions,
+                            Some(&mut cache),
+                            taps,
+                            Mode::OrdinaryDecode,
+                            ().into(),
+                        )?
+                    };
+                    let logits = target.dflash2_project_hidden_on(&output.hidden, ().into())?;
+                    let next = mlx::ops::reduction::argmax(&logits, -1, false)?
+                        .reshape(&[batch as i32, 1][..])?;
+                    if pipelined {
+                        mlx::transforms::async_eval(&[&next, &output.context_hidden])?;
+                        // Read back the previous step's tokens (emission lags one step).
+                        if let Some(previous) = emitted.last() {
+                            let _ = previous.to_vec::<u32>()?;
+                        }
+                        emitted.push(next.clone());
+                        input = next;
+                    } else {
+                        mlx::transforms::eval(&[&next, &output.context_hidden])?;
+                        let host = next.to_vec::<u32>()?;
+                        input = (&host[..], &[batch as i32, 1][..]).try_into()?;
+                    }
+                }
+                mlx::transforms::synchronize()?;
+                if rep >= 1 {
+                    per_step.push(started.elapsed().as_secs_f64() * 1e3 / steps as f64);
+                }
+                drop(cache);
+            }
+            writeln!(
+                out,
+                "{}",
+                json!({"kind": "pipeline_curve", "profile_label": args.profile_label,
+                       "batch": batch, "pipelined": pipelined, "steps": steps,
+                       "median_step_ms": median(per_step.clone()), "samples": per_step})
+            )?;
         }
     }
     Ok(())

@@ -75,8 +75,18 @@ rust::Vec<WireT> array_to_vec_typed(const MlxArray& a) {
   // underlying strides, causing ptr[i] to read the wrong elements.
   // contiguous() forces a materialized copy with unit element stride.
   // It is a no-op (zero extra copy) when the array is already contiguous.
-  mlx::core::array flat = mlx::core::contiguous(mlx::core::flatten(a));
-  mlx::core::eval(flat);
+  // An array already laid out row-contiguously is read in place after waiting
+  // on its own completion event: building flatten/contiguous here would queue
+  // new GPU work behind everything submitted since, so the read would also
+  // wait for that unrelated work.
+  mlx::core::array own = a;
+  mlx::core::eval(own);
+  mlx::core::array flat = own.flags().row_contiguous
+      ? own
+      : mlx::core::contiguous(mlx::core::flatten(own));
+  if (!own.flags().row_contiguous) {
+    mlx::core::eval(flat);
+  }
   rust::Vec<WireT> out;
   out.reserve(flat.size());
   const CppT* ptr = flat.data<CppT>();

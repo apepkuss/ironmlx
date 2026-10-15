@@ -23,6 +23,7 @@ pub(crate) mod m5_tree_attention;
 pub mod mlp;
 pub(crate) mod moe_fast_path;
 pub mod moe_grouped_qmv;
+pub(crate) mod moe_tile_experts;
 pub mod mrope;
 pub mod mtp;
 pub mod norm;

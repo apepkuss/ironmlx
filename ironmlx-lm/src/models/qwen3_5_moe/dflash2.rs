@@ -50,6 +50,15 @@ pub(crate) fn qwen36_moe_dflash2_flat_tree_max_nodes(bits: i32) -> usize {
     }
 }
 
+/// Whether ragged multi-request rows (B>1) run MLX's ordinary batched
+/// kernels instead of each row's B1 arithmetic (profile setting; B1 is
+/// always row-exact).
+fn ragged_fast_arithmetic() -> bool {
+    ironmlx_core::m5_profile::flag(
+        ironmlx_core::m5_profile::settings::DFLASH2_RAGGED_FAST_ARITHMETIC,
+    )
+}
+
 /// Whether the explicit experimental setting arms the expert-grouped gather
 /// qmv for multi-token verification (not part of the M5 MoE profile).
 fn m5_grouped_experts() -> bool {
@@ -97,25 +106,28 @@ impl Qwen35MoeModel {
             "Qwen3.6 MoE DFlash2 runs B>1 target rows only as ragged rows, got {input_dims:?}"
         );
         let verify_width = input_dims[1] as usize;
+        // Relaxed ragged rows (profile setting): ordinary batched kernels for
+        // B>1 target rows; B1 forwards keep the row-exact routes below.
+        let relaxed = input_dims[0] > 1 && ragged_fast_arithmetic();
+        let _relaxed = relaxed.then(crate::nn::position_stable_qmm::relaxed_ragged_scope);
+        let exact_rows = !relaxed;
         // Verification keeps every quantized projection on the
         // product-stable route (one dispatch, ordinary Q=1 accumulation
         // tree), full attention on the position-stable bulk route, and
         // GatedDelta replay capture for exact prefix restore. Routed experts
         // run one unisolated gather per verify block; B1 routing keeps the
         // per-token expert products of ordinary decoding.
-        let _position_stable_linear = mode
-            .requires_position_stability()
+        let _position_stable_linear = (exact_rows && mode.requires_position_stability())
             .then(crate::nn::position_stable_linear::scope);
-        let _position_stable_qmm = mode
-            .requires_position_stability()
+        let _position_stable_qmm = (exact_rows && mode.requires_position_stability())
             .then(crate::nn::position_stable_qmm::scope);
-        let _dflash2_bulk_attention = mode
-            .requires_position_stability()
+        let _dflash2_bulk_attention = (exact_rows && mode.requires_position_stability())
             .then(crate::nn::position_stable_qmm::dflash2_bulk_attention_scope);
         // Multi-row verify, and ragged multi-request one-token decode, keep
         // every row's projections on the one-row qmv_fast accumulation tree.
-        let _product_stable_qmm = ((mode.is_verify() && verify_width > 1)
-            || (input_dims[0] > 1 && mode == DFlash2TargetForwardMode::OrdinaryDecode))
+        let _product_stable_qmm = (exact_rows
+            && ((mode.is_verify() && verify_width > 1)
+                || (input_dims[0] > 1 && mode == DFlash2TargetForwardMode::OrdinaryDecode)))
             .then(crate::nn::product_stable_qmm::scope);
         // M5 MoE affine4 projections (experimental): every target forward of
         // the stream, including ordinary Q=1 decoding, uses the same
@@ -127,6 +139,8 @@ impl Qwen35MoeModel {
         // each row keeps the MLX gather_qmv_fast arithmetic.
         let _grouped_experts = (mode.is_verify() && self.m5_grouped_route(verify_width))
             .then(crate::nn::moe_grouped_qmv::scope);
+        let _tile_experts = (mode.is_verify() && crate::nn::moe_tile_experts::requested())
+            .then(crate::nn::moe_tile_experts::scope);
         let (hidden, context_hidden) = self.text().forward_with_dflash2_taps_on(
             input_ids,
             position_ids,
@@ -345,6 +359,9 @@ impl DFlash2Target for Qwen35MoeModel {
                         qwen36_moe_grouped_experts_min_rows(bits).unwrap_or(0)
                     )
                 }
+                Some(bits) if ragged_fast_arithmetic() => {
+                    format!("qwen36-moe-affine{bits}-ragged-b4-relaxed-v1")
+                }
                 Some(bits) => format!("qwen36-moe-affine{bits}-ragged-b4-v1"),
                 None => "qwen35-moe-unqualified".to_owned(),
             },
@@ -517,6 +534,35 @@ impl DFlash2Target for Qwen35MoeModel {
         )
     }
 
+    fn dflash2_commit_target_rows_device_on(
+        &self,
+        cache: &mut [LayerCache],
+        counts: &Array,
+        target: StreamOrDevice,
+    ) -> Result<Option<Vec<bool>>> {
+        Ok(Some(
+            self.text()
+                .commit_dflash2_rows_device_on(cache, counts, target)?,
+        ))
+    }
+
+    fn dflash2_finish_target_rows_on(
+        &self,
+        cache: &mut [LayerCache],
+        snapshots: &[LayerCacheSnapshot],
+        accepted_lens: &[usize],
+        device_done: &[bool],
+        target: StreamOrDevice,
+    ) -> Result<()> {
+        self.text().finish_dflash2_rows_host_on(
+            cache,
+            snapshots,
+            accepted_lens,
+            device_done,
+            target,
+        )
+    }
+
     fn dflash2_project_hidden_on(&self, hidden: &Array, target: StreamOrDevice) -> Result<Array> {
         let shape = hidden.shape();
         let dims = shape.as_slice();
@@ -528,7 +574,9 @@ impl DFlash2Target for Qwen35MoeModel {
         let _m5_affine4 = self.m5_affine4_head().then(crate::nn::m5_affine4::scope);
         // Multi-position projection uses the product-stable affine kernel so
         // each row keeps the ordinary Q=1 accumulation tree.
-        let _product_stable = (dims[0] * dims[1] > 1).then(crate::nn::product_stable_qmm::scope);
+        let relaxed = dims[0] > 1 && ragged_fast_arithmetic();
+        let _product_stable =
+            (!relaxed && dims[0] * dims[1] > 1).then(crate::nn::product_stable_qmm::scope);
         let _fast_paths = self
             .text()
             .affine4_fast_paths()

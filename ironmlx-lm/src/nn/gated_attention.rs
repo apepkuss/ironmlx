@@ -406,6 +406,23 @@ impl GatedAttention {
             )?;
 
             super::decoder_layer::prefill_stage("attn_qkv_proj", &[&q_full, &k, &v])?;
+            if crate::models::qwen3_5_moe::timing_ablation::skips(
+                crate::models::qwen3_5_moe::timing_ablation::ATTN_CORE,
+            ) {
+                // Timing attribution only: zeros that still depend on q/k/v,
+                // then the output projection.
+                let keep = mlx::ops::reduction::sum_on(&k, -1, true, target)?;
+                let keep = &keep + &mlx::ops::reduction::sum_on(&v, -1, true, target)?;
+                let q_half = mlx::ops::indexing::slice_on(
+                    &q_full,
+                    &[0_i32, 0, 0][..],
+                    &[batch, seq, h_q * d][..],
+                    target,
+                )?;
+                let gated = &(&q_half * &mlx::ops::zeros_like(&q_half)?)
+                    + &(&keep * &mlx::ops::zeros_like(&keep)?);
+                return self.o_proj.forward_on(&gated, target);
+            }
             // Step 2: per-head reshape Q to [B, S, Hq, D*2], then split last axis into
             // (queries [B,S,Hq,D], gate [B,S,Hq,D]). Per-head reshape BEFORE split is
             // critical: it matches q_proj weight matrix row layout in mlx-lm.
@@ -474,7 +491,9 @@ impl GatedAttention {
                     // its own cache offset, exactly as that row's B1 verify.
                     let ragged_bulk =
                         ragged_rows_armed() && batch > 1 && !super::m5_attention::enabled();
-                    if ragged_bulk && seq > 1 {
+                    let ragged_relaxed =
+                        ragged_bulk && super::position_stable_qmm::relaxed_ragged_is_armed();
+                    if ragged_bulk && seq > 1 && !ragged_relaxed {
                         anyhow::ensure!(
                             exact_batched_verify
                                 && super::position_stable_qmm::dflash2_bulk_attention_is_armed()
@@ -485,16 +504,17 @@ impl GatedAttention {
                             "ragged DFlash2 rows require the bulk position-stable verify route"
                         );
                     }
-                    if ragged_bulk && seq == 1 {
-                        // Ragged one-token decode: one cache update for every
-                        // row, then each row attends over its own prefix with
-                        // the ordinary decode SDPA of a B1 row.
+                    if ragged_bulk && (seq == 1 || ragged_relaxed) {
+                        // Ragged rows decoding one token (B1 ordinary decode
+                        // SDPA per row), or relaxed ragged verify rows: one
+                        // cache update for every row, then each row attends
+                        // over its own prefix with one causal SDPA.
                         anyhow::ensure!(
                             mask.is_none()
                                 && kv_validity_mask.is_none()
                                 && c.turboquant().is_none()
-                                && lens_ref.iter().all(|&len| len == 1),
-                            "ragged DFlash2 decode rows require a plain dense cache"
+                                && lens_ref.iter().all(|&len| len == seq),
+                            "ragged DFlash2 rows require a plain dense cache"
                         );
                         let (queries, k) = mrope.apply(&queries, &k, cos, sin)?;
                         let base = c.offsets().to_vec();
@@ -502,11 +522,11 @@ impl GatedAttention {
                             c.update_and_fetch_for_attention_on(&k, &v, lens_ref, target)?;
                         let mut rows = Vec::with_capacity(batch as usize);
                         for row in 0..batch {
-                            let end = base[row as usize] + 1;
+                            let end = base[row as usize] + seq;
                             let q_row = mlx::ops::indexing::slice_strided_on(
                                 &queries,
                                 &[row, 0, 0, 0][..],
-                                &[row + 1, h_q, 1, d][..],
+                                &[row + 1, h_q, seq, d][..],
                                 &[1_i32, 1, 1, 1][..],
                                 target,
                             )?;

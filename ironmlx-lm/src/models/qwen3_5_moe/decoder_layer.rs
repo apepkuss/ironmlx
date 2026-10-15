@@ -289,6 +289,42 @@ impl DecoderLayerMoe {
         )
     }
 
+    /// Device half of a per-row speculative commit (see
+    /// `GatedDeltaNet::commit_speculative_rows_device_on`); full-attention
+    /// layers only move offsets, so they report done.
+    pub(crate) fn commit_speculative_rows_device_on(
+        &self,
+        cache: &mut LayerCache,
+        counts: &Array,
+        target: StreamOrDevice,
+    ) -> Result<bool> {
+        match (&self.attn, cache) {
+            (AttnPath::Linear(attn), LayerCache::Linear(cache)) => {
+                attn.commit_speculative_rows_device_on(cache, counts, target)
+            }
+            (AttnPath::Full(_), LayerCache::Full(_)) => Ok(true),
+            _ => Ok(false),
+        }
+    }
+
+    /// Host half: offsets of a device-committed layer; the full host restore
+    /// otherwise.
+    pub(crate) fn finish_speculative_rows_host_on(
+        &self,
+        cache: &mut LayerCache,
+        base: &crate::core::cache::layer::LayerCacheSnapshot,
+        accepted_lens: &[usize],
+        device_done: bool,
+        target: StreamOrDevice,
+    ) -> Result<()> {
+        match (&self.attn, &mut *cache, device_done) {
+            (AttnPath::Linear(attn), LayerCache::Linear(gdc), true) => {
+                attn.finish_speculative_rows_host(gdc, accepted_lens)
+            }
+            _ => self.restore_speculative_prefix_rows_on(cache, base, accepted_lens, target),
+        }
+    }
+
     /// Per-row variant of [`Self::restore_speculative_prefix_on`].
     pub(crate) fn restore_speculative_prefix_rows_on(
         &self,

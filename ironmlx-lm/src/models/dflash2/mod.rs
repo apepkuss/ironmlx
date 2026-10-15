@@ -564,6 +564,30 @@ pub trait DFlash2Target: crate::core::Model {
         target: StreamOrDevice,
     ) -> Result<DFlash2TargetOutput>;
 
+    /// Device half of a per-row commit from GPU accepted counts (`[B]`
+    /// int32); `None` when unsupported. One flag per layer for
+    /// [`Self::dflash2_finish_target_rows_on`].
+    fn dflash2_commit_target_rows_device_on(
+        &self,
+        _cache: &mut [LayerCache],
+        _counts: &Array,
+        _target: StreamOrDevice,
+    ) -> Result<Option<Vec<bool>>> {
+        Ok(None)
+    }
+
+    /// Host half of a per-row commit started on the device.
+    fn dflash2_finish_target_rows_on(
+        &self,
+        cache: &mut [LayerCache],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+        accepted_lens: &[usize],
+        _device_done: &[bool],
+        target: StreamOrDevice,
+    ) -> Result<()> {
+        self.dflash2_restore_target_prefix_rows_on(cache, snapshots, accepted_lens, target)
+    }
+
     fn dflash2_restore_target_prefix_on(
         &self,
         cache: &mut [LayerCache],
