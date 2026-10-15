@@ -139,8 +139,14 @@ impl Qwen35MoeModel {
         // each row keeps the MLX gather_qmv_fast arithmetic.
         let _grouped_experts = (mode.is_verify() && self.m5_grouped_route(verify_width))
             .then(crate::nn::moe_grouped_qmv::scope);
-        let _tile_experts = (mode.is_verify() && crate::nn::moe_tile_experts::requested())
-            .then(crate::nn::moe_tile_experts::scope);
+        // Expert tiles for every decode-side forward (verify and one-token
+        // ordinary windows; not prefill): per-row tile arithmetic does not
+        // depend on the window width, so a single request's output does not
+        // depend on which draft budgets the timing-driven policy picks.
+        let _tile_experts = ((mode.is_verify()
+            || mode == DFlash2TargetForwardMode::OrdinaryDecode)
+            && crate::nn::moe_tile_experts::requested())
+        .then(crate::nn::moe_tile_experts::scope);
         let (hidden, context_hidden) = self.text().forward_with_dflash2_taps_on(
             input_ids,
             position_ids,
