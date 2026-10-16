@@ -385,6 +385,7 @@ impl GatedDeltaNet {
         let defer_captured_state_commit = capture_active
             && ((super::position_stable_qmm::exact_affine8_b4_q2_is_armed() && seq == 2)
                 || tree.is_some());
+        let mut fused_output: Option<Array> = None;
         let ((qkv, z), (b, a)) = {
             // Relaxed ragged rows replay from the captured inputs themselves,
             // so their projections need not reproduce B1 decode bits.
@@ -438,6 +439,7 @@ impl GatedDeltaNet {
                 } => {
                     if super::product_stable_qmm::is_armed() || super::m5_affine4::armed() {
                         let output = projection.forward_on(x, target)?;
+                        fused_output = Some(output.clone());
                         let mut parts = mlx::ops::shape::split_at_on(
                             &output,
                             &[
@@ -495,8 +497,42 @@ impl GatedDeltaNet {
             let normed = &(&z * &zero_z) + &(&keep * &mlx::ops::zeros_like(&keep)?);
             return self.out_proj.forward_on(&normed, target);
         }
+        // Fused decode/verify preparation: conv-state prepend, conv1d + SiLU,
+        // q/k norms and gates in one dispatch.
+        let fused_prep = match (fused_output.as_ref(), cache.as_deref()) {
+            // Bit-identical to the fast-path chain (IronQkNorm, IronGdnGates).
+            (Some(output), Some(c))
+                if super::fused_norm::requested()
+                    && super::moe_fast_path::is_armed()
+                    && mask.is_none()
+                    && tree.is_none()
+                    && !defer_captured_state_commit
+                    && per_row_lens.is_none_or(|lens| lens.iter().all(|&l| l == seq))
+                    && self.conv1d.bias().is_none()
+                    && self.cfg.head_k_dim == 128
+                    && self.cfg.head_v_dim == 128
+                    && seq <= 64 =>
+            {
+                let z_width = z.shape().as_slice()[2];
+                Some(super::gdn_prep::prep_on(
+                    output,
+                    c.conv_state(),
+                    self.conv1d.weight(),
+                    &self.a_log,
+                    &self.dt_bias,
+                    self.cfg.conv_dim(),
+                    z_width,
+                    self.cfg.num_k_heads,
+                    self.cfg.num_v_heads,
+                    target,
+                )?)
+            }
+            _ => None,
+        };
         // Step 2a: prepend conv_state
-        let conv_input = {
+        let conv_input = if let Some(p) = fused_prep.as_ref() {
+            p.conv_input.clone()
+        } else {
             match cache.as_mut() {
                 Some(c) => concatenate(&[c.conv_state(), &qkv], 1)?,
                 None => {
@@ -510,7 +546,10 @@ impl GatedDeltaNet {
         };
 
         // Step 2b: conv1d + silu
-        let conv_out = {
+        let conv_out = if fused_prep.is_some() {
+            // Unused: the fused preparation produced q/k/v directly.
+            qkv.clone()
+        } else {
             let conv_out = if let Some(plan) = tree.as_ref() {
                 let windows =
                     plan.conv_windows(&conv_input, self.cfg.conv_kernel_size - 1, target)?;
@@ -578,87 +617,92 @@ impl GatedDeltaNet {
             c.update_conv(new_conv_state);
         }
 
-        // Step 3: split + reshape per-head
-        // conv_out shape: [B, S, conv_dim] = [B, S, key_dim*2 + value_dim]
-        // Split at [key_dim, 2*key_dim] → 3 segments [B, S, key_dim], [B, S, key_dim], [B, S, value_dim]
-        let (q_per_head, k_per_head, v_per_head) = {
-            let split_at = vec![self.cfg.key_dim(), 2 * self.cfg.key_dim()];
-            let parts = mlx::ops::shape::split_at_on(&conv_out, &split_at, -1, target)?;
-            let q_flat = &parts[0]; // [B, S, num_k_heads * head_k_dim]
-            let k_flat = &parts[1]; // [B, S, num_k_heads * head_k_dim]
-            let v_flat = &parts[2]; // [B, S, num_v_heads * head_v_dim]
-
-            let q_per_head = q_flat.reshape_on(
-                (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim),
-                target,
-            )?;
-            let k_per_head = k_flat.reshape_on(
-                (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim),
-                target,
-            )?;
-            let v_per_head = v_flat.reshape_on(
-                (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
-                target,
-            )?;
-            (q_per_head, k_per_head, v_per_head)
-        };
-
-        // Step 4: q/k rms_norm (no weight)
-        let (q_scaled, k_scaled) = if super::moe_fast_path::is_armed()
-            && conv_out.dtype() == Dtype::Bfloat16
-            && self.cfg.head_k_dim == 128
-        {
-            let inv_scale = 1.0_f32 / (self.cfg.head_k_dim as f32).sqrt();
-            let (q, k) = mlx::quantization::qk_norm_fused_on(
-                &conv_out,
-                self.cfg.num_k_heads,
-                self.cfg.head_k_dim,
-                0,
-                self.cfg.key_dim(),
-                inv_scale * inv_scale,
-                inv_scale,
-                1e-6,
-                target,
-            )?;
-            let shape = (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim);
-            (q.reshape_on(shape, target)?, k.reshape_on(shape, target)?)
+        let (q_scaled, k_scaled, v_per_head, g, beta) = if let Some(p) = fused_prep {
+            (p.q, p.k, p.v, p.g, p.beta)
         } else {
-            let inv_scale = 1.0_f32 / (self.cfg.head_k_dim as f32).sqrt();
-            let q_normed = mlx::fast::rms_norm_on(&q_per_head, None, 1e-6, target)?;
-            let q_scaled = &q_normed * (inv_scale * inv_scale); // panic-on-err, no `?`
-            let k_normed = mlx::fast::rms_norm_on(&k_per_head, None, 1e-6, target)?;
-            let k_scaled = &k_normed * inv_scale; // panic-on-err, no `?`
-            (q_scaled, k_scaled)
-        };
+            // Step 3: split + reshape per-head
+            // conv_out shape: [B, S, conv_dim] = [B, S, key_dim*2 + value_dim]
+            // Split at [key_dim, 2*key_dim] → 3 segments [B, S, key_dim], [B, S, key_dim], [B, S, value_dim]
+            let (q_per_head, k_per_head, v_per_head) = {
+                let split_at = vec![self.cfg.key_dim(), 2 * self.cfg.key_dim()];
+                let parts = mlx::ops::shape::split_at_on(&conv_out, &split_at, -1, target)?;
+                let q_flat = &parts[0]; // [B, S, num_k_heads * head_k_dim]
+                let k_flat = &parts[1]; // [B, S, num_k_heads * head_k_dim]
+                let v_flat = &parts[2]; // [B, S, num_v_heads * head_v_dim]
 
-        // Steps 5-6: g = exp(-exp(A_log) * softplus(a + dt_bias)), beta = sigmoid(b).
-        let (g, beta) = if super::moe_fast_path::is_armed()
-            && a.dtype() == Dtype::Bfloat16
-            && b.dtype() == Dtype::Bfloat16
-            && self.a_log.dtype() == Dtype::Bfloat16
-            && self.dt_bias.dtype() == Dtype::Bfloat16
-        {
-            mlx::quantization::gdn_gates_fused_on(&a, &b, &self.a_log, &self.dt_bias, target)?
-        } else {
-            // Step 5: compute_g = exp(-exp(A_log) * softplus(a + dt_bias))
-            // softplus stabilised: where(x > 20, x, log(1 + exp(x)))
-            let g = {
-                let x_sp = &a + &self.dt_bias;
-                let twenty: Array = (&[20.0_f32][..], ()).try_into()?;
-                let zeros = a.zeros_like()?;
-                let safe = zeros.logaddexp(&x_sp)?;
-                let cond = x_sp.greater(&twenty)?;
-                let sp = cond.where_(&x_sp, &safe)?;
-                let a_log_f32 = mlx::ops::cast::astype(&self.a_log, Dtype::Float32)?;
-                let exp_alog = a_log_f32.exp()?;
-                let neg_exp_alog = mlx::ops::binary::negative(&exp_alog)?;
-                let inner = &neg_exp_alog * &sp;
-                inner.exp()?
+                let q_per_head = q_flat.reshape_on(
+                    (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim),
+                    target,
+                )?;
+                let k_per_head = k_flat.reshape_on(
+                    (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim),
+                    target,
+                )?;
+                let v_per_head = v_flat.reshape_on(
+                    (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
+                    target,
+                )?;
+                (q_per_head, k_per_head, v_per_head)
             };
 
-            // Step 6: beta = sigmoid(b)
-            let beta = b.sigmoid_on(target)?;
-            (g, beta)
+            // Step 4: q/k rms_norm (no weight)
+            let (q_scaled, k_scaled) = if super::moe_fast_path::is_armed()
+                && conv_out.dtype() == Dtype::Bfloat16
+                && self.cfg.head_k_dim == 128
+            {
+                let inv_scale = 1.0_f32 / (self.cfg.head_k_dim as f32).sqrt();
+                let (q, k) = mlx::quantization::qk_norm_fused_on(
+                    &conv_out,
+                    self.cfg.num_k_heads,
+                    self.cfg.head_k_dim,
+                    0,
+                    self.cfg.key_dim(),
+                    inv_scale * inv_scale,
+                    inv_scale,
+                    1e-6,
+                    target,
+                )?;
+                let shape = (batch, seq, self.cfg.num_k_heads, self.cfg.head_k_dim);
+                (q.reshape_on(shape, target)?, k.reshape_on(shape, target)?)
+            } else {
+                let inv_scale = 1.0_f32 / (self.cfg.head_k_dim as f32).sqrt();
+                let q_normed = mlx::fast::rms_norm_on(&q_per_head, None, 1e-6, target)?;
+                let q_scaled = &q_normed * (inv_scale * inv_scale); // panic-on-err, no `?`
+                let k_normed = mlx::fast::rms_norm_on(&k_per_head, None, 1e-6, target)?;
+                let k_scaled = &k_normed * inv_scale; // panic-on-err, no `?`
+                (q_scaled, k_scaled)
+            };
+
+            // Steps 5-6: g = exp(-exp(A_log) * softplus(a + dt_bias)), beta = sigmoid(b).
+            let (g, beta) = if super::moe_fast_path::is_armed()
+                && a.dtype() == Dtype::Bfloat16
+                && b.dtype() == Dtype::Bfloat16
+                && self.a_log.dtype() == Dtype::Bfloat16
+                && self.dt_bias.dtype() == Dtype::Bfloat16
+            {
+                mlx::quantization::gdn_gates_fused_on(&a, &b, &self.a_log, &self.dt_bias, target)?
+            } else {
+                // Step 5: compute_g = exp(-exp(A_log) * softplus(a + dt_bias))
+                // softplus stabilised: where(x > 20, x, log(1 + exp(x)))
+                let g = {
+                    let x_sp = &a + &self.dt_bias;
+                    let twenty: Array = (&[20.0_f32][..], ()).try_into()?;
+                    let zeros = a.zeros_like()?;
+                    let safe = zeros.logaddexp(&x_sp)?;
+                    let cond = x_sp.greater(&twenty)?;
+                    let sp = cond.where_(&x_sp, &safe)?;
+                    let a_log_f32 = mlx::ops::cast::astype(&self.a_log, Dtype::Float32)?;
+                    let exp_alog = a_log_f32.exp()?;
+                    let neg_exp_alog = mlx::ops::binary::negative(&exp_alog)?;
+                    let inner = &neg_exp_alog * &sp;
+                    inner.exp()?
+                };
+
+                // Step 6: beta = sigmoid(b)
+                let beta = b.sigmoid_on(target)?;
+                (g, beta)
+            };
+            (q_scaled, k_scaled, v_per_head, g, beta)
         };
         super::decoder_layer::prefill_stage(
             "gdn_conv_norm_gates",
@@ -820,6 +864,28 @@ impl GatedDeltaNet {
 
         super::decoder_layer::prefill_stage("gdn_recurrence", &[&y])?;
         // Step 8: RmsNormGated(y, z) + reshape + out_proj
+        let gated_in_place = match (fused_output.as_ref(), self.norm.weight()) {
+            (Some(output), weight)
+                if super::fused_norm::requested()
+                    && mask.is_none()
+                    && tree.is_none()
+                    && self.cfg.head_v_dim == 128
+                    && seq <= 64 =>
+            {
+                Some(super::gdn_prep::gated_norm_on(
+                    &y,
+                    output,
+                    self.cfg.conv_dim(),
+                    weight,
+                    self.norm.eps(),
+                    target,
+                )?)
+            }
+            _ => None,
+        };
+        if let Some(normed_flat) = gated_in_place {
+            return self.out_proj.forward_on(&normed_flat, target);
+        }
         let out = {
             let z_per_head = z.reshape_on(
                 (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),

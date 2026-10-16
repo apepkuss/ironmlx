@@ -238,6 +238,14 @@ impl RmsNormGated {
         })
     }
 
+    pub fn weight(&self) -> &Array {
+        &self.weight
+    }
+
+    pub fn eps(&self) -> f32 {
+        self.eps
+    }
+
     /// Forward pass with default stream.
     pub fn forward(&self, hidden: &Array, gate: Option<&Array>) -> Result<Array> {
         self.forward_on(hidden, gate, ())

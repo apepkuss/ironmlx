@@ -238,6 +238,24 @@ impl Qwen35MoeModel {
         self.text.config()
     }
 
+    /// Profile setting `MOE_M5_EXPERTS`: convert every layer's expert
+    /// weights to the M5 tiled layout now rather than in the first forward.
+    /// Call after the loader is dropped (the checkpoint arrays are then the
+    /// only other copy, released layer by layer).
+    pub fn prepare_m5_experts(&self) -> Result<usize> {
+        let started = std::time::Instant::now();
+        let converted = self.text.prepare_m5_experts(StreamOrDevice::default())?;
+        if converted > 0 {
+            mlx::clear_cache();
+            tracing::info!(
+                layers = converted,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "M5 expert layout prepared (Qwen3.6 MoE)"
+            );
+        }
+        Ok(converted)
+    }
+
     pub(crate) fn lm_head(&self) -> &Linear {
         &self.lm_head
     }

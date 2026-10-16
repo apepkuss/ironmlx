@@ -124,6 +124,9 @@ pub struct DFlash2DraftModel {
     layers: Vec<DFlash2DecoderLayer>,
     norm: RmsNorm,
     selector: DFlash2CandidateSelector,
+    /// Projections live in single-resident M5 stores: every proposal arms
+    /// the M5 route.
+    m5_resident: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,7 +163,29 @@ impl DFlash2DraftModel {
             selector: DFlash2CandidateSelector::from_loader(loader, &config, draft_bits)?,
             layers,
             config,
+            m5_resident: false,
         })
+    }
+
+    /// Profile setting `DFLASH2_DRAFT_M5_RESIDENT`: move the input, layer and
+    /// MLP projections into single-resident M5 stores (call after any
+    /// precision check: shared projections hide their quantized arrays).
+    /// Returns the number of stores created.
+    pub fn share_weight_layout_if_requested(&mut self) -> Result<usize> {
+        if !super::m5_resident_requested() || self.m5_resident {
+            return Ok(0);
+        }
+        let mut stores = usize::from(self.fc.share_whole()?.is_some());
+        for layer in &mut self.layers {
+            stores += layer.share_weight_layout()?;
+        }
+        self.m5_resident = stores > 0;
+        tracing::info!(stores, "DFlash2 drafter projections in resident M5 layout");
+        Ok(stores)
+    }
+
+    fn m5_scope(&self, requested: bool) -> Option<crate::nn::m5_affine4::Scope> {
+        (self.m5_resident || requested).then(crate::nn::m5_affine4::scope)
     }
 
     pub fn config(&self) -> &DFlash2Config {
@@ -275,10 +300,9 @@ impl DFlash2DraftModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
-        // Single-request drafts keep the native projections: their GPU time
-        // is hidden behind the verify build, so the M5 route's extra host
-        // encoding only lengthens the window (B1 windows 0.4-0.5 ms longer
-        // at every budget). Ragged drafts take the M5 route (profile setting).
+        // Single-request drafts take the M5 route when the projections live
+        // in the resident M5 layout.
+        let _m5_draft = self.m5_scope(false);
         let _native_walk = target_model
             .dflash2_draft_fast_paths()
             .then(super::selector::native_walk_scope);
@@ -315,9 +339,9 @@ impl DFlash2DraftModel {
     ) -> Result<Array> {
         let target = target.into();
         // The draft's affine4 projections on the M5 route (profile setting).
-        let _m5_draft =
-            ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::DFLASH2_DRAFT_M5)
-                .then(crate::nn::m5_affine4::scope);
+        let _m5_draft = self.m5_scope(ironmlx_core::m5_profile::flag(
+            ironmlx_core::m5_profile::settings::DFLASH2_DRAFT_M5,
+        ));
         let input_shape = input_ids.shape();
         let input_dims = input_shape.as_slice();
         if input_dims.len() != 2
@@ -462,6 +486,7 @@ impl DFlash2DraftModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<DFlash2DraftTree> {
         let target = target.into();
+        let _m5_draft = self.m5_scope(false);
         let (proposal_hidden, logits, _, anchor) =
             self.proposal_lattice_on(target_model, input_ids, target_hidden, cache, target, true)?;
         self.selector.select_tree_on(

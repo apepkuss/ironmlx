@@ -235,22 +235,35 @@ impl DFlash2Attention {
             let v_width = v.out_features();
             let projection =
                 Linear::fuse_quantized_outputs(&[&q, &k, &v], "DFlash2 drafter fused Q/K/V")?;
-            let mut split = projection.split_quantized_outputs(
-                &[q.out_features(), k.out_features(), v_width],
-                "DFlash2 drafter split Q/K/V",
-            )?;
-            DFlash2InputProjections::Fused {
-                projection,
-                // Q is always consumed from the fused proposal projection;
-                // only K/V need shared Q1-compatible row views for the
-                // variable-length context projection.
-                k: {
-                    let _q_view = split.remove(0);
-                    split.remove(0)
-                },
-                v: split.remove(0),
-                q_width,
-                k_width,
+            if super::m5_resident_requested() {
+                // The context K/V keep their own arrays (row views would keep
+                // the fused checkpoint-layout buffer alive beside its tiled
+                // store).
+                DFlash2InputProjections::Fused {
+                    projection,
+                    k,
+                    v,
+                    q_width,
+                    k_width,
+                }
+            } else {
+                let mut split = projection.split_quantized_outputs(
+                    &[q.out_features(), k.out_features(), v_width],
+                    "DFlash2 drafter split Q/K/V",
+                )?;
+                DFlash2InputProjections::Fused {
+                    projection,
+                    // Q is always consumed from the fused proposal projection;
+                    // only K/V need shared Q1-compatible row views for the
+                    // variable-length context projection.
+                    k: {
+                        let _q_view = split.remove(0);
+                        split.remove(0)
+                    },
+                    v: split.remove(0),
+                    q_width,
+                    k_width,
+                }
             }
         } else {
             DFlash2InputProjections::Separate { q, k, v }
@@ -266,6 +279,23 @@ impl DFlash2Attention {
             rope_theta: cfg.rope_parameters.rope_theta,
             scale: 1.0 / (cfg.head_dim as f32).sqrt(),
         })
+    }
+
+    /// Move every projection into a single-resident M5 store; returns the
+    /// number of stores.
+    pub(super) fn share_weight_layout(&mut self) -> Result<usize> {
+        let mut linears: Vec<&mut Linear> = match &mut self.input_projections {
+            DFlash2InputProjections::Separate { q, k, v } => vec![q, k, v],
+            DFlash2InputProjections::Fused {
+                projection, k, v, ..
+            } => vec![projection, k, v],
+        };
+        linears.push(&mut self.o_proj);
+        let mut stores = 0;
+        for linear in linears {
+            stores += usize::from(linear.share_whole()?.is_some());
+        }
+        Ok(stores)
     }
 
     /// Every projection object, including the K/V row views of a fused Q/K/V.

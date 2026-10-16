@@ -2225,7 +2225,7 @@ where
         let logits = rows[0]
             .model
             .dflash2_project_hidden_on(&verified.hidden, target)?;
-        let verified_tokens_arr = mlx::ops::reduction::argmax(&logits, -1, false)?;
+        let verified_tokens_arr = argmax_last(&logits)?;
         mlx::transforms::async_eval(&[&verified_tokens_arr, &verified.context_hidden])?;
         mark("t_head_submitted");
         // Accepted counts on the GPU and the cache commit submitted now,
@@ -2734,7 +2734,7 @@ where
             mlx::ops::shape::concatenate_on(&verified_logits_refs, 0, target)?
         };
         let verified_tokens_arr = (!first_key.sampled)
-            .then(|| mlx::ops::reduction::argmax(&verified_logits, -1, false))
+            .then(|| argmax_last(&verified_logits))
             .transpose()?;
         let mut prepared_sampling = Vec::with_capacity(batch_size);
         for (batch_row, row) in rows.iter().enumerate() {
@@ -3536,7 +3536,7 @@ where
             .request
             .sampler
             .is_greedy()
-            .then(|| mlx::ops::reduction::argmax(&verified_logits, -1, false))
+            .then(|| argmax_last(&verified_logits))
             .transpose()?;
         self.counters.projection_build_us = self
             .counters
@@ -4398,6 +4398,15 @@ fn ragged_tail_requested() -> bool {
     *ENABLED.get_or_init(|| {
         ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::DFLASH2_RAGGED_TAIL)
     })
+}
+
+/// Argmax over the vocabulary of verify logits: the many-threadgroup kernel
+/// (identical result for finite logits) when it applies, else MLX.
+fn argmax_last(logits: &Array) -> Result<Array> {
+    match ironmlx_lm::nn::fast_argmax::argmax_last_on(logits, StreamOrDevice::default())? {
+        Some(tokens) => Ok(tokens),
+        None => Ok(mlx::ops::reduction::argmax(logits, -1, false)?),
+    }
 }
 
 /// M5 profile setting `DFLASH2_GPU_COMMIT`.

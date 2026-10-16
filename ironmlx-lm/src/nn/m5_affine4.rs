@@ -36,6 +36,11 @@ fn supported_arch(arch: &str) -> bool {
         })
         .is_some_and(|generation| generation >= 17)
 }
+/// Whether this GPU has the tensor unit the M5 kernels need.
+pub(crate) fn tensor_unit_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| mlx::metal::architecture().is_ok_and(|arch| supported_arch(&arch)))
+}
 pub(crate) fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -68,7 +73,43 @@ fn tile_width(n: i32) -> i32 {
         32
     }
 }
+/// Split-K override for the per-shape sweep test (0 = per-shape choice).
+static FORCED_SPLIT_K: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+#[cfg(test)]
+pub(crate) fn force_split_k(sk: i32) {
+    FORCED_SPLIT_K.store(sk, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// K slices per threadgroup measured best on the M5 Max (applegpu_g17s) for
+/// the Qwen3.6 MoE target and DFlash2 drafter projections, as one kernel in
+/// a dependent chain (decode / verify rows): narrow outputs need more slices
+/// to keep enough simdgroups streaming. M5 profile setting
+/// `M5_TUNED_SPLIT_K`; other devices and shapes keep the default.
+fn tuned_split_k(n: i32, k: i32) -> Option<i32> {
+    static TUNED: OnceLock<bool> = OnceLock::new();
+    if !*TUNED.get_or_init(|| {
+        ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::M5_TUNED_SPLIT_K)
+            && mlx::metal::architecture().is_ok_and(|arch| arch == "applegpu_g17s")
+    }) {
+        return None;
+    }
+    match (n, k) {
+        (2048, 4096) | (2048, 6144) | (2048, 16384) => Some(8),
+        (512, 2048) => Some(16),
+        (12352, 2048) | (12288, 2048) | (9216, 2048) => Some(2),
+        _ => None,
+    }
+}
+
 fn split_k(n: i32, k: i32) -> i32 {
+    let forced = FORCED_SPLIT_K.load(std::sync::atomic::Ordering::Relaxed);
+    if forced > 0 {
+        return forced.min((k / 64).max(1));
+    }
+    if let Some(sk) = tuned_split_k(n, k) {
+        return sk;
+    }
     static SHAPE: OnceLock<bool> = OnceLock::new();
     if *SHAPE.get_or_init(|| {
         std::env::var("IRONMLX_EXPERIMENTAL_M5_QMM_SHAPE_SPLIT").as_deref() == Ok("1")
@@ -128,28 +169,44 @@ fn prepare(p: &QuantizedLinearParts<'_>, target: StreamOrDevice) -> Result<Prepa
     Ok(Prepared { weight, sb })
 }
 
-type KernelKey = (i32, i32, i32, bool);
+/// (N, K, row blocks, edge, fused group sums, K slices).
+type KernelKey = (i32, i32, i32, bool, bool, i32);
 
-fn kernel(n: i32, k: i32, tmr: i32, edge: bool) -> Result<MetalKernel> {
+/// Group sums of x inside the tensor kernel instead of a separate dependent
+/// dispatch per projection (M5 profile setting `M5_FUSED_XSUM`); same
+/// summation order, so the output bits are unchanged.
+fn fused_xsum() -> bool {
+    static FUSED: OnceLock<bool> = OnceLock::new();
+    *FUSED.get_or_init(|| {
+        ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::M5_FUSED_XSUM)
+    })
+}
+
+fn kernel(n: i32, k: i32, tmr: i32, edge: bool, fxs: bool) -> Result<MetalKernel> {
     static CACHE: OnceLock<Mutex<HashMap<KernelKey, MetalKernel>>> = OnceLock::new();
     let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
-    let key = (n, k, tmr, edge);
+    let sk = split_k(n, k);
+    let key = (n, k, tmr, edge, fxs, sk);
     if let Some(kernel) = cache.get(&key) {
         return Ok(kernel.clone());
     }
     // Fusion is identical for serial and verify before selecting this shape.
-    let sk = split_k(n, k);
     let nt = tile_width(n);
     let body = format!(
-        "constexpr int N={n}, K={k}, GS=64, NT={nt}, SK={sk}, TMR={tmr}, EDGE={};\n{}",
+        "constexpr int N={n}, K={k}, GS=64, NT={nt}, SK={sk}, TMR={tmr}, EDGE={}, FXS={};\n{}",
         i32::from(edge),
+        i32::from(fxs),
         if nt == 64 {
             include_str!("m5_affine4_coop.metal")
         } else {
             include_str!("m5_affine4.metal")
         }
     );
-    let kernel = MetalKernel::builder(format!("ironmlx_m5_affine4_v2_{n}_{k}_{tmr}_{nt}_{sk}_{}",i32::from(edge)))
+    let kernel = MetalKernel::builder(format!(
+        "ironmlx_m5_affine4_v2_{n}_{k}_{tmr}_{nt}_{sk}_{}{}",
+        i32::from(edge),
+        if fxs { "_fxs" } else { "" }
+    ))
         .inputs(&["X","XS","Wq","SBt","mdims"]).outputs(&["Y"])
         .header("#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\nusing namespace mpp::tensor_ops;")
         .source(body).build()?;
@@ -316,30 +373,35 @@ fn run_prepared(
     let block = mp.min(32);
     let (tmr, edge) = kernel_variant(m);
     let dims: Array = (&[m, mp][..], &[2][..]).try_into()?;
-    static XSUM: OnceLock<MetalKernel> = OnceLock::new();
-    if XSUM.get().is_none() {
-        let built = MetalKernel::builder("ironmlx_m5_affine4_xsum_v1")
-            .inputs(&["X","mdims"]).outputs(&["XS"])
-            .source("const int M=mdims[0], MP=mdims[1]; const uint m=thread_position_in_grid.y, g=thread_position_in_grid.x; if(g>=K/64 || int(m)>=MP)return; float acc=0.0f; if(int(m)<M) for(int i=0;i<64;i++)acc+=float(X[m*K+g*64+i]); XS[g*MP+m]=acc;")
-            .build()?;
-        let _ = XSUM.set(built);
-    }
-    let xs = XSUM
-        .get()
-        .unwrap()
-        .dispatch_builder()
-        .inputs(&[x, &dims])
-        .template_int("K", k)
-        .output_shapes(&[Shape::from(&[k / 64, mp][..])])
-        .output_dtypes(&[Dtype::Float32])
-        .grid(k / 64, mp, 1)
-        .threadgroup((k / 64).min(256), 1, 1)
-        .stream(target)
-        .dispatch()?
-        .take_at(0)?;
-    let sk = split_k(n, k);
     let nt = tile_width(n);
-    let y = kernel(n, k, tmr, edge)?
+    let fxs = fused_xsum() && nt == 32;
+    let xs = if fxs {
+        // The fused kernel never reads XS; x stands in for the input slot.
+        x.clone()
+    } else {
+        static XSUM: OnceLock<MetalKernel> = OnceLock::new();
+        if XSUM.get().is_none() {
+            let built = MetalKernel::builder("ironmlx_m5_affine4_xsum_v1")
+                .inputs(&["X","mdims"]).outputs(&["XS"])
+                .source("const int M=mdims[0], MP=mdims[1]; const uint m=thread_position_in_grid.y, g=thread_position_in_grid.x; if(g>=K/64 || int(m)>=MP)return; float acc=0.0f; if(int(m)<M) for(int i=0;i<64;i++)acc+=float(X[m*K+g*64+i]); XS[g*MP+m]=acc;")
+                .build()?;
+            let _ = XSUM.set(built);
+        }
+        XSUM.get()
+            .unwrap()
+            .dispatch_builder()
+            .inputs(&[x, &dims])
+            .template_int("K", k)
+            .output_shapes(&[Shape::from(&[k / 64, mp][..])])
+            .output_dtypes(&[Dtype::Float32])
+            .grid(k / 64, mp, 1)
+            .threadgroup((k / 64).min(256), 1, 1)
+            .stream(target)
+            .dispatch()?
+            .take_at(0)?
+    };
+    let sk = split_k(n, k);
+    let y = kernel(n, k, tmr, edge, fxs)?
         .dispatch_builder()
         .inputs(&[x, &xs, &p0.weight, &p0.sb, &dims])
         .output_shapes(&[Shape::from(&[m, n][..])])
@@ -548,6 +610,89 @@ mod tests {
             total_fwd * 1e3,
             total_inv * 1e3
         );
+        Ok(())
+    }
+
+    /// Diagnostic: per-shape split-K sweep in a dependent chain of the
+    /// production projection shapes (the source of `tuned_split_k`). Run
+    /// with --ignored.
+    #[test]
+    #[ignore]
+    #[serial(mlx_metal)]
+    fn split_k_sweep_production_shapes() -> Result<()> {
+        if let Ok(root) = std::env::var("MLX_DIR") {
+            mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib"))?;
+        }
+        use mlx::ops::cast::astype;
+        let target = StreamOrDevice::default();
+        let shapes = [
+            (2048, 4096),
+            (12352, 2048),
+            (9216, 2048),
+            (6144, 2048),
+            (12288, 2048),
+            (2048, 6144),
+            (2048, 16384),
+            (512, 2048),
+            (248320, 2048),
+        ];
+        for (n, k) in shapes {
+            let bytes_one = (n as f64) * (k as f64) * (0.5 + 4.0 / 64.0);
+            let layers = ((1.5e9 / bytes_one) as usize).clamp(2, 40);
+            let mut weights = Vec::new();
+            for layer in 0..layers {
+                let key = mlx::random::key(300 + layer as u64)?;
+                let w = mlx::random::normal()
+                    .shape(&[n, k][..])
+                    .scale(0.05)
+                    .key(&key)
+                    .sample()?;
+                let w = astype(&w, Dtype::Bfloat16)?;
+                let q = mlx::quantization::quantize(&w, Some(64), Some(4), "affine", None)?;
+                let p = tiled_from_native(&q[0], &q[1], &q[2], target)?;
+                mlx::transforms::eval(&[&p.weight, &p.sb])?;
+                weights.push(p);
+            }
+            for m in [1, 8, 16] {
+                let x0: Vec<f32> = (0..m * k).map(|v| ((v % 13) as f32 - 6.0) * 0.05).collect();
+                let x0: Array = (x0.as_slice(), &[m, k][..]).try_into()?;
+                let x0 = astype(&x0, Dtype::Bfloat16)?;
+                let mut line = format!("N=sk n={n} k={k} m={m}");
+                for sk in [1, 2, 4, 8, 16] {
+                    if sk > k / 64 {
+                        continue;
+                    }
+                    force_split_k(sk);
+                    let mut runs = Vec::new();
+                    for _ in 0..7 {
+                        let started = std::time::Instant::now();
+                        let mut x = x0.clone();
+                        for w in &weights {
+                            let y = forward_tiled(&x, w, None, target)?;
+                            // Next input: the first k outputs (tiled when N < K).
+                            let y = mlx::ops::indexing::slice_on(
+                                &y,
+                                &[0, 0][..],
+                                &[m, k.min(n)][..],
+                                target,
+                            )?;
+                            x = if n >= k {
+                                y
+                            } else {
+                                let reps = vec![&y; (k / n) as usize];
+                                mlx::ops::shape::concatenate_on(&reps, 1, target)?
+                            };
+                        }
+                        mlx::transforms::eval(&[&x])?;
+                        runs.push(started.elapsed().as_secs_f64() * 1e6 / layers as f64);
+                    }
+                    runs.sort_by(f64::total_cmp);
+                    line.push_str(&format!(" sk{sk}={:.1}", runs[runs.len() / 2]));
+                }
+                force_split_k(0);
+                eprintln!("{line} (us/layer, {layers} layers)");
+            }
+        }
         Ok(())
     }
 }

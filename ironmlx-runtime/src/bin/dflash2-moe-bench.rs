@@ -212,7 +212,15 @@ fn verify_curve(
     // Timing attribution only: the same verifies with one component's
     // output replaced by zeros (see `timing_ablation`).
     for width in 1_usize..=8 {
-        for ablation in ["noexperts", "noshared", "noattn", "nogdn", "noall"] {
+        for ablation in [
+            "noexperts",
+            "noshared",
+            "noattn",
+            "nogdn",
+            "noall",
+            "nogdncore",
+            "noattncore",
+        ] {
             shapes.push((format!("{ablation}-q{width}"), vec![-3]));
         }
     }
@@ -243,6 +251,8 @@ fn verify_curve(
                 "noshared" => ablation::SHARED_EXPERT,
                 "noattn" => ablation::FULL_ATTENTION,
                 "nogdn" => ablation::LINEAR_ATTENTION,
+                "nogdncore" => ablation::GDN_CORE,
+                "noattncore" => ablation::ATTN_CORE,
                 "noall" => {
                     ablation::ROUTED_EXPERTS
                         | ablation::SHARED_EXPERT
@@ -860,7 +870,9 @@ fn moe_microbench(
         target.config().num_experts_per_tok,
         target.config().norm_topk_prob,
     )?;
-    let routed = block.routed();
+    let routed = block
+        .routed()
+        .expect("microbench needs MLX routed experts (MOE_M5_EXPERTS off)");
     let taps = draft.config().dflash_config.target_layer_ids.clone();
     let hidden = target.config().hidden_size;
     // Widths the target certifies for a B1 linear verify (Qwen3.6 MoE: up to
@@ -972,15 +984,17 @@ fn main() -> Result<()> {
     let tokenizer = Tokenizer::from_loader(&loader)?;
     let target = Qwen35MoeModel::from_loader(&loader).context("load MoE target")?;
     drop(loader);
+    target.prepare_m5_experts()?;
     let target_load_s = load_started.elapsed().as_secs_f64();
     let draft_started = Instant::now();
     let draft_loader = Loader::open_dflash2(&args.draft)?;
-    let draft = DFlash2DraftModel::from_loader(
+    let mut draft = DFlash2DraftModel::from_loader(
         &draft_loader,
         target.dflash2_target_spec(),
         (args.draft_bits != 0).then_some(args.draft_bits),
     )?;
     drop(draft_loader);
+    draft.share_weight_layout_if_requested()?;
     let draft_load_s = draft_started.elapsed().as_secs_f64();
     let capabilities = target.dflash2_verify_capabilities();
     let prompts: Vec<PromptCase> = serde_json::from_reader(std::fs::File::open(&args.prompts)?)?;
@@ -1106,6 +1120,18 @@ fn main() -> Result<()> {
                         &budget_setting,
                     ),
                 }
+                // In-process A/B of the M5 expert route (both layouts
+                // resident with IRONMLX_DIAGNOSTIC_MOE_M5_AB=1).
+                let (mode_name, m5_off) = match mode_name.strip_suffix("-m5off") {
+                    Some(base) => (base, true),
+                    None => (mode_name, false),
+                };
+                ironmlx_lm::nn::moe_m5_experts::set_ab_off(m5_off);
+                let (mode_name, no_prep) = match mode_name.strip_suffix("-noprep") {
+                    Some(base) => (base, true),
+                    None => (mode_name, false),
+                };
+                ironmlx_lm::nn::fused_norm::set_ab_off(no_prep);
                 let (base_mode, generic) = match mode_name.strip_suffix("-generic") {
                     Some(base) => (base, true),
                     None => (mode_name, false),
@@ -1163,6 +1189,10 @@ fn main() -> Result<()> {
                 let natural_eos = tokens.iter().position(|token| eos.contains(token));
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 std::hash::Hash::hash(&tokens, &mut hasher);
+                let footprint = ironmlx_runtime::core::process_memory::macos_phys_footprint_bytes();
+                mlx::clear_cache();
+                let footprint_cleared =
+                    ironmlx_runtime::core::process_memory::macos_phys_footprint_bytes();
                 writeln!(
                     out,
                     "{}",
@@ -1178,10 +1208,14 @@ fn main() -> Result<()> {
                         "finish": finish,
                         "natural_eos_index": natural_eos,
                         "token_hash": std::hash::Hasher::finish(&hasher),
+                        "tokens": tokens,
+                        "prompt_ids": prompt_ids,
                         "ttft_s": ttft,
                         "e2e_s": e2e,
                         "decode_tps": decode_tps,
-                        "footprint": ironmlx_runtime::core::process_memory::macos_phys_footprint_bytes(),
+                        "footprint": footprint,
+                        "footprint_cleared": footprint_cleared,
+                        "mlx_active": mlx::memory::snapshot().active_bytes,
                         "mlx_peak": mlx::memory::snapshot().peak_bytes,
                         "metrics": metrics,
                         "grouped_expert_dispatches":

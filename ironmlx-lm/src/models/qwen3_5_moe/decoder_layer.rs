@@ -145,6 +145,11 @@ impl DecoderLayerMoe {
         out
     }
 
+    /// Convert this layer's M5 expert store to its tiled layout now.
+    pub(crate) fn prepare_m5_experts(&self, target: StreamOrDevice) -> Result<bool> {
+        self.ffn.prepare_m5_experts(target)
+    }
+
     /// Single-resident affine4 layout for this layer's dense projections
     /// (see `nn::shared_weight_layout`). Returns the number of stores.
     pub(crate) fn share_weight_layout(&mut self) -> Result<usize> {
@@ -263,6 +268,26 @@ impl DecoderLayerMoe {
                     }
                 }
             };
+            if crate::nn::fused_norm::requested()
+                && x.dtype() == mlx::Dtype::Bfloat16
+                && attn.dtype() == mlx::Dtype::Bfloat16
+                && x.shape().as_slice()[1] <= 64
+                && x.shape().as_slice()[2] % 128 == 0
+                && x.shape().as_slice()[2] <= 4096
+            {
+                // Residual add + post norm in one dispatch, and the MoE's
+                // residual add in its combine (both bit-identical).
+                let (h, normed_post) = crate::nn::fused_norm::add_rms_norm_on(
+                    x,
+                    &attn,
+                    self.post_attention_layernorm.weight(),
+                    self.post_attention_layernorm.eps(),
+                    target,
+                )?;
+                return self
+                    .ffn
+                    .forward_residual_on(&normed_post, &h, target, layer_idx);
+            }
             let h = x + &attn;
 
             // Block 2: post_norm + SparseMoeBlock + residual

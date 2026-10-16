@@ -151,6 +151,16 @@ impl Qwen35MoeTextModel {
             .collect()
     }
 
+    /// Convert every layer's M5 expert store now (start-up); returns the
+    /// number of layers converted.
+    pub(crate) fn prepare_m5_experts(&self, target: StreamOrDevice) -> Result<usize> {
+        let mut converted = 0;
+        for layer in &self.layers {
+            converted += usize::from(layer.prepare_m5_experts(target)?);
+        }
+        Ok(converted)
+    }
+
     /// Single-resident affine4 layout for every layer's dense projections.
     pub(crate) fn share_weight_layout(&mut self) -> Result<usize> {
         let mut stores = 0;
@@ -455,7 +465,8 @@ impl Qwen35MoeTextModel {
             ));
         }
         let refs = captured.iter().collect::<Vec<_>>();
-        let context_hidden = mlx::ops::shape::concatenate_on(&refs, -1, target)?;
+        // One copy dispatch instead of one strided copy per tapped layer.
+        let context_hidden = crate::nn::concat_last::concat_last_on(&refs, target)?;
         Ok((self.norm.forward_on(&x, target)?, context_hidden))
     }
 

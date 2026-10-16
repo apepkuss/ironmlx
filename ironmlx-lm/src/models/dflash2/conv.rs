@@ -23,6 +23,10 @@ impl DFlash2GroupedConv {
         &self.kernel_projection
     }
 
+    pub(super) fn share_weight_layout(&mut self) -> Result<usize> {
+        Ok(usize::from(self.kernel_projection.share_whole()?.is_some()))
+    }
+
     pub(super) fn from_loader(
         loader: &Loader,
         prefix: &str,

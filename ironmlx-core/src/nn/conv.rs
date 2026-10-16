@@ -57,6 +57,15 @@ impl Conv1d {
         &self.cfg
     }
 
+    /// Weight `[C_out, K, C_in / groups]`.
+    pub fn weight(&self) -> &Array {
+        &self.weight
+    }
+
+    pub fn bias(&self) -> Option<&Array> {
+        self.bias.as_ref()
+    }
+
     /// Forward pass with default stream.
     pub fn forward(&self, x: &Array) -> Result<Array> {
         self.forward_on(x, ())

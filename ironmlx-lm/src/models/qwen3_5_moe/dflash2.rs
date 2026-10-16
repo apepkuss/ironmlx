@@ -197,6 +197,8 @@ impl DFlash2Target for Qwen35MoeModel {
         if self.dflash2_target_bits.is_none() {
             return Ok(());
         }
+        // Expert weights to the M5 tiled layout before the first request.
+        self.prepare_m5_experts()?;
         let started = std::time::Instant::now();
         let target = StreamOrDevice::default();
         let mut cache = self.make_cache(1, 64, crate::core::Model::cache_dtype(self))?;

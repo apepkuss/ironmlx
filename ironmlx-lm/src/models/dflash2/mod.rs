@@ -36,6 +36,18 @@ pub fn experimental_tree_profile() -> bool {
     })
 }
 
+/// M5 profile setting `DFLASH2_DRAFT_M5_RESIDENT` with the shared weight
+/// layout on a GPU with the tensor unit.
+pub(crate) fn m5_resident_requested() -> bool {
+    static REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *REQUESTED.get_or_init(|| {
+        ironmlx_core::m5_profile::flag(
+            ironmlx_core::m5_profile::settings::DFLASH2_DRAFT_M5_RESIDENT,
+        ) && crate::nn::shared_weight_layout::requested()
+            && crate::nn::m5_affine4::tensor_unit_available()
+    })
+}
+
 fn load_linear(loader: &Loader, prefix: &str, draft_bits: Option<i32>) -> Result<Linear> {
     let Some(bits) = draft_bits else {
         return Linear::from_loader(loader, prefix);

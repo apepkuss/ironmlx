@@ -63,6 +63,10 @@ pub mod settings {
     /// Qwen3.6 MoE: routed and shared experts of narrow verify batches as
     /// expert tiles (`nn::moe_tile_experts`).
     pub const MOE_TILE_EXPERTS: &str = "IRONMLX_EXPERIMENTAL_MOE_TILE_EXPERTS";
+    /// Qwen3.6 MoE: routed and shared experts of every batch on the M5
+    /// tensor unit with one tiled resident copy of the expert weights
+    /// (`nn::moe_m5_experts`).
+    pub const MOE_M5_EXPERTS: &str = "IRONMLX_EXPERIMENTAL_MOE_M5_EXPERTS";
     /// GatedDelta speculative commit: replay only each row's accepted steps,
     /// state only.
     pub const GDN_COMMIT_KERNEL: &str = "IRONMLX_EXPERIMENTAL_GDN_COMMIT_KERNEL";
@@ -81,6 +85,18 @@ pub mod settings {
     /// Fixed draft budget of a request that ran ragged windows and is left
     /// decoding alone; 0 keeps its adaptive single-request policy.
     pub const DFLASH2_RAGGED_SOLO_BUDGET: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_RAGGED_SOLO_BUDGET";
+    /// M5 affine4 tensor kernel computes the group sums of x itself instead
+    /// of a separate dependent dispatch per projection (same bits).
+    pub const M5_FUSED_XSUM: &str = "IRONMLX_EXPERIMENTAL_M5_FUSED_XSUM";
+    /// Every DFlash2 drafter projection in one resident M5 tiled layout, and
+    /// every proposal on the M5 route (no checkpoint-layout copy kept).
+    pub const DFLASH2_DRAFT_M5_RESIDENT: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_DRAFT_M5_RESIDENT";
+    /// M5 affine4 kernel: per-shape K-slice counts tuned on the M5 Max.
+    pub const M5_TUNED_SPLIT_K: &str = "IRONMLX_EXPERIMENTAL_M5_TUNED_SPLIT_K";
+    /// Bit-identical single-dispatch decoder glue: GatedDelta input
+    /// preparation and gated norm, residual add + norm, the MoE residual add
+    /// (`nn::fused_norm`, `nn::gdn_prep`).
+    pub const FUSED_GLUE: &str = "IRONMLX_EXPERIMENTAL_FUSED_GLUE";
 }
 
 /// Model family a DFlash2 profile is qualified for. Each family carries its
@@ -150,10 +166,15 @@ impl M5ProfileTarget {
 /// 364.97 tok/s against 346.3 for Splash 1.3.0; teacher-forced flips
 /// 1.2-2.3% of positions, all within a reference margin of 0.63.
 ///
-/// Single-request drafts keep the native drafter projections: their GPU time
-/// is hidden behind the verify build, so the M5 route's host encoding only
-/// lengthened B1 windows (0.4-0.5 ms at every budget with both layouts
-/// resident). Target arithmetic is unchanged, so outputs are too.
+/// Routed and shared experts of every batch run on the M5 tensor unit from
+/// one tiled resident copy of the expert weights (converted at start-up);
+/// the drafter's projections live in one resident M5 layout and every
+/// proposal takes that route; M5 projections use per-shape K-slice counts and
+/// in-kernel group sums; GatedDelta input preparation, its gated norm and the
+/// decoder's residual add + post norm (and the MoE residual add) are single
+/// dispatches computing the op-by-op values bit for bit. Paired in-process B1
+/// q8 windows: experts -4.3%, glue -2.1%, drafts -0.7%; verify q8 12.7 ->
+/// 11.7 ms with the split counts.
 const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
     (settings::DFLASH2_RAGGED_LINEAR, "1"),
     (settings::DFLASH2_RAGGED_BUDGET, "3"),
@@ -168,6 +189,11 @@ const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
     (settings::M5_SHARED_WEIGHT_LAYOUT, "1"),
     (settings::M5_PRECOMPILE, "1"),
     (settings::MOE_TILE_EXPERTS, "1"),
+    (settings::MOE_M5_EXPERTS, "1"),
+    (settings::M5_TUNED_SPLIT_K, "1"),
+    (settings::M5_FUSED_XSUM, "1"),
+    (settings::FUSED_GLUE, "1"),
+    (settings::DFLASH2_DRAFT_M5_RESIDENT, "1"),
     (settings::GDN_COMMIT_KERNEL, "1"),
     (settings::QEMBEDDING_RUNTIME_COUNT, "1"),
     (settings::MLX_CACHE_MAX_MIB, "512"),
@@ -759,6 +785,11 @@ mod tests {
             settings::M5_SHARED_WEIGHT_LAYOUT,
             settings::M5_PRECOMPILE,
             settings::MOE_TILE_EXPERTS,
+            settings::MOE_M5_EXPERTS,
+            settings::M5_TUNED_SPLIT_K,
+            settings::M5_FUSED_XSUM,
+            settings::FUSED_GLUE,
+            settings::DFLASH2_DRAFT_M5_RESIDENT,
             settings::GDN_COMMIT_KERNEL,
         ] {
             assert_eq!(
