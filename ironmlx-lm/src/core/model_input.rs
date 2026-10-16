@@ -518,6 +518,44 @@ pub fn build_position_ids_vl(
     image_token_id: i32,
     spatial_merge_size: i32,
 ) -> crate::Result<Array> {
+    let (streams, _) =
+        vl_position_streams(input_ids, grid_thw, image_token_id, spatial_merge_size)?;
+    let s = input_ids.len();
+    // Layout: [stream_t | stream_h | stream_w] contiguous, shape [3, 1, S].
+    let arr: Array = (&streams[..], &[3_i32, 1_i32, s as i32][..]).try_into()?;
+    Ok(arr)
+}
+
+/// MRoPE position delta of a VL prompt: its largest position + 1 minus its
+/// length (`mrope_position_deltas` of Qwen-VL `get_rope_index`). Image blocks
+/// span fewer positions than tokens, so every token after the prompt takes
+/// position `token index + delta` on all three streams. Same arguments and
+/// errors as [`build_position_ids_vl`].
+pub fn vl_rope_delta(
+    input_ids: &[i32],
+    grid_thw: &[(i32, i32, i32)],
+    image_token_id: i32,
+    spatial_merge_size: i32,
+) -> crate::Result<i32> {
+    let (_, next_position) =
+        vl_position_streams(input_ids, grid_thw, image_token_id, spatial_merge_size)?;
+    let len = i32::try_from(input_ids.len()).map_err(|_| {
+        anyhow!(
+            "vl_rope_delta: prompt length {} exceeds i32",
+            input_ids.len()
+        )
+    })?;
+    Ok(next_position - len)
+}
+
+/// The three MRoPE streams of a VL prompt, `[t | h | w]` each of the prompt's
+/// length, and the position following its last token.
+fn vl_position_streams(
+    input_ids: &[i32],
+    grid_thw: &[(i32, i32, i32)],
+    image_token_id: i32,
+    spatial_merge_size: i32,
+) -> crate::Result<(Vec<i32>, i32)> {
     if grid_thw.is_empty() {
         return Err(anyhow!(
             "build_position_ids_vl: grid_thw must be non-empty (use build_position_ids for text-only)"
@@ -610,6 +648,7 @@ pub fn build_position_ids_vl(
             stream_h.push(st_idx + k);
             stream_w.push(st_idx + k);
         }
+        st_idx += trail_len;
     }
 
     // Sanity: each stream must have exactly S entries. Algorithmic invariant
@@ -619,15 +658,11 @@ pub fn build_position_ids_vl(
     debug_assert_eq!(stream_h.len(), s);
     debug_assert_eq!(stream_w.len(), s);
 
-    // Build [3, S] array and reshape to [3, 1, S].
-    // Layout: [stream_t | stream_h | stream_w] contiguous, shape [3, S].
     let mut flat: Vec<i32> = Vec::with_capacity(3 * s);
     flat.extend_from_slice(&stream_t);
     flat.extend_from_slice(&stream_h);
     flat.extend_from_slice(&stream_w);
-
-    let arr: Array = (&flat[..], &[3_i32, 1_i32, s as i32][..]).try_into()?;
-    Ok(arr)
+    Ok((flat, st_idx))
 }
 
 /// Build MRoPE position ids `[3, B, max_len]` for mixed text+VL batch prefill
@@ -932,6 +967,29 @@ pub fn slice_vision_embeds_rows(
 #[cfg(test)]
 mod composition_tests {
     use super::*;
+
+    #[test]
+    fn vl_rope_delta_is_the_position_after_the_prompt_minus_its_length() {
+        let pad = IMAGE_TOKEN_ID;
+        // Text 0..2, one (1, 4, 6) image -> 2x3 merged tokens at positions
+        // t=2, h=2..3, w=2..4 (largest 4), trailing text 5..6.
+        let ids = [1, 2, pad, pad, pad, pad, pad, pad, 3, 4];
+        let delta = vl_rope_delta(&ids, &[(1, 4, 6)], pad, 2).unwrap();
+        assert_eq!(delta, 7 - ids.len() as i32);
+        let positions: Vec<i32> = build_position_ids_vl(&ids, &[(1, 4, 6)], pad, 2)
+            .unwrap()
+            .to_vec()
+            .unwrap();
+        assert_eq!(
+            positions.iter().max().unwrap() + 1 - ids.len() as i32,
+            delta
+        );
+        // An image closing the prompt: the next position follows its block.
+        let ids = [1, pad, pad, pad, pad];
+        assert_eq!(vl_rope_delta(&ids, &[(1, 4, 4)], pad, 2).unwrap(), 3 - 5);
+        assert!(vl_rope_delta(&ids, &[], pad, 2).is_err());
+    }
+
     #[test]
     fn vl_chunk_composition_counts_runs_and_edges() {
         let ids: Vec<u32> = vec![42, 42, 1, 42, 2, 42, 42, 42];

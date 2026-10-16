@@ -202,6 +202,7 @@ use {
     ironmlx_lm::core::model_input::slice_logits_row,
     ironmlx_lm::core::model_input::slice_pos_ids_axis2,
     ironmlx_lm::core::model_input::slice_vision_embeds_rows,
+    ironmlx_lm::core::model_input::vl_rope_delta,
 };
 
 /// Convenience alias — avoids `clippy::type_complexity` on Vec<Option<&[...]>> sites.
@@ -391,6 +392,8 @@ struct PromptLookupMtpDraftInput {
     row_idx: usize,
     current_token: u32,
     verify_start_pos: i32,
+    /// MRoPE position delta of the row (`Scheduler::row_rope_delta`).
+    rope_delta: i32,
     expected_draft_tokens: Vec<u32>,
 }
 
@@ -937,6 +940,11 @@ pub struct RequestState {
     /// Tokenizer id of `<|image_pad|>`. Carried from
     /// `GenerateRequest::image_token_id`. Unused if `pixel_values` is None.
     pub image_token_id: i32,
+    /// MRoPE position delta of a Qwen-VL prompt ([`vl_rope_delta`]): tokens
+    /// after the prompt take position `token index + delta`. Zero for text
+    /// rows; read through `Scheduler::row_rope_delta`, which ignores it for
+    /// models without VL MRoPE positions.
+    pub mrope_delta: i32,
     /// Per-request chunk size for chunked mid-batch prefill. Copied from
     /// `GenerateRequest::prefill_chunk_size` at admit time, clamped to i32.
     /// `0` is preserved as "disable chunking" and expanded to prompt length
@@ -6847,6 +6855,19 @@ impl<M: Model> Scheduler<M> {
         Ok(())
     }
 
+    /// MRoPE position delta of the request in `row` for `model`: zero for
+    /// text rows, models that derive positions themselves and VL models with
+    /// sequential positions.
+    fn row_rope_delta(&self, model: &M, row: usize) -> i32 {
+        if !model.requires_position_ids() || model.vl_positions_sequential() {
+            return 0;
+        }
+        self.slots
+            .get(row)
+            .and_then(Option::as_ref)
+            .map_or(0, |state| state.mrope_delta)
+    }
+
     fn mtp_position_ids(&mut self, model: &M, start_pos: i32, len: i32) -> Result<Array> {
         if model.requires_position_ids() {
             build_position_ids(start_pos, len)
@@ -6959,6 +6980,22 @@ impl<M: Model> Scheduler<M> {
             prompt_len
         );
         let real_len = prompt_len as i32;
+        // A prompt whose images are not in the Qwen-VL layout (another
+        // model family) has no MRoPE delta; a Qwen-VL prompt that fails the
+        // scan is rejected by its prefill's `build_position_ids_vl`.
+        let mrope_delta = match req.image_grid_thw.as_deref() {
+            Some(grids) if !grids.is_empty() => {
+                let ids: Vec<i32> = req.prompt_ids.iter().map(|&id| id as i32).collect();
+                vl_rope_delta(
+                    &ids,
+                    grids,
+                    req.image_token_id,
+                    req.image_spatial_merge_size,
+                )
+                .unwrap_or(0)
+            }
+            _ => 0,
+        };
         let constraint_plan = req.constraint.clone();
         let constraint = req
             .constraint
@@ -6983,6 +7020,7 @@ impl<M: Model> Scheduler<M> {
             image_grid_thw: req.image_grid_thw,
             image_spatial_merge_size: req.image_spatial_merge_size,
             image_token_id: req.image_token_id,
+            mrope_delta,
             prefill_chunk_size: i32::try_from(req.prefill_chunk_size).unwrap_or(i32::MAX),
             decode_cadence_mid_chunk_cap: req.decode_cadence_mid_chunk_cap,
             kv_cache_turboquant_bits: req.kv_cache_turboquant_bits,
@@ -9511,6 +9549,7 @@ impl<M: Model> Scheduler<M> {
             let mut verify_flat = vec![0_u32; batch * max_verify_len];
             let mut verify_lens = vec![0_i32; batch];
             let mut verify_starts = vec![0_i32; batch];
+            let mut verify_position_starts = vec![0_i32; batch];
             for (ctx_idx, ctx) in contexts.iter().enumerate() {
                 let compact_row = cache_row_for_ctx[ctx_idx];
                 let start = compact_row * max_verify_len;
@@ -9519,6 +9558,8 @@ impl<M: Model> Scheduler<M> {
                     .copy_from_slice(&ctx.draft_tokens);
                 verify_lens[compact_row] = (ctx.draft_tokens.len() + 1) as i32;
                 verify_starts[compact_row] = ctx.verify_start_pos;
+                verify_position_starts[compact_row] =
+                    ctx.verify_start_pos + self.row_rope_delta(model, ctx.row_idx);
             }
             let max_context_tokens = verify_starts
                 .iter()
@@ -9557,6 +9598,7 @@ impl<M: Model> Scheduler<M> {
                         row_idx: ctx.row_idx,
                         current_token: ctx.current_token,
                         verify_start_pos: ctx.verify_start_pos,
+                        rope_delta: self.row_rope_delta(model, ctx.row_idx),
                         expected_draft_tokens: ctx.draft_tokens.clone(),
                     })
                     .collect::<Vec<_>>();
@@ -9595,7 +9637,7 @@ impl<M: Model> Scheduler<M> {
             let verify_logits = if exact_batched_verify {
                 let position_ids = if model.requires_position_ids() {
                     build_mtp_batched_position_ids(
-                        &verify_starts,
+                        &verify_position_starts,
                         &verify_lens,
                         max_verify_len as i32,
                     )?
@@ -9643,7 +9685,7 @@ impl<M: Model> Scheduler<M> {
                         if depth < verify_lens[row] as usize {
                             step_tokens[row] = verify_flat[row * max_verify_len + depth] as i32;
                             step_lens[row] = 1;
-                            step_starts[row] = verify_starts[row] + depth as i32;
+                            step_starts[row] = verify_position_starts[row] + depth as i32;
                         }
                     }
                     let step_arr: Array =
@@ -10037,7 +10079,8 @@ impl<M: Model> Scheduler<M> {
                             *dst = token as i32;
                         }
                         replay_lens[compact_row] = accepted_len as i32;
-                        replay_starts[compact_row] = ctx.verify_start_pos;
+                        replay_starts[compact_row] =
+                            ctx.verify_start_pos + self.row_rope_delta(model, ctx.row_idx);
                     }
                     let mut replay_hidden_steps =
                         capture_accepted_hidden.then(|| Vec::with_capacity(max_replay_len));
@@ -10207,9 +10250,10 @@ impl<M: Model> Scheduler<M> {
                         accepted_verify_input_len,
                         mlx::StreamOrDevice::default(),
                     )?;
+                    let rope_delta = self.row_rope_delta(model, ctx.row_idx);
                     let position_ids = self.mtp_position_ids(
                         model,
-                        ctx.verify_start_pos,
+                        ctx.verify_start_pos + rope_delta,
                         accepted_verify_input_len as i32,
                     )?;
                     mtp_shadow_commits.push(PromptLookupMtpAcceptedInput {
@@ -10416,6 +10460,10 @@ impl<M: Model> Scheduler<M> {
         );
         let mut snapshots = Vec::with_capacity(inputs.len());
         let mut seen_rows = HashSet::with_capacity(inputs.len());
+        let rope_deltas: HashMap<usize, i32> = inputs
+            .iter()
+            .map(|input| (input.row_idx, input.rope_delta))
+            .collect();
         for input in inputs {
             anyhow::ensure!(
                 seen_rows.insert(input.row_idx),
@@ -10499,7 +10547,7 @@ impl<M: Model> Scheduler<M> {
                             )?;
                             let current_position_ids = Self::prompt_lookup_mtp_position_ids(
                                 model,
-                                ctx.verify_start_pos,
+                                ctx.verify_start_pos + rope_deltas[&ctx.row_idx],
                                 1,
                             )?;
                             let position_ids = concatenate_position_id_steps(
@@ -10541,7 +10589,7 @@ impl<M: Model> Scheduler<M> {
                         for offset in produced..ctx.draft_budget {
                             let position_ids = Self::prompt_lookup_mtp_position_ids(
                                 model,
-                                ctx.verify_start_pos + offset as i32,
+                                ctx.verify_start_pos + rope_deltas[&ctx.row_idx] + offset as i32,
                                 1,
                             )?;
                             let draft_started = Instant::now();
@@ -10674,7 +10722,11 @@ impl<M: Model> Scheduler<M> {
                         )?;
                         let positions = active_indices
                             .iter()
-                            .map(|&idx| contexts[idx].verify_start_pos + offset as i32)
+                            .map(|&idx| {
+                                contexts[idx].verify_start_pos
+                                    + rope_deltas[&contexts[idx].row_idx]
+                                    + offset as i32
+                            })
                             .collect::<Vec<_>>();
                         let position_ids = if model.requires_position_ids() {
                             build_decode_position_ids(&positions)?
@@ -13017,7 +13069,9 @@ impl<M: Model> Scheduler<M> {
                     1,
                     mlx::StreamOrDevice::default(),
                 )?;
-                let current_position_ids = self.mtp_position_ids(model, ctx.verify_start_pos, 1)?;
+                let rope_delta = self.row_rope_delta(model, ctx.row_idx);
+                let current_position_ids =
+                    self.mtp_position_ids(model, ctx.verify_start_pos + rope_delta, 1)?;
                 let position_ids = concatenate_position_id_steps(
                     &tail.position_ids,
                     &current_position_ids,
@@ -13069,9 +13123,13 @@ impl<M: Model> Scheduler<M> {
                 produced = 1;
             }
 
+            let rope_delta = self.row_rope_delta(model, ctx.row_idx);
             for offset in produced..ctx.draft_budget {
-                let position_ids =
-                    self.mtp_position_ids(model, ctx.verify_start_pos + offset as i32, 1)?;
+                let position_ids = self.mtp_position_ids(
+                    model,
+                    ctx.verify_start_pos + rope_delta + offset as i32,
+                    1,
+                )?;
                 let draft_forward_start = Instant::now();
                 let output = model.mtp_forward_on(
                     mtp,
@@ -13309,7 +13367,11 @@ impl<M: Model> Scheduler<M> {
                 )?;
                 let positions = active_indices
                     .iter()
-                    .map(|&idx| contexts[idx].verify_start_pos + offset as i32)
+                    .map(|&idx| {
+                        contexts[idx].verify_start_pos
+                            + self.row_rope_delta(model, contexts[idx].row_idx)
+                            + offset as i32
+                    })
                     .collect::<Vec<_>>();
                 let position_ids = if model.requires_position_ids() {
                     build_decode_position_ids(&positions)?
@@ -13472,7 +13534,8 @@ impl<M: Model> Scheduler<M> {
             }
             let mut verify_starts = vec![0_i32; b];
             for (ctx, &compact_row) in contexts.iter().zip(cache_row_for_ctx.iter()) {
-                verify_starts[compact_row] = ctx.verify_start_pos;
+                verify_starts[compact_row] =
+                    ctx.verify_start_pos + self.row_rope_delta(model, ctx.row_idx);
             }
             let (verify_arr, verify_lens) = build_mtp_device_verify_input(
                 &contexts,
@@ -13734,7 +13797,8 @@ impl<M: Model> Scheduler<M> {
                         replay_flat[start + 1..start + accepted_len]
                             .copy_from_slice(&resolved_draft_tokens[ctx_idx][..accepted_len - 1]);
                         replay_lens[compact_row] = accepted_len as i32;
-                        replay_starts[compact_row] = ctx.verify_start_pos;
+                        replay_starts[compact_row] =
+                            ctx.verify_start_pos + self.row_rope_delta(model, ctx.row_idx);
                     }
                     let mut replay_hidden_steps = Vec::with_capacity(max_replay_len);
                     for depth in 0..max_replay_len {
@@ -14285,6 +14349,7 @@ impl<M: Model> Scheduler<M> {
             current_token,
             draft_budget,
             history.len(),
+            self.row_rope_delta(model, row_idx),
             draft_constraint.as_mut(),
         )?;
         let current: Array = (&[current_token][..], &[1_i32, 1_i32][..]).try_into()?;
@@ -14308,7 +14373,9 @@ impl<M: Model> Scheduler<M> {
         let mtp_cache_snapshot = draft_result.cache_snapshot;
         let verify_len = draft_budget + 1;
         let verify_start_pos = (prompt_ids.len() + generated_tokens.len() - 1) as i32;
-        let verify_pos_ids = self.mtp_position_ids(model, verify_start_pos, verify_len as i32)?;
+        let rope_delta = self.row_rope_delta(model, row_idx);
+        let verify_pos_ids =
+            self.mtp_position_ids(model, verify_start_pos + rope_delta, verify_len as i32)?;
         let pre_window_hidden = row_state.last_hidden.clone();
 
         let base_snapshot = (draft_budget > 0).then(|| {
@@ -14582,6 +14649,7 @@ impl<M: Model> Scheduler<M> {
         current_token: u32,
         draft_budget: usize,
         history_len: usize,
+        rope_delta: i32,
         mut constraint: Option<&mut ironmlx_lm::core::constrained::ConstraintSession>,
     ) -> Result<MtpDeviceDraftResult>
     where
@@ -14597,7 +14665,8 @@ impl<M: Model> Scheduler<M> {
             .ok_or_else(|| anyhow!("draft_mtp_tokens_single_greedy_device: invalid history len"))?;
 
         for offset in 0..draft_budget {
-            let position_ids = self.mtp_position_ids(model, start_pos + offset as i32, 1)?;
+            let position_ids =
+                self.mtp_position_ids(model, start_pos + rope_delta + offset as i32, 1)?;
             let draft_forward_start = Instant::now();
             let output = model.mtp_forward_on(
                 mtp,
@@ -16048,8 +16117,14 @@ impl<M: Model> Scheduler<M> {
             // The cache offset is the zero-based position where the current
             // token will be written. `RequestState::real_len` already includes
             // that emitted-but-not-yet-cached token, so using it directly here
-            // shifts every ordinary Scheduler decode position by one.
-            build_decode_position_ids(&pre_offsets)?
+            // shifts every ordinary Scheduler decode position by one. VL rows
+            // continue after their prompt's MRoPE delta.
+            let positions: Vec<i32> = active_rows
+                .iter()
+                .zip(&pre_offsets)
+                .map(|(&row, &offset)| offset + self.row_rope_delta(model, row))
+                .collect();
+            build_decode_position_ids(&positions)?
         } else {
             self.reusable_dummy_position_ids()?
         };
@@ -21300,6 +21375,44 @@ mod tests {
     /// `Model` + `DenseVlMethods` without requiring a real Qwen35 weight
     /// file.  `batched_prefill` returns synthetic logits that always argmax
     /// to token 3; all other forward paths are unreachable from unit tests.
+    #[test]
+    #[serial(mlx_metal)]
+    fn vl_rows_decode_after_their_prompt_mrope_positions() {
+        let mut scheduler = Scheduler::<FinishedPhaseFakeModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        // Text position 0, one (1, 4, 4) image of 2x2 merged tokens at
+        // t=1, h=1..2, w=1..2, trailing text at 3..4: the next position is 5
+        // for a 7-token prompt.
+        let pad = 248_056_u32;
+        let mut vl = mk_req(vec![1, pad, pad, pad, pad, 2, 3]);
+        vl.pixel_values = Some(vec![
+            mlx::Array::zeros((1_i32, 1_i32), mlx::Dtype::Float32).unwrap()
+        ]);
+        vl.image_grid_thw = Some(vec![(1, 4, 4)]);
+        let vl = scheduler.admit(vl).expect("admit VL");
+        let text = scheduler.admit(mk_req(vec![1, 2, 3])).expect("admit text");
+        let row = |id| {
+            scheduler
+                .slots
+                .iter()
+                .position(|slot| slot.as_ref().is_some_and(|state| state.id == id))
+                .expect("admitted row")
+        };
+        let (vl_row, text_row) = (row(vl), row(text));
+        assert_eq!(
+            scheduler.row_rope_delta(&FinishedPhaseFakeModel, vl_row),
+            5 - 7
+        );
+        assert_eq!(
+            scheduler.row_rope_delta(&FinishedPhaseFakeModel, text_row),
+            0
+        );
+    }
+
     struct FinishedPhaseFakeModel;
 
     impl ironmlx_lm::core::model::Model for FinishedPhaseFakeModel {
@@ -24628,6 +24741,7 @@ mod tests {
             row_idx: 0,
             current_token: 8,
             verify_start_pos: 1,
+            rope_delta: 0,
             expected_draft_tokens: vec![9],
         }];
 
@@ -24722,6 +24836,7 @@ mod tests {
             row_idx: 0,
             current_token: 8,
             verify_start_pos: 1,
+            rope_delta: 0,
             expected_draft_tokens: vec![9],
         }];
 
@@ -24785,6 +24900,7 @@ mod tests {
             row_idx: 0,
             current_token: 8,
             verify_start_pos: 1,
+            rope_delta: 0,
             expected_draft_tokens: vec![9],
         }];
 
