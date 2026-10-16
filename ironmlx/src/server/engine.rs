@@ -119,7 +119,11 @@ pub(crate) trait EngineVariantHttpAdapter {
 impl EngineVariantHttpAdapter for EngineVariant {
     async fn openai_chat_completions(&self, req: openai::ChatRequest) -> Response {
         match self {
-            Self::Audio(_) | Self::Decision(_) | Self::QwenImage(_) | Self::Embedding(_) => {
+            Self::Asr(_)
+            | Self::Audio(_)
+            | Self::Decision(_)
+            | Self::QwenImage(_)
+            | Self::Embedding(_) => {
                 super::audio::task_mismatch(super::api_error::ApiProtocol::OpenAi)
             }
             Self::Qwen35(state) => openai::chat_completions_with_state(state.clone(), req).await,
@@ -145,7 +149,11 @@ impl EngineVariantHttpAdapter for EngineVariant {
 
     async fn openai_responses(&self, req: responses::ResponsesRequest) -> Response {
         match self {
-            Self::Audio(_) | Self::Decision(_) | Self::QwenImage(_) | Self::Embedding(_) => {
+            Self::Asr(_)
+            | Self::Audio(_)
+            | Self::Decision(_)
+            | Self::QwenImage(_)
+            | Self::Embedding(_) => {
                 super::audio::task_mismatch(super::api_error::ApiProtocol::OpenAi)
             }
             Self::Qwen35(state) => responses::responses_with_state(state.clone(), req).await,
@@ -180,7 +188,11 @@ impl EngineVariantHttpAdapter for EngineVariant {
 
     async fn anthropic_messages(&self, req: anthropic::MessagesRequest) -> Response {
         match self {
-            Self::Audio(_) | Self::Decision(_) | Self::QwenImage(_) | Self::Embedding(_) => {
+            Self::Asr(_)
+            | Self::Audio(_)
+            | Self::Decision(_)
+            | Self::QwenImage(_)
+            | Self::Embedding(_) => {
                 super::audio::task_mismatch(super::api_error::ApiProtocol::Anthropic)
             }
             Self::Qwen35(state) => anthropic::messages_with_state(state.clone(), req).await,
@@ -334,6 +346,13 @@ pub(crate) fn engine_pool_router() -> Router<EnginePoolState> {
         .route("/v1/images/edits", post(openai_images_edits))
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/audio/speech", post(super::audio::speech))
+        .route("/v1/realtime", get(super::realtime::realtime))
+        .route(
+            "/v1/audio/transcriptions",
+            post(super::transcriptions::transcriptions).layer(
+                axum::extract::DefaultBodyLimit::max(super::transcriptions::MAX_ASR_REQUEST_BYTES),
+            ),
+        )
         .route("/v1/systemone", post(super::systemone::system_one))
         .route("/v1/decisions", post(super::decisions::decisions))
         .route(

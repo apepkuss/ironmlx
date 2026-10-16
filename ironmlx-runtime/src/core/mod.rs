@@ -56,6 +56,7 @@ pub mod model_management;
 
 pub mod model_capacity;
 
+pub mod asr_execution;
 pub mod audio_execution;
 pub mod decision_execution;
 

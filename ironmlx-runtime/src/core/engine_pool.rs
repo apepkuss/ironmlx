@@ -157,6 +157,7 @@ pub struct EngineLoadedModelInfo {
 }
 
 struct EnginePoolInner {
+    asr_settings: Mutex<HashMap<String, super::asr_execution::AsrSettings>>,
     registry: Mutex<EngineRegistry>,
     slots: Mutex<HashMap<String, Arc<EngineSlot>>>,
     runtime: EngineRuntimeOptions,
@@ -434,6 +435,7 @@ struct EngineSlotRuntimeSnapshot {
 
 #[derive(Clone)]
 pub enum EngineVariant {
+    Asr(super::asr_execution::AsrRuntime),
     Embedding(super::embedding_execution::EmbeddingRuntime),
     Decision(super::decision_execution::DecisionRuntime),
     Audio(super::audio_execution::AudioRuntime),
@@ -580,6 +582,7 @@ impl EnginePoolState {
         }
         let state = Self {
             inner: Arc::new(EnginePoolInner {
+                asr_settings: Mutex::new(HashMap::new()),
                 registry: Mutex::new(registry),
                 slots: Mutex::new(slots),
                 runtime,
@@ -598,6 +601,7 @@ impl EnginePoolState {
         let registry = EngineRegistry::empty(max_loaded_models)?;
         Ok(Self {
             inner: Arc::new(EnginePoolInner {
+                asr_settings: Mutex::new(HashMap::new()),
                 registry: Mutex::new(registry),
                 slots: Mutex::new(HashMap::new()),
                 runtime,
@@ -745,9 +749,57 @@ impl EnginePoolState {
             .resolve_model_id(requested)?
             .to_owned();
         let slots = self.inner.slots.lock().await;
-        Ok(slots
-            .get(&id)
-            .is_some_and(|slot| slot.model.audio.is_some()))
+        Ok(slots.get(&id).is_some_and(|slot| {
+            slot.model.audio.is_some() || slot.model.capabilities.runtime_kind == "asr"
+        }))
+    }
+
+    pub async fn is_asr_model(&self, id: &str) -> Result<bool> {
+        self.inner
+            .registry
+            .lock()
+            .await
+            .resolve_model_id(Some(id))?;
+        Ok(self
+            .inner
+            .slots
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|slot| slot.model.capabilities.runtime_kind == "asr"))
+    }
+
+    pub async fn asr_settings(&self, id: &str) -> Result<super::asr_execution::AsrSettings> {
+        anyhow::ensure!(
+            self.is_asr_model(id).await?,
+            "ASR settings require an ASR model"
+        );
+        Ok(self
+            .inner
+            .asr_settings
+            .lock()
+            .await
+            .get(id)
+            .copied()
+            .unwrap_or_default())
+    }
+
+    pub async fn set_asr_settings(
+        &self,
+        id: &str,
+        settings: super::asr_execution::AsrSettings,
+    ) -> Result<()> {
+        settings.validate()?;
+        anyhow::ensure!(
+            self.is_asr_model(id).await?,
+            "ASR settings require an ASR model"
+        );
+        self.inner
+            .asr_settings
+            .lock()
+            .await
+            .insert(id.to_owned(), settings);
+        Ok(())
     }
 
     pub async fn is_embedding_model(&self, id: &str) -> bool {
@@ -859,8 +911,8 @@ impl EnginePoolState {
         set_default: bool,
     ) -> Result<EngineModelControlResult> {
         validate_engine_model_config(&model)?;
-        if set_default && model.capabilities.runtime_kind == "embedding" {
-            bail!("embedding models cannot be the default generation model");
+        if set_default && matches!(model.capabilities.runtime_kind, "embedding" | "asr") {
+            bail!("embedding and ASR models cannot be the default generation model");
         }
         let model_id = model.id.clone();
         let new_slot = Arc::new(EngineSlot {
@@ -891,7 +943,9 @@ impl EnginePoolState {
             let mut registry = self.inner.registry.lock().await;
             registry.remove_model(&model_id);
             registry.upsert_model(model.manifest_view(), set_default || was_previous_default)?;
-            if previous_default.is_none() && model.capabilities.runtime_kind == "embedding" {
+            if previous_default.is_none()
+                && matches!(model.capabilities.runtime_kind, "embedding" | "asr")
+            {
                 registry.restore_default_model(None)?;
             }
         }
@@ -932,8 +986,8 @@ impl EnginePoolState {
         pinned: Option<bool>,
     ) -> Result<EngineModelControlResult> {
         validate_engine_model_config(&model)?;
-        if set_default && model.capabilities.runtime_kind == "embedding" {
-            bail!("embedding models cannot be the default generation model");
+        if set_default && matches!(model.capabilities.runtime_kind, "embedding" | "asr") {
+            bail!("embedding and ASR models cannot be the default generation model");
         }
         let model_id = model.id.clone();
         let previous_default = self
@@ -1037,7 +1091,7 @@ impl EnginePoolState {
 
     pub async fn set_default_model(&self, requested: &str) -> Result<()> {
         if self.is_embedding_model(requested).await {
-            bail!("embedding models cannot be the default generation model");
+            bail!("embedding and ASR models cannot be the default generation model");
         }
         self.inner
             .registry
@@ -2064,6 +2118,7 @@ impl EngineVariant {
             Self::DiffusionGemma(_)
             | Self::QwenImage(_)
             | Self::Audio(_)
+            | Self::Asr(_)
             | Self::Decision(_)
             | Self::Embedding(_) => return None,
         };
@@ -2089,6 +2144,7 @@ impl EngineVariant {
             Self::DiffusionGemma(_)
             | Self::QwenImage(_)
             | Self::Audio(_)
+            | Self::Asr(_)
             | Self::Decision(_)
             | Self::Embedding(_) => Ok(0),
         }
@@ -2096,6 +2152,15 @@ impl EngineVariant {
 
     fn loaded_health(&self) -> LoadedEngineHealth {
         match self {
+            Self::Asr(state) => {
+                let (active_requests, queued_requests) = state.active_and_queued();
+                LoadedEngineHealth::Audio {
+                    scheduler: "serial_asr",
+                    active_requests,
+                    queued_requests,
+                    queue_capacity: super::asr_execution::ASR_QUEUE_CAPACITY,
+                }
+            }
             Self::Embedding(state) => {
                 let (active_requests, queued_requests) = state.active_and_queued();
                 LoadedEngineHealth::Embedding {
@@ -2183,6 +2248,7 @@ impl EngineVariant {
             Self::DiffusionGemma(_) => "diffusion_gemma",
             Self::QwenImage(_) => "qwen_image_2_1",
             Self::Audio(_) => "indextts25",
+            Self::Asr(_) => "qwen3_asr",
             Self::Decision(_) => "laya_multilingual_mlx",
             Self::Embedding(_) => "embedding_gemma2",
         }
@@ -2201,6 +2267,7 @@ impl EngineVariant {
             Self::DiffusionGemma(state) => state.model_weight_bytes,
             Self::QwenImage(state) => state.model_weight_bytes,
             Self::Audio(state) => state.model_weight_bytes(),
+            Self::Asr(state) => state.model_weight_bytes(),
             Self::Decision(state) => state.model_weight_bytes(),
             Self::Embedding(state) => state.model_weight_bytes(),
         }
@@ -2208,6 +2275,10 @@ impl EngineVariant {
 
     fn pending_requests(&self) -> usize {
         match self {
+            Self::Asr(state) => {
+                let (active, queued) = state.active_and_queued();
+                active + queued
+            }
             Self::Embedding(state) => {
                 let (active, queued) = state.active_and_queued();
                 active + queued
@@ -2252,6 +2323,7 @@ impl EngineVariant {
             Self::DiffusionGemma(state) => state.runtime_usage.snapshot(false),
             Self::QwenImage(state) => state.runtime_usage.snapshot(false),
             Self::Audio(_) => Default::default(),
+            Self::Asr(state) => state.usage(),
             Self::Decision(state) => state.usage(),
             Self::Embedding(state) => state.usage(),
         }
@@ -2332,6 +2404,11 @@ async fn load_engine_variant(
     model: &EngineModelConfig,
     runtime: &EngineRuntimeOptions,
 ) -> Result<EngineVariant> {
+    if model.capabilities.runtime_kind == "asr" {
+        return Ok(EngineVariant::Asr(
+            super::asr_execution::AsrRuntime::load(model.path.clone()).await?,
+        ));
+    }
     if model.capabilities.runtime_kind == "embedding" {
         return Ok(EngineVariant::Embedding(
             super::embedding_execution::EmbeddingRuntime::load(model.path.clone()).await?,

@@ -1,6 +1,7 @@
 import Foundation
 
 public protocol BackendModelLoading: Sendable {
+    func updateASRSettings(model: String, settings: BackendASRSettings) async throws
     func waitUntilReady(timeout: TimeInterval) async throws
     func registerModel(
         model: String,
@@ -155,9 +156,13 @@ public struct BackendRestartCoordinator: Sendable {
         var loadedModels: [String] = []
         var failures: [BackendModelRecoveryFailure] = []
         let recoveryModels = snapshot.models.sorted(by: Self.recoveryOrder)
-        let hasConfirmedDefault = recoveryModels.contains(where: \.isDefault)
+        let defaultCandidates = recoveryModels.filter { model in
+            let capabilities = model.capabilities ?? localModels.first(where: { $0.id == model.id })?.capabilities
+            return !["embedding", "asr"].contains(capabilities?.runtimeKind ?? "")
+        }
+        let defaultModelID = defaultCandidates.first(where: \.isDefault)?.id ?? defaultCandidates.first?.id
 
-        for (index, model) in recoveryModels.enumerated() {
+        for model in recoveryModels {
             do {
                 let resolvedModel = try await scanner.verifiedModelPathAsync(
                     for: model.modelDir ?? model.id,
@@ -166,7 +171,7 @@ public struct BackendRestartCoordinator: Sendable {
                 _ = try await client.loadModel(
                     model: model.id,
                     modelDir: resolvedModel,
-                    setDefault: model.isDefault || !hasConfirmedDefault && index == 0,
+                    setDefault: model.id == defaultModelID,
                     maxCacheCap: model.maxCacheCap,
                     pinned: model.pinned,
                     mtpModelDir: model.mtpModelDir,

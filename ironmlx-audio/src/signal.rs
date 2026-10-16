@@ -81,6 +81,18 @@ pub fn resample_mono(
     target_rate: u32,
     control: &dyn SessionControl,
 ) -> Result<Vec<f32>> {
+    resample_mono_with_limit(input, source_rate, target_rate, 60, control)
+}
+
+/// Same sinc resampler with a caller-owned duration budget for ASR recordings.
+/// Reference-audio callers keep the original 60-second bound above.
+pub fn resample_mono_with_limit(
+    input: &[f32],
+    source_rate: u32,
+    target_rate: u32,
+    max_seconds: u32,
+    control: &dyn SessionControl,
+) -> Result<Vec<f32>> {
     control.check()?;
     if !(8000..=96000).contains(&source_rate)
         || !(8000..=96000).contains(&target_rate)
@@ -92,7 +104,7 @@ pub fn resample_mono(
             "expected finite nonempty samples and 8–96 kHz rates",
         ));
     }
-    if input.len() > source_rate as usize * 60 {
+    if max_seconds == 0 || input.len() > source_rate as usize * max_seconds as usize {
         return Err(AudioError::CapacityExceeded {
             resource: "resample input",
         });
@@ -172,4 +184,24 @@ pub fn resample_mono(
         output.push(value);
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod asr_duration_tests {
+    use super::*;
+    struct Control;
+    impl SessionControl for Control {
+        fn check(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn asr_duration_budget_does_not_change_reference_limit() {
+        let input = vec![0.; 61 * 16000];
+        assert!(resample_mono(&input, 16000, 16000, &Control).is_err());
+        let output = resample_mono_with_limit(&input, 16000, 24000, 7200, &Control).unwrap();
+        assert_eq!(output.len(), 61 * 24000);
+        assert!(output.iter().all(|v| *v == 0.));
+        assert!(resample_mono_with_limit(&input, 16000, 16000, 60, &Control).is_err());
+    }
 }

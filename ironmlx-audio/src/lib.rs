@@ -8,6 +8,7 @@ mod error;
 pub mod features;
 pub mod indextts25;
 pub mod io;
+pub mod qwen3_asr;
 pub mod resources;
 pub mod signal;
 pub use api::*;

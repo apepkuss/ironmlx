@@ -345,6 +345,40 @@ import Testing
     ], "\(loaderCalls)")
 }
 
+@Test(arguments: ["asr", "embedding"], [false, true]) @MainActor
+func restartNeverPromotesAudioOrEmbeddingToGenerationDefault(runtimeKind: String, withGeneration: Bool) async throws {
+    let model = "mlx-community/Audio-8bit"
+    let (root, path) = try restartModelRoot(repoID: model)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let generation = "mlx-community/Text-4bit"
+    if withGeneration { _ = try restartModelRoot(repoID: generation, root: root) }
+    let loader = FakeRestartModelLoader()
+    let scanner = LocalModelScanner(rootURL: root)
+    let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    let coordinator = BackendRestartCoordinator(scanner: scanner, parameterStore: store, clientFactory: { _, _ in loader })
+    var snapshot = BackendRecoverySnapshot.capture(
+        config: AppConfig(port: 9068, loadedModels: withGeneration ? [model, generation] : [model]),
+        scanner: scanner, parameterStore: store
+    )
+    snapshot.models[0].capabilities = BackendModelCapabilities(
+        runtimeKind: runtimeKind, supportsStreaming: true, supportsVision: false,
+        supportsAudio: runtimeKind == "asr", supportsMtp: false, supportsPromptLookup: false,
+        supportsSpeculativeDecoding: false, supportsKvCache: false, supportedSamplingParameters: []
+    )
+    for invalidDefault in [false, true] {
+        snapshot.models[0].isDefault = invalidDefault
+        let result = await coordinator.restore(snapshot)
+        #expect(result.success)
+        #expect(result.loadedModels.contains(model))
+        let calls = await loader.calls
+        #expect(calls.contains(where: { $0.hasPrefix("load:\(model):\(path.path):false:") }))
+        #expect(!calls.contains(where: { $0.hasPrefix("load:\(model):\(path.path):true:") }))
+        if withGeneration {
+            #expect(calls.contains(where: { $0.hasPrefix("load:\(generation):") && $0.contains(":true:") }))
+        }
+    }
+}
+
 @Test @MainActor func restartDefaultModelRegistersLocalModelsWithoutLoadingWhenNoRestoredModel() async throws {
     let (root, snapshot) = try restartModelRoot(repoID: "mlx-community/Tiny-4bit")
     let loader = FakeRestartModelLoader()

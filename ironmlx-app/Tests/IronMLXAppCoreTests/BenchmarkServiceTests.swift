@@ -1031,7 +1031,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(
         dashboardHTML(
             html,
-            contains: "models.filter(m => !['block_diffusion', 'decision', 'embedding'].includes(m.capabilities?.runtime_kind))"
+            contains: "models.filter(m => !['block_diffusion', 'decision', 'embedding', 'asr'].includes(m.capabilities?.runtime_kind))"
         )
     )
 }
@@ -1133,7 +1133,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "performance.decode_tokens_per_second"))
     #expect(dashboardHTML(html, contains: "performance.session_decode_tokens_per_second"))
     #expect(dashboardHTML(html, contains: "performance.ttft_ms"))
-    #expect(dashboardHTML(html, contains: "if (!isDiffusion)"))
+    #expect(dashboardHTML(html, contains: "if (!isDiffusion && !isASR)"))
     #expect(dashboardHTML(html, contains: "if (usage.prefix_cache)"))
     #expect(dashboardHTML(html, contains: "eligibleTokens > 0"))
     #expect(dashboardHTML(html, contains: "renderRuntimeModels(window.__RUNTIME_MODELS__ || [])"))

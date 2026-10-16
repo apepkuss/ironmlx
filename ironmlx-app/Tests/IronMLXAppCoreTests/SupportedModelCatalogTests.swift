@@ -10,7 +10,7 @@ struct SupportedModelCatalogTests {
     @MainActor
     func bootstrapContainsBundledCatalog() throws {
         let catalog = try SupportedModelCatalog.bundled()
-        #expect(catalog.entries.count == 59)
+        #expect(catalog.entries.count == 61)
         let script = try DashboardWindowController.bootstrapScript(config: AppConfig(), route: .status)
         let context = JSContext()!
         context.evaluateScript("var window = {};\n" + script)
@@ -44,6 +44,9 @@ struct SupportedModelCatalogTests {
                 #expect(entry.noteKey != nil)
             }
         }
+        let asr = catalog.entries.filter { $0.category == "stt" }
+        #expect(Set(asr.map(\.hfRepo)) == Set(["mlx-community/Qwen3-ASR-0.6B-8bit", "mlx-community/Qwen3-ASR-1.7B-8bit"]))
+        #expect(asr.allSatisfy { $0.capabilities == ["stt"] && $0.msRepo == nil })
         let laya = try #require(catalog.entries.first { $0.id == "laya" })
         #expect(laya.msRepo == nil, "Do not invent a mirror for a repository missing on ModelScope")
     }
@@ -52,7 +55,7 @@ struct SupportedModelCatalogTests {
     func quantizationGroups() throws {
         let catalog = try SupportedModelCatalog.bundled()
         let groups = Dictionary(grouping: catalog.entries, by: \.modelId)
-        #expect(groups.count == 29)
+        #expect(groups.count == 31)
         #expect(groups["qwen35-2b"]?.map(\.variantLabel) == ["Affine · 4 bit", "Affine · 5 bit", "Affine · 6 bit", "OptiQ · 4 bit"])
         #expect(groups["qwen38-27b"]?.map(\.variantLabel) == ["Affine · 4 bit", "Affine · 8 bit"])
         for entries in groups.values {

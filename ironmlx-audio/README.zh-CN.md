@@ -18,6 +18,16 @@ flowchart TD
 
 服务端资源注册、WAV 响应和 PCM 流式传输，见[语音 API 契约](../docs/zh-CN/audio-speech-api.md)。
 
+## Qwen3-ASR 语音识别
+
+原生 `qwen3_asr::Qwen3Asr` 支持已发布的 0.6B、1.7B affine 8-bit 模型，
+包含 128 维 Whisper 特征、卷积音频编码器和带缓存的 Qwen3 文本解码器。
+分词、特征提取和推理均使用 Rust/MLX；Python 只用于开发时的参考比较。
+
+通过 `ironmlx transcribe` 或兼容 OpenAI 的 `POST /v1/audio/transcriptions` 使用。
+当前离线配置接受单声道或双声道 WAV、FLAC、MP3，自动分段长录音，转换到 16 kHz，
+支持自动或指定语言并返回文本。用法和边界见[语音识别 API](../docs/zh-CN/audio-transcriptions-api.md)。
+
 ## 公共接口
 
 | 接口 | 职责 |

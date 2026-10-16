@@ -41,7 +41,7 @@ axum-server.workspace = true
 # adds CORS or request-tracing middleware, restore:
 #   tower-http.workspace = true
 tokio-stream.workspace = true
-futures.workspace = true
+futures = { workspace = true, features = ["std", "async-await"] }
 reqwest.workspace = true
 rustls.workspace = true
 libc.workspace = true
@@ -54,6 +54,8 @@ default = []
 vision-dump = ["ironmlx-lm/vision-dump"]
 
 [dev-dependencies]
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
+tempfile = "3"
 ironmlx-runtime = { path = "../ironmlx-runtime", features = ["test-support"] }
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 ironmlx-lm = { path = "../ironmlx-lm", features = ["test-support"] }

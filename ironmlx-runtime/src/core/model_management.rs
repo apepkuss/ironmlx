@@ -198,6 +198,25 @@ pub fn build_engine_model_config(
         prompt_lookup,
         pinned,
     } = request;
+    if read_model_type(model_dir)? == "qwen3_asr" {
+        if audio.is_some()
+            || decision.is_some()
+            || max_cache_cap_override.is_some()
+            || default_max_output_tokens.is_some()
+            || mtp.is_some()
+            || prompt_lookup.is_some()
+            || sampling_defaults_override != SamplingDefaults::default()
+        {
+            bail!("ASR models do not accept TTS, decision or generation settings");
+        }
+        ironmlx_audio::qwen3_asr::preflight_model_metadata(model_dir)?;
+        let mut config = decision_model_config(model_id, model_dir.to_path_buf(), pinned);
+        config.capabilities = EngineModelCapabilities::asr();
+        return Ok(EngineModelLoad {
+            config,
+            warning: None,
+        });
+    }
     if ironmlx_lm::models::embedding_gemma2::is_checkpoint(model_dir)? {
         ironmlx_lm::core::loader::preflight_model_metadata(model_dir)?;
         if audio.is_some()
@@ -809,6 +828,25 @@ pub fn build_engine_model_config_for_pool(
     scheduler_profile_store: Option<&SchedulerProfileStore>,
     hardware_label: &str,
 ) -> Result<crate::core::engine_pool::EngineModelConfig> {
+    if model.load_policy != EngineLoadPolicy::Disabled
+        && read_model_type(&model.path)? == "qwen3_asr"
+    {
+        if model.audio.is_some()
+            || model.decision.is_some()
+            || model.scheduler_profile.is_some()
+            || model.mtp_model_dir.is_some()
+            || model.mtp_draft_tokens.is_some()
+            || model.prompt_lookup.is_some()
+        {
+            bail!("ASR models do not accept TTS, decision or generation settings");
+        }
+        let mut config = decision_model_config(model.id, model.path, false);
+        config.capabilities = EngineModelCapabilities::asr();
+        config.default = model.default;
+        config.load_policy = model.load_policy;
+        super::runtime_config::validate_engine_model_config(&config)?;
+        return Ok(config);
+    }
     if ironmlx_lm::models::embedding_gemma2::is_checkpoint(&model.path)? {
         if model.audio.is_some()
             || model.decision.is_some()

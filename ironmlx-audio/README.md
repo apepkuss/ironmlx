@@ -21,6 +21,18 @@ process memory reservations and transport cancellation belong to the runtime.
 For server registration, WAV responses and PCM streaming, see the
 [speech API contract](../docs/audio-speech-api.md).
 
+## Qwen3-ASR recognition
+
+Native `qwen3_asr::Qwen3Asr` supports the published 0.6B and 1.7B affine 8-bit
+checkpoints: 128-bin Whisper features, convolutional audio encoder and cached
+Qwen3 text decoder. Tokenization, feature extraction and inference use Rust/MLX;
+Python is only used for reference comparisons during development.
+
+Use `ironmlx transcribe` or OpenAI-compatible `POST /v1/audio/transcriptions`.
+The offline profile accepts mono/stereo WAV, FLAC and MP3 with automatic long-audio segmentation,
+converts to 16 kHz, and returns text with automatic or explicit language selection.
+See [Speech recognition API](../docs/audio-transcriptions-api.md) for usage and bounds.
+
 ## Public interfaces
 
 | Interface | Responsibility |

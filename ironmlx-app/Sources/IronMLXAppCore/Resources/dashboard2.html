@@ -5366,7 +5366,20 @@
         <div class="modal-field"><label for="modal-reasoning-efforts" data-i18n="reasoning_native_efforts">NATIVE EFFORTS</label><input type="text" id="modal-reasoning-efforts" readonly></div>
         <div class="modal-field"><label for="modal-reasoning-default" data-i18n="reasoning_default_effort">DEFAULT EFFORT</label><input type="text" id="modal-reasoning-default" readonly></div>
       </div>
-      <div class="model-params-output-section">
+      <div class="model-params-output-section" id="modal-asr-settings" style="display:none">
+        <div class="modal-row model-params-setting-row">
+          <div class="modal-field">
+            <div class="field-label-with-help"><label for="modal-asr-duration" data-i18n="asr_max_duration">MAX AUDIO DURATION (SECONDS)</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" data-i18n-aria-label="asr_max_duration" aria-describedby="asr-duration-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="asr-duration-help" role="tooltip" data-i18n="asr_duration_help"></span></span></div>
+            <input type="text" inputmode="numeric" id="modal-asr-duration">
+          </div>
+          <div class="modal-field">
+            <div class="field-label-with-help"><label for="modal-asr-output-tokens" data-i18n="asr_max_output_tokens">MAX OUTPUT TOKENS PER SEGMENT</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" data-i18n-aria-label="asr_max_output_tokens" aria-describedby="asr-output-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="asr-output-help" role="tooltip" data-i18n="asr_output_help"></span></span></div>
+            <input type="text" inputmode="numeric" id="modal-asr-output-tokens">
+          </div>
+        </div>
+        <p style="font-size:12px;color:var(--text-dim);line-height:1.6;margin:8px 0 16px" data-i18n="asr_defaults_help"></p>
+      </div>
+      <div class="model-params-output-section" id="modal-generation-settings">
       <div class="modal-row model-params-setting-row model-params-capacity-row">
         <div class="modal-field"><div class="field-label-with-help"><label for="modal-max-tokens" data-i18n="max_context_tokens">MAX CONTEXT TOKENS</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" aria-label="About max context tokens" data-i18n-aria-label="max_context_tokens_help_label" aria-describedby="max-context-tokens-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="max-context-tokens-help" role="tooltip" data-i18n="max_context_tokens_help">Runtime KV cache limit for one sequence. Input and generated tokens share this context; this is not the output limit.</span></span></div><input type="text" placeholder="--" id="modal-max-tokens"></div>
         <div class="modal-field"><div class="field-label-with-help"><label for="modal-max-output-tokens" data-i18n="default_max_output_tokens">MAX OUTPUT TOKENS</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" aria-label="About max output tokens" data-i18n-aria-label="default_max_output_tokens_help_label" aria-describedby="max-output-tokens-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="max-output-tokens-help" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="default_max_output_tokens">MAX OUTPUT TOKENS</span><span class="profile-help-tooltip-body" data-i18n="default_max_output_tokens_help">Default token budget for one Responses reply when the request omits max_output_tokens.</span><span class="profile-help-tooltip-flow" data-i18n="default_max_output_tokens_help_budget">Reasoning and visible answer tokens share this budget. If it runs out, the answer may be cut off or may not appear at all.</span><span class="profile-help-tooltip-flow" data-i18n="default_max_output_tokens_help_priority">An explicit request value takes precedence. Leave this field empty to use the server default of 256.</span><span class="profile-help-tooltip-flow" data-i18n="default_max_output_tokens_help_scope">This is not the model's fixed output capability and does not change its context or KV cache size. The remaining context also limits usable output.</span></span></span></div><input type="text" inputmode="numeric" placeholder="256" id="modal-max-output-tokens"></div>
@@ -5613,6 +5626,14 @@
       catalog_text: "Text generation",
       catalog_vision: "Image understanding",
       catalog_tts: "Speech synthesis",
+      catalog_stt: "Speech recognition",
+      asr_settings_applied: "Settings saved. New requests and realtime sessions use these values.",
+      asr_max_duration: "MAX AUDIO DURATION (SECONDS)",
+      asr_max_output_tokens: "MAX OUTPUT TOKENS PER SEGMENT",
+      asr_duration_help: "Maximum duration of a file request or a realtime audio turn. Long audio is split automatically. Range: 1–7200 seconds.",
+      asr_output_help: "Output token budget for each recognition segment, from 1 to 8192. It is not a total limit on the merged recording.",
+      asr_defaults_help: "Defaults come from this model’s ASR profile. Leave a field empty to use its default. Changes apply to new requests and realtime sessions.",
+      asr_invalid_settings: "Duration must be an integer from 1 to 7200 seconds; output tokens must be an integer from 1 to 8192.",
       catalog_image: "Image generation",
       catalog_decision: "Typed decisions",
       catalog_assistant: "Acceleration assistants",
@@ -6212,6 +6233,14 @@
       catalog_text: "文本生成",
       catalog_vision: "图片理解",
       catalog_tts: "语音合成",
+      catalog_stt: "语音识别",
+      asr_settings_applied: "参数已保存，将用于新请求和新实时会话。",
+      asr_max_duration: "最大音频时长（秒）",
+      asr_max_output_tokens: "每段最大输出 Token",
+      asr_duration_help: "限制一次文件请求或一轮实时输入的累计时长。长音频仍自动分段。允许 1–7200 秒。",
+      asr_output_help: "每个识别片段的输出 Token 预算，允许 1–8192。不是合并后整段录音的总 Token 上限。",
+      asr_defaults_help: "默认值来自当前模型的 ASR 配置。留空使用对应默认值；修改对新请求和新实时会话生效。",
+      asr_invalid_settings: "时长必须为 1–7200 秒的整数，输出 Token 数必须为 1–8192 的整数。",
       catalog_image: "图片生成",
       catalog_decision: "类型化决策",
       catalog_assistant: "加速辅助模型",
@@ -6811,6 +6840,14 @@
       catalog_text: "文字生成",
       catalog_vision: "圖片理解",
       catalog_tts: "語音合成",
+      catalog_stt: "語音辨識",
+      asr_settings_applied: "參數已儲存，將用於新請求和新即時工作階段。",
+      asr_max_duration: "最長音訊時間（秒）",
+      asr_max_output_tokens: "每段最大輸出 Token",
+      asr_duration_help: "限制單次檔案請求或一輪即時輸入的累計時間。長音訊仍自動分段。允許 1–7200 秒。",
+      asr_output_help: "每個辨識片段的輸出 Token 預算，允許 1–8192。不是合併後整段錄音的總 Token 上限。",
+      asr_defaults_help: "預設值來自目前模型的 ASR 設定。留空使用對應預設值；修改對新請求和新即時工作階段生效。",
+      asr_invalid_settings: "時間必須為 1–7200 秒的整數，輸出 Token 數必須為 1–8192 的整數。",
       catalog_image: "圖片生成",
       catalog_decision: "型別化決策",
       catalog_assistant: "加速輔助模型",
@@ -7413,6 +7450,14 @@
       catalog_text: "テキスト生成",
       catalog_vision: "画像理解",
       catalog_tts: "音声合成",
+      catalog_stt: "音声認識",
+      asr_settings_applied: "設定を保存しました。新しいリクエストとリアルタイムセッションに適用されます。",
+      asr_max_duration: "最大音声時間（秒）",
+      asr_max_output_tokens: "区間ごとの最大出力 Token",
+      asr_duration_help: "ファイルリクエストまたはリアルタイムの1ターンの最大時間。長い音声は自動分割されます。範囲: 1–7200秒。",
+      asr_output_help: "認識区間ごとの出力 Token 予算。範囲: 1–8192。結合後の録音全体の上限ではありません。",
+      asr_defaults_help: "既定値はこのモデルの ASR 設定に基づきます。空欄で既定値を使用します。変更は新しいリクエストとリアルタイムセッションに適用されます。",
+      asr_invalid_settings: "時間は1–7200秒、出力 Token 数は1–8192の整数にしてください。",
       catalog_image: "画像生成",
       catalog_decision: "型付き意思決定",
       catalog_assistant: "生成高速化の補助モデル",
@@ -8015,6 +8060,14 @@
       catalog_text: "텍스트 생성",
       catalog_vision: "이미지 이해",
       catalog_tts: "음성 합성",
+      catalog_stt: "음성 인식",
+      asr_settings_applied: "설정이 저장되었습니다. 새 요청과 새 실시간 세션에 적용됩니다.",
+      asr_max_duration: "최대 오디오 길이(초)",
+      asr_max_output_tokens: "구간당 최대 출력 Token",
+      asr_duration_help: "파일 요청 또는 실시간 입력 한 턴의 최대 길이입니다. 긴 오디오는 자동 분할됩니다. 범위: 1–7200초.",
+      asr_output_help: "각 인식 구간의 출력 Token 한도입니다. 범위: 1–8192. 합쳐진 녹음 전체의 한도가 아닙니다.",
+      asr_defaults_help: "기본값은 이 모델의 ASR 설정에서 가져옵니다. 비워 두면 기본값을 사용합니다. 변경 사항은 새 요청과 새 실시간 세션에 적용됩니다.",
+      asr_invalid_settings: "길이는 1–7200초, 출력 Token 수는 1–8192의 정수여야 합니다.",
       catalog_image: "이미지 생성",
       catalog_decision: "타입 지정 의사결정",
       catalog_assistant: "생성 가속 보조 모델",
@@ -9835,6 +9888,14 @@
     const generationDefaults = local.generation_defaults || {};
     const capabilities = local.capabilities || {};
     const reasoning = local.reasoning || {};
+    const isASR = capabilities.runtime_kind === 'asr';
+    const asrDefaults = local.asr_defaults || {};
+    document.getElementById('modal-asr-settings').style.display = isASR ? '' : 'none';
+    document.getElementById('modal-generation-settings').style.display = isASR ? 'none' : '';
+    document.getElementById('modal-asr-duration').value = saved.asr?.max_audio_duration_seconds ?? asrDefaults.max_audio_duration_seconds ?? '';
+    document.getElementById('modal-asr-duration').placeholder = String(asrDefaults.max_audio_duration_seconds ?? '');
+    document.getElementById('modal-asr-output-tokens').value = saved.asr?.max_output_tokens ?? asrDefaults.max_output_tokens ?? '';
+    document.getElementById('modal-asr-output-tokens').placeholder = String(asrDefaults.max_output_tokens ?? '');
     const nativeEfforts = Array.isArray(reasoning.native_efforts)
       ? reasoning.native_efforts.filter(effort => typeof effort === 'string' && effort.trim())
       : [];
@@ -9859,12 +9920,12 @@
     document.getElementById('modal-model-type').value = modelTypeLabel(local);
     document.getElementById('modal-context-size').closest('.modal-field').style.display =
       capabilities.supports_kv_cache === false ? 'none' : '';
-    ['modal-max-tokens', 'modal-max-output-tokens'].forEach(id => {
+    ['modal-max-tokens', 'modal-max-output-tokens', 'modal-temperature'].forEach(id => {
       document.getElementById(id).closest('.modal-field').style.display =
-        capabilities.runtime_kind === 'embedding' ? 'none' : '';
+        ['embedding', 'asr'].includes(capabilities.runtime_kind) ? 'none' : '';
     });
     document.getElementById('modal-causal-sampling-row').style.display =
-      (isBlockDiffusion || capabilities.runtime_kind === 'embedding') ? 'none' : '';
+      (isBlockDiffusion || ['embedding', 'asr'].includes(capabilities.runtime_kind)) ? 'none' : '';
     document.getElementById('modal-mtp-section').style.display =
       capabilities.supports_mtp === false ? 'none' : '';
     document.getElementById('modal-dflash2-section').style.display =
@@ -10024,8 +10085,21 @@
     const dict = I18N[currentLang] || I18N.en;
     const local = window.__LOCAL_MODELS__[modelId] || {};
     const capabilities = local.capabilities || {};
-    if (capabilities.runtime_kind === 'embedding') {
+    if (['embedding', 'asr'].includes(capabilities.runtime_kind)) {
       const params = { model_id: modelId, alias: document.getElementById('modal-alias-input').value };
+      if (capabilities.runtime_kind === 'asr') {
+        const defaults = local.asr_defaults || {};
+        const durationText = document.getElementById('modal-asr-duration').value.trim();
+        const tokensText = document.getElementById('modal-asr-output-tokens').value.trim();
+        const duration = durationText ? parsePositiveInteger(durationText) : defaults.max_audio_duration_seconds;
+        const tokens = tokensText ? parsePositiveInteger(tokensText) : defaults.max_output_tokens;
+        if (!duration || duration > 7200 || !tokens || tokens > 8192) {
+          showToast(t('asr_invalid_settings'), 'warn');
+          return;
+        }
+        params.asr = durationText || tokensText
+          ? { max_audio_duration_seconds: duration, max_output_tokens: tokens } : null;
+      }
       if (window.webkit?.messageHandlers?.saveModelParams) {
         window.webkit.messageHandlers.saveModelParams.postMessage(JSON.stringify(params));
       }
@@ -10153,6 +10227,8 @@
     if (result.success) {
       if (result.status === 'reload_deferred') {
         showToast(dict.params_reload_deferred || 'Model parameters saved. The model will reload when idle.', 'info');
+      } else if (result.status === 'settings_updated') {
+        showToast(t('asr_settings_applied'), 'success');
       } else if (result.status === 'reloaded') {
         showToast(dict.params_reloaded || 'Model parameters applied. The model has been reloaded.', 'success');
       } else if (result.warning) {
@@ -12570,7 +12646,7 @@
           + '<td class="model-status-cell" data-status-tooltip="' + escapeAttr(status.title) + '"' + (status.title ? ' tabindex="0"' : '')
           + ' onmouseenter="showModelStatusTooltip(this)" onmouseleave="hideModelTableTooltip()"'
           + ' onfocus="showModelStatusTooltip(this)" onblur="hideModelTableTooltip()"><span class="status-dot ' + status.dot + '"></span> <span class="model-status-text">' + status.text + '</span></td>'
-          + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' ' + (!isModelLoadable(m) || m.type === 'embedding' ? 'disabled ' : '') + 'style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
+          + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' ' + (!isModelLoadable(m) || ['embedding', 'asr'].includes(m.type) ? 'disabled ' : '') + 'style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
           + '<td><button class="icon-btn" title="' + escapeAttr(dict.model_param_settings) + '" aria-label="' + escapeAttr(dict.model_param_settings) + '" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
           + '<td>' + renderModelLoadActions(m, escapedSq, escaped, actionClass, actionText, isLoaded) + '</td>'
           + '<td>' + renderModelMoreActions(m, escapedSq) + '</td>';
@@ -12589,7 +12665,7 @@
     if (!profileSelect) return;
     const current = profileSelect.value;
     profileSelect.innerHTML = '<option value="">' + (dict.select_model || 'Select a model...') + '</option>';
-    models.filter(m => !['block_diffusion', 'decision', 'embedding'].includes(m.capabilities?.runtime_kind)).forEach(m => {
+    models.filter(m => !['block_diffusion', 'decision', 'embedding', 'asr'].includes(m.capabilities?.runtime_kind)).forEach(m => {
       const opt = document.createElement('option');
       opt.value = m.id;
       opt.textContent = m.id;
@@ -14793,6 +14869,7 @@
       const isDiffusion = model.runtime_kind === 'block_diffusion';
       const isDecision = model.runtime_kind === 'decision';
       const isEmbedding = model.runtime_kind === 'embedding';
+      const isASR = model.runtime_kind === 'asr';
       const activeRequests = Number(model.active_requests || 0);
       const queuedRequests = Number(model.queued_requests || 0);
       const queueCapacity = Number(model.queue_capacity || 0);
@@ -15000,7 +15077,7 @@
               false
             )
           + '</div></div>';
-      } else if (!isDiffusion) {
+      } else if (!isDiffusion && !isASR) {
         const performance = usage.performance || {};
         const completedRequests = Number(performance.completed_requests);
         const windowSeconds = Number(performance.window_seconds);

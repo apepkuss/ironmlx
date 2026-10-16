@@ -381,7 +381,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     mtpEnabledModels: state.mtpEnabledModels,
                     dflash2EnabledModels: state.dflash2EnabledModels
                 )
-                let benchmarkModels = models.filter { $0.readiness?.isLoadable != false && !["decision", "embedding"].contains($0.capabilities?.runtimeKind ?? "") }.map {
+                let benchmarkModels = models.filter { $0.readiness?.isLoadable != false && !["decision", "embedding", "asr"].contains($0.capabilities?.runtimeKind ?? "") }.map {
                     BenchmarkModel(repoID: $0.repoID, loaded: $0.loaded)
                 }
                 let json = (try? Self.jsonString(benchmarkModels)) ?? "[]"
@@ -1511,7 +1511,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 try await client.waitUntilReady()
                 await self.registerLocalModels(config: config, client: client)
                 let loadedModels = try await client.fetchLoadedModels()
-                let setDefault = capabilities?.runtimeKind != "embedding" && Self.shouldSetDefaultWhenLoadingModel(
+                let setDefault = !["embedding", "asr"].contains(capabilities?.runtimeKind ?? "") && Self.shouldSetDefaultWhenLoadingModel(
                     model,
                     config: config,
                     currentLoadedModelCount: loadedModels.count
@@ -2580,6 +2580,13 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         Task {
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
+                if scanner.model(for: model)?.capabilities?.runtimeKind == "asr" {
+                    try await client.updateASRSettings(model: model, settings: parameters.asr ?? .qwen3Defaults)
+                    await MainActor.run {
+                        self.sendJavaScript("onModelParamsReloaded(\(Self.jsStringLiteral(#"{"success":true,"status":"settings_updated"}"#)))")
+                    }
+                    return
+                }
                 let loadedModels = try await client.fetchLoadedModels()
                 if scanner.model(for: model)?.capabilities?.runtimeKind == "decision",
                    !loadedModels.contains(where: { $0.id == model || $0.model == model || $0.path == model }) {

@@ -432,6 +432,14 @@ pub struct EngineModelCapabilities {
 }
 
 impl EngineModelCapabilities {
+    pub fn asr() -> Self {
+        Self {
+            runtime_kind: "asr",
+            supports_audio: true,
+            supports_streaming: true,
+            ..Self::audio()
+        }
+    }
     pub fn image_generation() -> Self {
         Self {
             runtime_kind: "image_generation",
@@ -556,10 +564,13 @@ impl EnginePoolConfig {
     pub(crate) fn validate_enabled_model_architectures(&self) -> Result<()> {
         for model in &self.models {
             validate_engine_model_config(model)?;
-            if model.capabilities.runtime_kind == "embedding"
+            if matches!(model.capabilities.runtime_kind, "embedding" | "asr")
                 && self.default_model.as_deref() == Some(model.id.as_str())
             {
-                bail!("embedding models cannot be the default generation model");
+                bail!(
+                    "{} models cannot be the default generation model",
+                    model.capabilities.runtime_kind
+                );
             }
         }
         Ok(())
@@ -567,6 +578,25 @@ impl EnginePoolConfig {
 }
 
 pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<()> {
+    if model.capabilities.runtime_kind == "asr" {
+        if model.load_policy == EngineLoadPolicy::Disabled {
+            return Ok(());
+        }
+        ironmlx_audio::qwen3_asr::preflight_model_metadata(&model.path)?;
+        if model.capabilities != EngineModelCapabilities::asr()
+            || model.default
+            || model.audio.is_some()
+            || model.decision.is_some()
+            || model.scheduler_runtime_profile.is_some()
+            || model.mtp.is_some()
+            || model.prompt_lookup.is_some()
+            || model.default_max_output_tokens.is_some()
+            || model.sampling_defaults != SamplingDefaults::default()
+        {
+            bail!("ASR models do not accept TTS, decision or generation settings");
+        }
+        return Ok(());
+    }
     if let Some(settings) = model.decision {
         settings.validate()?;
         if model.capabilities.runtime_kind != "decision" {

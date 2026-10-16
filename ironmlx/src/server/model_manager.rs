@@ -402,6 +402,21 @@ pub async fn serve_app_daemon(
     serve_result
 }
 
+async fn app_realtime_handler(
+    State(manager): State<ModelManager>,
+    axum::extract::Query(query): axum::extract::Query<super::realtime::RealtimeQuery>,
+    upgrade: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    super::realtime::realtime_with_pool(manager.pool, query, upgrade).await
+}
+
+async fn app_transcriptions_handler(
+    State(manager): State<ModelManager>,
+    request: axum::extract::Request,
+) -> Response {
+    super::transcriptions::transcriptions_with_pool(manager.pool, request).await
+}
+
 async fn app_speech_handler(
     State(manager): State<ModelManager>,
     Extension(voices): Extension<super::voices::VoiceStore>,
@@ -448,6 +463,13 @@ fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Route
         .route("/v1/images/edits", post(app_images_edit_handler))
         .route("/v1/messages", post(app_anthropic_handler))
         .route("/v1/audio/speech", post(app_speech_handler))
+        .route("/v1/realtime", get(app_realtime_handler))
+        .route(
+            "/v1/audio/transcriptions",
+            post(app_transcriptions_handler).layer(axum::extract::DefaultBodyLimit::max(
+                super::transcriptions::MAX_ASR_REQUEST_BYTES,
+            )),
+        )
         .merge(super::voices::router())
         .route("/v1/systemone", post(app_systemone_handler))
         .route("/v1/decisions", post(app_decisions_handler))
@@ -458,6 +480,10 @@ fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Route
             )),
         )
         .route("/admin/api/models/loaded", get(list_loaded_handler))
+        .route(
+            "/admin/api/models/asr",
+            get(asr_settings_handler).post(update_asr_settings_handler),
+        )
         .route(
             "/admin/api/audio/execution-profile",
             get(audio_execution_profile_handler),
@@ -533,6 +559,83 @@ async fn app_models_handler(
 
 async fn list_loaded_handler(State(manager): State<ModelManager>) -> Json<Vec<LoadedModelInfo>> {
     Json(manager.list_loaded().await)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AsrSettingsQuery {
+    model: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AsrSettingsUpdate {
+    model: String,
+    settings: ironmlx_runtime::core::asr_execution::AsrSettings,
+}
+
+async fn read_asr_settings(
+    pool: &EnginePoolState,
+    model: &str,
+) -> std::result::Result<
+    ironmlx_runtime::core::asr_execution::AsrSettings,
+    super::api_error::ApiError,
+> {
+    use super::api_error::ApiError;
+    if !pool
+        .is_asr_model(model)
+        .await
+        .map_err(ApiError::engine_resolution)?
+    {
+        return Err(ApiError::invalid_request(
+            "model_task_mismatch",
+            "ASR settings require an ASR model",
+        ));
+    }
+    pool.asr_settings(model)
+        .await
+        .map_err(|e| ApiError::internal("asr_settings_failed", e.to_string()))
+}
+
+async fn asr_settings_handler(
+    State(manager): State<ModelManager>,
+    axum::extract::Query(query): axum::extract::Query<AsrSettingsQuery>,
+) -> Response {
+    match read_asr_settings(&manager.pool, &query.model).await {
+        Ok(settings) => Json(
+            serde_json::json!({"success":true,"model":query.model,"settings":settings,
+            "defaults":ironmlx_runtime::core::asr_execution::AsrSettings::default()}),
+        )
+        .into_response(),
+        Err(error) => error.into_response(super::api_error::ApiProtocol::OpenAi),
+    }
+}
+
+async fn update_asr_settings_handler(
+    State(manager): State<ModelManager>,
+    Json(request): Json<AsrSettingsUpdate>,
+) -> Response {
+    use super::api_error::{ApiError, ApiProtocol};
+    let apply = async {
+        request
+            .settings
+            .validate()
+            .map_err(|e| ApiError::invalid_request("invalid_asr_settings", e.to_string()))?;
+        read_asr_settings(&manager.pool, &request.model).await?;
+        manager
+            .pool
+            .set_asr_settings(&request.model, request.settings)
+            .await
+            .map_err(|e| ApiError::internal("asr_settings_failed", e.to_string()))?;
+        Ok::<_, ApiError>(Json(
+            serde_json::json!({"success":true,"model":request.model,"settings":request.settings}),
+        ))
+    }
+    .await;
+    match apply {
+        Ok(response) => response.into_response(),
+        Err(error) => error.into_response(ApiProtocol::OpenAi),
+    }
 }
 
 async fn load_model_handler(
@@ -2832,3 +2935,7 @@ mod laya_app_tests;
 #[cfg(test)]
 #[path = "embedding_app_tests.rs"]
 mod embedding_app_tests;
+
+#[cfg(test)]
+#[path = "asr_app_tests.rs"]
+mod asr_app_tests;

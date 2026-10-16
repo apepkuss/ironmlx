@@ -28,7 +28,7 @@ cxx = "1.0"
 cxx-build = "1.0"
 thiserror = "2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "net", "time"] }
-axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "macros", "multipart"] }
+axum = { version = "0.7", default-features = false, features = ["http1", "json", "tokio", "macros", "multipart", "ws", "query"] }
 axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 tower-http = { version = "0.5", default-features = false, features = ["cors"] }
 tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }

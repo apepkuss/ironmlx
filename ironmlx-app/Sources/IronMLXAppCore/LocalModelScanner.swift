@@ -186,6 +186,7 @@ public struct LocalModelReasoningMetadata: Codable, Equatable, Sendable {
 }
 
 public struct LocalModel: Codable, Equatable, Sendable {
+    public var asrDefaults: BackendASRSettings?
     public var id: String
     public var repoID: String
     public var displayName: String?
@@ -240,6 +241,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         self.type = type
         self.architecture = architecture
         self.capabilities = capabilities
+        self.asrDefaults = capabilities?.runtimeKind == "asr" ? .qwen3Defaults : nil
         self.sizeMB = sizeMB
         self.loaded = loaded
         self.pinned = pinned
@@ -271,6 +273,7 @@ public struct LocalModel: Codable, Equatable, Sendable {
         case maxPositionEmbeddings = "max_position_embeddings"
         case effectiveMaxTokens = "effective_max_tokens"
         case generationDefaults = "generation_defaults"
+        case asrDefaults = "asr_defaults"
         case mtp
         case dflash2
         case quantization
@@ -1251,6 +1254,12 @@ public struct LocalModelScanner: Sendable {
 
     private func runtimeCapabilities(config: [String: Any]) -> BackendModelCapabilities {
         let modelType = normalizedString(config["model_type"]) ?? ""
+        if modelType == "qwen3-asr" {
+            return BackendModelCapabilities(runtimeKind: "asr", supportsStreaming: true,
+                supportsVision: false, supportsAudio: true, supportsMtp: false,
+                supportsPromptLookup: false, supportsSpeculativeDecoding: false,
+                supportsKvCache: false, supportedSamplingParameters: [])
+        }
         if modelType == "embedding-gemma2" {
             return BackendModelCapabilities(
                 runtimeKind: "embedding", supportsStreaming: false,
@@ -1387,7 +1396,7 @@ public struct LocalModelScanner: Sendable {
         case "reranker":
             return "Reranker models are detected for metadata display, but ironmlx-app serving currently loads LLM/VLM generation models only."
         case "asr":
-            return "ASR models are detected for metadata display, but ironmlx-app serving currently loads LLM/VLM generation models only."
+            return "This ASR checkpoint profile is not supported by the native audio runtime."
         case "tts":
             return "TTS models are detected for metadata display, but ironmlx-app serving currently loads LLM/VLM generation models only."
         default:
@@ -1987,6 +1996,14 @@ public struct LocalModelScanner: Sendable {
             : requiredWeightFilesMissing(in: url, files: files)
         let quantization = quantizationInspection(config: configJSON, snapshot: url)
         var capabilityType = modelCapabilityType(config: configJSON)
+        if normalizedString(configJSON["model_type"]) == "qwen3-asr" {
+            var required = ["tokenizer_config.json", "preprocessor_config.json"]
+            required += FileManager.default.isReadableFile(atPath: url.appendingPathComponent("tokenizer.json").path)
+                ? ["tokenizer.json"] : ["vocab.json", "merges.txt"]
+            missingFiles.append(contentsOf: required.filter {
+                !FileManager.default.isReadableFile(atPath: url.appendingPathComponent($0).path)
+            })
+        }
         missingFiles.append(contentsOf: quantization.missingFiles)
 
         let readiness: LocalModelReadiness
@@ -2041,7 +2058,8 @@ public struct LocalModelScanner: Sendable {
             capabilityType = "tts"
         }
         let supportedEmbedding = isSupportedEmbeddingConfig(configJSON)
-        if manifest.compatibility.downloadOnly == true && !supportedEmbedding {
+        let supportedASR = Qwen3ASRModelSupport.isSupported(configJSON)
+        if manifest.compatibility.downloadOnly == true && !supportedEmbedding && !supportedASR {
             readiness = LocalModelReadiness(
                 status: "unsupported", reasonCode: "download_only_model",
                 message: manifest.compatibility.runtimeSupportError ?? "Downloaded for file use only; this model cannot run in IronMLX."
@@ -2054,7 +2072,7 @@ public struct LocalModelScanner: Sendable {
             )
         } else if capabilityType == "tts", manifest.compatibility.modelType == "indextts2_5", missingFiles.isEmpty {
             readiness = audioReadiness(manifest: manifest)
-        } else if !supportedEmbedding, let unsupportedReason = unsupportedModelTypeReason(for: capabilityType) {
+        } else if !supportedEmbedding && !supportedASR, let unsupportedReason = unsupportedModelTypeReason(for: capabilityType) {
             readiness = LocalModelReadiness(
                 status: "unsupported",
                 reasonCode: "unsupported_model_type",

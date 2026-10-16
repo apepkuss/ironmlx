@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:95052b74-dc65-5299-913a-49c8b7c9c79a",
+  "serialNumber": "urn:uuid:a3a13968-a769-502c-b930-3048ed865bcf",
   "version": 1,
   "metadata": {
     "component": {
@@ -1533,6 +1533,35 @@
     },
     {
       "type": "library",
+      "bom-ref": "cargo:byteorder@1.5.0",
+      "group": "crates.io",
+      "name": "byteorder",
+      "version": "1.5.0",
+      "licenses": [
+        {
+          "expression": "Unlicense OR MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "ironmlx:license-files",
+          "value": "rust-license-0f96a83840e146e4.txt"
+        }
+      ],
+      "purl": "pkg:cargo/byteorder@1.5.0",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/BurntSushi/byteorder"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "cargo:bytes@1.12.1",
       "group": "crates.io",
       "name": "bytes",
@@ -2282,6 +2311,35 @@
         {
           "type": "vcs",
           "url": "https://github.com/TedDriggs/darling"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "cargo:data-encoding@2.10.0",
+      "group": "crates.io",
+      "name": "data-encoding",
+      "version": "2.10.0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "ironmlx:license-files",
+          "value": "rust-license-b68ad1a3367b8254.txt"
+        }
+      ],
+      "purl": "pkg:cargo/data-encoding@2.10.0",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/ia0/data-encoding"
         }
       ]
     },
@@ -6840,6 +6898,35 @@
     },
     {
       "type": "library",
+      "bom-ref": "cargo:sha1@0.10.7",
+      "group": "crates.io",
+      "name": "sha1",
+      "version": "0.10.7",
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "ironmlx:license-files",
+          "value": "rust-license-b4eb00df6e2a4d22.txt"
+        }
+      ],
+      "purl": "pkg:cargo/sha1@0.10.7",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/RustCrypto/hashes"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "cargo:sha2@0.10.9",
       "group": "crates.io",
       "name": "sha2",
@@ -7971,6 +8058,35 @@
     },
     {
       "type": "library",
+      "bom-ref": "cargo:tokio-tungstenite@0.24.0",
+      "group": "crates.io",
+      "name": "tokio-tungstenite",
+      "version": "0.24.0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "ironmlx:license-files",
+          "value": "rust-license-fdd55e2b2da854b0.txt"
+        }
+      ],
+      "purl": "pkg:cargo/tokio-tungstenite@0.24.0",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/snapview/tokio-tungstenite"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "cargo:tokio-util@0.7.19",
       "group": "crates.io",
       "name": "tokio-util",
@@ -8348,6 +8464,35 @@
     },
     {
       "type": "library",
+      "bom-ref": "cargo:tungstenite@0.24.0",
+      "group": "crates.io",
+      "name": "tungstenite",
+      "version": "0.24.0",
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "ironmlx:license-files",
+          "value": "rust-license-7fea0ee51a4ca5d5.txt"
+        }
+      ],
+      "purl": "pkg:cargo/tungstenite@0.24.0",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/snapview/tungstenite-rs"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "cargo:typenum@1.20.1",
       "group": "crates.io",
       "name": "typenum",
@@ -8604,6 +8749,35 @@
         {
           "type": "vcs",
           "url": "https://github.com/servo/rust-url"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "cargo:utf-8@0.7.6",
+      "group": "crates.io",
+      "name": "utf-8",
+      "version": "0.7.6",
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "ironmlx:license-files",
+          "value": "rust-license-23f18e03dc49df91.txt"
+        }
+      ],
+      "purl": "pkg:cargo/utf-8@0.7.6",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/SimonSapin/rust-utf8"
         }
       ]
     },

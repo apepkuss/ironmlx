@@ -1313,6 +1313,40 @@ fn run_app_daemon(args: ServeArgs) -> Result<()> {
     })
 }
 
+fn run_asr_server(args: ServeArgs, model_dir: PathBuf) -> Result<()> {
+    use ironmlx_runtime::core::engine_pool::{
+        EngineLoadPolicy, EngineModelManifest, EnginePoolConfig,
+    };
+    if args.dflash2_model_dir.is_some()
+        || args.mtp_model_dir.is_some()
+        || args.mtp_draft_tokens.is_some()
+        || resolve_prompt_lookup_config(&args)?.is_some()
+        || args.scheduler_profile.is_some()
+    {
+        bail!("ASR serving does not accept generation scheduler or speculative decoding settings");
+    }
+    let manifest = EngineModelManifest {
+        id: single_model_id(&args)?,
+        path: model_dir,
+        load_policy: EngineLoadPolicy::Preload,
+        default: false,
+        audio: None,
+        decision: None,
+        scheduler_profile: None,
+        mtp_model_dir: None,
+        mtp_draft_tokens: None,
+        prompt_lookup: None,
+    };
+    let model = build_engine_model_config_for_pool(&args, manifest, None, "")?;
+    let config = EnginePoolConfig {
+        default_model: None,
+        max_loaded_models: Some(1),
+        models: vec![model],
+    };
+    let runtime_config = engine_runtime_config(&args)?;
+    serve_runtime()?.block_on(server::engine::serve_engine_pool(config, runtime_config))
+}
+
 pub fn run(mut args: ServeArgs) -> Result<()> {
     args.network_config = Some(server::security::ServerNetworkConfig::resolve(
         args.network_mode,
@@ -1345,6 +1379,10 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
             "--model must point to a local directory (got '{}'); HF hub auto-download is deferred",
             model_arg
         ));
+    }
+
+    if read_model_type(&model_dir)? == "qwen3_asr" {
+        return run_asr_server(args, model_dir);
     }
 
     let mut resolved_scheduler = if args.dflash2_model_dir.is_some() {

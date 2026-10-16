@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-09",
+  "updatedAt": "2026-10-16",
   "entries": [
     {
       "id": "qwen35-2b-4bit",
@@ -1534,6 +1534,54 @@
         "ironmlx-lm/src/models/embedding_gemma2/mod.rs",
         "docs/text-embeddings.md"
       ]
+    },
+    {
+      "id": "qwen3-asr-06b-8bit",
+      "name": "Qwen3-ASR 0.6B",
+      "parameters": "0.6B",
+      "weightFormat": "Affine 8-bit",
+      "weightBytes": 1006229426,
+      "downloadBytes": 1010771234,
+      "category": "stt",
+      "capabilities": [
+        "stt"
+      ],
+      "status": "verified",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3-ASR-0.6B-8bit",
+      "msRepo": null,
+      "metadataRevision": "89e96d92ba34aca20b3e29fb10cc284097d1219f",
+      "evidence": [
+        "docs/audio-transcriptions-api.md",
+        "ironmlx-audio/src/qwen3_asr/mod.rs"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "qwen3-asr-06b",
+      "variantLabel": "Affine · 8 bit"
+    },
+    {
+      "id": "qwen3-asr-17b-8bit",
+      "name": "Qwen3-ASR 1.7B",
+      "parameters": "1.7B",
+      "weightFormat": "Affine 8-bit",
+      "weightBytes": 2463307541,
+      "downloadBytes": 2467856503,
+      "category": "stt",
+      "capabilities": [
+        "stt"
+      ],
+      "status": "verified",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3-ASR-1.7B-8bit",
+      "msRepo": null,
+      "metadataRevision": "a8379a2e2f9e313c9292cdf1af4055ab56d50d55",
+      "evidence": [
+        "docs/audio-transcriptions-api.md",
+        "ironmlx-audio/src/qwen3_asr/mod.rs"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "qwen3-asr-17b",
+      "variantLabel": "Affine · 8 bit"
     }
   ]
 }

@@ -233,21 +233,32 @@ async fn authenticate_lan(
 
 async fn enforce_request_body_limit(request: Request, next: Next) -> Response {
     let protocol = super::api_error::ApiProtocol::from_path(request.uri().path());
+    let body_limit = if request.uri().path() == "/v1/audio/transcriptions" {
+        super::transcriptions::MAX_ASR_REQUEST_BYTES
+    } else {
+        MAX_REQUEST_BODY_BYTES
+    };
     if request
         .headers()
         .get(header::CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|length| length > MAX_REQUEST_BODY_BYTES)
+        .is_some_and(|length| length > body_limit)
     {
         return super::api_error::ApiError::from_status(
             StatusCode::PAYLOAD_TOO_LARGE,
             "request_body_too_large",
-            "The request body exceeds the 32 MiB limit.",
+            format!(
+                "The request body exceeds the {} MiB limit.",
+                body_limit / (1024 * 1024)
+            ),
         )
         .into_response(protocol);
     }
-    if request.uri().path() == "/v1/audio/speech" {
+    if matches!(
+        request.uri().path(),
+        "/v1/audio/speech" | "/v1/audio/transcriptions"
+    ) {
         return next.run(request).await;
     }
     let (parts, body) = request.into_parts();
@@ -257,7 +268,10 @@ async fn enforce_request_body_limit(request: Request, next: Next) -> Response {
             return super::api_error::ApiError::from_status(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request_body_too_large",
-                "The request body exceeds the 32 MiB limit.",
+                format!(
+                    "The request body exceeds the {} MiB limit.",
+                    body_limit / (1024 * 1024)
+                ),
             )
             .into_response(protocol);
         }

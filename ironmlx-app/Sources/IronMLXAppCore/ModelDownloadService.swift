@@ -1461,12 +1461,12 @@ public actor ModelDownloadService {
                     // current backend's metadata preflight accepts it; the
                     // manifest is then rewritten from that result.
                     if manifest.compatibility.downloadOnly == true,
-                       manifest.compatibility.modelType == "embedding_gemma2"
+                       ["embedding_gemma2", "qwen3_asr"].contains(manifest.compatibility.modelType)
                         || manifest.compatibility.artifactRole == ModelArtifactRole.dflash2Drafter,
                        let compatibility = try? await metadataPreflight.validate(metadataDirectory: finalSnapshot),
                        compatibility.modelType == manifest.compatibility.modelType,
                        compatibility.artifactRole == manifest.compatibility.artifactRole
-                        || manifest.compatibility.modelType == "embedding_gemma2" {
+                        || ["embedding_gemma2", "qwen3_asr"].contains(manifest.compatibility.modelType) {
                         manifest.compatibility = ModelSnapshotCompatibility(
                             modelType: compatibility.modelType, artifactRole: compatibility.artifactRole,
                             quantizationMode: compatibility.quantization?.mode,
@@ -1591,22 +1591,31 @@ public actor ModelDownloadService {
                 )
                 runtimeSupportError = error.localizedDescription
             }
-            let tokenizerPath: String
+            let requiredMetadataPaths: [String]
             switch compatibility.artifactRole {
             case "decision":
-                tokenizerPath = "tokenizer/tokenizer.json"
+                requiredMetadataPaths = ["tokenizer/tokenizer.json"]
             case ModelArtifactRole.imageGeneration:
-                tokenizerPath = "processor/tokenizer.json"
+                requiredMetadataPaths = ["processor/tokenizer.json"]
             default:
-                tokenizerPath = "tokenizer.json"
+                if compatibility.modelType == "qwen3_asr" {
+                    // Qwen3-ASR checkpoints can ship the split BPE vocabulary
+                    // instead of a consolidated tokenizer.json.
+                    let tokenizerPaths = metadata.contains { $0.path == "tokenizer.json" }
+                        ? ["tokenizer.json"] : ["vocab.json", "merges.txt"]
+                    requiredMetadataPaths = ["tokenizer_config.json", "preprocessor_config.json"] + tokenizerPaths
+                } else {
+                    requiredMetadataPaths = ["tokenizer.json"]
+                }
             }
-            if ttsProfile == nil, compatibility.artifactRole != ModelArtifactRole.dflash2Drafter,
-               !metadata.contains(where: { $0.path == tokenizerPath }) {
-                throw DownloadFailure(
-                    repoID: repoID,
-                    code: "repo_missing_metadata",
-                    message: "Repository \(repoID) is missing \(tokenizerPath)."
-                )
+            if ttsProfile == nil, compatibility.artifactRole != ModelArtifactRole.dflash2Drafter {
+                for path in requiredMetadataPaths where !metadata.contains(where: { $0.path == path }) {
+                    throw DownloadFailure(
+                        repoID: repoID,
+                        code: "repo_missing_metadata",
+                        message: "Repository \(repoID) is missing \(path)."
+                    )
+                }
             }
             let weightBytes = try checkedTotalBytes(
                 weights,

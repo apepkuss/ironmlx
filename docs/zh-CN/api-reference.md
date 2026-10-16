@@ -12,6 +12,7 @@
 | [文本与视觉 API](text-vision-api.md) | Responses、Chat Completions、Messages；文本与图片理解、思考、工具、结构化输出 |
 | [Embedding API](text-embeddings.md) | 文本、图片、音频与组合输入；输出维度与编码 |
 | [语音合成 API](audio-speech-api.md) | 语音输出、声音配置与参考音频 |
+| [语音识别 API](audio-transcriptions-api.md) | 本地 Qwen3-ASR 音频转写 |
 | [图片生成 API](image-generation-api.md) | 文生图与单图条件编辑 |
 | [System One API](laya-systemone-api.md) | Laya 的选择、评分与真假概率请求 |
 | [OpenAI Decisions API](openai-decisions-api.md) | 通过官方 OpenAI SDK 获取 Laya 的 predicate、choice 与 score 答案 |
@@ -30,6 +31,8 @@
 | `POST` | `/v1/messages` | Messages 推理 | App / EnginePool / CLI; 兼容模型 | [文本与视觉 API](text-vision-api.md#anthropic-messages) |
 | `POST` | `/v1/embeddings` | 文本、图片、音频与组合向量 | App / EnginePool; EmbeddingGemma 2 | [Embedding API](text-embeddings.md#调用) |
 | `POST` | `/v1/audio/speech` | 语音合成 | App / EnginePool; 音频模型 | [语音合成 API](audio-speech-api.md#请求) |
+| `POST` | `/v1/audio/transcriptions` | 语音识别 | App / EnginePool；ASR 模型 | [语音识别 API](audio-transcriptions-api.md) |
+| `GET` | `/v1/realtime` | 实时转写 | App / EnginePool; ASR WebSocket 会话 | [Realtime](audio-transcriptions-api.md) |
 | `GET` | `/v1/audio/voices` | 查询可用声音 | App / EnginePool; 配置声音服务 | [语音合成 API](audio-speech-api.md) |
 | `GET` | `/admin/api/audio/voices` | 查询全部声音（含禁用项） | App / EnginePool; 配置声音服务 | [语音合成 API](audio-speech-api.md) |
 | `POST` | `/v1/audio/voices` | 创建声音 | App / EnginePool; 配置声音服务 | [语音合成 API](audio-speech-api.md) |
