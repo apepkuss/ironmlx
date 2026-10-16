@@ -68,6 +68,98 @@ pub(crate) fn init_test_metallib() {
     });
 }
 
+/// Conservative estimate of a Qwen3.5 vision tower's weight bytes: the
+/// vision stack of the MLX VL checkpoints is bf16 (also under 4-bit text
+/// weights), so it is budgeted at 2 bytes per parameter.
+pub fn approx_weight_bytes(cfg: &VisionConfig) -> usize {
+    let h = cfg.hidden_size as usize;
+    let depth = cfg.depth as usize;
+    let inter = cfg.intermediate_size as usize;
+    let out_h = cfg.out_hidden_size as usize;
+    let patch = cfg.patch_size as usize;
+    let temporal = cfg.temporal_patch_size as usize;
+    let in_channels = cfg.in_channels as usize;
+    let pos = cfg.num_position_embeddings as usize;
+    let merge = cfg.spatial_merge_size as usize;
+    let merge_hidden = merge * merge * h;
+
+    let patch_embed = h * temporal * patch * patch * in_channels + h;
+    let pos_embed = pos * h;
+    let block =
+        2 * h + (3 * h * h + 3 * h) + (h * h + h) + 2 * h + (inter * h + inter) + (h * inter + h);
+    let blocks = depth * block;
+    let merger = 2 * h + merge_hidden * merge_hidden + merge_hidden + out_h * merge_hidden + out_h;
+
+    2 * (patch_embed + pos_embed + blocks + merger)
+}
+
+/// A model's vision tower: loaded with the model when its loader retained
+/// the `vision_tower.*` tensors, or recorded with its checkpoint so it can be
+/// loaded on first use when the serving path left it out
+/// ([`crate::core::Loader::drop_vision_tower`]). Once loaded it stays
+/// resident.
+pub struct VisionSlot {
+    tower: std::sync::OnceLock<VisionTower>,
+    deferred: Option<(std::path::PathBuf, VisionConfig)>,
+}
+
+impl VisionSlot {
+    /// No vision encoder (a text-only checkpoint).
+    pub fn none() -> Self {
+        Self {
+            tower: std::sync::OnceLock::new(),
+            deferred: None,
+        }
+    }
+
+    /// The tower of a checkpoint with `cfg` (`None` for text-only models):
+    /// built now when `loader` retained its tensors, deferred otherwise.
+    pub fn from_loader(loader: &crate::core::Loader, cfg: Option<&VisionConfig>) -> Result<Self> {
+        let Some(cfg) = cfg else {
+            return Ok(Self::none());
+        };
+        let tower = std::sync::OnceLock::new();
+        if loader.contains("vision_tower.patch_embed.proj.weight") {
+            let _ = tower.set(VisionTower::from_loader(loader, cfg)?);
+            return Ok(Self {
+                tower,
+                deferred: None,
+            });
+        }
+        Ok(Self {
+            tower,
+            deferred: Some((loader.model_dir().to_path_buf(), cfg.clone())),
+        })
+    }
+
+    /// The resident tower, if loaded.
+    pub fn get(&self) -> Option<&VisionTower> {
+        self.tower.get()
+    }
+
+    /// Whether the checkpoint has a vision encoder (loaded or deferred).
+    pub fn available(&self) -> bool {
+        self.tower.get().is_some() || self.deferred.is_some()
+    }
+
+    /// Loads a deferred tower from its checkpoint (only its tensors are read)
+    /// on the calling thread, whose stream then owns every derived weight.
+    /// Returns `true` when this call loaded it, `false` when it was resident.
+    pub fn load_deferred(&self) -> Result<bool> {
+        if self.tower.get().is_some() {
+            return Ok(false);
+        }
+        let (model_dir, cfg) = self
+            .deferred
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("model has no vision encoder"))?;
+        let loader = crate::core::Loader::open_vision(model_dir)?;
+        let tower = VisionTower::from_loader(&loader, cfg)?;
+        // A concurrent load that won keeps its tower; this one is dropped.
+        Ok(self.tower.set(tower).is_ok())
+    }
+}
+
 impl VisionTower {
     /// Construct VisionTower by loading all sub-module weights from `loader`.
     ///

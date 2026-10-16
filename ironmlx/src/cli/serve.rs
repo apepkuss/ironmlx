@@ -1397,12 +1397,13 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
     }
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
     let mut loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
+    let component_bytes = loader.loaded_tensor_component_bytes();
     if dflash2_family.is_some() {
-        // DFlash2 serving rejects image input, so the vision encoder would
-        // only hold resident memory.
+        // DFlash2 serving loads the vision encoder on its first image
+        // request (text-only serving never holds it); its bytes stay in the
+        // estimate as a cold component materialized by that request.
         loader.drop_vision_tower();
     }
-    let component_bytes = loader.loaded_tensor_component_bytes();
     let static_memory_estimate = StaticMemoryEstimate {
         text_cold_bytes: component_bytes.text,
         vision_cold_bytes: component_bytes.vision,

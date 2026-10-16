@@ -9,7 +9,7 @@ use crate::core::vision::{
     estimate_transformer_vision_prefill_tensor_bytes, DenseVlMethods, VisionPrefillMemoryProfile,
 };
 use crate::core::Loader;
-use crate::models::vision::VisionTower;
+use crate::models::vision::VisionSlot;
 use crate::nn::{AttnKind, Linear, Mtp, MtpStepOutput};
 use crate::Result;
 
@@ -38,9 +38,9 @@ pub const MIN_KV_CACHE_CAP_FOR_GPU_PERF: i32 = 256;
 
 /// Top-level Qwen3.5 dense model: hybrid 32-layer text core + tied/untied lm_head.
 ///
-/// `vision` is present only when the model was loaded via [`Loader::open_multimodal`]
-/// AND the config contains a `vision_config` block. Text-only inference is unaffected when
-/// `vision` is `None`.
+/// `vision` is loaded when the model was loaded via [`Loader::open_multimodal`]
+/// AND the config contains a `vision_config` block, and deferred to first use when the
+/// serving path dropped its tensors. Text-only inference is unaffected without it.
 pub struct Qwen35Model {
     text: Qwen35TextModel,
     exact_batched_verify_profile: super::speculative::ExactBatchedVerifyProfile,
@@ -49,8 +49,9 @@ pub struct Qwen35Model {
     loaded_weight_bytes: Option<usize>,
     /// `Some` when `!tie_word_embeddings`. `None` reuses `text.embed_tokens` for output projection.
     lm_head: Option<Linear>,
-    /// Vision encoder; `Some` for VL models loaded with `open_multimodal`. `None` for text-only.
-    vision: Option<VisionTower>,
+    /// Vision encoder: loaded for VL models opened with `open_multimodal`,
+    /// deferred when the serving path dropped its tensors, absent for text-only.
+    vision: VisionSlot,
 }
 
 /// Slice per-row last hidden states from `hidden [B, S, H]`.
@@ -129,15 +130,7 @@ impl Qwen35Model {
         } else {
             Some(Linear::from_loader(loader, "lm_head")?)
         };
-        let vision = if let Some(vc) = cfg.vision_config.as_ref() {
-            if loader.contains("vision_tower.patch_embed.proj.weight") {
-                Some(VisionTower::from_loader(loader, vc)?)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let vision = VisionSlot::from_loader(loader, cfg.vision_config.as_ref())?;
         let text = Qwen35TextModel::from_loader_dflash2(loader, cfg)?;
         let mut model = Self {
             text,
@@ -403,15 +396,7 @@ impl Qwen35Model {
         // lightweight sentinel rather than attempting VisionTower::from_loader and catching errors.
         // This avoids spurious error messages for text-only callers who use Loader::open (which
         // drops all vision_tower.* keys during sanitize).
-        let vision = if let Some(vc) = cfg.vision_config.as_ref() {
-            if loader.contains("vision_tower.patch_embed.proj.weight") {
-                Some(VisionTower::from_loader(loader, vc)?)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let vision = VisionSlot::from_loader(loader, cfg.vision_config.as_ref())?;
 
         let text = Qwen35TextModel::from_loader(loader, cfg)?;
         Ok(Self {
@@ -431,7 +416,7 @@ impl Qwen35Model {
             exact_batched_verify_profile: super::speculative::ExactBatchedVerifyProfile::Disabled,
             loaded_weight_bytes: None,
             lm_head,
-            vision: None,
+            vision: VisionSlot::none(),
         }
     }
 
@@ -439,8 +424,15 @@ impl Qwen35Model {
         self.text.config()
     }
 
-    pub(crate) fn vision_loaded(&self) -> bool {
-        self.vision.is_some()
+    /// Whether the checkpoint has a vision encoder, resident or deferred.
+    pub fn vision_available(&self) -> bool {
+        self.vision.available()
+    }
+
+    /// Loads a vision encoder whose tensors were dropped at load (see
+    /// [`VisionSlot::load_deferred`]); `true` when this call loaded it.
+    pub fn load_deferred_vision(&self) -> Result<bool> {
+        self.vision.load_deferred()
     }
 
     /// Extract memory-budget-relevant model attributes for Scheduler::new
@@ -760,7 +752,7 @@ impl Qwen35Model {
         }
         let vision = self
             .vision
-            .as_ref()
+            .get()
             .ok_or_else(|| anyhow!("model has no vision_tower; use Loader::open_multimodal"))?;
         if pixel_values.len() == 1 {
             vision.forward(&pixel_values[0], grid_thw)
@@ -1204,7 +1196,7 @@ impl Qwen35Model {
             exact_batched_verify_profile: super::speculative::ExactBatchedVerifyProfile::Disabled,
             loaded_weight_bytes: None,
             lm_head: None,
-            vision: None,
+            vision: VisionSlot::none(),
         }
     }
 }
@@ -1500,6 +1492,129 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         mode: crate::models::dflash2::DFlash2TargetForwardMode,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<crate::models::dflash2::DFlash2TargetOutput> {
+        self.forward_dflash2_target_on(
+            input_ids,
+            None,
+            position_ids,
+            cache,
+            target_layer_ids,
+            mode,
+            target,
+        )
+    }
+
+    fn dflash2_supports_images(&self) -> bool {
+        self.vision_available()
+    }
+
+    fn dflash2_load_vision(&self) -> crate::Result<bool> {
+        self.load_deferred_vision()
+    }
+
+    fn dflash2_vision_embeds_on(
+        &self,
+        pixel_values: &[mlx::Array],
+        grid_thw: &[(i32, i32, i32)],
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        DenseVlMethods::compute_vision_embeds(self, pixel_values, grid_thw, target)
+    }
+
+    fn dflash2_forward_target_vl_on(
+        &self,
+        input_ids: &mlx::Array,
+        image_embeds: &mlx::Array,
+        image_token_id: i32,
+        position_ids: &mlx::Array,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+        target_layer_ids: &[usize],
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<crate::models::dflash2::DFlash2TargetOutput> {
+        self.forward_dflash2_target_on(
+            input_ids,
+            Some((image_embeds, image_token_id)),
+            position_ids,
+            cache,
+            target_layer_ids,
+            crate::models::dflash2::DFlash2TargetForwardMode::Prefill,
+            target,
+        )
+    }
+
+    fn dflash2_project_hidden_on(
+        &self,
+        hidden: &mlx::Array,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<mlx::Array> {
+        let _m5_lane = (super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4
+            && crate::nn::m5_affine4::enabled())
+        .then(crate::nn::m5_affine4::scope);
+        let shape = hidden.shape();
+        let dims = shape.as_slice();
+        if dims.len() != 3 || dims[0] <= 0 {
+            return Err(anyhow!(
+                "Qwen35 DFlash2 target projection requires [B,S,H] with B>0, got {dims:?}"
+            ));
+        }
+        if dims[1] == 1 {
+            return self.project_hidden_unisolated_on(hidden, target);
+        }
+        // The product-stable affine kernel evaluates all verify positions in
+        // one dispatch while retaining the exact Q=1 accumulation tree. Q3
+        // affine8 uses its explicit four-vector tiling hint; every other
+        // product-stable projection remains on the default tile.
+        let affine8_wide_tiling = dims[1] == 3
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine8Dense;
+        let _affine8_wide_qmm =
+            affine8_wide_tiling.then(crate::nn::product_stable_qmm::affine8_wide_scope);
+        let _product_stable = (!affine8_wide_tiling).then(crate::nn::product_stable_qmm::scope);
+        self.project_hidden_unisolated_on(hidden, target)
+    }
+
+    fn dflash2_restore_target_prefix_on(
+        &self,
+        cache: &mut [crate::core::cache::layer::LayerCache],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+        accepted_len: usize,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<()> {
+        self.text
+            .restore_dflash2_speculative_prefix_on(cache, snapshots, accepted_len, target)
+    }
+
+    fn dflash2_restore_target_prefix_rows_on(
+        &self,
+        cache: &mut [LayerCache],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+        accepted_lens: &[usize],
+        target: StreamOrDevice,
+    ) -> crate::Result<()> {
+        self.text.restore_dflash2_speculative_prefix_rows_on(
+            cache,
+            snapshots,
+            accepted_lens,
+            target,
+        )
+    }
+}
+
+impl Qwen35Model {
+    /// DFlash2 target forward; with `image_embeds` (a VL prefill) its
+    /// image-pad tokens take the vision encoder's rows.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_dflash2_target_on(
+        &self,
+        input_ids: &mlx::Array,
+        image_embeds: Option<(&mlx::Array, i32)>,
+        position_ids: &mlx::Array,
+        cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
+        target_layer_ids: &[usize],
+        mode: crate::models::dflash2::DFlash2TargetForwardMode,
+        target: mlx::StreamOrDevice,
+    ) -> crate::Result<crate::models::dflash2::DFlash2TargetOutput> {
         let _m5_lane = (super::dflash2_lane::is_qwen38_27b(self.config())
             && self.exact_batched_verify_profile
                 == super::speculative::ExactBatchedVerifyProfile::Affine4
@@ -1569,6 +1684,7 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         );
         let (hidden, context_hidden) = self.text.forward_with_dflash2_taps_on(
             input_ids,
+            image_embeds,
             position_ids,
             cache,
             target_layer_ids,
@@ -1579,65 +1695,6 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
             hidden,
             context_hidden,
         })
-    }
-
-    fn dflash2_project_hidden_on(
-        &self,
-        hidden: &mlx::Array,
-        target: mlx::StreamOrDevice,
-    ) -> crate::Result<mlx::Array> {
-        let _m5_lane = (super::dflash2_lane::is_qwen38_27b(self.config())
-            && self.exact_batched_verify_profile
-                == super::speculative::ExactBatchedVerifyProfile::Affine4
-            && crate::nn::m5_affine4::enabled())
-        .then(crate::nn::m5_affine4::scope);
-        let shape = hidden.shape();
-        let dims = shape.as_slice();
-        if dims.len() != 3 || dims[0] <= 0 {
-            return Err(anyhow!(
-                "Qwen35 DFlash2 target projection requires [B,S,H] with B>0, got {dims:?}"
-            ));
-        }
-        if dims[1] == 1 {
-            return self.project_hidden_unisolated_on(hidden, target);
-        }
-        // The product-stable affine kernel evaluates all verify positions in
-        // one dispatch while retaining the exact Q=1 accumulation tree. Q3
-        // affine8 uses its explicit four-vector tiling hint; every other
-        // product-stable projection remains on the default tile.
-        let affine8_wide_tiling = dims[1] == 3
-            && self.exact_batched_verify_profile
-                == super::speculative::ExactBatchedVerifyProfile::Affine8Dense;
-        let _affine8_wide_qmm =
-            affine8_wide_tiling.then(crate::nn::product_stable_qmm::affine8_wide_scope);
-        let _product_stable = (!affine8_wide_tiling).then(crate::nn::product_stable_qmm::scope);
-        self.project_hidden_unisolated_on(hidden, target)
-    }
-
-    fn dflash2_restore_target_prefix_on(
-        &self,
-        cache: &mut [crate::core::cache::layer::LayerCache],
-        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
-        accepted_len: usize,
-        target: mlx::StreamOrDevice,
-    ) -> crate::Result<()> {
-        self.text
-            .restore_dflash2_speculative_prefix_on(cache, snapshots, accepted_len, target)
-    }
-
-    fn dflash2_restore_target_prefix_rows_on(
-        &self,
-        cache: &mut [LayerCache],
-        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
-        accepted_lens: &[usize],
-        target: StreamOrDevice,
-    ) -> crate::Result<()> {
-        self.text.restore_dflash2_speculative_prefix_rows_on(
-            cache,
-            snapshots,
-            accepted_lens,
-            target,
-        )
     }
 }
 
@@ -1703,8 +1760,8 @@ impl DenseVlMethods for Qwen35Model {
             grid_thw.len()
         );
         anyhow::ensure!(
-            self.vision_loaded(),
-            "Qwen35Model vision peak estimator requires a loaded vision tower"
+            self.vision_available(),
+            "Qwen35Model vision peak estimator requires a vision encoder"
         );
         let config =
             self.config().vision_config.as_ref().ok_or_else(|| {

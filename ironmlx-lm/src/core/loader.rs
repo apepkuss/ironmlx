@@ -311,6 +311,8 @@ enum SanitizeMode {
     Mtp,
     Gemma4Drafter,
     DFlash2Draft,
+    /// Only the vision encoder's tensors (read and evaluated on their own).
+    VisionOnly,
     Embedding {
         keep_vision_tower: bool,
         keep_audio_tower: bool,
@@ -361,6 +363,15 @@ impl Loader {
                 keep_vision_tower: true,
             },
         )
+    }
+
+    /// Open only the vision encoder's tensors of a multimodal checkpoint,
+    /// with the same values [`Loader::open_multimodal`] gives them. The text
+    /// model's tensors are dropped before anything is read, so a serving
+    /// path that left the encoder out (see [`Loader::drop_vision_tower`]) can
+    /// load it on first use without materializing the model again.
+    pub fn open_vision(model_dir: &Path) -> Result<Self> {
+        Self::open_impl(model_dir, SanitizeMode::VisionOnly)
     }
 
     /// Open a standalone Qwen MTP draft-head checkpoint.
@@ -447,7 +458,7 @@ impl Loader {
             sanitize_mode,
             SanitizeMode::Text {
                 keep_vision_tower: true
-            }
+            } | SanitizeMode::VisionOnly
         ) {
             load_optiq_vision_sidecar(model_dir, &config_raw, &mut tensors)?;
         }
@@ -479,6 +490,8 @@ impl Loader {
                 Self::sanitize_gemma4_drafter(&mut tensors, &config_raw)?
             }
             SanitizeMode::DFlash2Draft => Self::sanitize_dflash2_draft(&mut tensors, &config_raw)?,
+            // Text sanitizing never rewrites encoder tensors.
+            SanitizeMode::VisionOnly => tensors.retain(|key, _| is_vision_tensor_key(key)),
         }
         validate_quantized_storage_manifest(&tensors, quant, &quant_overrides)?;
 
@@ -515,8 +528,8 @@ impl Loader {
     }
 
     /// Drop the vision-encoder tensors of a multimodal loader before any
-    /// model is built from it, for serving paths that reject image input, so
-    /// the encoder never becomes resident.
+    /// model is built from it, so the encoder is not resident until a model
+    /// loads it on first use ([`Loader::open_vision`]).
     pub fn drop_vision_tower(&mut self) {
         self.weights.retain(|key, _| !is_vision_tensor_key(key));
     }

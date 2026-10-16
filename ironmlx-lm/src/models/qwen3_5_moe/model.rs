@@ -9,7 +9,7 @@ use crate::core::cache::layer::LayerCache;
 use crate::core::cache::{GatedDeltaCache, KVCache, MtpCache};
 use crate::core::model::ModelMeta;
 use crate::core::{Loader, Model};
-use crate::models::vision::{VisionConfig, VisionTower};
+use crate::models::vision::{VisionConfig, VisionSlot, VisionTower};
 use crate::nn::{AttnKind, Linear, MtpStepOutput};
 use crate::Result;
 
@@ -35,8 +35,10 @@ pub struct Qwen35MoeModel {
     pub(super) draft_vocab: std::sync::OnceLock<Option<super::draft_vocab::DraftVocab>>,
     /// Identity of this loaded target for state kept across its requests.
     pub(super) instance: crate::models::dflash2::DFlash2Instance,
-    /// Vision encoder; `Some` for multimodal MoE checkpoints loaded with `open_multimodal`.
-    vision: Option<VisionTower>,
+    /// Vision encoder: loaded with multimodal MoE checkpoints opened with
+    /// `open_multimodal`, or deferred to first use when the serving path
+    /// dropped its tensors (see [`Self::load_deferred_vision`]).
+    vision: VisionSlot,
 }
 
 /// Slice per-row last hidden states from `hidden [B, S, H]`.
@@ -123,15 +125,7 @@ impl Qwen35MoeModel {
                     .pointer("/text_config/dtype")
                     .and_then(serde_json::Value::as_str),
             );
-        let vision = if let Some(vc) = cfg.vision_config.as_ref() {
-            if loader.contains("vision_tower.patch_embed.proj.weight") {
-                Some(VisionTower::from_loader(loader, vc)?)
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let vision = VisionSlot::from_loader(loader, cfg.vision_config.as_ref())?;
         let dflash2_target_bits =
             crate::models::qwen3_6_moe::qwen36_moe_dflash2_target_bits(loader.config_raw_value())
                 .ok();
@@ -269,7 +263,18 @@ impl Qwen35MoeModel {
     }
 
     pub fn vision(&self) -> Option<&VisionTower> {
-        self.vision.as_ref()
+        self.vision.get()
+    }
+
+    /// Whether the checkpoint has a vision encoder, resident or deferred.
+    pub fn vision_available(&self) -> bool {
+        self.vision.available()
+    }
+
+    /// Loads a vision encoder whose tensors were dropped at load (see
+    /// [`VisionSlot::load_deferred`]); `true` when this call loaded it.
+    pub fn load_deferred_vision(&self) -> Result<bool> {
+        self.vision.load_deferred()
     }
 
     pub fn load_mtp_head(&self, loader: &Loader) -> Result<Qwen35MoeMtp> {
@@ -438,34 +443,10 @@ impl Qwen35MoeModel {
         text + vision
     }
 
-    /// Conservative bf16 estimate for the shared Qwen3.5 vision tower. The
-    /// MoE text weights are 4-bit, while the vision stack in the MLX VL
-    /// checkpoint is bf16, so budget it at 2 bytes per parameter.
+    /// Conservative bf16 estimate for the shared Qwen3.5 vision tower
+    /// ([`crate::models::vision::approx_weight_bytes`]).
     fn approx_vision_weight_bytes(cfg: &VisionConfig) -> usize {
-        let h = cfg.hidden_size as usize;
-        let depth = cfg.depth as usize;
-        let inter = cfg.intermediate_size as usize;
-        let out_h = cfg.out_hidden_size as usize;
-        let patch = cfg.patch_size as usize;
-        let temporal = cfg.temporal_patch_size as usize;
-        let in_channels = cfg.in_channels as usize;
-        let pos = cfg.num_position_embeddings as usize;
-        let merge = cfg.spatial_merge_size as usize;
-        let merge_hidden = merge * merge * h;
-
-        let patch_embed = h * temporal * patch * patch * in_channels + h;
-        let pos_embed = pos * h;
-        let block = 2 * h
-            + (3 * h * h + 3 * h)
-            + (h * h + h)
-            + 2 * h
-            + (inter * h + inter)
-            + (h * inter + h);
-        let blocks = depth * block;
-        let merger =
-            2 * h + merge_hidden * merge_hidden + merge_hidden + out_h * merge_hidden + out_h;
-
-        2 * (patch_embed + pos_embed + blocks + merger)
+        crate::models::vision::approx_weight_bytes(cfg)
     }
 
     /// Slice the last sequence position from `hidden [B, S, H]` and project to
@@ -588,7 +569,7 @@ impl Qwen35MoeModel {
             lm_head,
             draft_vocab: std::sync::OnceLock::new(),
             instance: crate::models::dflash2::DFlash2Instance::new(),
-            vision: None,
+            vision: VisionSlot::none(),
         }
     }
 
@@ -650,7 +631,7 @@ impl Qwen35MoeModel {
     ) -> Result<Array> {
         let vision = self
             .vision
-            .as_ref()
+            .get()
             .ok_or_else(|| anyhow!("model has no vision_tower; use Loader::open_multimodal"))?;
         vision.forward(pixel_values, grid_thw)
     }
@@ -1020,8 +1001,8 @@ impl crate::core::vision::DenseVlMethods for Qwen35MoeModel {
         grid_thw: &[(i32, i32, i32)],
     ) -> crate::Result<usize> {
         anyhow::ensure!(
-            self.vision.is_some(),
-            "Qwen35MoeModel vision peak estimator requires a loaded vision tower"
+            self.vision.available(),
+            "Qwen35MoeModel vision peak estimator requires a vision encoder"
         );
         let config = self.config().vision_config.as_ref().ok_or_else(|| {
             anyhow!("Qwen35MoeModel vision peak estimator requires vision_config")
@@ -1213,7 +1194,7 @@ mod tests {
     }
 
     fn assert_model_vision_slot(model: &Qwen35MoeModel) {
-        let _: &Option<crate::models::vision::VisionTower> = &model.vision;
+        let _: &crate::models::vision::VisionSlot = &model.vision;
     }
 
     #[test]

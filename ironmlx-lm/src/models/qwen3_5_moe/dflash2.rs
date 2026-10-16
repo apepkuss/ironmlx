@@ -85,9 +85,11 @@ impl Qwen35MoeModel {
 
     /// Shared B1 DFlash2 target forward for linear windows and flat trees
     /// (the tree plan, when present, is carried by the thread-local scope).
+    #[allow(clippy::too_many_arguments)]
     fn forward_dflash2_on(
         &self,
         input_ids: &Array,
+        image_embeds: Option<(&Array, i32)>,
         position_ids: &Array,
         cache: Option<&mut [LayerCache]>,
         target_layer_ids: &[usize],
@@ -149,6 +151,7 @@ impl Qwen35MoeModel {
         .then(crate::nn::moe_tile_experts::scope);
         let (hidden, context_hidden) = self.text().forward_with_dflash2_taps_on(
             input_ids,
+            image_embeds,
             position_ids,
             cache,
             target_layer_ids,
@@ -440,6 +443,7 @@ impl DFlash2Target for Qwen35MoeModel {
         let _tree = crate::nn::dflash_tree::enter(plan)?;
         self.forward_dflash2_on(
             input_ids,
+            None,
             &positions,
             Some(cache),
             target_layer_ids,
@@ -508,10 +512,58 @@ impl DFlash2Target for Qwen35MoeModel {
         }
         self.forward_dflash2_on(
             input_ids,
+            None,
             position_ids,
             cache,
             target_layer_ids,
             mode,
+            target,
+        )
+    }
+
+    fn dflash2_supports_images(&self) -> bool {
+        self.vision_available()
+    }
+
+    fn dflash2_load_vision(&self) -> Result<bool> {
+        self.load_deferred_vision()
+    }
+
+    fn dflash2_vision_embeds_on(
+        &self,
+        pixel_values: &[Array],
+        grid_thw: &[(i32, i32, i32)],
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        crate::core::vision::DenseVlMethods::compute_vision_embeds(
+            self,
+            pixel_values,
+            grid_thw,
+            target,
+        )
+    }
+
+    fn dflash2_forward_target_vl_on(
+        &self,
+        input_ids: &Array,
+        image_embeds: &Array,
+        image_token_id: i32,
+        position_ids: &Array,
+        cache: Option<&mut [LayerCache]>,
+        target_layer_ids: &[usize],
+        target: StreamOrDevice,
+    ) -> Result<DFlash2TargetOutput> {
+        anyhow::ensure!(
+            crate::nn::dflash_tree::current().is_none(),
+            "Qwen3.6 MoE DFlash2 VL prefill called inside a flat tree scope"
+        );
+        self.forward_dflash2_on(
+            input_ids,
+            Some((image_embeds, image_token_id)),
+            position_ids,
+            cache,
+            target_layer_ids,
+            DFlash2TargetForwardMode::Prefill,
             target,
         )
     }

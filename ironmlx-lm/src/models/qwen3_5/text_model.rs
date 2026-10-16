@@ -326,6 +326,7 @@ impl Qwen35TextModel {
     pub(crate) fn forward_with_dflash2_taps_on(
         &self,
         input_ids: &Array,
+        image_embeds: Option<(&Array, i32)>,
         position_ids: &Array,
         cache: Option<&mut [LayerCache]>,
         target_layer_ids: &[usize],
@@ -374,7 +375,16 @@ impl Qwen35TextModel {
             }
         }
 
-        let hidden = self.embed_on(input_ids, target)?;
+        let mut hidden = self.embed_on(input_ids, target)?;
+        // Image-pad tokens of a VL prefill take the vision encoder's rows.
+        if let Some((embeds, image_token_id)) = image_embeds {
+            hidden = super::cross_modal::replace_image_tokens(
+                &hidden,
+                input_ids,
+                embeds,
+                image_token_id,
+            )?;
+        }
         let (cos, sin) = self.mrope.cos_sin(position_ids)?;
         let mut x = hidden;
         let mut captured = Vec::with_capacity(target_layer_ids.len());
