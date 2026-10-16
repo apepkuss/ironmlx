@@ -97,6 +97,10 @@ pub mod settings {
     /// preparation and gated norm, residual add + norm, the MoE residual add
     /// (`nn::fused_norm`, `nn::gdn_prep`).
     pub const FUSED_GLUE: &str = "IRONMLX_EXPERIMENTAL_FUSED_GLUE";
+    /// DFlash2 serving runs a few short synthetic requests of the prompt
+    /// length classes through the request pipeline before it accepts
+    /// requests, so no shape-specialized kernel compiles inside a request.
+    pub const DFLASH2_STARTUP_WARMUP: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_STARTUP_WARMUP";
 }
 
 /// Model family a DFlash2 profile is qualified for. Each family carries its
@@ -175,6 +179,12 @@ impl M5ProfileTarget {
 /// dispatches computing the op-by-op values bit for bit. Paired in-process B1
 /// q8 windows: experts -4.3%, glue -2.1%, drafts -0.7%; verify q8 12.7 ->
 /// 11.7 ms with the split counts.
+///
+/// The vision encoder is not loaded (DFlash2 serving rejects image input):
+/// B1 serving footprint 22.23 -> 21.34 GB. Startup warmup requests compile the
+/// prompt-length-specialized kernels before serving: the first run of a new
+/// build no longer stalls 190-240 ms inside a request (prefill of a prompt
+/// over 64 tokens, the drafter's first 33-48-row context projection).
 const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
     (settings::DFLASH2_RAGGED_LINEAR, "1"),
     (settings::DFLASH2_RAGGED_BUDGET, "3"),
@@ -195,6 +205,7 @@ const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
     (settings::FUSED_GLUE, "1"),
     (settings::DFLASH2_DRAFT_M5_RESIDENT, "1"),
     (settings::GDN_COMMIT_KERNEL, "1"),
+    (settings::DFLASH2_STARTUP_WARMUP, "1"),
     (settings::QEMBEDDING_RUNTIME_COUNT, "1"),
     (settings::MLX_CACHE_MAX_MIB, "512"),
     (settings::WIRED_WEIGHTS, "1"),
@@ -791,6 +802,7 @@ mod tests {
             settings::FUSED_GLUE,
             settings::DFLASH2_DRAFT_M5_RESIDENT,
             settings::GDN_COMMIT_KERNEL,
+            settings::DFLASH2_STARTUP_WARMUP,
         ] {
             assert_eq!(
                 setting_with(None, moe, name).as_deref(),

@@ -794,6 +794,80 @@ impl DFlash2TensorBatchCache {
     }
 }
 
+/// Prompt lengths of the startup warmup: one per row class of the
+/// shape-specialized kernels a single request's prompt reaches (M5 affine4
+/// row variants up to 128 rows, the fused decoder glue up to 64 tokens,
+/// aligned and unaligned prefill tiles, longer prompts).
+const STARTUP_WARMUP_PROMPT_LENGTHS: [usize; 11] =
+    [12, 24, 40, 56, 72, 100, 128, 136, 200, 264, 520];
+/// Generated tokens per warmup request: the prefill, the first proposal over
+/// the prompt context, first-token sampling and the first verify windows.
+const STARTUP_WARMUP_NEW_TOKENS: usize = 4;
+
+/// M5 profile setting `DFLASH2_STARTUP_WARMUP`.
+pub(crate) fn startup_warmup_requested() -> bool {
+    ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::DFLASH2_STARTUP_WARMUP)
+}
+
+/// Runs short synthetic single requests through the B1 request pipeline
+/// before serving starts, so the Metal libraries and pipelines specialized to
+/// a prompt-length class are compiled here instead of inside a request (a
+/// new build's first compile of one costs up to ~240 ms). No prefix cache is
+/// involved and the token ids are fixed, so serving state is unchanged.
+pub(crate) fn run_dflash2_startup_warmup<M>(
+    model: &M,
+    draft: &DFlash2DraftModel,
+    tokenizer: &Tokenizer,
+    execution: DFlash2ExecutionOptions,
+    prefill_chunk_size: usize,
+) -> Result<()>
+where
+    M: DFlash2Target,
+{
+    let started = Instant::now();
+    for &length in &STARTUP_WARMUP_PROMPT_LENGTHS {
+        let request = GenerateRequest {
+            priority: Default::default(),
+            prompt_ids: (0..length as u32)
+                .map(|i| 1000 + (i * 7919) % 50_000)
+                .collect(),
+            max_new_tokens: STARTUP_WARMUP_NEW_TOKENS,
+            sampler: ironmlx_core::sampler::Sampler::greedy(),
+            stop_token_ids: Vec::new(),
+            prefill_chunk_size,
+            decode_cadence_mid_chunk_cap: 1,
+            kv_cache_turboquant_bits: None,
+            pixel_values: None,
+            image_grid_thw: None,
+            image_spatial_merge_size: 2,
+            image_token_id: ironmlx_lm::core::model_input::IMAGE_TOKEN_ID,
+            constraint: None,
+        };
+        let mut stream = DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
+            model,
+            draft,
+            tokenizer,
+            request,
+            execution,
+            None,
+            &|| false,
+        )
+        .with_context(|| format!("DFlash2 startup warmup ({length}-token prompt)"))?;
+        while let Some(event) = stream.next_token()? {
+            if event.finish_reason.is_some() {
+                break;
+            }
+        }
+    }
+    mlx::clear_cache();
+    tracing::info!(
+        requests = STARTUP_WARMUP_PROMPT_LENGTHS.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "DFlash2 startup warmup finished"
+    );
+    Ok(())
+}
+
 impl<'m, M> DFlash2TextGenerationStream<'m, M>
 where
     M: DFlash2Target,
