@@ -2,14 +2,27 @@
 import importlib.util
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 SCRIPT = Path(__file__).resolve().parents[1] / "release-archives.py"
 spec = importlib.util.spec_from_file_location("archives", SCRIPT)
 archives = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(archives)
+
+
+class ArchiveToolTests(unittest.TestCase):
+    def test_failed_command_preserves_diagnostics(self):
+        error = subprocess.CalledProcessError(1, ["hdiutil"], output="attach failed: resource busy\n")
+        with patch.object(archives.subprocess, "run", side_effect=error), \
+                patch.object(archives.sys, "stderr") as stderr:
+            with self.assertRaises(subprocess.CalledProcessError) as caught:
+                archives.run("hdiutil", "attach", "broken.dmg")
+        self.assertIs(caught.exception, error)
+        self.assertIn("resource busy", "".join(call.args[0] for call in stderr.write.call_args_list))
 
 
 @unittest.skipUnless(shutil.which("hdiutil") and shutil.which("ditto"), "requires macOS archive tools")

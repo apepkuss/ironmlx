@@ -13,6 +13,7 @@ import posixpath
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import zipfile
 
@@ -21,7 +22,13 @@ MATERIALS = ("LICENSE", "NOTICE", "SBOM.cdx.json", "THIRD_PARTY_NOTICES.md",
 
 
 def run(*args):
-    subprocess.run([str(arg) for arg in args], check=True, stdout=subprocess.DEVNULL)
+    try:
+        subprocess.run([str(arg) for arg in args], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    except subprocess.CalledProcessError as error:
+        if error.stdout:
+            print(error.stdout, file=sys.stderr, end="" if error.stdout.endswith("\n") else "\n")
+        raise
 
 
 def digest(path):
@@ -129,11 +136,11 @@ def verify(repo, app, output, package):
         mount = temp / "dmg"
         mount.mkdir()
         run("hdiutil", "attach", output / "IronMLX.dmg", "-readonly", "-nobrowse",
-            "-mountpoint", mount, "-quiet")
+            "-mountpoint", mount)
         try:
             check_dmg_root(mount)
         finally:
-            run("hdiutil", "detach", mount, "-quiet")
+            run("hdiutil", "detach", mount)
 
 
 def assemble(repo, app, output, package):
