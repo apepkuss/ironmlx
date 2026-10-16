@@ -74,29 +74,57 @@ test('model parameter help explains the three capacity fields in each language',
   }
 });
 
-test('model parameters form three base rows plus a hidden reasoning metadata row', () => {
+test('model parameters retain generation rows and a separate hidden ASR section', () => {
   const rows = [...html.matchAll(/<div class="modal-row model-params-setting-row[^>]*>/g)]
     .filter(row => row.index > html.indexOf('<!-- Model Params Modal -->'));
   const expected = [
     ['modal-alias-input', 'modal-model-type', 'modal-context-size'],
     ['modal-reasoning-capability', 'modal-reasoning-efforts', 'modal-reasoning-default'],
+    ['modal-asr-duration', 'modal-asr-output-tokens'],
     ['modal-max-tokens', 'modal-max-output-tokens', 'modal-temperature'],
     ['modal-top-p', 'modal-top-k', 'modal-repeat-penalty'],
   ];
   assert.equal(rows.length, expected.length);
   assert.match(rows[1][0], /id="modal-reasoning-metadata-row" hidden/);
-  const outputSection = html.indexOf('<div class="model-params-output-section">', rows[0].index);
-  assert.ok(outputSection > rows[1].index && outputSection < rows[2].index);
+  const asrSection = html.indexOf('<div class="model-params-output-section" id="modal-asr-settings" style="display:none">');
+  const outputSection = html.indexOf('<div class="model-params-output-section" id="modal-generation-settings">');
+  assert.ok(asrSection > rows[1].index && asrSection < rows[2].index);
+  assert.ok(outputSection > rows[2].index && outputSection < rows[3].index);
   assert.ok(html.includes('.model-params-output-section {\n    border-top: 0.5px solid var(--border);'));
   for (let index = 0; index < rows.length; index++) {
     const end = index + 1 < rows.length
       ? rows[index + 1].index : html.indexOf('<div id="modal-mtp-section"', rows[index].index);
     const row = html.slice(rows[index].index, end);
     const positions = expected[index].map(id => row.indexOf(`id="${id}"`));
-    assert.equal((row.match(/class="modal-field"/g) || []).length, 3);
+    assert.equal((row.match(/class="modal-field"/g) || []).length, expected[index].length);
     assert.ok(positions.every(position => position >= 0));
-    assert.ok(positions[0] < positions[1] && positions[1] < positions[2]);
-    assert.equal((row.match(/class="profile-help-trigger"/g) || []).length, [1, 1, 2, 0][index]);
+    assert.ok(positions.every((position, field) => field === 0 || positions[field - 1] < position));
+    assert.equal((row.match(/class="profile-help-trigger"/g) || []).length, [1, 1, 2, 2, 0][index]);
+  }
+});
+
+test('ASR parameter save uses model defaults, supports overrides and resets without generation settings', () => {
+  const cases = [
+    { duration: '600', tokens: '2048', defaults: [1200, 1024], expected: [600, 2048] },
+    { duration: '', tokens: '2048', defaults: [900, 512], expected: [900, 2048] },
+    { duration: '600', tokens: '', defaults: [900, 512], expected: [600, 512] },
+    { duration: '', tokens: '', defaults: [1200, 1024], expected: null },
+  ];
+  for (const { duration, tokens, defaults, expected } of cases) {
+    const page = dashboard();
+    const model = page.context.window.__CURRENT_PARAM_MODEL__;
+    Object.assign(page.context.window.__LOCAL_MODELS__[model], {
+      capabilities: { runtime_kind: 'asr' },
+      asr_defaults: { max_audio_duration_seconds: defaults[0], max_output_tokens: defaults[1] },
+    });
+    page.context.document.getElementById = id => ({ value: {
+      'modal-alias-input': 'Speech recognition',
+      'modal-asr-duration': duration,
+      'modal-asr-output-tokens': tokens,
+    }[id] });
+    page.context.saveModelParams();
+    assert.deepEqual(page.payload, { model_id: model, alias: 'Speech recognition',
+      asr: expected && { max_audio_duration_seconds: expected[0], max_output_tokens: expected[1] } });
   }
 });
 

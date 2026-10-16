@@ -6,6 +6,8 @@ const vm = require('node:vm');
 const resourceRoot = path.join(__dirname, '../../ironmlx-app/Sources/IronMLXAppCore/Resources');
 const html = fs.readFileSync(path.join(resourceRoot, 'dashboard2.html'), 'utf8');
 const catalog = JSON.parse(fs.readFileSync(path.join(resourceRoot, 'supported-models.json'), 'utf8'));
+const modelCount = new Set(catalog.entries.map(entry => entry.modelId || entry.id)).size;
+const catalogSummary = `${modelCount} 个模型 · ${catalog.entries.length} 个版本`;
 function slice(start, end) { return html.slice(html.indexOf(start), html.indexOf(end, html.indexOf(start))); }
 const translations = slice('  const I18N =', '  const LANG_MAP =');
 const sourceTabs = slice('  function switchDlSource(', '  const ACTIVE_DOWNLOAD_PHASES');
@@ -89,8 +91,8 @@ test('default tab is the catalogue and keyboard navigation selects one panel', (
 
 test('catalogue lists all models without presenting assistants as chat models', () => {
   const p = page(); p.render();
-  assert.equal(p.element('catalog-model-list').buttons.length, 29);
-  assert.match(p.element('catalog-summary').textContent, /29 个模型 · 59 个版本/);
+  assert.equal(p.element('catalog-model-list').buttons.length, modelCount);
+  assert.ok(p.element('catalog-summary').textContent.includes(catalogSummary));
   p.choose('gemma4-e2b-4bit', 'gemma4-e2b-4bit');
   assert.match(p.element('catalog-model-list').innerHTML, /架构兼容 · 待运行验证/);
   p.choose('dflash2-qwen38', 'dflash2-qwen38');
@@ -99,7 +101,7 @@ test('catalogue lists all models without presenting assistants as chat models', 
 
 test('every model requires a quantization choice, including single FP16 and BF16 variants', () => {
   const p = page(); p.render();
-  assert.equal((p.element('catalog-model-list').innerHTML.match(/class="catalog-row"/g) || []).length, 29);
+  assert.equal((p.element('catalog-model-list').innerHTML.match(/class="catalog-row"/g) || []).length, modelCount);
   const qwen35 = p.element('variant-qwen35-2b');
   assert.deepEqual(qwen35.options.map(option => option.label), ['选择量化版本', 'Affine · 4 bit', 'Affine · 5 bit', 'Affine · 6 bit', 'OptiQ · 4 bit']);
   assert.equal(qwen35.value, '');
@@ -117,7 +119,7 @@ test('every model requires a quantization choice, including single FP16 and BF16
   const firstRow = p.element('catalog-model-list').innerHTML.split('</article>')[0];
   assert.doesNotMatch(firstRow, /class="catalog-repo"|预计下载|权重预算|架构兼容/);
   assert.doesNotMatch(firstRow, /请先选择量化版本/);
-  assert.equal(p.element('catalog-model-list').selects.length, 29);
+  assert.equal(p.element('catalog-model-list').selects.length, modelCount);
   assert.deepEqual(p.element('variant-laya').options.map(option => option.label), ['选择量化版本', 'FP16']);
   assert.deepEqual(p.element('variant-dflash2-qwen38').options.map(option => option.label), ['选择量化版本', 'BF16']);
   p.choose('laya', 'laya');
@@ -128,7 +130,7 @@ test('every model requires a quantization choice, including single FP16 and BF16
   const distinct = structuredClone(catalog.entries.find(entry => entry.id === 'qwen38-27b-4bit'));
   distinct.id = 'different-finetune'; distinct.modelId = 'different-finetune';
   p.context.window.__IRONMLX_SUPPORTED_MODELS__.entries.push(distinct); p.render();
-  assert.equal((p.element('catalog-model-list').innerHTML.match(/class="catalog-row"/g) || []).length, 30);
+  assert.equal((p.element('catalog-model-list').innerHTML.match(/class="catalog-row"/g) || []).length, modelCount + 1);
 });
 
 test('variant changes update repository, bytes, memory, status and the HF download target', () => {
@@ -167,12 +169,32 @@ test('same-bit formats stay distinct and selection survives rerenders, tabs and 
   assert.match(p.element('catalog-model-list').innerHTML, /采用 4\/8-bit 混合精度/);
   p.render();
   assert.equal(p.element('variant-qwen35-2b').value, 'qwen35-2b-optiq-4bit');
-  assert.match(p.element('catalog-summary').textContent, /29 个模型 · 59 个版本/);
+  assert.ok(p.element('catalog-summary').textContent.includes(catalogSummary));
   p.context.switchDlSource('hf'); p.context.switchDlSource('catalog');
   p.context.refreshSupportedModelActions();
   assert.equal(p.element('variant-qwen35-2b').value, 'qwen35-2b-optiq-4bit');
   p.element('catalog-model-list').buttons[0].events.click();
   assert.equal(p.requests[0][1].repo_id, 'mlx-community/Qwen3.5-2B-OptiQ-4bit');
+});
+
+test('both Qwen3-ASR sizes require variant selection and download as speech recognition models', () => {
+  for (const [modelId, size] of [['qwen3-asr-06b', '0.6B'], ['qwen3-asr-17b', '1.7B']]) {
+    const p = page(); p.render();
+    const entryId = `${modelId}-8bit`;
+    const entry = catalog.entries.find(candidate => candidate.id === entryId);
+    assert.ok(entry, `${size} catalogue entry`);
+    assert.equal(entry.category, 'stt');
+    assert.deepEqual(entry.capabilities, ['stt']);
+    assert.equal(p.element(`variant-${modelId}`).value, '');
+    p.choose(modelId, entryId);
+    const row = p.element('catalog-model-list').innerHTML.split('</article>')
+      .find(value => value.includes(`data-model-id="${modelId}"`));
+    assert.ok(row.includes(p.context.t('catalog_stt')));
+    const button = p.element('catalog-model-list').buttons.find(value => value.dataset.entryId === entryId);
+    assert.equal(button.disabled, false);
+    button.events.click();
+    assert.deepEqual(p.requests, [['hf', { repo_id: `mlx-community/Qwen3-ASR-${size}-8bit`, token: null }]]);
+  }
 });
 
 test('public catalogue downloads use the existing queues without credentials', () => {
