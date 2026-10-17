@@ -4878,11 +4878,25 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
         streams
     };
 
+    // Per row: the vision rows its replay still reaches (images inside the
+    // restored prefix are not encoded again) and the row its first replayed
+    // image pad takes.
     let mut vision_embeds_full = Vec::with_capacity(b);
+    let mut vision_rows_start = vec![0_usize; b];
     for row in 0..b {
         let embeds = match (pixel_values[row], grid_thw[row]) {
             (Some(pv), Some(grids)) if !grids.is_empty() => {
-                Some(model.compute_vision_embeds(pv, grids, mlx::StreamOrDevice::default())?)
+                let (embeds, rows_start) = vision_embeds_after_prefix(
+                    model,
+                    pv,
+                    grids,
+                    &fingerprints[row],
+                    &prompt_ids_u32[row],
+                    replay_from[row],
+                    image_token_id,
+                )?;
+                vision_rows_start[row] = rows_start;
+                embeds
             }
             (Some(_), None) => {
                 anyhow::bail!(
@@ -4943,10 +4957,11 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
                     "forward_batched_vl_with_paged_prefix: row {row} image token without vision embeds"
                 )
             })?;
-            let image_row = prompt_ids[row][..pos]
-                .iter()
-                .filter(|&&tok| tok == image_token_id)
-                .count();
+            let image_row = vision_rows_start[row]
+                + prompt_ids[row][replay_from[row]..pos]
+                    .iter()
+                    .filter(|&&tok| tok == image_token_id)
+                    .count();
             vision_slices.push(slice_vision_embeds_rows(embeds, image_row, image_row + 1)?);
         }
         let vision_embeds_slice = match vision_slices.len() {
@@ -29244,9 +29259,87 @@ mod tests {
             "fully hit VL batch should restore prefixes instead of recomputing them"
         );
         assert_eq!(hit_model.forward_seq_lens(), vec![1]);
+        assert_eq!(
+            hit_model.vision_grid_lens(),
+            Vec::<usize>::new(),
+            "restored prefixes cover every image, so none is encoded again"
+        );
 
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn batched_vl_partial_prefix_hit_encodes_only_images_past_the_restored_prefix() {
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
+        use mlx::Dtype;
+
+        let pad = IMAGE_TOKEN_ID as u32;
+        // One pad token per (1, 2, 2) image at merge 2.
+        fn vl_req(ids: Vec<u32>, pixels: &[f32]) -> GenerateRequest {
+            let mut req = mk_req(ids);
+            req.pixel_values = Some(
+                pixels
+                    .iter()
+                    .map(|&value| {
+                        let array: mlx::Array =
+                            (&[value; 4][..], &[1_i32, 4][..]).try_into().unwrap();
+                        mlx::ops::astype(&array, Dtype::Bfloat16).unwrap()
+                    })
+                    .collect(),
+            );
+            req.image_grid_thw = Some(vec![(1_i32, 2_i32, 2_i32); pixels.len()]);
+            req.image_spatial_merge_size = 2;
+            req.image_token_id = IMAGE_TOKEN_ID;
+            req
+        }
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-batch-vl-partial-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "vl-test", 2, 32)
+            .expect("prefix config");
+
+        let mut warm = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        warm.enable_paged_prefix_cache(config.clone())
+            .expect("enable prefix cache");
+        warm.admit(vl_req(vec![1, pad, 2], &[0.0]))
+            .expect("admit warm");
+        warm.prefill_admitted(&StepDecodeMaskModel::default())
+            .expect("warm prefill");
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+
+        // Row 0 extends the warm prompt and appends image C (restores 3
+        // tokens, encodes C only); row 1 is a cold image prompt.
+        let mut batch = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        batch
+            .enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        batch
+            .admit(vl_req(vec![1, pad, 2, 3, pad, 4], &[0.0, 5.0]))
+            .expect("admit appended");
+        batch
+            .admit(vl_req(vec![7, pad, 8], &[1.0]))
+            .expect("admit cold");
+        let model = StepDecodeMaskModel::default();
+        let events = batch.prefill_admitted(&model).expect("batched prefill");
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(model.vision_grid_lens(), vec![1, 1]);
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
