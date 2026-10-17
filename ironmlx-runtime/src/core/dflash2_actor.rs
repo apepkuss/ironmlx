@@ -896,7 +896,15 @@ where
         let mut prefix_cache = prefix_cache_max_bytes
             .map(DFlash2PrefixCache::new)
             .transpose()
-            .expect("validated DFlash2 prefix cache capacity");
+            .expect("validated DFlash2 prefix cache capacity")
+            .map(|cache| {
+                let turn_boundary = crate::core::chat_prefix::ChatTurnBoundary::probe(&tokenizer);
+                tracing::info!(
+                    generation_suffixes = ?turn_boundary.as_ref().map(|b| b.suffixes()),
+                    "DFlash2 prefix cache chat turn boundary"
+                );
+                cache.with_turn_boundary(turn_boundary)
+            });
         let mut next_request_id = 1_u64;
         let mut active = Vec::<ActiveDFlash2Request<'_, M>>::with_capacity(b_max);
         let mut paused_background = VecDeque::<ActiveDFlash2Request<'_, M>>::with_capacity(b_max);

@@ -13,6 +13,7 @@ use mlx::{Array, StreamOrDevice};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::core::chat_prefix::ChatTurnBoundary;
 use crate::core::dflash2_budget::{
     DFlash2BudgetPolicyKind, DFlash2DraftBudgetPolicy, DFlash2PolicyDomain, DFlash2WindowRole,
 };
@@ -237,6 +238,9 @@ pub(crate) struct DFlash2PrefixCache {
     saves: u64,
     evictions: u64,
     entries: Vec<DFlash2PrefixArtifact>,
+    /// Where a chat prompt's next turn diverges; a prompt ending in a
+    /// generation suffix is also saved without it (see [`ChatTurnBoundary`]).
+    turn_boundary: Option<ChatTurnBoundary>,
 }
 
 impl DFlash2PrefixCache {
@@ -251,7 +255,21 @@ impl DFlash2PrefixCache {
             saves: 0,
             evictions: 0,
             entries: Vec::new(),
+            turn_boundary: None,
         })
+    }
+
+    pub(crate) fn with_turn_boundary(mut self, turn_boundary: Option<ChatTurnBoundary>) -> Self {
+        self.turn_boundary = turn_boundary;
+        self
+    }
+
+    /// The length of `prompt_ids` a follow-up chat turn shares, when the
+    /// prompt ends in its template's generation suffix.
+    fn turn_reusable_len(&self, prompt_ids: &[u32]) -> Option<usize> {
+        self.turn_boundary
+            .as_ref()
+            .and_then(|boundary| boundary.reusable_len(prompt_ids))
     }
 
     /// The longest artifact whose tokens prefix `prompt_ids` and whose
@@ -1405,6 +1423,14 @@ where
         };
 
         let prompt_len = request.prompt_ids.len();
+        // A chat prompt's next turn shares it only up to its generation
+        // suffix: the prefill ends a chunk there and saves that boundary.
+        let turn_boundary = prefix_cache
+            .as_deref()
+            .and_then(|cache| cache.turn_reusable_len(&request.prompt_ids))
+            .map(i32::try_from)
+            .transpose()
+            .context("DFlash2 prompt is too long")?;
         let cap = i32::try_from(dflash2_target_cache_tokens(
             prompt_len,
             request.max_new_tokens,
@@ -1495,6 +1521,10 @@ where
                 position,
                 prefill_execution,
             );
+            let chunk_len = match turn_boundary {
+                Some(boundary) if position < boundary => chunk_len.min(boundary - position),
+                _ => chunk_len,
+            };
             // A chunk never splits an image's pad run.
             let chunk_len = match vl.as_ref() {
                 Some(vl) => {
@@ -1552,17 +1582,25 @@ where
             memory_phase_diagnostic("prefill_chunk_evaluated", position + chunk_len, prompt_len);
             ensure_dflash2_request_not_cancelled(is_cancelled)?;
             // Dense and linear target state is materially larger than an
-            // ordinary paged-KV prefix entry. Retain the last reusable chunk
-            // boundary and the exact full prompt instead of every cumulative
-            // prefill chunk. This preserves exact-repeat and appended-turn
-            // reuse without multiplying resident memory by the chunk count.
-            let cache_this_boundary = should_cache_dflash2_prefill_boundary(
-                prompt_len_i32,
-                position,
-                chunk_len,
-                request.prefill_chunk_size,
-                prefill_execution,
-            );
+            // ordinary paged-KV prefix entry. Retain the exact full prompt and
+            // one shorter boundary instead of every cumulative prefill chunk:
+            // a chat prompt's turn boundary (what its next turn shares), else
+            // the last reusable chunk boundary. This preserves exact-repeat,
+            // follow-up-turn and appended-text reuse without multiplying
+            // resident memory by the chunk count.
+            let cache_this_boundary = match turn_boundary {
+                Some(boundary) => {
+                    let stop = position + chunk_len;
+                    stop == boundary || stop == prompt_len_i32
+                }
+                None => should_cache_dflash2_prefill_boundary(
+                    prompt_len_i32,
+                    position,
+                    chunk_len,
+                    request.prefill_chunk_size,
+                    prefill_execution,
+                ),
+            };
             if let (true, Some(cache)) = (cache_this_boundary, prefix_cache.as_deref_mut()) {
                 match cache.insert(
                     &request.prompt_ids[..stop],

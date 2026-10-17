@@ -2114,3 +2114,160 @@ fn image_prefix_artifacts_survive_an_appended_image_and_separate_same_grid_image
         ids1.len()
     );
 }
+
+/// A chat follow-up turn restores turn 1's prompt up to its generation
+/// suffix (which the template drops when it renders the reply as history),
+/// with thinking on and off and across prefill chunks. The boundary state
+/// turn 1 saves before prefilling its suffix is bit-identical to turn 2's
+/// cold prefill state there in the same chunks. (Turn 2 need not decode as
+/// without the cache: prefill logits move by a few tenths with where chunks
+/// end, enough to flip a near tie.)
+#[test]
+#[serial(mlx_metal)]
+#[ignore = "loads a full local Qwen3.6 MoE target and the incoai DFlash2 draft"]
+fn chat_follow_up_turns_restore_the_previous_prompt_up_to_its_generation_suffix() {
+    use crate::core::chat_prefix::ChatTurnBoundary;
+    use ironmlx_lm::core::Message;
+
+    let Some(fixture) = fixture() else {
+        eprintln!("skipping: QWEN36_MOE_DFLASH2_TARGET or DFLASH2_MODEL is not set");
+        return;
+    };
+    let message = |role: &str, content: &str| Message {
+        role: role.to_owned(),
+        content: content.to_owned(),
+    };
+    let run = |ids: &[u32], cache: Option<&mut DFlash2PrefixCache>| {
+        let mut stream = DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
+            &fixture.target,
+            &fixture.draft,
+            &fixture.tokenizer,
+            request(ids.to_vec(), 24, Vec::new(), Sampler::greedy()),
+            DFlash2ExecutionOptions {
+                block_size: 8,
+                p2: DFlash2P2Options::default(),
+            },
+            cache.map(|cache| (cache, "chat-turn-prefix-test")),
+            &|| false,
+        )
+        .expect("DFlash2 stream");
+        let hit = stream.prefix_cache_hit_tokens();
+        (drain(|| stream.next_token()), hit)
+    };
+    let boundary = ChatTurnBoundary::probe(&fixture.tokenizer).expect("generation suffixes");
+    let long_notes =
+        "The survey log records tide heights, bird counts and the weather each morning. "
+            .repeat(200);
+    for kwargs in [None, Some(serde_json::json!({ "enable_thinking": false }))] {
+        for question in [
+            "Describe a lighthouse at night.".to_owned(),
+            format!("{long_notes}Summarize these notes."),
+        ] {
+            let encode = |messages: &[Message]| {
+                let text = fixture
+                    .tokenizer
+                    .apply_chat_template(messages, true, kwargs.as_ref())
+                    .expect("template");
+                fixture.tokenizer.encode(&text, false).expect("encode")
+            };
+            let ids1 = encode(&[message("user", &question)]);
+            let ids2 = encode(&[
+                message("user", &question),
+                message(
+                    "assistant",
+                    "A tall white tower sweeps its beam over dark water.",
+                ),
+                message("user", "Now describe it at dawn."),
+            ]);
+            let reusable = boundary
+                .reusable_len(&ids1)
+                .expect("turn 1 ends in a suffix");
+            assert_eq!(ids2[..reusable], ids1[..reusable]);
+
+            let new_cache = || {
+                DFlash2PrefixCache::new(8 << 30)
+                    .expect("prefix cache")
+                    .with_turn_boundary(Some(boundary.clone()))
+            };
+            let mut cache = new_cache();
+            let (turn1, hit) = run(&ids1, Some(&mut cache));
+            assert_eq!(hit, 0);
+            let (cached, hit) = run(&ids2, Some(&mut cache));
+            assert_eq!(hit, reusable, "turn 2 restores turn 1 up to its suffix");
+            let (repeat, hit) = run(&ids1, Some(&mut cache));
+            assert_eq!(hit, ids1.len(), "an exact repeat restores the whole prompt");
+            assert_eq!(
+                repeat, turn1,
+                "an exact repeat decodes like turn 1 ({kwargs:?})"
+            );
+
+            // The boundary state turn 1 saved before prefilling its suffix
+            // is the state turn 2 reaches cold in the same chunks (ending one
+            // at the boundary, by declaring the rest its generation suffix).
+            let mut reference = DFlash2PrefixCache::new(8 << 30)
+                .expect("prefix cache")
+                .with_turn_boundary(Some(ChatTurnBoundary::from_suffixes(vec![ids2
+                    [reusable..]
+                    .to_vec()])));
+            let (_, hit) = run(&ids2, Some(&mut reference));
+            assert_eq!(hit, 0);
+            let artifact_at = |cache: &DFlash2PrefixCache| {
+                cache
+                    .entries
+                    .iter()
+                    .find(|entry| entry.token_ids.len() == reusable)
+                    .map(artifact_bits)
+                    .expect("artifact at the turn boundary")
+            };
+            assert!(
+                artifact_at(&cache) == artifact_at(&reference),
+                "turn 1's boundary artifact is bit-identical to turn 2's cold state there ({kwargs:?})"
+            );
+            eprintln!(
+                "[qwen36-moe-dflash2 chat turn prefix] {kwargs:?}: turn1 {} tokens, turn2 {} tokens: restored {reusable}; same tokens as without the cache: turn1 {}, turn2 {}",
+                ids1.len(),
+                ids2.len(),
+                turn1 == run(&ids1, None).0,
+                cached == run(&ids2, None).0,
+            );
+        }
+    }
+}
+
+/// Every array of a DFlash2 prefix artifact as bits, for exact comparison.
+fn artifact_bits(artifact: &DFlash2PrefixArtifact) -> Vec<(Vec<i32>, Vec<u32>)> {
+    use ironmlx_lm::core::cache::prefix_payload::PrefixLayerPayload;
+    let mut arrays = vec![&artifact.context_hidden, &artifact.last_hidden];
+    for layer in &artifact.target_cache.main_layers {
+        match layer {
+            PrefixLayerPayload::FullDense { k, v }
+            | PrefixLayerPayload::FullPaged {
+                k_pages: k,
+                v_pages: v,
+            } => arrays.extend([k, v]),
+            PrefixLayerPayload::FullTurboQuantPacked {
+                k_packed,
+                k_norms,
+                v_packed,
+                v_norms,
+            } => arrays.extend([k_packed, k_norms, v_packed, v_norms]),
+            PrefixLayerPayload::Linear {
+                conv_state,
+                recurrent_state,
+            } => arrays.extend([conv_state, recurrent_state]),
+            PrefixLayerPayload::Mla { c_kv, k_pe } => arrays.extend([c_kv, k_pe]),
+        }
+    }
+    arrays
+        .into_iter()
+        .map(|array| {
+            let values = mlx::ops::cast::astype(array, mlx::Dtype::Float32)
+                .and_then(|values| values.to_vec::<f32>())
+                .expect("artifact array values");
+            (
+                array.shape().as_slice().to_vec(),
+                values.into_iter().map(f32::to_bits).collect(),
+            )
+        })
+        .collect()
+}
