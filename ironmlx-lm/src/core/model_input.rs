@@ -615,11 +615,29 @@ fn vl_position_streams(
         // st_idx for the image block = st_idx + text_len (max of text block + 1)
         let img_st_idx = st_idx + text_len;
 
+        // The image's merged grid must match its run of image tokens: a
+        // prompt in another layout (or with a wrong grid) has no Qwen-VL
+        // positions, and is rejected rather than given streams of the wrong
+        // length.
+        let n_img = llm_grid_t * llm_grid_h * llm_grid_w;
+        let span = usize::try_from(n_img).ok().filter(|&n| n > 0).ok_or_else(|| {
+            anyhow!("build_position_ids_vl: image {img_idx} has an empty merged grid ({t}, {h}, {w})")
+        })?;
+        let span_matches = input_ids
+            .get(ed_image..ed_image + span)
+            .is_some_and(|run| run.iter().all(|&tok| tok == image_token_id));
+        if !span_matches {
+            return Err(anyhow!(
+                "build_position_ids_vl: image {img_idx} grid ({t}, {h}, {w}) needs {span} image tokens \
+                 from position {ed_image}, but the prompt (len {}) does not have them",
+                input_ids.len()
+            ));
+        }
+
         // --- Image block ---
         // t_index: arange(llm_grid_t) broadcast over (llm_grid_t, llm_grid_h*llm_grid_w), flattened
         // h_index: arange(llm_grid_h) broadcast over (llm_grid_t, llm_grid_h, llm_grid_w), flattened
         // w_index: arange(llm_grid_w) broadcast over (llm_grid_t, llm_grid_h, llm_grid_w), flattened
-        let n_img = llm_grid_t * llm_grid_h * llm_grid_w;
         for ti in 0..llm_grid_t {
             for hi in 0..llm_grid_h {
                 for wi in 0..llm_grid_w {
@@ -637,7 +655,7 @@ fn vl_position_streams(
         st_idx = img_block_max + 1;
 
         // Advance input scan past the image token span.
-        st = ed_image + n_img as usize;
+        st = ed_image + span;
     }
 
     // --- Trailing text block (after last image) ---
@@ -988,6 +1006,20 @@ mod composition_tests {
         let ids = [1, pad, pad, pad, pad];
         assert_eq!(vl_rope_delta(&ids, &[(1, 4, 4)], pad, 2).unwrap(), 3 - 5);
         assert!(vl_rope_delta(&ids, &[], pad, 2).is_err());
+    }
+
+    /// A grid that does not match its run of image tokens is rejected, not
+    /// scanned past the prompt into streams of the wrong length.
+    #[test]
+    fn vl_positions_reject_a_grid_that_does_not_match_its_image_tokens() {
+        let pad = IMAGE_TOKEN_ID;
+        // A (1, 4, 4) image at merge 2 needs four image tokens.
+        let one_pad = [1, 2, 3, pad, 4];
+        assert!(vl_rope_delta(&one_pad, &[(1, 4, 4)], pad, 2).is_err());
+        assert!(build_position_ids_vl(&one_pad, &[(1, 4, 4)], pad, 2).is_err());
+        let text_inside = [1, pad, pad, 7, pad, 2];
+        assert!(vl_rope_delta(&text_inside, &[(1, 4, 4)], pad, 2).is_err());
+        assert!(vl_rope_delta(&[1, pad, 2], &[(1, 0, 4)], pad, 2).is_err());
     }
 
     #[test]
