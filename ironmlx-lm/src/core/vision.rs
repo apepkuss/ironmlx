@@ -78,6 +78,56 @@ pub(crate) struct VisionPrefillMemoryProfile {
     pub output_hidden_size: usize,
     pub spatial_merge_area: usize,
     pub activation_bytes: usize,
+    pub attention: VisionAttention,
+}
+
+/// How a vision tower runs attention over an image's patches, which decides
+/// whether its scores are ever materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VisionAttention {
+    /// The `heads x tokens x tokens` score matrix exists in f32.
+    MaterializedScores,
+    /// The Qwen tower's attention: f32 rotary embedding of q and k
+    /// (`apply_rotary_vision`), then unmasked
+    /// `mlx::fast::scaled_dot_product_attention` per image with this head
+    /// dim. MLX's full-attention kernel streams the scores, needing beside
+    /// its output at most contiguous copies of q, k and v; images it does
+    /// not cover (short sequences, other head dims) still count their
+    /// scores.
+    FusedSdpa { head_dim: usize },
+}
+
+impl VisionAttention {
+    /// Head dims MLX's fused full-attention kernel takes (query length > 8,
+    /// equal query/value head dims; `has_fused_kernel` in
+    /// `scaled_dot_product_attention.cpp`).
+    const FUSED_FULL_ATTENTION_HEAD_DIMS: [usize; 7] = [64, 72, 80, 96, 128, 192, 256];
+
+    /// Bytes attention adds to the q/k/v activations for one image of
+    /// `tokens` patches.
+    fn image_bytes(self, profile: &VisionPrefillMemoryProfile, tokens: usize) -> usize {
+        match self {
+            Self::FusedSdpa { head_dim }
+                if tokens > 8 && Self::FUSED_FULL_ATTENTION_HEAD_DIMS.contains(&head_dim) =>
+            {
+                // In hidden-size activations: the rotary of q and k, each
+                // an f32 product pair and sum (2 x 3 x 2), then contiguous
+                // q/k/v copies and the output (4). Measured against the
+                // Qwen3.6 tower's footprint on MLX 73ad5df2, about 23 such
+                // activations (with the 4 of the q/k/v stage) are live at
+                // 65536 patches.
+                tokens
+                    .saturating_mul(profile.hidden_size)
+                    .saturating_mul(profile.activation_bytes)
+                    .saturating_mul(16)
+            }
+            _ => profile
+                .num_attention_heads
+                .saturating_mul(tokens)
+                .saturating_mul(tokens)
+                .saturating_mul(std::mem::size_of::<f32>()),
+        }
+    }
 }
 
 /// Conservative upper bound for a transformer-style vision tower. It covers
@@ -113,7 +163,7 @@ pub(crate) fn estimate_transformer_vision_prefill_tensor_bytes(
         total.saturating_add(pixels.size().saturating_mul(pixels.dtype().byte_size()))
     });
     let mut total_tokens = 0usize;
-    let mut attention_scores = 0usize;
+    let mut attention_bytes = 0usize;
     for &(t, h, w) in grid_thw {
         anyhow::ensure!(
             t > 0 && h > 0 && w > 0,
@@ -124,20 +174,15 @@ pub(crate) fn estimate_transformer_vision_prefill_tensor_bytes(
             .saturating_mul(usize::try_from(h).unwrap_or(usize::MAX))
             .saturating_mul(usize::try_from(w).unwrap_or(usize::MAX));
         total_tokens = total_tokens.saturating_add(tokens);
-        attention_scores = attention_scores.saturating_add(
-            profile
-                .num_attention_heads
-                .saturating_mul(tokens)
-                .saturating_mul(tokens)
-                .saturating_mul(std::mem::size_of::<f32>()),
-        );
+        attention_bytes =
+            attention_bytes.saturating_add(profile.attention.image_bytes(&profile, tokens));
     }
 
     let hidden_activations = total_tokens
         .saturating_mul(profile.hidden_size)
         .saturating_mul(profile.activation_bytes);
     let qkv_peak = hidden_activations.saturating_mul(4);
-    let attention_peak = qkv_peak.saturating_add(attention_scores);
+    let attention_peak = qkv_peak.saturating_add(attention_bytes);
     let mlp_peak = total_tokens
         .saturating_mul(profile.intermediate_size)
         .saturating_mul(profile.activation_bytes)
@@ -187,6 +232,7 @@ mod tests {
                 output_hidden_size: 8,
                 spatial_merge_area: 4,
                 activation_bytes: 2,
+                attention: VisionAttention::MaterializedScores,
             },
         )
         .expect("valid estimate");
@@ -205,6 +251,7 @@ mod tests {
                 output_hidden_size: 8,
                 spatial_merge_area: 4,
                 activation_bytes: 2,
+                attention: VisionAttention::MaterializedScores,
             },
         )
         .expect("one concatenated tensor may describe multiple image grids");
@@ -219,8 +266,51 @@ mod tests {
                 output_hidden_size: 8,
                 spatial_merge_area: 4,
                 activation_bytes: 2,
+                attention: VisionAttention::MaterializedScores,
             },
         )
         .is_err());
+    }
+
+    /// A fused-attention tower counts linear q/k/v copies instead of the
+    /// quadratic score matrix, but only where MLX's fused kernel applies.
+    #[test]
+    fn fused_attention_replaces_the_score_matrix_where_mlx_fuses() {
+        // A 128 x 128 grid: 16384 patches, as a 4.2M-pixel Qwen image.
+        let pixels: Array = (&[0.0_f32; 16][..], &[1_i32, 16][..])
+            .try_into()
+            .expect("pixel payload");
+        let profile = |attention| VisionPrefillMemoryProfile {
+            hidden_size: 1152,
+            intermediate_size: 4304,
+            num_attention_heads: 16,
+            output_hidden_size: 2048,
+            spatial_merge_area: 4,
+            activation_bytes: 2,
+            attention,
+        };
+        let estimate = |grid, attention| {
+            estimate_transformer_vision_prefill_tensor_bytes(
+                std::slice::from_ref(&pixels),
+                &[grid],
+                profile(attention),
+            )
+            .expect("valid estimate")
+        };
+        let materialized = estimate((1, 128, 128), VisionAttention::MaterializedScores);
+        let fused = estimate((1, 128, 128), VisionAttention::FusedSdpa { head_dim: 72 });
+        // 16 heads x 16384^2 f32 scores dominate the materialized estimate.
+        assert!(materialized > 16 * 16384 * 16384 * 4);
+        assert!(fused < 2 << 30, "fused estimate {fused}");
+        // A head dim MLX does not fuse, or a sequence short enough for the
+        // vector kernel, keeps the score matrix.
+        assert_eq!(
+            estimate((1, 128, 128), VisionAttention::FusedSdpa { head_dim: 112 }),
+            materialized
+        );
+        assert_eq!(
+            estimate((1, 2, 4), VisionAttention::FusedSdpa { head_dim: 72 }),
+            estimate((1, 2, 4), VisionAttention::MaterializedScores)
+        );
     }
 }

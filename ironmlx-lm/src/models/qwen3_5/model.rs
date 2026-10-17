@@ -1784,6 +1784,10 @@ impl DenseVlMethods for Qwen35Model {
                     .map_err(|_| anyhow!("Qwen35Model vision out_hidden_size must be positive"))?,
                 spatial_merge_area: merge.saturating_mul(merge),
                 activation_bytes: self.hidden_dtype().byte_size(),
+                // The tower's attention is MLX's fused SDPA without a mask.
+                attention: crate::core::vision::VisionAttention::FusedSdpa {
+                    head_dim: config.head_dim()?,
+                },
             },
         )
     }
