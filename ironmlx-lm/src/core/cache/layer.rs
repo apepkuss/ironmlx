@@ -655,6 +655,10 @@ pub fn restore_prefix_entry_for_rows(
     Ok(())
 }
 
+/// Key spec of a FullPaged-only cache's first `token_ids.len()` tokens. Each
+/// layer keeps its own KV heads, head dims and dtype (Gemma4 mixes sliding
+/// and global attention shapes); the layers share one page size, since the
+/// prefix is stored as whole pages.
 pub fn paged_prefix_key_spec_for_full_caches(
     model_id: &str,
     token_ids: &[u32],
@@ -663,68 +667,51 @@ pub fn paged_prefix_key_spec_for_full_caches(
     if caches.is_empty() {
         return Ok(None);
     }
-    let mut first: Option<&KVCache> = None;
+    let cached_len = i32::try_from(token_ids.len())
+        .map_err(|_| anyhow::anyhow!("paged prefix token length exceeds i32"))?;
+    let mut block_size: Option<i32> = None;
+    let mut main_layers = Vec::with_capacity(caches.len());
     for cache in caches {
         let LayerCache::Full(kv) = cache else {
             return Ok(None);
         };
-        if kv.paged().is_none() {
+        let Some(paged) = kv.paged() else {
             return Ok(None);
+        };
+        let layer_block_size = paged.block_size();
+        if *block_size.get_or_insert(layer_block_size) != layer_block_size {
+            anyhow::bail!("paged prefix cache requires one page size across full-attention layers");
         }
-        if let Some(base) = first {
-            if kv.n_kv_heads() != base.n_kv_heads()
-                || kv.head_dim() != base.head_dim()
-                || kv.v_head_dim() != base.v_head_dim()
-                || kv.dtype() != base.dtype()
-                || kv.paged().map(|p| p.block_size()) != base.paged().map(|p| p.block_size())
-            {
-                anyhow::bail!("paged prefix cache requires uniform full-attention KV layout");
-            }
-        } else {
-            first = Some(kv);
-        }
-    }
-    let Some(base) = first else {
-        return Ok(None);
-    };
-    let paged = base
-        .paged()
-        .expect("paged checked above for every full-attention cache");
-    let cached_len = i32::try_from(token_ids.len())
-        .map_err(|_| anyhow::anyhow!("paged prefix token length exceeds i32"))?;
-    let page_count = (cached_len + paged.block_size() - 1) / paged.block_size();
-    let main_layers = (0..caches.len())
-        .map(|_| PrefixLayerSpec {
+        let page_count = (cached_len + layer_block_size - 1) / layer_block_size;
+        main_layers.push(PrefixLayerSpec {
             kind: PrefixLayerKind::FullPaged,
             tensors: vec![
                 PrefixTensorSpec {
-                    dtype: base.dtype(),
-                    shape: vec![
-                        page_count,
-                        base.n_kv_heads(),
-                        paged.block_size(),
-                        base.head_dim(),
-                    ],
+                    dtype: kv.dtype(),
+                    shape: vec![page_count, kv.n_kv_heads(), layer_block_size, kv.head_dim()],
                 },
                 PrefixTensorSpec {
-                    dtype: base.dtype(),
+                    dtype: kv.dtype(),
                     shape: vec![
                         page_count,
-                        base.n_kv_heads(),
-                        paged.block_size(),
-                        base.v_head_dim(),
+                        kv.n_kv_heads(),
+                        layer_block_size,
+                        kv.v_head_dim(),
                     ],
                 },
             ],
-        })
-        .collect();
+        });
+    }
+    let Some(block_size) = block_size else {
+        return Ok(None);
+    };
     Ok(Some(PagedPrefixKeySpec {
         entry_kind: crate::core::cache::prefix_payload::PrefixEntryKind::WholePrefix,
         model_id: model_id.to_owned(),
         token_ids: token_ids.iter().map(|&id| id as i32).collect(),
         cached_len,
         fingerprint: None,
-        block_size: paged.block_size(),
+        block_size,
         kv_cache_profile: None,
         main_layers,
         mtp_layers: vec![],
@@ -799,9 +786,36 @@ pub fn restore_paged_prefix_layers_for_row(
 
 #[cfg(test)]
 mod tests {
-    use super::{LayerCache, LayerCacheSnapshot};
+    use super::{paged_prefix_key_spec_for_full_caches, LayerCache, LayerCacheSnapshot};
     use crate::core::cache::KVCache;
     use mlx::Dtype;
+
+    /// Layers with different KV heads and head dims (Gemma4's sliding and
+    /// global attention) get a spec each; differing page sizes are rejected.
+    #[test]
+    fn full_paged_key_spec_keeps_each_layers_kv_shape() {
+        let paged = |heads, head_dim, block_size| {
+            LayerCache::Full(
+                KVCache::new(1, heads, head_dim, head_dim, Dtype::Bfloat16, 64)
+                    .with_paged(block_size, 16)
+                    .expect("paged KV"),
+            )
+        };
+        let caches = [paged(8, 256, 16), paged(2, 512, 16)];
+        let spec = paged_prefix_key_spec_for_full_caches("gemma4", &[1; 20], &caches)
+            .expect("spec")
+            .expect("FullPaged-only cache");
+        let shapes: Vec<_> = spec
+            .main_layers
+            .iter()
+            .map(|layer| layer.tensors[0].shape.clone())
+            .collect();
+        assert_eq!(shapes, vec![vec![2, 8, 16, 256], vec![2, 2, 16, 512]]);
+        assert_eq!(spec.block_size, 16);
+
+        let mixed_pages = [paged(8, 256, 16), paged(2, 512, 32)];
+        assert!(paged_prefix_key_spec_for_full_caches("gemma4", &[1; 20], &mixed_pages).is_err());
+    }
 
     #[test]
     fn dflash2_full_kv_transaction_snapshot_is_offsets_only() {
