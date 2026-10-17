@@ -20,9 +20,17 @@ ASR 模型不能设为默认聊天生成模型。
 ## API
 
 请求使用 `multipart/form-data`，必需字段为 `model` 和二进制文件 `file`。
-可选字段为 `language`、`prompt` 和 `response_format`。省略 `language` 时自动识别；
-`response_format` 支持 `json`（默认）与 `text`。采用贪心解码，接受
-`temperature=0`。使用 `stream=true`、`response_format=json` 时返回 SSE，
+可选字段为 `language`、`prompt`、`response_format` 和 `timestamp_granularities[]`。
+省略 `language` 时自动识别。`response_format` 支持三个值：
+
+| 值 | 返回内容 | 调用模型 |
+| --- | --- | --- |
+| `json`（默认） | JSON 格式的转写文字 | 仅 ASR |
+| `text` | 纯文本 | 仅 ASR |
+| `verbose_json` | 转写文字、时长及指定粒度的时间戳 | ASR 加固定 ForcedAligner |
+
+只做单模型转写时，使用 `json` 或 `text`，不传 `timestamp_granularities[]`。
+采用贪心解码，接受 `temperature=0`。使用 `stream=true`、`response_format=json` 时返回 SSE，
 事件为 `transcript.text.delta` 和 `transcript.text.done`；拼接增量文本即可得到最终文本。
 
 ```sh
@@ -86,8 +94,73 @@ App 通过本机管理端点 `POST /admin/api/models/asr` 应用设置，
 - 上传超时 60 秒；处理期限为 180 秒加录音时长的两倍。
 - 断开请求会取消计算；已提交的 GPU 工作完成后才释放模型租约和内存预留。
 
-不支持的参数、重复字段、字幕格式、时间戳和非零温度会明确报错。
-强制对齐和说话人分离尚未实现。流式文件转写要求 `response_format=json`。
+不支持的参数、重复的普通字段、字幕格式和非零温度会明确报错。
+说话人分离尚未实现。流式文件转写要求 `response_format=json`。
+
+## 带时间戳转写：固定双模型流程
+
+向现有转写接口传入 `response_format=verbose_json`。`model` 仍选择两款受支持的
+Qwen3-ASR 中的一款；IronMLX 先转写，再用固定的
+`mlx-community/Qwen3-ForcedAligner-0.6B-8bit` 对齐每段音频和识别文字。
+请提前下载、注册该辅助模型，请求不会自动下载权重。当前不提供 `alignment_model`
+参数或任意模型组合接口。
+
+```sh
+curl http://127.0.0.1:9068/v1/audio/transcriptions \
+  -F model=mlx-community/Qwen3-ASR-0.6B-8bit -F file=@speech.wav \
+  -F response_format=verbose_json \
+  -F 'timestamp_granularities[]=word' -F 'timestamp_granularities[]=segment'
+```
+
+响应包含 `task`、`text`、`language`、`duration`（秒），以及请求的
+`words: [{word,start,end}]` 和／或 `segments: [{id,text,start,end}]`。
+`timestamp_granularities[]` 是数组字段，`[]` 表示可传入多个值。
+`word` 请求字词级时间戳，`segment` 请求片段级时间戳；同时请求时，像上例一样
+重复传入同名 multipart 字段。此字段仅适用于 `verbose_json`，省略时默认 `segment`；
+在 `json` 或 `text` 模式下传入会报错。两种时间戳均来自真实对齐；片段时间覆盖该 ASR 窗口中
+首个至最后一个对齐单元，不代表按句分段或 VAD 边界。长音频结果会加上窗口在
+原始录音中的时间偏移。普通 `json`／`text` 和 SSE 仍只调用 ASR；时间戳仅支持
+非流式 `verbose_json`，本次不为实时 WebSocket 增加时间戳。
+字段遵循 [OpenAI 转写契约](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)，
+不伪造 Whisper 专属的 token 评分或置信度字段。
+
+缺少辅助模型、对齐语言不受支持、容量不足或对齐失败时，整个请求报错，不返回
+缺失或伪造时间戳的成功结果。进入对齐步骤前释放 ASR 租约，仍遵守原有模型数量、
+固定加载与内存策略：App 达到模型数量上限会拒绝加载，通常需要给两款模型留出
+加载名额；使用 lazy 模型的模型池服务可以按既有策略卸载空闲且未固定的模型，
+因此可以只保留一个加载名额。
+
+## 独立强制对齐（IronMLX 扩展）
+
+`POST /v1/audio/alignments` 使用 multipart，必须提供 `model`、`file`、`text`、
+`language`。`model` 指定已注册的 ForcedAligner；此接口仅对齐，不运行 ASR。
+可选 `response_format=json`。不接受采样参数、提示词、流式输出或时间戳粒度参数。
+这是 IronMLX 扩展接口，不是 OpenAI 或 Anthropic 标准 API。
+
+```sh
+curl http://127.0.0.1:9068/v1/audio/alignments \
+  -F model=mlx-community/Qwen3-ForcedAligner-0.6B-8bit \
+  -F file=@speech.wav -F 'text=甚至出现交易几乎停滞的情况。' -F language=zh
+```
+
+返回 `{text,language,duration,words:[{word,start,end}]}`，时间单位为秒。
+独立对齐最多接受 300 秒音频、16,384 个 UTF-8 字节的文字和 2,048 个有声文字单元；
+音频和文字合计不能超过 8,192 个上下文 token。更长的独立对齐输入应由上游拆成
+相互匹配的音频／文字对，不能在不知道文字归属的情况下仅切音频。组合流程则利用
+各 ASR 窗口的转写文字自动处理，并沿用对应 ASR 模型的时长设置。
+文件、上传、排队、取消和内存边界与转写接口共用。
+
+该对齐模型支持中文、粤语、英语、德语、西班牙语、法语、意大利语、葡萄牙语、俄语、
+日语和韩语。其他语言仍可普通转写，但不能使用此固定对齐流程。
+中文汉字逐字对齐，空格分隔的文字按清理后的词处理。本原生实现对日语逐字符对齐、
+韩语按空格单位对齐，不使用上游 nagisa／soynlp 分词；因此 `words` 不保证在所有语言
+中都是语言学意义上的词。标点保留在顶层全文中，没有独立时间戳。
+模型预测时间戳的粒度为 80 ms，返回小数秒不表示具有更细精度。
+对齐给定文字不等于验证文字识别正确。
+
+App 将该模型标为 `runtime_kind: "alignment"`，支持音频输入，不支持流式输出、
+默认聊天模型、生成采样或输出 Token 参数。旧的已校验仅下载快照在加载时通过
+原生预检后升级，保留已有权重。App 不增加录音或转写操作页面。
 
 ## 实时识别
 

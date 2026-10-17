@@ -362,3 +362,5 @@ IRONMLX_AUDIO_APP_BUNDLE=/absolute/path/to/IronMLX.app \
 IRONMLX_AUDIO_APP_REFERENCE=/absolute/path/to/reference.wav \
 swift test -c release --package-path ironmlx-app --filter audioAppLoadsAndRestoresFromSavedConfigurationWithBundle
 ```
+
+Native Qwen3-ForcedAligner affine 8-bit inference uses the shared audio/text backbone and a separate timestamp classification head. `Qwen3Asr::align` accepts audio plus supplied text. The server exposes independent alignment and fixed ASR-plus-alignment workflows; see the same API contract for language units, limits and timestamp precision.

@@ -12,9 +12,10 @@ func asrConfig(large: Bool) -> [String: Any] {
 }
 private struct ASRPreflight: ModelMetadataPreflighting {
     var accepts = true
+    var role = "asr"
     func validate(metadataDirectory _: URL) async throws -> ModelMetadataPreflightResult {
         if !accepts { throw ModelMetadataPreflightError.rejected("unsupported Qwen3-ASR configuration") }
-        return ModelMetadataPreflightResult(modelType: "qwen3_asr", artifactRole: "asr",
+        return ModelMetadataPreflightResult(modelType: "qwen3_asr", artifactRole: role,
             quantization: ModelQuantizationPreflight(mode: "affine", bits: 8, groupSize: 64, overrideCount: 0))
     }
 }
@@ -52,4 +53,43 @@ func qwen3ASROldSnapshotBecomesLoadableWithoutRedownloading(large: Bool) async t
     #expect(model.capabilities?.runtimeKind == "asr")
     #expect(model.capabilities?.supportsKvCache == false)
     #expect(model.capabilities?.supportsAudio == true)
+}
+
+
+@Test
+func qwen3ForcedAlignerSnapshotUsesAlignmentTask() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    var config = asrConfig(large: false)
+    var thinker = config["thinker_config"] as! [String: Any]
+    var audio = thinker["audio_config"] as! [String: Any]
+    var text = thinker["text_config"] as! [String: Any]
+    audio["d_model"] = 1024
+    audio["encoder_layers"] = 24
+    text["vocab_size"] = 152064
+    thinker["audio_config"] = audio
+    thinker["text_config"] = text
+    thinker["model_type"] = "qwen3_forced_aligner"
+    thinker["classify_num"] = 5000
+    config["thinker_config"] = thinker
+    config["timestamp_token_id"] = 151705
+    config["timestamp_segment_time"] = 80
+    let repo = "mlx-community/Qwen3-ForcedAligner-0.6B-8bit"
+    let snapshot = try writeVerifiedTestSnapshot(root: root, repoID: repo, files: [
+        "config.json": try JSONSerialization.data(withJSONObject: config),
+        "tokenizer_config.json": Data("{}".utf8), "preprocessor_config.json": Data("{}".utf8),
+        "vocab.json": Data("{}".utf8), "merges.txt": Data("#version: 0.2".utf8), "model.safetensors": Data("weights".utf8),
+    ])
+    var manifest = try ModelSnapshotVerifier().loadManifest(at: snapshot)
+    manifest.compatibility.modelType = "qwen3_asr"
+    manifest.compatibility.downloadOnly = true
+    manifest.compatibility.artifactRole = "download_only"
+    try ModelDownloadStore(rootURL: root).writeManifest(manifest, to: snapshot)
+    try await Qwen3ASRModelSupport.upgradeDownloadOnlySnapshot(at: snapshot.path, preflight: ASRPreflight(role: "alignment"))
+    let model = try #require(LocalModelScanner(rootURL: root).model(for: repo))
+    #expect(model.readiness?.isLoadable == true)
+    #expect(model.type == "alignment")
+    #expect(model.capabilities?.runtimeKind == "alignment")
+    #expect(model.capabilities?.supportsStreaming == false)
+    #expect(model.asrDefaults == nil)
 }

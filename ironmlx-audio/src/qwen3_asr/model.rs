@@ -13,11 +13,20 @@ use serde::Serialize;
 use std::{collections::HashMap, path::Path};
 
 #[derive(Debug, Clone, Serialize)]
+pub struct TranscriptSegment {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+    pub language: String,
+}
+#[derive(Debug, Clone, Serialize)]
 pub struct Transcription {
     pub text: String,
     pub language: String,
     pub duration: f64,
     pub generated_tokens: usize,
+    #[serde(skip)]
+    pub segments: Vec<TranscriptSegment>,
     #[serde(skip)]
     pub raw_text: String,
     #[serde(skip)]
@@ -26,18 +35,19 @@ pub struct Transcription {
 
 /// One model belongs to one inference worker. Only owned PCM/results cross threads.
 pub struct Qwen3Asr {
-    config: Config,
+    pub(super) config: Config,
     weights: WeightMap,
-    tokenizer: tokenizers::Tokenizer,
-    embed: Embedding,
+    pub(super) tokenizer: tokenizers::Tokenizer,
+    pub(super) embed: Embedding,
     encoder: Vec<EncoderLayer>,
-    decoder: Vec<DecoderLayer>,
+    pub(super) decoder: Vec<DecoderLayer>,
     final_audio_norm: LayerNorm,
-    final_text_norm: RmsNorm,
+    pub(super) final_text_norm: RmsNorm,
     conv_out: Linear,
     proj1: Linear,
     proj2: Linear,
     weight_bytes: u64,
+    pub(super) timestamp_head: Option<Linear>,
 }
 
 struct EncoderLayer {
@@ -50,7 +60,7 @@ struct EncoderLayer {
     fc1: Linear,
     fc2: Linear,
 }
-struct DecoderLayer {
+pub(super) struct DecoderLayer {
     norm1: RmsNorm,
     norm2: RmsNorm,
     q_norm: RmsNorm,
@@ -63,7 +73,7 @@ struct DecoderLayer {
     up: Linear,
     down: Linear,
 }
-type Cache = Option<(Array, Array)>;
+pub(super) type Cache = Option<(Array, Array)>;
 
 fn linear(w: &WeightMap, p: &str) -> Result<Linear> {
     Linear::from_loader(w, p)
@@ -157,6 +167,11 @@ impl Qwen3Asr {
             conv_out: linear(&weights, "audio_tower.conv_out")?,
             proj1: linear(&weights, "audio_tower.proj1")?,
             proj2: linear(&weights, "audio_tower.proj2")?,
+            timestamp_head: if config.is_aligner() {
+                Some(linear(&weights, "lm_head")?)
+            } else {
+                None
+            },
             config,
             weights,
             encoder,
@@ -170,6 +185,10 @@ impl Qwen3Asr {
         Ok(model)
     }
 
+    pub fn is_aligner(&self) -> bool {
+        self.config.is_aligner()
+    }
+
     pub fn weight_bytes(&self) -> u64 {
         self.weight_bytes
     }
@@ -178,7 +197,11 @@ impl Qwen3Asr {
         self.config.language(language).map(|_| ())
     }
 
-    fn encode_audio(&self, features: &Array, control: &dyn SessionControl) -> Result<Array> {
+    pub(super) fn encode_audio(
+        &self,
+        features: &Array,
+        control: &dyn SessionControl,
+    ) -> Result<Array> {
         let cfg = &self.config.thinker_config.audio_config;
         let frames = features.shape().as_slice()[1] as usize;
         let chunk_size = cfg.n_window * 2;
@@ -315,11 +338,14 @@ impl Qwen3Asr {
             language: String::new(),
             duration: samples.len() as f64 / 16000.,
             generated_tokens: 0,
+            segments: Vec::new(),
             raw_text: String::new(),
             stable_text: String::new(),
         };
         for range in prepared.segments {
             control.check()?;
+            let start = range.start as f64 / 16000.;
+            let end = range.end as f64 / 16000.;
             let mut segment = samples[range].to_vec();
             segment.resize(segment.len().max(201), 0.);
             let pcm = PcmBuffer {
@@ -332,6 +358,12 @@ impl Qwen3Asr {
             let result = self.transcribe_window(&pcm, language, prompt, max_tokens, "", control)?;
             let delta = super::segments::append_text(&mut output.text, &result.text);
             output.generated_tokens += result.generated_tokens;
+            output.segments.push(TranscriptSegment {
+                start,
+                end,
+                text: result.text.clone(),
+                language: result.language.clone(),
+            });
             if !result.language.is_empty()
                 && !output.language.split(',').any(|l| l == result.language)
             {
@@ -419,6 +451,10 @@ impl Qwen3Asr {
         control: &dyn SessionControl,
     ) -> Result<Transcription> {
         control.check()?;
+        ensure!(
+            !self.is_aligner(),
+            "ForcedAligner requires audio and text alignment, not transcription"
+        );
         ensure!(
             pcm.format.channels > 0
                 && pcm.format.channels <= 2
@@ -519,9 +555,15 @@ impl Qwen3Asr {
                 };
                 return Ok(Transcription {
                     text: text.trim().to_owned(),
-                    language: detected,
+                    language: detected.clone(),
                     duration,
                     generated_tokens: generated.len(),
+                    segments: vec![TranscriptSegment {
+                        start: 0.,
+                        end: duration,
+                        text: text.trim().to_owned(),
+                        language: detected.clone(),
+                    }],
                     raw_text: raw.clone(),
                     stable_text: String::new(),
                 });
@@ -603,6 +645,9 @@ fn validate_weights(weights: &WeightMap, config: &Config) -> Result<()> {
         }
     };
     quant("model.embed_tokens".into(), t.vocab_size, t.hidden_size);
+    if config.is_aligner() {
+        quant("lm_head".into(), 5000, t.hidden_size);
+    }
     for i in 0..t.num_hidden_layers {
         for (name, out, input) in [
             (
@@ -682,7 +727,7 @@ impl EncoderLayer {
     }
 }
 impl DecoderLayer {
-    fn forward(
+    pub(super) fn forward(
         &self,
         x: &Array,
         cfg: &TextConfig,

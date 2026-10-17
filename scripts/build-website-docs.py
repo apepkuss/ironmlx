@@ -21,6 +21,7 @@ PAGES = (
     ("text-vision-api.md", "Text and vision API", "文本与视觉 API", "Use Responses, Chat Completions, and Messages for text and image understanding.", "查阅文本与图片理解、思考、工具、结构化输出和流式协议。"),
     ("text-embeddings.md", "Embedding API", "Embedding API", "Create text, image, audio, and combined vectors with EmbeddingGemma 2.", "通过 EmbeddingGemma 2 生成文本、图片、音频与组合向量。"),
     ("audio-speech-api.md", "Speech synthesis API", "语音合成 API", "Generate speech and manage voices through the local API.", "通过本地 API 合成语音与管理声音配置。"),
+    ("audio-transcriptions-api.md", "Speech recognition and alignment API", "语音识别与对齐 API", "Transcribe audio, align supplied text, or return timestamps with the fixed two-model workflow.", "单独转写、对齐已有文字，或通过固定双模型流程返回文字与时间戳。"),
     ("image-generation-api.md", "Image generation API", "图片生成 API", "Generate images and edit a reference image through the local API.", "通过本地 API 生成图片与编辑参考图片。"),
     ("laya-systemone-api.md", "System One API", "System One API", "Send choice, score, and true/false probability requests to Laya.", "通过 Laya 处理选择、评分与真假概率请求。"),
     ("openai-decisions-api.md", "OpenAI Decisions API", "OpenAI Decisions API", "Call Laya with the official OpenAI SDK Decisions API.", "通过官方 OpenAI SDK 的 Decisions API 调用 Laya。"),
@@ -50,17 +51,17 @@ PAGES = (
 )
 GROUPS = (
     ("start", "Getting started", "开始使用", "Everything you need for your first local inference.", "从安装到首次请求，开始本地推理。", PAGES[:3]),
-    ("api", "Development & API", "开发与 API", "Integrate APIs, build from source, and contribute to IronMLX.", "接入 API、从源码构建与参与 IronMLX 开发。", PAGES[3:14]),
-    ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[14:17]),
-    ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[17:21]),
-    ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[21:27]),
-    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[27:30]),
-    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[30:]),
+    ("api", "Development & API", "开发与 API", "Integrate APIs, build from source, and contribute to IronMLX.", "接入 API、从源码构建与参与 IronMLX 开发。", PAGES[3:15]),
+    ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[15:18]),
+    ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[18:22]),
+    ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[22:28]),
+    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[28:31]),
+    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[31:]),
 )
 PAGE_MAP = {entry[0]: entry for entry in PAGES}
 GROUP_MAP = {entry[0]: group for group in GROUPS for entry in group[5]}
 PAGE_PARENT = {filename: "api-reference.md" for filename in (
-    "service-api.md", "text-vision-api.md", "text-embeddings.md", "audio-speech-api.md",
+    "service-api.md", "text-vision-api.md", "text-embeddings.md", "audio-speech-api.md", "audio-transcriptions-api.md",
     "image-generation-api.md", "laya-systemone-api.md", "openai-decisions-api.md",
 )}
 CHILD_PAGES = {"api-reference.md": tuple(PAGE_MAP[filename] for filename in PAGE_PARENT)}

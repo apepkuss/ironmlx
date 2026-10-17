@@ -1214,6 +1214,7 @@ public struct LocalModelScanner: Sendable {
     }
 
     private func modelCapabilityType(config: [String: Any]) -> String {
+        if (config["thinker_config"] as? [String: Any])?["model_type"] as? String == "qwen3_forced_aligner" { return "alignment" }
         let signals = modelCapabilitySignals(config: config)
         let modelType = normalizedString(config["model_type"]) ?? ""
         if modelType == "laya-multilingual-mlx" {
@@ -1255,7 +1256,8 @@ public struct LocalModelScanner: Sendable {
     private func runtimeCapabilities(config: [String: Any]) -> BackendModelCapabilities {
         let modelType = normalizedString(config["model_type"]) ?? ""
         if modelType == "qwen3-asr" {
-            return BackendModelCapabilities(runtimeKind: "asr", supportsStreaming: true,
+            let aligner = (config["thinker_config"] as? [String: Any])?["model_type"] as? String == "qwen3_forced_aligner"
+            return BackendModelCapabilities(runtimeKind: aligner ? "alignment" : "asr", supportsStreaming: !aligner,
                 supportsVision: false, supportsAudio: true, supportsMtp: false,
                 supportsPromptLookup: false, supportsSpeculativeDecoding: false,
                 supportsKvCache: false, supportedSamplingParameters: [])
@@ -1395,6 +1397,8 @@ public struct LocalModelScanner: Sendable {
             return "Embedding models are detected for metadata display, but ironmlx-app serving currently loads LLM/VLM generation models only."
         case "reranker":
             return "Reranker models are detected for metadata display, but ironmlx-app serving currently loads LLM/VLM generation models only."
+        case "alignment":
+            return "This ForcedAligner checkpoint profile is not supported by the native audio runtime."
         case "asr":
             return "This ASR checkpoint profile is not supported by the native audio runtime."
         case "tts":

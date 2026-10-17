@@ -88,6 +88,12 @@ output tokens per segment. Both Qwen3-ASR sizes default to 1,200 seconds and
 1,024 tokens, using the official chunk/evaluation policy as a reference.
 Values persist independently by model ID and apply to new requests and realtime
 sessions, without reloading weights. The App restores them on backend startup.
+Qwen3-ForcedAligner checkpoints whose top-level `model_type` is `qwen3_asr`
+are identified by the nested `thinker_config.model_type` and serve the independent
+`POST /v1/audio/alignments` task. Timestamped transcription uses this checkpoint
+as a fixed auxiliary model. It has no autoregressive output-token setting and
+cannot become the default chat model.
+
 Previously downloaded file-only snapshots are promoted after native preflight,
 without downloading their weights again. ASR tokenizers may use `tokenizer.json`
 or split `vocab.json`/`merges.txt`, with `tokenizer_config.json` and

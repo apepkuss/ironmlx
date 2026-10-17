@@ -190,6 +190,29 @@ class WebsiteDocumentationTests(unittest.TestCase):
                 for retired in ("api", "api-compatibility-matrix", "tts-model-download", "laya-phase-one-contract"):
                     self.assertFalse((directory / f"{retired}.html").exists())
 
+    def test_transcription_alignment_and_workflow_are_published_under_api_hub(self):
+        self.assertEqual(DOCS.GROUP_MAP["audio-transcriptions-api.md"][0], "api")
+        self.assertEqual(DOCS.PAGE_PARENT["audio-transcriptions-api.md"], "api-reference.md")
+        for directory in (self.website / "docs", self.website / "zh-Hans/docs"):
+            with self.subTest(language=directory):
+                topic = (directory / "audio-transcriptions-api.html").read_text(encoding="utf-8")
+                self.assertIn('href="api-reference.html"', topic)
+                self.assertIn('/v1/audio/transcriptions', topic)
+                self.assertIn('/v1/audio/alignments', topic)
+                self.assertIn('verbose_json', topic)
+                self.assertIn('timestamp_granularities[]', topic)
+                self.assertIn('Qwen3-ForcedAligner-0.6B-8bit', topic)
+                for name in ("api-reference.html", "supported-models.html", "audio-library.html"):
+                    html = (directory / name).read_text(encoding="utf-8")
+                    self.assertIn('href="audio-transcriptions-api.html', html)
+                    self.assertNotIn('blob/dev/docs/audio-transcriptions-api.md', html)
+                    self.assertNotIn('blob/dev/docs/zh-CN/audio-transcriptions-api.md', html)
+                hub = (directory / "api-reference.html").read_text(encoding="utf-8")
+                self.assertIn('<code>/v1/audio/alignments</code>', hub)
+                search = json.loads((directory / "search-index.json").read_text(encoding="utf-8"))
+                page = next(item for item in search if item["href"] == "audio-transcriptions-api.html")
+                self.assertTrue(any('verbose_json' in section['text'] for section in page['sections']))
+
     def test_repository_documents_have_bilingual_web_destinations(self):
         links = {
             "audio-speech-api": "audio-library",

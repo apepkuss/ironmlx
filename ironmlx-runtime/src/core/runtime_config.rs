@@ -432,6 +432,14 @@ pub struct EngineModelCapabilities {
 }
 
 impl EngineModelCapabilities {
+    pub fn alignment() -> Self {
+        Self {
+            runtime_kind: "alignment",
+            supports_streaming: false,
+            ..Self::asr()
+        }
+    }
+
     pub fn asr() -> Self {
         Self {
             runtime_kind: "asr",
@@ -564,8 +572,10 @@ impl EnginePoolConfig {
     pub(crate) fn validate_enabled_model_architectures(&self) -> Result<()> {
         for model in &self.models {
             validate_engine_model_config(model)?;
-            if matches!(model.capabilities.runtime_kind, "embedding" | "asr")
-                && self.default_model.as_deref() == Some(model.id.as_str())
+            if matches!(
+                model.capabilities.runtime_kind,
+                "embedding" | "asr" | "alignment"
+            ) && self.default_model.as_deref() == Some(model.id.as_str())
             {
                 bail!(
                     "{} models cannot be the default generation model",
@@ -578,12 +588,17 @@ impl EnginePoolConfig {
 }
 
 pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<()> {
-    if model.capabilities.runtime_kind == "asr" {
+    if matches!(model.capabilities.runtime_kind, "asr" | "alignment") {
         if model.load_policy == EngineLoadPolicy::Disabled {
             return Ok(());
         }
-        ironmlx_audio::qwen3_asr::preflight_model_metadata(&model.path)?;
-        if model.capabilities != EngineModelCapabilities::asr()
+        let metadata = ironmlx_audio::qwen3_asr::preflight_model_metadata(&model.path)?;
+        let expected = if metadata.artifact_role == "alignment" {
+            EngineModelCapabilities::alignment()
+        } else {
+            EngineModelCapabilities::asr()
+        };
+        if model.capabilities != expected
             || model.default
             || model.audio.is_some()
             || model.decision.is_some()

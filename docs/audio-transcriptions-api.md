@@ -37,8 +37,10 @@ same `id`, `path`, and `load_policy` fields as other managed models.
 
 Use `multipart/form-data` with required `model` and binary `file` fields.
 Optional fields are `language` (language code or supported language name),
-`prompt` (context), and `response_format` (`json` or `text`, default `json`).
-Omitting `language` enables language detection. Greedy decoding is used;
+`prompt` (context), and `response_format` (`json`, `text` or `verbose_json`, default `json`).
+Omitting `language` enables language detection. For standalone ASR use `json` or
+`text` and omit `timestamp_granularities[]`; `verbose_json` enables the two-model
+workflow described below. Greedy decoding is used;
 `temperature=0` is accepted. Set `stream=true` with JSON output for SSE events
 `transcript.text.delta` and `transcript.text.done`; deltas concatenate to the final text.
 
@@ -102,9 +104,84 @@ in-flight requests. The App persists the values in its model parameter store.
 - Disconnects cancel work at computation checkpoints. Model leases and memory
   reservations remain held until submitted GPU operations finish.
 
-Unsupported parameters, duplicate fields, subtitles, timestamps and nonzero temperature
-return explicit OpenAI-shaped errors. Forced alignment and speaker diarization are
-not implemented. `stream=true` requires `response_format=json`.
+Unsupported parameters, duplicate scalar fields, subtitles and nonzero temperature
+return explicit OpenAI-shaped errors. Speaker diarization is not implemented. `stream=true` requires `response_format=json`.
+
+## Timestamped transcription: fixed two-model workflow
+
+Send `response_format=verbose_json` to the existing transcription endpoint.
+`model` selects either supported Qwen3-ASR size. IronMLX transcribes first, then
+aligns each recognized audio/text segment with the fixed auxiliary checkpoint
+`mlx-community/Qwen3-ForcedAligner-0.6B-8bit`. Download and register this checkpoint
+in advance; requests do not download weights. There is no `alignment_model` option
+or arbitrary model-composition interface in this version.
+
+```sh
+curl http://127.0.0.1:9068/v1/audio/transcriptions \
+  -F model=mlx-community/Qwen3-ASR-0.6B-8bit -F file=@speech.wav \
+  -F response_format=verbose_json \
+  -F 'timestamp_granularities[]=word' -F 'timestamp_granularities[]=segment'
+```
+
+The response contains `task`, `text`, `language`, `duration` (seconds), and the
+requested `words: [{word,start,end}]` and/or `segments: [{id,text,start,end}]`.
+`timestamp_granularities[]` is an array field: `word` requests word/unit times and
+`segment` requests segment times. Repeat the same multipart field to request both,
+as in the example above. It requires `verbose_json`; omitting it defaults to
+`segment`, while supplying it with `json` or `text` is an error. Both kinds of timestamps come from actual
+alignment; segment times span the first through last aligned unit of each ASR
+window. They are not sentence segmentation or VAD boundaries. Long-file times
+include each window's offset in the original recording. Plain `json`/`text` and
+SSE transcription continue to use only ASR; timestamp output requires nonstreaming
+`verbose_json`. Realtime WebSocket timestamps are not added by this workflow.
+Field names follow the [OpenAI transcription contract](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create);
+Whisper-specific token scores and confidence fields are not synthesized.
+
+Missing dependencies, unsupported alignment languages, capacity exhaustion or an
+alignment failure return an error for the whole request, rather than a successful
+response with fabricated or missing timestamps. The ASR lease is released before
+alignment. Existing model-count, pinning and memory policies still apply: the App's
+reject-on-capacity policy normally needs two available model slots, while a lazy
+model-pool server can evict an idle unpinned model even with one loaded-model slot.
+
+## Independent forced alignment (IronMLX extension)
+
+`POST /v1/audio/alignments` accepts multipart fields `model`, `file`, `text`, and
+`language`; all four are required. `model` identifies the registered ForcedAligner
+checkpoint. This performs alignment only and does not run an ASR model.
+`response_format=json` is optional. Sampling, prompts, streaming and timestamp
+selection fields are not accepted. This endpoint is an IronMLX extension, not an
+OpenAI or Anthropic standard API.
+
+```sh
+curl http://127.0.0.1:9068/v1/audio/alignments \
+  -F model=mlx-community/Qwen3-ForcedAligner-0.6B-8bit \
+  -F file=@speech.wav -F 'text=甚至出现交易几乎停滞的情况。' -F language=zh
+```
+
+It returns `{text,language,duration,words:[{word,start,end}]}` with times in seconds.
+Standalone audio is bounded to 300 seconds, text to 16,384 UTF-8 bytes and 2,048
+spoken units, with an 8,192-token combined audio/text context. Split longer
+standalone inputs into matching audio/text pairs upstream; audio cannot be split
+without knowing which supplied words belong to each part. The combined workflow
+handles this using the ASR window transcripts and retains the ASR duration setting.
+Other file, upload, queue, cancellation and memory limits are shared with transcription.
+
+The checkpoint supports Chinese, Cantonese, English, German, Spanish, French,
+Italian, Portuguese, Russian, Japanese and Korean. Languages outside that set
+remain available for plain ASR but cannot use this fixed alignment workflow.
+Chinese ideographs are individual units; space-delimited text uses cleaned words.
+Japanese uses character units and Korean uses whitespace units in this native
+implementation, rather than the upstream nagisa/soynlp word segmentation. The
+`words` field therefore does not promise linguistic word boundaries for every language.
+Punctuation is preserved in the top-level text but receives no separate timestamp.
+The model predicts 80 ms timestamp classes; decimal seconds do not imply finer
+precision. It aligns supplied text and does not certify that the text is correct.
+
+The App reports this model as `runtime_kind: "alignment"`, with audio input and
+without streaming, chat defaults, generation sampling, or output-token settings.
+Existing verified file-only snapshots are promoted by successful native preflight
+when loaded, retaining downloaded weights. No recording or transcription UI is added.
 
 ## Realtime transcription
 

@@ -10,7 +10,7 @@ struct SupportedModelCatalogTests {
     @MainActor
     func bootstrapContainsBundledCatalog() throws {
         let catalog = try SupportedModelCatalog.bundled()
-        #expect(catalog.entries.count == 61)
+        #expect(catalog.entries.count == 62)
         let script = try DashboardWindowController.bootstrapScript(config: AppConfig(), route: .status)
         let context = JSContext()!
         context.evaluateScript("var window = {};\n" + script)
@@ -55,7 +55,7 @@ struct SupportedModelCatalogTests {
     func quantizationGroups() throws {
         let catalog = try SupportedModelCatalog.bundled()
         let groups = Dictionary(grouping: catalog.entries, by: \.modelId)
-        #expect(groups.count == 31)
+        #expect(groups.count == 32)
         #expect(groups["qwen35-2b"]?.map(\.variantLabel) == ["Affine · 4 bit", "Affine · 5 bit", "Affine · 6 bit", "OptiQ · 4 bit"])
         #expect(groups["qwen38-27b"]?.map(\.variantLabel) == ["Affine · 4 bit", "Affine · 8 bit"])
         for entries in groups.values {

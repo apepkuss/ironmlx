@@ -436,6 +436,7 @@ struct EngineSlotRuntimeSnapshot {
 #[derive(Clone)]
 pub enum EngineVariant {
     Asr(super::asr_execution::AsrRuntime),
+    Alignment(super::alignment_execution::AlignmentRuntime),
     Embedding(super::embedding_execution::EmbeddingRuntime),
     Decision(super::decision_execution::DecisionRuntime),
     Audio(super::audio_execution::AudioRuntime),
@@ -750,8 +751,24 @@ impl EnginePoolState {
             .to_owned();
         let slots = self.inner.slots.lock().await;
         Ok(slots.get(&id).is_some_and(|slot| {
-            slot.model.audio.is_some() || slot.model.capabilities.runtime_kind == "asr"
+            slot.model.audio.is_some()
+                || matches!(slot.model.capabilities.runtime_kind, "asr" | "alignment")
         }))
+    }
+
+    pub async fn is_alignment_model(&self, id: &str) -> Result<bool> {
+        self.inner
+            .registry
+            .lock()
+            .await
+            .resolve_model_id(Some(id))?;
+        Ok(self
+            .inner
+            .slots
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|slot| slot.model.capabilities.runtime_kind == "alignment"))
     }
 
     pub async fn is_asr_model(&self, id: &str) -> Result<bool> {
@@ -911,7 +928,12 @@ impl EnginePoolState {
         set_default: bool,
     ) -> Result<EngineModelControlResult> {
         validate_engine_model_config(&model)?;
-        if set_default && matches!(model.capabilities.runtime_kind, "embedding" | "asr") {
+        if set_default
+            && matches!(
+                model.capabilities.runtime_kind,
+                "embedding" | "asr" | "alignment"
+            )
+        {
             bail!("embedding and ASR models cannot be the default generation model");
         }
         let model_id = model.id.clone();
@@ -944,7 +966,10 @@ impl EnginePoolState {
             registry.remove_model(&model_id);
             registry.upsert_model(model.manifest_view(), set_default || was_previous_default)?;
             if previous_default.is_none()
-                && matches!(model.capabilities.runtime_kind, "embedding" | "asr")
+                && matches!(
+                    model.capabilities.runtime_kind,
+                    "embedding" | "asr" | "alignment"
+                )
             {
                 registry.restore_default_model(None)?;
             }
@@ -986,7 +1011,12 @@ impl EnginePoolState {
         pinned: Option<bool>,
     ) -> Result<EngineModelControlResult> {
         validate_engine_model_config(&model)?;
-        if set_default && matches!(model.capabilities.runtime_kind, "embedding" | "asr") {
+        if set_default
+            && matches!(
+                model.capabilities.runtime_kind,
+                "embedding" | "asr" | "alignment"
+            )
+        {
             bail!("embedding and ASR models cannot be the default generation model");
         }
         let model_id = model.id.clone();
@@ -1090,8 +1120,11 @@ impl EnginePoolState {
     }
 
     pub async fn set_default_model(&self, requested: &str) -> Result<()> {
-        if self.is_embedding_model(requested).await {
-            bail!("embedding and ASR models cannot be the default generation model");
+        if self.is_embedding_model(requested).await
+            || self.is_asr_model(requested).await?
+            || self.is_alignment_model(requested).await?
+        {
+            bail!("embedding, ASR and alignment models cannot be the default generation model");
         }
         self.inner
             .registry
@@ -2119,6 +2152,7 @@ impl EngineVariant {
             | Self::QwenImage(_)
             | Self::Audio(_)
             | Self::Asr(_)
+            | Self::Alignment(_)
             | Self::Decision(_)
             | Self::Embedding(_) => return None,
         };
@@ -2145,6 +2179,7 @@ impl EngineVariant {
             | Self::QwenImage(_)
             | Self::Audio(_)
             | Self::Asr(_)
+            | Self::Alignment(_)
             | Self::Decision(_)
             | Self::Embedding(_) => Ok(0),
         }
@@ -2152,6 +2187,15 @@ impl EngineVariant {
 
     fn loaded_health(&self) -> LoadedEngineHealth {
         match self {
+            Self::Alignment(state) => {
+                let (active_requests, queued_requests) = state.active_and_queued();
+                LoadedEngineHealth::Audio {
+                    scheduler: "serial_alignment",
+                    active_requests,
+                    queued_requests,
+                    queue_capacity: super::alignment_execution::ALIGNMENT_QUEUE_CAPACITY,
+                }
+            }
             Self::Asr(state) => {
                 let (active_requests, queued_requests) = state.active_and_queued();
                 LoadedEngineHealth::Audio {
@@ -2249,6 +2293,7 @@ impl EngineVariant {
             Self::QwenImage(_) => "qwen_image_2_1",
             Self::Audio(_) => "indextts25",
             Self::Asr(_) => "qwen3_asr",
+            Self::Alignment(_) => "qwen3_forced_aligner",
             Self::Decision(_) => "laya_multilingual_mlx",
             Self::Embedding(_) => "embedding_gemma2",
         }
@@ -2268,6 +2313,7 @@ impl EngineVariant {
             Self::QwenImage(state) => state.model_weight_bytes,
             Self::Audio(state) => state.model_weight_bytes(),
             Self::Asr(state) => state.model_weight_bytes(),
+            Self::Alignment(state) => state.model_weight_bytes(),
             Self::Decision(state) => state.model_weight_bytes(),
             Self::Embedding(state) => state.model_weight_bytes(),
         }
@@ -2275,6 +2321,10 @@ impl EngineVariant {
 
     fn pending_requests(&self) -> usize {
         match self {
+            Self::Alignment(state) => {
+                let (active, queued) = state.active_and_queued();
+                active + queued
+            }
             Self::Asr(state) => {
                 let (active, queued) = state.active_and_queued();
                 active + queued
@@ -2324,6 +2374,7 @@ impl EngineVariant {
             Self::QwenImage(state) => state.runtime_usage.snapshot(false),
             Self::Audio(_) => Default::default(),
             Self::Asr(state) => state.usage(),
+            Self::Alignment(state) => state.usage(),
             Self::Decision(state) => state.usage(),
             Self::Embedding(state) => state.usage(),
         }
@@ -2404,6 +2455,11 @@ async fn load_engine_variant(
     model: &EngineModelConfig,
     runtime: &EngineRuntimeOptions,
 ) -> Result<EngineVariant> {
+    if model.capabilities.runtime_kind == "alignment" {
+        return Ok(EngineVariant::Alignment(
+            super::alignment_execution::AlignmentRuntime::load(model.path.clone()).await?,
+        ));
+    }
     if model.capabilities.runtime_kind == "asr" {
         return Ok(EngineVariant::Asr(
             super::asr_execution::AsrRuntime::load(model.path.clone()).await?,

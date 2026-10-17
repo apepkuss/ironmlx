@@ -209,9 +209,13 @@ pub fn build_engine_model_config(
         {
             bail!("ASR models do not accept TTS, decision or generation settings");
         }
-        ironmlx_audio::qwen3_asr::preflight_model_metadata(model_dir)?;
+        let metadata = ironmlx_audio::qwen3_asr::preflight_model_metadata(model_dir)?;
         let mut config = decision_model_config(model_id, model_dir.to_path_buf(), pinned);
-        config.capabilities = EngineModelCapabilities::asr();
+        config.capabilities = if metadata.artifact_role == "alignment" {
+            EngineModelCapabilities::alignment()
+        } else {
+            EngineModelCapabilities::asr()
+        };
         return Ok(EngineModelLoad {
             config,
             warning: None,
@@ -841,8 +845,13 @@ pub fn build_engine_model_config_for_pool(
         {
             bail!("ASR models do not accept TTS, decision or generation settings");
         }
+        let metadata = ironmlx_audio::qwen3_asr::preflight_model_metadata(&model.path)?;
         let mut config = decision_model_config(model.id, model.path, false);
-        config.capabilities = EngineModelCapabilities::asr();
+        config.capabilities = if metadata.artifact_role == "alignment" {
+            EngineModelCapabilities::alignment()
+        } else {
+            EngineModelCapabilities::asr()
+        };
         config.default = model.default;
         config.load_policy = model.load_policy;
         super::runtime_config::validate_engine_model_config(&config)?;

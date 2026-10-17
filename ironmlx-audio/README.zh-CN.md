@@ -308,3 +308,5 @@ IRONMLX_AUDIO_APP_BUNDLE=/absolute/path/to/IronMLX.app \
 IRONMLX_AUDIO_APP_REFERENCE=/absolute/path/to/reference.wav \
 swift test -c release --package-path ironmlx-app --filter audioAppLoadsAndRestoresFromSavedConfigurationWithBundle
 ```
+
+原生 Qwen3-ForcedAligner affine 8-bit 推理复用音频／文字骨干，使用独立时间戳分类头。`Qwen3Asr::align` 接收音频和已有文字。服务端同时提供独立对齐和固定 ASR 加对齐流程；语言单元、限制与时间戳精度见[转写接口契约](../docs/zh-CN/audio-transcriptions-api.md)。

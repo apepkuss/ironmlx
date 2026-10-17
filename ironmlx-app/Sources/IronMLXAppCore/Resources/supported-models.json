@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-16",
+  "updatedAt": "2026-10-17",
   "entries": [
     {
       "id": "qwen35-2b-4bit",
@@ -1581,6 +1581,30 @@
       ],
       "msMetadataRevision": null,
       "modelId": "qwen3-asr-17b",
+      "variantLabel": "Affine · 8 bit"
+    },
+    {
+      "id": "qwen3-forced-aligner-06b-8bit",
+      "name": "Qwen3-ForcedAligner 0.6B",
+      "parameters": "0.6B",
+      "weightFormat": "Affine 8-bit",
+      "weightBytes": 1271924386,
+      "downloadBytes": 1276473392,
+      "category": "alignment",
+      "capabilities": [
+        "alignment"
+      ],
+      "status": "verified",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Qwen3-ForcedAligner-0.6B-8bit",
+      "msRepo": null,
+      "metadataRevision": "0e1a68e91d815300c7c9754b2a7639378b23db15",
+      "evidence": [
+        "docs/audio-transcriptions-api.md",
+        "ironmlx-audio/src/qwen3_asr/alignment.rs"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "qwen3-forced-aligner-06b",
       "variantLabel": "Affine · 8 bit"
     }
   ]

@@ -14,7 +14,15 @@ enum Qwen3ASRModelSupport {
               text["num_attention_heads"] as? Int == 16,
               text["num_key_value_heads"] as? Int == 8,
               text["head_dim"] as? Int == 128,
-              text["vocab_size"] as? Int == 151936 else { return false }
+              [151936, 152064].contains(text["vocab_size"] as? Int ?? 0) else { return false }
+        if thinker["model_type"] as? String == "qwen3_forced_aligner" {
+            return audio["d_model"] as? Int == 1024 && audio["encoder_layers"] as? Int == 24
+                && text["hidden_size"] as? Int == 1024 && text["vocab_size"] as? Int == 152064
+                && thinker["classify_num"] as? Int == 5000
+                && config["timestamp_token_id"] as? Int == 151705
+                && config["timestamp_segment_time"] as? Int == 80
+        }
+        guard text["vocab_size"] as? Int == 151936 else { return false }
         return (audio["d_model"] as? Int == 896 && audio["encoder_layers"] as? Int == 18
             && text["hidden_size"] as? Int == 1024)
             || (audio["d_model"] as? Int == 1024 && audio["encoder_layers"] as? Int == 24
@@ -33,7 +41,7 @@ enum Qwen3ASRModelSupport {
               manifest.compatibility.downloadOnly == true else { return }
         _ = try verifier.verifyStructure(snapshot: directory)
         let result = try await preflight.validate(metadataDirectory: directory)
-        guard result.modelType == "qwen3_asr", result.artifactRole == "asr" else {
+        guard result.modelType == "qwen3_asr", ["asr", "alignment"].contains(result.artifactRole) else {
             throw ModelMetadataPreflightError.rejected("Invalid Qwen3-ASR preflight result.")
         }
         manifest.compatibility = ModelSnapshotCompatibility(

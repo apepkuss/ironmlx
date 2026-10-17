@@ -24,9 +24,10 @@ The developer guide includes the API quick start and directs readers to API,
 CLI, source development, and maintenance references. The overview cards link
 to the user guide, developer guide, and troubleshooting page. The developer
 guide card opens the page from the beginning and links to the API reference hub.
-The hub provides six topic entry points and an index of all documented endpoints.
+The hub provides API topic entry points and an index of all documented endpoints.
 Service and management, text and vision, text/image/audio embeddings, speech
-synthesis, image generation, and System One are child pages in both desktop
+synthesis, speech recognition and alignment, image generation, System One and
+OpenAI Decisions are child pages in both desktop
 and mobile navigation.
 
 Development & API groups the API hub with source builds, library references,
@@ -38,7 +39,9 @@ and adjacent-page navigation use the same grouping and reading order.
 `PAGE_PARENT` and `CHILD_PAGES` define API topic nesting; child pages have an
 API reference breadcrumb and search group, while overview categories show the
 hub. `api-reference.html` serves the hub; text and vision contracts live at
-`text-vision-api.html`. Update Markdown links when moving contract sections.
+`text-vision-api.html`. The `audio-transcriptions-api.html` topic covers standalone
+ASR, the independent alignment extension, the fixed timestamp workflow, realtime
+transcription and server VAD. Update Markdown links when moving contract sections.
 Shared addresses, authentication, health checks, model discovery and management
 contracts live in the service and management reference. Each inference topic
 maintains its own protocol fields, examples, errors and limits.

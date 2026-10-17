@@ -28,6 +28,15 @@ async fn transcribe(
     audio: &[u8],
     extra: &[(&str, &str)],
 ) -> (StatusCode, Vec<u8>) {
+    audio_request(app, "/v1/audio/transcriptions", model, audio, extra).await
+}
+async fn audio_request(
+    app: &Router,
+    path: &str,
+    model: &str,
+    audio: &[u8],
+    extra: &[(&str, &str)],
+) -> (StatusCode, Vec<u8>) {
     let boundary = "ironmlx-asr-test";
     let mut data = format!(
         "--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n"
@@ -44,7 +53,7 @@ async fn transcribe(
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v1/audio/transcriptions")
+                .uri(path)
                 .header(
                     "content-type",
                     format!("multipart/form-data; boundary={boundary}"),
@@ -645,4 +654,451 @@ async fn qwen3_asr_server_vad_queues_speech_and_ignores_silence() {
         let _ = server.await;
         json_request(&app, "/admin/api/models/unload", json!({"model":model})).await;
     }
+}
+
+#[tokio::test]
+#[serial_test::serial(mlx_metal)]
+#[ignore = "requires both ASR models, ForcedAligner and reference WAV"]
+async fn qwen3_alignment_and_timestamp_workflow() {
+    use ironmlx_audio::AudioIo;
+    let root = std::env::var("MLX_DIR").unwrap();
+    mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib")).unwrap();
+    let args = super::tests::serve_args();
+    let manager = ModelManager::new(
+        crate::cli::serve::engine_runtime_config(&args).unwrap(),
+        Some(2),
+        SchedulerResolutionOptions::from(&args),
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let voices = crate::server::voices::VoiceStore::open(dir.path().to_owned()).unwrap();
+    let app = app_router(manager, voices);
+    let audio = std::fs::read(std::env::var("IRONMLX_ASR_TEST_AUDIO").unwrap()).unwrap();
+    let aligner = crate::server::transcriptions::FIXED_ALIGNER;
+    json_request(
+        &app,
+        "/admin/api/models/register",
+        json!({"model":aligner,"model_dir":std::env::var("IRONMLX_ALIGNER_DIR").unwrap()}),
+    )
+    .await;
+    let (status, bytes) = audio_request(
+        &app,
+        "/v1/audio/alignments",
+        aligner,
+        &audio,
+        &[("text", "甚至出现交易几乎停滞的情况。"), ("language", "zh")],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let aligned: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(aligned["words"].as_array().unwrap().len(), 13);
+    assert_eq!(aligned["words"][0]["start"], 0.4);
+    for extra in [
+        vec![("text", "hello")],
+        vec![("text", "hello"), ("language", "xx")],
+        vec![("text", "hello"), ("language", "en"), ("stream", "true")],
+    ] {
+        let (status, _) =
+            audio_request(&app, "/v1/audio/alignments", aligner, &audio, &extra).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, _) = transcribe(&app, aligner, &audio, &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    for (size, var) in [
+        ("0.6B", "IRONMLX_ASR_SMALL_DIR"),
+        ("1.7B", "IRONMLX_ASR_LARGE_DIR"),
+    ] {
+        let model = format!("mlx-community/Qwen3-ASR-{size}-8bit");
+        json_request(
+            &app,
+            "/admin/api/models/register",
+            json!({"model":model,"model_dir":std::env::var(var).unwrap()}),
+        )
+        .await;
+        let (status, bytes) = transcribe(
+            &app,
+            &model,
+            &audio,
+            &[
+                ("response_format", "verbose_json"),
+                ("timestamp_granularities[]", "word"),
+                ("timestamp_granularities[]", "segment"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(result["text"].as_str().unwrap().contains("交易"));
+        assert_eq!(result["words"].as_array().unwrap().len(), 13);
+        assert!(!result["segments"].as_array().unwrap().is_empty());
+        println!("{size}: {result}");
+        let (status, _) = transcribe(
+            &app,
+            &model,
+            &audio,
+            &[("timestamp_granularities[]", "word")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = transcribe(
+            &app,
+            &model,
+            &audio,
+            &[("response_format", "verbose_json"), ("stream", "true")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        if size == "0.6B" {
+            let io = ironmlx_audio::io::NativeAudioIo;
+            let mut pcm = io.decode(&audio, &Default::default()).unwrap();
+            pcm.samples = pcm.samples.repeat(8);
+            let long = io.encode_wav(&pcm).unwrap();
+            let (status, bytes) = transcribe(
+                &app,
+                &model,
+                &long,
+                &[
+                    ("response_format", "verbose_json"),
+                    ("timestamp_granularities[]", "word"),
+                ],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+            let result: Value = serde_json::from_slice(&bytes).unwrap();
+            let words = result["words"].as_array().unwrap();
+            assert!(words.last().unwrap()["end"].as_f64().unwrap() > 30.);
+            assert!(words
+                .windows(2)
+                .all(|w| w[0]["end"].as_f64().unwrap() <= w[1]["start"].as_f64().unwrap() + 0.001));
+            println!(
+                "Long recording: {} aligned units, final time {}",
+                words.len(),
+                words.last().unwrap()["end"]
+            );
+        }
+        json_request(&app, "/admin/api/models/unload", json!({"model":model})).await;
+    }
+    json_request(&app, "/admin/api/models/unload", json!({"model":aligner})).await;
+}
+
+#[tokio::test]
+#[serial_test::serial(mlx_metal)]
+#[ignore = "requires local ASR and ForcedAligner checkpoints"]
+async fn qwen3_timestamp_pool_evicts_between_workflow_steps() {
+    use ironmlx_runtime::core::engine_pool::{
+        EngineLoadPolicy, EngineModelManifest, EnginePoolConfig,
+    };
+    use ironmlx_runtime::core::model_management::build_engine_model_config_for_pool;
+    let root = std::env::var("MLX_DIR").unwrap();
+    mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib")).unwrap();
+    let args = super::tests::serve_args();
+    let mut models = Vec::new();
+    for (id, var) in [
+        ("mlx-community/Qwen3-ASR-0.6B-8bit", "IRONMLX_ASR_SMALL_DIR"),
+        (
+            crate::server::transcriptions::FIXED_ALIGNER,
+            "IRONMLX_ALIGNER_DIR",
+        ),
+    ] {
+        let manifest = EngineModelManifest {
+            id: id.into(),
+            path: std::env::var(var).unwrap().into(),
+            load_policy: EngineLoadPolicy::Lazy,
+            default: false,
+            audio: None,
+            decision: None,
+            scheduler_profile: None,
+            mtp_model_dir: None,
+            mtp_draft_tokens: None,
+            prompt_lookup: None,
+        };
+        models.push(
+            build_engine_model_config_for_pool(
+                &SchedulerResolutionOptions::from(&args),
+                manifest,
+                None,
+                "",
+            )
+            .unwrap(),
+        );
+    }
+    let pool = EnginePoolState::new(
+        EnginePoolConfig {
+            models,
+            default_model: None,
+            max_loaded_models: Some(1),
+        },
+        crate::cli::serve::engine_runtime_config(&args)
+            .unwrap()
+            .options,
+    )
+    .await
+    .unwrap();
+    let app = crate::server::engine::engine_pool_router().with_state(pool.clone());
+    let audio = std::fs::read(std::env::var("IRONMLX_ASR_TEST_AUDIO").unwrap()).unwrap();
+    let (status, bytes) = transcribe(
+        &app,
+        "mlx-community/Qwen3-ASR-0.6B-8bit",
+        &audio,
+        &[
+            ("response_format", "verbose_json"),
+            ("timestamp_granularities[]", "word"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["words"].as_array().unwrap().len(), 13);
+    assert!(
+        !pool
+            .is_model_loaded("mlx-community/Qwen3-ASR-0.6B-8bit")
+            .await
+    );
+    assert!(
+        pool.is_model_loaded(crate::server::transcriptions::FIXED_ALIGNER)
+            .await
+    );
+    // Exercise the standalone route on the pool surface too.
+    let (status, _) = audio_request(
+        &app,
+        "/v1/audio/alignments",
+        crate::server::transcriptions::FIXED_ALIGNER,
+        &audio,
+        &[("text", "甚至出现交易几乎停滞的情况。"), ("language", "zh")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+#[serial_test::serial(mlx_metal)]
+#[ignore = "requires local ASR, ForcedAligner and reference WAV"]
+async fn qwen3_alignment_rejects_limits_and_cancels_cleanly() {
+    use ironmlx_audio::{AudioIo, PcmBuffer, PcmFormat};
+    use std::time::Duration;
+    let root = std::env::var("MLX_DIR").unwrap();
+    mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib")).unwrap();
+    let args = super::tests::serve_args();
+    let manager = ModelManager::new(
+        crate::cli::serve::engine_runtime_config(&args).unwrap(),
+        Some(2),
+        SchedulerResolutionOptions::from(&args),
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let voices = crate::server::voices::VoiceStore::open(dir.path().to_owned()).unwrap();
+    let app = app_router(manager.clone(), voices);
+    let audio = std::fs::read(std::env::var("IRONMLX_ASR_TEST_AUDIO").unwrap()).unwrap();
+    let asr = "mlx-community/Qwen3-ASR-0.6B-8bit";
+    let aligner = crate::server::transcriptions::FIXED_ALIGNER;
+    json_request(
+        &app,
+        "/admin/api/models/register",
+        json!({"model":asr,"model_dir":std::env::var("IRONMLX_ASR_SMALL_DIR").unwrap()}),
+    )
+    .await;
+    let (status, bytes) =
+        transcribe(&app, asr, &audio, &[("response_format", "verbose_json")]).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert!(
+        !manager.pool.is_model_loaded(asr).await,
+        "Missing dependency must fail before loading ASR"
+    );
+    let (status, bytes) = transcribe(&app, asr, &audio, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert!(serde_json::from_slice::<Value>(&bytes).unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .contains("交易"));
+    json_request(
+        &app,
+        "/admin/api/models/register",
+        json!({"model":aligner,"model_dir":std::env::var("IRONMLX_ALIGNER_DIR").unwrap()}),
+    )
+    .await;
+    for extra in [
+        vec![("text", "!!!"), ("language", "zh")],
+        vec![("text", "hello"), ("language", "en"), ("temperature", "0")],
+        vec![("text", "hello"), ("text", "duplicate"), ("language", "en")],
+    ] {
+        let (status, bytes) =
+            audio_request(&app, "/v1/audio/alignments", aligner, &audio, &extra).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+    let oversized_text = "啊".repeat(2049);
+    let (status, _) = audio_request(
+        &app,
+        "/v1/audio/alignments",
+        aligner,
+        &audio,
+        &[("text", &oversized_text), ("language", "zh")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let io = ironmlx_audio::io::NativeAudioIo;
+    // Valid standalone inputs must not inherit the TTS reference resampler's 60s cap.
+    let mut extended = io.decode(&audio, &Default::default()).unwrap();
+    assert_eq!(
+        extended.format,
+        PcmFormat {
+            sample_rate: 16000,
+            channels: 1
+        }
+    );
+    extended.samples.resize(61 * 16000, 0.);
+    let extended = io.encode_wav(&extended).unwrap();
+    let (status, bytes) = audio_request(
+        &app,
+        "/v1/audio/alignments",
+        aligner,
+        &extended,
+        &[("text", "甚至出现交易几乎停滞的情况。"), ("language", "zh")],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["duration"], 61.);
+    assert_eq!(result["words"].as_array().unwrap().len(), 13);
+    let mut pcm = PcmBuffer {
+        format: PcmFormat {
+            sample_rate: 16000,
+            channels: 1,
+        },
+        samples: vec![0.; 301 * 16000],
+    };
+    let long = io.encode_wav(&pcm).unwrap();
+    let (status, _) = audio_request(
+        &app,
+        "/v1/audio/alignments",
+        aligner,
+        &long,
+        &[("text", "你好"), ("language", "zh")],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Audio duration limit was not enforced"
+    );
+    pcm.samples.truncate(300 * 16000);
+    let long = io.encode_wav(&pcm).unwrap();
+    let context_text = "啊".repeat(2048);
+    let (status, bytes) = audio_request(
+        &app,
+        "/v1/audio/alignments",
+        aligner,
+        &long,
+        &[("text", &context_text), ("language", "zh")],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert!(
+        String::from_utf8_lossy(&bytes).contains("8192"),
+        "Expected combined audio/text context rejection"
+    );
+    let request_app = app.clone();
+    let pending = tokio::spawn(async move {
+        audio_request(
+            &request_app,
+            "/v1/audio/alignments",
+            aligner,
+            &long,
+            &[("text", "你好"), ("language", "zh")],
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while manager.pool.pending_requests(aligner).await.unwrap_or(0) == 0 {
+            assert!(
+                !pending.is_finished(),
+                "Cancellation request unexpectedly finished before worker admission"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while manager.pool.pending_requests(aligner).await.unwrap_or(0) != 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Cancellation must release admission resources and leave the worker usable.
+    let (status, bytes) = audio_request(
+        &app,
+        "/v1/audio/alignments",
+        aligner,
+        &audio,
+        &[("text", "甚至出现交易几乎停滞的情况。"), ("language", "zh")],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let (status, bytes) =
+        transcribe(&app, asr, &audio, &[("response_format", "verbose_json")]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(!result["segments"].as_array().unwrap().is_empty());
+    assert!(
+        result.get("words").is_none(),
+        "Default granularity is segment only"
+    );
 }

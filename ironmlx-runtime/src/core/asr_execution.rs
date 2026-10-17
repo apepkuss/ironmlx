@@ -305,10 +305,13 @@ impl AsrRuntime {
                 language: String::new(),
                 duration,
                 generated_tokens: 0,
+                segments: Vec::new(),
                 raw_text: String::new(),
                 stable_text: String::new(),
             };
             for range in prepared.segments {
+                let start = range.start as f64 / 16000.;
+                let end = range.end as f64 / 16000.;
                 let mut samples = prepared.samples[range].to_vec();
                 samples.resize(samples.len().max(201), 0.);
                 let result = self
@@ -335,6 +338,14 @@ impl AsrRuntime {
                 let delta =
                     ironmlx_audio::qwen3_asr::append_transcript(&mut output.text, &result.text);
                 output.generated_tokens += result.generated_tokens;
+                output
+                    .segments
+                    .push(ironmlx_audio::qwen3_asr::TranscriptSegment {
+                        start,
+                        end,
+                        text: result.text.clone(),
+                        language: result.language.clone(),
+                    });
                 if !result.language.is_empty()
                     && !output.language.split(',').any(|v| v == result.language)
                 {

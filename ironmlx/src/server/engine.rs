@@ -120,6 +120,7 @@ impl EngineVariantHttpAdapter for EngineVariant {
     async fn openai_chat_completions(&self, req: openai::ChatRequest) -> Response {
         match self {
             Self::Asr(_)
+            | Self::Alignment(_)
             | Self::Audio(_)
             | Self::Decision(_)
             | Self::QwenImage(_)
@@ -150,6 +151,7 @@ impl EngineVariantHttpAdapter for EngineVariant {
     async fn openai_responses(&self, req: responses::ResponsesRequest) -> Response {
         match self {
             Self::Asr(_)
+            | Self::Alignment(_)
             | Self::Audio(_)
             | Self::Decision(_)
             | Self::QwenImage(_)
@@ -189,6 +191,7 @@ impl EngineVariantHttpAdapter for EngineVariant {
     async fn anthropic_messages(&self, req: anthropic::MessagesRequest) -> Response {
         match self {
             Self::Asr(_)
+            | Self::Alignment(_)
             | Self::Audio(_)
             | Self::Decision(_)
             | Self::QwenImage(_)
@@ -349,6 +352,12 @@ pub(crate) fn engine_pool_router() -> Router<EnginePoolState> {
         .route("/v1/realtime", get(super::realtime::realtime))
         .route(
             "/v1/audio/transcriptions",
+            post(super::transcriptions::transcriptions).layer(
+                axum::extract::DefaultBodyLimit::max(super::transcriptions::MAX_ASR_REQUEST_BYTES),
+            ),
+        )
+        .route(
+            "/v1/audio/alignments",
             post(super::transcriptions::transcriptions).layer(
                 axum::extract::DefaultBodyLimit::max(super::transcriptions::MAX_ASR_REQUEST_BYTES),
             ),

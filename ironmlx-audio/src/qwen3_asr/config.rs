@@ -8,10 +8,18 @@ pub struct Config {
     pub thinker_config: ThinkerConfig,
     pub quantization: Quantization,
     pub support_languages: Vec<String>,
+    #[serde(default)]
+    pub timestamp_token_id: Option<u32>,
+    #[serde(default)]
+    pub timestamp_segment_time: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct ThinkerConfig {
+    #[serde(default)]
+    pub model_type: Option<String>,
+    #[serde(default)]
+    pub classify_num: Option<i32>,
     pub audio_config: AudioConfig,
     pub text_config: TextConfig,
     pub audio_token_id: u32,
@@ -71,6 +79,10 @@ impl Config {
         Ok(config)
     }
 
+    pub fn is_aligner(&self) -> bool {
+        self.thinker_config.model_type.as_deref() == Some("qwen3_forced_aligner")
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.model_type == "qwen3_asr",
@@ -88,10 +100,14 @@ impl Config {
             t.intermediate_size,
         );
         ensure!(
-            matches!(
-                profile,
-                (896, 18, 14, 3584, 1024, 3072) | (1024, 24, 16, 4096, 2048, 6144)
-            ),
+            if self.is_aligner() {
+                profile == (1024, 24, 16, 4096, 1024, 3072)
+            } else {
+                matches!(
+                    profile,
+                    (896, 18, 14, 3584, 1024, 3072) | (1024, 24, 16, 4096, 2048, 6144)
+                )
+            },
             "unsupported Qwen3-ASR encoder/decoder profile: {profile:?}"
         );
         ensure!(
@@ -107,9 +123,18 @@ impl Config {
                 && t.num_attention_heads == 16
                 && t.num_key_value_heads == 8
                 && t.head_dim == 128
-                && t.vocab_size == 151936
-                && t.tie_word_embeddings
-                && t.max_position_embeddings == 65536
+                && if self.is_aligner() {
+                    t.vocab_size == 152064
+                        && !t.tie_word_embeddings
+                        && t.max_position_embeddings == 8192
+                        && self.timestamp_token_id == Some(151705)
+                        && self.timestamp_segment_time == Some(80)
+                        && self.thinker_config.classify_num == Some(5000)
+                } else {
+                    t.vocab_size == 151936
+                        && t.tie_word_embeddings
+                        && t.max_position_embeddings == 65536
+                }
                 && t.rms_norm_eps == 1e-6
                 && t.rope_theta == 1_000_000.,
             "unsupported Qwen3-ASR text configuration"
@@ -195,7 +220,11 @@ pub fn preflight_model_metadata(directory: &Path) -> Result<Metadata> {
     super::tokenizer::load(directory)?;
     Ok(Metadata {
         model_type: "qwen3_asr",
-        artifact_role: "asr",
+        artifact_role: if config.is_aligner() {
+            "alignment"
+        } else {
+            "asr"
+        },
         quantization: config.quantization,
     })
 }
@@ -219,6 +248,27 @@ mod tests {
         }
         Ok(())
     }
+    #[test]
+    fn forced_aligner_requires_its_own_profile_and_timestamp_head() -> Result<()> {
+        let mut config: Config = serde_json::from_str(SMALL)?;
+        config.thinker_config.model_type = Some("qwen3_forced_aligner".into());
+        assert!(config.validate().is_err());
+        config.thinker_config.audio_config.d_model = 1024;
+        config.thinker_config.audio_config.encoder_layers = 24;
+        config.thinker_config.audio_config.encoder_attention_heads = 16;
+        config.thinker_config.audio_config.encoder_ffn_dim = 4096;
+        config.thinker_config.text_config.vocab_size = 152064;
+        config.thinker_config.text_config.max_position_embeddings = 8192;
+        config.thinker_config.text_config.tie_word_embeddings = false;
+        config.timestamp_token_id = Some(151705);
+        config.timestamp_segment_time = Some(80);
+        config.thinker_config.classify_num = Some(5000);
+        config.validate()?;
+        config.timestamp_segment_time = Some(1);
+        assert!(config.validate().is_err());
+        Ok(())
+    }
+
     #[test]
     fn incompatible_profiles_are_rejected_before_weights() -> Result<()> {
         for (key, value) in [("bits", 4), ("group_size", 32)] {

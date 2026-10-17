@@ -61,3 +61,5 @@ pub mod audio_execution;
 pub mod decision_execution;
 
 pub mod embedding_execution;
+
+pub mod alignment_execution;

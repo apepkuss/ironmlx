@@ -31,7 +31,7 @@ trace the path from the App or HTTP request through runtime execution to the res
 
 ## API integration
 
-Use the [API reference](api-reference.md) to look up all documented endpoints and choose a service and management, text and vision, embedding, speech synthesis, image generation or System One topic.
+Use the [API reference](api-reference.md) to look up all documented endpoints and choose a service and management, text and vision, embedding, speech synthesis, speech recognition and alignment, image generation or System One topic.
 
 ### API quick start
 

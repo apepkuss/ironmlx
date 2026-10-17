@@ -44,3 +44,10 @@ Text fixtures are authored test sentences and reference tokenization outputs.
   window coefficients and synthetic spectral regression data contain no model
   weights or recorded speech. Conversion preserves the external model notices
   and configurations byte-for-byte in the derived artifact.
+
+- Qwen3-ForcedAligner timestamp prompting, mixed Chinese text units and monotonic
+  timestamp repair follow QwenLM/Qwen3-ASR's qwen3_forced_aligner.py.
+  Copyright 2026 The Alibaba Qwen team, Apache-2.0 (repository LICENSE).
+  The native implementation adds bounded input, cancellation and model lifecycle
+  integration. Japanese uses character units and Korean uses whitespace units;
+  no external segmentation dictionaries or model weights are bundled.

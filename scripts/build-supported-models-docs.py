@@ -11,7 +11,7 @@ CATALOG = ROOT / "ironmlx-app/Sources/IronMLXAppCore/Resources/supported-models.
 # Same order and categories as CATALOG_TYPES in the App's Supported models tab.
 SECTIONS = (
     ("LLM / VLM", "Language and vision", "语言与视觉", ("text", "vision")),
-    ("Audio", "Speech and audio", "音频", ("tts", "audio", "stt")),
+    ("Audio", "Speech and audio", "音频", ("tts", "audio", "stt", "alignment")),
     ("Image", "Image generation", "图片生成", ("image",)),
     ("Embedding", "Vector embeddings", "向量", ("embedding",)),
     ("Decision", "Typed decisions", "决策", ("decision",)),
@@ -134,7 +134,12 @@ def generate(catalog, language):
             }
             kind, function, guide, en_api, zh_api, api = details[title]
             for entries in selected:
-                rows.append([repo_link(entries[0]["name"], entries[0]), kind, f"[{function}]({guide})", weight_links(entries)])
+                row_kind, row_function, row_guide = kind, function, guide
+                if title == "Audio" and entries[0]["category"] in ("stt", "alignment"):
+                    row_kind = "Audio / ASR" if entries[0]["category"] == "stt" else "Audio / Alignment"
+                    row_function = local("Speech recognition", "语音识别", language) if entries[0]["category"] == "stt" else local("Forced alignment", "强制对齐", language)
+                    row_guide = "audio-transcriptions-api.md"
+                rows.append([repo_link(entries[0]["name"], entries[0]), row_kind, f"[{row_function}]({row_guide})", weight_links(entries)])
             lines.append(table(headers, rows))
             if title == "Embedding":
                 lines.append(local(f"EmbeddingGemma 2 supports BF16 and Affine 4-bit; video inputs are unsupported. See the [{en_api}]({api}) for input formats, dimensions and limits.", f"EmbeddingGemma 2 支持 BF16 与 Affine 4-bit，不支持视频输入。输入格式、维度与限制见[{zh_api}]({api})。", language))

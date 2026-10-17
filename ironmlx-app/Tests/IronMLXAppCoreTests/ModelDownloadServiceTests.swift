@@ -696,13 +696,13 @@ func downloadOnlyCompletesVerifiedSnapshotWithoutMakingItLoadable(message: Strin
     #expect(await service.downloadHuggingFace(repoID: repoID, token: nil).downloadOnly == true)
 }
 
-@Test(arguments: ["split", "consolidated", "vocab.json", "merges.txt", "tokenizer_config.json", "preprocessor_config.json"])
-func qwen3ASRDownloadOnlyUsesASRMetadata(layout: String) async throws {
+@Test(arguments: ["split", "consolidated", "vocab.json", "merges.txt", "tokenizer_config.json", "preprocessor_config.json"], [false, true])
+func qwen3ASRDownloadOnlyUsesASRMetadata(layout: String, forcedAligner: Bool) async throws {
     let root = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }
-    let repoID = "mlx-community/Qwen3-ASR-0.6B-8bit"
+    let repoID = forcedAligner ? "mlx-community/Qwen3-ForcedAligner-0.6B-8bit" : "mlx-community/Qwen3-ASR-0.6B-8bit"
     let client = FakeModelDownloadHTTPClient()
-    let message = "Error: unsupported model_type: qwen3_asr (expected 'llama')"
+    let message = forcedAligner ? "Error: unsupported model_type: qwen3_forced_aligner" : "Error: unsupported model_type: qwen3_asr (expected 'llama')"
     let weights = Data("asr-weights".utf8)
     var files: [(path: String, data: Data, sha256: String?)] = [
         ("config.json", Data(#"{"model_type":"qwen3_asr","architectures":["Qwen3ASRForConditionalGeneration"]}"#.utf8), nil),
