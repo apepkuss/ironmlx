@@ -1,0 +1,39 @@
+name: Dependency audit
+
+# RustSec advisories are published against versions already pinned in
+# Cargo.lock, so they surface without any change here. Audit main daily so a
+# new advisory is fixed on its own instead of failing the next unrelated push.
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-audit-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Audit Rust dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Same tool version and invocation as the CI audit gate.
+      - name: Install pinned Rust dependency audit tool
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install --locked --version 0.22.2 cargo-audit
+          test "$(cargo audit --version)" = "cargo-audit-audit 0.22.2"
+
+      - name: Audit Rust dependencies for known vulnerabilities
+        shell: bash
+        run: cargo audit
