@@ -50,7 +50,7 @@ async fn p5c_http_smoke_chat_completion_non_stream() {
         &dir,
         "--port",
         &port.to_string(),
-        "--b-max",
+        "--max-sequences",
         "1",
         "--max-cache-cap",
         "4096",
