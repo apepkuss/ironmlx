@@ -6668,28 +6668,45 @@ pub(crate) mod tests {
             .await
             .expect("send second request");
         let mut reply_rx_2 = Box::pin(reply_rx_2);
-        loop {
+        let early_second = loop {
             tokio::select! {
                 biased;
                 second = &mut reply_rx_2 => {
-                    let _ = second.expect("second reply channel").expect("second admit");
-                    panic!("second queued request was admitted before the resident first request finished");
+                    let second = second.expect("second reply channel").expect("second admit");
+                    // The actor delivers the first request's terminal event
+                    // before admitting the second; a slow poll can find both
+                    // ready, so the terminal event may already be queued.
+                    let mut first_finished = false;
+                    while let Ok(event) = events_1.try_recv() {
+                        if event.finish_reason.is_some() {
+                            first_finished = true;
+                            break;
+                        }
+                    }
+                    assert!(
+                        first_finished,
+                        "second queued request was admitted before the resident first request finished"
+                    );
+                    break Some(second);
                 }
                 event = events_1.recv() => {
                     let event = event.expect("first request event");
                     if event.finish_reason.is_some() {
-                        break;
+                        break None;
                     }
                 }
             }
-        }
+        };
 
-        let mut events_2 = tokio::time::timeout(Duration::from_secs(2), &mut reply_rx_2)
-            .await
-            .expect("second reply timeout")
-            .expect("second reply")
-            .expect("second admit")
-            .event_rx;
+        let mut events_2 = match early_second {
+            Some(second) => second,
+            None => tokio::time::timeout(Duration::from_secs(2), &mut reply_rx_2)
+                .await
+                .expect("second reply timeout")
+                .expect("second reply")
+                .expect("second admit"),
+        }
+        .event_rx;
         while let Some(event) = tokio::time::timeout(Duration::from_secs(2), events_2.recv())
             .await
             .expect("second event timeout")
