@@ -218,7 +218,7 @@ fn build_recommendations(
         items.push(warn(
             "memory_budget_overrun",
             format!(
-                "reserved KV ({}) exceeds available budget ({}); lower --b-max or --max-cache-cap before enabling this profile",
+                "reserved KV ({}) exceeds available budget ({}); lower --max-sequences or --max-cache-cap before enabling this profile",
                 format_bytes(derived.reserved_kv_bytes),
                 format_bytes(derived.available_budget_bytes)
             ),

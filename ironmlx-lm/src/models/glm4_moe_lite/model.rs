@@ -25,7 +25,7 @@
 //!   path. When `mask = Some(..)` (e.g. `batched_prefill`'s engine mask), it is
 //!   passed straight through. For decode (`L == 1`) no mask is needed: the
 //!   single query attends to the whole valid cache.
-//! - **Continuous batching (`--b-max > 1`).** Supported: `MlaLatentCache`
+//! - **Continuous batching (`--max-sequences > 1`).** Supported: `MlaLatentCache`
 //!   implements per-row migration (`adopt_row_from`) and the scheduler wires
 //!   `LayerCache::Mla` into row-adoption + the dtype-finder, so B>1 batched
 //!   prefill (different-length prompts) and B>1 heterogeneous-offset decode
