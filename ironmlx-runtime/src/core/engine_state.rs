@@ -580,6 +580,7 @@ pub async fn build_plain_app_state<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let paged_prefix_cache = with_chat_turn_boundary(paged_prefix_cache, &tokenizer);
     build_app_state(
         model,
         tokenizer,
@@ -633,6 +634,7 @@ where
         crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile(
             &scheduler_runtime_profile,
         )?;
+    let paged_prefix_cache = with_chat_turn_boundary(paged_prefix_cache, &tokenizer);
     build_app_state(
         model,
         tokenizer,
@@ -701,6 +703,7 @@ where
             &scheduler_runtime_profile,
             crate::core::speculative_qualification::NeuralExactSource::QwenMtp,
         )?;
+    let paged_prefix_cache = with_chat_turn_boundary(paged_prefix_cache, &tokenizer);
     build_app_state(
         model,
         tokenizer,
@@ -782,6 +785,7 @@ pub async fn build_gemma4_drafter_app_state(
             crate::core::speculative_qualification::NeuralExactSource::Gemma4Assistant,
         )?;
     let drafter = Arc::new(Mutex::new(drafter));
+    let paged_prefix_cache = with_chat_turn_boundary(paged_prefix_cache, &tokenizer);
     let base = build_app_state(
         model,
         tokenizer,
@@ -816,6 +820,22 @@ pub async fn build_gemma4_drafter_app_state(
     Ok(Gemma4DrafterEngine {
         base,
         mtp_draft_tokens,
+    })
+}
+
+/// The paged prefix cache, told where `tokenizer`'s chat prompts end the
+/// part a follow-up turn shares.
+fn with_chat_turn_boundary(
+    paged_prefix_cache: Option<PagedPrefixCacheConfig>,
+    tokenizer: &Tokenizer,
+) -> Option<PagedPrefixCacheConfig> {
+    paged_prefix_cache.map(|config| {
+        let turn_boundary = crate::core::chat_prefix::ChatTurnBoundary::probe(tokenizer);
+        tracing::info!(
+            generation_suffixes = ?turn_boundary.as_ref().map(|b| b.suffixes()),
+            "paged prefix cache chat turn boundary"
+        );
+        config.with_turn_boundary(turn_boundary)
     })
 }
 

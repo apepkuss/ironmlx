@@ -3090,27 +3090,84 @@ fn try_restore_paged_prefix_for_prompt(
     )
 }
 
+/// Where a prompt prefilled from `start` ends its penultimate chunk, the
+/// prefix saved for reuse: before a chat prompt's generation suffix (what
+/// its next turn shares, see [`PagedPrefixCacheConfig::turn_reusable_len`])
+/// unless the prefill starts past it, else before the last token. A chunked
+/// prefill passes `start` = where it began or any later chunk start: once at
+/// the boundary it no longer splits. Every prefill path splits there, so
+/// speculative paths reproduce the ordinary cache.
+fn prefix_split_point(
+    config: Option<&PagedPrefixCacheConfig>,
+    prompt_ids: &[u32],
+    start: usize,
+) -> usize {
+    config
+        .and_then(|config| config.turn_reusable_len(prompt_ids))
+        .filter(|&boundary| boundary >= start)
+        .unwrap_or_else(|| prompt_ids.len().saturating_sub(1))
+}
+
+/// Whether `split` (from [`prefix_split_point`]) is a chat prompt's turn
+/// boundary: a prefix the restored-prompt paths save as well.
+fn is_turn_boundary(
+    config: Option<&PagedPrefixCacheConfig>,
+    prompt_ids: &[u32],
+    split: usize,
+) -> bool {
+    config.and_then(|config| config.turn_reusable_len(prompt_ids)) == Some(split)
+}
+
+fn try_save_turn_boundary_prefix(
+    config: Option<&PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<&PrefixLruCacheHandle>,
+    cache: &[LayerCache],
+    row: usize,
+    prompt_ids: &[u32],
+    fingerprint: &PrefixFingerprint,
+) {
+    match try_save_paged_prefix_for_prompt_row(
+        config,
+        prefix_lru_cache,
+        cache,
+        row,
+        prompt_ids,
+        fingerprint,
+    ) {
+        Ok(Some(key)) => {
+            tracing::debug!("paged SSD prefix cache saved turn boundary: row={row} key={key}");
+        }
+        Ok(None) => {}
+        Err(err) => {
+            tracing::warn!("paged SSD prefix cache turn boundary save skipped: row={row} {err:#}");
+        }
+    }
+}
+
 fn paged_prefix_restore_candidates(
     store: &PagedPrefixStore,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-    prompt_len: usize,
+    config: &PagedPrefixCacheConfig,
+    prompt_ids: &[u32],
 ) -> Result<Vec<(usize, i32)>> {
+    let prompt_len = prompt_ids.len();
     if prompt_len <= 1 {
         return Ok(Vec::new());
     }
-    let max_cached_len = i32::try_from(prompt_len - 1)
-        .map_err(|_| anyhow!("paged prefix restore length exceeds i32"))?;
-    // The writer always stores the maximal reusable prefix (prompt_len - 1).
+    // The writer stores the prompt's split point (see `prefix_split_point`).
     // Probe it directly so an in-flight async store entry is visible before
     // its temporary directory has been atomically renamed into place.
+    let max_cached_len = i32::try_from(prefix_split_point(Some(config), prompt_ids, 0))
+        .map_err(|_| anyhow!("paged prefix restore length exceeds i32"))?;
     let mut cached_lengths = vec![max_cached_len];
+    let longest = i32::try_from(prompt_len - 1)
+        .map_err(|_| anyhow!("paged prefix restore length exceeds i32"))?;
     if let Some(prefix_lru_cache) = prefix_lru_cache {
         cached_lengths.extend(
-            lock_prefix_lru_cache(prefix_lru_cache)?
-                .cached_lengths_descending(max_cached_len as usize),
+            lock_prefix_lru_cache(prefix_lru_cache)?.cached_lengths_descending(longest as usize),
         );
     }
-    cached_lengths.extend(store.cached_lengths_descending(max_cached_len)?);
+    cached_lengths.extend(store.cached_lengths_descending(longest)?);
     cached_lengths.sort_unstable_by(|a, b| b.cmp(a));
     cached_lengths.dedup();
     let mut candidates = Vec::with_capacity(cached_lengths.len());
@@ -3280,7 +3337,7 @@ fn try_restore_paged_prefix_for_prompt_row(
     }
     let store = config.store();
     for (restore_len, cached_len) in
-        paged_prefix_restore_candidates(&store, prefix_lru_cache, prompt_ids.len())?
+        paged_prefix_restore_candidates(&store, prefix_lru_cache, config, prompt_ids)?
     {
         let Some(spec) = prefix_key_spec_for_caches(
             &config.model_id,
@@ -3361,7 +3418,7 @@ fn try_restore_paged_prefix_for_prompt_rows(
     }
     let store = config.store();
     for (restore_len, cached_len) in
-        paged_prefix_restore_candidates(&store, prefix_lru_cache, prompt_ids.len())?
+        paged_prefix_restore_candidates(&store, prefix_lru_cache, config, prompt_ids)?
     {
         let Some(spec) = prefix_key_spec_for_caches(
             &config.model_id,
@@ -3589,7 +3646,7 @@ fn try_restore_paged_prefix_for_prompt_with_mtp_row(
     }
     let store = config.store();
     for (restore_len, cached_len) in
-        paged_prefix_restore_candidates(&store, prefix_lru_cache, prompt_ids.len())?
+        paged_prefix_restore_candidates(&store, prefix_lru_cache, config, prompt_ids)?
     {
         let Some(mut spec) = prefix_key_spec_for_caches(
             &config.model_id,
@@ -3986,18 +4043,26 @@ fn log_prefix_lru_save(
     }
 }
 
+/// Prefills `prompt_ids[start_pos..end_pos]` in two chunks split at
+/// `split_at`, calling `on_split` with the cache between them; returns the
+/// last position's logits.
+#[allow(clippy::too_many_arguments)]
 fn forward_single_text_suffix<M: Model>(
     model: &M,
     cache: &mut [LayerCache],
     prompt_ids: &[u32],
     start_pos: i32,
+    split_at: i32,
     end_pos: i32,
     dummy_position_ids: Option<&Array>,
+    on_split: &mut dyn FnMut(&[LayerCache]),
 ) -> Result<Array> {
-    if start_pos < 0 || start_pos >= end_pos {
-        anyhow::bail!("forward_single_text_suffix: invalid range [{start_pos}, {end_pos})");
+    if start_pos < 0 || start_pos > split_at || split_at >= end_pos {
+        anyhow::bail!(
+            "forward_single_text_suffix: invalid range [{start_pos}, {split_at}, {end_pos})"
+        );
     }
-    let last_pos = end_pos - 1;
+    let last_pos = split_at;
     if start_pos < last_pos {
         let prefix_ids = &prompt_ids[start_pos as usize..last_pos as usize];
         let prefix_len = last_pos - start_pos;
@@ -4016,14 +4081,16 @@ fn forward_single_text_suffix<M: Model>(
             mlx::StreamOrDevice::default(),
         )?;
         mlx::transforms::eval(&[&prefix_hidden])?;
+        on_split(cache);
     }
 
     let last_ids = &prompt_ids[last_pos as usize..end_pos as usize];
-    let last_arr: Array = (last_ids, &[1_i32, 1_i32][..]).try_into()?;
+    let last_len = end_pos - last_pos;
+    let last_arr: Array = (last_ids, &[1_i32, last_len][..]).try_into()?;
     let last_position_ids = if let Some(dummy) = dummy_position_ids {
         dummy.clone()
     } else {
-        build_position_ids(last_pos, 1)?
+        build_position_ids(last_pos, last_len)?
     };
     model.forward_on(
         &last_arr,
@@ -4243,13 +4310,19 @@ fn try_save_batched_text_prefix_row(
     }
 }
 
+/// Batched cold prefill to each row's split point (see
+/// [`prefix_split_point`]), saving it, then the rows' last tokens as one
+/// decode step. Returns `None` after the first stage when a row has more
+/// than its last token left (a chat turn boundary): the caller replays the
+/// rest from `split_at`.
 fn forward_batched_text_cold_miss_with_paged_prefix<M: Model>(
     model: &M,
     cache: &mut [LayerCache],
     prompt_ids: &[Vec<u32>],
+    split_at: &[usize],
     prefix_cache_config: Option<&PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-) -> Result<Array> {
+) -> Result<Option<Array>> {
     let b = prompt_ids.len();
     anyhow::ensure!(
         b > 0,
@@ -4261,10 +4334,9 @@ fn forward_batched_text_cold_miss_with_paged_prefix<M: Model>(
     );
 
     let mut prefix_lens = Vec::with_capacity(b);
-    for ids in prompt_ids {
+    for &split in split_at {
         prefix_lens.push(
-            i32::try_from(ids.len() - 1)
-                .map_err(|_| anyhow!("batched text prefix length exceeds i32"))?,
+            i32::try_from(split).map_err(|_| anyhow!("batched text prefix length exceeds i32"))?,
         );
     }
     let max_prefix_len = prefix_lens
@@ -4292,9 +4364,16 @@ fn forward_batched_text_cold_miss_with_paged_prefix<M: Model>(
             prefix_lru_cache,
             cache,
             row,
-            &ids[..ids.len() - 1],
+            &ids[..split_at[row]],
             "prefix",
         );
+    }
+    if prompt_ids
+        .iter()
+        .zip(split_at)
+        .any(|(ids, &split)| split + 1 != ids.len())
+    {
+        return Ok(None);
     }
 
     let last_tokens: Vec<i32> = prompt_ids
@@ -4326,7 +4405,7 @@ fn forward_batched_text_cold_miss_with_paged_prefix<M: Model>(
         );
     }
 
-    Ok(logits)
+    Ok(Some(logits))
 }
 
 fn forward_batched_text_with_paged_prefix<M: Model>(
@@ -4385,17 +4464,27 @@ fn forward_batched_text_with_paged_prefix<M: Model>(
         }
     }
 
+    // Each row saves its split point once the replay passes it.
+    let split_at: Vec<usize> = prompt_ids
+        .iter()
+        .zip(&replay_from)
+        .map(|(ids, &start)| prefix_split_point(prefix_cache_config, ids, start))
+        .collect();
     if dummy_position_ids.is_none()
         && replay_from.iter().all(|&pos| pos == 0)
         && prompt_ids.iter().all(|ids| ids.len() > 1)
     {
-        return forward_batched_text_cold_miss_with_paged_prefix(
+        match forward_batched_text_cold_miss_with_paged_prefix(
             model,
             cache,
             prompt_ids,
+            &split_at,
             prefix_cache_config,
             prefix_lru_cache,
-        );
+        )? {
+            Some(logits) => return Ok(logits),
+            None => replay_from.clone_from(&split_at),
+        }
     }
 
     let max_len = prompt_ids.iter().map(Vec::len).max().unwrap_or(0);
@@ -4441,13 +4530,13 @@ fn forward_batched_text_with_paged_prefix<M: Model>(
             if per_row_lens[row] == 0 {
                 continue;
             }
-            if ids.len() > 1 && pos + 2 == ids.len() {
+            if pos + 1 == split_at[row] {
                 match try_save_paged_prefix_for_prompt_row(
                     prefix_cache_config,
                     prefix_lru_cache,
                     cache,
                     row,
-                    &ids[..ids.len() - 1],
+                    &ids[..split_at[row]],
                     &PrefixFingerprint::text(),
                 ) {
                     Ok(Some(key)) => {
@@ -4632,12 +4721,14 @@ fn try_save_batched_vl_prefix_row(
     }
 }
 
+/// [`forward_batched_text_cold_miss_with_paged_prefix`] for image prompts.
 #[allow(clippy::too_many_arguments)]
 fn forward_batched_vl_cold_miss_with_paged_prefix<M: Model + DenseVlMethods>(
     model: &M,
     cache: &mut [LayerCache],
     prompt_ids: &[Vec<i32>],
     prompt_ids_u32: &[Vec<u32>],
+    split_at: &[usize],
     pixel_values: &[PixelValuesSlice<'_>],
     grid_thw: &[GridThwSlice<'_>],
     image_token_id: i32,
@@ -4646,7 +4737,7 @@ fn forward_batched_vl_cold_miss_with_paged_prefix<M: Model + DenseVlMethods>(
     prefix_cache_config: Option<&PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
     fingerprints: &[PrefixFingerprint],
-) -> Result<Array> {
+) -> Result<Option<Array>> {
     let b = prompt_ids.len();
     anyhow::ensure!(
         b > 0,
@@ -4665,10 +4756,9 @@ fn forward_batched_vl_cold_miss_with_paged_prefix<M: Model + DenseVlMethods>(
     );
 
     let mut prefix_lens = Vec::with_capacity(b);
-    for ids in prompt_ids {
+    for &split in split_at {
         prefix_lens.push(
-            i32::try_from(ids.len() - 1)
-                .map_err(|_| anyhow!("batched VL prefix length exceeds i32"))?,
+            i32::try_from(split).map_err(|_| anyhow!("batched VL prefix length exceeds i32"))?,
         );
     }
     let max_prefix_len = prefix_lens
@@ -4717,10 +4807,17 @@ fn forward_batched_vl_cold_miss_with_paged_prefix<M: Model + DenseVlMethods>(
             prefix_lru_cache,
             cache,
             row,
-            &prompt_ids_u32[row][..prompt_ids_u32[row].len() - 1],
+            &prompt_ids_u32[row][..split_at[row]],
             &fingerprints[row],
             "prefix",
         );
+    }
+    if prompt_ids
+        .iter()
+        .zip(split_at)
+        .any(|(ids, &split)| split + 1 != ids.len())
+    {
+        return Ok(None);
     }
 
     let last_tokens: Vec<i32> = prompt_ids
@@ -4764,7 +4861,7 @@ fn forward_batched_vl_cold_miss_with_paged_prefix<M: Model + DenseVlMethods>(
         );
     }
 
-    Ok(logits)
+    Ok(Some(logits))
 }
 
 fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
@@ -4841,17 +4938,24 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
         }
     }
 
+    // Each row saves its split point once the replay passes it.
+    let split_at: Vec<usize> = prompt_ids_u32
+        .iter()
+        .zip(&replay_from)
+        .map(|(ids, &start)| prefix_split_point(prefix_cache_config, ids, start))
+        .collect();
     if replay_from.iter().all(|&pos| pos == 0)
         && prompt_ids.iter().all(|ids| ids.len() > 1)
         && prompt_ids
             .iter()
             .all(|ids| ids.last().copied() != Some(image_token_id))
     {
-        return forward_batched_vl_cold_miss_with_paged_prefix(
+        match forward_batched_vl_cold_miss_with_paged_prefix(
             model,
             cache,
             prompt_ids,
             &prompt_ids_u32,
+            &split_at,
             pixel_values,
             grid_thw,
             image_token_id,
@@ -4860,7 +4964,10 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
             prefix_cache_config,
             prefix_lru_cache,
             &fingerprints,
-        );
+        )? {
+            Some(logits) => return Ok(logits),
+            None => replay_from.clone_from(&split_at),
+        }
     }
 
     let position_streams = if dummy_position_ids.is_some() {
@@ -4996,13 +5103,13 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
             let ids = &prompt_ids[row];
             let ids_u32 = &prompt_ids_u32[row];
             let fingerprint = &fingerprints[row];
-            if ids.len() > 1 && pos + 2 == ids.len() {
+            if pos + 1 == split_at[row] {
                 match try_save_paged_prefix_for_prompt_row(
                     prefix_cache_config,
                     prefix_lru_cache,
                     cache,
                     row,
-                    &ids_u32[..ids_u32.len() - 1],
+                    &ids_u32[..split_at[row]],
                     fingerprint,
                 ) {
                     Ok(Some(key)) => {
@@ -5077,6 +5184,8 @@ fn slice_vision_embeds_for_image_pads(
 struct SingleVlSuffixInput<'a> {
     prompt_ids: &'a [i32],
     start_pos: i32,
+    /// Where the prefill ends its first chunk (see `forward_single_vl_suffix`).
+    split_at: i32,
     end_pos: i32,
     position_ids_full: &'a Array,
     position_ids_is_dummy: bool,
@@ -5087,14 +5196,19 @@ struct SingleVlSuffixInput<'a> {
     image_token_id: i32,
 }
 
+/// Prefills `prompt_ids[start_pos..end_pos]` in two chunks split at
+/// `split_at`, calling `on_split` with the cache between them; returns the
+/// last position's logits.
 fn forward_single_vl_suffix<M: Model + DenseVlMethods>(
     model: &M,
     cache: &mut [LayerCache],
     input: SingleVlSuffixInput<'_>,
+    on_split: &mut dyn FnMut(&[LayerCache]),
 ) -> Result<Array> {
     let SingleVlSuffixInput {
         prompt_ids,
         start_pos,
+        split_at,
         end_pos,
         position_ids_full,
         position_ids_is_dummy,
@@ -5102,10 +5216,12 @@ fn forward_single_vl_suffix<M: Model + DenseVlMethods>(
         vision_rows_start,
         image_token_id,
     } = input;
-    if start_pos < 0 || start_pos >= end_pos {
-        anyhow::bail!("forward_single_vl_suffix: invalid range [{start_pos}, {end_pos})");
+    if start_pos < 0 || start_pos > split_at || split_at >= end_pos {
+        anyhow::bail!(
+            "forward_single_vl_suffix: invalid range [{start_pos}, {split_at}, {end_pos})"
+        );
     }
-    let last_pos = end_pos - 1;
+    let last_pos = split_at;
     let mut image_pad_cursor = vision_rows_start;
 
     if start_pos < last_pos {
@@ -5135,10 +5251,11 @@ fn forward_single_vl_suffix<M: Model + DenseVlMethods>(
             mlx::StreamOrDevice::default(),
         )?;
         mlx::transforms::eval(&[&prefix_hidden])?;
+        on_split(cache);
     }
 
     let last_ids = &prompt_ids[last_pos as usize..end_pos as usize];
-    let last_arr: Array = (last_ids, &[1_i32, 1_i32][..]).try_into()?;
+    let last_arr: Array = (last_ids, &[1_i32, end_pos - last_pos][..]).try_into()?;
     let last_position_ids = if position_ids_is_dummy {
         position_ids_full.clone()
     } else {
@@ -12080,8 +12197,11 @@ impl<M: Model> Scheduler<M> {
             // cache numerically different before speculative decode starts.
             let split_final_token =
                 self.paged_prefix_cache.is_some() || !ordinary_prefill_is_adaptive_chunked;
-            if split_final_token && pos + n == prompt_len_i32 && pos < prompt_len_i32 - 1 {
-                n = prompt_len_i32 - 1 - pos;
+            let split =
+                prefix_split_point(self.paged_prefix_cache.as_ref(), &prompt_ids, pos as usize)
+                    as i32;
+            if split_final_token && pos < split && pos + n > split {
+                n = split - pos;
             }
             let chunk_ids = &prompt_ids[pos as usize..(pos as usize + n as usize)];
             let (hidden, chunk_pos_ids) = if is_vl {
@@ -15204,18 +15324,41 @@ impl<M: Model> Scheduler<M> {
                             )?,
                             None => (None, 0),
                         };
+                        let split_at = prefix_split_point(
+                            paged_prefix_cache_config.as_ref(),
+                            &prompt_ids_u32,
+                            start_pos as usize,
+                        );
+                        let save_split = is_turn_boundary(
+                            paged_prefix_cache_config.as_ref(),
+                            &prompt_ids_u32,
+                            split_at,
+                        );
                         forward_single_vl_suffix(
                             model,
                             prefill_cache,
                             SingleVlSuffixInput {
                                 prompt_ids: &per_row_ids_i32[0],
                                 start_pos,
+                                split_at: split_at as i32,
                                 end_pos: max_len,
                                 position_ids_full: &position_ids_full,
                                 position_ids_is_dummy: dummy_position_ids.is_some(),
                                 vision_embeds_full: vision_embeds_full.as_ref(),
                                 vision_rows_start,
                                 image_token_id: img_token_id,
+                            },
+                            &mut |cache| {
+                                if save_split {
+                                    try_save_turn_boundary_prefix(
+                                        paged_prefix_cache_config.as_ref(),
+                                        prefix_lru_cache.as_ref(),
+                                        cache,
+                                        0,
+                                        &prompt_ids_u32[..split_at],
+                                        &vl_prefix_fingerprint,
+                                    );
+                                }
                             },
                         )?
                     } else if max_len > 1 {
@@ -15228,7 +15371,11 @@ impl<M: Model> Scheduler<M> {
                                 )
                             })
                             .transpose()?;
-                        let prefix_len = max_len - 1;
+                        let prefix_len = prefix_split_point(
+                            paged_prefix_cache_config.as_ref(),
+                            &prompt_ids_u32,
+                            0,
+                        ) as i32;
                         let prefix_input_ids = mlx::ops::indexing::slice_strided(
                             &input_ids,
                             &[0_i32, 0][..],
@@ -15404,8 +15551,14 @@ impl<M: Model> Scheduler<M> {
                         prefill_cache,
                         prompt_ids,
                         immutable_replay_from[0] as i32,
+                        prefix_split_point(
+                            paged_prefix_cache_config.as_ref(),
+                            prompt_ids,
+                            immutable_replay_from[0],
+                        ) as i32,
                         max_len,
                         dummy_position_ids.as_ref(),
+                        &mut |_| {},
                     )?
                 } else if let Some(start_pos) = try_restore_paged_prefix_for_prompt(
                     paged_prefix_cache_config.as_ref(),
@@ -15416,16 +15569,38 @@ impl<M: Model> Scheduler<M> {
                 )? {
                     self.runtime_usage
                         .record_prefix_cache_hit_tokens(start_pos as u64);
+                    let split_at = prefix_split_point(
+                        paged_prefix_cache_config.as_ref(),
+                        prompt_ids,
+                        start_pos as usize,
+                    );
+                    let save_split =
+                        is_turn_boundary(paged_prefix_cache_config.as_ref(), prompt_ids, split_at);
                     forward_single_text_suffix(
                         model,
                         prefill_cache,
                         prompt_ids,
                         start_pos,
+                        split_at as i32,
                         max_len,
                         dummy_position_ids.as_ref(),
+                        &mut |cache| {
+                            if save_split {
+                                try_save_turn_boundary_prefix(
+                                    paged_prefix_cache_config.as_ref(),
+                                    prefix_lru_cache.as_ref(),
+                                    cache,
+                                    0,
+                                    &prompt_ids[..split_at],
+                                    &PrefixFingerprint::text(),
+                                );
+                            }
+                        },
                     )?
                 } else if max_len > 1 {
-                    let prefix_len = max_len - 1;
+                    let prefix_len =
+                        prefix_split_point(paged_prefix_cache_config.as_ref(), prompt_ids, 0)
+                            as i32;
                     let prefix_input_ids = mlx::ops::indexing::slice_strided(
                         &input_ids,
                         &[0_i32, 0][..],
@@ -15475,7 +15650,7 @@ impl<M: Model> Scheduler<M> {
                     let last_position_ids = if let Some(dummy) = dummy_position_ids.as_ref() {
                         dummy.clone()
                     } else {
-                        build_position_ids(prefix_len, 1)?
+                        build_position_ids(prefix_len, max_len - prefix_len)?
                     };
                     model.forward_on(
                         &last_input_ids,
@@ -16761,11 +16936,15 @@ impl<M: Model> Scheduler<M> {
                 }));
             }
         }
-        if self.paged_prefix_cache.is_some()
-            && chunk_end == handle.prompt_len
-            && handle.chunk_start < handle.prompt_len - 1
-        {
-            chunk_end = handle.prompt_len - 1;
+        if self.paged_prefix_cache.is_some() {
+            let split = prefix_split_point(
+                self.paged_prefix_cache.as_ref(),
+                &handle.prompt_ids,
+                handle.chunk_start as usize,
+            ) as i32;
+            if handle.chunk_start < split && chunk_end > split {
+                chunk_end = split;
+            }
         }
         let is_last = chunk_end == handle.prompt_len;
         let chunk_len = chunk_end - handle.chunk_start;
@@ -17361,11 +17540,15 @@ impl<M: Model> Scheduler<M> {
                 }));
             }
         }
-        if self.paged_prefix_cache.is_some()
-            && chunk_end == handle.prompt_len
-            && handle.chunk_start < handle.prompt_len - 1
-        {
-            chunk_end = handle.prompt_len - 1;
+        if self.paged_prefix_cache.is_some() {
+            let split = prefix_split_point(
+                self.paged_prefix_cache.as_ref(),
+                &handle.prompt_ids,
+                handle.chunk_start as usize,
+            ) as i32;
+            if handle.chunk_start < split && chunk_end > split {
+                chunk_end = split;
+            }
         }
         let is_last = chunk_end == handle.prompt_len;
         let chunk_len = chunk_end - handle.chunk_start;
@@ -18880,8 +19063,11 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
             // first speculative window.
             let split_final_token =
                 prefix_cache.is_enabled() || !ordinary_prefill_is_adaptive_chunked;
-            if split_final_token && pos + n == prompt_len_i32 && pos < prompt_len_i32 - 1 {
-                n = prompt_len_i32 - 1 - pos;
+            let split =
+                prefix_split_point(self.paged_prefix_cache.as_ref(), &prompt_ids, pos as usize)
+                    as i32;
+            if split_final_token && pos < split && pos + n > split {
+                n = split - pos;
             }
             if n <= 0 {
                 return Err(anyhow!(
@@ -29405,6 +29591,146 @@ mod tests {
         assert_eq!(other.vision_grid_lens(), vec![2]);
         assert_eq!(other.forward_seq_lens(), vec![1]);
         assert_eq!(other.hidden_seq_lens(), vec![5]);
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    /// A prefix cache whose chat template's generation suffix is `[7, 8]`.
+    fn turn_boundary_prefix_config(
+        root: &std::path::Path,
+    ) -> crate::core::cache::PagedPrefixCacheConfig {
+        crate::core::cache::PagedPrefixCacheConfig::new(root, "turn-test", 2, 64)
+            .expect("prefix config")
+            .with_turn_boundary(Some(
+                crate::core::chat_prefix::ChatTurnBoundary::from_suffixes(vec![vec![7, 8]]),
+            ))
+    }
+
+    /// A chat prompt is prefilled up to its generation suffix and saved there;
+    /// each follow-up turn restores the previous turn's boundary and saves its
+    /// own, and an exact repeat restores the boundary too.
+    #[test]
+    #[serial(mlx_metal)]
+    fn chat_turns_restore_the_previous_turn_boundary() {
+        let _prefix_store_isolation = PrefixStoreTestIsolation::new();
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-turns-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = turn_boundary_prefix_config(&root);
+        let run = |prompt: Vec<u32>| {
+            let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+                1,
+                32768,
+                crate::core::memory_budget::test_meta_qwen35(),
+            )
+            .expect("scheduler startup");
+            scheduler
+                .enable_paged_prefix_cache(config.clone())
+                .expect("enable prefix cache");
+            scheduler.admit(mk_req(prompt)).expect("admit");
+            let model = StepDecodeMaskModel::hybrid();
+            scheduler.prefill_admitted(&model).expect("prefill");
+            crate::core::cache::process_async_prefix_store_queue().wait_idle();
+            (model.hidden_seq_lens(), model.forward_seq_lens())
+        };
+
+        // Turn 1 ends a chunk before its suffix.
+        assert_eq!(run(vec![1, 2, 3, 7, 8]), (vec![3], vec![2]));
+        // Turn 2 restores [1, 2, 3] and ends a chunk before its own suffix.
+        assert_eq!(run(vec![1, 2, 3, 4, 5, 7, 8]), (vec![2], vec![2]));
+        // Turn 3 restores turn 2's boundary, saved on its restored path.
+        assert_eq!(run(vec![1, 2, 3, 4, 5, 6, 7, 8]), (vec![1], vec![2]));
+        // An exact repeat restores the boundary and computes its suffix.
+        assert_eq!(run(vec![1, 2, 3, 7, 8]), (vec![], vec![2]));
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    /// A batched cold prefill stops each chat row at its turn boundary and
+    /// replays the suffix, so the row's next turn restores the boundary.
+    #[test]
+    #[serial(mlx_metal)]
+    fn batched_cold_chat_rows_save_their_turn_boundaries() {
+        let _prefix_store_isolation = PrefixStoreTestIsolation::new();
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-batch-turns-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = turn_boundary_prefix_config(&root);
+        let scheduler_with_cache = |b_max| {
+            let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+                b_max,
+                32768,
+                crate::core::memory_budget::test_meta_qwen35(),
+            )
+            .expect("scheduler startup");
+            scheduler
+                .enable_paged_prefix_cache(config.clone())
+                .expect("enable prefix cache");
+            scheduler
+        };
+
+        let mut batch = scheduler_with_cache(2);
+        batch.admit(mk_req(vec![1, 2, 3, 7, 8])).expect("admit 0");
+        batch.admit(mk_req(vec![4, 5, 6, 9])).expect("admit 1");
+        let model = StepDecodeMaskModel::hybrid();
+        let events = batch.prefill_admitted(&model).expect("prefill");
+        assert_eq!(events.len(), 2);
+        // Row 0 stops at 3, row 1 (no suffix) at its last token; the rest
+        // is replayed one position at a time.
+        assert_eq!(model.forward_seq_lens(), vec![3, 1, 1]);
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+
+        let mut next = scheduler_with_cache(1);
+        next.admit(mk_req(vec![1, 2, 3, 4, 7, 8]))
+            .expect("admit turn 2");
+        let model = StepDecodeMaskModel::hybrid();
+        next.prefill_admitted(&model).expect("prefill turn 2");
+        assert_eq!(
+            (model.hidden_seq_lens(), model.forward_seq_lens()),
+            (vec![1], vec![2]),
+            "turn 2 restores row 0's boundary"
+        );
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    /// MTP prefill splits a chat prompt at its turn boundary like ordinary
+    /// prefill (so speculative decode starts from the same cache), and a
+    /// follow-up turn restores it.
+    #[test]
+    #[serial(mlx_metal)]
+    fn mtp_prefill_splits_and_restores_chat_turn_boundaries() {
+        let _prefix_store_isolation = PrefixStoreTestIsolation::new();
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-mtp-turns-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = turn_boundary_prefix_config(&root);
+        let run = |prompt: Vec<u32>| {
+            let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+                1,
+                32768,
+                crate::core::memory_budget::test_meta_qwen35(),
+            )
+            .expect("scheduler startup");
+            scheduler
+                .enable_paged_prefix_cache(config.clone())
+                .expect("enable prefix cache");
+            scheduler.admit(mtp_req(prompt, 1)).expect("admit");
+            let model = ScriptedMtpSchedulerModel::new(5, Vec::new(), Vec::new());
+            let cfg = MtpSpeculativeConfig::new(1, Sampler::greedy()).expect("mtp cfg");
+            scheduler
+                .prefill_admitted_mtp_single(&model, &FakeMtpHead, cfg)
+                .expect("MTP prefill");
+            crate::core::cache::process_async_prefix_store_queue().wait_idle();
+            model.mtp_hidden_seq_lens()
+        };
+
+        assert_eq!(run(vec![1, 2, 3, 7, 8]), vec![3, 2]);
+        assert_eq!(run(vec![1, 2, 3, 4, 5, 7, 8]), vec![2, 2]);
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
