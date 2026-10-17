@@ -270,8 +270,9 @@ pub fn patchify(raw: &[f32], h: i32, w: i32) -> Result<(Array, i32, i32)> {
     Ok((arr, grid_h, grid_w))
 }
 
-/// Pipeline: decode → smart_resize into `bounds` → Lanczos resize →
-/// normalize → patchify. Returns `(pixel_values, grid_h, grid_w)`.
+/// Pipeline: decode → smart_resize into `bounds` → PIL BICUBIC resize (the
+/// resampling of `Qwen2VLImageProcessor` and of mlx-vlm, which resizes with
+/// PIL) → normalize → patchify. Returns `(pixel_values, grid_h, grid_w)`.
 pub fn preprocess(img_bytes: &[u8], bounds: PixelBounds) -> Result<(Array, i32, i32)> {
     // 1. decode
     let img = crate::core::image_input::load_from_memory_bounded(img_bytes)
@@ -282,35 +283,16 @@ pub fn preprocess(img_bytes: &[u8], bounds: PixelBounds) -> Result<(Array, i32, 
     // 2. smart resize target size
     let (h2, w2) = smart_resize(orig_h, orig_w, bounds)?;
 
-    // 3. Lanczos3 resize (HF default).
-    // Skip resize when target equals source — PIL LANCZOS is a no-op in this
-    // case (identity); resampling through a Lanczos kernel would introduce
-    // rounding error without changing meaning.
-    let n_pix = (3 * h2 * w2) as usize;
-    let mut chw = vec![0.0_f32; n_pix];
+    // 3. Resize (a no-op when the size already fits) and 4. normalize:
+    //    [(H, W, 3) u8] → [(3, H, W) f32], (px/255 - 0.5)/0.5
+    let resized = crate::core::image_resample::resize_rgb(img.as_raw(), orig_w, orig_h, w2, h2);
     let plane = (h2 * w2) as usize;
-    if orig_h == h2 && orig_w == w2 {
-        // 4a. Already correct size — normalize directly.
-        for (i, p) in img.pixels().enumerate() {
-            let n = normalize_pixel([p.0[0], p.0[1], p.0[2]]);
-            chw[i] = n[0];
-            chw[plane + i] = n[1];
-            chw[2 * plane + i] = n[2];
-        }
-    } else {
-        let resized = image::imageops::resize(
-            &img,
-            w2 as u32,
-            h2 as u32,
-            image::imageops::FilterType::Lanczos3,
-        );
-        // 4b. normalize: [(H, W, 3) u8] → [(3, H, W) f32], (px/255 - 0.5)/0.5
-        for (i, p) in resized.pixels().enumerate() {
-            let n = normalize_pixel([p.0[0], p.0[1], p.0[2]]);
-            chw[i] = n[0];
-            chw[plane + i] = n[1];
-            chw[2 * plane + i] = n[2];
-        }
+    let mut chw = vec![0.0_f32; 3 * plane];
+    for (i, p) in resized.chunks_exact(3).enumerate() {
+        let n = normalize_pixel([p[0], p[1], p[2]]);
+        chw[i] = n[0];
+        chw[plane + i] = n[1];
+        chw[2 * plane + i] = n[2];
     }
 
     // 5. patchify
@@ -559,7 +541,7 @@ mod tests {
             .fold(0.0_f32, f32::max);
         assert!(
             max_diff < 1e-3,
-            "max_diff = {} (HF Lanczos vs Rust Lanczos may differ slightly)",
+            "max_diff = {} (an unresized image is normalized exactly)",
             max_diff
         );
     }

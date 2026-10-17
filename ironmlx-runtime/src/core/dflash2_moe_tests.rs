@@ -2015,9 +2015,13 @@ fn qwen36_moe_dflash2_actor_admission_first_token_lifecycle() {
 
 /// Image prompts and the DFlash2 prefix cache: a prompt that extends an
 /// earlier image prompt and appends another image restores the earlier
-/// prompt (its boundary covers the first image only) and decodes the same
-/// tokens as without the cache; the same tokens with a different first image
-/// of the same grid restore nothing. The vision encoder loads on demand.
+/// prompt (its boundary covers the first image only), encoding only the
+/// appended image: its rows match those it takes when both images are
+/// encoded together, and restoring decodes deterministically. The same
+/// tokens with a different first image of the same grid restore nothing.
+/// The vision encoder loads on demand. (A restored prompt need not decode
+/// as without the cache: the prefill chunks and the vision batch differ,
+/// moving logits enough to flip a near tie.)
 #[test]
 #[serial(mlx_metal)]
 #[ignore = "loads a full local Qwen3.6 MoE target and the incoai DFlash2 draft"]
@@ -2089,32 +2093,71 @@ fn image_prefix_artifacts_survive_an_appended_image_and_separate_same_grid_image
         (drain(|| stream.next_token()), hit)
     };
 
-    let mut cache = DFlash2PrefixCache::new(8 << 30).expect("prefix cache");
-    let (_, hit) = run(
-        vl_request(&ids1, vec![(&image_a, grid_a)]),
-        Some(&mut cache),
-    );
-    assert_eq!(hit, 0);
-    let (cached, hit) = run(
-        vl_request(&ids2, vec![(&image_a, grid_a), (&image_c, grid_c)]),
-        Some(&mut cache),
-    );
-    assert_eq!(hit, ids1.len(), "turn 2 restores turn 1's whole prompt");
-    let (cold, _) = run(
-        vl_request(&ids2, vec![(&image_a, grid_a), (&image_c, grid_c)]),
-        None,
-    );
+    let restored_turn2 = || {
+        let mut cache = DFlash2PrefixCache::new(8 << 30).expect("prefix cache");
+        let (_, hit) = run(
+            vl_request(&ids1, vec![(&image_a, grid_a)]),
+            Some(&mut cache),
+        );
+        assert_eq!(hit, 0);
+        let (cached, hit) = run(
+            vl_request(&ids2, vec![(&image_a, grid_a), (&image_c, grid_c)]),
+            Some(&mut cache),
+        );
+        assert_eq!(hit, ids1.len(), "turn 2 restores turn 1's whole prompt");
+        (cached, cache)
+    };
+    let (cached, mut cache) = restored_turn2();
     assert_eq!(
-        cached, cold,
-        "a restored image prefix decodes like a cold prefill"
+        restored_turn2().0,
+        cached,
+        "a restored image prefix decodes deterministically"
     );
+
+    // The restored prompt encodes image C alone: its rows are those C takes
+    // when encoded with A, up to batching noise, and not A's.
+    let embeds = |images: &[&mlx::Array], grids: &[(i32, i32, i32)]| {
+        let pixels: Vec<mlx::Array> = images.iter().map(|&image| image.clone()).collect();
+        let rows = fixture
+            .target
+            .dflash2_vision_embeds_on(&pixels, grids, StreamOrDevice::default())
+            .expect("vision embeds");
+        mlx::ops::cast::astype(&rows, mlx::Dtype::Float32)
+            .and_then(|rows| rows.to_vec::<f32>())
+            .expect("embed values")
+    };
+    let joint = embeds(&[&image_a, &image_c], &[grid_a, grid_c]);
+    let alone = embeds(&[&image_c], &[grid_c]);
+    let (rows_a, rows_c) = (
+        (grid_a.1 * grid_a.2 / 4) as usize,
+        (grid_c.1 * grid_c.2 / 4) as usize,
+    );
+    let width = alone.len() / rows_c;
+    let joint_c = &joint[rows_a * width..];
+    assert_eq!(joint_c.len(), alone.len());
+    let relative = |a: &[f32], b: &[f32]| {
+        let diff: f64 = a.iter().zip(b).map(|(x, y)| f64::from(x - y).powi(2)).sum();
+        let norm: f64 = b.iter().map(|y| f64::from(*y).powi(2)).sum();
+        (diff / norm).sqrt()
+    };
+    let batching_noise = relative(joint_c, &alone);
+    let other_image = relative(&joint[..rows_c * width], &alone);
+    eprintln!(
+        "[qwen36-moe-dflash2 image prefix] C alone vs C with A: {batching_noise:.5}, vs A's rows: {other_image:.5}"
+    );
+    // bf16 batching noise through the tower measured 2.2%; distinct images 114%.
+    assert!(
+        batching_noise < 0.05,
+        "C's rows depend on its batch: {batching_noise}"
+    );
+    assert!(other_image > 0.5, "C's rows look like A's: {other_image}");
     let (_, hit) = run(
         vl_request(&ids2, vec![(&image_b, grid_a), (&image_c, grid_c)]),
         Some(&mut cache),
     );
     assert_eq!(hit, 0, "a different image of the same grid must not hit");
     eprintln!(
-        "[qwen36-moe-dflash2 image prefix] turn1 {} tokens, turn2 {} tokens: restored {} and matched the cold run",
+        "[qwen36-moe-dflash2 image prefix] turn1 {} tokens, turn2 {} tokens: restored {}",
         ids1.len(),
         ids2.len(),
         ids1.len()
