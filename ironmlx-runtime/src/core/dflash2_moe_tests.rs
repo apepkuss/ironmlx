@@ -2011,3 +2011,106 @@ fn qwen36_moe_dflash2_actor_admission_first_token_lifecycle() {
     });
     mlx::clear_cache();
 }
+
+/// Image prompts and the DFlash2 prefix cache: a prompt that extends an
+/// earlier image prompt and appends another image restores the earlier
+/// prompt (its boundary covers the first image only) and decodes the same
+/// tokens as without the cache; the same tokens with a different first image
+/// of the same grid restore nothing. The vision encoder loads on demand.
+#[test]
+#[serial(mlx_metal)]
+#[ignore = "loads a full local Qwen3.6 MoE target and the incoai DFlash2 draft"]
+fn image_prefix_artifacts_survive_an_appended_image_and_separate_same_grid_images() {
+    use ironmlx_lm::models::qwen3_5::image_processor;
+
+    let Some(fixture) = fixture() else {
+        eprintln!("skipping: QWEN36_MOE_DFLASH2_TARGET or DFLASH2_MODEL is not set");
+        return;
+    };
+    assert!(fixture.target.dflash2_load_vision().expect("load vision"));
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ironmlx/tests/fixtures/qwen35_vl");
+    let read = |path: std::path::PathBuf| {
+        let (pixels, h, w) =
+            image_processor::preprocess(&std::fs::read(path).expect("image")).expect("preprocess");
+        mlx::transforms::eval(&[&pixels]).expect("eval pixels");
+        (pixels, (1, h, w))
+    };
+    let (image_a, grid_a) = read(fixtures.join("coco_sample.jpg"));
+    let (image_c, grid_c) = read(fixtures.join("multi_image/image_0.jpg"));
+    // Same grid as A, different content.
+    let image_b = mlx::ops::negative(&image_a).expect("negate");
+    mlx::transforms::eval(&[&image_b]).expect("eval pixels");
+    let image = |(_, h, w): (i32, i32, i32)| {
+        format!(
+            "<|vision_start|>{}<|vision_end|>",
+            "<|image_pad|>".repeat((h * w / 4) as usize)
+        )
+    };
+    let turn1 = format!(
+        "<|im_start|>user\n{}Describe this image in detail.<|im_end|>\n<|im_start|>assistant\n",
+        image(grid_a)
+    );
+    let turn2 = format!(
+        "{turn1}{}Compare this image with the first one.",
+        image(grid_c)
+    );
+    let ids1 = fixture.tokenizer.encode(&turn1, false).expect("encode");
+    let ids2 = fixture.tokenizer.encode(&turn2, false).expect("encode");
+    assert!(ids2.starts_with(&ids1), "turn 2 must extend turn 1");
+
+    let vl_request = |ids: &[u32], images: Vec<(&mlx::Array, (i32, i32, i32))>| {
+        let mut request = request(ids.to_vec(), 24, Vec::new(), Sampler::greedy());
+        request.pixel_values = Some(images.iter().map(|(pixels, _)| (*pixels).clone()).collect());
+        request.image_grid_thw = Some(images.iter().map(|&(_, grid)| grid).collect());
+        request
+    };
+    let run = |request: GenerateRequest, cache: Option<&mut DFlash2PrefixCache>| {
+        let mut stream = DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
+            &fixture.target,
+            &fixture.draft,
+            &fixture.tokenizer,
+            request,
+            DFlash2ExecutionOptions {
+                block_size: 8,
+                p2: DFlash2P2Options::default(),
+            },
+            cache.map(|cache| (cache, "image-prefix-test")),
+            &|| false,
+        )
+        .expect("DFlash2 stream");
+        let hit = stream.prefix_cache_hit_tokens();
+        (drain(|| stream.next_token()), hit)
+    };
+
+    let mut cache = DFlash2PrefixCache::new(8 << 30).expect("prefix cache");
+    let (_, hit) = run(
+        vl_request(&ids1, vec![(&image_a, grid_a)]),
+        Some(&mut cache),
+    );
+    assert_eq!(hit, 0);
+    let (cached, hit) = run(
+        vl_request(&ids2, vec![(&image_a, grid_a), (&image_c, grid_c)]),
+        Some(&mut cache),
+    );
+    assert_eq!(hit, ids1.len(), "turn 2 restores turn 1's whole prompt");
+    let (cold, _) = run(
+        vl_request(&ids2, vec![(&image_a, grid_a), (&image_c, grid_c)]),
+        None,
+    );
+    assert_eq!(
+        cached, cold,
+        "a restored image prefix decodes like a cold prefill"
+    );
+    let (_, hit) = run(
+        vl_request(&ids2, vec![(&image_b, grid_a), (&image_c, grid_c)]),
+        Some(&mut cache),
+    );
+    assert_eq!(hit, 0, "a different image of the same grid must not hit");
+    eprintln!(
+        "[qwen36-moe-dflash2 image prefix] turn1 {} tokens, turn2 {} tokens: restored {} and matched the cold run",
+        ids1.len(),
+        ids2.len(),
+        ids1.len()
+    );
+}

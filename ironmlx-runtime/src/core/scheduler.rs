@@ -139,6 +139,10 @@ use crate::core::speculative::{
     QwenMtpDraftPolicySnapshot, QwenMtpDraftPolicyState,
 };
 use crate::core::speculative_qualification::{NeuralExactRegime, NeuralExactSource};
+use crate::core::vl_prefix::{
+    update_prefix_fingerprint_hash, update_prefix_fingerprint_str, update_prefix_fingerprint_usize,
+    PrefixFingerprint,
+};
 use ironmlx_lm::core::cache::active_payload::ActiveKvEntryChunkReader;
 use ironmlx_lm::core::model::Model;
 use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
@@ -790,7 +794,7 @@ pub struct AdmitMidHandle {
     /// `prompt_len` across the chunk loop.
     pub(crate) temp_cache: Vec<ironmlx_lm::core::cache::layer::LayerCache>,
     pub(crate) immutable_in_place: bool,
-    pub(crate) prefix_fingerprint: Option<String>,
+    pub(crate) prefix_fingerprint: PrefixFingerprint,
     pub(crate) is_vl: bool,
     pub(crate) image_token_id: i32,
     /// Whether `position_ids_full` holds real full-prompt MRoPE ids. When
@@ -834,7 +838,7 @@ pub struct MtpAdmitMidHandle {
     pub(crate) chunk_start: i32,
     pub(crate) temp_cache: Vec<ironmlx_lm::core::cache::layer::LayerCache>,
     pub(crate) mtp_cache: MtpCache,
-    pub(crate) prefix_fingerprint: Option<String>,
+    pub(crate) prefix_fingerprint: PrefixFingerprint,
     pub(crate) is_vl: bool,
     pub(crate) image_token_id: i32,
     pub(crate) position_ids_required: bool,
@@ -865,7 +869,7 @@ pub struct Gemma4DrafterAdmitMidHandle {
     pub(crate) decode_cadence_mid_chunk_cap: usize,
     pub(crate) chunk_start: i32,
     pub(crate) temp_cache: Vec<ironmlx_lm::core::cache::layer::LayerCache>,
-    pub(crate) prefix_fingerprint: Option<String>,
+    pub(crate) prefix_fingerprint: PrefixFingerprint,
     pub(crate) is_vl: bool,
     pub(crate) image_token_id: i32,
     pub(crate) dummy_position_ids: Option<Array>,
@@ -2239,27 +2243,6 @@ fn paged_adopt_page_copies(cache: &[LayerCache]) -> u64 {
         })
 }
 
-fn update_prefix_fingerprint_hash(hash: &mut u64, bytes: &[u8]) {
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    for &byte in bytes {
-        *hash ^= u64::from(byte);
-        *hash = hash.wrapping_mul(FNV_PRIME);
-    }
-}
-
-fn update_prefix_fingerprint_i32(hash: &mut u64, value: i32) {
-    update_prefix_fingerprint_hash(hash, &value.to_le_bytes());
-}
-
-fn update_prefix_fingerprint_usize(hash: &mut u64, value: usize) {
-    update_prefix_fingerprint_hash(hash, &value.to_le_bytes());
-}
-
-fn update_prefix_fingerprint_str(hash: &mut u64, value: &str) {
-    update_prefix_fingerprint_usize(hash, value.len());
-    update_prefix_fingerprint_hash(hash, value.as_bytes());
-}
-
 fn generate_request_from_state(state: &RequestState) -> Result<GenerateRequest> {
     Ok(GenerateRequest {
         priority: state.priority,
@@ -2346,46 +2329,55 @@ fn divided_mtp_stats_timing(stats: &MtpSpeculativeStats, divisor: u64) -> MtpSpe
     }
 }
 
+/// Vision rows a VL prefill resuming after `restored` prompt tokens still
+/// slices, and the index of its first unconsumed row. Images entirely inside
+/// the restored prefix are not encoded again when images pair up with their
+/// pad runs ([`PrefixFingerprint::uncached_images`]); otherwise every image
+/// is encoded and the prefix's pads are skipped.
+fn vision_embeds_after_prefix<M: DenseVlMethods>(
+    model: &M,
+    pixel_values: &[Array],
+    grids: &[(i32, i32, i32)],
+    fingerprint: &PrefixFingerprint,
+    prompt_ids: &[u32],
+    restored: usize,
+    image_token_id: i32,
+) -> Result<(Option<Array>, usize)> {
+    if let Some(rest) = fingerprint.uncached_images(restored) {
+        if rest.first == grids.len() {
+            return Ok((None, 0));
+        }
+        let embeds = model.compute_vision_embeds(
+            &pixel_values[rest.first..],
+            &grids[rest.first..],
+            mlx::StreamOrDevice::default(),
+        )?;
+        return Ok((Some(embeds), rest.rows_inside));
+    }
+    let embeds =
+        model.compute_vision_embeds(pixel_values, grids, mlx::StreamOrDevice::default())?;
+    Ok((
+        Some(embeds),
+        count_image_pad(&prompt_ids[..restored], image_token_id),
+    ))
+}
+
+/// Prefix identity of a request for the paged prefix cache (see
+/// [`PrefixFingerprint`]): keyed per boundary by the images it covers.
 pub(crate) fn paged_prefix_fingerprint_for_request(
+    prompt_ids: &[u32],
     pixel_values: Option<&[Array]>,
     image_grid_thw: Option<&[(i32, i32, i32)]>,
     image_token_id: i32,
     image_spatial_merge_size: i32,
-) -> Result<Option<String>> {
-    let Some(pixel_values) = pixel_values else {
-        return Ok(None);
-    };
-    let grids = image_grid_thw.ok_or_else(|| {
-        anyhow!("paged prefix cache VL fingerprint: pixel_values present but grid_thw is None")
-    })?;
-
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    update_prefix_fingerprint_str(&mut hash, "ironmlx-vl-prefix-v1");
-    update_prefix_fingerprint_i32(&mut hash, image_token_id);
-    update_prefix_fingerprint_i32(&mut hash, image_spatial_merge_size);
-    update_prefix_fingerprint_usize(&mut hash, grids.len());
-    for &(t, h, w) in grids {
-        update_prefix_fingerprint_i32(&mut hash, t);
-        update_prefix_fingerprint_i32(&mut hash, h);
-        update_prefix_fingerprint_i32(&mut hash, w);
-    }
-
-    update_prefix_fingerprint_usize(&mut hash, pixel_values.len());
-    for pixel_array in pixel_values {
-        update_prefix_fingerprint_str(&mut hash, &pixel_array.dtype().to_string());
-        let shape = pixel_array.shape();
-        update_prefix_fingerprint_usize(&mut hash, shape.as_slice().len());
-        for &dim in shape.as_slice() {
-            update_prefix_fingerprint_i32(&mut hash, dim);
-        }
-        let values = mlx::ops::astype(pixel_array, Dtype::Float32)?.to_vec::<f32>()?;
-        update_prefix_fingerprint_usize(&mut hash, values.len());
-        for value in values {
-            update_prefix_fingerprint_hash(&mut hash, &value.to_bits().to_le_bytes());
-        }
-    }
-
-    Ok(Some(format!("vl:{hash:016x}")))
+) -> Result<PrefixFingerprint> {
+    PrefixFingerprint::for_request(
+        prompt_ids,
+        pixel_values,
+        image_grid_thw,
+        image_token_id,
+        image_spatial_merge_size,
+    )
 }
 
 fn immutable_prefix_chain_hash(model_id: &str, parent_hash: Option<u64>, tokens: &[u32]) -> u64 {
@@ -3086,7 +3078,7 @@ fn try_restore_paged_prefix_for_prompt(
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
     cache: &mut [LayerCache],
     prompt_ids: &[u32],
-    fingerprint: Option<&str>,
+    fingerprint: &PrefixFingerprint,
 ) -> Result<Option<i32>> {
     try_restore_paged_prefix_for_prompt_row(
         config,
@@ -3275,7 +3267,7 @@ fn try_restore_paged_prefix_for_prompt_row(
     cache: &mut [LayerCache],
     cache_row: usize,
     prompt_ids: &[u32],
-    fingerprint: Option<&str>,
+    fingerprint: &PrefixFingerprint,
 ) -> Result<Option<i32>> {
     let Some(config) = config else {
         return Ok(None);
@@ -3283,7 +3275,7 @@ fn try_restore_paged_prefix_for_prompt_row(
     if prompt_ids.len() <= 1 {
         return Ok(None);
     }
-    if fingerprint.is_none() && cache_is_fullpaged_only(cache) {
+    if !fingerprint.is_vl() && cache_is_fullpaged_only(cache) {
         return Ok(None);
     }
     let store = config.store();
@@ -3294,7 +3286,7 @@ fn try_restore_paged_prefix_for_prompt_row(
             &config.model_id,
             &prompt_ids[..restore_len],
             cached_len,
-            fingerprint,
+            fingerprint.at(cached_len as usize).as_deref(),
             config.block_size,
             cache,
         )?
@@ -3343,12 +3335,12 @@ fn try_restore_paged_prefix_for_prompt_rows(
     cache: &mut [LayerCache],
     cache_rows: &[usize],
     prompt_ids: &[u32],
-    fingerprint: Option<&str>,
+    fingerprint: &PrefixFingerprint,
 ) -> Result<Option<i32>> {
     if cache_rows.is_empty() {
         return Ok(None);
     }
-    if fingerprint.is_none() && cache_is_fullpaged_only(cache) {
+    if !fingerprint.is_vl() && cache_is_fullpaged_only(cache) {
         return Ok(None);
     }
     if cache_rows.len() == 1 {
@@ -3375,7 +3367,7 @@ fn try_restore_paged_prefix_for_prompt_rows(
             &config.model_id,
             &prompt_ids[..restore_len],
             cached_len,
-            fingerprint,
+            fingerprint.at(cached_len as usize).as_deref(),
             config.block_size,
             cache,
         )?
@@ -3445,7 +3437,7 @@ fn try_save_paged_prefix_for_prompt(
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
     cache: &[LayerCache],
     prompt_ids: &[u32],
-    fingerprint: Option<&str>,
+    fingerprint: &PrefixFingerprint,
 ) -> Result<Option<String>> {
     try_save_paged_prefix_for_prompt_row(
         config,
@@ -3463,7 +3455,7 @@ fn try_save_paged_prefix_for_prompt_row(
     cache: &[LayerCache],
     cache_row: usize,
     prompt_ids: &[u32],
-    fingerprint: Option<&str>,
+    fingerprint: &PrefixFingerprint,
 ) -> Result<Option<String>> {
     let Some(config) = config else {
         return Ok(None);
@@ -3471,7 +3463,7 @@ fn try_save_paged_prefix_for_prompt_row(
     if prompt_ids.is_empty() {
         return Ok(None);
     }
-    if fingerprint.is_none() && cache_is_fullpaged_only(cache) {
+    if !fingerprint.is_vl() && cache_is_fullpaged_only(cache) {
         return Ok(None);
     }
     let Some(cached_len) = cache_row_cached_len(cache, cache_row)? else {
@@ -3490,7 +3482,7 @@ fn try_save_paged_prefix_for_prompt_row(
         &config.model_id,
         prompt_ids,
         cached_len,
-        fingerprint,
+        fingerprint.at(cached_len as usize).as_deref(),
         config.block_size,
         cache,
     )?
@@ -3560,7 +3552,7 @@ fn try_restore_paged_prefix_for_prompt_with_mtp(
     prompt_ids: &[u32],
     hidden_size: i32,
     hidden_dtype: Dtype,
-    fingerprint: Option<&str>,
+    fingerprint: &PrefixFingerprint,
 ) -> Result<Option<(i32, Array)>> {
     try_restore_paged_prefix_for_prompt_with_mtp_row(
         config,
@@ -3587,7 +3579,7 @@ fn try_restore_paged_prefix_for_prompt_with_mtp_row(
     prompt_ids: &[u32],
     hidden_size: i32,
     hidden_dtype: Dtype,
-    fingerprint: Option<&str>,
+    fingerprint: &PrefixFingerprint,
 ) -> Result<Option<(i32, Array)>> {
     let Some(config) = config else {
         return Ok(None);
@@ -3603,7 +3595,7 @@ fn try_restore_paged_prefix_for_prompt_with_mtp_row(
             &config.model_id,
             &prompt_ids[..restore_len],
             cached_len,
-            fingerprint,
+            fingerprint.at(cached_len as usize).as_deref(),
             config.block_size,
             main_cache,
         )?
@@ -3696,7 +3688,7 @@ fn try_save_paged_prefix_for_prompt_with_mtp(
     mtp_cache: &MtpCache,
     last_hidden: &Array,
     prompt_ids: &[u32],
-    fingerprint: Option<&str>,
+    fingerprint: &PrefixFingerprint,
 ) -> Result<Option<String>> {
     try_save_paged_prefix_for_prompt_with_mtp_row(
         config,
@@ -3721,7 +3713,7 @@ fn try_save_paged_prefix_for_prompt_with_mtp_row(
     mtp_cache_row: usize,
     last_hidden: &Array,
     prompt_ids: &[u32],
-    fingerprint: Option<&str>,
+    fingerprint: &PrefixFingerprint,
 ) -> Result<Option<String>> {
     let Some(config) = config else {
         return Ok(None);
@@ -3751,7 +3743,7 @@ fn try_save_paged_prefix_for_prompt_with_mtp_row(
         &config.model_id,
         prompt_ids,
         cached_len,
-        fingerprint,
+        fingerprint.at(cached_len as usize).as_deref(),
         config.block_size,
         main_cache,
     )?
@@ -4235,7 +4227,7 @@ fn try_save_batched_text_prefix_row(
         cache,
         row,
         prompt_ids,
-        None,
+        &PrefixFingerprint::text(),
     ) {
         Ok(Some(key)) => {
             tracing::debug!(
@@ -4383,7 +4375,7 @@ fn forward_batched_text_with_paged_prefix<M: Model>(
             cache,
             &group,
             &prompt_ids[first_row],
-            None,
+            &PrefixFingerprint::text(),
         )?
         .unwrap_or(0) as usize;
         runtime_usage
@@ -4456,7 +4448,7 @@ fn forward_batched_text_with_paged_prefix<M: Model>(
                     cache,
                     row,
                     &ids[..ids.len() - 1],
-                    None,
+                    &PrefixFingerprint::text(),
                 ) {
                     Ok(Some(key)) => {
                         tracing::debug!(
@@ -4478,7 +4470,7 @@ fn forward_batched_text_with_paged_prefix<M: Model>(
                     cache,
                     row,
                     ids,
-                    None,
+                    &PrefixFingerprint::text(),
                 ) {
                     Ok(Some(key)) => {
                         tracing::debug!(
@@ -4617,7 +4609,7 @@ fn try_save_batched_vl_prefix_row(
     cache: &[LayerCache],
     row: usize,
     prompt_ids: &[u32],
-    fingerprint: Option<&str>,
+    fingerprint: &PrefixFingerprint,
     label: &str,
 ) {
     match try_save_paged_prefix_for_prompt_row(
@@ -4653,7 +4645,7 @@ fn forward_batched_vl_cold_miss_with_paged_prefix<M: Model + DenseVlMethods>(
     dummy_position_ids: Option<&Array>,
     prefix_cache_config: Option<&PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-    fingerprints: &[Option<String>],
+    fingerprints: &[PrefixFingerprint],
 ) -> Result<Array> {
     let b = prompt_ids.len();
     anyhow::ensure!(
@@ -4726,7 +4718,7 @@ fn forward_batched_vl_cold_miss_with_paged_prefix<M: Model + DenseVlMethods>(
             cache,
             row,
             &prompt_ids_u32[row][..prompt_ids_u32[row].len() - 1],
-            fingerprints[row].as_deref(),
+            &fingerprints[row],
             "prefix",
         );
     }
@@ -4767,7 +4759,7 @@ fn forward_batched_vl_cold_miss_with_paged_prefix<M: Model + DenseVlMethods>(
             cache,
             row,
             &prompt_ids_u32[row],
-            fingerprints[row].as_deref(),
+            &fingerprints[row],
             "prompt",
         );
     }
@@ -4812,19 +4804,26 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
     for row in 0..b {
         let fingerprint = if prefix_cache_config.is_some() {
             paged_prefix_fingerprint_for_request(
+                &prompt_ids_u32[row],
                 pixel_values[row],
                 grid_thw[row],
                 image_token_id,
                 image_spatial_merge_size,
             )?
         } else {
-            None
+            PrefixFingerprint::text()
         };
         fingerprints.push(fingerprint);
     }
 
+    // Rows with one prompt and one image set share every boundary's key.
+    let full_prompt_keys = fingerprints
+        .iter()
+        .zip(&prompt_ids_u32)
+        .map(|(fingerprint, ids)| fingerprint.at(ids.len()))
+        .collect::<Vec<_>>();
     let mut replay_from = vec![0_usize; b];
-    for group in prefix_restore_groups(&prompt_ids_u32, Some(&fingerprints))? {
+    for group in prefix_restore_groups(&prompt_ids_u32, Some(&full_prompt_keys))? {
         let first_row = group[0];
         let restored = try_restore_paged_prefix_for_prompt_rows(
             prefix_cache_config,
@@ -4832,7 +4831,7 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
             cache,
             &group,
             &prompt_ids_u32[first_row],
-            fingerprints[first_row].as_deref(),
+            &fingerprints[first_row],
         )?
         .unwrap_or(0) as usize;
         runtime_usage
@@ -4981,7 +4980,7 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
             }
             let ids = &prompt_ids[row];
             let ids_u32 = &prompt_ids_u32[row];
-            let fingerprint = fingerprints[row].as_deref();
+            let fingerprint = &fingerprints[row];
             if ids.len() > 1 && pos + 2 == ids.len() {
                 match try_save_paged_prefix_for_prompt_row(
                     prefix_cache_config,
@@ -5066,7 +5065,10 @@ struct SingleVlSuffixInput<'a> {
     end_pos: i32,
     position_ids_full: &'a Array,
     position_ids_is_dummy: bool,
+    /// Vision rows of the images the suffix still reaches.
     vision_embeds_full: Option<&'a Array>,
+    /// Row of `vision_embeds_full` the suffix's first image pad takes.
+    vision_rows_start: usize,
     image_token_id: i32,
 }
 
@@ -5082,14 +5084,14 @@ fn forward_single_vl_suffix<M: Model + DenseVlMethods>(
         position_ids_full,
         position_ids_is_dummy,
         vision_embeds_full,
+        vision_rows_start,
         image_token_id,
     } = input;
     if start_pos < 0 || start_pos >= end_pos {
         anyhow::bail!("forward_single_vl_suffix: invalid range [{start_pos}, {end_pos})");
     }
     let last_pos = end_pos - 1;
-    let image_pads_before = count_image_pad_i32(&prompt_ids[..start_pos as usize], image_token_id);
-    let mut image_pad_cursor = image_pads_before;
+    let mut image_pad_cursor = vision_rows_start;
 
     if start_pos < last_pos {
         let prefix_ids = &prompt_ids[start_pos as usize..last_pos as usize];
@@ -11948,13 +11950,14 @@ impl<M: Model> Scheduler<M> {
         };
         let prefix_fingerprint = if self.paged_prefix_cache.is_some() {
             paged_prefix_fingerprint_for_request(
+                &prompt_ids,
                 pixel_values.as_deref(),
                 image_grid_thw.as_deref(),
                 image_token_id,
                 image_spatial_merge_size,
             )?
         } else {
-            None
+            PrefixFingerprint::text()
         };
         let vl_position_ids_full = if is_vl {
             if model.requires_position_ids() {
@@ -12013,7 +12016,7 @@ impl<M: Model> Scheduler<M> {
                 &prompt_ids,
                 model.mtp_hidden_size(mtp),
                 model.mtp_hidden_dtype(mtp),
-                prefix_fingerprint.as_deref(),
+                &prefix_fingerprint,
             )?
         {
             self.runtime_usage
@@ -12021,11 +12024,24 @@ impl<M: Model> Scheduler<M> {
             pos = restore_len;
             mtp_prev_hidden = Some(restored_last_hidden);
         }
-        let mut image_pad_cursor = if is_vl {
-            count_image_pad_i32(&prompt_ids_i32[..pos as usize], image_token_id)
-        } else {
-            0
-        };
+        let mut image_pad_cursor = 0;
+        if is_vl {
+            let pv = pixel_values.as_deref().ok_or_else(|| {
+                anyhow!("prefill_admitted_mtp_single: image pads without pixel_values")
+            })?;
+            let grids = image_grid_thw.as_deref().ok_or_else(|| {
+                anyhow!("prefill_admitted_mtp_single: image pads without grid_thw")
+            })?;
+            (vl_vision_embeds_full, image_pad_cursor) = vision_embeds_after_prefix(
+                model,
+                pv,
+                grids,
+                &prefix_fingerprint,
+                &prompt_ids,
+                pos as usize,
+                image_token_id,
+            )?;
+        }
         while pos < prompt_len_i32 {
             let remaining = prompt_len_i32 - pos;
             let mut n = if prefill_chunk_size == 0 {
@@ -12065,19 +12081,6 @@ impl<M: Model> Scheduler<M> {
                     slice_pos_ids_axis2(position_ids_full, pos, pos + n)?
                 };
                 let chunk_image_pads = count_image_pad_i32(chunk_ids_i32, image_token_id);
-                if chunk_image_pads > 0 && vl_vision_embeds_full.is_none() {
-                    let pv = pixel_values.as_deref().ok_or_else(|| {
-                        anyhow!("prefill_admitted_mtp_single: image pads without pixel_values")
-                    })?;
-                    let grids = image_grid_thw.as_deref().ok_or_else(|| {
-                        anyhow!("prefill_admitted_mtp_single: image pads without grid_thw")
-                    })?;
-                    vl_vision_embeds_full = Some(model.compute_vision_embeds(
-                        pv,
-                        grids,
-                        mlx::StreamOrDevice::default(),
-                    )?);
-                }
                 let chunk_vision_embeds = slice_vision_embeds_for_image_pads(
                     vl_vision_embeds_full.as_ref(),
                     image_pad_cursor,
@@ -12151,7 +12154,7 @@ impl<M: Model> Scheduler<M> {
                     &mtp_cache,
                     &chunk_last_hidden,
                     &prompt_ids[..new_pos as usize],
-                    prefix_fingerprint.as_deref(),
+                    &prefix_fingerprint,
                 ) {
                     Ok(Some(key)) => {
                         tracing::debug!("paged SSD prefix cache MTP saved: key={key}");
@@ -15016,7 +15019,7 @@ impl<M: Model> Scheduler<M> {
                         cache,
                         &group,
                         &prompt_ids[first_row],
-                        None,
+                        &PrefixFingerprint::text(),
                     )?
                     .unwrap_or(0) as usize;
                     self.runtime_usage.record_prefix_cache_hit_tokens(
@@ -15143,41 +15146,49 @@ impl<M: Model> Scheduler<M> {
                     } else {
                         build_position_ids_vl(&per_row_ids_i32[0], grids, img_token_id, merge_size)?
                     };
-                    let vision_embeds_full = if grids.is_empty() {
+                    let pv = if grids.is_empty() {
                         None
                     } else {
-                        let pv = per_row_pv[0].ok_or_else(|| {
+                        Some(per_row_pv[0].ok_or_else(|| {
                             anyhow!(
                                 "single-row VL prefill: grid_thw present but pixel_values is None"
                             )
-                        })?;
-                        Some(model.compute_vision_embeds(
-                            pv,
-                            grids,
-                            mlx::StreamOrDevice::default(),
-                        )?)
+                        })?)
                     };
                     let prompt_ids_u32: Vec<u32> =
                         per_row_ids_i32[0].iter().map(|&tok| tok as u32).collect();
                     let vl_prefix_fingerprint = if paged_prefix_cache_config.is_some() {
                         paged_prefix_fingerprint_for_request(
+                            &prompt_ids_u32,
                             per_row_pv[0],
                             per_row_grids[0],
                             img_token_id,
                             merge_size,
                         )?
                     } else {
-                        None
+                        PrefixFingerprint::text()
                     };
                     if let Some(start_pos) = try_restore_paged_prefix_for_prompt(
                         paged_prefix_cache_config.as_ref(),
                         prefix_lru_cache.as_ref(),
                         prefill_cache,
                         &prompt_ids_u32,
-                        vl_prefix_fingerprint.as_deref(),
+                        &vl_prefix_fingerprint,
                     )? {
                         self.runtime_usage
                             .record_prefix_cache_hit_tokens(start_pos as u64);
+                        let (vision_embeds_full, vision_rows_start) = match pv {
+                            Some(pv) => vision_embeds_after_prefix(
+                                model,
+                                pv,
+                                grids,
+                                &vl_prefix_fingerprint,
+                                &prompt_ids_u32,
+                                start_pos as usize,
+                                img_token_id,
+                            )?,
+                            None => (None, 0),
+                        };
                         forward_single_vl_suffix(
                             model,
                             prefill_cache,
@@ -15188,10 +15199,20 @@ impl<M: Model> Scheduler<M> {
                                 position_ids_full: &position_ids_full,
                                 position_ids_is_dummy: dummy_position_ids.is_some(),
                                 vision_embeds_full: vision_embeds_full.as_ref(),
+                                vision_rows_start,
                                 image_token_id: img_token_id,
                             },
                         )?
                     } else if max_len > 1 {
+                        let vision_embeds_full = pv
+                            .map(|pv| {
+                                model.compute_vision_embeds(
+                                    pv,
+                                    grids,
+                                    mlx::StreamOrDevice::default(),
+                                )
+                            })
+                            .transpose()?;
                         let prefix_len = max_len - 1;
                         let prefix_input_ids = mlx::ops::indexing::slice_strided(
                             &input_ids,
@@ -15266,7 +15287,7 @@ impl<M: Model> Scheduler<M> {
                             prefix_lru_cache.as_ref(),
                             prefill_cache,
                             &prompt_ids_u32[..prefix_len as usize],
-                            vl_prefix_fingerprint.as_deref(),
+                            &vl_prefix_fingerprint,
                         ) {
                             Ok(Some(key)) => {
                                 tracing::debug!(
@@ -15292,6 +15313,15 @@ impl<M: Model> Scheduler<M> {
                             mlx::StreamOrDevice::default(),
                         )?
                     } else {
+                        let vision_embeds_full = pv
+                            .map(|pv| {
+                                model.compute_vision_embeds(
+                                    pv,
+                                    grids,
+                                    mlx::StreamOrDevice::default(),
+                                )
+                            })
+                            .transpose()?;
                         model.forward_vl_chunk(
                             &input_ids,
                             &position_ids_full,
@@ -15367,7 +15397,7 @@ impl<M: Model> Scheduler<M> {
                     prefix_lru_cache.as_ref(),
                     prefill_cache,
                     prompt_ids,
-                    None,
+                    &PrefixFingerprint::text(),
                 )? {
                     self.runtime_usage
                         .record_prefix_cache_hit_tokens(start_pos as u64);
@@ -15410,7 +15440,7 @@ impl<M: Model> Scheduler<M> {
                         prefix_lru_cache.as_ref(),
                         prefill_cache,
                         &prompt_ids[..prefix_len as usize],
-                        None,
+                        &PrefixFingerprint::text(),
                     ) {
                         Ok(Some(key)) => {
                             tracing::debug!("paged SSD prefix cache saved prefix: key={key}");
@@ -15505,13 +15535,14 @@ impl<M: Model> Scheduler<M> {
                     .expect("prefill_rows contain only occupied slots");
                 let prefix_fingerprint = if paged_prefix_cache_config.is_some() {
                     paged_prefix_fingerprint_for_request(
+                        &state.prompt_ids,
                         state.pixel_values.as_deref(),
                         state.image_grid_thw.as_deref(),
                         state.image_token_id,
                         state.image_spatial_merge_size,
                     )?
                 } else {
-                    None
+                    PrefixFingerprint::text()
                 };
                 (state.prompt_ids.clone(), prefix_fingerprint)
             };
@@ -15521,7 +15552,7 @@ impl<M: Model> Scheduler<M> {
                     prefix_lru_cache.as_ref(),
                     cache,
                     &prompt_ids,
-                    prefix_fingerprint.as_deref(),
+                    &prefix_fingerprint,
                 ) {
                     Ok(Some(key)) => {
                         tracing::debug!("paged SSD prefix cache saved: key={key}");
@@ -16396,13 +16427,14 @@ impl<M: Model> Scheduler<M> {
         let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&[row_idx])?;
         let prefix_fingerprint = if self.paged_prefix_cache.is_some() {
             paged_prefix_fingerprint_for_request(
+                &prompt_ids,
                 pixel_values.as_deref(),
                 image_grid_thw.as_deref(),
                 image_token_id,
                 image_spatial_merge_size,
             )?
         } else {
-            None
+            PrefixFingerprint::text()
         };
         let destination_owner = self
             .request_block_tables
@@ -16454,7 +16486,7 @@ impl<M: Model> Scheduler<M> {
                 self.prefix_lru_cache.as_ref(),
                 &mut temp_cache,
                 &prompt_ids,
-                prefix_fingerprint.as_deref(),
+                &prefix_fingerprint,
             )?
             .unwrap_or(0)
         };
@@ -16512,24 +16544,24 @@ impl<M: Model> Scheduler<M> {
         } else {
             None
         };
-        let vision_embeds_full = if is_vl {
+        let (vision_embeds_full, image_pad_consumed) = if is_vl {
             let pv = pixel_values
                 .as_deref()
                 .expect("is_vl implies pixel_values is Some");
             let grids = image_grid_thw
                 .as_deref()
                 .expect("is_vl implies image_grid_thw is Some");
-            Some(model.compute_vision_embeds(pv, grids, mlx::StreamOrDevice::default())?)
-        } else {
-            None
-        };
-        let image_pad_consumed = if is_vl {
-            count_image_pad(
-                &prompt_ids[..prefix_restored_start as usize],
+            vision_embeds_after_prefix(
+                model,
+                pv,
+                grids,
+                &prefix_fingerprint,
+                &prompt_ids,
+                prefix_restored_start as usize,
                 image_token_id,
-            )
+            )?
         } else {
-            0
+            (None, 0)
         };
 
         Ok(AdmitMidHandle {
@@ -16866,7 +16898,7 @@ impl<M: Model> Scheduler<M> {
                 self.prefix_lru_cache.as_ref(),
                 &handle.temp_cache,
                 &handle.prompt_ids[..chunk_end as usize],
-                handle.prefix_fingerprint.as_deref(),
+                &handle.prefix_fingerprint,
             ) {
                 Ok(Some(key)) => {
                     tracing::debug!(
@@ -16943,7 +16975,7 @@ impl<M: Model> Scheduler<M> {
                 self.prefix_lru_cache.as_ref(),
                 &temp_cache,
                 &prompt_ids,
-                prefix_fingerprint.as_deref(),
+                &prefix_fingerprint,
             ) {
                 Ok(Some(key)) => {
                     tracing::debug!("paged SSD prefix cache saved during mid-admit: key={key}");
@@ -17134,16 +17166,16 @@ impl<M: Model> Scheduler<M> {
         let is_vl = pixel_values.is_some();
         let prefix_fingerprint = if self.paged_prefix_cache.is_some() {
             paged_prefix_fingerprint_for_request(
+                &prompt_ids,
                 pixel_values.as_deref(),
                 image_grid_thw.as_deref(),
                 image_token_id,
                 image_spatial_merge_size,
             )?
         } else {
-            None
+            PrefixFingerprint::text()
         };
         let mut chunk_start = 0_i32;
-        let mut image_pad_consumed = 0usize;
         let mut mtp_prev_hidden = None;
         let mut last_prompt_hidden = None;
         if let Some((restore_len, restored_last_hidden)) =
@@ -17155,17 +17187,12 @@ impl<M: Model> Scheduler<M> {
                 &prompt_ids,
                 model.mtp_hidden_size(mtp),
                 model.mtp_hidden_dtype(mtp),
-                prefix_fingerprint.as_deref(),
+                &prefix_fingerprint,
             )?
         {
             self.runtime_usage
                 .record_prefix_cache_hit_tokens(restore_len as u64);
             chunk_start = restore_len;
-            image_pad_consumed = if is_vl {
-                count_image_pad(&prompt_ids[..chunk_start as usize], image_token_id)
-            } else {
-                0
-            };
             mtp_prev_hidden = Some(restored_last_hidden.clone());
             if chunk_start >= prompt_len {
                 last_prompt_hidden = Some(restored_last_hidden);
@@ -17211,16 +17238,24 @@ impl<M: Model> Scheduler<M> {
         } else {
             None
         };
-        let vision_embeds_full = if is_vl {
+        let (vision_embeds_full, image_pad_consumed) = if is_vl {
             let pv = pixel_values
                 .as_deref()
                 .expect("is_vl implies pixel_values is Some");
             let grids = image_grid_thw
                 .as_deref()
                 .expect("is_vl implies image_grid_thw is Some");
-            Some(model.compute_vision_embeds(pv, grids, mlx::StreamOrDevice::default())?)
+            vision_embeds_after_prefix(
+                model,
+                pv,
+                grids,
+                &prefix_fingerprint,
+                &prompt_ids,
+                chunk_start as usize,
+                image_token_id,
+            )?
         } else {
-            None
+            (None, 0)
         };
 
         let chunk_size = if prefill_chunk_size == 0 {
@@ -17419,7 +17454,7 @@ impl<M: Model> Scheduler<M> {
             &handle.mtp_cache,
             &chunk_last_hidden,
             &handle.prompt_ids[..new_pos as usize],
-            handle.prefix_fingerprint.as_deref(),
+            &handle.prefix_fingerprint,
         ) {
             Ok(Some(key)) => {
                 tracing::debug!("paged SSD prefix cache MTP mid-admit saved: key={key}");
@@ -17779,24 +17814,22 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
         let is_vl = pixel_values.is_some();
         let prefix_fingerprint = if prefix_cache.is_enabled() {
             paged_prefix_fingerprint_for_request(
+                &prompt_ids,
                 pixel_values.as_deref(),
                 image_grid_thw.as_deref(),
                 image_token_id,
                 image_spatial_merge_size,
             )?
         } else {
-            None
+            PrefixFingerprint::text()
         };
         let mut chunk_start = 0_i32;
         let mut image_pad_consumed = 0usize;
         let mut last_prompt_hidden = None;
         let mut last_shared_kv = None;
-        if let Some(restored) = prefix_cache.try_restore(
-            model,
-            &mut temp_cache,
-            &prompt_ids,
-            prefix_fingerprint.as_deref(),
-        )? {
+        if let Some(restored) =
+            prefix_cache.try_restore(model, &mut temp_cache, &prompt_ids, &prefix_fingerprint)?
+        {
             chunk_start = restored.cached_len;
             image_pad_consumed =
                 count_image_pad(&prompt_ids[..chunk_start as usize], image_token_id);
@@ -18037,7 +18070,7 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
             &handle.temp_cache,
             &chunk_last_hidden,
             &handle.prompt_ids[..new_pos as usize],
-            handle.prefix_fingerprint.as_deref(),
+            &handle.prefix_fingerprint,
         ) {
             Ok(Some(key)) => {
                 tracing::debug!("paged SSD prefix cache Gemma4 drafter mid-admit saved: key={key}");
@@ -18749,13 +18782,14 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
         };
         let prefix_fingerprint = if prefix_cache.is_enabled() {
             paged_prefix_fingerprint_for_request(
+                &prompt_ids,
                 pixel_values.as_deref(),
                 image_grid_thw.as_deref(),
                 image_token_id,
                 image_spatial_merge_size,
             )?
         } else {
-            None
+            PrefixFingerprint::text()
         };
         let dummy_position_ids = if model.requires_position_ids() {
             None
@@ -18800,7 +18834,7 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
                 model,
                 cache.as_mut_slice(),
                 &prompt_ids,
-                prefix_fingerprint.as_deref(),
+                &prefix_fingerprint,
             )?
         } {
             pos = restored.cached_len;
@@ -18938,7 +18972,7 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
                     cache,
                     &chunk_last_hidden,
                     &prompt_ids[..new_pos as usize],
-                    prefix_fingerprint.as_deref(),
+                    &prefix_fingerprint,
                 ) {
                     Ok(Some(key)) => {
                         tracing::debug!("paged SSD prefix cache Gemma4 drafter saved: key={key}");
@@ -21834,9 +21868,14 @@ mod tests {
         hidden_seq_lens: std::sync::Mutex<Vec<i32>>,
         batched_prefill_batches: std::sync::Mutex<Vec<i32>>,
         batched_prefill_lens: std::sync::Mutex<Vec<Vec<i32>>>,
+        vision_grid_lens: std::sync::Mutex<Vec<usize>>,
     }
 
     impl StepDecodeMaskModel {
+        fn vision_grid_lens(&self) -> Vec<usize> {
+            self.vision_grid_lens.lock().unwrap().clone()
+        }
+
         fn hybrid() -> Self {
             Self {
                 hybrid_cache: true,
@@ -22054,6 +22093,7 @@ mod tests {
             grid_thw: &[(i32, i32, i32)],
             _target: mlx::StreamOrDevice,
         ) -> crate::Result<mlx::Array> {
+            self.vision_grid_lens.lock().unwrap().push(grid_thw.len());
             let rows = grid_thw.len().max(1) as i32;
             mlx::Array::zeros((rows, 1_i32), mlx::Dtype::Float32)
                 .map_err(|e| anyhow::anyhow!("fake vision embeds failed: {e:?}"))
@@ -29206,6 +29246,72 @@ mod tests {
         assert_eq!(hit_model.forward_seq_lens(), vec![1]);
 
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
+
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn vl_paged_prefix_survives_an_appended_image_and_separates_same_grid_images() {
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
+        use mlx::Dtype;
+
+        let pad = IMAGE_TOKEN_ID as u32;
+        // One pad token per (1, 2, 2) image at merge 2.
+        fn vl_req(ids: Vec<u32>, pixels: &[f32]) -> GenerateRequest {
+            let mut req = mk_req(ids);
+            req.pixel_values = Some(
+                pixels
+                    .iter()
+                    .map(|&value| {
+                        let array: mlx::Array =
+                            (&[value; 4][..], &[1_i32, 4][..]).try_into().unwrap();
+                        mlx::ops::astype(&array, Dtype::Bfloat16).unwrap()
+                    })
+                    .collect(),
+            );
+            req.image_grid_thw = Some(vec![(1_i32, 2_i32, 2_i32); pixels.len()]);
+            req.image_spatial_merge_size = 2;
+            req.image_token_id = IMAGE_TOKEN_ID;
+            req
+        }
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-vl-append-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "vl-test", 2, 32)
+            .expect("prefix config");
+        let run = |request: GenerateRequest| {
+            let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+                1,
+                32768,
+                crate::core::memory_budget::test_meta_qwen35(),
+            )
+            .expect("scheduler startup");
+            scheduler
+                .enable_paged_prefix_cache(config.clone())
+                .expect("enable prefix cache");
+            scheduler.admit(request).expect("admit");
+            let model = StepDecodeMaskModel::default();
+            scheduler.prefill_admitted(&model).expect("prefill");
+            crate::core::cache::process_async_prefix_store_queue().wait_idle();
+            model
+        };
+
+        // Turn 1: image A.
+        run(vl_req(vec![1, pad, 2], &[0.0]));
+        // A later prompt extends it and appends image C: turn 1's whole
+        // prompt (which covers A only) is restored, and only C is encoded.
+        let appended = run(vl_req(vec![1, pad, 2, 3, pad, 4], &[0.0, 5.0]));
+        assert_eq!(appended.vision_grid_lens(), vec![1]);
+        assert_eq!(appended.hidden_seq_lens(), vec![2]);
+        assert_eq!(appended.forward_seq_lens(), vec![1]);
+        // The same tokens with a different first image of the same grid
+        // restore nothing and encode both images.
+        let other = run(vl_req(vec![1, pad, 2, 3, pad, 4], &[1.0, 5.0]));
+        assert_eq!(other.vision_grid_lens(), vec![2]);
+        assert_eq!(other.forward_seq_lens(), vec![1]);
+        assert_eq!(other.hidden_seq_lens(), vec![5]);
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }

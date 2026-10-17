@@ -21,6 +21,7 @@ use crate::core::speculative::{
     resolve_exact_deterministic_target_logits, resolve_exact_deterministic_target_tokens,
     sample_logits_positions, ExactSamplingCounters, MtpDraftPolicyWindow,
 };
+use crate::core::vl_prefix::PrefixFingerprint;
 use crate::Result;
 use ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntry;
 use ironmlx_lm::core::model_input::build_position_ids;
@@ -253,19 +254,22 @@ impl DFlash2PrefixCache {
         })
     }
 
+    /// The longest artifact whose tokens prefix `prompt_ids` and whose
+    /// fingerprint is `fingerprint(its token count)` (an image prompt keys
+    /// each boundary by the images it covers, see [`PrefixFingerprint`]).
     fn load_longest(
         &mut self,
         prompt_ids: &[u32],
-        fingerprint: &str,
+        fingerprint: &dyn Fn(usize) -> String,
     ) -> Option<DFlash2PrefixArtifact> {
         let hit_index = self
             .entries
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
-                entry.fingerprint == fingerprint
-                    && entry.token_ids.len() <= prompt_ids.len()
+                entry.token_ids.len() <= prompt_ids.len()
                     && prompt_ids.starts_with(&entry.token_ids)
+                    && entry.fingerprint == fingerprint(entry.token_ids.len())
             })
             .max_by_key(|(_, entry)| entry.cached_len)
             .map(|(index, _)| index);
@@ -881,7 +885,9 @@ where
 /// image-pad token in prompt order, the prompt's MRoPE positions and the
 /// position delta of the tokens after it.
 struct DFlash2VlPrompt {
-    embeds: Array,
+    /// Vision rows of the images the prefill still reaches (`None` when the
+    /// restored prefix covers every image).
+    embeds: Option<Array>,
     positions: Array,
     rope_delta: i32,
     image_token_id: i32,
@@ -889,9 +895,16 @@ struct DFlash2VlPrompt {
 }
 
 impl DFlash2VlPrompt {
-    /// `None` for a text request; for a VL one, runs the vision encoder
-    /// (which must be resident) over its images.
-    fn prepare<M: DFlash2Target>(model: &M, request: &GenerateRequest) -> Result<Option<Self>> {
+    /// `None` for a text request. For a VL one resuming after `restored`
+    /// prompt tokens, runs the vision encoder (which must be resident) over
+    /// the images not entirely inside that prefix when `identity` pairs
+    /// images with their pad runs, over every image otherwise.
+    fn prepare<M: DFlash2Target>(
+        model: &M,
+        request: &GenerateRequest,
+        identity: &PrefixFingerprint,
+        restored: usize,
+    ) -> Result<Option<Self>> {
         let (Some(pixels), Some(grids)) = (
             request.pixel_values.as_deref(),
             request.image_grid_thw.as_deref(),
@@ -903,19 +916,32 @@ impl DFlash2VlPrompt {
         let merge = request.image_spatial_merge_size;
         let positions = build_position_ids_vl(&ids, grids, token, merge)?;
         let rope_delta = vl_rope_delta(&ids, grids, token, merge)?;
-        let embeds = model.dflash2_vision_embeds_on(pixels, grids, StreamOrDevice::default())?;
-        let rows = usize::try_from(embeds.shape().as_slice()[0])?;
-        let pads = count_image_pad(&request.prompt_ids, token);
-        anyhow::ensure!(
-            rows == pads,
-            "DFlash2 image input has {rows} vision rows for {pads} image-pad tokens"
-        );
+        let (first, consumed_rows) = match identity.uncached_images(restored) {
+            Some(rest) => (rest.first, rest.rows_inside),
+            None => (0, count_image_pad(&request.prompt_ids[..restored], token)),
+        };
+        let embeds = if first < grids.len() {
+            let embeds = model.dflash2_vision_embeds_on(
+                &pixels[first..],
+                &grids[first..],
+                StreamOrDevice::default(),
+            )?;
+            let rows = usize::try_from(embeds.shape().as_slice()[0])?;
+            let pads = count_image_pad(&request.prompt_ids[restored..], token);
+            anyhow::ensure!(
+                rows == consumed_rows + pads,
+                "DFlash2 image input has {rows} vision rows for {consumed_rows} restored and {pads} remaining image-pad tokens"
+            );
+            Some(embeds)
+        } else {
+            None
+        };
         Ok(Some(Self {
             embeds,
             positions,
             rope_delta,
             image_token_id: token,
-            consumed_rows: 0,
+            consumed_rows,
         }))
     }
 
@@ -943,8 +969,11 @@ impl DFlash2VlPrompt {
                 StreamOrDevice::default(),
             );
         }
-        let rows =
-            slice_vision_embeds_rows(&self.embeds, self.consumed_rows, self.consumed_rows + pads)?;
+        let embeds = self
+            .embeds
+            .as_ref()
+            .ok_or_else(|| anyhow!("DFlash2 VL prefill reached image pads without vision rows"))?;
+        let rows = slice_vision_embeds_rows(embeds, self.consumed_rows, self.consumed_rows + pads)?;
         self.consumed_rows += pads;
         model.dflash2_forward_target_vl_on(
             input,
@@ -959,7 +988,10 @@ impl DFlash2VlPrompt {
 
     /// The prompt's MRoPE delta, once every vision row was consumed.
     fn finish(self) -> Result<i32> {
-        let rows = usize::try_from(self.embeds.shape().as_slice()[0])?;
+        let rows = match self.embeds.as_ref() {
+            Some(embeds) => usize::try_from(embeds.shape().as_slice()[0])?,
+            None => 0,
+        };
         anyhow::ensure!(
             self.consumed_rows == rows,
             "DFlash2 VL prefill consumed {} of {rows} vision rows",
@@ -1350,13 +1382,26 @@ where
         Self::validate_request(model, draft, &request, block_size)?;
         ensure_dflash2_request_not_cancelled(is_cancelled)?;
         let mut request = request;
-        let mut vl = DFlash2VlPrompt::prepare(model, &request)?;
-        // Prefix artifacts are keyed by token ids alone, which do not tell two
-        // images apart: a VL prompt neither reads nor writes them.
-        let prefix_cache = if vl.is_some() { None } else { prefix_cache };
         let (mut prefix_cache, prefix_fingerprint) = match prefix_cache {
             Some((cache, fingerprint)) => (Some(cache), fingerprint),
             None => (None, "generation-stream-no-prefix-cache"),
+        };
+        // Image-pad tokens do not tell two images apart: an image prompt's
+        // artifacts are keyed by the images each boundary covers as well.
+        let prefix_identity = if prefix_cache.is_some() {
+            PrefixFingerprint::for_request(
+                &request.prompt_ids,
+                request.pixel_values.as_deref(),
+                request.image_grid_thw.as_deref(),
+                request.image_token_id,
+                request.image_spatial_merge_size,
+            )?
+        } else {
+            PrefixFingerprint::text()
+        };
+        let prefix_key = |len: usize| match prefix_identity.at(len) {
+            Some(images) => format!("{prefix_fingerprint};{images}"),
+            None => prefix_fingerprint.to_owned(),
         };
 
         let prompt_len = request.prompt_ids.len();
@@ -1381,7 +1426,7 @@ where
         let mut phases = PrefillPhaseDiagnostic::start();
 
         if let Some(cache) = prefix_cache.as_deref_mut() {
-            let artifact = cache.load_longest(&request.prompt_ids, prefix_fingerprint);
+            let artifact = cache.load_longest(&request.prompt_ids, &prefix_key);
             PrefillPhaseDiagnostic::mark(&mut phases, "load", 0);
             if let Some(artifact) = artifact {
                 let restore_result = restore_prefix_entry_for_row(
@@ -1408,13 +1453,21 @@ where
                             error = %error,
                             "invalid DFlash2 prefix artifact evicted; falling back to cold prefill"
                         );
-                        cache.invalidate(&artifact.token_ids, prefix_fingerprint);
+                        cache
+                            .invalidate(&artifact.token_ids, &prefix_key(artifact.token_ids.len()));
                         target_cache = model.make_cache(1, cap, model.cache_dtype())?;
                     }
                 }
             }
         }
         PrefillPhaseDiagnostic::mark(&mut phases, "lookup", position);
+        // The vision rows the prefill still reaches (after a restored prefix).
+        let mut vl = DFlash2VlPrompt::prepare(
+            model,
+            &request,
+            &prefix_identity,
+            usize::try_from(position)?,
+        )?;
         // A cold miss computes the whole prompt like a request without a
         // prefix cache; its saved artifacts come from that same pass.
         let prefill_execution = if cold_single_prefill && position == 0 {
@@ -1513,7 +1566,7 @@ where
             if let (true, Some(cache)) = (cache_this_boundary, prefix_cache.as_deref_mut()) {
                 match cache.insert(
                     &request.prompt_ids[..stop],
-                    prefix_fingerprint,
+                    &prefix_key(stop),
                     &target_cache,
                     retained,
                     chunk_last_hidden,
@@ -5979,12 +6032,14 @@ mod tests {
         cache.total_bytes = 288;
 
         let hit = cache
-            .load_longest(&[1, 2, 3, 4, 9], "runtime-a")
+            .load_longest(&[1, 2, 3, 4, 9], &|_| "runtime-a".to_owned())
             .expect("longest hit");
         assert_eq!(hit.token_ids, vec![1, 2, 3, 4]);
         assert_eq!(cache.snapshot().hits, 1);
 
-        assert!(cache.load_longest(&[1, 7], "runtime-a").is_none());
+        assert!(cache
+            .load_longest(&[1, 7], &|_| "runtime-a".to_owned())
+            .is_none());
         assert_eq!(cache.snapshot().misses, 1);
     }
 
