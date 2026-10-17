@@ -2419,6 +2419,7 @@ async fn load_engine_variant(
     let vision_input = Some(VisionInputConfig::from_causal_loader(
         architecture,
         &loader,
+        runtime.max_image_pixels,
     )?);
     match architecture {
         ModelArchitecture::Qwen35Dense => {
@@ -3121,6 +3122,7 @@ mod tests {
             scheduler_autotune_report: false,
             paged_prefix_cache: None,
             prefix_lru_cache_max_bytes: None,
+            max_image_pixels: None,
             model_ttl: None,
             memory_limits: EnginePoolMemoryLimits::default(),
             active_kv_offload: crate::core::cache::ActiveKvOffloadConfig::disabled(),

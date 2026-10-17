@@ -195,9 +195,10 @@ pub fn prepare_images(
         }
         (default_spatial_merge_size, image_tok_id)
     } else {
+        let pixel_bounds = image_processor::PixelBounds::for_model(loader.model_dir(), None)?;
         for image in images {
             let NamedImage { label, bytes } = image?;
-            let (pixel_values, gh, gw) = image_processor::preprocess(&bytes)
+            let (pixel_values, gh, gw) = image_processor::preprocess(&bytes, pixel_bounds)
                 .with_context(|| format!("preprocessing {label}"))?;
             let grid = (1, gh, gw);
             let token_count = image_token_count_for_grid(grid, default_spatial_merge_size)?;

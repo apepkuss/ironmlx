@@ -2486,6 +2486,7 @@ mod tests {
             admission_deadline_ms: None,
             admission_queue_max: None,
             max_cache_cap: None,
+            max_image_pixels: None,
             decode_cadence_mid_chunk_cap: None,
             scheduler_profile: None,
             scheduler_autotune_report: false,

@@ -328,6 +328,7 @@ async fn main() -> Result<()> {
             effective_cap,
         )),
         static_memory_estimate,
+        ironmlx_lm::core::vision_input::VisionInputConfig::TextOnly,
     )
     .await
     .context("build DFlash2 qualification engine")?;

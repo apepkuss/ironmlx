@@ -98,8 +98,11 @@ fn decoded_tokens_follow_the_vl_prompt_positions() {
     let tokenizer = Tokenizer::from_loader(&loader).unwrap();
     let model = Qwen35MoeModel::from_loader(&loader).unwrap();
 
-    let (pixels, grid_h, grid_w) =
-        image_processor::preprocess(&std::fs::read(IMAGE).unwrap()).unwrap();
+    let (pixels, grid_h, grid_w) = image_processor::preprocess(
+        &std::fs::read(IMAGE).unwrap(),
+        image_processor::PixelBounds::for_model(loader.model_dir(), None).unwrap(),
+    )
+    .unwrap();
     mlx::transforms::eval(&[&pixels]).unwrap();
     let grids = vec![(1_i32, grid_h, grid_w)];
     let pads = (grid_h * grid_w / 4) as usize;

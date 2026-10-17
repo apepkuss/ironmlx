@@ -332,6 +332,8 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
         prefill_chunk_size: 256,
         vision_input: VisionInputConfig::Qwen {
             spatial_merge_size: 2,
+            pixel_bounds:
+                ironmlx_lm::models::qwen3_5::image_processor::PixelBounds::PROCESSOR_DEFAULT,
         },
         request_execution: ironmlx_runtime::core::task_execution::RequestExecutionHandle::Scheduler(Arc::new(
             handle.clone(),

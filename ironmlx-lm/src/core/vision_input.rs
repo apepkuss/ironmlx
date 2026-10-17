@@ -7,6 +7,9 @@ pub enum VisionInputConfig {
     TextOnly,
     Qwen {
         spatial_merge_size: i32,
+        /// Pixel range images are resized into: the checkpoint's processor
+        /// range with the serving cap applied.
+        pixel_bounds: qwen3_5::image_processor::PixelBounds,
     },
     Gemma4 {
         vision_config: crate::models::gemma4::Gemma4VisionConfig,
@@ -25,10 +28,13 @@ use crate::core::tokenizer::Tokenizer;
 use crate::models::{gemma4, qwen3_5};
 
 impl VisionInputConfig {
-    /// Resolve the input contract from the same configuration used by the loader.
+    /// Resolve the input contract from the same configuration used by the
+    /// loader. `max_image_pixels` caps the image size a Qwen checkpoint's
+    /// processor allows (`None`: the default cap).
     pub fn from_causal_loader(
         architecture: crate::models::ModelArchitecture,
         loader: &crate::core::Loader,
+        max_image_pixels: Option<i32>,
     ) -> anyhow::Result<Self> {
         use crate::models::ModelArchitecture;
         Ok(match architecture {
@@ -42,6 +48,10 @@ impl VisionInputConfig {
                         let config: qwen3_5::VisionConfig = serde_json::from_value(value.clone())?;
                         Self::Qwen {
                             spatial_merge_size: config.spatial_merge_size,
+                            pixel_bounds: qwen3_5::image_processor::PixelBounds::for_model(
+                                loader.model_dir(),
+                                max_image_pixels,
+                            )?,
                         }
                     }
                     None => Self::TextOnly,
@@ -114,7 +124,9 @@ pub fn derive_image_token_and_merge(
 ) -> (i32, i32) {
     match vision_input {
         VisionInputConfig::TextOnly => (-1, 1),
-        VisionInputConfig::Qwen { spatial_merge_size } => (
+        VisionInputConfig::Qwen {
+            spatial_merge_size, ..
+        } => (
             tokenizer
                 .token_to_id("<|image_pad|>")
                 .map(|id| id as i32)
@@ -179,7 +191,9 @@ pub fn expand_decoded_messages(
 ) -> anyhow::Result<ExpandedVisionInputs> {
     let spatial_merge_size = match vision_input {
         VisionInputConfig::TextOnly => 1,
-        VisionInputConfig::Qwen { spatial_merge_size } => *spatial_merge_size,
+        VisionInputConfig::Qwen {
+            spatial_merge_size, ..
+        } => *spatial_merge_size,
         VisionInputConfig::Gemma4 { vision_config } => vision_config.pooling_kernel_size,
         VisionInputConfig::DiffusionGemma { vision_config, .. } => {
             vision_config.pooling_kernel_size
@@ -203,8 +217,9 @@ pub fn expand_decoded_messages(
                 vision_input.validate_image_input()?;
                 match vision_input {
                     VisionInputConfig::TextOnly => unreachable!("image input validated above"),
-                    VisionInputConfig::Qwen { .. } => {
-                        let (pv, gh, gw) = qwen3_5::image_processor::preprocess(img_bytes)?;
+                    VisionInputConfig::Qwen { pixel_bounds, .. } => {
+                        let (pv, gh, gw) =
+                            qwen3_5::image_processor::preprocess(img_bytes, *pixel_bounds)?;
                         let n = ((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize;
                         placeholders.push(qwen_placeholder(n));
                         all_pixel_values.push(pv);
@@ -305,6 +320,7 @@ mod tests {
             msgs,
             &VisionInputConfig::Qwen {
                 spatial_merge_size: 2,
+                pixel_bounds: qwen3_5::image_processor::PixelBounds::PROCESSOR_DEFAULT,
             },
         )
         .unwrap();
@@ -365,6 +381,7 @@ mod tests {
         let (tok_id, merge) = derive_image_token_and_merge(
             &VisionInputConfig::Qwen {
                 spatial_merge_size: 2,
+                pixel_bounds: qwen3_5::image_processor::PixelBounds::PROCESSOR_DEFAULT,
             },
             &tok,
         );
@@ -473,6 +490,7 @@ mod tests {
             msgs,
             &VisionInputConfig::Qwen {
                 spatial_merge_size: 2,
+                pixel_bounds: qwen3_5::image_processor::PixelBounds::PROCESSOR_DEFAULT,
             },
         )
         .unwrap();

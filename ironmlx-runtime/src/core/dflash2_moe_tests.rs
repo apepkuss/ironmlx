@@ -1888,6 +1888,7 @@ fn qwen36_moe_dflash2_actor_admission_first_token_lifecycle() {
                 ),
             ),
             Default::default(),
+            ironmlx_lm::core::vision_input::VisionInputConfig::TextOnly,
         )
         .await
         .expect("DFlash2 engine");
@@ -2028,11 +2029,16 @@ fn image_prefix_artifacts_survive_an_appended_image_and_separate_same_grid_image
         return;
     };
     assert!(fixture.target.dflash2_load_vision().expect("load vision"));
+    let target_dir = std::env::var("QWEN36_MOE_DFLASH2_TARGET").expect("target");
+    let pixel_bounds =
+        image_processor::PixelBounds::for_model(std::path::Path::new(&target_dir), None)
+            .expect("pixel bounds");
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../ironmlx/tests/fixtures/qwen35_vl");
     let read = |path: std::path::PathBuf| {
         let (pixels, h, w) =
-            image_processor::preprocess(&std::fs::read(path).expect("image")).expect("preprocess");
+            image_processor::preprocess(&std::fs::read(path).expect("image"), pixel_bounds)
+                .expect("preprocess");
         mlx::transforms::eval(&[&pixels]).expect("eval pixels");
         (pixels, (1, h, w))
     };

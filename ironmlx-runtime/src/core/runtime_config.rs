@@ -683,6 +683,8 @@ pub struct EngineRuntimeOptions {
     pub scheduler_autotune_report: bool,
     pub paged_prefix_cache: Option<EnginePagedPrefixCacheSettings>,
     pub prefix_lru_cache_max_bytes: Option<usize>,
+    /// Cap on the pixels an input image is resized to (`None`: the default).
+    pub max_image_pixels: Option<i32>,
     pub model_ttl: Option<Duration>,
     pub memory_limits: EnginePoolMemoryLimits,
     pub active_kv_offload: ActiveKvOffloadConfig,

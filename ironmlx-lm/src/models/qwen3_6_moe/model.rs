@@ -888,6 +888,7 @@ mod tests {
     fn prepare_fixture_images(
         paths: &[&str],
         spatial_merge_size: i32,
+        pixel_bounds: crate::models::qwen3_5::image_processor::PixelBounds,
     ) -> (Array, Vec<(i32, i32, i32)>, String) {
         let mut pixel_values = Vec::with_capacity(paths.len());
         let mut grids = Vec::with_capacity(paths.len());
@@ -896,7 +897,8 @@ mod tests {
         for path in paths {
             let bytes = std::fs::read(path).expect("fixture image");
             let (pv, gh, gw) =
-                crate::models::qwen3_5::image_processor::preprocess(&bytes).expect("preprocess");
+                crate::models::qwen3_5::image_processor::preprocess(&bytes, pixel_bounds)
+                    .expect("preprocess");
             let token_count = ((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize;
             prompt_prefix.push_str(&image_placeholder_string(token_count));
             pixel_values.push(pv);
@@ -1210,6 +1212,11 @@ mod tests {
                 "/../ironmlx/tests/fixtures/qwen35_vl/coco_sample.jpg"
             )],
             merge,
+            crate::models::qwen3_5::image_processor::PixelBounds::for_model(
+                loader.model_dir(),
+                None,
+            )
+            .expect("pixel bounds"),
         );
         content.push_str(
             "Describe this image in one concise sentence. Mention the main animals and the furniture color.",

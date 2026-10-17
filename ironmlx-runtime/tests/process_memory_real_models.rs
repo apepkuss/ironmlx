@@ -207,11 +207,52 @@ fn qwen35_real_vision_peak_is_covered() {
         .expect("open Qwen3.5 multimodal checkpoint");
     let model =
         ironmlx_lm::models::qwen3_5::Qwen35Model::from_loader(&loader).expect("load Qwen3.5 model");
-    let (pixels, grid_h, grid_w) =
-        ironmlx_lm::models::qwen3_5::image_processor::preprocess(&fixture_image())
-            .expect("preprocess Qwen3.5 image");
+    let (pixels, grid_h, grid_w) = ironmlx_lm::models::qwen3_5::image_processor::preprocess(
+        &fixture_image(),
+        ironmlx_lm::models::qwen3_5::image_processor::PixelBounds::for_model(
+            loader.model_dir(),
+            None,
+        )
+        .expect("pixel bounds"),
+    )
+    .expect("preprocess Qwen3.5 image");
     calibrate(
         "qwen3.5",
+        &model,
+        vision_tensor_bytes(&loader),
+        &[pixels],
+        &[(1, grid_h, grid_w)],
+    );
+}
+
+/// The largest image served by default (the fixture resized to the default
+/// pixel limit, about 4096 image tokens): its fused-attention estimate must
+/// still cover the tower's peak.
+#[test]
+#[ignore = "requires IRONMLX_MEMORY_GOVERNOR_QWEN_MODEL"]
+fn qwen35_real_vision_peak_is_covered_at_the_default_image_limit() {
+    use ironmlx_lm::models::qwen3_5::image_processor::{PixelBounds, DEFAULT_MAX_IMAGE_PIXELS};
+
+    let loader = Loader::open_multimodal(&model_path("IRONMLX_MEMORY_GOVERNOR_QWEN_MODEL"))
+        .expect("open Qwen3.5 multimodal checkpoint");
+    let model =
+        ironmlx_lm::models::qwen3_5::Qwen35Model::from_loader(&loader).expect("load Qwen3.5 model");
+    let (pixels, grid_h, grid_w) = ironmlx_lm::models::qwen3_5::image_processor::preprocess(
+        &fixture_image(),
+        PixelBounds {
+            min_pixels: DEFAULT_MAX_IMAGE_PIXELS,
+            max_pixels: DEFAULT_MAX_IMAGE_PIXELS,
+        },
+    )
+    .expect("preprocess Qwen3.5 image");
+    let resized_pixels = grid_h * grid_w * 16 * 16;
+    assert!(
+        resized_pixels <= DEFAULT_MAX_IMAGE_PIXELS
+            && resized_pixels >= DEFAULT_MAX_IMAGE_PIXELS / 100 * 99,
+        "the fixture resizes to the default pixel limit, got {resized_pixels}"
+    );
+    calibrate(
+        "qwen3.5-default-image-limit",
         &model,
         vision_tensor_bytes(&loader),
         &[pixels],

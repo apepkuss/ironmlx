@@ -37,6 +37,8 @@ Limits are enforced before expensive preprocessing:
 | Decoder allocation per image | 96 MiB |
 | Concurrent image preprocessing jobs | 2 |
 
+An accepted image is then resized for the model. Qwen models keep its aspect ratio, align both sides to 32 px and bring its pixel count into the range their checkpoint's `preprocessor_config.json` gives (Qwen3.x: 65,536 to 16,777,216). `ironmlx serve --max-image-pixels` lowers that maximum; it defaults to 4,194,304. Each 32×32 block becomes one image token, so the default allows at most 4,096 per image.
+
 ## Stable security error codes
 
 | HTTP status | Code | Meaning |

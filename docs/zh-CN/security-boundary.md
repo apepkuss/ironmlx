@@ -38,6 +38,11 @@ Anthropic 兼容 API 接受同样的受控 base64 source。IronMLX 永远不会�
 解码 10 MiB、总解码 24 MiB、宽高 8192 像素、单张像素 16,777,216、总像素 33,554,432、
 单张 decoder 分配 96 MiB，以及最多 2 个并发预处理任务。
 
+通过检查的图片再按模型要求缩放。Qwen 模型保持宽高比，两边对齐到 32 像素，并把像素数调整到模型
+`preprocessor_config.json` 给出的范围内（Qwen3.x 为 65,536 到 16,777,216）。`ironmlx serve
+--max-image-pixels` 可降低这个上限，默认 4,194,304。每 32×32 像素对应一个图像 token，
+默认每张图最多 4,096 个。
+
 ## 稳定安全错误码
 
 | HTTP | 错误码 | 含义 |

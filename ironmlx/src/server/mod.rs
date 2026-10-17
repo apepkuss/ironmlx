@@ -293,6 +293,7 @@ pub(crate) async fn serve_with_dflash2<M>(
     prefix_cache: Option<ironmlx_runtime::core::cache::prefix_store::PrefixLruCacheConfig>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     static_memory_estimate: ironmlx_runtime::core::process_memory::StaticMemoryEstimate,
+    vision_input: ironmlx_lm::core::vision_input::VisionInputConfig,
 ) -> Result<()>
 where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
@@ -314,6 +315,7 @@ where
         prefix_cache,
         scheduler_runtime_profile,
         static_memory_estimate,
+        vision_input,
     )
     .await?;
     let app = Router::new()

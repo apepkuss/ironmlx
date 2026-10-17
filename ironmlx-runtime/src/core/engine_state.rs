@@ -1061,6 +1061,7 @@ pub async fn build_dflash2_engine<M>(
     prefix_cache: Option<crate::core::cache::PrefixLruCacheConfig>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
+    vision_input: VisionInputConfig,
 ) -> Result<CausalEngine<M>>
 where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
@@ -1082,6 +1083,7 @@ where
         prefix_cache,
         scheduler_runtime_profile,
         static_memory_estimate,
+        vision_input,
     )
     .await
 }
@@ -1104,6 +1106,7 @@ pub async fn build_dflash2_engine_with_options<M>(
     prefix_cache: Option<crate::core::cache::PrefixLruCacheConfig>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
+    vision_input: VisionInputConfig,
 ) -> Result<CausalEngine<M>>
 where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
@@ -1309,9 +1312,7 @@ where
         tokenizer,
         model_id,
         prefill_chunk_size,
-        vision_input: VisionInputConfig::Qwen {
-            spatial_merge_size: meta.spatial_merge_size,
-        },
+        vision_input,
         request_execution: RequestExecutionHandle::DFlash2(Arc::new(dflash2_handle)),
         paged_prefix_cache_enabled: prefix_cache.is_some(),
         b_max,
