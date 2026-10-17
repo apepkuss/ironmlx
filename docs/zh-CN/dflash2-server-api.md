@@ -21,8 +21,8 @@ DFlash2 当前通过独立执行路径提供三类入口：
 | Target（MoE） | `mlx-community/Qwen3.6-35B-A3B-4bit`、`-5bit`、`-6bit` 或 `-8bit` |
 | Draft（MoE） | `incoai/Qwen3.6-35B-A3B-DFlash2`（BF16） |
 
-当前范围仅包含文本生成。DFlash2 draft 不能作为普通 base model 加载，也不能用于
-图片或视频请求。Qwen3.8 target 必须使用 affine 4-bit 或 affine 8-bit；Qwen3.6 35B A3B
+支持文本与图片请求，不支持视频。Target 在首个图片请求时加载视觉编码器；DFlash2 draft
+不能作为普通 base model 加载。Qwen3.8 target 必须使用 affine 4-bit 或 affine 8-bit；Qwen3.6 35B A3B
 target 的限制见 [Qwen3.6 35B A3B（MoE）](#qwen36-35b-a3bmoe)。其他量化格式和
 非量化 target 不会被 App 标记为 DFlash2 兼容。
 

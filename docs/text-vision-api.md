@@ -14,7 +14,7 @@ IronMLX provides compatible OpenAI Responses, Chat Completions and Anthropic Mes
 
 Inference requests with unknown fields or unsupported field shapes return 400; unsupported capabilities are not silently ignored.
 
-Fixed CLI services select their model at startup. App and EnginePool resolve the request `model` or an unambiguous default. Support for vision, thinking and tools depends on the model and its native template; see [Supported models](supported-models.md). [DFlash2 configuration](dflash2-server-api.md) describes its text-only serving and sampling constraints.
+Fixed CLI services select their model at startup. App and EnginePool resolve the request `model` or an unambiguous default. Support for vision, thinking and tools depends on the model and its native template; see [Supported models](supported-models.md). [DFlash2 configuration](dflash2-server-api.md) describes its serving and sampling constraints.
 
 ## Endpoint index
 

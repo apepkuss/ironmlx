@@ -32,7 +32,7 @@ The same catalogue as **Models → Model Download → Supported models** in the 
 
 Images means image understanding. Tools require a compatible native template; the client executes them. Llama 3.2 supports one native custom tool call per turn.
 
-Acceleration requires matching auxiliary weights (see Drafter below); — means unsupported or not yet available. DFlash2 requires Qwen 3.8 27B Affine 4/8-bit or Qwen 3.6 35B A3B Affine 4/5/6/8-bit (not OptiQ), is text-only, and cannot run alongside MTP. See [MTP / Assistant](mtp-server-api.md) and [DFlash2](dflash2-server-api.md).
+Acceleration requires matching auxiliary weights (see Drafter below); — means unsupported or not yet available. DFlash2 requires Qwen 3.8 27B Affine 4/8-bit or Qwen 3.6 35B A3B Affine 4/5/6/8-bit (not OptiQ), serves text and image requests, and cannot run alongside MTP. See [MTP / Assistant](mtp-server-api.md) and [DFlash2](dflash2-server-api.md).
 
 ## Audio · Speech and audio
 
