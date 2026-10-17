@@ -237,7 +237,7 @@ development dependencies excluded, build dependencies retained.
 | ring | 0.17.14 | Apache-2.0 AND ISC | `THIRD_PARTY_LICENSES/rust-license-143368af9701a24e.txt`<br>`THIRD_PARTY_LICENSES/rust-license-f025ccfb7dfb6bdf.txt` | https://github.com/briansmith/ring |
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/rust-lang/rustc-hash |
 | rustfst | 1.3.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-b05785f9f18e6716.txt` | https://github.com/Garvys/rustfst |
-| rustls | 0.23.45 | Apache-2.0 OR ISC OR MIT | `THIRD_PARTY_LICENSES/rust-license-709e3175b4212f7b.txt` | https://github.com/rustls/rustls |
+| rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT | `THIRD_PARTY_LICENSES/rust-license-709e3175b4212f7b.txt` | https://github.com/rustls/rustls |
 | rustls-pemfile | 2.2.0 | Apache-2.0 OR ISC OR MIT | `THIRD_PARTY_LICENSES/rust-license-709e3175b4212f7b.txt` | https://github.com/rustls/pemfile |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-9117d922e6671255.txt` | https://github.com/rustls/pki-types |
 | rustls-webpki | 0.103.15 | ISC | `THIRD_PARTY_LICENSES/rust-license-5b698ca13897be3a.txt` | https://github.com/rustls/webpki |

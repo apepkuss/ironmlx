@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:a3a13968-a769-502c-b930-3048ed865bcf",
+  "serialNumber": "urn:uuid:530c60b0-2fcb-5be9-b4aa-7fc708a869d0",
   "version": 1,
   "metadata": {
     "component": {
@@ -6579,10 +6579,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "cargo:rustls@0.23.45",
+      "bom-ref": "cargo:rustls@0.23.46",
       "group": "crates.io",
       "name": "rustls",
-      "version": "0.23.45",
+      "version": "0.23.46",
       "licenses": [
         {
           "expression": "Apache-2.0 OR ISC OR MIT"
@@ -6598,7 +6598,7 @@
           "value": "rust-license-709e3175b4212f7b.txt"
         }
       ],
-      "purl": "pkg:cargo/rustls@0.23.45",
+      "purl": "pkg:cargo/rustls@0.23.46",
       "externalReferences": [
         {
           "type": "vcs",
