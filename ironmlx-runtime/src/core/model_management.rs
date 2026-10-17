@@ -198,7 +198,7 @@ pub fn build_engine_model_config(
         prompt_lookup,
         pinned,
     } = request;
-    if read_model_type(model_dir)? == "qwen3_asr" {
+    if model_dir.join("config.json").is_file() && read_model_type(model_dir)? == "qwen3_asr" {
         if audio.is_some()
             || decision.is_some()
             || max_cache_cap_override.is_some()
@@ -829,6 +829,7 @@ pub fn build_engine_model_config_for_pool(
     hardware_label: &str,
 ) -> Result<crate::core::engine_pool::EngineModelConfig> {
     if model.load_policy != EngineLoadPolicy::Disabled
+        && model.path.join("config.json").is_file()
         && read_model_type(&model.path)? == "qwen3_asr"
     {
         if model.audio.is_some()

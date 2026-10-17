@@ -69,6 +69,15 @@ async fn laya_app_registration_and_endpoint_boundaries() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{registered}");
+    let manifest = serde_json::from_value(json!({"id":MODEL,"path":root})).unwrap();
+    let config = ironmlx_runtime::core::model_management::build_engine_model_config_for_pool(
+        &SchedulerResolutionOptions::from(&super::tests::serve_args()),
+        manifest,
+        None,
+        "test",
+    )
+    .expect("LAYA manifest only requires mlx_config.json");
+    assert_eq!(config.capabilities.runtime_kind, "decision");
     let (_, list) = request(&app, "/v1/models", None).await;
     assert_eq!(list["models"][0]["name"], MODEL);
     assert_eq!(list["data"][0]["id"], MODEL);
