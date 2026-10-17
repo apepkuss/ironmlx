@@ -11,6 +11,7 @@ pub mod io;
 pub mod qwen3_asr;
 pub mod resources;
 pub mod signal;
+pub mod vad;
 pub use api::*;
 pub use error::{AudioError, Result};
 

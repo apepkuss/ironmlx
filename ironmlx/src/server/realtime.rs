@@ -8,7 +8,11 @@ use axum::{
     response::Response,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use ironmlx_audio::{qwen3_asr::Transcription, PcmBuffer, PcmFormat};
+use ironmlx_audio::{
+    qwen3_asr::Transcription,
+    vad::{VadSettings, VoiceDetector},
+    PcmBuffer, PcmFormat,
+};
 use ironmlx_runtime::core::{
     asr_execution::{AsrExecutionError, AsrRequest, AsrRuntime, AsrStreamingContext},
     engine_pool::{EngineLease, EnginePoolState, EngineVariant},
@@ -16,6 +20,7 @@ use ironmlx_runtime::core::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::VecDeque;
 use std::{
     future::Future,
     pin::Pin,
@@ -109,13 +114,14 @@ struct Configuration {
     model: Option<String>,
     language: Option<String>,
     prompt: Option<String>,
+    vad: Option<VadSettings>,
 }
 impl Configuration {
     fn view(&self, id: &str) -> Value {
         json!({"id":id,"type":"transcription","audio":{"input":{
             "format":{"type":"audio/pcm","rate":24000},
             "transcription":{"model":self.model,"language":self.language,"prompt":self.prompt},
-            "turn_detection":null
+            "turn_detection":self.vad
         }}})
     }
     fn update(&self, event: &Value) -> Result<Self, String> {
@@ -186,22 +192,34 @@ impl Configuration {
             None
         };
         for value in [
-            session.get("turn_detection"),
             session.get("input_audio_noise_reduction"),
-            input.and_then(|i| i.get("turn_detection")),
             input.and_then(|i| i.get("noise_reduction")),
         ]
         .into_iter()
         .flatten()
         {
             if !value.is_null() {
-                return Err("Use client-side turn detection; server VAD and noise reduction are unsupported".into());
+                return Err("Noise reduction is unsupported".into());
             }
         }
         let transcription = input
             .and_then(|i| i.get("transcription"))
             .or_else(|| session.get("input_audio_transcription"));
         let mut next = self.clone();
+        let nested_vad = input.and_then(|i| i.get("turn_detection"));
+        if nested_vad.is_some() && session.contains_key("turn_detection") {
+            return Err("Specify turn_detection only once".into());
+        }
+        if let Some(value) = nested_vad.or_else(|| session.get("turn_detection")) {
+            next.vad = if value.is_null() {
+                None
+            } else {
+                let settings: VadSettings =
+                    serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+                settings.validate()?;
+                Some(settings)
+            };
+        }
         if let Some(transcription) = transcription {
             let fields = transcription
                 .as_object()
@@ -334,6 +352,12 @@ impl Turn {
     }
 }
 
+fn vad_buffered_samples(turn: &Turn, queued: &VecDeque<Turn>, detector: &VoiceDetector) -> usize {
+    turn.audio.len()
+        + queued.iter().map(|t| t.audio.len()).sum::<usize>()
+        + detector.buffered_samples()
+}
+
 async fn send(socket: &mut WebSocket, mut event: Value) -> Result<(), ()> {
     event["event_id"] = format!("event_{}", uuid::Uuid::new_v4()).into();
     tokio::time::timeout(
@@ -380,6 +404,9 @@ async fn run(
     };
     let mut binding: Option<Binding> = None;
     let mut turn = Turn::default();
+    let mut queued: VecDeque<Turn> = VecDeque::new();
+    let mut detector: Option<VoiceDetector> = None;
+    let mut vad_item: Option<String> = None;
     let mut previous_item = None;
     let mut pending: Option<Pending> = None;
     let started = Instant::now();
@@ -400,6 +427,9 @@ async fn run(
             .await?;
             break;
         }
+        if pending.is_none() && turn.audio.is_empty() && !queued.is_empty() {
+            turn = queued.pop_front().unwrap();
+        }
         if pending.is_none() && turn.ready() {
             if binding.is_none() {
                 let Some(model) = config.model.as_deref() else {
@@ -416,6 +446,9 @@ async fn run(
                     Ok((_, lease)) => {
                         let EngineVariant::Asr(runtime) = lease.engine() else {
                             error(&mut socket, "Selected model does not support ASR", None).await?;
+                            if detector.is_some() {
+                                return Ok(());
+                            }
                             turn = Turn::default();
                             continue;
                         };
@@ -426,6 +459,9 @@ async fn run(
                     }
                     Err(e) => {
                         error(&mut socket, e.to_string(), None).await?;
+                        if detector.is_some() {
+                            return Ok(());
+                        }
                         turn = Turn::default();
                         continue;
                     }
@@ -473,6 +509,10 @@ async fn run(
                     Err(e) => {
                         let (kind,code)=if e.is_output_limit() {("invalid_request_error","asr_output_limit_exceeded")}else{("server_error","asr_inference_failed")};
                         send(&mut socket,json!({"type":"conversation.item.input_audio_transcription.failed","item_id":turn.item,"content_index":0,"error":{"type":kind,"code":code,"message":e.to_string()}})).await?;
+                        if vad_item.as_deref()==Some(turn.item.as_str()) {
+                            vad_item=None;
+                            if let Some(vad)=detector.as_mut() {vad.finish();}
+                        }
                         turn=Turn::default();
                         turn_samples=0;
                     }
@@ -505,7 +545,7 @@ async fn run(
                 let event:Value=match serde_json::from_str(&text) { Ok(event)=>event,Err(_)=>{error(&mut socket,"Invalid JSON event",None).await?;continue;} };
                 let failure: Option<String> = match event.get("type").and_then(Value::as_str).unwrap_or("") {
                     "session.update" | "transcription_session.update" => {
-                        if pending.is_some() || !turn.audio.is_empty() { Some("Update the session between audio turns".into()) }
+                        if pending.is_some() || !turn.audio.is_empty() || !queued.is_empty() || vad_item.is_some() { Some("Update the session between audio turns".into()) }
                         else { match config.update(&event) {
                             Err(e)=>Some(e),
                             Ok(next)=>{
@@ -513,6 +553,7 @@ async fn run(
                                     Ok(true)=>{
                                         settings=pool.asr_settings(next.model.as_deref().unwrap()).await.map_err(|_| ())?;
                                         turn_samples=0;
+                                        detector=next.vad.clone().map(|v| VoiceDetector::new(v,total_samples as u64)).transpose().map_err(|_| ())?;
                                         config=next; binding=None;
                                         let kind=if event["type"]=="transcription_session.update" {"transcription_session.updated"}else{"session.updated"};
                                         send(&mut socket,json!({"type":kind,"session":config.view(&session_id)})).await?; None
@@ -529,6 +570,40 @@ async fn run(
                                 Err(_)=>Some("audio must be canonical base64 PCM16".into()),
                                 Ok(bytes)=>{
                                     if total_samples+bytes.len()/2>7200*RATE { Some("Session reached its two-hour audio limit".into()) }
+                                    else if bytes.is_empty() || !bytes.len().is_multiple_of(2) || bytes.len()>8*RATE {
+                                        Some("Each append must contain nonempty PCM16 whole samples, at most four seconds".into())
+                                    }
+                                    else if detector.as_ref().is_some_and(|vad| vad_buffered_samples(&turn,&queued,vad)+bytes.len()/2>2*WINDOW) {
+                                        Some("Realtime input is too far ahead of inference; wait for results".into())
+                                    }
+                                    else if detector.is_some() {
+                                        total_samples+=bytes.len()/2;
+                                        for frame in detector.as_mut().unwrap().push(&bytes) {
+                                            if let Some(start)=frame.started {
+                                                let next=Turn::default();
+                                                let id=next.item.clone();
+                                                if turn.audio.is_empty() && pending.is_none() && queued.is_empty() {turn=next;} else {queued.push_back(next);}
+                                                vad_item=Some(id.clone());
+                                                send(&mut socket,json!({"type":"input_audio_buffer.speech_started","item_id":id,"audio_start_ms":start/24})).await?;
+                                            }
+                                            let id=vad_item.as_deref().unwrap();
+                                            let target=if turn.item==id {&mut turn} else {queued.iter_mut().find(|t|t.item==id).unwrap()};
+                                            if target.audio.len()+frame.audio.len()>settings.max_audio_duration_seconds as usize*RATE {
+                                                error(&mut socket,"VAD speech turn exceeds this model's configured audio duration",event.get("event_id")).await?;
+                                                return Ok(());
+                                            }
+                                            target.audio.extend(frame.audio.iter().map(|s|f32::from(*s)/32768.));
+                                            if let Some(end)=frame.stopped {
+                                                target.committed=true;
+                                                send(&mut socket,json!({"type":"input_audio_buffer.speech_stopped","item_id":id,"audio_end_ms":end/24})).await?;
+                                                let predecessor=if queued.len()>1 {Some(queued[queued.len()-2].item.clone())} else if !queued.is_empty() {Some(turn.item.clone())} else {previous_item.clone()};
+                                                let target=if turn.item==id {&mut turn} else {queued.iter_mut().find(|t|t.item==id).unwrap()};
+                                                acknowledge(&mut socket,target,&predecessor).await?;
+                                                vad_item=None;
+                                            }
+                                        }
+                                        None
+                                    }
                                     else if turn_samples+bytes.len()/2>settings.max_audio_duration_seconds as usize*RATE {
                                         Some(format!("Audio turn exceeds this model's configured duration limit of {} seconds",settings.max_audio_duration_seconds))
                                     }
@@ -538,12 +613,30 @@ async fn run(
                         } else {Some("audio is required".into())}
                     },
                     "input_audio_buffer.commit" => {
-                        if turn.audio.len()<RATE/10 {Some("At least 100 ms of audio is required before commit".into())}
+                        if let Some(vad)=detector.as_mut() {
+                            if let Some(id)=vad_item.take() {
+                                let target=if turn.item==id {&mut turn} else {queued.iter_mut().find(|t|t.item==id).unwrap()};
+                                let tail=vad.finish();
+                                if target.audio.len()+tail.len()>settings.max_audio_duration_seconds as usize*RATE {
+                                    error(&mut socket,"VAD speech turn exceeds this model's configured audio duration",event.get("event_id")).await?;
+                                    return Ok(());
+                                }
+                                target.audio.extend(tail.iter().map(|s|f32::from(*s)/32768.));
+                                target.committed=true;
+                                send(&mut socket,json!({"type":"input_audio_buffer.speech_stopped","item_id":id,"audio_end_ms":total_samples/24})).await?;
+                                let predecessor=if queued.len()>1 {Some(queued[queued.len()-2].item.clone())} else if !queued.is_empty() {Some(turn.item.clone())} else {previous_item.clone()};
+                                let target=if turn.item==id {&mut turn} else {queued.iter_mut().find(|t|t.item==id).unwrap()};
+                                acknowledge(&mut socket,target,&predecessor).await?;
+                                None
+                            } else {Some("No active speech turn to commit".into())}
+                        }
+                        else if turn.audio.len()<RATE/10 {Some("At least 100 ms of audio is required before commit".into())}
                         else if turn.committed {Some("This audio turn is already committed".into())}
                         else { turn.committed=true;acknowledge(&mut socket,&mut turn,&previous_item).await?;None }
                     },
                     "input_audio_buffer.clear" => {
-                        pending=None;turn=Turn::default();turn_samples=0;
+                        pending=None;turn=Turn::default();turn_samples=0;queued.clear();vad_item=None;
+                        detector=config.vad.clone().map(|v|VoiceDetector::new(v,total_samples as u64)).transpose().map_err(|_| ())?;
                         send(&mut socket,json!({"type":"input_audio_buffer.cleared"})).await?;None
                     },
                     _=>Some("Unsupported Realtime event".into()),
@@ -574,7 +667,7 @@ mod tests {
         );
         for session in [
             json!({"audio":{"input":{"format":{"type":"audio/pcm","rate":16000}}}}),
-            json!({"turn_detection":{"type":"server_vad"}}),
+            json!({"turn_detection":{"type":"semantic_vad"}}),
             json!({"input_audio_transcription":{"languages":["zh","en"]}}),
             json!({"input_audio_transcription":{"stream":true}}),
             json!({"unknown":1}),
@@ -582,6 +675,74 @@ mod tests {
             assert!(config.update(&json!({"session":session})).is_err());
         }
         assert!(config.language.is_none());
+    }
+
+    #[test]
+    fn server_vad_settings_support_both_schemas_and_preserve_atomic_updates() {
+        let config = Configuration {
+            model: Some("local-asr".into()),
+            ..Default::default()
+        };
+        for session in [
+            json!({"turn_detection":{"type":"server_vad"}}),
+            json!({"audio":{"input":{"turn_detection":{"type":"server_vad"}}}}),
+        ] {
+            let next = config.update(&json!({"session":session})).unwrap();
+            assert_eq!(next.vad.as_ref().unwrap().silence_duration_ms, 500);
+            assert_eq!(
+                next.view("id")["audio"]["input"]["turn_detection"]["threshold"],
+                0.5
+            );
+            assert!(next
+                .update(&json!({"session":{"turn_detection":null}}))
+                .unwrap()
+                .vad
+                .is_none());
+        }
+        for settings in [
+            json!({"type":"semantic_vad"}),
+            json!({"type":"server_vad","threshold":1.1}),
+            json!({"type":"server_vad","threshold":-1}),
+            json!({"type":"server_vad","prefix_padding_ms":1001}),
+            json!({"type":"server_vad","silence_duration_ms":0}),
+            json!({"type":"server_vad","create_response":true}),
+        ] {
+            assert!(config
+                .update(&json!({"session":{"turn_detection":settings}}))
+                .is_err());
+        }
+        assert!(config.vad.is_none());
+    }
+
+    #[test]
+    fn vad_capacity_includes_retained_prefix_and_partial_frame() {
+        let mut detector = VoiceDetector::new(
+            serde_json::from_value(json!({"type":"server_vad","prefix_padding_ms":1000})).unwrap(),
+            0,
+        )
+        .unwrap();
+        assert!(detector.push(&vec![0; 2 * RATE]).is_empty());
+        assert_eq!(detector.buffered_samples(), RATE);
+        let current = Turn {
+            audio: vec![0.; WINDOW],
+            ..Default::default()
+        };
+        let queued = VecDeque::from([Turn {
+            audio: vec![0.; WINDOW - RATE - 1],
+            ..Default::default()
+        }]);
+        assert_eq!(
+            vad_buffered_samples(&current, &queued, &detector),
+            2 * WINDOW - 1
+        );
+        assert!(detector.push(&[0, 0]).is_empty());
+        assert_eq!(
+            vad_buffered_samples(&current, &queued, &detector),
+            2 * WINDOW
+        );
+        assert!(vad_buffered_samples(&current, &queued, &detector) + 1 > 2 * WINDOW);
+        detector.finish();
+        assert_eq!(detector.buffered_samples(), 0);
     }
 
     #[test]

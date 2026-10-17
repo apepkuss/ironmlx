@@ -141,8 +141,37 @@ App 不提供录音客户端。服务端先发送 `session.created`，随后可�
 活跃会话持有模型租约；延迟取决于硬件和并发负载，建立连接本身不代表满足某个延迟指标。
 
 协议实现 OpenAI Realtime 的转写子集，并增加上述可修订临时文本事件。
-不提供 WebRTC、服务端 VAD、降噪、音频生成、时间戳或说话人分离。
-麦克风采集、客户端 VAD 和文本展示由上游应用负责。
+不提供 WebRTC、降噪、音频生成、时间戳或说话人分离。
+麦克风采集和文本展示由上游应用负责；客户端 VAD 可按需使用。
+
+### 服务端 VAD
+
+通过 `session.audio.input.turn_detection` 启用，也接受 beta 顶层
+`session.turn_detection`：
+
+```json
+{"type":"session.update","session":{"audio":{"input":{"turn_detection":{"type":"server_vad","threshold":0.5,"prefix_padding_ms":300,"silence_duration_ms":500}}}}}
+```
+
+省略配置时保留当前模式；初始为手动模式（`null`）。在轮次之间将
+`turn_detection` 设为 `null` 可关闭 VAD。阈值范围 0–1，前置保留范围
+0–1,000 ms，静音时长范围 100–3,000 ms。
+Earshot 1.2.2 使用内置分类器在本地 CPU 上按 16 ms 帧检测，无需额外下载模型。
+检测器的重采样不改变交给 ASR 的原始 24 kHz PCM。这是声学 VAD，不是语义 VAD。
+
+服务端发出 `input_audio_buffer.speech_started`，携带 `item_id` 和
+`audio_start_ms`；讲话结束后发出同一 ID 的 `input_audio_buffer.speech_stopped`
+及 `audio_end_ms`。时间相对于已接受音频的时间轴，包含前置保留与尾部静音；
+这些是语音边界，不是字词时间戳。上游必须持续发送静音音频才能检测静音结束，
+网络停止发包不等于静音。结束后自动发送 `input_audio_buffer.committed`，
+并以 `is_final: true` 完成转写，无需客户端提交。
+后续讲话可以在前一段推理期间排队，总待处理 PCM 仍限制为 60 秒。
+连续讲话即使没有静音，也会在约 28 秒时自动分段，保证 ASR 窗口有界。
+
+仍可用 `input_audio_buffer.commit` 主动结束当前讲话，不完整检测帧也会保留。
+没有活动讲话时提交会报错。清空会取消当前及排队轮次并重置检测器；断连会取消所有工作。
+每模型的音频时长和输出预算仍有效；VAD 轮次超过时长限制时明确报错并关闭会话、取消待处理任务。
+不支持降噪、`semantic_vad` 或对话生成/打断选项。这些是 API 会话参数，App 不增加任务操作界面。
 
 可运行的上游客户端见 [`examples/transcription-client.swift`](../../examples/transcription-client.swift)。
 客户端按录音速率发送原始 PCM，同时接收临时结果，将确认结果以 JSON 行写入标准输出。

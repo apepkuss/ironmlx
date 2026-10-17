@@ -373,3 +373,276 @@ async fn realtime_case(app: &Router, model: &str, audio: &ironmlx_audio::PcmBuff
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     server.abort();
 }
+
+#[tokio::test]
+#[serial_test::serial(mlx_metal)]
+#[ignore = "requires local ASR checkpoints and reference Chinese WAV"]
+async fn qwen3_asr_server_vad_queues_speech_and_ignores_silence() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+    let root = std::env::var("MLX_DIR").unwrap();
+    mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib")).unwrap();
+    let args = super::tests::serve_args();
+    let manager = ModelManager::new(
+        crate::cli::serve::engine_runtime_config(&args).unwrap(),
+        args.max_loaded_models,
+        SchedulerResolutionOptions::from(&args),
+    )
+    .unwrap();
+    let voices_dir = tempfile::tempdir().unwrap();
+    let voices = crate::server::voices::VoiceStore::open(voices_dir.path().to_path_buf()).unwrap();
+    let app = app_router(manager, voices);
+    let audio = ironmlx_audio::AudioIo::decode(
+        &ironmlx_audio::io::NativeAudioIo,
+        &std::fs::read(std::env::var("IRONMLX_ASR_TEST_AUDIO").unwrap()).unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
+    let samples = ironmlx_audio::signal::resample_mono(
+        &audio.samples,
+        audio.format.sample_rate,
+        24000,
+        &NoCancel,
+    )
+    .unwrap();
+    let speech: Vec<u8> = samples
+        .iter()
+        .flat_map(|x| ((x.clamp(-1., 1.) * 32767.) as i16).to_le_bytes())
+        .collect();
+    for (size, var) in [
+        ("0.6B", "IRONMLX_ASR_SMALL_DIR"),
+        ("1.7B", "IRONMLX_ASR_LARGE_DIR"),
+    ] {
+        let model = format!("mlx-community/Qwen3-ASR-{size}-8bit");
+        json_request(
+            &app,
+            "/admin/api/models/register",
+            json!({"model":model,"model_dir":std::env::var(var).unwrap()}),
+        )
+        .await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let router = app.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let (mut ws, _) = connect_async(format!(
+            "ws://127.0.0.1:{port}/v1/realtime?intent=transcription&model={model}"
+        ))
+        .await
+        .unwrap();
+        ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(json!({"type":"session.update","session":{"turn_detection":{"type":"server_vad"},"input_audio_transcription":{"language":"zh"}}}).to_string())).await.unwrap();
+        let updated: Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(updated["type"], "session.updated");
+        // Pure silence must not allocate an ASR turn or trigger inference.
+        ws.send(Message::Text(
+            json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(vec![0u8;48000])})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), ws.next())
+                .await
+                .is_err()
+        );
+        let mut input = speech.clone();
+        input.extend(vec![0u8; 48000]);
+        let repeated = input.repeat(2);
+        for chunk in repeated.chunks(9600) {
+            ws.send(Message::Text(
+                json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(chunk)})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        }
+        let mut starts = Vec::new();
+        let mut stops = Vec::new();
+        let mut commits = Vec::new();
+        let mut finals = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(90), async {
+            while finals.len() < 2 {
+                let e: Value =
+                    serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                        .unwrap();
+                assert_ne!(e["type"], "error", "{e}");
+                assert_ne!(
+                    e["type"], "conversation.item.input_audio_transcription.failed",
+                    "{e}"
+                );
+                match e["type"].as_str().unwrap() {
+                    "input_audio_buffer.speech_started" => starts.push(e),
+                    "input_audio_buffer.speech_stopped" => stops.push(e),
+                    "input_audio_buffer.committed" => commits.push(e),
+                    "conversation.item.input_audio_transcription.completed" => finals.push(e),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(starts.len(), 2);
+        assert_eq!(stops.len(), 2);
+        assert_eq!(commits.len(), 2);
+        for i in 0..2 {
+            assert_eq!(starts[i]["item_id"], stops[i]["item_id"]);
+            assert_eq!(starts[i]["item_id"], commits[i]["item_id"]);
+            assert_eq!(starts[i]["item_id"], finals[i]["item_id"]);
+            assert_eq!(finals[i]["is_final"], true);
+            assert!(
+                finals[i]["transcript"].as_str().unwrap().contains("交易"),
+                "{}",
+                finals[i]
+            );
+            assert!(
+                stops[i]["audio_end_ms"].as_u64().unwrap()
+                    > starts[i]["audio_start_ms"].as_u64().unwrap()
+            );
+        }
+        assert_eq!(commits[1]["previous_item_id"], commits[0]["item_id"]);
+        println!("{model}: {finals:?}");
+        // Clearing resets VAD state; silence after clear remains silent.
+        ws.send(Message::Text(
+            json!({"type":"input_audio_buffer.clear"}).to_string(),
+        ))
+        .await
+        .unwrap();
+        let cleared: Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(cleared["type"], "input_audio_buffer.cleared");
+        // Manual commit remains available with VAD enabled; flush the short last frame.
+        ws.send(Message::Text(json!({"type":"session.update","session":{"turn_detection":{"type":"server_vad","silence_duration_ms":3000}}}).to_string())).await.unwrap();
+        let updated: Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(updated["type"], "session.updated");
+        for chunk in speech.chunks(9600) {
+            ws.send(Message::Text(
+                json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(chunk)})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        }
+        ws.send(Message::Text(
+            json!({"type":"input_audio_buffer.commit"}).to_string(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let e: Value =
+                    serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                        .unwrap();
+                assert_ne!(e["type"], "error", "{e}");
+                assert_ne!(
+                    e["type"], "conversation.item.input_audio_transcription.failed",
+                    "{e}"
+                );
+                if e["type"] == "conversation.item.input_audio_transcription.completed" {
+                    assert_eq!(e["is_final"], true);
+                    assert!(e["transcript"].as_str().unwrap().contains("交易"), "{e}");
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        // Disabling VAD restores the existing explicit-commit transport.
+        ws.send(Message::Text(
+            json!({"type":"session.update","session":{"turn_detection":null}}).to_string(),
+        ))
+        .await
+        .unwrap();
+        let updated: Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(updated["type"], "session.updated");
+        assert!(updated["session"]["audio"]["input"]["turn_detection"].is_null());
+        for chunk in speech.chunks(9600) {
+            ws.send(Message::Text(
+                json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(chunk)})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        }
+        ws.send(Message::Text(
+            json!({"type":"input_audio_buffer.commit"}).to_string(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            loop {
+                let e: Value =
+                    serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                        .unwrap();
+                assert_ne!(e["type"], "error", "{e}");
+                assert_ne!(
+                    e["type"], "conversation.item.input_audio_transcription.failed",
+                    "{e}"
+                );
+                if e["type"] == "conversation.item.input_audio_transcription.completed" {
+                    assert_eq!(e["is_final"], true);
+                    assert!(e["transcript"].as_str().unwrap().contains("交易"), "{e}");
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        // Clear cancels in-flight and queued turns; no stale completion may follow its acknowledgement.
+        ws.send(Message::Text(
+            json!({"type":"session.update","session":{"turn_detection":{"type":"server_vad"}}})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+        let updated: Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(updated["type"], "session.updated");
+        for chunk in repeated.chunks(9600) {
+            ws.send(Message::Text(
+                json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(chunk)})
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        }
+        ws.send(Message::Text(
+            json!({"type":"input_audio_buffer.clear"}).to_string(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                let e: Value =
+                    serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                        .unwrap();
+                assert_ne!(e["type"], "error", "{e}");
+                if e["type"] == "input_audio_buffer.cleared" {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        ws.send(Message::Text(
+            json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(vec![0u8;48000])})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), ws.next())
+                .await
+                .is_err()
+        );
+        ws.close(None).await.unwrap();
+        server.abort();
+        let _ = server.await;
+        json_request(&app, "/admin/api/models/unload", json!({"model":model})).await;
+    }
+}

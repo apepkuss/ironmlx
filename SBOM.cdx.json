@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:530c60b0-2fcb-5be9-b4aa-7fc708a869d0",
+  "serialNumber": "urn:uuid:42123c5c-abf6-5e18-a66f-e4e6612bbbfc",
   "version": 1,
   "metadata": {
     "component": {
@@ -2572,6 +2572,35 @@
         {
           "type": "vcs",
           "url": "https://github.com/yaahc/displaydoc"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "cargo:earshot@1.2.2",
+      "group": "crates.io",
+      "name": "earshot",
+      "version": "1.2.2",
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "ironmlx:license-files",
+          "value": "rust-license-b05785f9f18e6716.txt"
+        }
+      ],
+      "purl": "pkg:cargo/earshot@1.2.2",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/pykeio/earshot"
         }
       ]
     },

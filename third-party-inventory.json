@@ -1032,6 +1032,16 @@
       {
         "license_expression": "MIT OR Apache-2.0",
         "license_files": [
+          "rust-license-b05785f9f18e6716.txt"
+        ],
+        "name": "earshot",
+        "repository": "https://github.com/pykeio/earshot",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "1.2.2"
+      },
+      {
+        "license_expression": "MIT OR Apache-2.0",
+        "license_files": [
           "rust-license-7576269ea71f767b.txt"
         ],
         "name": "either",

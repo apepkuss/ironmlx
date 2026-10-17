@@ -80,7 +80,9 @@ engine. The App manages their download, loading and service status. Upstream
 applications submit audio through `POST /v1/audio/transcriptions`; the Dashboard
 does not include a transcription client. The supported offline profile accepts
 WAV, FLAC or MP3 recordings with automatic long-audio segmentation.
-Realtime PCM transcription is available over `/v1/realtime`.
+Realtime PCM transcription is available over `/v1/realtime`, with optional CPU
+server VAD configured per API session. The backend detects speech boundaries and
+automatically commits turns; the App adds no recording or transcription controls.
 Each ASR model's parameter page exposes maximum audio duration and maximum
 output tokens per segment. Both Qwen3-ASR sizes default to 1,200 seconds and
 1,024 tokens, using the official chunk/evaluation policy as a reference.

@@ -162,9 +162,44 @@ errors. Active sessions retain their model lease. Timing depends on hardware and
 concurrent inference; a socket connection alone is not a latency guarantee.
 
 The protocol implements the transcription subset of OpenAI Realtime, with the
-provisional-text extension above. It does not provide WebRTC, server VAD, noise
+provisional-text extension above. It does not provide WebRTC, noise
 reduction, audio generation, timestamps or diarization. Upstream applications own
-microphone capture, client VAD and rendering.
+microphone capture and rendering; client VAD remains optional.
+
+### Server VAD
+
+Opt in with `session.audio.input.turn_detection` (or the beta top-level
+`session.turn_detection`):
+
+```json
+{"type":"session.update","session":{"audio":{"input":{"turn_detection":{"type":"server_vad","threshold":0.5,"prefix_padding_ms":300,"silence_duration_ms":500}}}}}
+```
+
+Omitted configuration preserves the current mode; the initial mode is manual
+(`null`). Set `turn_detection: null` between turns to disable VAD. Threshold is
+0–1, prefix padding is 0–1,000 ms, and silence duration is 100–3,000 ms.
+Earshot 1.2.2 performs local CPU detection on 16 ms frames using its embedded
+classifier; no external model download is needed. Detector resampling does not
+alter the original 24 kHz PCM sent to ASR. This is acoustic VAD, not semantic VAD.
+
+The server emits `input_audio_buffer.speech_started` with `item_id` and
+`audio_start_ms`, then `input_audio_buffer.speech_stopped` with the same ID and
+`audio_end_ms`. Times refer to the accepted audio timeline, including prefix and
+trailing silence; these are speech boundaries, not word timestamps. Audio must
+continue carrying silence for silence detection: a pause in network delivery is
+not silence. A stopped turn automatically emits `input_audio_buffer.committed`
+and completes transcription with `is_final: true`, without a client commit.
+Subsequent speech can queue while previous inference finishes; total queued PCM
+remains bounded by 60 seconds. Continuous speech is automatically split at about
+28 seconds to keep each ASR window bounded, even without a silent boundary.
+
+`input_audio_buffer.commit` can still end active speech manually; partial detector
+frames are preserved. Committing without active speech is an error. Clear cancels
+pending and queued turns and resets detector state; disconnect cancels all work.
+Per-model audio duration and output budgets still apply. Exceeding a VAD turn's
+audio duration reports an error and closes the session, cancelling pending work.
+Noise reduction, `semantic_vad`, and conversation response/interrupt options
+are not supported. These settings belong to API sessions; the App adds no task UI.
 
 An executable upstream example is [`examples/transcription-client.swift`](../examples/transcription-client.swift).
 It sends raw PCM at audio cadence while receiving provisional results, and writes

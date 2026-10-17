@@ -10,6 +10,7 @@ description = "Native audio model resources, signal processing, and speech infer
 publish = false
 
 [dependencies]
+earshot = "=1.2.2"
 ironmlx-core = { path = "../ironmlx-core" }
 mlx = { path = "../mlx" }
 thiserror.workspace = true

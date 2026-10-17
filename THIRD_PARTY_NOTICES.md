@@ -102,6 +102,7 @@ development dependencies excluded, build dependencies retained.
 | dirs | 6.0.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6a2e0ade09a7d5f8.txt` | https://github.com/soc/dirs-rs |
 | dirs-sys | 0.5.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6a2e0ade09a7d5f8.txt` | https://github.com/dirs-dev/dirs-sys-rs |
 | displaydoc | 0.2.7 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/yaahc/displaydoc |
+| earshot | 1.2.2 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-b05785f9f18e6716.txt` | https://github.com/pykeio/earshot |
 | either | 1.17.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-7576269ea71f767b.txt` | https://github.com/rayon-rs/either |
 | encoding_rs | 0.8.35 | (Apache-2.0 OR MIT) AND BSD-3-Clause | `THIRD_PARTY_LICENSES/rust-license-3fa4ca83dcc92378.txt`<br>`THIRD_PARTY_LICENSES/rust-license-838118388fe5c2e7.txt` | https://github.com/hsivonen/encoding_rs |
 | equivalent | 1.0.2 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-7365cc8878a1d7ce.txt` | https://github.com/indexmap-rs/equivalent |
