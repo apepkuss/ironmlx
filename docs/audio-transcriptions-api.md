@@ -37,10 +37,10 @@ same `id`, `path`, and `load_policy` fields as other managed models.
 
 Use `multipart/form-data` with required `model` and binary `file` fields.
 Optional fields are `language` (language code or supported language name),
-`prompt` (context), and `response_format` (`json`, `text` or `verbose_json`, default `json`).
+`prompt` (context), and `response_format` (`json`, `text`, `verbose_json`, `srt` or `vtt`, default `json`).
 Omitting `language` enables language detection. For standalone ASR use `json` or
-`text` and omit `timestamp_granularities[]`; `verbose_json` enables the two-model
-workflow described below. Greedy decoding is used;
+`text` and omit `timestamp_granularities[]`; `verbose_json`, `srt` and `vtt` enable the two-model
+workflow described below. Subtitle requests also omit `timestamp_granularities[]`. Greedy decoding is used;
 `temperature=0` is accepted. Set `stream=true` with JSON output for SSE events
 `transcript.text.delta` and `transcript.text.done`; deltas concatenate to the final text.
 
@@ -104,7 +104,7 @@ in-flight requests. The App persists the values in its model parameter store.
 - Disconnects cancel work at computation checkpoints. Model leases and memory
   reservations remain held until submitted GPU operations finish.
 
-Unsupported parameters, duplicate scalar fields, subtitles and nonzero temperature
+Unsupported parameters, duplicate scalar fields, unsupported output formats and nonzero temperature
 return explicit OpenAI-shaped errors. Speaker diarization is not implemented. `stream=true` requires `response_format=json`.
 
 ## Timestamped transcription: fixed two-model workflow
@@ -128,12 +128,13 @@ requested `words: [{word,start,end}]` and/or `segments: [{id,text,start,end}]`.
 `timestamp_granularities[]` is an array field: `word` requests word/unit times and
 `segment` requests segment times. Repeat the same multipart field to request both,
 as in the example above. It requires `verbose_json`; omitting it defaults to
-`segment`, while supplying it with `json` or `text` is an error. Both kinds of timestamps come from actual
+`segment`, while supplying it with any other response format is an error. Both kinds of timestamps come from actual
 alignment; segment times span the first through last aligned unit of each ASR
 window. They are not sentence segmentation or VAD boundaries. Long-file times
 include each window's offset in the original recording. Plain `json`/`text` and
-SSE transcription continue to use only ASR; timestamp output requires nonstreaming
-`verbose_json`. Realtime WebSocket timestamps are not added by this workflow.
+SSE transcription continue to use only ASR. Timestamped JSON uses nonstreaming
+`verbose_json`; subtitle output uses nonstreaming `srt` or `vtt` as described below.
+Realtime WebSocket timestamps are not added by this workflow.
 Field names follow the [OpenAI transcription contract](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create);
 Whisper-specific token scores and confidence fields are not synthesized.
 
@@ -149,7 +150,7 @@ model-pool server can evict an idle unpinned model even with one loaded-model sl
 `POST /v1/audio/alignments` accepts multipart fields `model`, `file`, `text`, and
 `language`; all four are required. `model` identifies the registered ForcedAligner
 checkpoint. This performs alignment only and does not run an ASR model.
-`response_format=json` is optional. Sampling, prompts, streaming and timestamp
+`response_format` accepts `json` (default), `srt` or `vtt`. Sampling, prompts, streaming and timestamp
 selection fields are not accepted. This endpoint is an IronMLX extension, not an
 OpenAI or Anthropic standard API.
 
@@ -159,7 +160,7 @@ curl http://127.0.0.1:9068/v1/audio/alignments \
   -F file=@speech.wav -F 'text=甚至出现交易几乎停滞的情况。' -F language=zh
 ```
 
-It returns `{text,language,duration,words:[{word,start,end}]}` with times in seconds.
+JSON returns `{text,language,duration,words:[{word,start,end}]}` with times in seconds.
 Standalone audio is bounded to 300 seconds, text to 16,384 UTF-8 bytes and 2,048
 spoken units, with an 8,192-token combined audio/text context. Split longer
 standalone inputs into matching audio/text pairs upstream; audio cannot be split
@@ -182,6 +183,68 @@ The App reports this model as `runtime_kind: "alignment"`, with audio input and
 without streaming, chat defaults, generation sampling, or output-token settings.
 Existing verified file-only snapshots are promoted by successful native preflight
 when loaded, retaining downloaded weights. No recording or transcription UI is added.
+
+## SRT and WebVTT subtitles
+
+Use the standard OpenAI transcription `response_format=srt` or `response_format=vtt`.
+Transcription runs the selected Qwen3-ASR and the fixed ForcedAligner; register both
+checkpoints before calling. On the independent IronMLX alignment endpoint, the same
+format options align supplied `text` and `language` without running ASR.
+Omit `timestamp_granularities[]`, which is only valid with `verbose_json`.
+`stream=true` is rejected; the server returns a complete subtitle document.
+
+```sh
+# Audio -> transcription -> alignment -> SubRip text
+curl http://127.0.0.1:9068/v1/audio/transcriptions \
+  -F model=mlx-community/Qwen3-ASR-0.6B-8bit \
+  -F file=@speech.wav -F language=zh -F response_format=srt \
+  -o speech.srt
+
+# Audio + existing transcript -> alignment -> WebVTT text
+curl http://127.0.0.1:9068/v1/audio/alignments \
+  -F model=mlx-community/Qwen3-ForcedAligner-0.6B-8bit \
+  -F file=@speech.wav -F 'text=甚至出现交易几乎停滞的情况。' \
+  -F language=zh -F response_format=vtt -o speech.vtt
+```
+
+| Format | Content-Type | Time notation | Header |
+| --- | --- | --- | --- |
+| `srt` | `application/x-subrip; charset=utf-8` | `HH:MM:SS,mmm` | No file header; numbered cues |
+| `vtt` | `text/vtt; charset=utf-8` | `HH:MM:SS.mmm` | `WEBVTT` and a blank line |
+
+The UTF-8 response body is subtitle text, without a JSON wrapper or server-side
+file URL. Upstream applications can save it as `.srt` or `.vtt`. For example:
+
+```srt
+1
+00:00:00,400 --> 00:00:03,680
+甚至出现交易几乎停滞的情况。
+
+```
+
+Cues use aligned word/unit times in the original audio coordinate system. They
+are rebuilt across ASR windows, rather than exposing a 25–30 second recognition
+window as one caption. Defaults prefer sentence punctuation after one second,
+clause punctuation after three seconds or one line, and pauses of at least 600 ms.
+Targets are six seconds per cue and two lines of 42 display units each; CJK and
+other full-width characters count as two units. These are formatting heuristics,
+not linguistic segmentation or broadcast-standard certification. A long single
+alignment unit, or merging untimed units, can exceed these targets; text is never
+discarded to satisfy a limit. No extra subtitle-style request fields are introduced.
+
+Source punctuation and letter case are retained, whitespace is normalized, and
+literal `&`, `<` and `>` are escaped in cue text. Zero-duration units are merged
+with timed neighbours. If nonempty speech has no positive interval at millisecond
+precision, the API returns HTTP 422 with `error.code=subtitle_timing_unavailable`,
+not guessed times or a partial subtitle file. Invalid/mismatched alignment returns
+an OpenAI-shaped `subtitle_output_failed` server error. Empty recognized speech
+returns empty SRT or a WebVTT header without placeholder cues.
+
+Subtitle export inherits ASR errors and alignment precision, including the model's
+80 ms timestamp classes and possible long-silence outliers; millisecond notation
+does not improve accuracy. Existing duration, context, dependency, capacity,
+deadline and cancellation rules still apply. No subtitles are added to SSE or
+Realtime WebSocket responses, and no Dashboard transcription controls are added.
 
 ## Realtime transcription
 

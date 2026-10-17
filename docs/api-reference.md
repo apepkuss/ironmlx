@@ -12,7 +12,7 @@ Choose an API topic by capability or look up a specific route in the endpoint in
 | [Text and vision API](text-vision-api.md) | Responses, Chat Completions and Messages; text and image understanding, reasoning, tools and structured outputs |
 | [Embedding API](text-embeddings.md) | Text, image, audio and combined inputs; output dimensions and encoding |
 | [Speech synthesis API](audio-speech-api.md) | Speech output, voice profiles and reference recordings |
-| [Speech recognition and alignment API](audio-transcriptions-api.md) | Standalone transcription, forced alignment and timestamped transcription |
+| [Speech recognition and alignment API](audio-transcriptions-api.md) | Standalone transcription, forced alignment, timestamps and SRT/WebVTT subtitles |
 | [Image generation API](image-generation-api.md) | Text-to-image generation and single-image conditional editing |
 | [System One API](laya-systemone-api.md) | Laya choice, score and true/false probability requests |
 | [OpenAI Decisions API](openai-decisions-api.md) | Laya predicate, choice and score answers through the official OpenAI SDK |
@@ -31,8 +31,8 @@ Availability depends on the serving mode and configured compatible models. This 
 | `POST` | `/v1/messages` | Messages inference | App / EnginePool / CLI; compatible model | [Text and vision API](text-vision-api.md#anthropic-messages) |
 | `POST` | `/v1/embeddings` | Text, image, audio and combined vectors | App / EnginePool; EmbeddingGemma 2 | [Embedding API](text-embeddings.md#api) |
 | `POST` | `/v1/audio/speech` | Speech synthesis | App / EnginePool; audio model | [Speech synthesis API](audio-speech-api.md#request) |
-| `POST` | `/v1/audio/transcriptions` | Speech recognition; `verbose_json` adds fixed-model alignment | App / EnginePool; ASR model | [Speech recognition API](audio-transcriptions-api.md) |
-| `POST` | `/v1/audio/alignments` | Align supplied text with audio (IronMLX extension) | App / EnginePool; ForcedAligner model | [Independent forced alignment](audio-transcriptions-api.md#independent-forced-alignment-ironmlx-extension) |
+| `POST` | `/v1/audio/transcriptions` | Speech recognition; aligned timestamps or SRT/WebVTT output | App / EnginePool; ASR model | [Speech recognition API](audio-transcriptions-api.md) |
+| `POST` | `/v1/audio/alignments` | Align supplied text with audio; JSON or SRT/WebVTT (IronMLX extension) | App / EnginePool; ForcedAligner model | [Independent forced alignment](audio-transcriptions-api.md#independent-forced-alignment-ironmlx-extension) |
 | `GET` | `/v1/realtime` | Realtime transcription | App / EnginePool; ASR WebSocket sessions | [Realtime](audio-transcriptions-api.md) |
 | `GET` | `/v1/audio/voices` | List enabled voices | App / EnginePool; configured voice service | [Speech synthesis API](audio-speech-api.md) |
 | `GET` | `/admin/api/audio/voices` | List all voices, including disabled profiles | App / EnginePool; configured voice service | [Speech synthesis API](audio-speech-api.md) |

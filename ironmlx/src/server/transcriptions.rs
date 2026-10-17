@@ -1,5 +1,6 @@
 //! OpenAI-compatible multipart audio transcription on the native ASR worker.
 use super::api_error::{ApiError, ApiProtocol};
+use super::subtitles::{self, SubtitleError, SubtitleFormat};
 use axum::{
     body::{to_bytes, Body},
     extract::{FromRequest, Multipart, Request, State},
@@ -158,12 +159,19 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
             }
         }
     }
-    if !matches!(format.as_str(), "json" | "text" | "verbose_json")
-        || (alignment_only && format != "json")
+    let subtitle_format = match format.as_str() {
+        "srt" => Some(SubtitleFormat::Srt),
+        "vtt" => Some(SubtitleFormat::Vtt),
+        _ => None,
+    };
+    if !matches!(
+        format.as_str(),
+        "json" | "text" | "verbose_json" | "srt" | "vtt"
+    ) || (alignment_only && format != "json" && subtitle_format.is_none())
     {
         return Err(ApiError::invalid_request(
             "unsupported_response_format",
-            "Transcription supports json, text and verbose_json; alignment supports json",
+            "Transcription supports json, text, verbose_json, srt and vtt; alignment supports json, srt and vtt",
         )
         .with_param(Some("response_format".into())));
     }
@@ -226,7 +234,9 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
             .map_err(|e| ApiError::internal("asr_settings_failed", e.to_string()))?
     };
     // Resolve the fixed dependency before spending GPU time on transcription.
-    if format == "verbose_json"
+    let needs_alignment = format == "verbose_json" || subtitle_format.is_some();
+    if !alignment_only
+        && needs_alignment
         && !pool
             .is_alignment_model(FIXED_ALIGNER)
             .await
@@ -269,9 +279,14 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
             slot,
         )
         .await?;
-        return Ok(Json(result).into_response());
+        return if let Some(format) = subtitle_format {
+            subtitle_response(&result.text, &result.words, result.duration, format)
+                .map_err(subtitle_error)
+        } else {
+            Ok(Json(result).into_response())
+        };
     }
-    let alignment_pcm = (format == "verbose_json").then(|| pcm.clone());
+    let alignment_pcm = needs_alignment.then(|| pcm.clone());
     let (_, lease) = pool
         .resolve_engine(Some(&model))
         .await
@@ -335,8 +350,18 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
         .map_err(execution_error)?;
     drop(runtime);
     if let Some(pcm) = alignment_pcm {
-        return timestamped_transcription(&pool, result, pcm, granularities, input_memory, slot)
-            .await;
+        return timestamped_transcription(
+            &pool,
+            result,
+            pcm,
+            TimestampOutput {
+                granularities,
+                subtitle_format,
+            },
+            input_memory,
+            slot,
+        )
+        .await;
     }
     Ok(if format == "text" {
         (
@@ -349,6 +374,32 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
     })
 }
 pub(super) const FIXED_ALIGNER: &str = "mlx-community/Qwen3-ForcedAligner-0.6B-8bit";
+
+struct TimestampOutput {
+    granularities: HashSet<String>,
+    subtitle_format: Option<SubtitleFormat>,
+}
+
+fn subtitle_response(
+    text: &str,
+    words: &[ironmlx_audio::qwen3_asr::AlignedWord],
+    duration: f64,
+    format: SubtitleFormat,
+) -> Result<Response, SubtitleError> {
+    let body = subtitles::render(text, words, duration, format)?;
+    Ok(([(header::CONTENT_TYPE, format.content_type())], body).into_response())
+}
+
+fn subtitle_error(error: SubtitleError) -> ApiError {
+    match error {
+        SubtitleError::UnavailableTiming => ApiError::from_status(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "subtitle_timing_unavailable",
+            error.to_string(),
+        ),
+        _ => ApiError::internal("subtitle_output_failed", error.to_string()),
+    }
+}
 
 async fn align_audio(
     pool: &EnginePoolState,
@@ -389,10 +440,11 @@ async fn timestamped_transcription(
     pool: &EnginePoolState,
     result: ironmlx_audio::qwen3_asr::Transcription,
     pcm: ironmlx_audio::PcmBuffer,
-    mut granularities: HashSet<String>,
+    output: TimestampOutput,
     input_memory: Arc<ironmlx_runtime::core::process_memory::MemoryReservation>,
     input_slot: Arc<tokio::sync::OwnedSemaphorePermit>,
 ) -> Result<Response, ApiError> {
+    let mut granularities = output.granularities;
     if granularities.is_empty() {
         granularities.insert("segment".into());
     }
@@ -429,6 +481,10 @@ async fn timestamped_transcription(
             w.end += segment.start;
             w
         }));
+    }
+    if let Some(format) = output.subtitle_format {
+        return subtitle_response(&result.text, &words, result.duration, format)
+            .map_err(subtitle_error);
     }
     let mut body = serde_json::json!({"task":"transcribe", "language":result.language, "duration":result.duration, "text":result.text});
     if granularities.contains("word") {
@@ -485,5 +541,28 @@ pub(super) fn execution_error(error: AsrExecutionError) -> ApiError {
             }
             ApiError::internal("asr_inference_failed", format!("{error:#}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn untimed_subtitles_return_an_openai_error_not_a_partial_file() {
+        let words = [ironmlx_audio::qwen3_asr::AlignedWord {
+            word: "Hello".into(),
+            start: 1.,
+            end: 1.,
+        }];
+        let response = subtitle_response("Hello", &words, 2., SubtitleFormat::Vtt)
+            .map_err(subtitle_error)
+            .unwrap_err()
+            .into_response(ApiProtocol::OpenAi);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["error"]["code"], "subtitle_timing_unavailable");
     }
 }

@@ -48,6 +48,7 @@ pub(crate) mod responses;
 mod scheduler_disconnect_tests;
 pub mod security;
 pub(crate) mod structured_output;
+mod subtitles;
 pub mod vision;
 pub(crate) mod voices;
 

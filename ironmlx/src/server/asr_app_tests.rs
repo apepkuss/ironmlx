@@ -65,8 +65,131 @@ async fn audio_request(
         .unwrap();
     assert!(response.headers().contains_key("x-request-id"));
     let status = response.status();
+    if status == StatusCode::OK {
+        if let Some((_, format)) = extra.iter().find(|(name, _)| *name == "response_format") {
+            let expected = match *format {
+                "srt" => Some("application/x-subrip; charset=utf-8"),
+                "vtt" => Some("text/vtt; charset=utf-8"),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                assert_eq!(response.headers()["content-type"], expected);
+            }
+        }
+    }
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     (status, bytes.to_vec())
+}
+
+fn subtitle_intervals(bytes: &[u8], format: &str) -> Vec<(f64, f64)> {
+    fn time(value: &str, separator: char) -> f64 {
+        let (clock, fraction) = value.split_once(separator).unwrap();
+        assert_eq!(fraction.len(), 3);
+        let fields = clock.split(':').collect::<Vec<_>>();
+        assert_eq!(fields.len(), 3);
+        assert!(fields[0].len() >= 2);
+        let numbers = fields
+            .iter()
+            .map(|v| v.parse::<u64>().unwrap())
+            .collect::<Vec<_>>();
+        assert!(numbers[1] < 60 && numbers[2] < 60);
+        (numbers[0] * 3600 + numbers[1] * 60 + numbers[2]) as f64
+            + fraction.parse::<u64>().unwrap() as f64 / 1000.
+    }
+    let text = std::str::from_utf8(bytes).unwrap();
+    let text = if format == "vtt" {
+        text.strip_prefix("WEBVTT\n\n").unwrap()
+    } else {
+        assert!(!text.starts_with("WEBVTT"));
+        text
+    };
+    let mut intervals = Vec::new();
+    for block in text.trim_end().split("\n\n").filter(|s| !s.is_empty()) {
+        let lines = block.lines().collect::<Vec<_>>();
+        assert!((3..=4).contains(&lines.len()));
+        assert_eq!(lines[0].parse::<usize>().unwrap(), intervals.len() + 1);
+        let (start, end) = lines[1].split_once(" --> ").unwrap();
+        let separator = if format == "srt" { ',' } else { '.' };
+        let interval = (time(start, separator), time(end, separator));
+        assert!(interval.1 > interval.0);
+        if let Some(&(_, previous_end)) = intervals.last() {
+            assert!(interval.0 >= previous_end);
+        }
+        intervals.push(interval);
+        assert!(lines[2..].iter().all(|s| !s.is_empty()));
+    }
+    intervals
+}
+
+fn subtitle_artifact(name: &str, format: &str, bytes: &[u8]) {
+    if let Ok(directory) = std::env::var("IRONMLX_SUBTITLE_TEST_OUTPUT_DIR") {
+        let directory = std::path::Path::new(&directory);
+        std::fs::create_dir_all(directory).unwrap();
+        std::fs::write(directory.join(format!("{name}.{format}")), bytes).unwrap();
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(mlx_metal)]
+async fn subtitle_request_options_are_validated_before_model_resolution() {
+    let args = super::tests::serve_args();
+    let manager = ModelManager::new(
+        crate::cli::serve::engine_runtime_config(&args).unwrap(),
+        Some(2),
+        SchedulerResolutionOptions::from(&args),
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_router(
+        manager,
+        crate::server::voices::VoiceStore::open(dir.path().to_owned()).unwrap(),
+    );
+    for format in ["srt", "vtt"] {
+        for path in ["/v1/audio/transcriptions", "/v1/audio/alignments"] {
+            let required = [
+                ("response_format", format),
+                ("text", "Hello"),
+                ("language", "en"),
+            ];
+            let fields = if path.ends_with("alignments") {
+                &required[..]
+            } else {
+                &required[..1]
+            };
+            let (status, body) =
+                audio_request(&app, path, "not-registered", b"not audio", fields).await;
+            assert_eq!(
+                status,
+                StatusCode::NOT_FOUND,
+                "{}",
+                String::from_utf8_lossy(&body)
+            );
+            for extra in [
+                ("stream", "true"),
+                ("timestamp_granularities[]", "word"),
+                ("response_format", "json"),
+            ] {
+                let mut fields = fields.to_vec();
+                fields.push(extra);
+                let (status, body) =
+                    audio_request(&app, path, "not-registered", b"not audio", &fields).await;
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "{}",
+                    String::from_utf8_lossy(&body)
+                );
+            }
+        }
+    }
+    let (status, _) = transcribe(
+        &app,
+        "not-registered",
+        b"not audio",
+        &[("response_format", "ass")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -163,7 +286,7 @@ async fn qwen3_asr_real_app_lifecycle_and_api() {
         );
         for fields in [
             vec![("stream", "true"), ("response_format", "text")],
-            vec![("response_format", "srt")],
+            vec![("response_format", "ass")],
             vec![("language", "not-a-language")],
             vec![("temperature", "0.5")],
             vec![("model", "duplicate")],
@@ -698,6 +821,31 @@ async fn qwen3_alignment_and_timestamp_workflow() {
     let aligned: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(aligned["words"].as_array().unwrap().len(), 13);
     assert_eq!(aligned["words"][0]["start"], 0.4);
+    for format in ["srt", "vtt"] {
+        let (status, bytes) = audio_request(
+            &app,
+            "/v1/audio/alignments",
+            aligner,
+            &audio,
+            &[
+                ("text", "甚至出现交易几乎停滞的情况。"),
+                ("language", "zh"),
+                ("response_format", format),
+            ],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(subtitle_intervals(&bytes, format), [(0.4, 3.68)]);
+        subtitle_artifact("standalone-zh", format, &bytes);
+        assert!(std::str::from_utf8(&bytes)
+            .unwrap()
+            .contains("甚至出现交易几乎停滞的情况。"));
+    }
     for extra in [
         vec![("text", "hello")],
         vec![("text", "hello"), ("language", "xx")],
@@ -742,6 +890,84 @@ async fn qwen3_alignment_and_timestamp_workflow() {
         assert_eq!(result["words"].as_array().unwrap().len(), 13);
         assert!(!result["segments"].as_array().unwrap().is_empty());
         println!("{size}: {result}");
+        for format in ["srt", "vtt"] {
+            let (status, bytes) = transcribe(
+                &app,
+                &model,
+                &audio,
+                &[("language", "zh"), ("response_format", format)],
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{}",
+                String::from_utf8_lossy(&bytes)
+            );
+            assert_eq!(subtitle_intervals(&bytes, format), [(0.4, 3.68)]);
+            subtitle_artifact(&format!("asr-{size}-zh"), format, &bytes);
+            assert!(std::str::from_utf8(&bytes)
+                .unwrap()
+                .contains("甚至出现交易几乎停滞的情况。"));
+        }
+        if let Ok(english_path) = std::env::var("IRONMLX_SUBTITLE_EN_AUDIO") {
+            let english = std::fs::read(english_path).unwrap();
+            let (status, bytes) = transcribe(&app, &model, &english, &[("language", "en")]).await;
+            assert_eq!(status, StatusCode::OK);
+            let transcript: Value = serde_json::from_slice(&bytes).unwrap();
+            let text = transcript["text"].as_str().unwrap();
+            assert!(text.contains("music"));
+            for format in ["srt", "vtt"] {
+                for path in ["/v1/audio/transcriptions", "/v1/audio/alignments"] {
+                    let alignment = path.ends_with("alignments");
+                    let mut fields = vec![("response_format", format), ("language", "en")];
+                    if alignment {
+                        fields.push(("text", text));
+                    }
+                    let (status, bytes) = audio_request(
+                        &app,
+                        path,
+                        if alignment { aligner } else { &model },
+                        &english,
+                        &fields,
+                    )
+                    .await;
+                    assert_eq!(
+                        status,
+                        StatusCode::OK,
+                        "{}",
+                        String::from_utf8_lossy(&bytes)
+                    );
+                    let intervals = subtitle_intervals(&bytes, format);
+                    assert!(
+                        intervals.last().unwrap().1 > 10. && intervals.last().unwrap().1 <= 15.061
+                    );
+                    let caption_text = std::str::from_utf8(&bytes)
+                        .unwrap()
+                        .split("\n\n")
+                        .filter(|block| block.contains(" --> "))
+                        .flat_map(|block| block.lines().skip(2))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    assert_eq!(
+                        caption_text,
+                        text.split_whitespace().collect::<Vec<_>>().join(" ")
+                    );
+                    subtitle_artifact(
+                        &format!(
+                            "asr-{size}-en-{}",
+                            if alignment {
+                                "alignment"
+                            } else {
+                                "transcription"
+                            }
+                        ),
+                        format,
+                        &bytes,
+                    );
+                }
+            }
+        }
         let (status, _) = transcribe(
             &app,
             &model,
@@ -790,6 +1016,29 @@ async fn qwen3_alignment_and_timestamp_workflow() {
                 words.len(),
                 words.last().unwrap()["end"]
             );
+            for format in ["srt", "vtt"] {
+                let (status, bytes) = transcribe(
+                    &app,
+                    &model,
+                    &long,
+                    &[("language", "zh"), ("response_format", format)],
+                )
+                .await;
+                assert_eq!(
+                    status,
+                    StatusCode::OK,
+                    "{}",
+                    String::from_utf8_lossy(&bytes)
+                );
+                let intervals = subtitle_intervals(&bytes, format);
+                assert!(
+                    intervals.len() >= 8,
+                    "Subtitles must not follow only the ASR windows"
+                );
+                assert!(intervals.last().unwrap().1 > 30.);
+                assert!(intervals.last().unwrap().1 <= 33.681);
+                subtitle_artifact("asr-0.6B-long-zh", format, &bytes);
+            }
         }
         json_request(&app, "/admin/api/models/unload", json!({"model":model})).await;
     }
@@ -869,6 +1118,22 @@ async fn qwen3_timestamp_pool_evicts_between_workflow_steps() {
     );
     let result: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(result["words"].as_array().unwrap().len(), 13);
+    for format in ["srt", "vtt"] {
+        let (status, bytes) = transcribe(
+            &app,
+            "mlx-community/Qwen3-ASR-0.6B-8bit",
+            &audio,
+            &[("response_format", format), ("language", "zh")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert_eq!(subtitle_intervals(&bytes, format), [(0.4, 3.68)]);
+    }
     assert!(
         !pool
             .is_model_loaded("mlx-community/Qwen3-ASR-0.6B-8bit")
@@ -917,18 +1182,19 @@ async fn qwen3_alignment_rejects_limits_and_cancels_cleanly() {
         json!({"model":asr,"model_dir":std::env::var("IRONMLX_ASR_SMALL_DIR").unwrap()}),
     )
     .await;
-    let (status, bytes) =
-        transcribe(&app, asr, &audio, &[("response_format", "verbose_json")]).await;
-    assert_eq!(
-        status,
-        StatusCode::NOT_FOUND,
-        "{}",
-        String::from_utf8_lossy(&bytes)
-    );
-    assert!(
-        !manager.pool.is_model_loaded(asr).await,
-        "Missing dependency must fail before loading ASR"
-    );
+    for format in ["verbose_json", "srt", "vtt"] {
+        let (status, bytes) = transcribe(&app, asr, &audio, &[("response_format", format)]).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        assert!(
+            !manager.pool.is_model_loaded(asr).await,
+            "Missing dependency must fail before loading ASR"
+        );
+    }
     let (status, bytes) = transcribe(&app, asr, &audio, &[]).await;
     assert_eq!(
         status,

@@ -21,15 +21,18 @@ ASR 模型不能设为默认聊天生成模型。
 
 请求使用 `multipart/form-data`，必需字段为 `model` 和二进制文件 `file`。
 可选字段为 `language`、`prompt`、`response_format` 和 `timestamp_granularities[]`。
-省略 `language` 时自动识别。`response_format` 支持三个值：
+省略 `language` 时自动识别。`response_format` 支持五个值：
 
 | 值 | 返回内容 | 调用模型 |
 | --- | --- | --- |
 | `json`（默认） | JSON 格式的转写文字 | 仅 ASR |
 | `text` | 纯文本 | 仅 ASR |
 | `verbose_json` | 转写文字、时长及指定粒度的时间戳 | ASR 加固定 ForcedAligner |
+| `srt` | SubRip 字幕文本 | ASR 加固定 ForcedAligner |
+| `vtt` | WebVTT 字幕文本 | ASR 加固定 ForcedAligner |
 
 只做单模型转写时，使用 `json` 或 `text`，不传 `timestamp_granularities[]`。
+字幕请求也不传此字段；它只用于 `verbose_json`。
 采用贪心解码，接受 `temperature=0`。使用 `stream=true`、`response_format=json` 时返回 SSE，
 事件为 `transcript.text.delta` 和 `transcript.text.done`；拼接增量文本即可得到最终文本。
 
@@ -94,7 +97,7 @@ App 通过本机管理端点 `POST /admin/api/models/asr` 应用设置，
 - 上传超时 60 秒；处理期限为 180 秒加录音时长的两倍。
 - 断开请求会取消计算；已提交的 GPU 工作完成后才释放模型租约和内存预留。
 
-不支持的参数、重复的普通字段、字幕格式和非零温度会明确报错。
+不支持的参数、重复的普通字段、不支持的输出格式和非零温度会明确报错。
 说话人分离尚未实现。流式文件转写要求 `response_format=json`。
 
 ## 带时间戳转写：固定双模型流程
@@ -117,10 +120,11 @@ curl http://127.0.0.1:9068/v1/audio/transcriptions \
 `timestamp_granularities[]` 是数组字段，`[]` 表示可传入多个值。
 `word` 请求字词级时间戳，`segment` 请求片段级时间戳；同时请求时，像上例一样
 重复传入同名 multipart 字段。此字段仅适用于 `verbose_json`，省略时默认 `segment`；
-在 `json` 或 `text` 模式下传入会报错。两种时间戳均来自真实对齐；片段时间覆盖该 ASR 窗口中
+在其他输出格式下传入会报错。两种时间戳均来自真实对齐；片段时间覆盖该 ASR 窗口中
 首个至最后一个对齐单元，不代表按句分段或 VAD 边界。长音频结果会加上窗口在
-原始录音中的时间偏移。普通 `json`／`text` 和 SSE 仍只调用 ASR；时间戳仅支持
-非流式 `verbose_json`，本次不为实时 WebSocket 增加时间戳。
+原始录音中的时间偏移。普通 `json`／`text` 和 SSE 仍只调用 ASR；时间戳 JSON 使用
+非流式 `verbose_json`，字幕使用下文的非流式 `srt` 或 `vtt`。
+本次不为实时 WebSocket 增加时间戳。
 字段遵循 [OpenAI 转写契约](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)，
 不伪造 Whisper 专属的 token 评分或置信度字段。
 
@@ -134,7 +138,8 @@ curl http://127.0.0.1:9068/v1/audio/transcriptions \
 
 `POST /v1/audio/alignments` 使用 multipart，必须提供 `model`、`file`、`text`、
 `language`。`model` 指定已注册的 ForcedAligner；此接口仅对齐，不运行 ASR。
-可选 `response_format=json`。不接受采样参数、提示词、流式输出或时间戳粒度参数。
+`response_format` 支持 `json`（默认）、`srt` 或 `vtt`。
+不接受采样参数、提示词、流式输出或时间戳粒度参数。
 这是 IronMLX 扩展接口，不是 OpenAI 或 Anthropic 标准 API。
 
 ```sh
@@ -143,7 +148,7 @@ curl http://127.0.0.1:9068/v1/audio/alignments \
   -F file=@speech.wav -F 'text=甚至出现交易几乎停滞的情况。' -F language=zh
 ```
 
-返回 `{text,language,duration,words:[{word,start,end}]}`，时间单位为秒。
+JSON 返回 `{text,language,duration,words:[{word,start,end}]}`，时间单位为秒。
 独立对齐最多接受 300 秒音频、16,384 个 UTF-8 字节的文字和 2,048 个有声文字单元；
 音频和文字合计不能超过 8,192 个上下文 token。更长的独立对齐输入应由上游拆成
 相互匹配的音频／文字对，不能在不知道文字归属的情况下仅切音频。组合流程则利用
@@ -161,6 +166,61 @@ curl http://127.0.0.1:9068/v1/audio/alignments \
 App 将该模型标为 `runtime_kind: "alignment"`，支持音频输入，不支持流式输出、
 默认聊天模型、生成采样或输出 Token 参数。旧的已校验仅下载快照在加载时通过
 原生预检后升级，保留已有权重。App 不增加录音或转写操作页面。
+
+## SRT 与 WebVTT 字幕
+
+转写接口使用 OpenAI 已定义的 `response_format=srt` 或 `response_format=vtt`。
+后端调用所选 Qwen3-ASR 和固定 ForcedAligner，请提前注册两款模型。
+独立的 IronMLX 强制对齐接口也接受这两个格式，使用已有 `text` 和 `language`，不运行 ASR。
+省略仅用于 `verbose_json` 的 `timestamp_granularities[]`。
+`stream=true` 会报错；字幕按完整文档返回。
+
+```sh
+# 音频 -> 转写 -> 对齐 -> SubRip 文本
+curl http://127.0.0.1:9068/v1/audio/transcriptions \
+  -F model=mlx-community/Qwen3-ASR-0.6B-8bit \
+  -F file=@speech.wav -F language=zh -F response_format=srt \
+  -o speech.srt
+
+# 音频 + 已有文字 -> 对齐 -> WebVTT 文本
+curl http://127.0.0.1:9068/v1/audio/alignments \
+  -F model=mlx-community/Qwen3-ForcedAligner-0.6B-8bit \
+  -F file=@speech.wav -F 'text=甚至出现交易几乎停滞的情况。' \
+  -F language=zh -F response_format=vtt -o speech.vtt
+```
+
+| 格式 | Content-Type | 时间格式 | 文件头 |
+| --- | --- | --- | --- |
+| `srt` | `application/x-subrip; charset=utf-8` | `HH:MM:SS,mmm` | 无文件头，字幕条目带序号 |
+| `vtt` | `text/vtt; charset=utf-8` | `HH:MM:SS.mmm` | `WEBVTT` 后空一行 |
+
+响应体为 UTF-8 字幕文本，不使用 JSON 包装，也不返回服务端文件地址。
+上游可自行保存为 `.srt` 或 `.vtt`。例如：
+
+```srt
+1
+00:00:00,400 --> 00:00:03,680
+甚至出现交易几乎停滞的情况。
+
+```
+
+字幕条目使用原始录音坐标中的对齐字词时间，跨 ASR 窗口重新分段，
+不会直接将一个 25–30 秒识别窗口当成一条字幕。默认在条目已有一秒时优先按句末标点分段，
+在已有三秒或一行文字时考虑分句标点，并在至少 600 ms 的停顿处分段。
+目标为每条六秒、最多两行，每行 42 个显示单位；汉字等全宽字符按两个单位计算。
+这些是排版启发规则，不是语言学分句或广播字幕标准认证。
+单个长对齐单元，或合并无时长单元时，可能超出目标；不会为满足限制而丢弃文字。
+本次不增加字幕样式请求参数。
+
+保留原文标点与大小写，统一空白字符，并在字幕正文中转义字面的 `&`、`<`、`>`。
+零时长单元与邻近的有时长内容合并。若非空讲话无法形成毫秒精度下的正时长区间，
+返回 HTTP 422，`error.code=subtitle_timing_unavailable`，不猜测时间或返回半份字幕。
+无效或与文字不匹配的对齐返回 OpenAI 形状的 `subtitle_output_failed` 服务端错误。
+识别文字为空时返回空 SRT，或仅含 WebVTT 文件头的文档，不添加占位条目。
+
+字幕导出继承 ASR 识别错误和对齐精度，包括模型的 80 ms 时间戳分类粒度及可能的长静音偏差；
+毫秒格式不提高准确率。原有时长、上下文、模型依赖、容量、超时与取消规则继续生效。
+SSE 和实时 WebSocket 不增加字幕输出，Dashboard 不增加转写控件。
 
 ## 实时识别
 

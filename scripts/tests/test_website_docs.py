@@ -201,6 +201,9 @@ class WebsiteDocumentationTests(unittest.TestCase):
                 self.assertIn('/v1/audio/alignments', topic)
                 self.assertIn('verbose_json', topic)
                 self.assertIn('timestamp_granularities[]', topic)
+                self.assertIn('response_format=srt', topic)
+                self.assertIn('response_format=vtt', topic)
+                self.assertIn('subtitle_timing_unavailable', topic)
                 self.assertIn('Qwen3-ForcedAligner-0.6B-8bit', topic)
                 for name in ("api-reference.html", "supported-models.html", "audio-library.html"):
                     html = (directory / name).read_text(encoding="utf-8")
@@ -212,6 +215,7 @@ class WebsiteDocumentationTests(unittest.TestCase):
                 search = json.loads((directory / "search-index.json").read_text(encoding="utf-8"))
                 page = next(item for item in search if item["href"] == "audio-transcriptions-api.html")
                 self.assertTrue(any('verbose_json' in section['text'] for section in page['sections']))
+                self.assertTrue(any('response_format=srt' in section['text'] for section in page['sections']))
 
     def test_repository_documents_have_bilingual_web_destinations(self):
         links = {
