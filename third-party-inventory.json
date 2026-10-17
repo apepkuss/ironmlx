@@ -210,7 +210,7 @@
       }
     ],
     "manifest": "compliance/bundled-assets.json",
-    "manifest_sha256": "acf9af792598ae4d83426d3e91a290acadd723402dc773532ac14a48521956fb"
+    "manifest_sha256": "dbb321459712c05f5c967242bb9441f7f30b9cf361273de9fef6cb7bee582bb4"
   },
   "generation": {
     "cargo_about_config": "about.toml",
