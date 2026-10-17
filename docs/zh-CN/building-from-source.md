@@ -154,7 +154,7 @@ MODEL="$HOME/.ironmlx/models/<org>/<model>"
   --host 127.0.0.1 \
   --port 8080 \
   --prefill-chunk-size 2048 \
-  --b-max 1 \
+  --max-sequences 1 \
   --max-cache-cap 32768
 ```
 

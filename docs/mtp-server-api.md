@@ -31,7 +31,7 @@ This page describes the Qwen MTP path. The same `--mtp-model-dir` CLI option als
 - `ironmlx generate --mtp-model-dir` supports Qwen text and Qwen VL greedy
   requests. VL requests use the scheduler-backed MTP path so the draft head sees
   the text-backbone hidden state produced after vision token replacement.
-- `ironmlx serve --mtp-model-dir` supports `--b-max N` for `N >= 1`.
+- `ironmlx serve --mtp-model-dir` supports `--max-sequences N` for `N >= 1`.
 - Server MTP runs only for scheduler-eligible greedy requests. Qwen VL requests
   are eligible after the vision prefill path has produced the text-backbone
   state; non-greedy sampling and other non-eligible requests fall back to the

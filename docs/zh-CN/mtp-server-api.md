@@ -22,7 +22,7 @@
 ## 请求与缓存限制
 
 - CLI 文本和视觉贪心请求均可使用 MTP；视觉请求在视觉 token 替换后，使用文本主干隐藏状态驱动 draft。
-- 服务支持 `--b-max N`，N 至少为 1。仅符合调度器条件的贪心请求使用 MTP；非贪心等请求回退到普通调度路径，仍正常返回。
+- 服务支持 `--max-sequences N`，N 至少为 1。仅符合调度器条件的贪心请求使用 MTP；非贪心等请求回退到普通调度路径，仍正常返回。
 - `--paged-prefix-cache-dir` 可与 MTP 组合，重复的兼容文本/视觉请求同时恢复主模型和 draft 缓存。不带值时目录为 `~/.ironmlx/cache/paged_prefix_cache`。
 - `--mtp-draft-tokens` 是启动配置，省略时按模型选择默认 draft 深度。
 
