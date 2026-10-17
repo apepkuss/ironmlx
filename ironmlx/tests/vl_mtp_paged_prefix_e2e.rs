@@ -59,7 +59,7 @@ impl ServerProcess {
             "127.0.0.1",
             "--port",
             &port.to_string(),
-            "--b-max",
+            "--max-sequences",
             "2",
             "--admission-deadline-ms",
             "200",
