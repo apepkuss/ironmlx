@@ -5,6 +5,7 @@ pub mod chat_template;
 pub mod constrained;
 pub mod generated_output;
 pub mod image_input;
+pub(crate) mod image_resample;
 pub mod loader;
 pub mod model;
 pub mod model_input;

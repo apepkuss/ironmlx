@@ -9,6 +9,7 @@ use mlx::Array;
 use std::time::Instant;
 
 use super::config::Gemma4VisionConfig;
+use crate::core::image_resample::resize_rgb;
 
 #[derive(Debug)]
 pub struct ProcessedImage {
@@ -128,160 +129,6 @@ pub fn preprocess(img_bytes: &[u8], cfg: &Gemma4VisionConfig) -> Result<Processe
         grid_w,
         soft_tokens,
     })
-}
-
-const PRECISION_BITS: i32 = 32 - 8 - 2;
-const BICUBIC_SUPPORT: f64 = 2.0;
-
-fn bicubic_filter(x: f64) -> f64 {
-    const A: f64 = -0.5;
-    let x = x.abs();
-    if x < 1.0 {
-        ((A + 2.0) * x - (A + 3.0)) * x * x + 1.0
-    } else if x < 2.0 {
-        (((x - 5.0) * x + 8.0) * x - 4.0) * A
-    } else {
-        0.0
-    }
-}
-
-fn clip8(acc: i64) -> u8 {
-    let v = acc >> PRECISION_BITS;
-    if v <= 0 {
-        0
-    } else if v >= 255 {
-        255
-    } else {
-        v as u8
-    }
-}
-
-fn pil_round(x: f64) -> i64 {
-    if x < 0.0 {
-        (x - 0.5).ceil() as i64
-    } else {
-        (x + 0.5).floor() as i64
-    }
-}
-
-fn precompute_coeffs(in_size: i32, out_size: i32) -> (Vec<i32>, Vec<i32>, usize) {
-    let scale = in_size as f64 / out_size as f64;
-    let filterscale = scale.max(1.0);
-    let support = BICUBIC_SUPPORT * filterscale;
-    let ksize = (support.ceil() as usize) * 2 + 1;
-
-    let mut kk = vec![0_i32; out_size as usize * ksize];
-    let mut bounds = vec![0_i32; out_size as usize * 2];
-    let mut prekk = vec![0.0_f64; ksize];
-
-    for xx in 0..out_size {
-        let center = (xx as f64 + 0.5) * scale;
-        let ss = 1.0 / filterscale;
-        let mut xmin = (center - support + 0.5) as i32;
-        if xmin < 0 {
-            xmin = 0;
-        }
-        let mut xmax = (center + support + 0.5) as i32;
-        if xmax > in_size {
-            xmax = in_size;
-        }
-        xmax -= xmin;
-
-        let mut ww = 0.0_f64;
-        for x in 0..xmax {
-            let w = bicubic_filter((x as f64 + xmin as f64 - center + 0.5) * ss);
-            prekk[x as usize] = w;
-            ww += w;
-        }
-        if ww != 0.0 {
-            for w in prekk.iter_mut().take(xmax as usize) {
-                *w /= ww;
-            }
-        }
-        let base = xx as usize * ksize;
-        for (x, &w) in prekk.iter().take(xmax as usize).enumerate() {
-            kk[base + x] = pil_round(w * (1_i64 << PRECISION_BITS) as f64) as i32;
-        }
-        bounds[xx as usize * 2] = xmin;
-        bounds[xx as usize * 2 + 1] = xmax;
-    }
-    (kk, bounds, ksize)
-}
-
-fn resample_horizontal(src: &[u8], in_w: usize, h: usize, out_w: i32) -> Vec<u8> {
-    let (kk, bounds, ksize) = precompute_coeffs(in_w as i32, out_w);
-    let out_w_usize = out_w as usize;
-    let mut dst = vec![0_u8; out_w_usize * h * 3];
-    let init = 1_i64 << (PRECISION_BITS - 1);
-    for yy in 0..h {
-        let src_row = yy * in_w * 3;
-        let dst_row = yy * out_w_usize * 3;
-        for xx in 0..out_w_usize {
-            let xmin = bounds[xx * 2] as usize;
-            let xsize = bounds[xx * 2 + 1] as usize;
-            let kbase = xx * ksize;
-            let mut acc = [init, init, init];
-            for x in 0..xsize {
-                let k = kk[kbase + x] as i64;
-                let sp = src_row + (xmin + x) * 3;
-                acc[0] += src[sp] as i64 * k;
-                acc[1] += src[sp + 1] as i64 * k;
-                acc[2] += src[sp + 2] as i64 * k;
-            }
-            let dp = dst_row + xx * 3;
-            dst[dp] = clip8(acc[0]);
-            dst[dp + 1] = clip8(acc[1]);
-            dst[dp + 2] = clip8(acc[2]);
-        }
-    }
-    dst
-}
-
-fn resample_vertical(src: &[u8], w: usize, in_h: usize, out_h: i32) -> Vec<u8> {
-    let (kk, bounds, ksize) = precompute_coeffs(in_h as i32, out_h);
-    let out_h_usize = out_h as usize;
-    let mut dst = vec![0_u8; w * out_h_usize * 3];
-    let init = 1_i64 << (PRECISION_BITS - 1);
-    for yy in 0..out_h_usize {
-        let ymin = bounds[yy * 2] as usize;
-        let ysize = bounds[yy * 2 + 1] as usize;
-        let kbase = yy * ksize;
-        let dst_row = yy * w * 3;
-        for xx in 0..w {
-            let mut acc = [init, init, init];
-            for y in 0..ysize {
-                let k = kk[kbase + y] as i64;
-                let sp = (ymin + y) * w * 3 + xx * 3;
-                acc[0] += src[sp] as i64 * k;
-                acc[1] += src[sp + 1] as i64 * k;
-                acc[2] += src[sp + 2] as i64 * k;
-            }
-            let dp = dst_row + xx * 3;
-            dst[dp] = clip8(acc[0]);
-            dst[dp + 1] = clip8(acc[1]);
-            dst[dp + 2] = clip8(acc[2]);
-        }
-    }
-    dst
-}
-
-fn pil_bicubic_resize(src: &[u8], in_w: usize, in_h: usize, out_w: usize, out_h: usize) -> Vec<u8> {
-    let horiz = resample_horizontal(src, in_w, in_h, out_w as i32);
-    resample_vertical(&horiz, out_w, in_h, out_h as i32)
-}
-
-fn resize_rgb(src_hwc: &[u8], orig_w: i32, orig_h: i32, dst_w: i32, dst_h: i32) -> Vec<u8> {
-    if orig_w == dst_w && orig_h == dst_h {
-        src_hwc.to_vec()
-    } else {
-        pil_bicubic_resize(
-            src_hwc,
-            orig_w as usize,
-            orig_h as usize,
-            dst_w as usize,
-            dst_h as usize,
-        )
-    }
 }
 
 fn unified_pixel_values(
@@ -484,12 +331,5 @@ mod tests {
         close(values[patch_dim], 48);
         close(values[patch_dim + 1], 0);
         close(values[patch_dim + 2], 48);
-    }
-
-    #[test]
-    fn pil_bicubic_resize_identity_when_same_size() {
-        let src = vec![0_u8, 1, 2, 10, 11, 12, 20, 21, 22, 30, 31, 32];
-        let out = resize_rgb(&src, 2, 2, 2, 2);
-        assert_eq!(out, src);
     }
 }
