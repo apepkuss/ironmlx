@@ -353,6 +353,11 @@ pub(crate) fn engine_pool_router() -> Router<EnginePoolState> {
         .route("/v1/messages", post(anthropic_messages))
         .route("/v1/audio/speech", post(super::audio::speech))
         .route("/v1/realtime", get(super::realtime::realtime))
+        .route("/v1/realtime/calls", post(super::webrtc::create))
+        .route(
+            "/v1/realtime/calls/:call_id/hangup",
+            post(super::webrtc::hangup),
+        )
         .route(
             "/v1/audio/transcriptions",
             post(super::transcriptions::transcriptions).layer(

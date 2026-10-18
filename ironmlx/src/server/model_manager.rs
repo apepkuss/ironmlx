@@ -402,6 +402,14 @@ pub async fn serve_app_daemon(
     serve_result
 }
 
+async fn app_webrtc_handler(
+    State(manager): State<ModelManager>,
+    axum::extract::Query(query): axum::extract::Query<super::webrtc::CallQuery>,
+    request: axum::extract::Request,
+) -> Response {
+    super::webrtc::create_with_pool(manager.pool, query, request).await
+}
+
 async fn app_realtime_handler(
     State(manager): State<ModelManager>,
     axum::extract::Query(query): axum::extract::Query<super::realtime::RealtimeQuery>,
@@ -464,6 +472,11 @@ fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Route
         .route("/v1/messages", post(app_anthropic_handler))
         .route("/v1/audio/speech", post(app_speech_handler))
         .route("/v1/realtime", get(app_realtime_handler))
+        .route("/v1/realtime/calls", post(app_webrtc_handler))
+        .route(
+            "/v1/realtime/calls/:call_id/hangup",
+            post(super::webrtc::hangup),
+        )
         .route(
             "/v1/audio/transcriptions",
             post(app_transcriptions_handler).layer(axum::extract::DefaultBodyLimit::max(
@@ -2951,3 +2964,7 @@ mod embedding_app_tests;
 #[cfg(test)]
 #[path = "asr_app_tests.rs"]
 mod asr_app_tests;
+
+#[cfg(test)]
+#[path = "webrtc_app_tests.rs"]
+mod webrtc_app_tests;

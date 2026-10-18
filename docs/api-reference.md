@@ -35,6 +35,8 @@ Availability depends on the serving mode and configured compatible models. This 
 | `POST` | `/v1/audio/alignments` | Align supplied text with audio; JSON or SRT/WebVTT (IronMLX extension) | App / EnginePool; ForcedAligner model | [Independent forced alignment](audio-transcriptions-api.md#independent-forced-alignment-ironmlx-extension) |
 | `POST` | `/v1/audio/diarizations` | Speaker activity; JSON, RTTM or file SSE (IronMLX extension) | App / EnginePool; Nemotron 3 Diarization | [API](audio-transcriptions-api.md) |
 | `GET` | `/v1/realtime` | Realtime transcription with optional aligned speaker labels | App / EnginePool; ASR WebSocket sessions | [Realtime](audio-transcriptions-api.md) |
+| `POST` | `/v1/realtime/calls` | Establish WebRTC audio and DataChannel transport; optional speaker labels | App / EnginePool; ASR sessions | [Realtime API](audio-transcriptions-api.md) |
+| `POST` | `/v1/realtime/calls/{call_id}/hangup` | Close and cancel a WebRTC call | App / EnginePool | [Realtime API](audio-transcriptions-api.md) |
 | `GET` | `/v1/audio/voices` | List enabled voices | App / EnginePool; configured voice service | [Speech synthesis API](audio-speech-api.md) |
 | `GET` | `/admin/api/audio/voices` | List all voices, including disabled profiles | App / EnginePool; configured voice service | [Speech synthesis API](audio-speech-api.md) |
 | `POST` | `/v1/audio/voices` | Create a voice | App / EnginePool; configured voice service | [Speech synthesis API](audio-speech-api.md) |

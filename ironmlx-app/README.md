@@ -81,7 +81,9 @@ file-only snapshots after native metadata preflight without re-downloading weigh
 Upstream clients use `POST /v1/audio/diarizations` for independent JSON/RTTM or
 uploaded-file SSE results. `response_format=diarized_json` on transcription combines
 Qwen3-ASR, ForcedAligner and Nemotron, with explicit ambiguous-overlap annotations.
-Realtime WebSocket sessions can opt into `audio.input.diarization` for continuous
+WebRTC clients establish calls with `POST /v1/realtime/calls`, send microphone
+audio on an Opus media track and use the `oai-events` DataChannel for the same
+transcription events. HTTP hangup cancels the call. Realtime WebSocket and WebRTC sessions can opt into `audio.input.diarization` for continuous
 speaker activity and aligned labels on confirmed text, retaining speaker context
 across turns. No recording or transcription UI is added. See the
 [recognition and diarization API](../docs/audio-transcriptions-api.md).

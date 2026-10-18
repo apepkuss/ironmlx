@@ -365,12 +365,108 @@ App 不提供录音客户端。服务端先发送 `session.created`，随后可�
 活跃会话持有模型租约；延迟取决于硬件和并发负载，建立连接本身不代表满足某个延迟指标。
 
 协议实现 OpenAI Realtime 的转写子集，并增加上述可修订临时文本事件。
-不提供 WebRTC、降噪或音频生成。可选说话人标注与时间戳见下文。
+支持下文的 WebRTC 接入；不提供降噪或音频生成。可选说话人标注与时间戳见下文。
 麦克风采集和文本展示由上游应用负责；客户端 VAD 可按需使用。
+
+### WebRTC 接入（OpenAI Realtime 风格）
+
+WebRTC 与 WebSocket 共用转写、VAD、可选说话人标注和资源调度。新增的是音频传输方式；
+App 仍不提供录音或结果展示界面。使用标准浏览器 `RTCPeerConnection`，
+发送一条 Opus 音频轨道，并创建可靠、有序、名为 `oai-events` 的 DataChannel。
+音频走媒体轨道，JSON 会话事件走 DataChannel，不通过 DataChannel 发送 Base64 音频。
+
+创建端点为 `POST /v1/realtime/calls`，请求采用 multipart：
+
+| 字段 | 含义 |
+| --- | --- |
+| `sdp` | 浏览器生成的 SDP offer，最多 64 KiB；提交前等待本地 ICE 收集完成 |
+| `session` | 可选 JSON 字符串；支持下方的转写会话配置 |
+
+```json
+{"type":"transcription","audio":{"input":{"transcription":{"model":"mlx-community/Qwen3-ASR-0.6B-8bit","language":"zh"},"turn_detection":{"type":"server_vad"},"diarization":{}}}}
+```
+
+省略 `diarization` 默认关闭；`{}` 开启默认说话人标注，`null` 关闭。
+也可指定 `model`、`threshold`、`latency`，与下文 WebSocket 扩展一致。
+辅助模型仍固定为 Qwen3-ForcedAligner 和 Nemotron，开启时需准备三个模型的加载容量。
+本端点也接受 `type: "realtime"`，将其规范为仅转写会话；不提供语音生成或对话模型调用。
+ASR 模型放在 `audio.input.transcription.model`；不要使用生成模型的会话字段。
+初始 VAD 默认开启，可显式设 `turn_detection: null` 使用手动提交。
+
+服务端返回 **201 Created**、`Content-Type: application/sdp`，正文为 SDP answer。
+将 answer 传给 `setRemoteDescription`。`Location` 头给出
+`/v1/realtime/calls/{call_id}`。连接成功后，DataChannel 返回 `session.created`，
+随后发送与 WebSocket 相同的转写、VAD 和说话人事件。
+也接受 `application/sdp` 的原始 SDP 正文，并用 URL 的 `model` 参数指定 ASR 模型；
+其他配置可在发送语音前通过 DataChannel 的 `session.update` 更新。
+SDP 自行协商 Opus 的 48 kHz RTP 时钟与双声道格式标识，后端解码为 24 kHz 单声道 PCM；
+会话中的 PCM 格式描述的是内部推理输入，不能用它改变媒体轨道的协商格式。
+只接受一条发送音频轨道和一个 DataChannel，不接受视频或其他音频编码。
+
+```sh
+curl http://127.0.0.1:9068/v1/realtime/calls \
+  -F 'sdp=<offer.sdp' \
+  -F 'session={"audio":{"input":{"transcription":{"model":"mlx-community/Qwen3-ASR-0.6B-8bit","language":"zh"}}}}' \
+  -D call-headers.txt -o answer.sdp
+curl -X POST http://127.0.0.1:9068/v1/realtime/calls/CALL_ID/hangup
+```
+
+`POST /v1/realtime/calls/{call_id}/hangup` 返回 200 并关闭连接、取消未完成工作；
+不存在或已清理的连接返回 404。挂断不等待转写完成。需要最后结果时，先结束讲话并保持静音
+供 VAD 提交，或通过 DataChannel 发送 `input_audio_buffer.commit`，等待 `completed`
+或启用标注时的 `diarized` 最终项，再挂断。音频轨道和 DataChannel 之间没有全局消息顺序，
+手动提交前应停止讲话并留出媒体到达的时间；服务端会先排空已收到的短时重排序缓冲。
+`input_audio_buffer.clear` 同时丢弃待排序音频并重置当前转写/说话人上下文。
+修改会话时，暂停 RTP 发送并等待当前轮次和标注完成，收到更新确认后再恢复。
+
+浏览器必须运行在 HTTPS 或 localhost 上。LAN 模式沿用现有 HTTPS 端点和 Bearer 认证。
+默认允许 localhost、回环地址，以及当前服务接口地址的安全来源访问这两个端点；
+其他前端来源用 `IRONMLX_WEBRTC_ALLOWED_ORIGINS` 配置逗号分隔的精确 HTTPS origin，
+例如 `https://speech.example.com`。浏览器可直接发送 Bearer 头，也可由上游服务器代理
+SDP 请求，避免将长期 API key 放在浏览器中。不新增临时密钥签发或 SIP 接口。
+
+服务端媒体 UDP 套接字绑定收到请求的服务接口，默认不联系外部 ICE 服务。
+可通过 `IRONMLX_WEBRTC_ICE_SERVERS` 配置标准 ICE server JSON 数组：
+
+```json
+[{"urls":["stun:stun.example.com:3478"]},{"urls":["turn:turn.example.com:3478"],"username":"USER","credential":"PASSWORD"}]
+```
+
+`IRONMLX_WEBRTC_ICE_POLICY` 默认为 `all`；设为 `relay` 可要求后端只使用 TURN 中继候选。
+如果收集不到可用候选，建连请求返回 `webrtc_ice_unavailable`（503）。
+浏览器自己的 STUN/TURN 配置放在 `RTCPeerConnection({iceServers})` 中，
+与后端配置分别生效。跨 NAT 时需部署可达的 STUN/TURN 或合适的网络转发；
+IronMLX 不包含 STUN/TURN 服务端。HTTP 的 HTTPS 端口与媒体 UDP 端口是不同的通道。
+本实现一次交换完整 SDP，不提供后续 PATCH trickle ICE 或连接内重新协商；
+网络接口变化后重新创建 call。
+
+WebRTC 与 WebSocket 合计最多八个实时会话，沿用两小时连接/输入和 90 秒输入空闲限制。
+创建请求最多 128 KiB；ICE 收集超时 20 秒，创建总超时 30 秒，
+SDP 返回后等待 DataChannel 打开最多 30 秒。DataChannel 单消息最多 256 KiB，
+发送缓冲有界，慢接收者会在超时后断开；传输层最多缓存 128 条待处理输入消息。
+RTP 排序缓冲最多 64 包、常规等待 60 ms；丢包或 DTX 的时间间隔保留为静音，
+不把后续文字向前移动。超过 60 秒的 RTP 时钟跳变、解码失败或积压会明确报错并结束连接。
+这些缓冲及模型窗口不是端到端延迟承诺。
+
+可直接复用上游浏览器模块 [`examples/webrtc-transcription-client.js`](../../examples/webrtc-transcription-client.js)：
+
+```javascript
+import { connectTranscription } from './webrtc-transcription-client.js';
+const client = await connectTranscription({
+  baseUrl: 'http://127.0.0.1:9068', language: 'zh', diarization: true,
+  onEvent: event => console.log(event)
+});
+// 等待所需的最终转写/标注后结束；hangup 会取消剩余工作。
+await client.hangup();
+```
+
+该模块负责麦克风采集、SDP 交换和挂断；展示逻辑仍由上游实现。
+后端使用原生 WebRTC 协议栈及静态链接的 libopus，无需 FFmpeg、Python 或浏览器进程。
+浏览器仅用于上游和开发验收。
 
 ### 实时说话人标注（IronMLX 扩展）
 
-在现有转写连接的 `session.audio.input.diarization` 中设置对象即可启用；默认关闭，
+在 WebSocket 或 WebRTC 转写会话的 `session.audio.input.diarization` 中设置对象即可启用；默认关闭，
 设为 `null` 关闭。该字段与下面三个新事件是 IronMLX 扩展，不是 OpenAI 标准字段。
 需注册并准备好 Qwen3-ASR、固定 Qwen3-ForcedAligner-0.6B-8bit 和
 `mlx-community/Nemotron-3-Diarization`，并提供至少三个模型的加载容量。

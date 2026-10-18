@@ -400,14 +400,123 @@ errors. Active sessions retain their model lease. Timing depends on hardware and
 concurrent inference; a socket connection alone is not a latency guarantee.
 
 The protocol implements the transcription subset of OpenAI Realtime, with the
-provisional-text extension above. It does not provide WebRTC, noise
+provisional-text extension above. WebRTC access is described below. It does not provide noise
 reduction or audio generation. Optional aligned speaker labels are described below. Upstream applications own
 microphone capture and rendering; client VAD remains optional.
 
+### WebRTC access (OpenAI Realtime style)
+
+WebRTC and WebSocket share transcription, VAD, optional speaker labels and managed
+inference. The App remains a backend service without recording/rendering controls.
+Use a browser `RTCPeerConnection` with one outgoing Opus audio track and a reliable,
+ordered DataChannel named `oai-events`. Media carries audio; the data channel
+carries JSON events, not Base64 audio appends.
+
+Create a call with `POST /v1/realtime/calls` using multipart fields:
+
+| Field | Meaning |
+| --- | --- |
+| `sdp` | Browser-generated SDP offer, up to 64 KiB; wait for local ICE gathering before posting |
+| `session` | Optional JSON string containing the transcription session configuration |
+
+```json
+{"type":"transcription","audio":{"input":{"transcription":{"model":"mlx-community/Qwen3-ASR-0.6B-8bit","language":"zh"},"turn_detection":{"type":"server_vad"},"diarization":{}}}}
+```
+
+Omitting `diarization` disables it initially; `{}` enables defaults and `null`
+disables it. The optional `model`, `threshold` and `latency` fields match the
+speaker-label extension below. Auxiliary models remain the fixed ForcedAligner
+and Nemotron pair, requiring capacity for three models when enabled.
+`type: "realtime"` is also accepted and normalized to a transcription-only session;
+no conversational generation or speech output is provided. Put the ASR model in
+`audio.input.transcription.model`. Server VAD is enabled initially; explicitly
+set `turn_detection: null` for manual commits.
+
+The response is **201 Created** with `Content-Type: application/sdp` and the SDP
+answer as its body. Apply it through `setRemoteDescription`. The `Location` header
+identifies `/v1/realtime/calls/{call_id}`. Once the DataChannel connects it receives
+`session.created`, followed by the existing transcription, VAD and speaker events.
+Raw `application/sdp` offers are also accepted with a `model` URL parameter;
+configure other options with `session.update` before sending speech.
+SDP negotiates Opus with a 48 kHz RTP clock and its two-channel format identifier;
+the backend decodes to mono 24 kHz PCM. PCM in the session view describes the
+internal inference input, not the negotiated media codec. Video, other codecs,
+multiple audio tracks and multiple data channels are rejected.
+
+```sh
+curl http://127.0.0.1:9068/v1/realtime/calls \
+  -F 'sdp=<offer.sdp' \
+  -F 'session={"audio":{"input":{"transcription":{"model":"mlx-community/Qwen3-ASR-0.6B-8bit","language":"zh"}}}}' \
+  -D call-headers.txt -o answer.sdp
+curl -X POST http://127.0.0.1:9068/v1/realtime/calls/CALL_ID/hangup
+```
+
+`POST /v1/realtime/calls/{call_id}/hangup` returns 200 and closes/cancels the call;
+an absent or cleaned-up call returns 404. Hangup does not wait for final results.
+Keep sending silence for VAD to finish, or send `input_audio_buffer.commit` and
+wait for the final `completed` item (or `diarized` with labels enabled), then
+hang up. Media and DataChannel events have no shared ordering: leave time for
+media to arrive before a manual commit. The server drains its received jitter
+buffer before committing. Clear also discards pending reordered audio and resets
+the transcription/speaker context. Pause RTP and wait for pending audio/labels to
+finish before updating configuration, then resume after the update acknowledgement.
+
+Browsers require HTTPS or localhost. LAN access uses the existing HTTPS/Bearer
+configuration. CORS for the call endpoints allows localhost/loopback and secure
+origins on the serving interface by default. Configure additional exact HTTPS
+origins through comma-separated `IRONMLX_WEBRTC_ALLOWED_ORIGINS`, for example
+`https://speech.example.com`. Send a Bearer header directly or proxy SDP through
+an upstream trusted server to keep a long-lived key out of browser code.
+No ephemeral-key issuer or SIP endpoints are added.
+
+Media UDP sockets bind the API interface receiving the request. No external ICE
+service is contacted by default. `IRONMLX_WEBRTC_ICE_SERVERS` accepts an ICE server
+JSON array for backend STUN/TURN gathering:
+
+```json
+[{"urls":["stun:stun.example.com:3478"]},{"urls":["turn:turn.example.com:3478"],"username":"USER","credential":"PASSWORD"}]
+```
+
+`IRONMLX_WEBRTC_ICE_POLICY` defaults to `all`; set `relay` to require TURN relay candidates on the backend.
+If gathering produces no usable candidates, creation fails with `webrtc_ice_unavailable` (503).
+Configure browser STUN/TURN separately through `RTCPeerConnection({iceServers})`.
+Cross-NAT deployments need reachable STUN/TURN or appropriate forwarding; IronMLX
+does not bundle those servers. HTTPS signaling and media UDP use separate ports.
+The transport exchanges complete SDP once; PATCH trickle ICE and in-call
+renegotiation are unsupported. Create a new call after a network-interface change.
+
+WebRTC and WebSocket share an eight-session limit, two-hour connection/input
+limits and the 90-second input idle timeout. Call bodies are limited to 128 KiB;
+ICE gathering to 20 seconds, total creation to 30 seconds and waiting for the
+DataChannel after returning SDP to 30 seconds. Each DataChannel message is at
+most 256 KiB; send buffering is bounded and slow receivers time out. The transport
+queues at most 128 pending input messages. RTP reordering retains at most 64
+packets with a normal 60 ms wait; loss/DTX gaps retain their duration as silence
+instead of shifting later text earlier. RTP jumps over 60 seconds, decode failures
+and overflow produce explicit errors and end the call. Buffer/model windows are
+not end-to-end latency guarantees.
+
+The upstream browser module [`examples/webrtc-transcription-client.js`](../examples/webrtc-transcription-client.js)
+handles microphone capture, SDP exchange and hangup:
+
+```javascript
+import { connectTranscription } from './webrtc-transcription-client.js';
+const client = await connectTranscription({
+  baseUrl: 'http://127.0.0.1:9068', language: 'zh', diarization: true,
+  onEvent: event => console.log(event)
+});
+// Wait for the final results you need first; hangup cancels remaining work.
+await client.hangup();
+```
+
+Rendering remains upstream. The backend uses a native WebRTC stack and statically
+linked libopus; it requires no FFmpeg, Python or browser process. Browsers are only
+needed by upstream clients and development acceptance tests.
+
 ### Realtime speaker labels (IronMLX extension)
 
-Set an object in `session.audio.input.diarization` on the existing transcription
-connection to opt in; the default is disabled and `null` disables it. This field
+Set an object in `session.audio.input.diarization` on a WebSocket or WebRTC
+transcription session to opt in; the default is disabled and `null` disables it. This field
 and the following three new events are IronMLX extensions, not OpenAI fields.
 Register and prepare Qwen3-ASR, the fixed Qwen3-ForcedAligner-0.6B-8bit and
 `mlx-community/Nemotron-3-Diarization`, with capacity for at least three loaded

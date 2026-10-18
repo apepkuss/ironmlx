@@ -14,6 +14,11 @@ name = "ironmlx"
 path = "src/main.rs"
 
 [dependencies]
+webrtc = "=0.21.1"
+rtc = { version = "=0.21.1", default-features = false }
+opus = "0.4"
+async-trait = "0.1"
+url = "2"
 ironmlx-audio = { path = "../ironmlx-audio" }
 ironmlx-image = { path = "../ironmlx-image" }
 ironmlx-runtime = { path = "../ironmlx-runtime" }

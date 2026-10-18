@@ -1,4 +1,4 @@
-//! Bounded transcription-only Realtime WebSocket sessions.
+//! Bounded Realtime transcription shared by WebSocket and WebRTC.
 use super::api_error::{ApiError, ApiProtocol};
 use super::realtime_speakers::{
     Annotation, AnnotationFuture, FeedFuture, Settings as SpeakerSettings, Speakers,
@@ -36,6 +36,61 @@ const RATE: usize = 24000;
 const WINDOW: usize = 30 * RATE;
 const STEP: usize = 2 * RATE;
 type Inference = Pin<Box<dyn Future<Output = Result<Transcription, AsrExecutionError>> + Send>>;
+
+/// Both transports share the same admission limits, inference scheduling and
+/// event protocol. WebRTC feeds decoded media through bounded channels.
+pub(super) enum SessionTransport {
+    WebSocket(Box<WebSocket>),
+    WebRtc {
+        incoming: tokio::sync::mpsc::Receiver<Message>,
+        outgoing: tokio::sync::mpsc::Sender<Message>,
+    },
+}
+impl SessionTransport {
+    async fn send(&mut self, event: Message) -> Result<(), ()> {
+        match self {
+            Self::WebSocket(socket) => socket.send(event).await.map_err(|_| ()),
+            Self::WebRtc { outgoing, .. } => outgoing.send(event).await.map_err(|_| ()),
+        }
+    }
+    async fn recv(&mut self) -> Option<Result<Message, ()>> {
+        match self {
+            Self::WebSocket(socket) => socket.recv().await.map(|event| event.map_err(|_| ())),
+            Self::WebRtc { incoming, .. } => incoming.recv().await.map(Ok),
+        }
+    }
+}
+pub(super) struct Admission {
+    pub slot: tokio::sync::OwnedSemaphorePermit,
+    pub memory: Arc<ironmlx_runtime::core::process_memory::MemoryReservation>,
+}
+pub(super) fn admit() -> Result<Admission, Box<ApiError>> {
+    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    let slot = SLOTS
+        .get_or_init(|| Arc::new(Semaphore::new(8)))
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            Box::new(ApiError::service_unavailable(
+                "realtime_capacity",
+                "Realtime session capacity reached",
+            ))
+        })?;
+    let governor = global_process_memory_governor();
+    governor.sample_process();
+    let memory = governor
+        .try_reserve(32 * 1024 * 1024, "ASR realtime input")
+        .map_err(|e| {
+            Box::new(ApiError::service_unavailable(
+                "asr_memory_unavailable",
+                e.to_string(),
+            ))
+        })?;
+    Ok(Admission {
+        slot,
+        memory: Arc::new(memory),
+    })
+}
 
 #[derive(Default, Deserialize)]
 pub(super) struct RealtimeQuery {
@@ -82,38 +137,32 @@ pub(super) async fn realtime_with_pool(
             }
         }
     }
-    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    let Ok(slot) = SLOTS
-        .get_or_init(|| Arc::new(Semaphore::new(8)))
-        .clone()
-        .try_acquire_owned()
-    else {
-        return ApiError::service_unavailable(
-            "realtime_capacity",
-            "Realtime session capacity reached",
-        )
-        .into_response(ApiProtocol::OpenAi);
-    };
-    let governor = global_process_memory_governor();
-    governor.sample_process();
-    let memory = match governor.try_reserve(32 * 1024 * 1024, "ASR realtime input") {
-        Ok(memory) => memory,
-        Err(error) => {
-            return ApiError::service_unavailable("asr_memory_unavailable", error.to_string())
-                .into_response(ApiProtocol::OpenAi)
-        }
+    let admission = match admit() {
+        Ok(admission) => admission,
+        Err(error) => return (*error).into_response(ApiProtocol::OpenAi),
     };
     upgrade
         .max_message_size(512 * 1024)
         .max_frame_size(512 * 1024)
         .on_upgrade(move |socket| async move {
-            let _slot = slot;
-            let _ = run(socket, pool, query.model, Arc::new(memory)).await;
+            let _slot = admission.slot;
+            let config = Configuration {
+                model: query.model,
+                ..Default::default()
+            };
+            let _ = run(
+                SessionTransport::WebSocket(Box::new(socket)),
+                pool,
+                config,
+                admission.memory,
+                None,
+            )
+            .await;
         })
 }
 
 #[derive(Default, Clone)]
-struct Configuration {
+pub(super) struct Configuration {
     model: Option<String>,
     language: Option<String>,
     prompt: Option<String>,
@@ -121,6 +170,60 @@ struct Configuration {
     diarization: Option<SpeakerSettings>,
 }
 impl Configuration {
+    pub async fn for_webrtc(
+        pool: &EnginePoolState,
+        mut session: Value,
+        model: Option<String>,
+    ) -> Result<Self, ApiError> {
+        let fields = session.as_object_mut().ok_or_else(|| {
+            ApiError::invalid_request("invalid_session", "session must be an object")
+        })?;
+        // Accept the Realtime envelope while retaining IronMLX's transcription-only task.
+        if fields.get("type").is_some_and(|v| v == "realtime") {
+            fields.insert("type".into(), "transcription".into());
+        }
+        let base = Self {
+            model,
+            vad: Some(serde_json::from_value(json!({"type":"server_vad"})).expect("default VAD")),
+            ..Default::default()
+        };
+        let config = base
+            .update(&json!({"session":session}))
+            .map_err(|e| ApiError::invalid_request("invalid_session", e))?;
+        let model = config.model.as_deref().expect("validated ASR model");
+        if !pool
+            .is_asr_model(model)
+            .await
+            .map_err(ApiError::engine_resolution)?
+        {
+            return Err(ApiError::invalid_request(
+                "model_task_mismatch",
+                "WebRTC transcription requires an ASR model",
+            ));
+        }
+        if config.diarization.is_some() {
+            for (id, valid) in [
+                (
+                    super::transcriptions::FIXED_ALIGNER,
+                    pool.is_alignment_model(super::transcriptions::FIXED_ALIGNER)
+                        .await,
+                ),
+                (
+                    ironmlx_audio::diarization::MODEL_ID,
+                    pool.is_diarization_model(ironmlx_audio::diarization::MODEL_ID)
+                        .await,
+                ),
+            ] {
+                if !valid.map_err(ApiError::engine_resolution)? {
+                    return Err(ApiError::invalid_request(
+                        "missing_diarization_dependency",
+                        format!("Register {id} for speaker labels"),
+                    ));
+                }
+            }
+        }
+        Ok(config)
+    }
     fn view(&self, id: &str) -> Value {
         let mut view = json!({"id":id,"type":"transcription","audio":{"input":{
             "format":{"type":"audio/pcm","rate":24000},
@@ -133,7 +236,7 @@ impl Configuration {
         }
         view
     }
-    fn update(&self, event: &Value) -> Result<Self, String> {
+    pub(super) fn update(&self, event: &Value) -> Result<Self, String> {
         let session = event
             .get("session")
             .and_then(Value::as_object)
@@ -295,6 +398,44 @@ impl Configuration {
     }
 }
 
+pub(super) struct Prepared {
+    binding: Binding,
+    speakers: Option<Speakers>,
+}
+impl Configuration {
+    pub async fn prepare(
+        &self,
+        pool: &EnginePoolState,
+        memory: Arc<ironmlx_runtime::core::process_memory::MemoryReservation>,
+    ) -> Result<Prepared, ApiError> {
+        let (_, lease) = pool
+            .resolve_engine(self.model.as_deref())
+            .await
+            .map_err(ApiError::engine_resolution)?;
+        let EngineVariant::Asr(runtime) = lease.engine() else {
+            return Err(ApiError::invalid_request(
+                "model_task_mismatch",
+                "Realtime transcription requires an ASR model",
+            ));
+        };
+        let binding = Binding {
+            runtime: runtime.clone(),
+            lease: Arc::new(lease),
+        };
+        let speakers = if let Some(settings) = self.diarization.clone() {
+            Some(
+                Speakers::open(pool, settings, 0, memory)
+                    .await
+                    .map_err(|e| {
+                        ApiError::service_unavailable("realtime_diarization_unavailable", e)
+                    })?,
+            )
+        } else {
+            None
+        };
+        Ok(Prepared { binding, speakers })
+    }
+}
 struct Binding {
     runtime: AsrRuntime,
     lease: Arc<EngineLease>,
@@ -380,7 +521,7 @@ fn vad_buffered_samples(turn: &Turn, queued: &VecDeque<Turn>, detector: &VoiceDe
         + detector.buffered_samples()
 }
 
-async fn send(socket: &mut WebSocket, mut event: Value) -> Result<(), ()> {
+async fn send(socket: &mut SessionTransport, mut event: Value) -> Result<(), ()> {
     event["event_id"] = format!("event_{}", uuid::Uuid::new_v4()).into();
     tokio::time::timeout(
         Duration::from_secs(10),
@@ -391,14 +532,14 @@ async fn send(socket: &mut WebSocket, mut event: Value) -> Result<(), ()> {
     .map_err(|_| ())
 }
 async fn error(
-    socket: &mut WebSocket,
+    socket: &mut SessionTransport,
     message: impl Into<String>,
     event_id: Option<&Value>,
 ) -> Result<(), ()> {
     send(socket, json!({"type":"error","error":{"type":"invalid_request_error","code":"invalid_realtime_request","message":message.into(),"event_id":event_id}})).await
 }
 async fn acknowledge(
-    socket: &mut WebSocket,
+    socket: &mut SessionTransport,
     turn: &mut Turn,
     previous: &Option<String>,
 ) -> Result<(), ()> {
@@ -409,30 +550,45 @@ async fn acknowledge(
     Ok(())
 }
 
-async fn run(
-    mut socket: WebSocket,
+pub(super) async fn run(
+    mut socket: SessionTransport,
     pool: EnginePoolState,
-    model: Option<String>,
+    mut config: Configuration,
     input_memory: Arc<ironmlx_runtime::core::process_memory::MemoryReservation>,
+    prepared: Option<Prepared>,
 ) -> Result<(), ()> {
     let session_id = format!("sess_{}", uuid::Uuid::new_v4());
-    let mut config = Configuration {
-        model,
-        ..Default::default()
-    };
     let mut settings = if let Some(model) = config.model.as_deref() {
         pool.asr_settings(model).await.map_err(|_| ())?
     } else {
         ironmlx_runtime::core::asr_execution::AsrSettings::default()
     };
-    let mut binding: Option<Binding> = None;
+    let (mut binding, mut speakers) = match prepared {
+        Some(ready) => (Some(ready.binding), ready.speakers),
+        None => (None, None),
+    };
     let mut turn = Turn::default();
     let mut queued: VecDeque<Turn> = VecDeque::new();
-    let mut detector: Option<VoiceDetector> = None;
+    let mut detector = config
+        .vad
+        .clone()
+        .map(|v| VoiceDetector::new(v, 0))
+        .transpose()
+        .map_err(|_| ())?;
     let mut vad_item: Option<String> = None;
     let mut previous_item = None;
     let mut pending: Option<Pending> = None;
-    let mut speakers: Option<Speakers> = None;
+    if speakers.is_none() {
+        if let Some(settings) = config.diarization.clone() {
+            match Speakers::open(&pool, settings, 0, input_memory.clone()).await {
+                Ok(state) => speakers = Some(state),
+                Err(message) => {
+                    error(&mut socket, message, None).await?;
+                    return Ok(());
+                }
+            }
+        }
+    }
     let mut speaker_feed: Option<FeedFuture> = None;
     let mut speaker_annotation: Option<AnnotationFuture> = None;
     let started = Instant::now();
@@ -443,6 +599,9 @@ async fn run(
         json!({"type":"session.created","session":config.view(&session_id)}),
     )
     .await?;
+    if let Some(state) = &speakers {
+        send(&mut socket, state.started()).await?;
+    }
     loop {
         if started.elapsed() > Duration::from_secs(7200) {
             error(

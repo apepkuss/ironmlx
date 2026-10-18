@@ -195,6 +195,11 @@ async fn authenticate_lan(
     next: Next,
 ) -> Response {
     let protocol = super::api_error::ApiProtocol::from_path(request.uri().path());
+    if request.method() == axum::http::Method::OPTIONS
+        && super::webrtc::call_path(request.uri().path())
+    {
+        return super::webrtc::preflight(&request);
+    }
     let Some(value) = request.headers().get(header::AUTHORIZATION) else {
         return protocol_error_response(
             StatusCode::UNAUTHORIZED,
@@ -233,7 +238,9 @@ async fn authenticate_lan(
 
 async fn enforce_request_body_limit(request: Request, next: Next) -> Response {
     let protocol = super::api_error::ApiProtocol::from_path(request.uri().path());
-    let body_limit = if matches!(
+    let body_limit = if super::webrtc::call_path(request.uri().path()) {
+        super::webrtc::MAX_REQUEST_BYTES
+    } else if matches!(
         request.uri().path(),
         "/v1/audio/transcriptions" | "/v1/audio/alignments" | "/v1/audio/diarizations"
     ) {
@@ -252,8 +259,8 @@ async fn enforce_request_body_limit(request: Request, next: Next) -> Response {
             StatusCode::PAYLOAD_TOO_LARGE,
             "request_body_too_large",
             format!(
-                "The request body exceeds the {} MiB limit.",
-                body_limit / (1024 * 1024)
+                "The request body exceeds the {} KiB limit.",
+                body_limit / 1024
             ),
         )
         .into_response(protocol);
@@ -268,15 +275,15 @@ async fn enforce_request_body_limit(request: Request, next: Next) -> Response {
         return next.run(request).await;
     }
     let (parts, body) = request.into_parts();
-    let bytes = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
+    let bytes = match to_bytes(body, body_limit).await {
         Ok(bytes) => bytes,
         Err(_) => {
             return super::api_error::ApiError::from_status(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "request_body_too_large",
                 format!(
-                    "The request body exceeds the {} MiB limit.",
-                    body_limit / (1024 * 1024)
+                    "The request body exceeds the {} KiB limit.",
+                    body_limit / 1024
                 ),
             )
             .into_response(protocol);
@@ -293,15 +300,21 @@ fn bounded_router(router: Router) -> Router {
 }
 
 pub(super) fn lan_api_router(router: Router, key_digest: [u8; 32]) -> Router {
-    bounded_router(router).layer(middleware::from_fn_with_state(key_digest, authenticate_lan))
+    bounded_router(router)
+        .layer(middleware::from_fn_with_state(key_digest, authenticate_lan))
+        .layer(middleware::from_fn(super::webrtc::cors))
 }
 
 fn local_management_router(router: Router) -> Router {
     bounded_router(router.merge(crate::logging::router()))
+        .layer(middleware::from_fn(super::webrtc::cors))
 }
 
 pub async fn serve_router(router: Router, config: ServerNetworkConfig, label: &str) -> Result<()> {
-    let local_router = local_management_router(router.clone());
+    let local_router =
+        local_management_router(router.clone()).layer(axum::Extension(super::webrtc::Network {
+            ip: config.local_addr.ip(),
+        }));
     let local_std = std::net::TcpListener::bind(config.local_addr)
         .with_context(|| format!("binding local listener {}", config.local_addr))?;
     local_std
@@ -330,7 +343,9 @@ pub async fn serve_router(router: Router, config: ServerNetworkConfig, label: &s
     lan_std
         .set_nonblocking(true)
         .context("configuring LAN listener")?;
-    let lan_router = lan_api_router(router, security.api_key_digest);
+    let lan_router = lan_api_router(router, security.api_key_digest).layer(axum::Extension(
+        super::webrtc::Network { ip: lan_addr.ip() },
+    ));
     tracing::info!(
         "{label} listening locally on http://{} and on authenticated LAN endpoint https://{}",
         config.local_addr,
@@ -408,6 +423,52 @@ mod tests {
                 .route("/v1/audio/voices/:id/preview", get(|| async { "ok" })),
         )
         .layer(middleware::from_fn_with_state(expected, authenticate_lan))
+    }
+
+    #[tokio::test]
+    async fn webrtc_browser_auth_and_limits_are_enforced_after_cors_preflight() {
+        let router = lan_api_router(
+            Router::new().route(
+                "/v1/realtime/calls",
+                axum::routing::post(|| async { StatusCode::CREATED }),
+            ),
+            Sha256::digest(b"imx_correct").into(),
+        );
+        for (method, token, size, status) in [
+            ("OPTIONS", None, 0, StatusCode::NO_CONTENT),
+            ("POST", None, 0, StatusCode::UNAUTHORIZED),
+            ("POST", Some("Bearer imx_correct"), 0, StatusCode::CREATED),
+            (
+                "POST",
+                Some("Bearer imx_correct"),
+                super::super::webrtc::MAX_REQUEST_BYTES + 1,
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+        ] {
+            let mut request = Request::builder()
+                .method(method)
+                .uri("/v1/realtime/calls")
+                .header(header::ORIGIN, "http://localhost:3000")
+                .header(header::CONTENT_TYPE, "application/sdp");
+            if let Some(token) = token {
+                request = request.header(header::AUTHORIZATION, token);
+            }
+            // No Content-Length: exercise the streamed body size limit too.
+            let response = router
+                .clone()
+                .oneshot(request.body(Body::from(vec![b'a'; size])).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            assert_eq!(
+                response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+                "http://localhost:3000"
+            );
+            if status == StatusCode::PAYLOAD_TOO_LARGE {
+                let body = to_bytes(response.into_body(), 4096).await.unwrap();
+                assert!(String::from_utf8_lossy(&body).contains("128 KiB"));
+            }
+        }
     }
 
     #[tokio::test]

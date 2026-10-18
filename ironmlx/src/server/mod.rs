@@ -41,6 +41,8 @@ pub(crate) mod realtime;
 mod realtime_speakers;
 pub(crate) mod systemone;
 pub(crate) mod transcriptions;
+mod webrtc;
+mod webrtc_audio;
 use ironmlx_runtime::core::runtime_health as health;
 mod diarizations;
 pub mod model_manager;
