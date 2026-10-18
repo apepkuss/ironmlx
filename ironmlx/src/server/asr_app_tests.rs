@@ -1613,3 +1613,487 @@ async fn qwen3_alignment_rejects_limits_and_cancels_cleanly() {
         "Default granularity is segment only"
     );
 }
+
+#[tokio::test]
+#[serial_test::serial(mlx_metal)]
+#[ignore = "requires Nemotron, both Qwen3 ASR checkpoints, ForcedAligner and reference WAV"]
+async fn realtime_speaker_labels_keep_context_across_turns_and_release_on_disconnect() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+    let root = std::env::var("MLX_DIR").unwrap();
+    mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib")).unwrap();
+    let args = super::tests::serve_args();
+    let manager = ModelManager::new(
+        crate::cli::serve::engine_runtime_config(&args).unwrap(),
+        Some(3),
+        SchedulerResolutionOptions::from(&args),
+    )
+    .unwrap();
+    let pool = manager.pool.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_router(
+        manager,
+        crate::server::voices::VoiceStore::open(dir.path().to_owned()).unwrap(),
+    );
+    let diarizer = ironmlx_audio::diarization::MODEL_ID;
+    let aligner = crate::server::transcriptions::FIXED_ALIGNER;
+    for (model, env) in [
+        (diarizer, "IRONMLX_DIARIZATION_DIR"),
+        (aligner, "IRONMLX_ALIGNER_DIR"),
+        ("mlx-community/Qwen3-ASR-0.6B-8bit", "IRONMLX_ASR_SMALL_DIR"),
+        ("mlx-community/Qwen3-ASR-1.7B-8bit", "IRONMLX_ASR_LARGE_DIR"),
+    ] {
+        json_request(
+            &app,
+            "/admin/api/models/register",
+            json!({"model":model,"model_dir":std::env::var(env).unwrap()}),
+        )
+        .await;
+    }
+    let pcm = ironmlx_audio::AudioIo::decode(
+        &ironmlx_audio::io::NativeAudioIo,
+        &std::fs::read(std::env::var("IRONMLX_ASR_TEST_AUDIO").unwrap()).unwrap(),
+        &Default::default(),
+    )
+    .unwrap();
+    let samples = ironmlx_audio::signal::resample_mono(
+        &pcm.samples,
+        pcm.format.sample_rate,
+        24000,
+        &NoCancel,
+    )
+    .unwrap();
+    let speech = samples
+        .iter()
+        .flat_map(|v| ((v.clamp(-1., 1.) * 32767.) as i16).to_le_bytes())
+        .collect::<Vec<_>>();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let router = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let mut evidence = Vec::new();
+    for (size, vad) in [("0.6B", false), ("1.7B", true)] {
+        let model = format!("mlx-community/Qwen3-ASR-{size}-8bit");
+        let (mut ws, _) = connect_async(format!(
+            "ws://127.0.0.1:{port}/v1/realtime?intent=transcription&model={model}"
+        ))
+        .await
+        .unwrap();
+        ws.next().await.unwrap().unwrap();
+        // Invalid options leave the old, disabled configuration intact.
+        ws.send(Message::Text(json!({"type":"session.update","session":{"audio":{"input":{"diarization":{"latency":"offline"}}}}}).to_string())).await.unwrap();
+        let rejected: Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(rejected["type"], "error");
+        ws.send(Message::Text(json!({"type":"session.update","session":{"audio":{"input":{"transcription":{"language":"zh"},"turn_detection":if vad {json!({"type":"server_vad"})} else {Value::Null},"diarization":{}}}}}).to_string())).await.unwrap();
+        let updated: Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(updated["type"], "session.updated", "{updated}");
+        assert_eq!(
+            updated["session"]["audio"]["input"]["diarization"]["latency"],
+            "low"
+        );
+        let started: Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        assert_eq!(started["type"], "input_audio_buffer.diarization.started");
+        let context = started["diarization_id"].clone();
+        let mut expected_start = 0.;
+        let mut first_speaker = None;
+        for round in 0..2 {
+            let mut input = Vec::new();
+            if vad {
+                input.extend(vec![0u8; 48000]);
+            }
+            input.extend_from_slice(&speech);
+            if vad {
+                input.extend(vec![0u8; 48000]);
+            }
+            let mut completed = std::collections::HashMap::new();
+            let mut labelled = Vec::new();
+            let mut live_activity = false;
+            for chunk in input.chunks(9600) {
+                ws.send(Message::Text(
+                    json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(chunk)})
+                        .to_string(),
+                ))
+                .await
+                .unwrap();
+                // Read concurrently at recording cadence: activity must arrive before commit.
+                let until = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+                while let Ok(Some(Ok(message))) = tokio::time::timeout_at(until, ws.next()).await {
+                    let event: Value = serde_json::from_str(&message.into_text().unwrap()).unwrap();
+                    assert_ne!(event["type"], "error", "{event}");
+                    assert_ne!(
+                        event["type"], "conversation.item.input_audio_transcription.failed",
+                        "{event}"
+                    );
+                    if event["type"] == "input_audio_buffer.diarization.delta" {
+                        live_activity = true;
+                        assert_eq!(event["diarization_id"], context);
+                    }
+                    if event["type"] == "conversation.item.input_audio_transcription.completed" {
+                        completed.insert(
+                            event["item_id"].as_str().unwrap().to_owned(),
+                            event["transcript"].clone(),
+                        );
+                    }
+                    if event["type"] == "conversation.item.input_audio_transcription.diarized" {
+                        labelled.push(event.clone());
+                    }
+                    evidence.push(event);
+                }
+            }
+            assert!(
+                live_activity,
+                "{model}: no speaker activity while microphone packets arrived"
+            );
+            if !vad {
+                ws.send(Message::Text(
+                    json!({"type":"input_audio_buffer.commit"}).to_string(),
+                ))
+                .await
+                .unwrap();
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(90), async {
+                while !labelled.iter().any(|e| e["is_final"] == true) {
+                    let event: Value = serde_json::from_str(
+                        &ws.next().await.unwrap().unwrap().into_text().unwrap(),
+                    )
+                    .unwrap();
+                    assert_ne!(event["type"], "error", "{event}");
+                    assert_ne!(
+                        event["type"], "conversation.item.input_audio_transcription.failed",
+                        "{event}"
+                    );
+                    if event["type"] == "conversation.item.input_audio_transcription.completed" {
+                        completed.insert(
+                            event["item_id"].as_str().unwrap().to_owned(),
+                            event["transcript"].clone(),
+                        );
+                    }
+                    if event["type"] == "conversation.item.input_audio_transcription.diarized" {
+                        labelled.push(event.clone());
+                    }
+                    evidence.push(event);
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!labelled.is_empty());
+            for event in &labelled {
+                assert_eq!(event["diarization_id"], context);
+                assert_eq!(
+                    completed.get(event["item_id"].as_str().unwrap()),
+                    Some(&event["transcript"])
+                );
+                assert!(
+                    event["transcript"].as_str().unwrap().contains("交易"),
+                    "{event}"
+                );
+                assert!(event["start"].as_f64().unwrap() >= expected_start);
+                let segments = event["segments"].as_array().unwrap();
+                assert_eq!(
+                    segments
+                        .iter()
+                        .map(|s| s["text"].as_str().unwrap())
+                        .collect::<String>(),
+                    event["transcript"].as_str().unwrap()
+                );
+                assert!(
+                    segments
+                        .iter()
+                        .any(|s| s["speaker"].as_str().unwrap().starts_with("speaker_")),
+                    "{event}"
+                );
+                let speaker = segments
+                    .iter()
+                    .find_map(|s| s["speaker"].as_str().filter(|s| s.starts_with("speaker_")))
+                    .unwrap();
+                if let Some(previous) = &first_speaker {
+                    assert_eq!(speaker, previous);
+                } else {
+                    first_speaker = Some(speaker.to_owned());
+                }
+                for segment in segments {
+                    assert!(segment["start"].as_f64().unwrap() >= event["start"].as_f64().unwrap());
+                    assert!(
+                        segment["end"].as_f64().unwrap() <= event["end"].as_f64().unwrap() + 1e-9
+                    );
+                }
+            }
+            expected_start += input.len() as f64 / 48000.;
+            println!(
+                "{model}: turn {round}, VAD={vad}, same context {context}, {} labelled items",
+                labelled.len()
+            );
+        }
+        // Clear while accepted audio is being processed, not just an idle turn.
+        ws.send(Message::Text(json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(&speech[..speech.len().min(3*48000)])}).to_string())).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        expected_start += speech.len().min(3 * 48000) as f64 / 48000.;
+        ws.send(Message::Text(
+            json!({"type":"input_audio_buffer.clear"}).to_string(),
+        ))
+        .await
+        .unwrap();
+        loop {
+            let event: Value =
+                serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            assert_ne!(event["type"], "error", "{event}");
+            if event["type"] == "input_audio_buffer.diarization.started" {
+                assert_ne!(event["diarization_id"], context);
+                assert!(
+                    (event["audio_start_ms"].as_f64().unwrap() / 1000. - expected_start).abs()
+                        < 0.002
+                );
+                break;
+            }
+        }
+        // Disconnect with an active feed; the lease must survive GPU cancellation,
+        // then become unloadable without any subsequent WebSocket close command.
+        ws.send(Message::Text(
+            json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(&speech[..speech.len().min(3*48000)])})
+                .to_string(),
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        ws.close(None).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while pool.pending_requests(diarizer).await.unwrap_or(0) != 0
+                || pool.pending_requests(&model).await.unwrap_or(0) != 0
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        json_request(&app, "/admin/api/models/unload", json!({"model":model})).await;
+    }
+    // Snapshots must not mutate live speaker caches, and streams sharing one
+    // model must keep separate states even when their packets are interleaved.
+    let (_, lease) = pool.resolve_engine(Some(diarizer)).await.unwrap();
+    let ironmlx_runtime::core::engine_pool::EngineVariant::Diarization(runtime) = lease.engine()
+    else {
+        panic!("wrong engine")
+    };
+    let runtime = runtime.clone();
+    let options = ironmlx_audio::diarization::Options {
+        latency: ironmlx_audio::diarization::Latency::Low,
+        ..Default::default()
+    };
+    let a = runtime.start_stream(options, lease).await.unwrap();
+    let (_, lease) = pool.resolve_engine(Some(diarizer)).await.unwrap();
+    let b = runtime.start_stream(options, lease).await.unwrap();
+    for chunk in pcm.samples.chunks(16000) {
+        assert_eq!(
+            a.feed(chunk.to_vec()).await.unwrap(),
+            b.feed(chunk.to_vec()).await.unwrap()
+        );
+        a.snapshot(Vec::new()).await.unwrap();
+    }
+    assert_eq!(
+        a.snapshot(Vec::new()).await.unwrap(),
+        b.snapshot(Vec::new()).await.unwrap()
+    );
+    drop(a);
+    drop(b);
+    drop(runtime);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    json_request(&app, "/admin/api/models/unload", json!({"model":diarizer})).await;
+    json_request(&app, "/admin/api/models/unload", json!({"model":aligner})).await;
+    assert!(!pool.is_model_loaded(diarizer).await);
+    if let Ok(path) = std::env::var("IRONMLX_REALTIME_DIARIZATION_EVIDENCE") {
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap()).unwrap();
+    }
+    server.abort();
+}
+
+#[tokio::test]
+#[serial_test::serial(mlx_metal)]
+#[ignore = "requires all three checkpoints and a natural multi-speaker meeting WAV"]
+async fn realtime_meeting_speaker_labels_cover_rolling_windows() {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+    let root = std::env::var("MLX_DIR").unwrap();
+    mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib")).unwrap();
+    let args = super::tests::serve_args();
+    let manager = ModelManager::new(
+        crate::cli::serve::engine_runtime_config(&args).unwrap(),
+        Some(3),
+        SchedulerResolutionOptions::from(&args),
+    )
+    .unwrap();
+    let pool = manager.pool.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_router(
+        manager,
+        crate::server::voices::VoiceStore::open(dir.path().to_owned()).unwrap(),
+    );
+    let model = "mlx-community/Qwen3-ASR-0.6B-8bit";
+    for (id, env) in [
+        (model, "IRONMLX_ASR_SMALL_DIR"),
+        (
+            crate::server::transcriptions::FIXED_ALIGNER,
+            "IRONMLX_ALIGNER_DIR",
+        ),
+        (
+            ironmlx_audio::diarization::MODEL_ID,
+            "IRONMLX_DIARIZATION_DIR",
+        ),
+    ] {
+        json_request(
+            &app,
+            "/admin/api/models/register",
+            json!({"model":id,"model_dir":std::env::var(env).unwrap()}),
+        )
+        .await;
+    }
+    let mut pcm = ironmlx_audio::AudioIo::decode(
+        &ironmlx_audio::io::NativeAudioIo,
+        &std::fs::read(std::env::var("IRONMLX_REALTIME_MEETING_AUDIO").unwrap()).unwrap(),
+        &ironmlx_audio::DecodeLimits {
+            max_duration_seconds: 7200,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(pcm.format.channels, 1);
+    pcm.samples.truncate(pcm.format.sample_rate as usize * 40);
+    let samples = ironmlx_audio::signal::resample_mono(
+        &pcm.samples,
+        pcm.format.sample_rate,
+        24000,
+        &NoCancel,
+    )
+    .unwrap();
+    let bytes = samples
+        .iter()
+        .flat_map(|s| ((s.clamp(-1., 1.) * 32767.) as i16).to_le_bytes())
+        .collect::<Vec<_>>();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let router = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/v1/realtime?model={model}"))
+        .await
+        .unwrap();
+    ws.next().await.unwrap().unwrap();
+    ws.send(Message::Text(json!({"type":"session.update","session":{"audio":{"input":{"transcription":{"language":"en"},"diarization":{}}}}}).to_string())).await.unwrap();
+    let mut events = Vec::new();
+    for packet in bytes.chunks(9600) {
+        ws.send(Message::Text(
+            json!({"type":"input_audio_buffer.append","audio":STANDARD.encode(packet)}).to_string(),
+        ))
+        .await
+        .unwrap();
+        let until = tokio::time::Instant::now() + std::time::Duration::from_millis(200);
+        while let Ok(Some(Ok(message))) = tokio::time::timeout_at(until, ws.next()).await {
+            let event: Value = serde_json::from_str(&message.into_text().unwrap()).unwrap();
+            assert_ne!(event["type"], "error", "{event}");
+            assert_ne!(
+                event["type"], "conversation.item.input_audio_transcription.failed",
+                "{event}"
+            );
+            events.push(event);
+        }
+    }
+    assert!(events
+        .iter()
+        .any(|e| e["type"] == "input_audio_buffer.diarization.delta"));
+    assert!(
+        events.iter().any(
+            |e| e["type"] == "conversation.item.input_audio_transcription.completed"
+                && e["is_final"] == false
+        ),
+        "No automatic rolling ASR window"
+    );
+    ws.send(Message::Text(
+        json!({"type":"input_audio_buffer.commit"}).to_string(),
+    ))
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        loop {
+            let event: Value =
+                serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            assert_ne!(event["type"], "error", "{event}");
+            assert_ne!(
+                event["type"], "conversation.item.input_audio_transcription.failed",
+                "{event}"
+            );
+            let done = event["type"] == "conversation.item.input_audio_transcription.diarized"
+                && event["is_final"] == true;
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let labelled = events
+        .iter()
+        .filter(|e| e["type"] == "conversation.item.input_audio_transcription.diarized")
+        .collect::<Vec<_>>();
+    assert!(labelled.len() >= 2);
+    let mut previous_end = 0.;
+    let mut speakers = std::collections::HashSet::new();
+    let context = &labelled[0]["diarization_id"];
+    for event in &labelled {
+        assert_eq!(&event["diarization_id"], context);
+        let original = events
+            .iter()
+            .find(|e| {
+                e["type"] == "conversation.item.input_audio_transcription.completed"
+                    && e["item_id"] == event["item_id"]
+            })
+            .unwrap();
+        assert_eq!(event["transcript"], original["transcript"]);
+        assert!((event["start"].as_f64().unwrap() - previous_end).abs() < 1e-6);
+        previous_end = event["end"].as_f64().unwrap();
+        let segments = event["segments"].as_array().unwrap();
+        assert_eq!(
+            segments
+                .iter()
+                .map(|s| s["text"].as_str().unwrap())
+                .collect::<String>(),
+            event["transcript"].as_str().unwrap()
+        );
+        for s in event["diarization"]["segments"].as_array().unwrap() {
+            speakers.insert(s["speaker"].as_str().unwrap().to_owned());
+        }
+    }
+    assert!((previous_end - bytes.len() as f64 / 48000.).abs() < 1e-6);
+    assert!(
+        speakers.len() >= 2,
+        "Natural meeting produced fewer than two speaker labels: {speakers:?}"
+    );
+    println!(
+        "Natural meeting: {previous_end}s, {} rolling labelled items, {} distinct speaker labels",
+        labelled.len(),
+        speakers.len()
+    );
+    if let Ok(path) = std::env::var("IRONMLX_REALTIME_MEETING_EVIDENCE") {
+        std::fs::write(path, serde_json::to_vec_pretty(&events).unwrap()).unwrap();
+    }
+    ws.close(None).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    for id in [
+        model,
+        crate::server::transcriptions::FIXED_ALIGNER,
+        ironmlx_audio::diarization::MODEL_ID,
+    ] {
+        json_request(&app, "/admin/api/models/unload", json!({"model":id})).await;
+        assert!(!pool.is_model_loaded(id).await);
+    }
+    server.abort();
+}

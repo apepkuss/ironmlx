@@ -389,5 +389,9 @@ to one native worker, not the HTTP task.
 
 The managed runtime adds queue/memory admission, cancellation, deadlines and
 model leases. The [recognition and diarization API](../docs/audio-transcriptions-api.md)
-exposes independent JSON/RTTM/file-SSE and the Qwen3 three-model workflow.
+exposes independent JSON/RTTM/file-SSE, the Qwen3 three-model workflow and optional
+Realtime WebSocket speaker labels. `DiarizationRuntime::start_stream` retains
+worker-local caches across turns; `DiarizationStream::snapshot` flushes a copy
+without consuming the live right context. Dropping a stream cancels its work and
+releases its cache reservation and model lease.
 The APIs label speakers; they do not identify people or extract separate voices.

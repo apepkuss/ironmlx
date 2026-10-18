@@ -38,6 +38,7 @@ pub(crate) mod embeddings;
 pub mod engine;
 pub(crate) mod images;
 pub(crate) mod realtime;
+mod realtime_speakers;
 pub(crate) mod systemone;
 pub(crate) mod transcriptions;
 use ironmlx_runtime::core::runtime_health as health;

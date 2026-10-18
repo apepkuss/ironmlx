@@ -43,12 +43,12 @@ private struct TranscriptionClient {
     private static func run() async throws {
         let arguments = Array(CommandLine.arguments.dropFirst())
         guard arguments.count.isMultiple(of: 2) else {
-            throw TranscriptionClientError("Use --audio FILE.pcm [--model ID] [--url ws://HOST/v1/realtime] [--language zh]")
+            throw TranscriptionClientError("Use --audio FILE.pcm [--model ID] [--url ws://HOST/v1/realtime] [--language zh] [--diarization true|false]")
         }
         var options: [String: String] = [:]
         for index in stride(from: 0, to: arguments.count, by: 2) {
             let name = arguments[index]
-            guard ["--audio", "--model", "--url", "--language"].contains(name), options[name] == nil else {
+            guard ["--audio", "--model", "--url", "--language", "--diarization"].contains(name), options[name] == nil else {
                 throw TranscriptionClientError("Unknown or repeated option: \(name)")
             }
             options[name] = arguments[index + 1]
@@ -61,6 +61,10 @@ private struct TranscriptionClient {
               audio.prefix(4) != Data("RIFF".utf8) else {
             throw TranscriptionClientError("Expected 100 ms–2 hours of raw PCM16 mono 24 kHz, without a WAV header")
         }
+        guard options["--diarization"] == nil || ["true", "false"].contains(options["--diarization"]!) else {
+            throw TranscriptionClientError("--diarization must be true or false")
+        }
+        let diarization = options["--diarization"] == "true"
         let model = options["--model"] ?? "mlx-community/Qwen3-ASR-0.6B-8bit"
         guard var url = URLComponents(string: options["--url"] ?? "ws://127.0.0.1:9068/v1/realtime"),
               ["ws", "wss"].contains(url.scheme ?? "") else {
@@ -80,10 +84,12 @@ private struct TranscriptionClient {
         }
         var transcription = ["model": model]
         if let language = options["--language"] { transcription["language"] = language }
-        try await send(["type": "session.update", "session": ["type": "transcription", "audio": ["input": [
+        var input: [String: Any] = [
             "format": ["type": "audio/pcm", "rate": 24000],
             "transcription": transcription, "turn_detection": NSNull()
-        ]]]], to: socket)
+        ]
+        if diarization { input["diarization"] = [String: Any]() }
+        try await send(["type": "session.update", "session": ["type": "transcription", "audio": ["input": input]]], to: socket)
         guard try await receive(from: socket)["type"] as? String == "session.updated" else {
             throw TranscriptionClientError("Expected session.updated")
         }
@@ -93,11 +99,14 @@ private struct TranscriptionClient {
                 let event = try await receive(from: socket)
                 let type = event["type"] as? String ?? ""
                 let data = try JSONSerialization.data(withJSONObject: event, options: [.sortedKeys])
-                if type == "conversation.item.input_audio_transcription.completed" {
+                let finalType = diarization ? "conversation.item.input_audio_transcription.diarized" : "conversation.item.input_audio_transcription.completed"
+                if type == finalType {
                     FileHandle.standardOutput.write(data + Data([10]))
                     // IronMLX marks the final item of an explicitly committed turn.
                     if event["is_final"] as? Bool == true { return }
-                } else if type == "conversation.item.input_audio_transcription.partial" {
+                } else if type == "conversation.item.input_audio_transcription.partial"
+                    || type == "input_audio_buffer.diarization.delta"
+                    || type == "input_audio_buffer.diarization.started" {
                     FileHandle.standardError.write(data + Data([10]))
                 }
             }

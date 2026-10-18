@@ -100,6 +100,7 @@ mod tests {
         Ok(())
     }
 }
+#[derive(Clone)]
 pub struct StreamingState {
     cache: Array,
     cache_predictions: Array,

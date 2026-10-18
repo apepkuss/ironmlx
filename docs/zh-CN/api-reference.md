@@ -34,7 +34,7 @@
 | `POST` | `/v1/audio/transcriptions` | 语音识别；对齐时间戳或 SRT/WebVTT 字幕 | App / EnginePool；ASR 模型 | [语音识别 API](audio-transcriptions-api.md) |
 | `POST` | `/v1/audio/alignments` | 已有文字与音频对齐；JSON 或 SRT/WebVTT（IronMLX 扩展） | App / EnginePool；ForcedAligner 模型 | [独立强制对齐](audio-transcriptions-api.md#独立强制对齐ironmlx-扩展) |
 | `POST` | `/v1/audio/diarizations` | 说话人时间段；JSON、RTTM 或文件 SSE（IronMLX 扩展） | App / EnginePool; Nemotron 3 Diarization | [API](audio-transcriptions-api.md) |
-| `GET` | `/v1/realtime` | 实时转写 | App / EnginePool; ASR WebSocket 会话 | [Realtime](audio-transcriptions-api.md) |
+| `GET` | `/v1/realtime` | 实时转写，可选说话人标注及对齐时间戳 | App / EnginePool; ASR WebSocket 会话 | [Realtime](audio-transcriptions-api.md) |
 | `GET` | `/v1/audio/voices` | 查询可用声音 | App / EnginePool; 配置声音服务 | [语音合成 API](audio-speech-api.md) |
 | `GET` | `/admin/api/audio/voices` | 查询全部声音（含禁用项） | App / EnginePool; 配置声音服务 | [语音合成 API](audio-speech-api.md) |
 | `POST` | `/v1/audio/voices` | 创建声音 | App / EnginePool; 配置声音服务 | [语音合成 API](audio-speech-api.md) |

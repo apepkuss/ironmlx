@@ -81,7 +81,9 @@ file-only snapshots after native metadata preflight without re-downloading weigh
 Upstream clients use `POST /v1/audio/diarizations` for independent JSON/RTTM or
 uploaded-file SSE results. `response_format=diarized_json` on transcription combines
 Qwen3-ASR, ForcedAligner and Nemotron, with explicit ambiguous-overlap annotations.
-No recording or transcription UI is added. See the
+Realtime WebSocket sessions can opt into `audio.input.diarization` for continuous
+speaker activity and aligned labels on confirmed text, retaining speaker context
+across turns. No recording or transcription UI is added. See the
 [recognition and diarization API](../docs/audio-transcriptions-api.md).
 
 Qwen3-ASR 0.6B/1.7B 8-bit checkpoints run through the native Rust/MLX ASR

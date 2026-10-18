@@ -125,7 +125,7 @@ curl http://127.0.0.1:9068/v1/audio/transcriptions \
 首个至最后一个对齐单元，不代表按句分段或 VAD 边界。长音频结果会加上窗口在
 原始录音中的时间偏移。普通 `json`／`text` 和 SSE 仍只调用 ASR；时间戳 JSON 使用
 非流式 `verbose_json`，字幕使用下文的非流式 `srt` 或 `vtt`。
-本次不为实时 WebSocket 增加时间戳。
+文件时间戳接口与下文的可选实时说话人标注独立；后者也提供已对齐文字的时间戳。
 字段遵循 [OpenAI 转写契约](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)，
 不伪造 Whisper 专属的 token 评分或置信度字段。
 
@@ -302,7 +302,7 @@ IronMLX 额外返回每段的 `speakers`、`ambiguous` 和独立的 `diarization
 这不提供混合声音分离，也不能补回 ASR 漏掉的文字。
 目前组合工作流按非流式请求执行；省略只用于 `verbose_json` 的 `timestamp_granularities[]`。
 为兼容客户端，接受 `chunking_strategy=auto`，实际沿用 IronMLX 已定义的 ASR 分段规则。
-其他分段配置、真实身份识别和带说话人的 Realtime WebSocket 事件尚不支持。
+其他分段配置和真实身份识别尚不支持。实时连接可通过下文的 IronMLX 扩展启用说话人标注。
 现有 SRT/VTT 继续使用 ASR 加对齐的行为。
 
 本地 CLI 示例：
@@ -365,8 +365,59 @@ App 不提供录音客户端。服务端先发送 `session.created`，随后可�
 活跃会话持有模型租约；延迟取决于硬件和并发负载，建立连接本身不代表满足某个延迟指标。
 
 协议实现 OpenAI Realtime 的转写子集，并增加上述可修订临时文本事件。
-不提供 WebRTC、降噪、音频生成、时间戳或说话人分离。
+不提供 WebRTC、降噪或音频生成。可选说话人标注与时间戳见下文。
 麦克风采集和文本展示由上游应用负责；客户端 VAD 可按需使用。
+
+### 实时说话人标注（IronMLX 扩展）
+
+在现有转写连接的 `session.audio.input.diarization` 中设置对象即可启用；默认关闭，
+设为 `null` 关闭。该字段与下面三个新事件是 IronMLX 扩展，不是 OpenAI 标准字段。
+需注册并准备好 Qwen3-ASR、固定 Qwen3-ForcedAligner-0.6B-8bit 和
+`mlx-community/Nemotron-3-Diarization`，并提供至少三个模型的加载容量。
+App 仍只提供后端服务，不增加麦克风或转写操作控件。
+
+```json
+{"type":"session.update","session":{"audio":{"input":{"transcription":{"language":"zh"},"diarization":{"model":"mlx-community/Nemotron-3-Diarization","threshold":0.5,"latency":"low"}}}}}
+```
+
+`diarization: {}` 使用以上默认值。`threshold` 必须大于 0 且小于 1；
+`latency` 支持 `low`、`very_low`、`ultra_low`，对应模型输入窗口约 1.04、0.64、0.32 秒，
+不是端到端延迟保证。实时模式不接受 `offline`、`min_duration`、`merge_gap`、
+指定人数或已知说话人信息。只支持上述固定辅助模型组合。
+手动 `commit` 和服务端 VAD 都可使用；静音也必须随原始音频持续发送给服务端。
+24 kHz PCM 会在保留跨包相位和滤波器上下文的前提下转换为 Nemotron 所需的 16 kHz。
+
+| 新事件 | 含义与客户端处理 |
+| --- | --- |
+| `input_audio_buffer.diarization.started` | 启用或重置后的 `diarization_id` 和 `audio_start_ms`；以该 ID 区分说话人上下文 |
+| `input_audio_buffer.diarization.delta` | 持续返回 `start`、`end` 与活动 `segments`；时间为接受音频时间轴上的秒数，可能没有活动或多人重叠，跨块的同一说话人区间可以连续 |
+| `conversation.item.input_audio_transcription.diarized` | 当前确认文字经过强制对齐后的说话人结果；按 `item_id` 与原 `completed` 事件关联，使用 `segments` 展示带时间戳及说话人的文字 |
+
+原有 `partial`、`delta` 和 `completed` 事件的含义保持不变，临时文字不附加推测标签。
+启用标注后，`completed` 只代表文字完成，还应等待同一 `item_id` 的 `diarized`。
+`diarized` 包含 `content_index`、`diarization_id`、`transcript`、`language`、`is_final`、
+原始全局时间 `start/end`、文字 `segments` 和独立活动结果 `diarization`。
+文字分段的 `speaker`、`speakers`、`ambiguous` 与文件组合流程相同；
+重叠讲话保留候选标签并返回 `unknown`，不假装已经分离重叠语音。
+分段文字拼接后等于该项的 `transcript`，其中 `start/end` 也使用全局秒数。
+
+```json
+{"type":"conversation.item.input_audio_transcription.diarized","item_id":"item_...","content_index":0,"diarization_id":"diar_...","transcript":"你好。","language":"Chinese","is_final":true,"start":2.0,"end":4.0,"segments":[{"type":"transcript.text.segment","id":"seg_0","speaker":"speaker_0","speakers":["speaker_0"],"ambiguous":false,"start":2.4,"end":3.2,"text":"你好。"}],"diarization":{"duration":2.0,"num_speakers":1,"segments":[{"speaker":"speaker_0","start":2.3,"end":3.4}]}}
+```
+
+说话人模型保留同一上下文的缓存，跨显式提交、VAD 轮次及 30 秒滚动窗口延续标签，
+不会每轮重新初始化。提交末尾使用当前音频的副本补齐右侧上下文，不污染后续流状态。
+确认标注使用当时的音频快照，不因后续音频自动修订；在线结果可能与整段录音离线重算不同。
+客户端用 `diarized.segments` 展示确认文字，活动事件用于独立活动时间轴。
+标签是模型给出的会话内编号，不保证真实身份或无误识别。
+
+清空会取消当前与排队工作、丢弃尚未返回的标注，并创建新的 `diarization_id`；
+已接受音频的全局时间轴继续前进。修改说话人配置也会开启新上下文；
+保持配置不变时修改语言、prompt 或 VAD 会保留上下文。
+只能在音频与标注均处理完成后修改会话设置；非法配置不会替换原配置。
+每连接最多缓存 60 秒待处理音频，标注队列最多 16 项且音频总量最多 60 秒，
+活动历史最多保留 90 秒；输入过快时先拒绝追加，不静默丢包。
+推理或对齐失败会返回 `realtime_diarization_failed` 并结束连接；断连会取消工作并释放模型租约。
 
 ### 服务端 VAD
 
@@ -406,6 +457,10 @@ ffmpeg -i speech.wav -ar 24000 -ac 1 -f s16le speech.pcm
 swiftc -parse-as-library examples/transcription-client.swift -o /tmp/ironmlx-transcription-client
 /tmp/ironmlx-transcription-client --audio speech.pcm --language zh
 ```
+
+
+添加 `--diarization true` 可启用实时说话人标注。客户端会等待 `diarized` 的最终项，
+将带说话人文字写入标准输出，活动事件写入标准错误；需先准备三个模型。
 
 使用 `--model` 指定 1.7B 模型，`--url` 指定实时端点。LAN 模式的 Bearer 密钥通过
 `IRONMLX_API_KEY` 环境变量传入，不写入命令行参数。空缓冲区提交仍会返回参数错误。

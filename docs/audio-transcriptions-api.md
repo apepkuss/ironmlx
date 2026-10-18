@@ -333,7 +333,7 @@ Adjacent equal attributions are grouped while retaining transcript punctuation.
 This workflow is nonstreaming; omit `timestamp_granularities[]`, which remains
 exclusive to `verbose_json`. `chunking_strategy=auto` is accepted for compatibility;
 IronMLX already applies its documented ASR chunking policy. Other chunking options,
-known-speaker identification and diarized Realtime WebSocket events are unsupported.
+known-speaker identification are unsupported. Realtime speaker labels are available through the IronMLX extension below.
 Existing SRT/VTT output retains its ASR-plus-alignment behavior.
 
 For local CLI use:
@@ -401,8 +401,69 @@ concurrent inference; a socket connection alone is not a latency guarantee.
 
 The protocol implements the transcription subset of OpenAI Realtime, with the
 provisional-text extension above. It does not provide WebRTC, noise
-reduction, audio generation, timestamps or diarization. Upstream applications own
+reduction or audio generation. Optional aligned speaker labels are described below. Upstream applications own
 microphone capture and rendering; client VAD remains optional.
+
+### Realtime speaker labels (IronMLX extension)
+
+Set an object in `session.audio.input.diarization` on the existing transcription
+connection to opt in; the default is disabled and `null` disables it. This field
+and the following three new events are IronMLX extensions, not OpenAI fields.
+Register and prepare Qwen3-ASR, the fixed Qwen3-ForcedAligner-0.6B-8bit and
+`mlx-community/Nemotron-3-Diarization`, with capacity for at least three loaded
+models. The App remains a backend service without microphone or transcription controls.
+
+```json
+{"type":"session.update","session":{"audio":{"input":{"transcription":{"language":"zh"},"diarization":{"model":"mlx-community/Nemotron-3-Diarization","threshold":0.5,"latency":"low"}}}}}
+```
+
+`diarization: {}` uses these defaults. `threshold` must be strictly between 0 and 1.
+`latency` accepts `low`, `very_low` or `ultra_low`: model input windows are about
+1.04, 0.64 or 0.32 seconds, not end-to-end latency guarantees. Realtime mode rejects
+`offline`, `min_duration`, `merge_gap`, requested speaker counts and known-speaker
+references. Only this fixed auxiliary-model combination is supported.
+Both manual commit and server VAD work. Send silence as part of the continuous
+original audio. Conversion from 24 kHz to 16 kHz retains sinc filter context and
+phase across PCM packet boundaries.
+
+| New event | Meaning and client action |
+| --- | --- |
+| `input_audio_buffer.diarization.started` | Supplies `diarization_id` and `audio_start_ms` after enable/reset; scope speaker labels to that context ID |
+| `input_audio_buffer.diarization.delta` | Supplies continuous `start`, `end` and activity `segments` in global accepted-audio seconds; chunks can be silent or overlapping and adjacent chunks can share a continuing speaker |
+| `conversation.item.input_audio_transcription.diarized` | Supplies confirmed text with aligned speaker labels; associate it with the original `completed` event by `item_id` and render its `segments` |
+
+Existing `partial`, `delta` and `completed` semantics are unchanged. Interim text
+does not receive speculative labels. With diarization enabled, `completed` means
+text is ready; also wait for `diarized` for the same item. It includes `content_index`,
+`diarization_id`, `transcript`, `language`, `is_final`, global `start/end`, text
+`segments` and independent activity `diarization`. Segment `speaker`, `speakers`
+and `ambiguous` follow the file workflow: ambiguous overlap retains candidate
+labels and returns `unknown`, without claiming to separate overlapping voices.
+Concatenating segment text reproduces the item's transcript; segment times are
+global seconds as well.
+
+```json
+{"type":"conversation.item.input_audio_transcription.diarized","item_id":"item_...","content_index":0,"diarization_id":"diar_...","transcript":"Hello.","language":"English","is_final":true,"start":2.0,"end":4.0,"segments":[{"type":"transcript.text.segment","id":"seg_0","speaker":"speaker_0","speakers":["speaker_0"],"ambiguous":false,"start":2.4,"end":3.2,"text":"Hello."}],"diarization":{"duration":2.0,"num_speakers":1,"segments":[{"speaker":"speaker_0","start":2.3,"end":3.4}]}}
+```
+
+Speaker caches survive explicit commits, VAD turns and 30-second rolling windows
+within one context. Turn completion flushes a copy with available right context,
+leaving the live stream unchanged. Confirmed labels use the audio snapshot at
+that time and are not revised by later audio; online results can differ from a
+whole-recording offline pass. Render confirmed text from `diarized.segments` and
+use activity events for a separate activity timeline. Labels are model-assigned
+session identifiers, not verified personal identities or guaranteed recognition.
+
+Clearing cancels current/queued work, discards outstanding annotations and creates
+a new `diarization_id`; the global accepted-audio timeline keeps advancing.
+Changing diarization settings also starts a new context. Keeping those settings
+unchanged while updating language, prompt or VAD preserves the context.
+Session updates require all audio and annotations to finish; invalid settings leave
+the old configuration intact. Each connection bounds pending audio to 60 seconds,
+annotations to 16 items and 60 seconds of PCM, and activity history to 90 seconds.
+Overload rejects appends before accepting their audio. Inference/alignment failure
+emits `realtime_diarization_failed` and ends the connection; disconnect cancels work
+and releases model leases.
 
 ### Server VAD
 
@@ -449,6 +510,11 @@ ffmpeg -i speech.wav -ar 24000 -ac 1 -f s16le speech.pcm
 swiftc -parse-as-library examples/transcription-client.swift -o /tmp/ironmlx-transcription-client
 /tmp/ironmlx-transcription-client --audio speech.pcm --language zh
 ```
+
+
+Add `--diarization true` to enable Realtime speaker labels. The client waits for
+the final `diarized` item and writes speaker-labelled text events to stdout, with
+activity events on stderr. Prepare all three models first.
 
 Use `--model` for the 1.7B model and `--url` for another realtime endpoint.
 LAN Bearer authentication reads `IRONMLX_API_KEY` from the environment rather than

@@ -4,10 +4,11 @@ use super::{
     process_memory::global_process_memory_governor,
 };
 use ironmlx_audio::{
-    diarization::{Diarization, NemotronDiarization, Options},
+    diarization::{Diarization, NemotronDiarization, Options, ProbabilityChunk, StreamingState},
     AudioError, PcmBuffer, SessionControl,
 };
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -59,6 +60,17 @@ impl Drop for Active {
     }
 }
 struct Cancellation(Arc<AtomicBool>);
+struct FeedCancellation {
+    flag: Arc<AtomicBool>,
+    armed: bool,
+}
+impl Drop for FeedCancellation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+    }
+}
 impl Drop for Cancellation {
     fn drop(&mut self) {
         self.0.store(true, Ordering::SeqCst);
@@ -80,6 +92,89 @@ impl SessionControl for Control {
     }
 }
 type Reply = Result<Diarization, DiarizationExecutionError>;
+type StreamReply = Result<ProbabilityChunk, DiarizationExecutionError>;
+struct StreamState {
+    state: StreamingState,
+    cancelled: Arc<AtomicBool>,
+    _lease: EngineLease,
+    _memory: super::process_memory::MemoryReservation,
+}
+struct StartStream {
+    options: Options,
+    cancelled: Arc<AtomicBool>,
+    lease: EngineLease,
+    reply: oneshot::Sender<Result<u64, DiarizationExecutionError>>,
+}
+struct FeedStream {
+    id: u64,
+    samples: Vec<f32>,
+    snapshot: bool,
+    reply: oneshot::Sender<StreamReply>,
+    control: Control,
+    _pending: Pending,
+}
+enum Command {
+    File(Job),
+    Start(StartStream),
+    Feed(FeedStream),
+}
+/// A session owns its cancellation flag. Dropping it releases worker-local state,
+/// including its model lease, even when the bounded command queue is full.
+pub struct DiarizationStream {
+    runtime: DiarizationRuntime,
+    id: u64,
+    cancellation: Cancellation,
+}
+impl DiarizationStream {
+    /// Feed finite mono 16 kHz PCM; only owned probabilities cross the worker boundary.
+    pub async fn feed(&self, samples: Vec<f32>) -> StreamReply {
+        self.request(samples, false).await
+    }
+    /// Flush a copy using the currently available right context. Live speaker
+    /// caches and PCM are retained, so a committed turn does not renumber speakers.
+    /// Optional samples supply the input resampler's final right-edge tail.
+    pub async fn snapshot(&self, tail: Vec<f32>) -> StreamReply {
+        self.request(tail, true).await
+    }
+    async fn request(&self, samples: Vec<f32>, snapshot: bool) -> StreamReply {
+        if samples.len() > 5 * 16000 || samples.iter().any(|v| !v.is_finite()) {
+            return Err(DiarizationExecutionError::Inference(anyhow::anyhow!(
+                "stream feed requires at most five seconds of finite mono 16 kHz PCM"
+            )));
+        }
+        let (reply, result) = oneshot::channel();
+        // A cancelled/timed-out feed invalidates this session; partially updated
+        // caches must never be reused. Disarming happens only after a full reply.
+        let mut cancellation = FeedCancellation {
+            flag: self.cancellation.0.clone(),
+            armed: true,
+        };
+        self.runtime
+            .inner
+            .counts
+            .pending
+            .fetch_add(1, Ordering::SeqCst);
+        self.runtime.send(Command::Feed(FeedStream {
+            id: self.id,
+            samples,
+            snapshot,
+            reply,
+            control: Control {
+                cancelled: cancellation.flag.clone(),
+                deadline: Instant::now() + Duration::from_secs(90),
+            },
+            _pending: Pending(self.runtime.inner.counts.clone()),
+        }))?;
+        let output = tokio::time::timeout(Duration::from_secs(90), result)
+            .await
+            .map_err(|_| DiarizationExecutionError::Timeout)?
+            .map_err(|_| DiarizationExecutionError::WorkerStopped)?;
+        // Do not cancel the live stream after a successful job.
+        cancellation.armed = false;
+        output
+    }
+}
+
 struct Job {
     request: DiarizationRequest,
     reply: oneshot::Sender<Reply>,
@@ -88,7 +183,7 @@ struct Job {
     _lease: Arc<EngineLease>,
 }
 struct Worker {
-    sender: Option<mpsc::SyncSender<Job>>,
+    sender: Option<mpsc::SyncSender<Command>>,
     thread: Option<std::thread::JoinHandle<()>>,
     counts: Arc<Counts>,
     weight_bytes: usize,
@@ -110,7 +205,7 @@ pub struct DiarizationRuntime {
 }
 impl DiarizationRuntime {
     pub(crate) async fn load(path: PathBuf) -> anyhow::Result<Self> {
-        let (sender, receiver) = mpsc::sync_channel::<Job>(DIARIZATION_QUEUE_CAPACITY);
+        let (sender, receiver) = mpsc::sync_channel::<Command>(DIARIZATION_QUEUE_CAPACITY);
         let (ready_tx, ready_rx) = oneshot::channel();
         let counts = Arc::new(Counts::default());
         let worker_counts = counts.clone();
@@ -128,7 +223,105 @@ impl DiarizationRuntime {
                 match load() {
                     Ok(model) => {
                         if ready_tx.send(Ok(model.weight_bytes() as usize)).is_ok() {
-                            while let Ok(job) = receiver.recv() {
+                            let mut streams: HashMap<u64, StreamState> = HashMap::new();
+                            let mut next_id = 0u64;
+                            loop {
+                                // Periodic pruning works even without a close command and
+                                // breaks the lease/runtime cycle after the client disappears.
+                                let _ = mlx::synchronize();
+                                streams.retain(|_, state| !state.cancelled.load(Ordering::SeqCst));
+                                let command = match receiver.recv_timeout(Duration::from_millis(50))
+                                {
+                                    Ok(command) => command,
+                                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                                };
+                                let job = match command {
+                                    Command::File(job) => job,
+                                    Command::Start(start) => {
+                                        if start.reply.is_closed()
+                                            || start.cancelled.load(Ordering::SeqCst)
+                                        {
+                                            continue;
+                                        }
+                                        streams.retain(|_, state| {
+                                            !state.cancelled.load(Ordering::SeqCst)
+                                        });
+                                        let output = (|| {
+                                            if streams.len() >= 8 {
+                                                return Err(DiarizationExecutionError::QueueFull);
+                                            }
+                                            let memory = global_process_memory_governor()
+                                                .try_reserve(
+                                                    16 * 1024 * 1024,
+                                                    "Nemotron streaming cache",
+                                                )
+                                                .map_err(|e| {
+                                                    DiarizationExecutionError::Memory(e.to_string())
+                                                })?;
+                                            let state = model.init_stream(start.options)?;
+                                            next_id += 1;
+                                            streams.insert(
+                                                next_id,
+                                                StreamState {
+                                                    state,
+                                                    cancelled: start.cancelled,
+                                                    _lease: start.lease,
+                                                    _memory: memory,
+                                                },
+                                            );
+                                            Ok(next_id)
+                                        })();
+                                        let _ = start.reply.send(output);
+                                        continue;
+                                    }
+                                    Command::Feed(feed) => {
+                                        if feed.reply.is_closed() {
+                                            continue;
+                                        }
+                                        worker_counts.active.fetch_add(1, Ordering::SeqCst);
+                                        let _active = Active(worker_counts.clone());
+                                        let output = (|| -> StreamReply {
+                                            feed.control.check().map_err(anyhow::Error::from)?;
+                                            let stream = streams
+                                                .get_mut(&feed.id)
+                                                .ok_or(DiarizationExecutionError::WorkerStopped)?;
+                                            let governor = global_process_memory_governor();
+                                            governor.sample_process();
+                                            let _memory = governor
+                                                .try_reserve(
+                                                    2 * 1024 * 1024 * 1024,
+                                                    "Nemotron streaming inference",
+                                                )
+                                                .map_err(|e| {
+                                                    DiarizationExecutionError::Memory(e.to_string())
+                                                })?;
+                                            let offset = stream.state.frames_processed;
+                                            let output = if feed.snapshot {
+                                                model.feed(
+                                                    &mut stream.state.clone(),
+                                                    &feed.samples,
+                                                    true,
+                                                    &feed.control,
+                                                )
+                                            } else {
+                                                model.feed(
+                                                    &mut stream.state,
+                                                    &feed.samples,
+                                                    false,
+                                                    &feed.control,
+                                                )
+                                            };
+                                            mlx::synchronize().map_err(anyhow::Error::from)?;
+                                            Ok((offset, output?))
+                                        })();
+                                        if output.is_err() {
+                                            streams.remove(&feed.id);
+                                        }
+                                        let _ = feed.reply.send(output);
+                                        continue;
+                                    }
+                                };
                                 if job.reply.is_closed() {
                                     continue;
                                 }
@@ -186,6 +379,45 @@ impl DiarizationRuntime {
             }),
         })
     }
+    fn send(&self, command: Command) -> Result<(), DiarizationExecutionError> {
+        self.inner
+            .sender
+            .as_ref()
+            .ok_or(DiarizationExecutionError::WorkerStopped)?
+            .try_send(command)
+            .map_err(|error| match error {
+                mpsc::TrySendError::Full(_) => DiarizationExecutionError::QueueFull,
+                mpsc::TrySendError::Disconnected(_) => DiarizationExecutionError::WorkerStopped,
+            })
+    }
+    pub async fn start_stream(
+        &self,
+        options: Options,
+        lease: EngineLease,
+    ) -> Result<DiarizationStream, DiarizationExecutionError> {
+        if !matches!(lease.engine(), EngineVariant::Diarization(runtime) if Arc::ptr_eq(&self.inner, &runtime.inner))
+        {
+            return Err(DiarizationExecutionError::WrongEngine);
+        }
+        options.validate()?;
+        let cancellation = Cancellation(Arc::new(AtomicBool::new(false)));
+        let (reply, result) = oneshot::channel();
+        self.send(Command::Start(StartStream {
+            options,
+            cancelled: cancellation.0.clone(),
+            lease,
+            reply,
+        }))?;
+        let id = tokio::time::timeout(Duration::from_secs(90), result)
+            .await
+            .map_err(|_| DiarizationExecutionError::Timeout)?
+            .map_err(|_| DiarizationExecutionError::WorkerStopped)??;
+        Ok(DiarizationStream {
+            runtime: self.clone(),
+            id,
+            cancellation,
+        })
+    }
     pub fn model_weight_bytes(&self) -> usize {
         self.inner.weight_bytes
     }
@@ -229,15 +461,7 @@ impl DiarizationRuntime {
             _pending: Pending(self.inner.counts.clone()),
             _lease: lease,
         };
-        self.inner
-            .sender
-            .as_ref()
-            .ok_or(DiarizationExecutionError::WorkerStopped)?
-            .try_send(job)
-            .map_err(|error| match error {
-                mpsc::TrySendError::Full(_) => DiarizationExecutionError::QueueFull,
-                mpsc::TrySendError::Disconnected(_) => DiarizationExecutionError::WorkerStopped,
-            })?;
+        self.send(Command::File(job))?;
         tokio::time::timeout(deadline, result)
             .await
             .map_err(|_| DiarizationExecutionError::Timeout)?

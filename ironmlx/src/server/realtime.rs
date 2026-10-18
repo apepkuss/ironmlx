@@ -1,5 +1,8 @@
 //! Bounded transcription-only Realtime WebSocket sessions.
 use super::api_error::{ApiError, ApiProtocol};
+use super::realtime_speakers::{
+    Annotation, AnnotationFuture, FeedFuture, Settings as SpeakerSettings, Speakers,
+};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -104,8 +107,8 @@ pub(super) async fn realtime_with_pool(
         .max_message_size(512 * 1024)
         .max_frame_size(512 * 1024)
         .on_upgrade(move |socket| async move {
-            let (_slot, _memory) = (slot, memory);
-            let _ = run(socket, pool, query.model).await;
+            let _slot = slot;
+            let _ = run(socket, pool, query.model, Arc::new(memory)).await;
         })
 }
 
@@ -115,14 +118,20 @@ struct Configuration {
     language: Option<String>,
     prompt: Option<String>,
     vad: Option<VadSettings>,
+    diarization: Option<SpeakerSettings>,
 }
 impl Configuration {
     fn view(&self, id: &str) -> Value {
-        json!({"id":id,"type":"transcription","audio":{"input":{
+        let mut view = json!({"id":id,"type":"transcription","audio":{"input":{
             "format":{"type":"audio/pcm","rate":24000},
             "transcription":{"model":self.model,"language":self.language,"prompt":self.prompt},
             "turn_detection":self.vad
-        }}})
+        }}});
+        if let Some(settings) = &self.diarization {
+            view["audio"]["input"]["diarization"] =
+                serde_json::to_value(settings).expect("speaker settings");
+        }
+        view
     }
     fn update(&self, event: &Value) -> Result<Self, String> {
         let session = event
@@ -167,6 +176,7 @@ impl Configuration {
                     "transcription",
                     "turn_detection",
                     "noise_reduction",
+                    "diarization",
                 ]
                 .contains(&key.as_str())
                 {
@@ -206,6 +216,16 @@ impl Configuration {
             .and_then(|i| i.get("transcription"))
             .or_else(|| session.get("input_audio_transcription"));
         let mut next = self.clone();
+        if let Some(value) = input.and_then(|i| i.get("diarization")) {
+            next.diarization = if value.is_null() {
+                None
+            } else {
+                let settings: SpeakerSettings =
+                    serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
+                settings.validate()?;
+                Some(settings)
+            };
+        }
         let nested_vad = input.and_then(|i| i.get("turn_detection"));
         if nested_vad.is_some() && session.contains_key("turn_detection") {
             return Err("Specify turn_detection only once".into());
@@ -293,6 +313,7 @@ struct Turn {
     item: String,
     committed: bool,
     acknowledged: bool,
+    start_sample: usize,
 }
 impl Default for Turn {
     fn default() -> Self {
@@ -305,6 +326,7 @@ impl Default for Turn {
             item: format!("item_{}", uuid::Uuid::new_v4()),
             committed: false,
             acknowledged: false,
+            start_sample: 0,
         }
     }
 }
@@ -391,6 +413,7 @@ async fn run(
     mut socket: WebSocket,
     pool: EnginePoolState,
     model: Option<String>,
+    input_memory: Arc<ironmlx_runtime::core::process_memory::MemoryReservation>,
 ) -> Result<(), ()> {
     let session_id = format!("sess_{}", uuid::Uuid::new_v4());
     let mut config = Configuration {
@@ -409,6 +432,9 @@ async fn run(
     let mut vad_item: Option<String> = None;
     let mut previous_item = None;
     let mut pending: Option<Pending> = None;
+    let mut speakers: Option<Speakers> = None;
+    let mut speaker_feed: Option<FeedFuture> = None;
+    let mut speaker_annotation: Option<AnnotationFuture> = None;
     let started = Instant::now();
     let mut total_samples = 0usize;
     let mut turn_samples = 0usize;
@@ -426,6 +452,17 @@ async fn run(
             )
             .await?;
             break;
+        }
+        if let Some(state) = speakers.as_mut() {
+            // Snapshot only after all accepted PCM reached the worker. Pause new
+            // feeds during that snapshot/alignment so its right context is exact.
+            if speaker_feed.is_none() && speaker_annotation.is_none() {
+                if let Some(annotation) = state.prepare_annotation(&pool) {
+                    speaker_annotation = Some(annotation);
+                } else {
+                    speaker_feed = state.prepare_feed();
+                }
+            }
         }
         if pending.is_none() && turn.audio.is_empty() && !queued.is_empty() {
             turn = queued.pop_front().unwrap();
@@ -491,7 +528,7 @@ async fn run(
                     update_index: turn.updates,
                 }),
                 progress: None,
-                input_memory: None,
+                input_memory: Some(input_memory.clone()),
                 input_slot: None,
             };
             let runtime = bound.runtime.clone();
@@ -503,6 +540,27 @@ async fn run(
             });
         }
         tokio::select! {
+            result=async { speaker_feed.as_mut().unwrap().as_mut().await }, if speaker_feed.is_some() => {
+                speaker_feed = None;
+                match result.and_then(|(chunk,until)| speakers.as_mut().unwrap().finish_feed(chunk,until)) {
+                    Ok(Some(event)) => send(&mut socket,event).await?,
+                    Ok(None) => {},
+                    Err(message) => {
+                        send(&mut socket,json!({"type":"error","error":{"type":"server_error","code":"realtime_diarization_failed","message":message}})).await?;
+                        break;
+                    }
+                }
+            }
+            result=async { speaker_annotation.as_mut().unwrap().as_mut().await }, if speaker_annotation.is_some() => {
+                speaker_annotation = None;
+                match result {
+                    Ok(event) => send(&mut socket,event).await?,
+                    Err(message) => {
+                        send(&mut socket,json!({"type":"error","error":{"type":"server_error","code":"realtime_diarization_failed","message":message}})).await?;
+                        break;
+                    }
+                }
+            }
             result=async { pending.as_mut().unwrap().future.as_mut().await }, if pending.is_some() => {
                 let work=pending.take().unwrap();
                 match result {
@@ -526,11 +584,20 @@ async fn run(
                         if final_now {
                             acknowledge(&mut socket,&mut turn,&previous_item).await?;
                             let is_final=turn.committed && work.samples==turn.audio.len();
+                            if let Some(state) = speakers.as_mut() {
+                                if let Err(message) = state.enqueue(Annotation {
+                                    item: turn.item.clone(), pcm: turn.audio[..work.samples].to_vec(), text: result.text.clone(),
+                                    language: result.language.clone(), start_sample: turn.start_sample, is_final,
+                                }) {
+                                    error(&mut socket,message,None).await?;
+                                    break;
+                                }
+                            }
                             send(&mut socket,json!({"type":"conversation.item.input_audio_transcription.completed","item_id":turn.item,"content_index":0,"transcript":result.text,"language":result.language,"is_final":is_final})).await?;
                             previous_item=Some(turn.item.clone());
                             let remaining=turn.audio.split_off(work.samples);
                             let committed=turn.committed && !remaining.is_empty();
-                            turn=Turn { audio:remaining, committed, ..Default::default() };
+                            turn=Turn { audio:remaining, committed, start_sample:turn.start_sample+work.samples, ..Default::default() };
                             if is_final { turn_samples=0; }
                         } else {
                             send(&mut socket,json!({"type":"conversation.item.input_audio_transcription.partial","item_id":turn.item,"content_index":0,"transcript":result.text,"revision":turn.updates+1})).await?;
@@ -543,20 +610,33 @@ async fn run(
                 let message=match incoming { Ok(Some(Ok(message))) => message, _ => break };
                 let text=match message { Message::Text(text)=>text, Message::Close(_)=>break, Message::Ping(data)=>{ socket.send(Message::Pong(data)).await.map_err(|_| ())?; continue; }, Message::Pong(_)=>continue, _=>{error(&mut socket,"Send JSON events with base64 PCM16 audio",None).await?;continue;} };
                 let event:Value=match serde_json::from_str(&text) { Ok(event)=>event,Err(_)=>{error(&mut socket,"Invalid JSON event",None).await?;continue;} };
+                let mut accepted_audio: Option<Vec<u8>> = None;
                 let failure: Option<String> = match event.get("type").and_then(Value::as_str).unwrap_or("") {
                     "session.update" | "transcription_session.update" => {
-                        if pending.is_some() || !turn.audio.is_empty() || !queued.is_empty() || vad_item.is_some() { Some("Update the session between audio turns".into()) }
+                        if pending.is_some() || !turn.audio.is_empty() || !queued.is_empty() || vad_item.is_some() || speaker_feed.is_some() || speaker_annotation.is_some() || speakers.as_ref().is_some_and(|s| !s.idle()) { Some("Update the session between audio turns and after speaker annotations complete".into()) }
                         else { match config.update(&event) {
                             Err(e)=>Some(e),
                             Ok(next)=>{
                                 match pool.is_asr_model(next.model.as_deref().unwrap()).await {
                                     Ok(true)=>{
+                                        let speaker_changed = next.diarization != config.diarization;
+                                        if speaker_changed {
+                                            let replacement = if let Some(settings) = next.diarization.clone() {
+                                                match Speakers::open(&pool,settings,total_samples,input_memory.clone()).await {
+                                                    Ok(state) => Some(state),
+                                                    Err(message) => { error(&mut socket,message,event.get("event_id")).await?; continue; }
+                                                }
+                                            } else { None };
+                                            speakers = replacement;
+                                        }
                                         settings=pool.asr_settings(next.model.as_deref().unwrap()).await.map_err(|_| ())?;
                                         turn_samples=0;
                                         detector=next.vad.clone().map(|v| VoiceDetector::new(v,total_samples as u64)).transpose().map_err(|_| ())?;
                                         config=next; binding=None;
                                         let kind=if event["type"]=="transcription_session.update" {"transcription_session.updated"}else{"session.updated"};
-                                        send(&mut socket,json!({"type":kind,"session":config.view(&session_id)})).await?; None
+                                        send(&mut socket,json!({"type":kind,"session":config.view(&session_id)})).await?;
+                                        if speaker_changed { if let Some(state)=&speakers { send(&mut socket,state.started()).await?; } }
+                                        None
                                     },
                                     Ok(false)=>Some("Selected model does not support ASR".into()), Err(e)=>Some(e.to_string()),
                                 }
@@ -573,14 +653,18 @@ async fn run(
                                     else if bytes.is_empty() || !bytes.len().is_multiple_of(2) || bytes.len()>8*RATE {
                                         Some("Each append must contain nonempty PCM16 whole samples, at most four seconds".into())
                                     }
+                                    else if speakers.as_ref().is_some_and(|s| !s.accepts(total_samples,bytes.len()/2)) {
+                                        Some("Realtime speaker processing is too far behind; wait for diarized results".into())
+                                    }
                                     else if detector.as_ref().is_some_and(|vad| vad_buffered_samples(&turn,&queued,vad)+bytes.len()/2>2*WINDOW) {
                                         Some("Realtime input is too far ahead of inference; wait for results".into())
                                     }
-                                    else if detector.is_some() {
+                                    else if let Some(vad) = detector.as_mut() {
                                         total_samples+=bytes.len()/2;
-                                        for frame in detector.as_mut().unwrap().push(&bytes) {
+                                        accepted_audio=Some(bytes.clone());
+                                        for frame in vad.push(&bytes) {
                                             if let Some(start)=frame.started {
-                                                let next=Turn::default();
+                                                let next=Turn { start_sample:start as usize, ..Default::default() };
                                                 let id=next.item.clone();
                                                 if turn.audio.is_empty() && pending.is_none() && queued.is_empty() {turn=next;} else {queued.push_back(next);}
                                                 vad_item=Some(id.clone());
@@ -607,7 +691,9 @@ async fn run(
                                     else if turn_samples+bytes.len()/2>settings.max_audio_duration_seconds as usize*RATE {
                                         Some(format!("Audio turn exceeds this model's configured duration limit of {} seconds",settings.max_audio_duration_seconds))
                                     }
-                                    else { match turn.append(&bytes) { Ok(())=>{total_samples+=bytes.len()/2;turn_samples+=bytes.len()/2;None},Err(e)=>Some(e) } }
+                                    else { if turn.audio.is_empty() { turn.start_sample=total_samples; }
+                                        match turn.append(&bytes) { Ok(())=>{total_samples+=bytes.len()/2;turn_samples+=bytes.len()/2;accepted_audio=Some(bytes);None},Err(e)=>Some(e) }
+                                    }
                                 }
                             }
                         } else {Some("audio is required".into())}
@@ -636,11 +722,25 @@ async fn run(
                     },
                     "input_audio_buffer.clear" => {
                         pending=None;turn=Turn::default();turn_samples=0;queued.clear();vad_item=None;
+                        speaker_feed=None; speaker_annotation=None; speakers=None;
+                        if let Some(settings)=config.diarization.clone() {
+                            match Speakers::open(&pool,settings,total_samples,input_memory.clone()).await {
+                                Ok(state)=>speakers=Some(state),
+                                Err(message)=>{error(&mut socket,message,event.get("event_id")).await?;return Ok(());}
+                            }
+                        }
                         detector=config.vad.clone().map(|v|VoiceDetector::new(v,total_samples as u64)).transpose().map_err(|_| ())?;
-                        send(&mut socket,json!({"type":"input_audio_buffer.cleared"})).await?;None
+                        send(&mut socket,json!({"type":"input_audio_buffer.cleared"})).await?;
+                        if let Some(state)=&speakers {send(&mut socket,state.started()).await?;}
+                        None
                     },
                     _=>Some("Unsupported Realtime event".into()),
                 };
+                if let Some(bytes) = accepted_audio {
+                    if let Some(state) = speakers.as_mut() {
+                        state.append(&bytes,total_samples);
+                    }
+                }
                 if let Some(message)=failure {error(&mut socket,message,event.get("event_id")).await?;}
             }
         }
@@ -675,6 +775,43 @@ mod tests {
             assert!(config.update(&json!({"session":session})).is_err());
         }
         assert!(config.language.is_none());
+    }
+
+    #[test]
+    fn speaker_settings_are_opt_in_strict_and_atomic() {
+        let config = Configuration {
+            model: Some("local-asr".into()),
+            ..Default::default()
+        };
+        assert!(config.view("session")["audio"]["input"]
+            .get("diarization")
+            .is_none());
+        let enabled = config
+            .update(&json!({"session":{"audio":{"input":{"diarization":{}}}}}))
+            .unwrap();
+        assert_eq!(
+            enabled.view("session")["audio"]["input"]["diarization"]["latency"],
+            "low"
+        );
+        for value in [
+            json!(true),
+            json!({"model":"other"}),
+            json!({"latency":"offline"}),
+            json!({"threshold":0}),
+            json!({"threshold":1}),
+            json!({"min_duration":1}),
+            json!({"num_speakers":2}),
+        ] {
+            assert!(enabled
+                .update(&json!({"session":{"audio":{"input":{"diarization":value}}}}))
+                .is_err());
+        }
+        assert!(enabled.diarization.is_some());
+        assert!(enabled
+            .update(&json!({"session":{"audio":{"input":{"diarization":null}}}}))
+            .unwrap()
+            .diarization
+            .is_none());
     }
 
     #[test]

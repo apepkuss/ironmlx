@@ -329,5 +329,8 @@ swift test -c release --package-path ironmlx-app --filter audioAppLoadsAndRestor
 
 托管运行时提供队列、内存准入、取消、超时及模型租约。
 [识别与说话人分离 API](../docs/zh-CN/audio-transcriptions-api.md)提供独立 JSON、
-RTTM、文件 SSE，以及 Qwen3 三模型组合流程。服务只标注说话人，不识别真实身份，
+RTTM、文件 SSE、Qwen3 三模型组合流程和可选的实时 WebSocket 说话人标注。
+`DiarizationRuntime::start_stream` 跨轮次保留工作线程内的缓存；
+`DiarizationStream::snapshot` 在副本中补齐末尾，不消费实时流的右侧上下文。
+丢弃流会取消工作并释放缓存预留和模型租约。服务只标注说话人，不识别真实身份，
 也不提取每个人的独立音轨。
