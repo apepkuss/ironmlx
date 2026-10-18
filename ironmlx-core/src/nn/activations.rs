@@ -98,6 +98,24 @@ pub fn invoke_geglu_tanh(func: &CompiledFn, gate: &Array, up: &Array) -> Result<
         .ok_or_else(|| anyhow!("GeGLU tanh returned no outputs"))
 }
 
+/// [`gelu_tanh`] compiled into one fused kernel: the same ops in the input
+/// dtype, without materializing each intermediate.
+pub fn build_gelu_tanh() -> CompiledFn {
+    compile(
+        |inputs: &[&Array]| -> mlx::Result<Vec<Array>> { Ok(vec![gelu_tanh_expr(inputs[0])?]) },
+        ShapeMode::Shapeless,
+    )
+    .expect("GELU tanh compile")
+}
+
+pub fn invoke_gelu_tanh(func: &CompiledFn, x: &Array) -> Result<Array> {
+    let mut outs = func
+        .invoke(&[x])
+        .map_err(|e| anyhow!("GELU tanh invoke failed: {e}"))?;
+    outs.pop()
+        .ok_or_else(|| anyhow!("GELU tanh returned no outputs"))
+}
+
 fn gelu_tanh_expr(x: &Array) -> mlx::Result<Array> {
     let three: Array = (&[3_i32][..], ()).try_into()?;
     let x3 = x.power(&three)?;

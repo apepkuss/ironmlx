@@ -13,7 +13,7 @@ pub use crate::models::qwen3_5::VisionConfig;
 use crate::nn::Embedding;
 use ironmlx_core::weights::WeightSource;
 
-use self::block::VitBlock;
+use self::block::{VisionRotary, VitBlock};
 use self::dump::dump_tensor;
 use self::merger::PatchMerger;
 use self::patch_embed::PatchEmbed;
@@ -252,8 +252,9 @@ impl VisionTower {
         x = self.add_learned_pos_embed(&x, grid_thw)?;
         dump_tensor("03_after_pos_embed", &x);
 
-        let rotary = self.compute_rotary_pos_emb(grid_thw)?;
-        dump_tensor("04_rotary_freqs", &rotary);
+        let freqs = self.compute_rotary_pos_emb(grid_thw)?;
+        dump_tensor("04_rotary_freqs", &freqs);
+        let rotary = VisionRotary::new(&freqs)?;
 
         let cu_seqlens: Vec<i32> = {
             let mut v = vec![0_i32];
@@ -467,10 +468,10 @@ impl VisionTower {
         let pos_embed_all = ops::concatenate(&refs, 0)?;
         dump_tensor("02_pos_embed_contrib", &pos_embed_all);
 
-        // Add to patch features without downcasting the patch-embed activations.
-        // mlx-vlm performs `hidden_states + pos_embeds` directly; with Qwen3.6
-        // the patch projection output is fp32 while learned positional embeds
-        // are bf16, so MLX promotion keeps the block input in fp32.
+        // Add to patch features without downcasting the patch-embed activations,
+        // as mlx-vlm performs `hidden_states + pos_embeds` directly: MLX
+        // promotion decides the block input dtype (bf16 for the bf16 Qwen3.5 and
+        // Qwen3.6 towers, whose patch projection and positional table are bf16).
         let result = x + &pos_embed_all;
         Ok(result)
     }

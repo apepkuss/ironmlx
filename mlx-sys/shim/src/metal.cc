@@ -7,6 +7,12 @@
 #include "mlx/backend/metal/metal.h"
 #include "mlx/device.h"
 
+namespace mlx::core::metal {
+// Exported by MLX's Metal backend (mlx/backend/metal/device.h), declared here
+// so this shim needs no Metal C++ headers.
+bool is_nax_available();
+}  // namespace mlx::core::metal
+
 namespace cxx_mlx {
 
 void start_capture(rust::Str path) {
@@ -41,6 +47,10 @@ rust::String device_architecture() {
   }
   throw std::runtime_error(
       "mlx::core::device_info(gpu)['architecture'] is not a std::string");
+}
+
+bool nax_available() {
+  return mlx::core::metal::is_nax_available();
 }
 
 }  // namespace cxx_mlx

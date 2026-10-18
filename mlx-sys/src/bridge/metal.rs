@@ -37,6 +37,12 @@ mod ffi_bridge {
         /// MLX always stores it as `std::string`).
         fn device_architecture() -> Result<String>;
 
+        /// Whether MLX may use its NAX (neural accelerator) kernels on this
+        /// device and OS (`mlx::core::metal::is_nax_available()`), the
+        /// condition MLX checks before choosing one. Throws if the Metal
+        /// backend isn't available.
+        fn nax_available() -> Result<bool>;
+
         /// Configure the QMM M-tile prefill library path (empty = off).
         /// Returns false if the setting was already read.
         fn set_prefill_qmm_mtile_library(path: &str) -> bool;
@@ -53,7 +59,7 @@ mod ffi_bridge {
 
 pub mod ffi {
     pub use super::ffi_bridge::{
-        device_architecture, set_metallib_path, set_prefill_d256_nax_library,
+        device_architecture, nax_available, set_metallib_path, set_prefill_d256_nax_library,
         set_prefill_masked_softmax, set_prefill_qmm_mtile_library, start_capture, stop_capture,
     };
 }
