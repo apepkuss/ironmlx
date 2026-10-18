@@ -432,6 +432,13 @@ pub struct EngineModelCapabilities {
 }
 
 impl EngineModelCapabilities {
+    pub fn diarization() -> Self {
+        Self {
+            runtime_kind: "diarization",
+            ..Self::asr()
+        }
+    }
+
     pub fn alignment() -> Self {
         Self {
             runtime_kind: "alignment",
@@ -574,7 +581,7 @@ impl EnginePoolConfig {
             validate_engine_model_config(model)?;
             if matches!(
                 model.capabilities.runtime_kind,
-                "embedding" | "asr" | "alignment"
+                "embedding" | "asr" | "alignment" | "diarization"
             ) && self.default_model.as_deref() == Some(model.id.as_str())
             {
                 bail!(
@@ -588,12 +595,21 @@ impl EnginePoolConfig {
 }
 
 pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<()> {
-    if matches!(model.capabilities.runtime_kind, "asr" | "alignment") {
+    if matches!(
+        model.capabilities.runtime_kind,
+        "asr" | "alignment" | "diarization"
+    ) {
         if model.load_policy == EngineLoadPolicy::Disabled {
             return Ok(());
         }
-        let metadata = ironmlx_audio::qwen3_asr::preflight_model_metadata(&model.path)?;
-        let expected = if metadata.artifact_role == "alignment" {
+        let role = if model.capabilities.runtime_kind == "diarization" {
+            ironmlx_audio::diarization::preflight_model_metadata(&model.path)?.artifact_role
+        } else {
+            ironmlx_audio::qwen3_asr::preflight_model_metadata(&model.path)?.artifact_role
+        };
+        let expected = if role == "diarization" {
+            EngineModelCapabilities::diarization()
+        } else if role == "alignment" {
             EngineModelCapabilities::alignment()
         } else {
             EngineModelCapabilities::asr()

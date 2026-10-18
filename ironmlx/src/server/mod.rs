@@ -41,6 +41,7 @@ pub(crate) mod realtime;
 pub(crate) mod systemone;
 pub(crate) mod transcriptions;
 use ironmlx_runtime::core::runtime_health as health;
+mod diarizations;
 pub mod model_manager;
 pub(crate) mod openai;
 pub(crate) mod responses;

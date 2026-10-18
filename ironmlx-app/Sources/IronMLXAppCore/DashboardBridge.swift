@@ -1511,7 +1511,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 try await client.waitUntilReady()
                 await self.registerLocalModels(config: config, client: client)
                 let loadedModels = try await client.fetchLoadedModels()
-                let setDefault = !["embedding", "asr"].contains(capabilities?.runtimeKind ?? "") && Self.shouldSetDefaultWhenLoadingModel(
+                let setDefault = !["embedding", "asr", "alignment", "diarization"].contains(capabilities?.runtimeKind ?? "") && Self.shouldSetDefaultWhenLoadingModel(
                     model,
                     config: config,
                     currentLoadedModelCount: loadedModels.count

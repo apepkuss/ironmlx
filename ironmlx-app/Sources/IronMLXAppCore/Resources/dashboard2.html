@@ -5628,6 +5628,7 @@
       catalog_tts: "Speech synthesis",
       catalog_stt: "Speech recognition",
       catalog_alignment: "Forced alignment",
+      catalog_diarization: "Speaker diarization",
       asr_settings_applied: "Settings saved. New requests and realtime sessions use these values.",
       asr_max_duration: "MAX AUDIO DURATION (SECONDS)",
       asr_max_output_tokens: "MAX OUTPUT TOKENS PER SEGMENT",
@@ -6236,6 +6237,7 @@
       catalog_tts: "语音合成",
       catalog_stt: "语音识别",
       catalog_alignment: "强制对齐",
+      catalog_diarization: "说话人分离",
       asr_settings_applied: "参数已保存，将用于新请求和新实时会话。",
       asr_max_duration: "最大音频时长（秒）",
       asr_max_output_tokens: "每段最大输出 Token",
@@ -6844,6 +6846,7 @@
       catalog_tts: "語音合成",
       catalog_stt: "語音辨識",
       catalog_alignment: "強制對齊",
+      catalog_diarization: "說話人分離",
       asr_settings_applied: "參數已儲存，將用於新請求和新即時工作階段。",
       asr_max_duration: "最長音訊時間（秒）",
       asr_max_output_tokens: "每段最大輸出 Token",
@@ -7455,6 +7458,7 @@
       catalog_tts: "音声合成",
       catalog_stt: "音声認識",
       catalog_alignment: "強制アライメント",
+      catalog_diarization: "話者ダイアライゼーション",
       asr_settings_applied: "設定を保存しました。新しいリクエストとリアルタイムセッションに適用されます。",
       asr_max_duration: "最大音声時間（秒）",
       asr_max_output_tokens: "区間ごとの最大出力 Token",
@@ -8066,6 +8070,7 @@
       catalog_tts: "음성 합성",
       catalog_stt: "음성 인식",
       catalog_alignment: "강제 정렬",
+      catalog_diarization: "화자 분리",
       asr_settings_applied: "설정이 저장되었습니다. 새 요청과 새 실시간 세션에 적용됩니다.",
       asr_max_duration: "최대 오디오 길이(초)",
       asr_max_output_tokens: "구간당 최대 출력 Token",
@@ -9927,10 +9932,10 @@
       capabilities.supports_kv_cache === false ? 'none' : '';
     ['modal-max-tokens', 'modal-max-output-tokens', 'modal-temperature'].forEach(id => {
       document.getElementById(id).closest('.modal-field').style.display =
-        ['embedding', 'asr', 'alignment'].includes(capabilities.runtime_kind) ? 'none' : '';
+        ['embedding', 'asr', 'alignment', 'diarization'].includes(capabilities.runtime_kind) ? 'none' : '';
     });
     document.getElementById('modal-causal-sampling-row').style.display =
-      (isBlockDiffusion || ['embedding', 'asr', 'alignment'].includes(capabilities.runtime_kind)) ? 'none' : '';
+      (isBlockDiffusion || ['embedding', 'asr', 'alignment', 'diarization'].includes(capabilities.runtime_kind)) ? 'none' : '';
     document.getElementById('modal-mtp-section').style.display =
       capabilities.supports_mtp === false ? 'none' : '';
     document.getElementById('modal-dflash2-section').style.display =
@@ -10090,7 +10095,7 @@
     const dict = I18N[currentLang] || I18N.en;
     const local = window.__LOCAL_MODELS__[modelId] || {};
     const capabilities = local.capabilities || {};
-    if (['embedding', 'asr', 'alignment'].includes(capabilities.runtime_kind)) {
+    if (['embedding', 'asr', 'alignment', 'diarization'].includes(capabilities.runtime_kind)) {
       const params = { model_id: modelId, alias: document.getElementById('modal-alias-input').value };
       if (capabilities.runtime_kind === 'asr') {
         const defaults = local.asr_defaults || {};
@@ -10606,7 +10611,7 @@
   let catalogSelectedType = 'all';
   const CATALOG_TYPES = [
     { id: 'llm', label: 'LLM / VLM', categories: ['text', 'vision'] },
-    { id: 'audio', label: 'Audio', categories: ['tts', 'audio', 'stt', 'alignment'] },
+    { id: 'audio', label: 'Audio', categories: ['tts', 'audio', 'stt', 'alignment', 'diarization'] },
     { id: 'image', label: 'Image', categories: ['image'] },
     { id: 'embedding', categories: ['embedding'] },
     { id: 'decision', label: 'Decision', categories: ['decision'] },
@@ -12447,6 +12452,7 @@
       reranker: 'Reranker',
       asr: 'ASR',
       alignment: 'Alignment',
+      diarization: 'Diarization',
       tts: 'TTS',
       decision: 'DECISION'
     };
@@ -12652,7 +12658,7 @@
           + '<td class="model-status-cell" data-status-tooltip="' + escapeAttr(status.title) + '"' + (status.title ? ' tabindex="0"' : '')
           + ' onmouseenter="showModelStatusTooltip(this)" onmouseleave="hideModelTableTooltip()"'
           + ' onfocus="showModelStatusTooltip(this)" onblur="hideModelTableTooltip()"><span class="status-dot ' + status.dot + '"></span> <span class="model-status-text">' + status.text + '</span></td>'
-          + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' ' + (!isModelLoadable(m) || ['embedding', 'asr', 'alignment'].includes(m.type) ? 'disabled ' : '') + 'style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
+          + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' ' + (!isModelLoadable(m) || ['embedding', 'asr', 'alignment', 'diarization'].includes(m.type) ? 'disabled ' : '') + 'style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
           + '<td><button class="icon-btn" title="' + escapeAttr(dict.model_param_settings) + '" aria-label="' + escapeAttr(dict.model_param_settings) + '" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
           + '<td>' + renderModelLoadActions(m, escapedSq, escaped, actionClass, actionText, isLoaded) + '</td>'
           + '<td>' + renderModelMoreActions(m, escapedSq) + '</td>';
@@ -12671,7 +12677,7 @@
     if (!profileSelect) return;
     const current = profileSelect.value;
     profileSelect.innerHTML = '<option value="">' + (dict.select_model || 'Select a model...') + '</option>';
-    models.filter(m => !['block_diffusion', 'decision', 'embedding', 'asr', 'alignment'].includes(m.capabilities?.runtime_kind)).forEach(m => {
+    models.filter(m => !['block_diffusion', 'decision', 'embedding', 'asr', 'alignment', 'diarization'].includes(m.capabilities?.runtime_kind)).forEach(m => {
       const opt = document.createElement('option');
       opt.value = m.id;
       opt.textContent = m.id;

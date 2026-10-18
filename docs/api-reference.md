@@ -33,6 +33,7 @@ Availability depends on the serving mode and configured compatible models. This 
 | `POST` | `/v1/audio/speech` | Speech synthesis | App / EnginePool; audio model | [Speech synthesis API](audio-speech-api.md#request) |
 | `POST` | `/v1/audio/transcriptions` | Speech recognition; aligned timestamps or SRT/WebVTT output | App / EnginePool; ASR model | [Speech recognition API](audio-transcriptions-api.md) |
 | `POST` | `/v1/audio/alignments` | Align supplied text with audio; JSON or SRT/WebVTT (IronMLX extension) | App / EnginePool; ForcedAligner model | [Independent forced alignment](audio-transcriptions-api.md#independent-forced-alignment-ironmlx-extension) |
+| `POST` | `/v1/audio/diarizations` | Speaker activity; JSON, RTTM or file SSE (IronMLX extension) | App / EnginePool; Nemotron 3 Diarization | [API](audio-transcriptions-api.md) |
 | `GET` | `/v1/realtime` | Realtime transcription | App / EnginePool; ASR WebSocket sessions | [Realtime](audio-transcriptions-api.md) |
 | `GET` | `/v1/audio/voices` | List enabled voices | App / EnginePool; configured voice service | [Speech synthesis API](audio-speech-api.md) |
 | `GET` | `/admin/api/audio/voices` | List all voices, including disabled profiles | App / EnginePool; configured voice service | [Speech synthesis API](audio-speech-api.md) |

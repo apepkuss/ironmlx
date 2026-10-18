@@ -158,7 +158,7 @@ public struct BackendRestartCoordinator: Sendable {
         let recoveryModels = snapshot.models.sorted(by: Self.recoveryOrder)
         let defaultCandidates = recoveryModels.filter { model in
             let capabilities = model.capabilities ?? localModels.first(where: { $0.id == model.id })?.capabilities
-            return !["embedding", "asr"].contains(capabilities?.runtimeKind ?? "")
+            return !["embedding", "asr", "alignment", "diarization"].contains(capabilities?.runtimeKind ?? "")
         }
         let defaultModelID = defaultCandidates.first(where: \.isDefault)?.id ?? defaultCandidates.first?.id
 

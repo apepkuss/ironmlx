@@ -49,6 +49,8 @@ pub(super) async fn transcriptions_with_pool(pool: EnginePoolState, request: Req
 }
 async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, ApiError> {
     let alignment_only = request.uri().path() == "/v1/audio/alignments";
+    let diarization_only = request.uri().path() == "/v1/audio/diarizations";
+    let mut diarization_options = ironmlx_audio::diarization::Options::default();
     let slot = input_slots().try_acquire_owned().map_err(|_| {
         ApiError::service_unavailable("asr_input_queue_full", "ASR input queue is full")
     })?;
@@ -139,17 +141,37 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
         match name.as_str() {
             "text" if alignment_only => text = Some(value),
             "timestamp_granularities[]"
-                if !alignment_only && matches!(value.as_str(), "word" | "segment") =>
+                if !alignment_only
+                    && !diarization_only
+                    && matches!(value.as_str(), "word" | "segment") =>
             {
                 granularities.insert(value);
             }
             "model" => model = Some(value),
             "language" => language = Some(value),
-            "prompt" => prompt = Some(value),
+            "prompt" if !diarization_only => prompt = Some(value),
+            "threshold" | "min_duration" | "merge_gap" | "latency" if diarization_only => {
+                let mut options = serde_json::to_value(diarization_options)
+                    .map_err(|e| ApiError::internal("diarization_options_failed", e.to_string()))?;
+                options[&name] = if name == "latency" {
+                    value.into()
+                } else {
+                    serde_json::from_str(&value).map_err(|_| {
+                        ApiError::invalid_request("invalid_value", format!("Invalid {name}"))
+                    })?
+                };
+                diarization_options = serde_json::from_value(options).map_err(|_| {
+                    ApiError::invalid_request("invalid_value", format!("Invalid {name}"))
+                })?;
+            }
             "response_format" => format = value,
+            "chunking_strategy" if !alignment_only && !diarization_only && value == "auto" => {}
             "stream" if value == "false" => {}
             "stream" if value == "true" => stream = true,
-            "temperature" if !alignment_only && value.parse::<f32>().ok() == Some(0.) => {}
+            "temperature"
+                if !alignment_only
+                    && !diarization_only
+                    && value.parse::<f32>().ok() == Some(0.) => {}
             _ => {
                 return Err(ApiError::invalid_request(
                     "unsupported_parameter",
@@ -166,12 +188,14 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
     };
     if !matches!(
         format.as_str(),
-        "json" | "text" | "verbose_json" | "srt" | "vtt"
+        "json" | "text" | "verbose_json" | "srt" | "vtt" | "diarized_json" | "rttm"
     ) || (alignment_only && format != "json" && subtitle_format.is_none())
+        || (diarization_only && !matches!(format.as_str(), "json" | "rttm"))
+        || (!diarization_only && format == "rttm")
     {
         return Err(ApiError::invalid_request(
             "unsupported_response_format",
-            "Transcription supports json, text, verbose_json, srt and vtt; alignment supports json, srt and vtt",
+            "Transcription supports json, text, verbose_json, srt, vtt and diarized_json; alignment supports json, srt and vtt; diarization supports json and rttm",
         )
         .with_param(Some("response_format".into())));
     }
@@ -199,7 +223,18 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
             "language must be nonempty",
         ));
     }
-    let is_correct_task = if alignment_only {
+    if diarization_only && (language.is_some() || prompt.is_some()) {
+        return Err(ApiError::invalid_request(
+            "unsupported_parameter",
+            "Diarization does not accept language or prompt",
+        ));
+    }
+    diarization_options
+        .validate()
+        .map_err(|e| ApiError::invalid_request("invalid_value", e.to_string()))?;
+    let is_correct_task = if diarization_only {
+        pool.is_diarization_model(&model).await
+    } else if alignment_only {
         pool.is_alignment_model(&model).await
     } else {
         pool.is_asr_model(&model).await
@@ -223,7 +258,12 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
             "Alignment requires text and language, and does not accept stream or prompt",
         ));
     }
-    let settings = if alignment_only {
+    let settings = if diarization_only {
+        ironmlx_runtime::core::asr_execution::AsrSettings {
+            max_audio_duration_seconds: 7200,
+            max_output_tokens: 1024,
+        }
+    } else if alignment_only {
         ironmlx_runtime::core::asr_execution::AsrSettings {
             max_audio_duration_seconds: 300,
             max_output_tokens: 1024,
@@ -234,7 +274,8 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
             .map_err(|e| ApiError::internal("asr_settings_failed", e.to_string()))?
     };
     // Resolve the fixed dependency before spending GPU time on transcription.
-    let needs_alignment = format == "verbose_json" || subtitle_format.is_some();
+    let needs_alignment =
+        format == "verbose_json" || format == "diarized_json" || subtitle_format.is_some();
     if !alignment_only
         && needs_alignment
         && !pool
@@ -247,6 +288,17 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
             "Register the Qwen3-ForcedAligner-0.6B-8bit checkpoint before requesting timestamps",
         ));
     }
+    if format == "diarized_json"
+        && !pool
+            .is_diarization_model(ironmlx_audio::diarization::MODEL_ID)
+            .await
+            .map_err(ApiError::engine_resolution)?
+    {
+        return Err(ApiError::invalid_request(
+            "missing_diarization_model",
+            "Register mlx-community/Nemotron-3-Diarization for diarized transcription",
+        ));
+    }
     let (pcm, input_memory, slot) = tokio::task::spawn_blocking(move || {
         let limits = DecodeLimits {
             max_duration_seconds: settings.max_audio_duration_seconds,
@@ -255,7 +307,7 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
             ..DecodeLimits::default()
         };
         let pcm = ironmlx_audio::io::NativeAudioIo.decode(&file, &limits)?;
-        if pcm.frames()? as u64 * 80 <= u64::from(pcm.format.sample_rate) {
+        if !diarization_only && pcm.frames()? as u64 * 80 <= u64::from(pcm.format.sample_rate) {
             return Err(ironmlx_audio::AudioError::InvalidInput {
                 field: "file",
                 reason: "ASR audio must exceed 12.5 ms".into(),
@@ -268,6 +320,21 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
     .map_err(|e| ApiError::invalid_request("invalid_audio_input", e.to_string()))?;
     let input_memory = Arc::new(input_memory);
     let slot = Arc::new(slot);
+    if diarization_only {
+        return super::diarizations::execute(
+            pool,
+            model,
+            pcm,
+            diarization_options,
+            format,
+            stream,
+            super::diarizations::InputReservation {
+                memory: input_memory,
+                slot,
+            },
+        )
+        .await;
+    }
     if alignment_only {
         let result = align_audio(
             &pool,
@@ -357,6 +424,7 @@ async fn execute(pool: EnginePoolState, request: Request) -> Result<Response, Ap
             TimestampOutput {
                 granularities,
                 subtitle_format,
+                diarized: format == "diarized_json",
             },
             input_memory,
             slot,
@@ -378,6 +446,7 @@ pub(super) const FIXED_ALIGNER: &str = "mlx-community/Qwen3-ForcedAligner-0.6B-8
 struct TimestampOutput {
     granularities: HashSet<String>,
     subtitle_format: Option<SubtitleFormat>,
+    diarized: bool,
 }
 
 fn subtitle_response(
@@ -481,6 +550,24 @@ async fn timestamped_transcription(
             w.end += segment.start;
             w
         }));
+    }
+    if output.diarized {
+        let turns = super::diarizations::infer(
+            pool,
+            ironmlx_audio::diarization::MODEL_ID,
+            pcm,
+            ironmlx_audio::diarization::Options::default(),
+            super::diarizations::InputReservation {
+                memory: input_memory,
+                slot: input_slot,
+            },
+        )
+        .await?;
+        return Ok(Json(
+            super::diarizations::attribute(&result.text, &words, result.duration, &turns)
+                .map_err(|e| ApiError::internal("diarization_attribution_failed", e.to_string()))?,
+        )
+        .into_response());
     }
     if let Some(format) = output.subtitle_format {
         return subtitle_response(&result.text, &words, result.duration, format)

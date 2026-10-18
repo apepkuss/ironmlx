@@ -364,3 +364,30 @@ swift test -c release --package-path ironmlx-app --filter audioAppLoadsAndRestor
 ```
 
 Native Qwen3-ForcedAligner affine 8-bit inference uses the shared audio/text backbone and a separate timestamp classification head. `Qwen3Asr::align` accepts audio plus supplied text. The server exposes independent alignment and fixed ASR-plus-alignment workflows; see the same API contract for language units, limits and timestamp precision.
+
+## Nemotron 3 speaker diarization
+
+`diarization::NemotronDiarization` loads the published Nemotron 3 BF16 MLX
+checkpoint, with strict configuration/tensor validation and no Python runtime.
+The native implementation uses a feature-stacking RoPE encoder and bounded
+arrival-order speaker cache/FIFO state. It supports eight speaker activity
+channels at 10 ms resolution, including simultaneous activity.
+
+`diarize` accepts owned PCM and resamples it to mono 16 kHz; `Options` controls
+threshold, minimum turn duration, gap merging and latency preset. The progress
+callback receives the absolute starting frame and native activity probabilities.
+The returned `Diarization` has recording duration, active-label count, speaker
+turns and an RTTM formatter.
+
+For incremental PCM, call `init_stream(options)` and repeatedly call
+`feed(&mut state, samples, false, control)` with finite mono 16 kHz samples.
+Flush once with `feed(&mut state, &[], true, control)`. PCM partitions do not
+reset speaker identity or time, and a finished state rejects further input.
+`offline`, `low`, `very_low`, and `ultra_low` match the documented cache/window
+presets; all retain bounded PCM history and encoder context. Models/states belong
+to one native worker, not the HTTP task.
+
+The managed runtime adds queue/memory admission, cancellation, deadlines and
+model leases. The [recognition and diarization API](../docs/audio-transcriptions-api.md)
+exposes independent JSON/RTTM/file-SSE and the Qwen3 three-model workflow.
+The APIs label speakers; they do not identify people or extract separate voices.

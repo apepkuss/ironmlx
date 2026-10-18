@@ -1461,12 +1461,12 @@ public actor ModelDownloadService {
                     // current backend's metadata preflight accepts it; the
                     // manifest is then rewritten from that result.
                     if manifest.compatibility.downloadOnly == true,
-                       ["embedding_gemma2", "qwen3_asr"].contains(manifest.compatibility.modelType)
+                       ["embedding_gemma2", "qwen3_asr", "nemotron_diarization"].contains(manifest.compatibility.modelType)
                         || manifest.compatibility.artifactRole == ModelArtifactRole.dflash2Drafter,
                        let compatibility = try? await metadataPreflight.validate(metadataDirectory: finalSnapshot),
                        compatibility.modelType == manifest.compatibility.modelType,
                        compatibility.artifactRole == manifest.compatibility.artifactRole
-                        || ["embedding_gemma2", "qwen3_asr"].contains(manifest.compatibility.modelType) {
+                        || ["embedding_gemma2", "qwen3_asr", "nemotron_diarization"].contains(manifest.compatibility.modelType) {
                         manifest.compatibility = ModelSnapshotCompatibility(
                             modelType: compatibility.modelType, artifactRole: compatibility.artifactRole,
                             quantizationMode: compatibility.quantization?.mode,
@@ -1598,7 +1598,11 @@ public actor ModelDownloadService {
             case ModelArtifactRole.imageGeneration:
                 requiredMetadataPaths = ["processor/tokenizer.json"]
             default:
-                if compatibility.modelType == "qwen3_asr" {
+                if compatibility.modelType == "nemotron_diarization" {
+                    // Audio-frame classification has no text tokenizer. Allow
+                    // Native preflight independently gates inference compatibility.
+                    requiredMetadataPaths = ["config.json"]
+                } else if compatibility.modelType == "qwen3_asr" {
                     // Qwen3-ASR checkpoints can ship the split BPE vocabulary
                     // instead of a consolidated tokenizer.json.
                     let tokenizerPaths = metadata.contains { $0.path == "tokenizer.json" }

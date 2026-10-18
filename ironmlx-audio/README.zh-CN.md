@@ -310,3 +310,24 @@ swift test -c release --package-path ironmlx-app --filter audioAppLoadsAndRestor
 ```
 
 原生 Qwen3-ForcedAligner affine 8-bit 推理复用音频／文字骨干，使用独立时间戳分类头。`Qwen3Asr::align` 接收音频和已有文字。服务端同时提供独立对齐和固定 ASR 加对齐流程；语言单元、限制与时间戳精度见[转写接口契约](../docs/zh-CN/audio-transcriptions-api.md)。
+
+## Nemotron 3 说话人分离
+
+`diarization::NemotronDiarization` 加载已发布的 Nemotron 3 BF16 MLX 快照，
+严格验证配置和张量，不依赖 Python 运行时。原生实现包含特征堆叠 RoPE 编码器、
+有界的说话人缓存和 FIFO，输出 8 路说话人活动概率，帧步长 10 ms，保留同时讲话。
+
+`diarize` 接收 PCM，转换为 16 kHz 单声道；`Options` 控制阈值、最短讲话段、
+间隔合并和延迟预设。进度回调提供绝对起始帧号及原生活动概率。
+返回的 `Diarization` 包含录音时长、活动编号数量、说话人时间段及 RTTM 格式化方法。
+
+增量 PCM 使用 `init_stream(options)` 初始化，再以有限值、16 kHz 单声道 PCM
+反复调用 `feed(&mut state, samples, false, control)`；结束时调用一次
+`feed(&mut state, &[], true, control)`。输入分块不会重置说话人编号或时间；
+已结束的状态拒绝继续输入。支持 `offline`、`low`、`very_low`、`ultra_low`，
+均使用有界的 PCM 历史与编码器上下文。模型和状态由原生工作线程拥有，不放在 HTTP 任务中。
+
+托管运行时提供队列、内存准入、取消、超时及模型租约。
+[识别与说话人分离 API](../docs/zh-CN/audio-transcriptions-api.md)提供独立 JSON、
+RTTM、文件 SSE，以及 Qwen3 三模型组合流程。服务只标注说话人，不识别真实身份，
+也不提取每个人的独立音轨。

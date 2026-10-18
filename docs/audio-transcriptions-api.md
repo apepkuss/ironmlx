@@ -1,4 +1,4 @@
-# Speech recognition API
+# Speech recognition, alignment and diarization API
 
 [简体中文](zh-CN/audio-transcriptions-api.md)
 
@@ -37,7 +37,7 @@ same `id`, `path`, and `load_policy` fields as other managed models.
 
 Use `multipart/form-data` with required `model` and binary `file` fields.
 Optional fields are `language` (language code or supported language name),
-`prompt` (context), and `response_format` (`json`, `text`, `verbose_json`, `srt` or `vtt`, default `json`).
+`prompt` (context), and `response_format` (`json`, `text`, `verbose_json`, `srt`, `vtt` or `diarized_json`, default `json`).
 Omitting `language` enables language detection. For standalone ASR use `json` or
 `text` and omit `timestamp_granularities[]`; `verbose_json`, `srt` and `vtt` enable the two-model
 workflow described below. Subtitle requests also omit `timestamp_granularities[]`. Greedy decoding is used;
@@ -105,7 +105,7 @@ in-flight requests. The App persists the values in its model parameter store.
   reservations remain held until submitted GPU operations finish.
 
 Unsupported parameters, duplicate scalar fields, unsupported output formats and nonzero temperature
-return explicit OpenAI-shaped errors. Speaker diarization is not implemented. `stream=true` requires `response_format=json`.
+return explicit OpenAI-shaped errors. Speaker-labeled output uses the workflow documented below. `stream=true` requires `response_format=json`.
 
 ## Timestamped transcription: fixed two-model workflow
 
@@ -245,6 +245,104 @@ Subtitle export inherits ASR errors and alignment precision, including the model
 does not improve accuracy. Existing duration, context, dependency, capacity,
 deadline and cancellation rules still apply. No subtitles are added to SSE or
 Realtime WebSocket responses, and no Dashboard transcription controls are added.
+
+## Speaker diarization: Nemotron 3
+
+`mlx-community/Nemotron-3-Diarization` (BF16, revision
+`59ed2dbfc1346dcea9d423c71306a3a2499c568f`) runs natively with Rust/MLX.
+It identifies up to eight generic speakers, including overlapping activity. Labels
+such as `speaker_0` are recording-local, ordered by arrival; they are not personal
+identities and cannot be compared across recordings. The 10 ms output frame stride
+is a representation resolution, not a guarantee of boundary accuracy.
+The App manages download, loading, unloading, lazy eviction and health reporting;
+older verified file-only snapshots are promoted after native metadata preflight,
+without downloading weights again. No recording or transcription client UI is added.
+The checkpoint uses [OpenMDW-1.1](https://huggingface.co/nvidia/Nemotron-3-Diarization);
+weights are user-downloaded and are not bundled with the App.
+
+### Independent diarization API (IronMLX extension)
+
+`POST /v1/audio/diarizations` accepts multipart `model` and binary `file`.
+It runs only the diarization model and returns no transcript or separated audio.
+WAV, FLAC and MP3, mono/stereo at 8–96 kHz are decoded and resampled to mono 16 kHz.
+Limits are 128 MiB encoded audio, 512 MiB decoded PCM, and two hours per recording;
+existing input-capacity, model queue, memory, deadline and cancellation gates apply.
+
+| Optional field | Default | Accepted values |
+| --- | --- | --- |
+| `response_format` | `json` | `json`, `rttm` |
+| `threshold` | `0.5` | Activity probability, strictly between 0 and 1 |
+| `min_duration` | `0` | Minimum turn duration, 0–30 seconds; applied before gap merging |
+| `merge_gap` | `0` | Merge same-speaker turns across gaps up to 0–5 seconds |
+| `latency` | `offline` | `offline`, `low`, `very_low`, `ultra_low` |
+| `stream` | `false` | `true` only with JSON output |
+
+Latency presets have input buffers of 30.4 s, 1.04 s, 0.64 s and 0.32 s respectively,
+excluding computation and STFT lookahead. Low latency trades context for response
+speed. Speaker-cache/FIFO state remains bounded and is retained across windows.
+Language, transcript text, prompts, generation sampling, speaker-name references
+and a caller-specified speaker count are unsupported and return explicit errors.
+
+```sh
+curl http://127.0.0.1:9068/v1/audio/diarizations \
+  -F model=mlx-community/Nemotron-3-Diarization -F file=@meeting.wav
+
+curl http://127.0.0.1:9068/v1/audio/diarizations \
+  -F model=mlx-community/Nemotron-3-Diarization -F file=@meeting.wav \
+  -F response_format=rttm -o meeting.rttm
+```
+
+JSON has `{duration,num_speakers,segments:[{speaker,start,end}]}`. Times are seconds
+on the original recording timeline. Segments for different speakers may overlap;
+`num_speakers` counts active output labels, not an independently verified headcount.
+RTTM is UTF-8 `text/plain`, with one `SPEAKER audio 1 start duration ...` line per turn.
+
+With `stream=true`, the uploaded file produces SSE `diarization.chunk` events with
+`{type,start,end,segments}` and a `diarization.done` event with `{type,result}`.
+Chunk boundaries may split turns, and short-turn/gap processing is local to each
+chunk. The final result applies filtering and merging over the whole recording and
+is authoritative. A failed stream ends with an OpenAI-shaped `error` event.
+This is uploaded-file streaming, not a microphone WebSocket protocol. The Rust
+model API also exposes stateful `init_stream`/`feed`, with a final flush.
+
+### Speaker-labeled transcription: fixed three-model workflow
+
+Use the standard OpenAI `response_format=diarized_json` on
+`POST /v1/audio/transcriptions`, selecting either supported Qwen3-ASR checkpoint.
+Register that ASR, the fixed Qwen3-ForcedAligner and Nemotron checkpoint first.
+Dependencies are checked before ASR inference. The server runs ASR, aligns its
+text, runs diarization on the same recording and attributes words by temporal
+overlap. The lazy engine-pool server may evict between steps even with one loaded-model slot.
+The App preserves its manual capacity policy: allow room for all three models or
+unload other models before requesting the workflow.
+
+```sh
+curl http://127.0.0.1:9068/v1/audio/transcriptions \
+  -F model=mlx-community/Qwen3-ASR-0.6B-8bit -F file=@meeting.wav \
+  -F language=zh -F response_format=diarized_json
+```
+
+The response uses OpenAI's `task`, `duration`, `text` and `segments`, whose items
+have `type=transcript.text.segment`, `id`, `speaker`, `start`, `end`, and `text`.
+IronMLX adds `speakers` and `ambiguous` per segment and the independent
+`diarization` result. A label is assigned when exactly one speaker overlaps at least
+20% of the aligned word. Multiple candidates produce `speaker=unknown`, their
+labels in `speakers`, and `ambiguous=true`; no candidate gives `unknown` with an
+empty list. This does not separate mixed voices or recover words missed by ASR.
+Adjacent equal attributions are grouped while retaining transcript punctuation.
+This workflow is nonstreaming; omit `timestamp_granularities[]`, which remains
+exclusive to `verbose_json`. `chunking_strategy=auto` is accepted for compatibility;
+IronMLX already applies its documented ASR chunking policy. Other chunking options,
+known-speaker identification and diarized Realtime WebSocket events are unsupported.
+Existing SRT/VTT output retains its ASR-plus-alignment behavior.
+
+For local CLI use:
+
+```sh
+ironmlx diarize --model /path/to/Nemotron-3-Diarization --audio meeting.wav
+ironmlx diarize --model /path/to/Nemotron-3-Diarization --audio meeting.wav \
+  --latency low --response-format rttm
+```
 
 ## Realtime transcription
 

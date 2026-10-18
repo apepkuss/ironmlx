@@ -235,7 +235,7 @@ async fn enforce_request_body_limit(request: Request, next: Next) -> Response {
     let protocol = super::api_error::ApiProtocol::from_path(request.uri().path());
     let body_limit = if matches!(
         request.uri().path(),
-        "/v1/audio/transcriptions" | "/v1/audio/alignments"
+        "/v1/audio/transcriptions" | "/v1/audio/alignments" | "/v1/audio/diarizations"
     ) {
         super::transcriptions::MAX_ASR_REQUEST_BYTES
     } else {
@@ -260,7 +260,10 @@ async fn enforce_request_body_limit(request: Request, next: Next) -> Response {
     }
     if matches!(
         request.uri().path(),
-        "/v1/audio/speech" | "/v1/audio/transcriptions" | "/v1/audio/alignments"
+        "/v1/audio/speech"
+            | "/v1/audio/transcriptions"
+            | "/v1/audio/alignments"
+            | "/v1/audio/diarizations"
     ) {
         return next.run(request).await;
     }

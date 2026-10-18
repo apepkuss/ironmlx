@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-17",
+  "updatedAt": "2026-10-18",
   "entries": [
     {
       "id": "qwen35-2b-4bit",
@@ -1606,6 +1606,30 @@
       "msMetadataRevision": null,
       "modelId": "qwen3-forced-aligner-06b",
       "variantLabel": "Affine · 8 bit"
+    },
+    {
+      "id": "nemotron-3-diarization-bf16",
+      "modelId": "nemotron-3-diarization",
+      "name": "Nemotron 3 Diarization",
+      "parameters": "0.1B",
+      "weightFormat": "BF16",
+      "variantLabel": "BF16",
+      "weightBytes": 198632220,
+      "downloadBytes": 198633741,
+      "category": "diarization",
+      "capabilities": [
+        "diarization"
+      ],
+      "status": "verified",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Nemotron-3-Diarization",
+      "msRepo": null,
+      "metadataRevision": "59ed2dbfc1346dcea9d423c71306a3a2499c568f",
+      "msMetadataRevision": null,
+      "evidence": [
+        "docs/audio-transcriptions-api.md",
+        "ironmlx-audio/src/diarization/model.rs"
+      ]
     }
   ]
 }

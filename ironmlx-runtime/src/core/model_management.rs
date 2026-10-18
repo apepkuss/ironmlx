@@ -198,7 +198,12 @@ pub fn build_engine_model_config(
         prompt_lookup,
         pinned,
     } = request;
-    if model_dir.join("config.json").is_file() && read_model_type(model_dir)? == "qwen3_asr" {
+    if model_dir.join("config.json").is_file()
+        && matches!(
+            read_model_type(model_dir)?.as_str(),
+            "qwen3_asr" | "nemotron_diarization"
+        )
+    {
         if audio.is_some()
             || decision.is_some()
             || max_cache_cap_override.is_some()
@@ -209,9 +214,15 @@ pub fn build_engine_model_config(
         {
             bail!("ASR models do not accept TTS, decision or generation settings");
         }
-        let metadata = ironmlx_audio::qwen3_asr::preflight_model_metadata(model_dir)?;
+        let role = if read_model_type(model_dir)? == "nemotron_diarization" {
+            ironmlx_audio::diarization::preflight_model_metadata(model_dir)?.artifact_role
+        } else {
+            ironmlx_audio::qwen3_asr::preflight_model_metadata(model_dir)?.artifact_role
+        };
         let mut config = decision_model_config(model_id, model_dir.to_path_buf(), pinned);
-        config.capabilities = if metadata.artifact_role == "alignment" {
+        config.capabilities = if role == "diarization" {
+            EngineModelCapabilities::diarization()
+        } else if role == "alignment" {
             EngineModelCapabilities::alignment()
         } else {
             EngineModelCapabilities::asr()
@@ -834,7 +845,10 @@ pub fn build_engine_model_config_for_pool(
 ) -> Result<crate::core::engine_pool::EngineModelConfig> {
     if model.load_policy != EngineLoadPolicy::Disabled
         && model.path.join("config.json").is_file()
-        && read_model_type(&model.path)? == "qwen3_asr"
+        && matches!(
+            read_model_type(&model.path)?.as_str(),
+            "qwen3_asr" | "nemotron_diarization"
+        )
     {
         if model.audio.is_some()
             || model.decision.is_some()
@@ -845,9 +859,15 @@ pub fn build_engine_model_config_for_pool(
         {
             bail!("ASR models do not accept TTS, decision or generation settings");
         }
-        let metadata = ironmlx_audio::qwen3_asr::preflight_model_metadata(&model.path)?;
+        let role = if read_model_type(&model.path)? == "nemotron_diarization" {
+            ironmlx_audio::diarization::preflight_model_metadata(&model.path)?.artifact_role
+        } else {
+            ironmlx_audio::qwen3_asr::preflight_model_metadata(&model.path)?.artifact_role
+        };
         let mut config = decision_model_config(model.id, model.path, false);
-        config.capabilities = if metadata.artifact_role == "alignment" {
+        config.capabilities = if role == "diarization" {
+            EngineModelCapabilities::diarization()
+        } else if role == "alignment" {
             EngineModelCapabilities::alignment()
         } else {
             EngineModelCapabilities::asr()

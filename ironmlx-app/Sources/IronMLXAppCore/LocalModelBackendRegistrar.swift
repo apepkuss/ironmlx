@@ -237,6 +237,7 @@ public enum LocalModelBackendRegistrar {
             }
             do {
                 try await Qwen3ASRModelSupport.upgradeDownloadOnlySnapshot(at: modelDir)
+                try await NemotronDiarizationModelSupport.upgradeDownloadOnlySnapshot(at: modelDir)
                 let capabilities = model.capabilities
                 let mtpRuntime = capabilities?.supportsMtp != false
                     ? try? ModelMtpRuntimeResolver.runtime(
@@ -250,7 +251,7 @@ public enum LocalModelBackendRegistrar {
                 _ = try await client.registerModel(
                     model: model.id,
                     modelDir: modelDir,
-                    setDefault: model.id == defaultModel && !["embedding", "asr"].contains(capabilities?.runtimeKind ?? ""),
+                    setDefault: model.id == defaultModel && !["embedding", "asr", "alignment", "diarization"].contains(capabilities?.runtimeKind ?? ""),
                     maxCacheCap: capabilities?.supportsKvCache != false
                         ? ModelLoadParameters.maxCacheCap(
                             for: model.id,

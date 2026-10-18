@@ -135,6 +135,23 @@ fn clean_text(text: &str) -> String {
     cleaned
 }
 
+pub(super) fn aligned_text(
+    text: &str,
+    words: &[AlignedWord],
+    duration: f64,
+) -> Result<Vec<(String, f64, f64)>, SubtitleError> {
+    Ok(aligned_units(text, words, duration)?
+        .into_iter()
+        .map(|u| {
+            (
+                u.text.to_owned(),
+                u.start as f64 / 1000.,
+                u.end as f64 / 1000.,
+            )
+        })
+        .collect())
+}
+
 fn aligned_units<'a>(
     text: &'a str,
     words: &[AlignedWord],

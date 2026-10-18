@@ -51,3 +51,13 @@ Text fixtures are authored test sentences and reference tokenization outputs.
   The native implementation adds bounded input, cancellation and model lifecycle
   integration. Japanese uses character units and Korean uses whitespace units;
   no external segmentation dictionaries or model weights are bundled.
+
+- Native Nemotron 3 Diarization's feature-stacking RoPE encoder, audio frontend
+  and arrival-order speaker cache follow Blaizzy/mlx-audio at
+  `4ef6c3a577ade12d946e4b1d1870e4ba67fb5b9a`.
+  Copyright (c) 2024 Prince Canuma, MIT; `licenses/mlx-audio-MIT.txt`.
+  The Rust adaptation adds native worker ownership, bounded capacity, cancellation,
+  strict checkpoint validation and explicit ambiguous speaker attribution.
+  The reference describes the NVIDIA NeMo Speech architecture and AOSC semantics.
+  External Nemotron weights and model configuration retain OpenMDW-1.1; no model
+  weights are distributed with this implementation.

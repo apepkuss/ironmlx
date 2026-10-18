@@ -11,7 +11,7 @@ CATALOG = ROOT / "ironmlx-app/Sources/IronMLXAppCore/Resources/supported-models.
 # Same order and categories as CATALOG_TYPES in the App's Supported models tab.
 SECTIONS = (
     ("LLM / VLM", "Language and vision", "语言与视觉", ("text", "vision")),
-    ("Audio", "Speech and audio", "音频", ("tts", "audio", "stt", "alignment")),
+    ("Audio", "Speech and audio", "音频", ("tts", "audio", "stt", "alignment", "diarization")),
     ("Image", "Image generation", "图片生成", ("image",)),
     ("Embedding", "Vector embeddings", "向量", ("embedding",)),
     ("Decision", "Typed decisions", "决策", ("decision",)),
@@ -138,6 +138,10 @@ def generate(catalog, language):
                 if title == "Audio" and entries[0]["category"] in ("stt", "alignment"):
                     row_kind = "Audio / ASR" if entries[0]["category"] == "stt" else "Audio / Alignment"
                     row_function = local("Speech recognition", "语音识别", language) if entries[0]["category"] == "stt" else local("Forced alignment", "强制对齐", language)
+                    row_guide = "audio-transcriptions-api.md"
+                if title == "Audio" and entries[0]["category"] == "diarization":
+                    row_kind = "Audio / Diarization"
+                    row_function = local("Speaker diarization", "说话人分离", language)
                     row_guide = "audio-transcriptions-api.md"
                 rows.append([repo_link(entries[0]["name"], entries[0]), row_kind, f"[{row_function}]({row_guide})", weight_links(entries)])
             lines.append(table(headers, rows))

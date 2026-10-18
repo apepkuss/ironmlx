@@ -1381,7 +1381,10 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
         ));
     }
 
-    if read_model_type(&model_dir)? == "qwen3_asr" {
+    if matches!(
+        read_model_type(&model_dir)?.as_str(),
+        "qwen3_asr" | "nemotron_diarization"
+    ) {
         return run_asr_server(args, model_dir);
     }
 

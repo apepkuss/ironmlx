@@ -6,6 +6,218 @@ use axum::{
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+#[tokio::test]
+#[serial_test::serial(mlx_metal)]
+async fn diarization_request_validation_precedes_model_resolution() {
+    let args = super::tests::serve_args();
+    let manager = ModelManager::new(
+        crate::cli::serve::engine_runtime_config(&args).unwrap(),
+        Some(1),
+        SchedulerResolutionOptions::from(&args),
+    )
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let app = app_router(
+        manager,
+        crate::server::voices::VoiceStore::open(root.path().to_owned()).unwrap(),
+    );
+    for fields in [
+        vec![],
+        vec![("response_format", "rttm")],
+        vec![("stream", "true"), ("latency", "low")],
+    ] {
+        let (status, _) =
+            audio_request(&app, "/v1/audio/diarizations", "missing", b"audio", &fields).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+    for fields in [
+        vec![("response_format", "srt")],
+        vec![("threshold", "1")],
+        vec![("threshold", "NaN")],
+        vec![("merge_gap", "-1")],
+        vec![("latency", "invalid")],
+        vec![("language", "en")],
+        vec![("prompt", "context")],
+        vec![("temperature", "0")],
+        vec![("threshold", "0.5"), ("threshold", "0.6")],
+    ] {
+        let (status, bytes) =
+            audio_request(&app, "/v1/audio/diarizations", "missing", b"audio", &fields).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial(mlx_metal)]
+#[ignore = "requires Nemotron BF16, both ASR checkpoints, ForcedAligner and reference WAV"]
+async fn nemotron_diarization_app_lifecycle_and_workflow() {
+    let root = std::env::var("MLX_DIR").unwrap();
+    mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib")).unwrap();
+    let args = super::tests::serve_args();
+    let manager = ModelManager::new(
+        crate::cli::serve::engine_runtime_config(&args).unwrap(),
+        Some(3),
+        SchedulerResolutionOptions::from(&args),
+    )
+    .unwrap();
+    let pool = manager.pool.clone();
+    let dir = tempfile::tempdir().unwrap();
+    let app = app_router(
+        manager,
+        crate::server::voices::VoiceStore::open(dir.path().to_owned()).unwrap(),
+    );
+    let model = ironmlx_audio::diarization::MODEL_ID;
+    let audio = std::fs::read(std::env::var("IRONMLX_ASR_TEST_AUDIO").unwrap()).unwrap();
+    for (id, env) in [
+        (model, "IRONMLX_DIARIZATION_DIR"),
+        (
+            crate::server::transcriptions::FIXED_ALIGNER,
+            "IRONMLX_ALIGNER_DIR",
+        ),
+        ("mlx-community/Qwen3-ASR-0.6B-8bit", "IRONMLX_ASR_SMALL_DIR"),
+        ("mlx-community/Qwen3-ASR-1.7B-8bit", "IRONMLX_ASR_LARGE_DIR"),
+    ] {
+        json_request(
+            &app,
+            "/admin/api/models/register",
+            json!({"model":id,"model_dir":std::env::var(env).unwrap()}),
+        )
+        .await;
+    }
+    assert!(pool.is_diarization_model(model).await.unwrap());
+    assert!(pool.set_default_model(model).await.is_err());
+    let (status, bytes) = audio_request(&app, "/v1/audio/diarizations", model, &audio, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    let result: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(result["num_speakers"], 1);
+    assert!(!result["segments"].as_array().unwrap().is_empty());
+    let (status, bytes) = audio_request(
+        &app,
+        "/v1/audio/diarizations",
+        model,
+        &audio,
+        &[("response_format", "rttm")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(std::str::from_utf8(&bytes)
+        .unwrap()
+        .starts_with("SPEAKER audio 1 "));
+    let (status, bytes) = audio_request(
+        &app,
+        "/v1/audio/diarizations",
+        model,
+        &audio,
+        &[("stream", "true"), ("latency", "low")],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let body = std::str::from_utf8(&bytes).unwrap();
+    assert!(body.contains("event: diarization.chunk"));
+    assert!(body.contains("event: diarization.done"));
+    assert!(!body.contains("event: error"), "{body}");
+    let mut end = 0.;
+    for line in body.lines().filter_map(|l| l.strip_prefix("data: ")) {
+        let event: Value = serde_json::from_str(line).unwrap();
+        if event["type"] == "diarization.chunk" {
+            assert_eq!(event["start"].as_f64().unwrap(), end);
+            end = event["end"].as_f64().unwrap();
+        }
+    }
+    assert!(
+        (end - result["duration"].as_f64().unwrap()).abs() < 0.011,
+        "SSE lost buffered activity frames"
+    );
+    for asr in [
+        "mlx-community/Qwen3-ASR-0.6B-8bit",
+        "mlx-community/Qwen3-ASR-1.7B-8bit",
+    ] {
+        let (status, bytes) = transcribe(
+            &app,
+            asr,
+            &audio,
+            &[("language", "zh"), ("response_format", "diarized_json")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let output: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(output["text"], "甚至出现交易几乎停滞的情况。");
+        assert!(output["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["speaker"] == "speaker_0"));
+        assert_eq!(
+            output["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|s| s["text"].as_str().unwrap())
+                .collect::<String>(),
+            output["text"].as_str().unwrap()
+        );
+        assert!(pool.is_model_loaded(model).await);
+        json_request(&app, "/admin/api/models/unload", json!({"model":asr})).await;
+    }
+    let (_, lease) = pool.resolve_engine(Some(model)).await.unwrap();
+    let ironmlx_runtime::core::engine_pool::EngineVariant::Diarization(runtime) = lease.engine()
+    else {
+        panic!("wrong diarization engine");
+    };
+    let runtime = runtime.clone();
+    let request = ironmlx_runtime::core::diarization_execution::DiarizationRequest {
+        pcm: ironmlx_audio::PcmBuffer {
+            format: ironmlx_audio::PcmFormat {
+                sample_rate: 16000,
+                channels: 1,
+            },
+            samples: vec![0.; 60 * 16000],
+        },
+        options: ironmlx_audio::diarization::Options {
+            latency: ironmlx_audio::diarization::Latency::UltraLow,
+            ..Default::default()
+        },
+        progress: None,
+        input_memory: None,
+        input_slot: None,
+    };
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(10),
+        runtime.diarize(request, lease)
+    )
+    .await
+    .is_err());
+    for _ in 0..200 {
+        if runtime.active_and_queued() == (0, 0) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        runtime.active_and_queued(),
+        (0, 0),
+        "cancelled job retained its model lease"
+    );
+    drop(runtime);
+    json_request(&app, "/admin/api/models/unload", json!({"model":model})).await;
+    assert!(!pool.is_model_loaded(model).await);
+}
+
 async fn json_request(app: &Router, path: &str, value: Value) -> Value {
     let response = app
         .clone()
@@ -1057,13 +1269,20 @@ async fn qwen3_timestamp_pool_evicts_between_workflow_steps() {
     mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib")).unwrap();
     let args = super::tests::serve_args();
     let mut models = Vec::new();
-    for (id, var) in [
+    let mut checkpoints = vec![
         ("mlx-community/Qwen3-ASR-0.6B-8bit", "IRONMLX_ASR_SMALL_DIR"),
         (
             crate::server::transcriptions::FIXED_ALIGNER,
             "IRONMLX_ALIGNER_DIR",
         ),
-    ] {
+    ];
+    if std::env::var_os("IRONMLX_DIARIZATION_DIR").is_some() {
+        checkpoints.push((
+            ironmlx_audio::diarization::MODEL_ID,
+            "IRONMLX_DIARIZATION_DIR",
+        ));
+    }
+    for (id, var) in checkpoints {
         let manifest = EngineModelManifest {
             id: id.into(),
             path: std::env::var(var).unwrap().into(),
@@ -1153,6 +1372,32 @@ async fn qwen3_timestamp_pool_evicts_between_workflow_steps() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    if std::env::var_os("IRONMLX_DIARIZATION_DIR").is_some() {
+        let (status, bytes) = transcribe(
+            &app,
+            "mlx-community/Qwen3-ASR-0.6B-8bit",
+            &audio,
+            &[("response_format", "diarized_json"), ("language", "zh")],
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let result: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["diarization"]["num_speakers"], 1);
+        assert!(
+            pool.is_model_loaded(ironmlx_audio::diarization::MODEL_ID)
+                .await
+        );
+        assert!(
+            !pool
+                .is_model_loaded(crate::server::transcriptions::FIXED_ALIGNER)
+                .await
+        );
+    }
 }
 
 #[tokio::test]

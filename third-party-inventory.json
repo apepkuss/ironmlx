@@ -5,12 +5,12 @@
         "bundled_hash_scope": "Attribution notice text; not a hash of compiled implementations",
         "bundled_modifications": "Notice retained with the complete accompanying upstream license texts. External model and dictionary distributions are not bundled.",
         "bundled_path": "ironmlx-audio/NOTICE.md",
-        "bundled_sha256": "21a6b1b296784be80fb2419d05b509bdda21ebc1b6f41504c467a93d6e5980f8",
+        "bundled_sha256": "4601628ee010e5187b49b3634e7b668e27ad332bc25de7e816c5851024023f7d",
         "component": "Audio implementation attribution notice",
         "copyright": "Upstream authors are identified in the bundled attribution notice.",
         "license": "Apache-2.0",
         "license_file": "audio-attributions.txt",
-        "license_sha256": "21a6b1b296784be80fb2419d05b509bdda21ebc1b6f41504c467a93d6e5980f8",
+        "license_sha256": "4601628ee010e5187b49b3634e7b668e27ad332bc25de7e816c5851024023f7d",
         "repository": "https://github.com/apepkuss/ironmlx",
         "revision": "555dcc1d484737c4235cd221278244be89876131",
         "source_path": "ironmlx-audio/NOTICE.md",
@@ -154,6 +154,22 @@
         "usage": "Required attribution for audio implementation distributed with the server."
       },
       {
+        "bundled_hash_scope": "License notice text; not a hash of the compiled or adapted implementation",
+        "bundled_modifications": "License text retained for native code linked through ironmlx-audio or algorithms adapted in its implementation. Model weights and external linguistic resources are not bundled.",
+        "bundled_path": "ironmlx-audio/licenses/mlx-audio-MIT.txt",
+        "bundled_sha256": "11d27e0259dec3a323fa6c04c330621d0950ab96c6760d5aac3e2e97229e6f22",
+        "component": "MLX Audio diarization implementation MIT notice",
+        "copyright": "Copyright (c) 2024 Prince Canuma",
+        "license": "MIT",
+        "license_file": "audio-mlx-audio-mit.txt",
+        "license_sha256": "11d27e0259dec3a323fa6c04c330621d0950ab96c6760d5aac3e2e97229e6f22",
+        "repository": "https://github.com/Blaizzy/mlx-audio",
+        "revision": "4ef6c3a577ade12d946e4b1d1870e4ba67fb5b9a",
+        "source_path": "LICENSE",
+        "source_url": "https://github.com/Blaizzy/mlx-audio",
+        "usage": "Required attribution for audio implementation distributed with the server."
+      },
+      {
         "brand_usage_reference": "https://modelscope.cn/models/modelscope/logos",
         "bundled_hash_scope": "Ordered SVG path d/fill attributes, excluding presentation wrapper",
         "bundled_modifications": "Converted React SVG to inline HTML, resized and styled for source identification. Path geometry and fills unchanged.",
@@ -210,7 +226,7 @@
       }
     ],
     "manifest": "compliance/bundled-assets.json",
-    "manifest_sha256": "dbb321459712c05f5c967242bb9441f7f30b9cf361273de9fef6cb7bee582bb4"
+    "manifest_sha256": "b5b99e001ef6b8b02c0999808612a50ef86dd69a1f9038ccc0296f34df3ec577"
   },
   "generation": {
     "cargo_about_config": "about.toml",

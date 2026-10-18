@@ -756,6 +756,79 @@ func qwen3ASRDownloadOnlyUsesASRMetadata(layout: String, forcedAligner: Bool) as
     #expect(scanner.downloadedSnapshotDirectory(for: repoID) == snapshot)
 }
 
+@Test(arguments: [false, true])
+func nemotronDiarizationDownloadOnlyDoesNotRequireTextTokenizer(corruptWeights: Bool) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "mlx-community/Nemotron-3-Diarization"
+    let message = "Error: unsupported model_type: nemotron_diarization"
+    let client = FakeModelDownloadHTTPClient()
+    configureDownloadOnlyFixture(client, repoID: repoID, tokenizer: false,
+        config: Data(#"{"model_type":"nemotron_diarization","num_speakers":8,"processor_config":{"sampling_rate":16000}}"#.utf8))
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: DownloadOnlyRejectingPreflight(message: message),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(!(await service.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    #expect(await service.downloadStatuses().first?.canContinueDownload == true)
+    #expect(client.streamRequests.isEmpty)
+    if corruptWeights {
+        client.streamResponses["https://huggingface.co/\(repoID)/resolve/\(testCommit)/model.safetensors"] =
+            StreamFixture(data: Data("damaged".utf8))
+    }
+    #expect(await service.resumeDownload(provider: .huggingFace, repoID: repoID, downloadOnly: true).success)
+    try await waitForDownloadCondition {
+        let queue = await service.downloadQueueSnapshot()
+        return queue.activeCount == 0 && queue.queuedCount == 0
+    }
+    let status = try #require(await service.downloadStatuses().first)
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    if corruptWeights {
+        #expect(status.status == "corrupt")
+        #expect(!FileManager.default.fileExists(atPath: snapshot.path))
+        return
+    }
+    #expect(status.status == "completed")
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(manifest.compatibility.modelType == "nemotron_diarization")
+    #expect(manifest.compatibility.downloadOnly == true)
+    #expect(manifest.compatibility.runtimeSupportError == message)
+    #expect(!FileManager.default.fileExists(atPath: snapshot.appendingPathComponent("tokenizer.json").path))
+    #expect(try Data(contentsOf: snapshot.appendingPathComponent("model.safetensors")) == Data("weights".utf8))
+    let scanner = LocalModelScanner(rootURL: root)
+    #expect(scanner.readiness(for: repoID)?.reasonCode == "download_only_model")
+    #expect(scanner.readiness(for: repoID)?.isLoadable == false)
+    #expect(scanner.resolveModelPath(for: repoID) == nil)
+    #expect(scanner.downloadedSnapshotDirectory(for: repoID) == snapshot)
+    #expect(await service.downloadHuggingFace(repoID: repoID, token: nil).downloadOnly == true)
+}
+
+@Test func nemotronDiarizationRunnableDownloadDoesNotRequireTextTokenizer() async throws {
+    struct NativeDiarizationPreflight: ModelMetadataPreflighting {
+        func validate(metadataDirectory _: URL) async throws -> ModelMetadataPreflightResult {
+            ModelMetadataPreflightResult(modelType: "nemotron_diarization", artifactRole: "diarization")
+        }
+    }
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "mlx-community/Nemotron-3-Diarization"
+    let client = FakeModelDownloadHTTPClient()
+    let config = Data(#"{"model_type":"nemotron_diarization","dtype":"bfloat16","num_speakers":8,"output_subsampling_factor":1,"encoder_config":{"d_model":512,"n_layers":31,"n_heads":8,"feat_in":128},"processor_config":{"sampling_rate":16000,"n_fft":512,"hop_length":160},"modules_config":{"num_speakers":8,"fc_d_model":512,"tf_d_model":192}}"#.utf8)
+    configureDownloadOnlyFixture(client, repoID: repoID, tokenizer: false, config: config)
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: NativeDiarizationPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    let result = await service.downloadHuggingFace(repoID: repoID, token: nil)
+    #expect(result.success)
+    #expect(result.downloadOnly != true)
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(manifest.compatibility.artifactRole == "diarization")
+    #expect(manifest.compatibility.downloadOnly == nil)
+    let model = try #require(LocalModelScanner(rootURL: root).model(for: repoID))
+    #expect(model.type == "diarization")
+    #expect(model.readiness?.isLoadable == true)
+}
+
 @Test func downloadOnlyDFlash2DraftCompletesWithoutItsOwnTokenizer() async throws {
     let root = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }

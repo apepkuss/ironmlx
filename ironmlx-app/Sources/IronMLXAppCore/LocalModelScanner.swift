@@ -1215,6 +1215,7 @@ public struct LocalModelScanner: Sendable {
 
     private func modelCapabilityType(config: [String: Any]) -> String {
         if (config["thinker_config"] as? [String: Any])?["model_type"] as? String == "qwen3_forced_aligner" { return "alignment" }
+        if config["model_type"] as? String == "nemotron_diarization" { return "diarization" }
         let signals = modelCapabilitySignals(config: config)
         let modelType = normalizedString(config["model_type"]) ?? ""
         if modelType == "laya-multilingual-mlx" {
@@ -1255,6 +1256,12 @@ public struct LocalModelScanner: Sendable {
 
     private func runtimeCapabilities(config: [String: Any]) -> BackendModelCapabilities {
         let modelType = normalizedString(config["model_type"]) ?? ""
+        if modelType == "nemotron-diarization" {
+            return BackendModelCapabilities(runtimeKind: "diarization", supportsStreaming: true,
+                supportsVision: false, supportsAudio: true, supportsMtp: false,
+                supportsPromptLookup: false, supportsSpeculativeDecoding: false,
+                supportsKvCache: false, supportedSamplingParameters: [])
+        }
         if modelType == "qwen3-asr" {
             let aligner = (config["thinker_config"] as? [String: Any])?["model_type"] as? String == "qwen3_forced_aligner"
             return BackendModelCapabilities(runtimeKind: aligner ? "alignment" : "asr", supportsStreaming: !aligner,
@@ -1397,6 +1404,8 @@ public struct LocalModelScanner: Sendable {
             return "Embedding models are detected for metadata display, but ironmlx-app serving currently loads LLM/VLM generation models only."
         case "reranker":
             return "Reranker models are detected for metadata display, but ironmlx-app serving currently loads LLM/VLM generation models only."
+        case "diarization":
+            return "This diarization checkpoint profile is not supported by the native audio runtime."
         case "alignment":
             return "This ForcedAligner checkpoint profile is not supported by the native audio runtime."
         case "asr":
@@ -2063,7 +2072,8 @@ public struct LocalModelScanner: Sendable {
         }
         let supportedEmbedding = isSupportedEmbeddingConfig(configJSON)
         let supportedASR = Qwen3ASRModelSupport.isSupported(configJSON)
-        if manifest.compatibility.downloadOnly == true && !supportedEmbedding && !supportedASR {
+        let supportedDiarization = NemotronDiarizationModelSupport.isSupported(configJSON)
+        if manifest.compatibility.downloadOnly == true && !supportedEmbedding && !supportedASR && !supportedDiarization {
             readiness = LocalModelReadiness(
                 status: "unsupported", reasonCode: "download_only_model",
                 message: manifest.compatibility.runtimeSupportError ?? "Downloaded for file use only; this model cannot run in IronMLX."
@@ -2076,7 +2086,7 @@ public struct LocalModelScanner: Sendable {
             )
         } else if capabilityType == "tts", manifest.compatibility.modelType == "indextts2_5", missingFiles.isEmpty {
             readiness = audioReadiness(manifest: manifest)
-        } else if !supportedEmbedding && !supportedASR, let unsupportedReason = unsupportedModelTypeReason(for: capabilityType) {
+        } else if !supportedEmbedding && !supportedASR && !supportedDiarization, let unsupportedReason = unsupportedModelTypeReason(for: capabilityType) {
             readiness = LocalModelReadiness(
                 status: "unsupported",
                 reasonCode: "unsupported_model_type",

@@ -75,6 +75,15 @@ cannot be loaded or selected as the default model. Model Management still allows
 file access, integrity verification, and deletion. Missing files, malformed
 metadata, and integrity failures cannot be overridden.
 
+Nemotron 3 Diarization BF16 runs through the native Rust/MLX audio runtime.
+The App identifies it as Diarization, manages its lifecycle, and promotes verified
+file-only snapshots after native metadata preflight without re-downloading weights.
+Upstream clients use `POST /v1/audio/diarizations` for independent JSON/RTTM or
+uploaded-file SSE results. `response_format=diarized_json` on transcription combines
+Qwen3-ASR, ForcedAligner and Nemotron, with explicit ambiguous-overlap annotations.
+No recording or transcription UI is added. See the
+[recognition and diarization API](../docs/audio-transcriptions-api.md).
+
 Qwen3-ASR 0.6B/1.7B 8-bit checkpoints run through the native Rust/MLX ASR
 engine. The App manages their download, loading and service status. Upstream
 applications submit audio through `POST /v1/audio/transcriptions`; the Dashboard

@@ -6,6 +6,7 @@
 mod backend_instance_lock;
 mod decide;
 mod dflash2_target;
+mod diarize;
 mod generate;
 mod hf_transfer;
 mod info;
@@ -46,6 +47,8 @@ pub struct Cli {
 enum Command {
     /// Transcribe a recording using a local Qwen3-ASR checkpoint.
     Transcribe(transcribe::TranscribeArgs),
+    /// Label speaker turns using a local Nemotron 3 diarization checkpoint.
+    Diarize(diarize::DiarizeArgs),
     /// Evaluate typed questions with a local Laya decision checkpoint.
     Decide(decide::DecideArgs),
     /// Print discovered model and runtime info, then exit.
@@ -85,6 +88,7 @@ impl Cli {
 
         match self.command {
             Command::Transcribe(args) => transcribe::run(args),
+            Command::Diarize(args) => diarize::run(args),
             Command::Decide(args) => decide::run(args),
             Command::Info(args) => info::run(args),
             Command::Generate(args) => generate::run(args),

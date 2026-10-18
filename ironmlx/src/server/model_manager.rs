@@ -476,6 +476,12 @@ fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Route
                 super::transcriptions::MAX_ASR_REQUEST_BYTES,
             )),
         )
+        .route(
+            "/v1/audio/diarizations",
+            post(app_transcriptions_handler).layer(axum::extract::DefaultBodyLimit::max(
+                super::transcriptions::MAX_ASR_REQUEST_BYTES,
+            )),
+        )
         .merge(super::voices::router())
         .route("/v1/systemone", post(app_systemone_handler))
         .route("/v1/decisions", post(app_decisions_handler))

@@ -121,6 +121,7 @@ impl EngineVariantHttpAdapter for EngineVariant {
         match self {
             Self::Asr(_)
             | Self::Alignment(_)
+            | Self::Diarization(_)
             | Self::Audio(_)
             | Self::Decision(_)
             | Self::QwenImage(_)
@@ -152,6 +153,7 @@ impl EngineVariantHttpAdapter for EngineVariant {
         match self {
             Self::Asr(_)
             | Self::Alignment(_)
+            | Self::Diarization(_)
             | Self::Audio(_)
             | Self::Decision(_)
             | Self::QwenImage(_)
@@ -192,6 +194,7 @@ impl EngineVariantHttpAdapter for EngineVariant {
         match self {
             Self::Asr(_)
             | Self::Alignment(_)
+            | Self::Diarization(_)
             | Self::Audio(_)
             | Self::Decision(_)
             | Self::QwenImage(_)
@@ -358,6 +361,12 @@ pub(crate) fn engine_pool_router() -> Router<EnginePoolState> {
         )
         .route(
             "/v1/audio/alignments",
+            post(super::transcriptions::transcriptions).layer(
+                axum::extract::DefaultBodyLimit::max(super::transcriptions::MAX_ASR_REQUEST_BYTES),
+            ),
+        )
+        .route(
+            "/v1/audio/diarizations",
             post(super::transcriptions::transcriptions).layer(
                 axum::extract::DefaultBodyLimit::max(super::transcriptions::MAX_ASR_REQUEST_BYTES),
             ),

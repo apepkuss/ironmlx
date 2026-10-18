@@ -437,6 +437,7 @@ struct EngineSlotRuntimeSnapshot {
 pub enum EngineVariant {
     Asr(super::asr_execution::AsrRuntime),
     Alignment(super::alignment_execution::AlignmentRuntime),
+    Diarization(super::diarization_execution::DiarizationRuntime),
     Embedding(super::embedding_execution::EmbeddingRuntime),
     Decision(super::decision_execution::DecisionRuntime),
     Audio(super::audio_execution::AudioRuntime),
@@ -752,8 +753,26 @@ impl EnginePoolState {
         let slots = self.inner.slots.lock().await;
         Ok(slots.get(&id).is_some_and(|slot| {
             slot.model.audio.is_some()
-                || matches!(slot.model.capabilities.runtime_kind, "asr" | "alignment")
+                || matches!(
+                    slot.model.capabilities.runtime_kind,
+                    "asr" | "alignment" | "diarization"
+                )
         }))
+    }
+
+    pub async fn is_diarization_model(&self, id: &str) -> Result<bool> {
+        self.inner
+            .registry
+            .lock()
+            .await
+            .resolve_model_id(Some(id))?;
+        Ok(self
+            .inner
+            .slots
+            .lock()
+            .await
+            .get(id)
+            .is_some_and(|slot| slot.model.capabilities.runtime_kind == "diarization"))
     }
 
     pub async fn is_alignment_model(&self, id: &str) -> Result<bool> {
@@ -931,7 +950,7 @@ impl EnginePoolState {
         if set_default
             && matches!(
                 model.capabilities.runtime_kind,
-                "embedding" | "asr" | "alignment"
+                "embedding" | "asr" | "alignment" | "diarization"
             )
         {
             bail!("embedding and ASR models cannot be the default generation model");
@@ -968,7 +987,7 @@ impl EnginePoolState {
             if previous_default.is_none()
                 && matches!(
                     model.capabilities.runtime_kind,
-                    "embedding" | "asr" | "alignment"
+                    "embedding" | "asr" | "alignment" | "diarization"
                 )
             {
                 registry.restore_default_model(None)?;
@@ -1014,7 +1033,7 @@ impl EnginePoolState {
         if set_default
             && matches!(
                 model.capabilities.runtime_kind,
-                "embedding" | "asr" | "alignment"
+                "embedding" | "asr" | "alignment" | "diarization"
             )
         {
             bail!("embedding and ASR models cannot be the default generation model");
@@ -1123,6 +1142,7 @@ impl EnginePoolState {
         if self.is_embedding_model(requested).await
             || self.is_asr_model(requested).await?
             || self.is_alignment_model(requested).await?
+            || self.is_diarization_model(requested).await?
         {
             bail!("embedding, ASR and alignment models cannot be the default generation model");
         }
@@ -2153,6 +2173,7 @@ impl EngineVariant {
             | Self::Audio(_)
             | Self::Asr(_)
             | Self::Alignment(_)
+            | Self::Diarization(_)
             | Self::Decision(_)
             | Self::Embedding(_) => return None,
         };
@@ -2180,6 +2201,7 @@ impl EngineVariant {
             | Self::Audio(_)
             | Self::Asr(_)
             | Self::Alignment(_)
+            | Self::Diarization(_)
             | Self::Decision(_)
             | Self::Embedding(_) => Ok(0),
         }
@@ -2187,6 +2209,15 @@ impl EngineVariant {
 
     fn loaded_health(&self) -> LoadedEngineHealth {
         match self {
+            Self::Diarization(state) => {
+                let (active_requests, queued_requests) = state.active_and_queued();
+                LoadedEngineHealth::Audio {
+                    scheduler: "serial_diarization",
+                    active_requests,
+                    queued_requests,
+                    queue_capacity: super::diarization_execution::DIARIZATION_QUEUE_CAPACITY,
+                }
+            }
             Self::Alignment(state) => {
                 let (active_requests, queued_requests) = state.active_and_queued();
                 LoadedEngineHealth::Audio {
@@ -2294,6 +2325,7 @@ impl EngineVariant {
             Self::Audio(_) => "indextts25",
             Self::Asr(_) => "qwen3_asr",
             Self::Alignment(_) => "qwen3_forced_aligner",
+            Self::Diarization(_) => "nemotron_diarization",
             Self::Decision(_) => "laya_multilingual_mlx",
             Self::Embedding(_) => "embedding_gemma2",
         }
@@ -2314,6 +2346,7 @@ impl EngineVariant {
             Self::Audio(state) => state.model_weight_bytes(),
             Self::Asr(state) => state.model_weight_bytes(),
             Self::Alignment(state) => state.model_weight_bytes(),
+            Self::Diarization(state) => state.model_weight_bytes(),
             Self::Decision(state) => state.model_weight_bytes(),
             Self::Embedding(state) => state.model_weight_bytes(),
         }
@@ -2321,6 +2354,10 @@ impl EngineVariant {
 
     fn pending_requests(&self) -> usize {
         match self {
+            Self::Diarization(state) => {
+                let (active, queued) = state.active_and_queued();
+                active + queued
+            }
             Self::Alignment(state) => {
                 let (active, queued) = state.active_and_queued();
                 active + queued
@@ -2375,6 +2412,7 @@ impl EngineVariant {
             Self::Audio(_) => Default::default(),
             Self::Asr(state) => state.usage(),
             Self::Alignment(state) => state.usage(),
+            Self::Diarization(state) => state.usage(),
             Self::Decision(state) => state.usage(),
             Self::Embedding(state) => state.usage(),
         }
@@ -2455,6 +2493,11 @@ async fn load_engine_variant(
     model: &EngineModelConfig,
     runtime: &EngineRuntimeOptions,
 ) -> Result<EngineVariant> {
+    if model.capabilities.runtime_kind == "diarization" {
+        return Ok(EngineVariant::Diarization(
+            super::diarization_execution::DiarizationRuntime::load(model.path.clone()).await?,
+        ));
+    }
     if model.capabilities.runtime_kind == "alignment" {
         return Ok(EngineVariant::Alignment(
             super::alignment_execution::AlignmentRuntime::load(model.path.clone()).await?,

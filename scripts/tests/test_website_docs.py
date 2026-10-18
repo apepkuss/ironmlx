@@ -204,6 +204,9 @@ class WebsiteDocumentationTests(unittest.TestCase):
                 self.assertIn('response_format=srt', topic)
                 self.assertIn('response_format=vtt', topic)
                 self.assertIn('subtitle_timing_unavailable', topic)
+                self.assertIn('/v1/audio/diarizations', topic)
+                self.assertIn('response_format=diarized_json', topic)
+                self.assertIn('mlx-community/Nemotron-3-Diarization', topic)
                 self.assertIn('Qwen3-ForcedAligner-0.6B-8bit', topic)
                 for name in ("api-reference.html", "supported-models.html", "audio-library.html"):
                     html = (directory / name).read_text(encoding="utf-8")
