@@ -385,6 +385,22 @@ impl GatedDeltaNet {
         let defer_captured_state_commit = capture_active
             && ((super::position_stable_qmm::exact_affine8_b4_q2_is_armed() && seq == 2)
                 || tree.is_some());
+        // Long-context prefill chunks (from the profile's minimum position on)
+        // take the decode route's fused input projection, preparation and
+        // gated norm kernels instead of the op-by-op chain (another rounding
+        // and summation order, so only from a fixed position on).
+        let long_prefill = seq > 64
+            && batch == 1
+            && mask.is_none()
+            && tree.is_none()
+            && !capture_active
+            && super::moe_fast_path::is_armed()
+            && super::fused_norm::requested()
+            && per_row_lens.is_none_or(|lens| lens.iter().all(|&l| l == seq))
+            && cache
+                .as_deref()
+                .zip(long_scan_min_position())
+                .is_some_and(|(c, from)| c.offsets()[0] >= from);
         let mut fused_output: Option<Array> = None;
         let ((qkv, z), (b, a)) = {
             // Relaxed ragged rows replay from the captured inputs themselves,
@@ -437,7 +453,10 @@ impl GatedDeltaNet {
                     z_width,
                     b_width,
                 } => {
-                    if super::product_stable_qmm::is_armed() || super::m5_affine4::armed() {
+                    if super::product_stable_qmm::is_armed()
+                        || super::m5_affine4::armed()
+                        || long_prefill
+                    {
                         let output = projection.forward_on(x, target)?;
                         fused_output = Some(output.clone());
                         let mut parts = mlx::ops::shape::split_at_on(
@@ -511,10 +530,17 @@ impl GatedDeltaNet {
                     && self.conv1d.bias().is_none()
                     && self.cfg.head_k_dim == 128
                     && self.cfg.head_v_dim == 128
-                    && seq <= 64 =>
+                    && (seq <= 64 || long_prefill) =>
             {
                 let z_width = z.shape().as_slice()[2];
-                Some(super::gdn_prep::prep_on(
+                // Long chunks: same arithmetic, rows carried per threadgroup and
+                // only the conv state's tail written (`conv_input` = that tail).
+                let prep = if seq > 64 {
+                    super::gdn_prep::prep_long_on
+                } else {
+                    super::gdn_prep::prep_on
+                };
+                Some(prep(
                     output,
                     c.conv_state(),
                     self.conv1d.weight(),
@@ -780,55 +806,138 @@ impl GatedDeltaNet {
                 )
             };
 
-            // Step 7c: T as 0-dim int32 array.
-            let t_arr: Array = (&[seq][..], ()).try_into()?;
-
             let in_dtype = x.dtype();
             let st_dtype = Dtype::Float32;
-            let y_shape = Shape::from(vec![batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim]);
-            let state_shape = Shape::from(vec![
-                batch,
-                self.cfg.num_v_heads,
-                self.cfg.head_v_dim,
-                self.cfg.head_k_dim,
-            ]);
+            // Step 7c/7d: the prefill recurrence over `len` tokens from `start`.
+            let regular = |start: i32,
+                           len: i32,
+                           state_in: Option<&Array>|
+             -> Result<(Array, Option<Array>)> {
+                let part = |a: &Array| -> Result<Array> {
+                    if start == 0 && len == seq {
+                        return Ok(a.clone());
+                    }
+                    let dims = a.shape();
+                    let dims = dims.as_slice();
+                    let mut lo = vec![0; dims.len()];
+                    let mut hi = dims.to_vec();
+                    lo[1] = start;
+                    hi[1] = start + len;
+                    Ok(mlx::ops::indexing::slice_on(a, &lo[..], &hi[..], target)?)
+                };
+                let (q, k, v, g, beta) = (
+                    part(&q_scaled)?,
+                    part(&k_scaled)?,
+                    part(&v_per_head)?,
+                    part(&g)?,
+                    part(&beta)?,
+                );
+                let t_arr: Array = (&[len][..], ()).try_into()?;
+                let y_shape =
+                    Shape::from(vec![batch, len, self.cfg.num_v_heads, self.cfg.head_v_dim]);
+                let state_shape = Shape::from(vec![
+                    batch,
+                    self.cfg.num_v_heads,
+                    self.cfg.head_v_dim,
+                    self.cfg.head_k_dim,
+                ]);
+                let mut kernel_inputs: Vec<&Array> = vec![&q, &k, &v, &g, &beta];
+                if let Some(state_in) = state_in {
+                    kernel_inputs.push(state_in);
+                }
+                kernel_inputs.push(&t_arr);
+                if let Some(m) = mask {
+                    kernel_inputs.push(m);
+                }
+                let mut output_shapes = vec![y_shape];
+                let mut output_dtypes = vec![in_dtype];
+                if !omit_state_output {
+                    output_shapes.push(state_shape);
+                    output_dtypes.push(st_dtype);
+                }
+                let mut outputs = kernel
+                    .dispatch_builder()
+                    .inputs(&kernel_inputs)
+                    .output_shapes(&output_shapes)
+                    .output_dtypes(&output_dtypes)
+                    .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
+                    .threadgroup(32, 4, 1)
+                    .template_int("Dk", self.cfg.head_k_dim)
+                    .template_int("Dv", self.cfg.head_v_dim)
+                    .template_int("Hk", self.cfg.num_k_heads)
+                    .template_int("Hv", self.cfg.num_v_heads)
+                    .template_dtype("InT", in_dtype)
+                    .template_dtype("StT", st_dtype)
+                    .stream(target)
+                    .dispatch()?;
+                let y = outputs.take_at(0)?; // [B, len, Hv, Dv]
+                let new_state = (!omit_state_output)
+                    .then(|| outputs.take_at(0))
+                    .transpose()?; // [B, Hv, Dv, Dk]
+                Ok((y, new_state))
+            };
 
-            // Step 7d: dispatch
-            let mut kernel_inputs: Vec<&Array> = vec![&q_scaled, &k_scaled, &v_per_head, &g, &beta];
-            if let Some(state_in) = state_in.as_ref() {
-                kernel_inputs.push(state_in);
-            }
-            kernel_inputs.push(&t_arr);
-            if let Some(m) = mask {
-                kernel_inputs.push(m);
-            }
-
-            let mut output_shapes = vec![y_shape];
-            let mut output_dtypes = vec![in_dtype];
-            if !omit_state_output {
-                output_shapes.push(state_shape);
-                output_dtypes.push(st_dtype);
-            }
-            let mut outputs = kernel
-                .dispatch_builder()
-                .inputs(&kernel_inputs)
-                .output_shapes(&output_shapes)
-                .output_dtypes(&output_dtypes)
-                .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
-                .threadgroup(32, 4, 1)
-                .template_int("Dk", self.cfg.head_k_dim)
-                .template_int("Dv", self.cfg.head_v_dim)
-                .template_int("Hk", self.cfg.num_k_heads)
-                .template_int("Hv", self.cfg.num_v_heads)
-                .template_dtype("InT", in_dtype)
-                .template_dtype("StT", st_dtype)
-                .stream(target)
-                .dispatch()?;
-
-            let y = outputs.take_at(0)?; // [B, S, Hv, Dv]
-            let new_state = (!omit_state_output)
-                .then(|| outputs.take_at(0))
-                .transpose()?; // [B, Hv, Dv, Dk]
+            // Long-context prefill: tokens from the profile's minimum position
+            // on run the long-chunk recurrence (same recurrence, another
+            // summation order), splitting a chunk that straddles it. Decode
+            // and verify windows (at most 16 rows) keep the recurrent kernel's
+            // arithmetic, which the speculative commit replays.
+            let offset = cache.as_deref().map_or(0, |c| c.offsets()[0]);
+            let long_from = long_scan_min_position()
+                .filter(|&from| {
+                    seq > 16
+                        && !zero_state
+                        && !omit_state_output
+                        && mask.is_none()
+                        && batch == 1
+                        && in_dtype == Dtype::Bfloat16
+                        && self.cfg.head_k_dim == 128
+                        && self.cfg.head_v_dim % 16 == 0
+                        && per_row_lens.is_none_or(|lens| lens.iter().all(|&l| l == seq))
+                        && offset + seq > from
+                })
+                .map(|from| (from - offset).max(0));
+            let (y, new_state) = match (long_from, state_in.as_ref()) {
+                (Some(split), Some(state_in)) => {
+                    let (head_y, mid_state) = if split > 0 {
+                        let (y, state) = regular(0, split, Some(state_in))?;
+                        (Some(y), state.expect("state output requested"))
+                    } else {
+                        (None, state_in.clone())
+                    };
+                    let slice = |a: &Array| -> Result<Array> {
+                        if split == 0 {
+                            return Ok(a.clone());
+                        }
+                        let dims = a.shape();
+                        let dims = dims.as_slice();
+                        let mut lo = vec![0; dims.len()];
+                        lo[1] = split;
+                        Ok(mlx::ops::indexing::slice_on(a, &lo[..], dims, target)?)
+                    };
+                    let (tail_y, state) = super::gdn_scan::scan_on(
+                        &slice(&q_scaled)?,
+                        &slice(&k_scaled)?,
+                        &slice(&v_per_head)?,
+                        &slice(&g)?,
+                        &slice(&beta)?,
+                        &mid_state,
+                        self.cfg.num_k_heads,
+                        self.cfg.num_v_heads,
+                        self.cfg.head_k_dim,
+                        self.cfg.head_v_dim,
+                        target,
+                    )?;
+                    let y = match head_y {
+                        Some(head) => {
+                            mlx::ops::shape::concatenate_on(&[&head, &tail_y], 1, target)?
+                        }
+                        None => tail_y,
+                    };
+                    (y, Some(state))
+                }
+                _ => regular(0, seq, state_in.as_ref())?,
+            };
 
             // Step 7e: update cache recurrent_state, advance offset
             if let (Some(c), Some(new_state)) = (cache.as_mut(), new_state) {
@@ -870,7 +979,7 @@ impl GatedDeltaNet {
                     && mask.is_none()
                     && tree.is_none()
                     && self.cfg.head_v_dim == 128
-                    && seq <= 64 =>
+                    && (seq <= 64 || long_prefill) =>
             {
                 Some(super::gdn_prep::gated_norm_on(
                     &y,
@@ -1560,6 +1669,19 @@ fn conv_gather_kernel() -> &'static MetalKernel {
     })
 }
 
+/// M5 profile setting `GDN_LONG_SCAN_MIN_POSITION`: the first token position
+/// whose prefill recurrence runs the long-chunk kernel (`None`: never).
+fn long_scan_min_position() -> Option<i32> {
+    static VALUE: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        ironmlx_core::m5_profile::setting(
+            ironmlx_core::m5_profile::settings::GDN_LONG_SCAN_MIN_POSITION,
+        )
+        .and_then(|v| v.parse().ok())
+        .filter(|&v: &i32| v > 0)
+    })
+}
+
 /// M5 profile setting `GDN_COMMIT_KERNEL`.
 fn commit_kernel_requested() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1786,6 +1908,94 @@ mod tests {
     use super::*;
     use mlx::{Array, Dtype, Shape};
     use serial_test::serial;
+
+    /// The long-chunk recurrence agrees with the prefill kernel (another
+    /// summation order only) on outputs and final state, with bf16 and f32
+    /// q / k staging and a block-tail chunk length.
+    #[test]
+    #[serial(mlx_metal)]
+    fn long_scan_matches_prefill_kernel() -> Result<()> {
+        if let Ok(root) = std::env::var("MLX_DIR") {
+            mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib"))?;
+        }
+        let t = 77_i32;
+        let fill = |shape: &[i32], scale: f32, seed: i32, dtype: Dtype| -> Result<Array> {
+            let n: i32 = shape.iter().product();
+            let v: Vec<f32> = (0..n)
+                .map(|i| {
+                    (((i64::from(i) + i64::from(seed)) * 7919 % 211) as f32 / 211.0 - 0.5) * scale
+                })
+                .collect();
+            Ok(mlx::ops::cast::astype(
+                &Array::try_from((v.as_slice(), shape))?,
+                dtype,
+            )?)
+        };
+        let v = fill(&[1, t, 32, 128], 1.0, 3, Dtype::Bfloat16)?;
+        let g = &fill(&[1, t, 32], 0.02, 4, Dtype::Float32)? + 0.98_f32;
+        let beta = fill(&[1, t, 32], 0.5, 5, Dtype::Float32)?;
+        let state = fill(&[1, 32, 128, 128], 0.02, 6, Dtype::Float32)?;
+        let t_arr: Array = (&[t][..], ()).try_into()?;
+        let kernel = build_gated_delta_kernel(false)?;
+        for dtype in [Dtype::Bfloat16, Dtype::Float32] {
+            let q = fill(&[1, t, 16, 128], 0.1, 1, dtype)?;
+            let k = fill(&[1, t, 16, 128], 0.1, 2, dtype)?;
+            let mut reference = kernel
+                .dispatch_builder()
+                .inputs(&[&q, &k, &v, &g, &beta, &state, &t_arr])
+                .output_shapes(&[
+                    Shape::from(vec![1, t, 32, 128]),
+                    Shape::from(vec![1, 32, 128, 128]),
+                ])
+                .output_dtypes(&[Dtype::Bfloat16, Dtype::Float32])
+                .grid(32, 128, 32)
+                .threadgroup(32, 4, 1)
+                .template_int("Dk", 128)
+                .template_int("Dv", 128)
+                .template_int("Hk", 16)
+                .template_int("Hv", 32)
+                .template_dtype("InT", Dtype::Bfloat16)
+                .template_dtype("StT", Dtype::Float32)
+                .dispatch()?;
+            let (ry, rs) = (reference.take_at(0)?, reference.take_at(0)?);
+            let (sy, ss) = super::super::gdn_scan::scan_on(
+                &q,
+                &k,
+                &v,
+                &g,
+                &beta,
+                &state,
+                16,
+                32,
+                128,
+                128,
+                StreamOrDevice::default(),
+            )?;
+            let max_diff = |a: &Array, b: &Array| -> Result<(f32, f32)> {
+                let a = mlx::ops::cast::astype(a, Dtype::Float32)?.to_vec::<f32>()?;
+                let b = mlx::ops::cast::astype(b, Dtype::Float32)?.to_vec::<f32>()?;
+                let diff = a
+                    .iter()
+                    .zip(&b)
+                    .map(|(x, y)| (x - y).abs())
+                    .fold(0.0, f32::max);
+                Ok((diff, a.iter().map(|x| x.abs()).fold(0.0, f32::max)))
+            };
+            let (y_diff, y_max) = max_diff(&ry, &sy)?;
+            let (s_diff, s_max) = max_diff(&rs, &ss)?;
+            // y rounds to bf16 (half an ulp at its largest values); the
+            // state differs by f32 summation order only.
+            assert!(
+                y_diff <= y_max / 128.0,
+                "{dtype:?}: y differs by {y_diff} (max {y_max})"
+            );
+            assert!(
+                s_diff <= s_max * 1e-5,
+                "{dtype:?}: state differs by {s_diff} (max {s_max})"
+            );
+        }
+        Ok(())
+    }
 
     fn small_gdn_components() -> GatedDeltaNet {
         // Synthetic small model:

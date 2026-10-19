@@ -136,6 +136,178 @@ const SOURCE: &str = r#"
   }
 "#;
 
+// Long prefill chunks: the same per-element arithmetic as SOURCE, with a
+// threadgroup carrying one head's 128 channels down RB rows (each lane four
+// channels, the conv window in registers) and only the conv state's tail
+// (the last KS - 1 conv input rows) written instead of the whole conv input.
+const SOURCE_LONG: &str = r#"
+  constexpr int D = 128;
+  constexpr int KEEP = KS - 1;
+  const uint lane = thread_index_in_simdgroup;
+  const int hd = int(threadgroup_position_in_grid.x);   // q heads, then k heads, then v heads
+  const int blk = int(threadgroup_position_in_grid.y);
+  const int b = int(threadgroup_position_in_grid.z);
+  const int S = int(proj_shape[1]);
+  const int s0 = blk * RB;
+  const int s1 = min(S, s0 + RB);
+  const device bfloat* st = (const device bfloat*)state + (int64_t)b * KEEP * C;
+  const device bfloat* pr = (const device bfloat*)proj + (int64_t)b * S * NP;
+  const int c0 = hd * D + int(lane) * 4;
+  // Conv input row r: state row r below KEEP, else projection row r - KEEP.
+  auto cin = [&](int r, int c) -> float {
+    return r < KEEP ? float(st[r * C + c]) : float(pr[(int64_t)(r - KEEP) * NP + c]);
+  };
+  float wv[4][KS];
+  float win[4][KEEP];
+  for (int i = 0; i < 4; i++) {
+    for (int j = 0; j < KS; j++) wv[i][j] = float(((const device bfloat*)w)[(c0 + i) * KS + j]);
+    for (int j = 0; j < KEEP; j++) win[i][j] = cin(s0 + j, c0 + i);
+  }
+  const bool is_qk = hd < 2 * HK;
+  const bool is_q = hd < HK;
+  const float scale = is_q ? as_type<float>(int(QBITS)) : as_type<float>(int(KBITS));
+  const int hv = hd - 2 * HK;
+  for (int s = s0; s < s1; s++) {
+    float vals[4];
+    for (int i = 0; i < 4; i++) {
+      // MLX depthwise conv1d: float accumulation over the taps in order.
+      const float xn = cin(s + KEEP, c0 + i);
+      float acc = 0.0f;
+      for (int j = 0; j < KS; j++) acc = metal::fma(j < KEEP ? win[i][j] : xn, wv[i][j], acc);
+      for (int j = 0; j + 1 < KEEP; j++) win[i][j] = win[i][j + 1];
+      win[i][KEEP - 1] = xn;
+      const bfloat conv = bfloat(acc);
+      vals[i] = float(mul_bf16(conv, sigmoid_bf16(conv)));
+    }
+    if (is_qk) {
+      float acc = 0.0f;
+      for (int i = 0; i < 4; i++) acc += vals[i] * vals[i];
+      acc = simd_sum(acc);
+      const float inv = metal::precise::rsqrt(acc / float(D) + 1e-6f);
+      device float* out = (is_q ? (device float*)q : (device float*)k) +
+          ((int64_t)(b * S + s) * HK + (is_q ? hd : hd - HK)) * D + lane * 4;
+      for (int i = 0; i < 4; i++) out[i] = float(mul_bf16(bfloat(1.0f), bfloat(vals[i] * inv))) * scale;
+    } else {
+      device bfloat* out = (device bfloat*)v + ((int64_t)(b * S + s) * HV + hv) * D + lane * 4;
+      for (int i = 0; i < 4; i++) out[i] = bfloat(vals[i]);
+      if (lane == 0) {
+        const device bfloat* row = pr + (int64_t)s * NP;
+        const bfloat x = row[A_OFF + hv] + ((const device bfloat*)dt_bias)[hv];
+        const bfloat safe = shim_logaddexp_bf16(bfloat(0), x);
+        const bfloat sp = static_cast<float>(x) > 20.0f ? x : safe;
+        const float neg = -metal::precise::exp(static_cast<float>(((const device bfloat*)a_log)[hv]));
+        ((device float*)g)[(b * S + s) * HV + hv] = metal::precise::exp(neg * static_cast<float>(sp));
+        ((device bfloat*)beta)[(b * S + s) * HV + hv] = static_cast<bfloat>(shim_sigmoid_bf16(row[B_OFF + hv]));
+      }
+    }
+  }
+  // The conv state for the next call: conv input rows S .. S + KEEP - 1.
+  if (s1 == S) {
+    device bfloat* tl = (device bfloat*)tail + (int64_t)b * KEEP * C;
+    for (int i = 0; i < 4; i++)
+      for (int r = 0; r < KEEP; r++) {
+        const int src = S + r;
+        tl[r * C + c0 + i] = src < KEEP ? st[src * C + c0 + i] : pr[(int64_t)(src - KEEP) * NP + c0 + i];
+      }
+  }
+"#;
+
+/// [`prep_on`] for long prefill chunks: the same outputs and arithmetic,
+/// except that `conv_input` holds only the conv state's tail `[B, KS - 1, C]`
+/// (the last `KS - 1` rows of the conv input).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prep_long_on(
+    proj: &Array,
+    state: &Array,
+    weight: &Array,
+    a_log: &Array,
+    dt_bias: &Array,
+    conv_dim: i32,
+    z_width: i32,
+    heads_k: i32,
+    heads_v: i32,
+    target: StreamOrDevice,
+) -> Result<Prepared> {
+    const RB: i32 = 32;
+    let ps = proj.shape();
+    let &[b, s, np] = ps.as_slice() else {
+        anyhow::bail!("gdn prep: projection must be [B, S, N]");
+    };
+    let ws = weight.shape();
+    let ks = ws.as_slice().get(1).copied().unwrap_or(0);
+    let keep = ks - 1;
+    ensure!(
+        proj.dtype() == Dtype::Bfloat16
+            && state.dtype() == Dtype::Bfloat16
+            && weight.dtype() == Dtype::Bfloat16
+            && a_log.dtype() == Dtype::Bfloat16
+            && dt_bias.dtype() == Dtype::Bfloat16
+            && ws.as_slice() == [conv_dim, ks, 1]
+            && keep >= 1
+            && s >= keep
+            && state.shape().as_slice() == [b, keep, conv_dim]
+            && conv_dim == (2 * heads_k + heads_v) * 128
+            && np == conv_dim + z_width + 2 * heads_v
+            && a_log.size() == heads_v as usize
+            && dt_bias.size() == heads_v as usize,
+        "gdn prep: unsupported shapes"
+    );
+    let inv_scale = 1.0_f32 / 128.0_f32.sqrt();
+    static KERNEL: OnceLock<MetalKernel> = OnceLock::new();
+    if KERNEL.get().is_none() {
+        let built = MetalKernel::builder("ironmlx_gdn_prep_long_v1")
+            .inputs(&["proj", "state", "w", "a_log", "dt_bias"])
+            .outputs(&["tail", "q", "k", "v", "g", "beta"])
+            .header(HEADER)
+            .source(SOURCE_LONG)
+            .build()?;
+        let _ = KERNEL.set(built);
+    }
+    let mut out = KERNEL
+        .get()
+        .expect("built")
+        .dispatch_builder()
+        .inputs(&[proj, state, weight, a_log, dt_bias])
+        .output_shapes(&[
+            Shape::from(&[b, keep, conv_dim][..]),
+            Shape::from(&[b, s, heads_k, 128][..]),
+            Shape::from(&[b, s, heads_k, 128][..]),
+            Shape::from(&[b, s, heads_v, 128][..]),
+            Shape::from(&[b, s, heads_v][..]),
+            Shape::from(&[b, s, heads_v][..]),
+        ])
+        .output_dtypes(&[
+            Dtype::Bfloat16,
+            Dtype::Float32,
+            Dtype::Float32,
+            Dtype::Bfloat16,
+            Dtype::Float32,
+            Dtype::Bfloat16,
+        ])
+        .grid(32 * (2 * heads_k + heads_v), (s + RB - 1) / RB, b)
+        .threadgroup(32, 1, 1)
+        .template_int("C", conv_dim)
+        .template_int("NP", np)
+        .template_int("KS", ks)
+        .template_int("HK", heads_k)
+        .template_int("HV", heads_v)
+        .template_int("RB", RB)
+        .template_int("B_OFF", conv_dim + z_width)
+        .template_int("A_OFF", conv_dim + z_width + heads_v)
+        .template_int("QBITS", (inv_scale * inv_scale).to_bits() as i32)
+        .template_int("KBITS", inv_scale.to_bits() as i32)
+        .stream(target)
+        .dispatch()?;
+    Ok(Prepared {
+        conv_input: out.take_at(0)?,
+        q: out.take_at(0)?,
+        k: out.take_at(0)?,
+        v: out.take_at(0)?,
+        g: out.take_at(0)?,
+        beta: out.take_at(0)?,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prep_on(
     proj: &Array,
@@ -324,6 +496,45 @@ mod tests {
             .key(&key)
             .sample()?;
         Ok(astype(&x, Dtype::Bfloat16)?)
+    }
+
+    /// The long-chunk preparation equals the per-row one bit for bit, its
+    /// tail equal to the last rows of the per-row conv input, across row
+    /// blocks (a partial last block included).
+    #[test]
+    #[serial(mlx_metal)]
+    fn long_prep_matches_prep_bit_for_bit() -> Result<()> {
+        if let Ok(root) = std::env::var("MLX_DIR") {
+            mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib"))?;
+        }
+        let (s, hk, hv) = (77_i32, 2_i32, 32_i32);
+        let conv_dim = (2 * hk + hv) * 128;
+        let z_width = hv * 128;
+        let np = conv_dim + z_width + 2 * hv;
+        let proj = rand(&[1, s, np], 0.5, 1)?;
+        let state = rand(&[1, 3, conv_dim], 0.5, 2)?;
+        let w = rand(&[conv_dim, 4, 1], 0.3, 3)?;
+        let a_log = rand(&[hv], 0.3, 4)?;
+        let dt = rand(&[hv], 0.3, 5)?;
+        let target = StreamOrDevice::default();
+        let a = prep_on(
+            &proj, &state, &w, &a_log, &dt, conv_dim, z_width, hk, hv, target,
+        )?;
+        let l = prep_long_on(
+            &proj, &state, &w, &a_log, &dt, conv_dim, z_width, hk, hv, target,
+        )?;
+        let tail = mlx::ops::indexing::slice(&a.conv_input, (0, s, 0), (1, s + 3, conv_dim))?;
+        for (name, x, y) in [
+            ("q", &a.q, &l.q),
+            ("k", &a.k, &l.k),
+            ("v", &a.v, &l.v),
+            ("g", &a.g, &l.g),
+            ("beta", &a.beta, &l.beta),
+            ("tail", &tail, &l.conv_input),
+        ] {
+            assert!(bits(x)? == bits(y)?, "{name} differs");
+        }
+        Ok(())
     }
 
     fn bits(a: &Array) -> Result<Vec<u32>> {

@@ -19,6 +19,7 @@ pub mod fused_norm;
 pub mod gated_attention;
 pub mod gated_delta_net;
 pub mod gdn_prep;
+pub(crate) mod gdn_scan;
 pub(crate) mod gemma4_verify_attention;
 pub mod linear;
 pub(crate) mod m5_affine4;
