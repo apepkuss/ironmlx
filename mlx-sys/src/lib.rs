@@ -28,7 +28,8 @@ pub mod shaders {
     /// QMM M-tile prefill library (kernel `ironmlx_qmm_bm128_aligned`).
     pub const PREFILL_QMM_MTILE_METALLIB: &[u8] =
         include_bytes!(concat!(env!("OUT_DIR"), "/prefill_qmm_mtile.metallib"));
-    /// D256 NAX prefill attention library (kernel `ironmlx_probe_dsplit_bf16`).
+    /// D256 NAX attention library (prefill `ironmlx_probe_dsplit_bf16`, split-K
+    /// decode/verify `ironmlx_splitk_d256_pass1_wm*` + `ironmlx_splitk_d256_pass2`).
     pub const PREFILL_D256_NAX_METALLIB: &[u8] =
         include_bytes!(concat!(env!("OUT_DIR"), "/prefill_d256_nax.metallib"));
 }

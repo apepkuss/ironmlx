@@ -11,4 +11,10 @@ namespace cxx_mlx {
 std::optional<mlx::core::array> experimental_prefill_d256_nax(
     const mlx::core::array& q, const mlx::core::array& k,
     const mlx::core::array& v, float scale, mlx::core::StreamOrDevice target);
+// Split-K variant for query blocks of at most 8 rows over long caches
+// (decode and speculative verify); `causal` aligns the rows to the cache end.
+std::optional<mlx::core::array> experimental_decode_d256_nax(
+    const mlx::core::array& q, const mlx::core::array& k,
+    const mlx::core::array& v, float scale, bool causal,
+    mlx::core::StreamOrDevice target);
 }  // namespace cxx_mlx

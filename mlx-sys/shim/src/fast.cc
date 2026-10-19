@@ -79,6 +79,12 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
     bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
   auto target = cxx_mlx::helpers::decode_stream_or_device(
       has_target, is_device_only, device_type, stream_index);
+  if ((mask_mode == "causal" || mask_mode == "") && mask_arr == nullptr && sinks == nullptr) {
+    if (auto candidate = experimental_decode_d256_nax(
+            queries, keys, values, scale, mask_mode == "causal", target)) {
+      return std::make_unique<MlxArray>(std::move(*candidate));
+    }
+  }
   if (mask_mode == "causal" && mask_arr == nullptr && sinks == nullptr) {
     if (auto candidate = experimental_prefill_d256_nax(queries, keys, values, scale, target)) {
       return std::make_unique<MlxArray>(std::move(*candidate));

@@ -235,6 +235,83 @@ fn qwen36_moe_dflash2_greedy_generation_matches_ordinary() {
     assert!(totals.3 > 0, "no rollback was exercised");
 }
 
+/// Over long contexts, greedy DFlash2 windows must emit the token IDs of the
+/// same stream decoding one token per window (budget 0, same prefill) where
+/// the attention regime changes mid-generation: prompts end just below 8193
+/// keys (where the M5 MoE profile switches decode and verify attention to
+/// split-K D256 NAX) and just below 16384 keys (where its key block grows),
+/// with fixed budgets 7 (eight verify rows) and 3.
+#[test]
+#[ignore = "loads a full local Qwen3.6 MoE target and the incoai DFlash2 draft"]
+#[serial(mlx_metal)]
+fn qwen36_moe_dflash2_long_context_windows_match_one_token_windows() {
+    let Some(fixture) = fixture() else {
+        eprintln!("skip: set QWEN36_MOE_DFLASH2_TARGET and DFLASH2_MODEL");
+        return;
+    };
+    let mut text = String::new();
+    let mut section = 0;
+    while fixture
+        .tokenizer
+        .encode(&text, false)
+        .expect("encode")
+        .len()
+        < 16_400
+    {
+        section += 1;
+        text.push_str(&format!(
+            "Section {section}. {} {} Note {}: {}\n",
+            PROMPTS[section % 3],
+            PROMPTS[(section + 1) % 3],
+            section * 7 % 113,
+            PROMPTS[(section + 2) % 3]
+        ));
+    }
+    let all_ids = fixture.tokenizer.encode(&text, false).expect("encode");
+    let max_new_tokens = 61;
+    for prompt_len in [8_170_usize, 16_360] {
+        let prompt_ids = all_ids[..prompt_len].to_vec();
+        let mut expected = Vec::new();
+        for budget in [0, 7, 3] {
+            let mut stream = DFlash2TextGenerationStream::new_text_only_with_options(
+                &fixture.target,
+                &fixture.draft,
+                &fixture.tokenizer,
+                request(
+                    prompt_ids.clone(),
+                    max_new_tokens,
+                    Vec::new(),
+                    Sampler::greedy(),
+                ),
+                8,
+                DFlash2P2Options::default(),
+            )
+            .expect("DFlash2 stream");
+            stream.experimental_fixed_budget = Some(budget);
+            let actual = drain(|| stream.next_token());
+            let metrics = stream.metrics();
+            if budget == 0 {
+                assert_eq!(metrics.drafted_tokens, 0);
+                expected = actual;
+                continue;
+            }
+            assert_eq!(
+                actual, expected,
+                "prompt_len {prompt_len} budget {budget} diverged from one-token windows"
+            );
+            assert!(metrics.drafted_tokens > 0, "no DFlash2 drafts");
+            eprintln!(
+                "[qwen36-moe-dflash2 long] prompt_len={prompt_len} budget={budget} windows={} drafted={} \
+                 accepted={} rollbacks={} exact",
+                metrics.windows,
+                metrics.drafted_tokens,
+                metrics.accepted_draft_tokens,
+                metrics.rollback_count,
+            );
+        }
+    }
+}
+
 /// Upper chi-square quantile by the Wilson-Hilferty approximation.
 /// Malformed draft inputs return `Err` before the drafter reads its anchor or
 /// touches the cache; a well-formed window still drafts and records an anchor
