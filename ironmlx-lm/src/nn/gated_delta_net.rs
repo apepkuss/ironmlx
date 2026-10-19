@@ -634,6 +634,15 @@ impl GatedDeltaNet {
                         })?;
                     mlx::ops::indexing::take_along_axis_on(&conv_input, &idx, 1, target)?
                 }
+                // A prefill chunk gathers its tail into an array of its own:
+                // a slice view would share (and keep alive) the chunk's whole
+                // conv input buffer.
+                _ if seq > 16 => {
+                    let tail: Vec<u32> =
+                        (total_len - n_keep..total_len).map(|i| i as u32).collect();
+                    let tail: Array = (&tail[..], &[n_keep][..]).try_into()?;
+                    mlx::ops::indexing::take_on(&conv_input, &tail, 1, target)?
+                }
                 _ => mlx::ops::indexing::slice(
                     &conv_input,
                     vec![0_i32, total_len - n_keep, 0].as_slice(),

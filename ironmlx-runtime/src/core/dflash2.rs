@@ -1577,7 +1577,18 @@ where
             let chunk_last_hidden = last_hidden
                 .as_ref()
                 .ok_or_else(|| anyhow!("DFlash2 prefill retained no final hidden"))?;
-            mlx::transforms::eval(&[retained, chunk_last_hidden])?;
+            // The chunk's GatedDelta conv windows (gathered tails) join the
+            // evaluation: left lazy, each one keeps its chunk's whole conv
+            // input alive until the next chunk reads it.
+            let mut chunk_outputs: Vec<&Array> = target_cache
+                .iter()
+                .filter_map(|layer| match layer {
+                    LayerCache::Linear(cache) => Some(cache.conv_state()),
+                    _ => None,
+                })
+                .collect();
+            chunk_outputs.extend([retained, chunk_last_hidden]);
+            mlx::transforms::eval(&chunk_outputs)?;
             PrefillPhaseDiagnostic::mark(&mut phases, "chunk", chunk_len);
             memory_phase_diagnostic("prefill_chunk_evaluated", position + chunk_len, prompt_len);
             ensure_dflash2_request_not_cancelled(is_cancelled)?;
