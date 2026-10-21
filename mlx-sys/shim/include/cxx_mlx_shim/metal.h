@@ -38,4 +38,13 @@ void set_metallib_path(rust::Str path);
 
 rust::String device_architecture();
 
+// === NAX availability ===
+//
+// Wraps `mlx::core::metal::is_nax_available()`: whether this device and OS
+// let MLX use its NAX (neural accelerator) kernels, the condition MLX itself
+// checks before choosing a NAX kernel such as its full attention for head
+// dims 64, 96 and 128. Throws if the Metal backend isn't available.
+
+bool nax_available();
+
 }  // namespace cxx_mlx

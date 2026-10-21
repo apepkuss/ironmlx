@@ -14,7 +14,7 @@ IronMLX 提供兼容 OpenAI Responses、Chat Completions 和 Anthropic Messages 
 
 推理请求中的未知字段或不支持的字段形状返回 400；不支持的能力不会被静默忽略。
 
-固定 CLI 服务在启动时选择模型；App 与 EnginePool 按请求 `model` 或明确的默认模型分派。图片、思考和工具能力取决于模型与原生模板，见[支持的模型](supported-models.md)。[DFlash2 配置](dflash2-server-api.md)说明其纯文本服务与采样限制。
+固定 CLI 服务在启动时选择模型；App 与 EnginePool 按请求 `model` 或明确的默认模型分派。图片、思考和工具能力取决于模型与原生模板，见[支持的模型](supported-models.md)。[DFlash2 配置](dflash2-server-api.md)说明其服务与采样限制。
 
 ## 端点索引
 

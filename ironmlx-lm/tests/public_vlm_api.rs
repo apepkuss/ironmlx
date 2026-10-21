@@ -48,9 +48,15 @@ fn batched_prefill_vl_b1_matches_forward_vl() {
         "/../ironmlx/tests/fixtures/qwen35_vl/multi_image/image_0.jpg"
     ))
     .expect("image_0 fixture");
-    let (pixel_values, grid_h, grid_w) =
-        ironmlx_lm::models::qwen3_5::image_processor::preprocess(&fixture_bytes)
-            .expect("preprocess");
+    let (pixel_values, grid_h, grid_w) = ironmlx_lm::models::qwen3_5::image_processor::preprocess(
+        &fixture_bytes,
+        ironmlx_lm::models::qwen3_5::image_processor::PixelBounds::for_model(
+            loader.model_dir(),
+            None,
+        )
+        .expect("pixel bounds"),
+    )
+    .expect("preprocess");
     let merge_size = 2_i32;
     let grids_real: Vec<(i32, i32, i32)> = vec![(1, grid_h, grid_w)];
     let n_pads = (grid_h * grid_w / (merge_size * merge_size)) as usize;

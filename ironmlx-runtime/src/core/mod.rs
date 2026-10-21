@@ -1,6 +1,7 @@
 //! Generation infrastructure that's model-agnostic.
 
 pub mod cache;
+pub(crate) mod chat_prefix;
 pub mod dflash2;
 pub mod gemma4_generation;
 pub mod generate;
@@ -14,6 +15,7 @@ pub mod scheduler;
 pub mod scheduler_autotune;
 pub mod speculative;
 pub mod speculative_qualification;
+pub(crate) mod vl_prefix;
 
 pub use dflash2::DFlash2Metrics;
 pub use dflash2::DFlash2TextGenerationStream;

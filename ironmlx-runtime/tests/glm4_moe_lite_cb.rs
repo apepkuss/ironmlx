@@ -1,6 +1,6 @@
 //! GLM-4.7-Flash (`glm4_moe_lite`) continuous-batching correctness test.
 //!
-//! The correctness gate for `--b-max > 1`: drive the REAL scheduler with
+//! The correctness gate for `--max-sequences > 1`: drive the REAL scheduler with
 //! `b_max=2` to generate greedy (temperature 0) continuations for TWO
 //! DIFFERENT-LENGTH prompts concurrently, and assert each prompt's generated
 //! token sequence is BIT-IDENTICAL to the SAME prompt's `b_max=1` SERIAL

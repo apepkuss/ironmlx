@@ -180,8 +180,8 @@ impl M5ProfileTarget {
 /// q8 windows: experts -4.3%, glue -2.1%, drafts -0.7%; verify q8 12.7 ->
 /// 11.7 ms with the split counts.
 ///
-/// The vision encoder is not loaded (DFlash2 serving rejects image input):
-/// B1 serving footprint 22.23 -> 21.34 GB. Startup warmup requests compile the
+/// The vision encoder loads on the first image request instead of at start:
+/// text-only B1 serving footprint 22.23 -> 21.34 GB. Startup warmup requests compile the
 /// prompt-length-specialized kernels before serving: the first run of a new
 /// build no longer stalls 190-240 ms inside a request (prefill of a prompt
 /// over 64 tokens, the drafter's first 33-48-row context projection).

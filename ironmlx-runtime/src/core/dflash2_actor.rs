@@ -896,7 +896,15 @@ where
         let mut prefix_cache = prefix_cache_max_bytes
             .map(DFlash2PrefixCache::new)
             .transpose()
-            .expect("validated DFlash2 prefix cache capacity");
+            .expect("validated DFlash2 prefix cache capacity")
+            .map(|cache| {
+                let turn_boundary = crate::core::chat_prefix::ChatTurnBoundary::probe(&tokenizer);
+                tracing::info!(
+                    generation_suffixes = ?turn_boundary.as_ref().map(|b| b.suffixes()),
+                    "DFlash2 prefix cache chat turn boundary"
+                );
+                cache.with_turn_boundary(turn_boundary)
+            });
         let mut next_request_id = 1_u64;
         let mut active = Vec::<ActiveDFlash2Request<'_, M>>::with_capacity(b_max);
         let mut paused_background = VecDeque::<ActiveDFlash2Request<'_, M>>::with_capacity(b_max);
@@ -1079,13 +1087,30 @@ where
                     worker_in_flight.fetch_sub(1, Ordering::Release);
                     continue;
                 }
-                if let Err(error) = DFlash2TextGenerationStream::<M>::validate_text_request(
-                    &draft, &request, block_size,
+                if let Err(error) = DFlash2TextGenerationStream::<M>::validate_request(
+                    &*model, &draft, &request, block_size,
                 ) {
                     let _ = reply_tx.send(Err(error));
                     worker_in_flight.fetch_sub(1, Ordering::Release);
                     continue;
                 }
+                // The vision encoder's working set for an image request's prefill.
+                let vision_prefill_bytes = match (
+                    request.pixel_values.as_deref(),
+                    request.image_grid_thw.as_deref(),
+                ) {
+                    (Some(pixels), Some(grids)) => {
+                        match model.estimate_vision_prefill_tensor_bytes(pixels, grids) {
+                            Ok(bytes) => bytes,
+                            Err(error) => {
+                                let _ = reply_tx.send(Err(error));
+                                worker_in_flight.fetch_sub(1, Ordering::Release);
+                                continue;
+                            }
+                        }
+                    }
+                    _ => 0,
+                };
 
                 let memory_charge = match reserve_dflash2_request_memory(
                     &budget_state,
@@ -1158,29 +1183,34 @@ where
                     worker_in_flight.fetch_sub(1, Ordering::Release);
                     continue;
                 }
-                let governor_reservation =
-                    match governor.try_reserve(memory_charge.bytes(), "dflash2_admission") {
-                        Ok(reservation) => reservation,
-                        Err(error) => {
-                            let snapshot = governor.snapshot();
-                            tracing::warn!(
-                                error = %error,
-                                "process memory governor rejected DFlash2 admission"
-                            );
-                            let error = SchedulerError::MemoryPressure {
-                                level: snapshot.pressure_level,
-                                current_bytes: snapshot.current_usage_bytes,
-                                ceiling_bytes: snapshot.effective_ceiling_bytes,
-                            };
-                            let _ = reply_tx.send(Err(anyhow::Error::new(error)));
-                            worker_in_flight.fetch_sub(1, Ordering::Release);
-                            continue;
-                        }
-                    };
+                let governor_reservation = match governor.try_reserve(
+                    memory_charge.bytes().saturating_add(vision_prefill_bytes),
+                    "dflash2_admission",
+                ) {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        let snapshot = governor.snapshot();
+                        tracing::warn!(
+                            error = %error,
+                            "process memory governor rejected DFlash2 admission"
+                        );
+                        let error = SchedulerError::MemoryPressure {
+                            level: snapshot.pressure_level,
+                            current_bytes: snapshot.current_usage_bytes,
+                            ceiling_bytes: snapshot.effective_ceiling_bytes,
+                        };
+                        let _ = reply_tx.send(Err(anyhow::Error::new(error)));
+                        worker_in_flight.fetch_sub(1, Ordering::Release);
+                        continue;
+                    }
+                };
 
+                // An image request also materializes the vision encoder, which
+                // DFlash2 serving loads on its first image request.
                 let components =
                     crate::core::process_memory::MaterializationComponents::for_request(
-                        false, true,
+                        request.pixel_values.is_some(),
+                        true,
                     );
                 let cold = match cold_materialization_tracker.begin(
                     components,
@@ -1206,6 +1236,9 @@ where
                 let batch_prompt_len = request.prompt_ids.len();
                 let batch_chunk_size = request.prefill_chunk_size;
                 let batch_priority = request.priority;
+                // An image request prefills alone (its rows join ragged
+                // decoding afterwards).
+                let batch_is_text = request.pixel_values.is_none();
                 let mut admission_requests = vec![request];
                 let mut admission_priorities = vec![batch_priority];
                 let mut admission_replies = vec![reply_tx];
@@ -1217,6 +1250,7 @@ where
                 // offsets. Cold misses without that feature can preserve the B1
                 // prefill morphology in one equal-length B=N graph.
                 while tensor_batching
+                    && batch_is_text
                     && prefix_cache.is_none()
                     && active.len() + admission_requests.len() < b_max
                     && pending.front().is_some_and(|command| match command {
@@ -1224,6 +1258,7 @@ where
                             request.prompt_ids.len() == batch_prompt_len
                                 && request.prefill_chunk_size == batch_chunk_size
                                 && request.priority == batch_priority
+                                && request.pixel_values.is_none()
                         }
                     })
                 {
@@ -1255,8 +1290,8 @@ where
                         worker_in_flight.fetch_sub(1, Ordering::Release);
                         continue;
                     }
-                    if let Err(error) = DFlash2TextGenerationStream::<M>::validate_text_request(
-                        &draft, &candidate, block_size,
+                    if let Err(error) = DFlash2TextGenerationStream::<M>::validate_request(
+                        &*model, &draft, &candidate, block_size,
                     ) {
                         let _ = candidate_reply.send(Err(error));
                         worker_in_flight.fetch_sub(1, Ordering::Release);
@@ -1332,22 +1367,43 @@ where
                     let request = admission_requests
                         .pop()
                         .expect("one DFlash2 admission request is present");
-                    DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
-                        &*model,
-                        &draft,
-                        &tokenizer,
-                        request,
-                        super::dflash2::DFlash2ExecutionOptions {
-                            block_size,
-                            p2: p2_options,
-                        },
-                        prefix_cache
-                            .as_mut()
-                            .map(|cache| (cache, prefix_fingerprint.as_str())),
-                        &|| admission_replies[0].is_closed(),
-                    )
-                    .map(|stream| vec![stream])
-                    .context("initializing DFlash2 actor stream")
+                    // The first image request loads the vision encoder here,
+                    // on the thread that runs it (its bytes are part of the
+                    // cold-materialization reservation above); it stays
+                    // resident for later requests.
+                    let vision_ready = if request.pixel_values.is_some() {
+                        let started = std::time::Instant::now();
+                        model.dflash2_load_vision().map(|loaded| {
+                            if loaded {
+                                tracing::info!(
+                                    target: "ironmlx::dflash2",
+                                    elapsed_ms = started.elapsed().as_millis() as u64,
+                                    "DFlash2 vision encoder loaded for the first image request"
+                                );
+                            }
+                        })
+                    } else {
+                        Ok(())
+                    };
+                    vision_ready
+                        .and_then(|()| {
+                            DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
+                                &*model,
+                                &draft,
+                                &tokenizer,
+                                request,
+                                super::dflash2::DFlash2ExecutionOptions {
+                                    block_size,
+                                    p2: p2_options,
+                                },
+                                prefix_cache
+                                    .as_mut()
+                                    .map(|cache| (cache, prefix_fingerprint.as_str())),
+                                &|| admission_replies[0].is_closed(),
+                            )
+                        })
+                        .map(|stream| vec![stream])
+                        .context("initializing DFlash2 actor stream")
                 };
                 let streams = match streams_result {
                     Ok(streams) => streams,

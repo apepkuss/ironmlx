@@ -13,6 +13,7 @@ use mlx::{Array, StreamOrDevice};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::core::chat_prefix::ChatTurnBoundary;
 use crate::core::dflash2_budget::{
     DFlash2BudgetPolicyKind, DFlash2DraftBudgetPolicy, DFlash2PolicyDomain, DFlash2WindowRole,
 };
@@ -21,9 +22,14 @@ use crate::core::speculative::{
     resolve_exact_deterministic_target_logits, resolve_exact_deterministic_target_tokens,
     sample_logits_positions, ExactSamplingCounters, MtpDraftPolicyWindow,
 };
+use crate::core::vl_prefix::PrefixFingerprint;
 use crate::Result;
 use ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntry;
 use ironmlx_lm::core::model_input::build_position_ids;
+use ironmlx_lm::core::model_input::{
+    build_position_ids_vl, count_image_pad, extend_vl_chunk_end_for_image_pad, slice_pos_ids_axis2,
+    slice_vision_embeds_rows, vl_rope_delta,
+};
 use ironmlx_lm::core::speculative_ops::{resolve_speculative_tokens, SpeculativeResolution};
 use {
     ironmlx_core::sampler::prepare_target_tokens_with_uniforms_batch,
@@ -232,6 +238,9 @@ pub(crate) struct DFlash2PrefixCache {
     saves: u64,
     evictions: u64,
     entries: Vec<DFlash2PrefixArtifact>,
+    /// Where a chat prompt's next turn diverges; a prompt ending in a
+    /// generation suffix is also saved without it (see [`ChatTurnBoundary`]).
+    turn_boundary: Option<ChatTurnBoundary>,
 }
 
 impl DFlash2PrefixCache {
@@ -246,22 +255,39 @@ impl DFlash2PrefixCache {
             saves: 0,
             evictions: 0,
             entries: Vec::new(),
+            turn_boundary: None,
         })
     }
 
+    pub(crate) fn with_turn_boundary(mut self, turn_boundary: Option<ChatTurnBoundary>) -> Self {
+        self.turn_boundary = turn_boundary;
+        self
+    }
+
+    /// The length of `prompt_ids` a follow-up chat turn shares, when the
+    /// prompt ends in its template's generation suffix.
+    fn turn_reusable_len(&self, prompt_ids: &[u32]) -> Option<usize> {
+        self.turn_boundary
+            .as_ref()
+            .and_then(|boundary| boundary.reusable_len(prompt_ids))
+    }
+
+    /// The longest artifact whose tokens prefix `prompt_ids` and whose
+    /// fingerprint is `fingerprint(its token count)` (an image prompt keys
+    /// each boundary by the images it covers, see [`PrefixFingerprint`]).
     fn load_longest(
         &mut self,
         prompt_ids: &[u32],
-        fingerprint: &str,
+        fingerprint: &dyn Fn(usize) -> String,
     ) -> Option<DFlash2PrefixArtifact> {
         let hit_index = self
             .entries
             .iter()
             .enumerate()
             .filter(|(_, entry)| {
-                entry.fingerprint == fingerprint
-                    && entry.token_ids.len() <= prompt_ids.len()
+                entry.token_ids.len() <= prompt_ids.len()
                     && prompt_ids.starts_with(&entry.token_ids)
+                    && entry.fingerprint == fingerprint(entry.token_ids.len())
             })
             .max_by_key(|(_, entry)| entry.cached_len)
             .map(|(index, _)| index);
@@ -374,7 +400,7 @@ impl DFlash2PrefixCache {
 
 #[derive(Debug, Error)]
 pub enum DFlash2RequestError {
-    #[error("DFlash2 is text-only; image inputs are unsupported")]
+    #[error("this DFlash2 target is text-only (no vision encoder); image inputs are unsupported")]
     VisionUnsupported,
     #[error("DFlash2 prompt_ids cannot be empty")]
     EmptyPrompt,
@@ -480,6 +506,8 @@ struct DFlash2Counters {
 pub(crate) struct DFlash2TensorBatchKey {
     draft_len: usize,
     verify_start: usize,
+    /// MRoPE position delta of the rows (positions are `verify_start + delta`).
+    rope_delta: i32,
     context_len: i32,
     draft_processed: i32,
     draft_retained: i32,
@@ -605,6 +633,9 @@ where
     prefix_cache_hit_tokens: usize,
     target_cache_cap: i32,
     p2_options: DFlash2P2Options,
+    /// MRoPE position delta of a VL prompt: the token at history index `i`
+    /// (past the prompt) takes position `i + rope_delta`. Zero for text.
+    rope_delta: i32,
 }
 
 /// Positions one verify window may append past the committed context: the
@@ -868,17 +899,150 @@ where
     Ok(())
 }
 
+/// The image half of a VL prefill: the vision encoder's rows for every
+/// image-pad token in prompt order, the prompt's MRoPE positions and the
+/// position delta of the tokens after it.
+struct DFlash2VlPrompt {
+    /// Vision rows of the images the prefill still reaches (`None` when the
+    /// restored prefix covers every image).
+    embeds: Option<Array>,
+    positions: Array,
+    rope_delta: i32,
+    image_token_id: i32,
+    consumed_rows: usize,
+}
+
+impl DFlash2VlPrompt {
+    /// `None` for a text request. For a VL one resuming after `restored`
+    /// prompt tokens, runs the vision encoder (which must be resident) over
+    /// the images not entirely inside that prefix when `identity` pairs
+    /// images with their pad runs, over every image otherwise.
+    fn prepare<M: DFlash2Target>(
+        model: &M,
+        request: &GenerateRequest,
+        identity: &PrefixFingerprint,
+        restored: usize,
+    ) -> Result<Option<Self>> {
+        let (Some(pixels), Some(grids)) = (
+            request.pixel_values.as_deref(),
+            request.image_grid_thw.as_deref(),
+        ) else {
+            return Ok(None);
+        };
+        let ids: Vec<i32> = request.prompt_ids.iter().map(|&id| id as i32).collect();
+        let token = request.image_token_id;
+        let merge = request.image_spatial_merge_size;
+        let positions = build_position_ids_vl(&ids, grids, token, merge)?;
+        let rope_delta = vl_rope_delta(&ids, grids, token, merge)?;
+        let (first, consumed_rows) = match identity.uncached_images(restored) {
+            Some(rest) => (rest.first, rest.rows_inside),
+            None => (0, count_image_pad(&request.prompt_ids[..restored], token)),
+        };
+        let embeds = if first < grids.len() {
+            let embeds = model.dflash2_vision_embeds_on(
+                &pixels[first..],
+                &grids[first..],
+                StreamOrDevice::default(),
+            )?;
+            let rows = usize::try_from(embeds.shape().as_slice()[0])?;
+            let pads = count_image_pad(&request.prompt_ids[restored..], token);
+            anyhow::ensure!(
+                rows == consumed_rows + pads,
+                "DFlash2 image input has {rows} vision rows for {consumed_rows} restored and {pads} remaining image-pad tokens"
+            );
+            Some(embeds)
+        } else {
+            None
+        };
+        Ok(Some(Self {
+            embeds,
+            positions,
+            rope_delta,
+            image_token_id: token,
+            consumed_rows,
+        }))
+    }
+
+    /// Prefill forward of the chunk `ids` starting at `position`; its pad
+    /// tokens take the next unconsumed vision rows.
+    fn forward_chunk<M: DFlash2Target>(
+        &mut self,
+        model: &M,
+        ids: &[u32],
+        input: &Array,
+        position: i32,
+        cache: &mut [LayerCache],
+        target_layer_ids: &[usize],
+    ) -> Result<ironmlx_lm::models::dflash2::DFlash2TargetOutput> {
+        let len = i32::try_from(ids.len())?;
+        let positions = slice_pos_ids_axis2(&self.positions, position, position + len)?;
+        let pads = count_image_pad(ids, self.image_token_id);
+        if pads == 0 {
+            return model.dflash2_forward_target_on(
+                input,
+                &positions,
+                Some(cache),
+                target_layer_ids,
+                DFlash2TargetForwardMode::Prefill,
+                StreamOrDevice::default(),
+            );
+        }
+        let embeds = self
+            .embeds
+            .as_ref()
+            .ok_or_else(|| anyhow!("DFlash2 VL prefill reached image pads without vision rows"))?;
+        let rows = slice_vision_embeds_rows(embeds, self.consumed_rows, self.consumed_rows + pads)?;
+        self.consumed_rows += pads;
+        model.dflash2_forward_target_vl_on(
+            input,
+            &rows,
+            self.image_token_id,
+            &positions,
+            Some(cache),
+            target_layer_ids,
+            StreamOrDevice::default(),
+        )
+    }
+
+    /// The prompt's MRoPE delta, once every vision row was consumed.
+    fn finish(self) -> Result<i32> {
+        let rows = match self.embeds.as_ref() {
+            Some(embeds) => usize::try_from(embeds.shape().as_slice()[0])?,
+            None => 0,
+        };
+        anyhow::ensure!(
+            self.consumed_rows == rows,
+            "DFlash2 VL prefill consumed {} of {rows} vision rows",
+            self.consumed_rows
+        );
+        Ok(self.rope_delta)
+    }
+}
+
 impl<'m, M> DFlash2TextGenerationStream<'m, M>
 where
     M: DFlash2Target,
 {
-    pub(crate) fn validate_text_request(
+    pub(crate) fn validate_request(
+        model: &M,
         draft: &DFlash2DraftModel,
         request: &GenerateRequest,
         block_size: usize,
     ) -> Result<()> {
-        if request.pixel_values.is_some() || request.image_grid_thw.is_some() {
-            return Err(anyhow::Error::new(DFlash2RequestError::VisionUnsupported));
+        match (
+            request.pixel_values.as_deref(),
+            request.image_grid_thw.as_deref(),
+        ) {
+            (None, None) => {}
+            _ if !model.dflash2_supports_images() => {
+                return Err(anyhow::Error::new(DFlash2RequestError::VisionUnsupported));
+            }
+            (Some(pixels), Some(grids)) if !grids.is_empty() && pixels.len() == grids.len() => {}
+            _ => {
+                return Err(anyhow!(
+                    "DFlash2 image input needs one pixel array per image grid"
+                ))
+            }
         }
         if request.prompt_ids.is_empty() {
             return Err(anyhow::Error::new(DFlash2RequestError::EmptyPrompt));
@@ -1018,7 +1182,11 @@ where
             }
         }
         for (index, request) in requests.iter().enumerate() {
-            Self::validate_text_request(draft, request, block_size)?;
+            Self::validate_request(model, draft, request, block_size)?;
+            anyhow::ensure!(
+                request.pixel_values.is_none(),
+                "DFlash2 batched prefill takes text-only requests; an image request prefills alone"
+            );
             ensure_dflash2_request_not_cancelled(Some(&|| is_cancelled(index)))?;
         }
 
@@ -1208,6 +1376,7 @@ where
                 prefix_cache_hit_tokens: 0,
                 target_cache_cap: cap,
                 p2_options: options,
+                rope_delta: 0,
             });
         }
         Ok(streams)
@@ -1228,14 +1397,40 @@ where
             prefix_cache,
             is_cancelled,
         } = prefill;
+        Self::validate_request(model, draft, &request, block_size)?;
+        ensure_dflash2_request_not_cancelled(is_cancelled)?;
+        let mut request = request;
         let (mut prefix_cache, prefix_fingerprint) = match prefix_cache {
             Some((cache, fingerprint)) => (Some(cache), fingerprint),
             None => (None, "generation-stream-no-prefix-cache"),
         };
-        Self::validate_text_request(draft, &request, block_size)?;
-        ensure_dflash2_request_not_cancelled(is_cancelled)?;
+        // Image-pad tokens do not tell two images apart: an image prompt's
+        // artifacts are keyed by the images each boundary covers as well.
+        let prefix_identity = if prefix_cache.is_some() {
+            PrefixFingerprint::for_request(
+                &request.prompt_ids,
+                request.pixel_values.as_deref(),
+                request.image_grid_thw.as_deref(),
+                request.image_token_id,
+                request.image_spatial_merge_size,
+            )?
+        } else {
+            PrefixFingerprint::text()
+        };
+        let prefix_key = |len: usize| match prefix_identity.at(len) {
+            Some(images) => format!("{prefix_fingerprint};{images}"),
+            None => prefix_fingerprint.to_owned(),
+        };
 
         let prompt_len = request.prompt_ids.len();
+        // A chat prompt's next turn shares it only up to its generation
+        // suffix: the prefill ends a chunk there and saves that boundary.
+        let turn_boundary = prefix_cache
+            .as_deref()
+            .and_then(|cache| cache.turn_reusable_len(&request.prompt_ids))
+            .map(i32::try_from)
+            .transpose()
+            .context("DFlash2 prompt is too long")?;
         let cap = i32::try_from(dflash2_target_cache_tokens(
             prompt_len,
             request.max_new_tokens,
@@ -1257,7 +1452,7 @@ where
         let mut phases = PrefillPhaseDiagnostic::start();
 
         if let Some(cache) = prefix_cache.as_deref_mut() {
-            let artifact = cache.load_longest(&request.prompt_ids, prefix_fingerprint);
+            let artifact = cache.load_longest(&request.prompt_ids, &prefix_key);
             PrefillPhaseDiagnostic::mark(&mut phases, "load", 0);
             if let Some(artifact) = artifact {
                 let restore_result = restore_prefix_entry_for_row(
@@ -1284,13 +1479,21 @@ where
                             error = %error,
                             "invalid DFlash2 prefix artifact evicted; falling back to cold prefill"
                         );
-                        cache.invalidate(&artifact.token_ids, prefix_fingerprint);
+                        cache
+                            .invalidate(&artifact.token_ids, &prefix_key(artifact.token_ids.len()));
                         target_cache = model.make_cache(1, cap, model.cache_dtype())?;
                     }
                 }
             }
         }
         PrefillPhaseDiagnostic::mark(&mut phases, "lookup", position);
+        // The vision rows the prefill still reaches (after a restored prefix).
+        let mut vl = DFlash2VlPrompt::prepare(
+            model,
+            &request,
+            &prefix_identity,
+            usize::try_from(position)?,
+        )?;
         // A cold miss computes the whole prompt like a request without a
         // prefix cache; its saved artifacts come from that same pass.
         let prefill_execution = if cold_single_prefill && position == 0 {
@@ -1318,19 +1521,44 @@ where
                 position,
                 prefill_execution,
             );
+            let chunk_len = match turn_boundary {
+                Some(boundary) if position < boundary => chunk_len.min(boundary - position),
+                _ => chunk_len,
+            };
+            // A chunk never splits an image's pad run.
+            let chunk_len = match vl.as_ref() {
+                Some(vl) => {
+                    extend_vl_chunk_end_for_image_pad(
+                        &request.prompt_ids,
+                        vl.image_token_id,
+                        position,
+                        position + chunk_len,
+                    ) - position
+                }
+                None => chunk_len,
+            };
             let start = position as usize;
             let stop = start + chunk_len as usize;
             let input: Array =
                 (&request.prompt_ids[start..stop], &[1_i32, chunk_len][..]).try_into()?;
-            let position_ids = build_position_ids(position, chunk_len)?;
-            let output = model.dflash2_forward_target_on(
-                &input,
-                &position_ids,
-                Some(&mut target_cache),
-                target_layer_ids,
-                DFlash2TargetForwardMode::Prefill,
-                StreamOrDevice::default(),
-            )?;
+            let output = match vl.as_mut() {
+                Some(vl) => vl.forward_chunk(
+                    model,
+                    &request.prompt_ids[start..stop],
+                    &input,
+                    position,
+                    &mut target_cache,
+                    target_layer_ids,
+                )?,
+                None => model.dflash2_forward_target_on(
+                    &input,
+                    &build_position_ids(position, chunk_len)?,
+                    Some(&mut target_cache),
+                    target_layer_ids,
+                    DFlash2TargetForwardMode::Prefill,
+                    StreamOrDevice::default(),
+                )?,
+            };
             ensure_dflash2_request_not_cancelled(is_cancelled)?;
             context_hidden = Some(retain_context_tail(
                 context_hidden.as_ref(),
@@ -1354,21 +1582,29 @@ where
             memory_phase_diagnostic("prefill_chunk_evaluated", position + chunk_len, prompt_len);
             ensure_dflash2_request_not_cancelled(is_cancelled)?;
             // Dense and linear target state is materially larger than an
-            // ordinary paged-KV prefix entry. Retain the last reusable chunk
-            // boundary and the exact full prompt instead of every cumulative
-            // prefill chunk. This preserves exact-repeat and appended-turn
-            // reuse without multiplying resident memory by the chunk count.
-            let cache_this_boundary = should_cache_dflash2_prefill_boundary(
-                prompt_len_i32,
-                position,
-                chunk_len,
-                request.prefill_chunk_size,
-                prefill_execution,
-            );
+            // ordinary paged-KV prefix entry. Retain the exact full prompt and
+            // one shorter boundary instead of every cumulative prefill chunk:
+            // a chat prompt's turn boundary (what its next turn shares), else
+            // the last reusable chunk boundary. This preserves exact-repeat,
+            // follow-up-turn and appended-text reuse without multiplying
+            // resident memory by the chunk count.
+            let cache_this_boundary = match turn_boundary {
+                Some(boundary) => {
+                    let stop = position + chunk_len;
+                    stop == boundary || stop == prompt_len_i32
+                }
+                None => should_cache_dflash2_prefill_boundary(
+                    prompt_len_i32,
+                    position,
+                    chunk_len,
+                    request.prefill_chunk_size,
+                    prefill_execution,
+                ),
+            };
             if let (true, Some(cache)) = (cache_this_boundary, prefix_cache.as_deref_mut()) {
                 match cache.insert(
                     &request.prompt_ids[..stop],
-                    prefix_fingerprint,
+                    &prefix_key(stop),
                     &target_cache,
                     retained,
                     chunk_last_hidden,
@@ -1393,6 +1629,13 @@ where
 
         let last_hidden =
             last_hidden.ok_or_else(|| anyhow!("DFlash2 prefill produced no hidden"))?;
+        // Generated tokens continue after the prompt's MRoPE positions; the
+        // pixels are not needed past the prefill.
+        let rope_delta = match vl.take() {
+            Some(vl) => vl.finish()?,
+            None => 0,
+        };
+        request.pixel_values = None;
         let first_logits =
             model.dflash2_project_hidden_on(&last_hidden, StreamOrDevice::default())?;
         let context_hidden =
@@ -1484,6 +1727,7 @@ where
             prefix_cache_hit_tokens,
             target_cache_cap: cap,
             p2_options,
+            rope_delta,
         })
     }
 
@@ -1672,6 +1916,7 @@ where
         Ok(Some(DFlash2TensorBatchKey {
             draft_len,
             verify_start: self.history.len() - 1,
+            rope_delta: self.rope_delta,
             context_len: context_dims[1],
             draft_processed,
             draft_retained,
@@ -1970,7 +2215,8 @@ where
         let mut out = Vec::with_capacity(tokens.len().saturating_sub(1));
         for pair in tokens.windows(2) {
             let input: Array = (&[pair[0]][..], &[1_i32, 1][..]).try_into()?;
-            let positions = build_position_ids(i32::try_from(self.history.len() - 1)?, 1)?;
+            let positions =
+                build_position_ids(i32::try_from(self.history.len() - 1)? + self.rope_delta, 1)?;
             let output = self.model.dflash2_forward_target_on(
                 &input,
                 &positions,
@@ -2266,7 +2512,13 @@ where
             mlx::ops::shape::concatenate_on(&[&current_arr, &draft_tokens_arr], 1, target)?;
         let position_rows = positions_before
             .iter()
-            .map(|&start| build_position_ids(i32::try_from(start)?, i32::try_from(verify_len)?))
+            .zip(rows.iter())
+            .map(|(&start, row)| {
+                build_position_ids(
+                    i32::try_from(start)? + row.rope_delta,
+                    i32::try_from(verify_len)?,
+                )
+            })
             .collect::<Result<Vec<_>>>()?;
         let position_refs = position_rows.iter().collect::<Vec<_>>();
         let verify_positions = mlx::ops::shape::concatenate_on(&position_refs, 1, target)?;
@@ -2547,7 +2799,8 @@ where
         let input: Array = (&current_tokens[..], &[batch_size_i32, 1][..]).try_into()?;
         let position_rows = positions_before
             .iter()
-            .map(|&start| build_position_ids(i32::try_from(start)?, 1))
+            .zip(rows.iter())
+            .map(|(&start, row)| build_position_ids(i32::try_from(start)? + row.rope_delta, 1))
             .collect::<Result<Vec<_>>>()?;
         let position_refs = position_rows.iter().collect::<Vec<_>>();
         let positions = mlx::ops::shape::concatenate_on(&position_refs, 1, target)?;
@@ -2747,8 +3000,10 @@ where
         let current_arr: Array = (&current_tokens[..], &[batch_size_i32, 1][..]).try_into()?;
         let verify_arr =
             mlx::ops::shape::concatenate_on(&[&current_arr, &draft_tokens_arr], 1, target)?;
-        let positions =
-            build_position_ids(i32::try_from(first_key.verify_start)?, verify_len as i32)?;
+        let positions = build_position_ids(
+            i32::try_from(first_key.verify_start)? + first_key.rope_delta,
+            verify_len as i32,
+        )?;
         let position_rows = (0..batch_size).map(|_| &positions).collect::<Vec<_>>();
         let verify_positions = mlx::ops::shape::concatenate_on(&position_rows, 1, target)?;
         let snapshots = batch_cache
@@ -2956,7 +3211,8 @@ where
                         };
                         let input: Array = (&[token][..], &[1_i32, 1][..]).try_into()?;
                         let position = build_position_ids(
-                            i32::try_from(first_key.verify_start.saturating_add(depth))?,
+                            i32::try_from(first_key.verify_start.saturating_add(depth))?
+                                + first_key.rope_delta,
                             1,
                         )?;
                         let replayed = row.model.dflash2_forward_target_on(
@@ -3178,7 +3434,7 @@ where
             &[i32::try_from(paths.len())?, i32::try_from(verify_len)?][..],
         )
             .try_into()?;
-        let verify_start = i32::try_from(self.history.len() - 1)?;
+        let verify_start = i32::try_from(self.history.len() - 1)? + self.rope_delta;
         let verify_positions = build_position_ids(verify_start, i32::try_from(verify_len)?)?;
         let verify_positions = mlx::ops::shape::broadcast_to(
             &verify_positions,
@@ -3401,7 +3657,7 @@ where
         let verified = self.model.dflash2_forward_tree_on(
             &input,
             &parents,
-            (self.history.len() - 1) as i32,
+            (self.history.len() - 1) as i32 + self.rope_delta,
             &mut self.target_cache,
             &self.draft.config().dflash_config.target_layer_ids,
             StreamOrDevice::default(),
@@ -3555,7 +3811,7 @@ where
             StreamOrDevice::default(),
         )?;
         let verify_len = draft_len + 1;
-        let verify_start = i32::try_from(self.history.len() - 1)?;
+        let verify_start = i32::try_from(self.history.len() - 1)? + self.rope_delta;
         let verify_positions = build_position_ids(verify_start, verify_len as i32)?;
         let snapshots = self
             .target_cache
@@ -3884,7 +4140,8 @@ where
         DFlash2VerifyPlan::build(&self.verify_capabilities, 1, 0)?;
         let context_tokens = self.history.len();
         let input: Array = (&[current_token][..], &[1_i32, 1][..]).try_into()?;
-        let positions = build_position_ids(i32::try_from(self.history.len() - 1)?, 1)?;
+        let positions =
+            build_position_ids(i32::try_from(self.history.len() - 1)? + self.rope_delta, 1)?;
         let verify_started = Instant::now();
         let output = self.model.dflash2_forward_target_on(
             &input,
@@ -5813,12 +6070,14 @@ mod tests {
         cache.total_bytes = 288;
 
         let hit = cache
-            .load_longest(&[1, 2, 3, 4, 9], "runtime-a")
+            .load_longest(&[1, 2, 3, 4, 9], &|_| "runtime-a".to_owned())
             .expect("longest hit");
         assert_eq!(hit.token_ids, vec![1, 2, 3, 4]);
         assert_eq!(cache.snapshot().hits, 1);
 
-        assert!(cache.load_longest(&[1, 7], "runtime-a").is_none());
+        assert!(cache
+            .load_longest(&[1, 7], &|_| "runtime-a".to_owned())
+            .is_none());
         assert_eq!(cache.snapshot().misses, 1);
     }
 
@@ -6046,6 +6305,7 @@ mod tests {
         let key = DFlash2TensorBatchKey {
             draft_len: 3,
             verify_start: 64,
+            rope_delta: 0,
             context_len: 32,
             draft_processed: 32,
             draft_retained: 32,

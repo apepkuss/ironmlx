@@ -6,16 +6,157 @@ use anyhow::{anyhow, Result};
 use mlx::ops::shape::{broadcast_to, expand_dims, transpose_axes};
 use mlx::Array;
 
-// 默认值跟 HF qwen2_vl image_processor 一致
 const FACTOR: i32 = 32; // patch_size * spatial_merge_size = 16 * 2
-const MIN_PIXELS: i32 = 56 * 56; // 3136
-const MAX_PIXELS: i32 = 14 * 14 * 4 * 1280; // 1003520
+
+/// Most pixels an image is resized to by default, whatever larger size its
+/// model allows: 4096 merged image tokens (`FACTOR`² pixels each). A model's
+/// own limit (Qwen3.x: 16,777,216) is what it can take, not what serving one
+/// image should cost; servers override this with `--max-image-pixels`.
+pub const DEFAULT_MAX_IMAGE_PIXELS: i32 = 4_194_304;
+
+/// Pixel range an image is resized into, `[min_pixels, max_pixels]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelBounds {
+    pub min_pixels: i32,
+    pub max_pixels: i32,
+}
+
+impl PixelBounds {
+    /// HF `Qwen2VLImageProcessor`'s range for a configuration that sets none.
+    pub const PROCESSOR_DEFAULT: Self = Self {
+        min_pixels: 56 * 56,
+        max_pixels: 28 * 28 * 1280,
+    };
+
+    /// The range a checkpoint's `preprocessor_config.json` gives, resolved as
+    /// HF `Qwen2VLImageProcessor` does: `size.shortest_edge` /
+    /// `size.longest_edge` are the minimum and maximum pixel counts, top-level
+    /// `min_pixels` / `max_pixels` override them, and the processor defaults
+    /// fill what neither sets. The patch geometry and normalization must be
+    /// the ones this processor implements.
+    pub fn from_preprocessor_config(config: &serde_json::Value) -> Result<Self> {
+        let int = |value: &serde_json::Value, name: &str| -> Result<Option<i32>> {
+            match value {
+                serde_json::Value::Null => Ok(None),
+                value => value
+                    .as_i64()
+                    .and_then(|v| i32::try_from(v).ok())
+                    .filter(|&v| v > 0)
+                    .map(Some)
+                    .ok_or_else(|| {
+                        anyhow!("preprocessor config: {name} must be a positive integer")
+                    }),
+            }
+        };
+        for (name, expected) in [
+            ("patch_size", PATCH),
+            ("temporal_patch_size", TEMPORAL_PATCH),
+            ("merge_size", MERGE_SIZE),
+        ] {
+            if let Some(value) = int(&config[name], name)? {
+                if value != expected {
+                    return Err(anyhow!(
+                        "preprocessor config: {name} {value} is not supported (expected {expected})"
+                    ));
+                }
+            }
+        }
+        for (name, expected) in [("image_mean", IMAGE_MEAN), ("image_std", IMAGE_STD)] {
+            if let Some(values) = config[name].as_array() {
+                let matches = values.len() == 3
+                    && values
+                        .iter()
+                        .zip(expected)
+                        .all(|(v, e)| v.as_f64().is_some_and(|v| (v - f64::from(e)).abs() < 1e-6));
+                if !matches {
+                    return Err(anyhow!("preprocessor config: {name} {values:?} is not supported (expected {expected:?})"));
+                }
+            }
+        }
+        let size = &config["size"];
+        let (shortest, longest) = if size.is_null() {
+            (
+                Some(Self::PROCESSOR_DEFAULT.min_pixels),
+                Some(Self::PROCESSOR_DEFAULT.max_pixels),
+            )
+        } else {
+            (
+                int(&size["shortest_edge"], "size.shortest_edge")?,
+                int(&size["longest_edge"], "size.longest_edge")?,
+            )
+        };
+        let min_pixels = int(&config["min_pixels"], "min_pixels")?.or(shortest);
+        let max_pixels = int(&config["max_pixels"], "max_pixels")?.or(longest);
+        let (Some(min_pixels), Some(max_pixels)) = (min_pixels, max_pixels) else {
+            return Err(anyhow!(
+                "preprocessor config: size must contain shortest_edge and longest_edge"
+            ));
+        };
+        let bounds = Self {
+            min_pixels,
+            max_pixels,
+        };
+        if bounds.min_pixels > bounds.max_pixels {
+            return Err(anyhow!(
+                "preprocessor config: min pixels {} exceed max pixels {}",
+                bounds.min_pixels,
+                bounds.max_pixels
+            ));
+        }
+        Ok(bounds)
+    }
+
+    /// The range of the checkpoint in `model_dir`; the processor defaults when
+    /// it has no `preprocessor_config.json`.
+    pub fn from_model_dir(model_dir: &std::path::Path) -> Result<Self> {
+        let path = model_dir.join("preprocessor_config.json");
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let config: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(|e| anyhow!("{}: {e}", path.display()))?;
+                Self::from_preprocessor_config(&config)
+                    .map_err(|e| anyhow!("{}: {e}", path.display()))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(Self::PROCESSOR_DEFAULT)
+            }
+            Err(error) => Err(anyhow!("{}: {error}", path.display())),
+        }
+    }
+
+    /// The range a server resizes images of the checkpoint in `model_dir`
+    /// into: its processor range capped at `max_image_pixels`.
+    pub fn for_model(model_dir: &std::path::Path, max_image_pixels: Option<i32>) -> Result<Self> {
+        Self::from_model_dir(model_dir)?.capped(max_image_pixels)
+    }
+
+    /// The range with its maximum lowered to `max_image_pixels` (by default
+    /// [`DEFAULT_MAX_IMAGE_PIXELS`]); a cap below the minimum is rejected.
+    pub fn capped(self, max_image_pixels: Option<i32>) -> Result<Self> {
+        let cap = max_image_pixels.unwrap_or(DEFAULT_MAX_IMAGE_PIXELS);
+        if cap < self.min_pixels {
+            return Err(anyhow!(
+                "max image pixels {cap} is below the model's minimum of {}",
+                self.min_pixels
+            ));
+        }
+        Ok(Self {
+            max_pixels: self.max_pixels.min(cap),
+            ..self
+        })
+    }
+}
 
 /// Resize with aspect-ratio preservation, patch alignment and a total pixel
-/// count within [MIN_PIXELS, MAX_PIXELS].
+/// count within `bounds` (HF `smart_resize`, Python's round-half-to-even
+/// included).
 ///
 /// Returns `Err` if absolute aspect ratio > 200.
-pub fn smart_resize(height: i32, width: i32) -> Result<(i32, i32)> {
+pub fn smart_resize(height: i32, width: i32, bounds: PixelBounds) -> Result<(i32, i32)> {
+    let PixelBounds {
+        min_pixels,
+        max_pixels,
+    } = bounds;
     let max_dim = height.max(width) as f64;
     let min_dim = height.min(width) as f64;
     if max_dim / min_dim > 200.0 {
@@ -26,16 +167,25 @@ pub fn smart_resize(height: i32, width: i32) -> Result<(i32, i32)> {
         ));
     }
     let f = FACTOR as f64;
-    let mut h_bar = ((height as f64 / f).round() * f) as i32;
-    let mut w_bar = ((width as f64 / f).round() * f) as i32;
-    if h_bar * w_bar > MAX_PIXELS {
-        let beta = ((height as f64 * width as f64) / MAX_PIXELS as f64).sqrt();
+    let mut h_bar = ((height as f64 / f).round_ties_even() * f) as i32;
+    let mut w_bar = ((width as f64 / f).round_ties_even() * f) as i32;
+    if h_bar as i64 * w_bar as i64 > max_pixels as i64 {
+        let beta = ((height as f64 * width as f64) / max_pixels as f64).sqrt();
         h_bar = (((height as f64 / beta) / f).floor() * f).max(f) as i32;
         w_bar = (((width as f64 / beta) / f).floor() * f).max(f) as i32;
-    } else if h_bar * w_bar < MIN_PIXELS {
-        let beta = (MIN_PIXELS as f64 / (height as f64 * width as f64)).sqrt();
+    } else if (h_bar as i64 * w_bar as i64) < min_pixels as i64 {
+        let beta = (min_pixels as f64 / (height as f64 * width as f64)).sqrt();
         h_bar = (((height as f64 * beta) / f).ceil() * f) as i32;
         w_bar = (((width as f64 * beta) / f).ceil() * f) as i32;
+    }
+    // Upscaling to the minimum can overshoot a cap close to it after
+    // alignment; the cap wins over the soft minimum.
+    while h_bar as i64 * w_bar as i64 > max_pixels as i64 && (h_bar > FACTOR || w_bar > FACTOR) {
+        if h_bar >= w_bar && h_bar > FACTOR {
+            h_bar -= FACTOR;
+        } else {
+            w_bar -= FACTOR;
+        }
     }
     Ok((h_bar, w_bar))
 }
@@ -120,9 +270,10 @@ pub fn patchify(raw: &[f32], h: i32, w: i32) -> Result<(Array, i32, i32)> {
     Ok((arr, grid_h, grid_w))
 }
 
-/// Pipeline: decode → smart_resize → Lanczos resize → normalize → patchify.
-/// Returns `(pixel_values, grid_h, grid_w)`.
-pub fn preprocess(img_bytes: &[u8]) -> Result<(Array, i32, i32)> {
+/// Pipeline: decode → smart_resize into `bounds` → PIL BICUBIC resize (the
+/// resampling of `Qwen2VLImageProcessor` and of mlx-vlm, which resizes with
+/// PIL) → normalize → patchify. Returns `(pixel_values, grid_h, grid_w)`.
+pub fn preprocess(img_bytes: &[u8], bounds: PixelBounds) -> Result<(Array, i32, i32)> {
     // 1. decode
     let img = crate::core::image_input::load_from_memory_bounded(img_bytes)
         .map_err(|e| anyhow!("decode image: {e}"))?
@@ -130,37 +281,18 @@ pub fn preprocess(img_bytes: &[u8]) -> Result<(Array, i32, i32)> {
     let (orig_w, orig_h) = (img.width() as i32, img.height() as i32);
 
     // 2. smart resize target size
-    let (h2, w2) = smart_resize(orig_h, orig_w)?;
+    let (h2, w2) = smart_resize(orig_h, orig_w, bounds)?;
 
-    // 3. Lanczos3 resize (HF default).
-    // Skip resize when target equals source — PIL LANCZOS is a no-op in this
-    // case (identity); resampling through a Lanczos kernel would introduce
-    // rounding error without changing meaning.
-    let n_pix = (3 * h2 * w2) as usize;
-    let mut chw = vec![0.0_f32; n_pix];
+    // 3. Resize (a no-op when the size already fits) and 4. normalize:
+    //    [(H, W, 3) u8] → [(3, H, W) f32], (px/255 - 0.5)/0.5
+    let resized = crate::core::image_resample::resize_rgb(img.as_raw(), orig_w, orig_h, w2, h2);
     let plane = (h2 * w2) as usize;
-    if orig_h == h2 && orig_w == w2 {
-        // 4a. Already correct size — normalize directly.
-        for (i, p) in img.pixels().enumerate() {
-            let n = normalize_pixel([p.0[0], p.0[1], p.0[2]]);
-            chw[i] = n[0];
-            chw[plane + i] = n[1];
-            chw[2 * plane + i] = n[2];
-        }
-    } else {
-        let resized = image::imageops::resize(
-            &img,
-            w2 as u32,
-            h2 as u32,
-            image::imageops::FilterType::Lanczos3,
-        );
-        // 4b. normalize: [(H, W, 3) u8] → [(3, H, W) f32], (px/255 - 0.5)/0.5
-        for (i, p) in resized.pixels().enumerate() {
-            let n = normalize_pixel([p.0[0], p.0[1], p.0[2]]);
-            chw[i] = n[0];
-            chw[plane + i] = n[1];
-            chw[2 * plane + i] = n[2];
-        }
+    let mut chw = vec![0.0_f32; 3 * plane];
+    for (i, p) in resized.chunks_exact(3).enumerate() {
+        let n = normalize_pixel([p[0], p[1], p[2]]);
+        chw[i] = n[0];
+        chw[plane + i] = n[1];
+        chw[2 * plane + i] = n[2];
     }
 
     // 5. patchify
@@ -235,39 +367,105 @@ mod tests {
         assert!(r.is_err());
     }
 
-    /// Golden values 从 mlx-vlm `_smart_resize_image` 直接取
-    /// (FACTOR=32, MIN=56*56, MAX=14*14*4*1280 跟 spec 配置一致)。
+    /// Qwen3.x checkpoints' range, capped at the default limit.
+    fn qwen3_bounds() -> PixelBounds {
+        PixelBounds {
+            min_pixels: 65_536,
+            max_pixels: 16_777_216,
+        }
+        .capped(None)
+        .expect("cap")
+    }
+
     #[test]
     fn smart_resize_typical_image() {
         // 768×1024 输入 → 应该 round 到 32 倍数，没超 max
-        let (h, w) = smart_resize(768, 1024).expect("smart_resize");
-        assert_eq!(h, 768);
-        assert_eq!(w, 1024);
+        let (h, w) = smart_resize(768, 1024, qwen3_bounds()).expect("smart_resize");
+        assert_eq!((h, w), (768, 1024));
     }
 
     #[test]
     fn smart_resize_too_large_downscaled() {
-        // 4096×4096 = 16M px > max=14*14*4*1280 = 1003520; 应缩小
-        let (h, w) = smart_resize(4096, 4096).expect("smart_resize");
-        assert!(h * w <= 14 * 14 * 4 * 1280);
-        assert_eq!(h % 32, 0);
-        assert_eq!(w % 32, 0);
+        // 8000×6000 = 48M px > the default cap; 应缩小
+        let (h, w) = smart_resize(8000, 6000, qwen3_bounds()).expect("smart_resize");
+        assert!(h * w <= DEFAULT_MAX_IMAGE_PIXELS);
+        assert_eq!((h % 32, w % 32), (0, 0));
     }
 
     #[test]
     fn smart_resize_too_small_upscaled() {
-        // 32×32 = 1024 px < min=56*56=3136; 应放大
-        let (h, w) = smart_resize(32, 32).expect("smart_resize");
-        assert!(h * w >= 56 * 56);
-        assert_eq!(h % 32, 0);
-        assert_eq!(w % 32, 0);
+        // 32×32 = 1024 px < the Qwen3.x minimum of 65536; 应放大
+        let (h, w) = smart_resize(32, 32, qwen3_bounds()).expect("smart_resize");
+        assert_eq!((h, w), (256, 256));
+    }
+
+    #[test]
+    fn smart_resize_rounds_half_to_even_like_python() {
+        // 80 / 32 = 2.5 rounds to 2 (Python's round), not 3.
+        let bounds = PixelBounds {
+            min_pixels: 1,
+            max_pixels: i32::MAX,
+        };
+        assert_eq!(smart_resize(80, 112, bounds).unwrap(), (64, 128));
     }
 
     #[test]
     fn smart_resize_extreme_aspect_ratio_rejected() {
         // 长宽比 > 200 → Err (no panic — hostile request safety)
-        let r = smart_resize(1, 250);
+        let r = smart_resize(1, 250, qwen3_bounds());
         assert!(r.is_err(), "expected Err on extreme aspect ratio");
+    }
+
+    #[test]
+    fn pixel_bounds_follow_the_processor_configuration() {
+        let parse = |json: &str| {
+            PixelBounds::from_preprocessor_config(&serde_json::from_str(json).unwrap())
+        };
+        let qwen3 = r#"{"size": {"longest_edge": 16777216, "shortest_edge": 65536},
+            "patch_size": 16, "temporal_patch_size": 2, "merge_size": 2,
+            "image_mean": [0.5, 0.5, 0.5], "image_std": [0.5, 0.5, 0.5]}"#;
+        assert_eq!(
+            parse(qwen3).unwrap(),
+            PixelBounds {
+                min_pixels: 65_536,
+                max_pixels: 16_777_216
+            }
+        );
+        // Top-level min/max pixels override size; no size means the defaults.
+        assert_eq!(
+            parse(r#"{"size": {"longest_edge": 9000000, "shortest_edge": 65536}, "max_pixels": 2000000}"#)
+                .unwrap()
+                .max_pixels,
+            2_000_000
+        );
+        assert_eq!(parse("{}").unwrap(), PixelBounds::PROCESSOR_DEFAULT);
+        // A partial size, a geometry or normalization this processor does not
+        // implement, and an empty range are rejected.
+        assert!(parse(r#"{"size": {"shortest_edge": 65536}}"#).is_err());
+        assert!(parse(r#"{"patch_size": 14}"#).is_err());
+        assert!(parse(r#"{"image_mean": [0.48, 0.46, 0.41]}"#).is_err());
+        assert!(parse(r#"{"min_pixels": 5000000, "max_pixels": 1000000}"#).is_err());
+    }
+
+    #[test]
+    fn pixel_bounds_cap_lowers_only_the_maximum() {
+        let model = PixelBounds {
+            min_pixels: 65_536,
+            max_pixels: 16_777_216,
+        };
+        assert_eq!(
+            model.capped(None).unwrap().max_pixels,
+            DEFAULT_MAX_IMAGE_PIXELS
+        );
+        assert_eq!(model.capped(Some(1_000_000)).unwrap().max_pixels, 1_000_000);
+        // A cap above the model's own limit does not raise it.
+        assert_eq!(
+            PixelBounds::PROCESSOR_DEFAULT
+                .capped(Some(8_000_000))
+                .unwrap(),
+            PixelBounds::PROCESSOR_DEFAULT
+        );
+        assert!(model.capped(Some(10_000)).is_err());
     }
 
     #[test]
@@ -278,7 +476,8 @@ mod tests {
             "/../ironmlx/tests/fixtures/qwen35_vl/coco_sample.jpg"
         ));
         let bytes = std::fs::read(path).expect("read coco sample");
-        let (pixel_values, grid_h, grid_w) = preprocess(&bytes).expect("preprocess");
+        let (pixel_values, grid_h, grid_w) =
+            preprocess(&bytes, qwen3_bounds()).expect("preprocess");
         assert!(grid_h * grid_w >= 4); // at least 4 patches
 
         // Check normalized values match HF
@@ -342,23 +541,32 @@ mod tests {
             .fold(0.0_f32, f32::max);
         assert!(
             max_diff < 1e-3,
-            "max_diff = {} (HF Lanczos vs Rust Lanczos may differ slightly)",
+            "max_diff = {} (an unresized image is normalized exactly)",
             max_diff
         );
     }
 
+    /// HF transformers' own `smart_resize` (factor 32) over the Qwen3.x
+    /// range, that range capped at the default limit and the processor
+    /// defaults: edge cases and random sizes.
     #[test]
-    fn smart_resize_matches_hf_100_random() {
+    fn smart_resize_matches_hf() {
         let golden =
             include_str!("../../../../ironmlx/tests/fixtures/qwen35_vl/smart_resize_golden.txt");
         for line in golden.lines() {
             let parts: Vec<i32> = line.split(',').map(|s| s.parse().unwrap()).collect();
-            let (h, w, py_h, py_w) = (parts[0], parts[1], parts[2], parts[3]);
-            let (rs_h, rs_w) = smart_resize(h, w).expect("smart_resize");
+            let [h, w, min_pixels, max_pixels, py_h, py_w] = parts[..] else {
+                panic!("malformed golden line {line:?}");
+            };
+            let bounds = PixelBounds {
+                min_pixels,
+                max_pixels,
+            };
+            let (rs_h, rs_w) = smart_resize(h, w, bounds).expect("smart_resize");
             assert_eq!(
                 (rs_h, rs_w),
                 (py_h, py_w),
-                "mismatch on {h}x{w}: rust=({rs_h},{rs_w}) py=({py_h},{py_w})"
+                "mismatch on {h}x{w} in {bounds:?}: rust=({rs_h},{rs_w}) py=({py_h},{py_w})"
             );
         }
     }

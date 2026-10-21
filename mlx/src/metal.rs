@@ -72,6 +72,16 @@ pub fn architecture() -> Result<String> {
     mlx_sys::metal::ffi::device_architecture().map_err(Error::from)
 }
 
+/// Whether MLX may use its NAX (neural accelerator) kernels on this device
+/// and OS (`mlx::core::metal::is_nax_available()`): the condition MLX checks
+/// before choosing a NAX kernel, such as its full attention for head dims
+/// 64, 96 and 128.
+///
+/// Errors if the Metal backend isn't available on this system.
+pub fn nax_available() -> Result<bool> {
+    mlx_sys::metal::ffi::nax_available().map_err(Error::from)
+}
+
 /// Precompiled prefill kernel libraries for Apple GPU generation 17+.
 pub use mlx_sys::shaders as prefill_shaders;
 

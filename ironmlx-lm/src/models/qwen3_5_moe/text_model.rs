@@ -381,6 +381,7 @@ impl Qwen35MoeTextModel {
     pub(crate) fn forward_with_dflash2_taps_on(
         &self,
         input_ids: &Array,
+        image_embeds: Option<(&Array, i32)>,
         position_ids: &Array,
         mut cache: Option<&mut [LayerCache]>,
         target_layer_ids: &[usize],
@@ -428,6 +429,15 @@ impl Qwen35MoeTextModel {
             .then(crate::nn::moe_fast_path::scope);
         let (cos, sin) = self.mrope.cos_sin(position_ids)?;
         let mut x = self.embed_on(input_ids, target)?;
+        // Image-pad tokens of a VL prefill take the vision encoder's rows.
+        if let Some((embeds, image_token_id)) = image_embeds {
+            x = crate::models::qwen3_5::cross_modal::replace_image_tokens(
+                &x,
+                input_ids,
+                embeds,
+                image_token_id,
+            )?;
+        }
         let mut captured = Vec::with_capacity(target_layer_ids.len());
         let mut next_capture = 0_usize;
         // Verify and decode forwards (a few positions) hand every

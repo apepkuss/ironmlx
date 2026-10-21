@@ -7,7 +7,7 @@
 //!
 //! The fixture stores int32 arrays; comparison is exact (integer equality).
 
-use ironmlx_lm::core::model_input::{build_position_ids_vl, IMAGE_TOKEN_ID};
+use ironmlx_lm::core::model_input::{build_position_ids_vl, vl_rope_delta, IMAGE_TOKEN_ID};
 
 const FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -74,8 +74,14 @@ fn build_position_ids_vl_matches_mlx_vlm() {
         our_vec.len()
     );
 
+    // `get_rope_index`'s delta: the largest position + 1 minus the length.
+    let expected_delta = exp_vec.iter().copied().max().unwrap() + 1 - ids_flat.len() as i32;
+    let delta = vl_rope_delta(&ids_flat, &grid_tuples, IMAGE_TOKEN_ID, spatial_merge_size)
+        .expect("vl_rope_delta failed");
+    assert_eq!(delta, expected_delta, "MRoPE position delta");
+
     eprintln!(
-        "build_position_ids_vl PASS — {} elements compared, all exact",
+        "build_position_ids_vl PASS — {} elements compared, all exact; delta {delta}",
         our_vec.len()
     );
 }

@@ -2386,7 +2386,7 @@ mod tests {
     #[test]
     fn load_error_maps_memory_budget_to_actionable_code() {
         let error = AdminError::from_load_error(anyhow::anyhow!(
-            "memory budget exceeded: b_max=1 × resident_cap=262144 × 786432 bytes/token = 206158430208 bytes > available 126701535232 (logical cap 262144, policy full_resident). Lower --b-max or --max-cache-cap."
+            "memory budget exceeded: b_max=1 × resident_cap=262144 × 786432 bytes/token = 206158430208 bytes > available 126701535232 (logical cap 262144, policy full_resident). Lower --max-sequences or --max-cache-cap."
         ));
 
         assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
@@ -2486,6 +2486,7 @@ mod tests {
             admission_deadline_ms: None,
             admission_queue_max: None,
             max_cache_cap: None,
+            max_image_pixels: None,
             decode_cadence_mid_chunk_cap: None,
             scheduler_profile: None,
             scheduler_autotune_report: false,

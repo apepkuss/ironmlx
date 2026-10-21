@@ -249,7 +249,7 @@ impl Gemma4DrafterPrefixCache {
         model: &Gemma4Model,
         cache: &mut [LayerCache],
         prompt_ids: &[u32],
-        fingerprint: Option<&str>,
+        fingerprint: &crate::core::vl_prefix::PrefixFingerprint,
     ) -> Result<Option<Gemma4DrafterPrefixRestore>> {
         let Some(config) = self.config() else {
             return Ok(None);
@@ -268,7 +268,7 @@ impl Gemma4DrafterPrefixCache {
                 &config.model_id,
                 &prompt_ids[..restore_len],
                 cached_len,
-                fingerprint,
+                fingerprint.at(cached_len as usize).as_deref(),
                 config.block_size,
                 cache,
             )?
@@ -343,7 +343,7 @@ impl Gemma4DrafterPrefixCache {
         cache: &[LayerCache],
         last_hidden: &Array,
         prompt_ids: &[u32],
-        fingerprint: Option<&str>,
+        fingerprint: &crate::core::vl_prefix::PrefixFingerprint,
     ) -> Result<Option<String>> {
         let Some(config) = self.config() else {
             return Ok(None);
@@ -367,7 +367,7 @@ impl Gemma4DrafterPrefixCache {
             &config.model_id,
             prompt_ids,
             cached_len,
-            fingerprint,
+            fingerprint.at(cached_len as usize).as_deref(),
             config.block_size,
             cache,
         )?
@@ -717,13 +717,14 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         let is_vl = request.pixel_values.is_some();
         let prefix_fingerprint = if prefix_cache.is_enabled() {
             paged_prefix_fingerprint_for_request(
+                &request.prompt_ids,
                 request.pixel_values.as_deref(),
                 request.image_grid_thw.as_deref(),
                 request.image_token_id,
                 request.image_spatial_merge_size,
             )?
         } else {
-            None
+            crate::core::vl_prefix::PrefixFingerprint::text()
         };
         let mut vision_embeds_full = None;
         let position_ids_full = if is_vl && dummy_position_ids.is_none() {
@@ -748,12 +749,9 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
         let mut last_prompt_hidden = None;
         let mut last_shared_kv = None;
 
-        if let Some(restored) = prefix_cache.try_restore(
-            model,
-            &mut cache,
-            &request.prompt_ids,
-            prefix_fingerprint.as_deref(),
-        )? {
+        if let Some(restored) =
+            prefix_cache.try_restore(model, &mut cache, &request.prompt_ids, &prefix_fingerprint)?
+        {
             pos = restored.cached_len;
             image_pad_consumed =
                 count_image_pad(&request.prompt_ids[..pos as usize], request.image_token_id);
@@ -844,7 +842,7 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
                 &cache,
                 &chunk_last_hidden,
                 &request.prompt_ids[..new_pos as usize],
-                prefix_fingerprint.as_deref(),
+                &prefix_fingerprint,
             ) {
                 Ok(Some(key)) => {
                     tracing::debug!("paged SSD prefix cache Gemma4 drafter saved: key={key}");

@@ -72,6 +72,9 @@ pub struct GenerationStream<'m, M: Model> {
     /// Reusable `[3, 1, 1]` placeholder for models that derive positions
     /// internally instead of consuming caller-built MRoPE position ids.
     dummy_position_ids: Option<Array>,
+    /// MRoPE position delta of a VL prompt ([`vl_rope_delta`]): generated
+    /// tokens take position `token index + rope_delta`. Zero for text.
+    rope_delta: i32,
     /// All token ids so far: prompt ++ generated.
     history: Vec<u32>,
     request: GenerateRequest,
@@ -245,6 +248,7 @@ impl<'m, M: ironmlx_lm::core::model::Model + DenseVlMethods> GenerationStream<'m
         // P6.7: For VL requests, run the vision tower once before the
         // chunking loop. Models that consume MRoPE position ids also build
         // them for the full prompt so each chunk can slice its own range.
+        let mut rope_delta = 0;
         let (vision_embeds_full, position_ids_full) = if let (Some(pv), Some(grids)) = (
             request.pixel_values.as_deref(),
             request.image_grid_thw.as_deref(),
@@ -258,6 +262,12 @@ impl<'m, M: ironmlx_lm::core::model::Model + DenseVlMethods> GenerationStream<'m
                 Some(build_position_ids(0, prompt_len as i32)?)
             } else {
                 let full_ids_i32: Vec<i32> = request.prompt_ids.iter().map(|&u| u as i32).collect();
+                rope_delta = vl_rope_delta(
+                    &full_ids_i32,
+                    grids,
+                    request.image_token_id,
+                    request.image_spatial_merge_size,
+                )?;
                 Some(build_position_ids_vl(
                     &full_ids_i32,
                     grids,
@@ -436,6 +446,7 @@ impl<'m, M: ironmlx_lm::core::model::Model + DenseVlMethods> GenerationStream<'m
                 position_ids_full: None,
                 image_pad_consumed: 0,
                 dummy_position_ids,
+                rope_delta,
                 history,
                 request,
                 finished: false,
@@ -474,6 +485,7 @@ impl<'m, M: ironmlx_lm::core::model::Model + DenseVlMethods> GenerationStream<'m
                 position_ids_full: None,
                 image_pad_consumed: 0,
                 dummy_position_ids,
+                rope_delta,
                 history,
                 request,
                 finished: false,
@@ -530,6 +542,7 @@ impl<'m, M: ironmlx_lm::core::model::Model> GenerationStream<'m, M> {
             Some(build_position_ids(0, 1)?)
         };
 
+        let rope_delta = 0;
         let chunk_size = request.prefill_chunk_size;
         let prompt_len_i32 = prompt_len as i32;
         let mut pos: i32 = 0;
@@ -601,6 +614,7 @@ impl<'m, M: ironmlx_lm::core::model::Model> GenerationStream<'m, M> {
                 position_ids_full: None,
                 image_pad_consumed: 0,
                 dummy_position_ids,
+                rope_delta,
                 history,
                 request,
                 finished: false,
@@ -634,6 +648,7 @@ impl<'m, M: ironmlx_lm::core::model::Model> GenerationStream<'m, M> {
                 position_ids_full: None,
                 image_pad_consumed: 0,
                 dummy_position_ids,
+                rope_delta,
                 history,
                 request,
                 finished: false,
@@ -667,7 +682,7 @@ impl<'m, M: ironmlx_lm::core::model::Model> GenerationStream<'m, M> {
     fn decode_position_ids(&self, pos: i32) -> Result<Array> {
         match self.dummy_position_ids.as_ref() {
             Some(dummy) => Ok(dummy.clone()),
-            None => build_position_ids(pos, 1),
+            None => build_position_ids(pos + self.rope_delta, 1),
         }
     }
 

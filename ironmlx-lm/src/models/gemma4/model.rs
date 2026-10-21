@@ -1157,6 +1157,7 @@ impl crate::core::vision::DenseVlMethods for Gemma4Model {
                     .map_err(|_| anyhow!("Gemma4 text hidden_size must be positive"))?,
                 spatial_merge_area: pool.saturating_mul(pool),
                 activation_bytes: self.hidden_dtype().byte_size(),
+                attention: crate::core::vision::VisionAttention::MaterializedScores,
             },
         )
     }

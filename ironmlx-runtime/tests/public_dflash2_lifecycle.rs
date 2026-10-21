@@ -47,6 +47,7 @@ async fn dflash2_public_runtime_cancels_recovers_and_releases_model_ownership() 
         None,
         default_scheduler_runtime_profile(SchedulerAutotuneRuntimeContext::local_default(4096)),
         estimate,
+        ironmlx_lm::core::vision_input::VisionInputConfig::TextOnly,
     )
     .await
     .expect("native engine");
@@ -170,6 +171,7 @@ async fn dflash2_foreground_preempts_and_resumes_background_without_replay() {
         None,
         default_scheduler_runtime_profile(SchedulerAutotuneRuntimeContext::local_default(4096)),
         estimate,
+        ironmlx_lm::core::vision_input::VisionInputConfig::TextOnly,
     )
     .await
     .expect("native engine");

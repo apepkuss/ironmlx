@@ -148,7 +148,7 @@ fn available_budget_bytes_for_total_ram(meta: &ModelMeta, total_ram_bytes: usize
      {bytes_per_token} bytes/token + {fixed_bytes_per_sequence} fixed bytes/sequence) = \
      {requested_bytes} bytes > available {available_bytes} \
      (logical cap {cap}, policy {policy}, total RAM {total_ram_bytes} - model {model_weight_bytes} - safety margin 2147483648). \
-     Lower --b-max or --max-cache-cap."
+     Lower --max-sequences or --max-cache-cap."
 )]
 pub struct MemoryBudgetError {
     pub b_max: usize,
@@ -532,7 +532,7 @@ mod tests {
             .expect_err("4 × 32768 × 114688 should exceed 8 - 3 - 2 = 3 GiB budget");
         let msg = format!("{err}");
         assert!(msg.contains("memory budget exceeded"), "msg: {msg}");
-        assert!(msg.contains("Lower --b-max"), "msg: {msg}");
+        assert!(msg.contains("Lower --max-sequences"), "msg: {msg}");
     }
 
     #[test]

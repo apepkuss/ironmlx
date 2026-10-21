@@ -3,6 +3,7 @@
 //!
 //! Driven by:
 //!   IMAGE_PATH=/path/to/coco_sample.jpg
+//!   QWEN35_MODEL=/path/to/Qwen3.5 snapshot (its processor's pixel range)
 //!   IRONMLX_PREPROCESS_DUMP_DIR=/tmp/p6_diff/ironmlx_pre
 //!   MLX_DIR=$HOME/.local/mlx
 //!   cargo test -p ironmlx-lm --features vision-dump --test preprocess_dump --release -- --ignored
@@ -13,7 +14,7 @@ use std::path::Path;
 
 use mlx::Dtype;
 
-use ironmlx_lm::models::qwen3_5::image_processor::preprocess;
+use ironmlx_lm::models::qwen3_5::image_processor::{preprocess, PixelBounds};
 
 #[test]
 #[ignore]
@@ -23,7 +24,10 @@ fn p6_3a_preprocess_dump() {
         .expect("IRONMLX_PREPROCESS_DUMP_DIR env required");
 
     let bytes = std::fs::read(Path::new(&img_path)).expect("read image");
-    let (pv_native, grid_h, grid_w) = preprocess(&bytes).expect("preprocess");
+    // The pixel range a server resizes this checkpoint's images into.
+    let model_dir = std::env::var("QWEN35_MODEL").expect("QWEN35_MODEL env required");
+    let bounds = PixelBounds::for_model(Path::new(&model_dir), None).expect("pixel bounds");
+    let (pv_native, grid_h, grid_w) = preprocess(&bytes, bounds).expect("preprocess");
 
     eprintln!(
         "[p6_3a_preprocess_dump] grid_thw=[1,{grid_h},{grid_w}] native_shape={:?}",

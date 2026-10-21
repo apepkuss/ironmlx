@@ -32,7 +32,7 @@
 
 图片指图片理解；工具调用需要兼容的原生模板，由客户端执行。Llama 3.2 每轮支持一个原生自定义工具调用。
 
-加速需要匹配的辅助权重，见下方 Drafter 表；— 表示不支持或待支持。DFlash2 仅用于 Qwen 3.8 27B Affine 4/8-bit 与 Qwen 3.6 35B A3B Affine 4/5/6/8-bit（不含 OptiQ）的文本请求，与 MTP 互斥。详见 [MTP / Assistant](mtp-server-api.md) / [DFlash2](dflash2-server-api.md)。
+加速需要匹配的辅助权重，见下方 Drafter 表；— 表示不支持或待支持。DFlash2 用于 Qwen 3.8 27B Affine 4/8-bit 与 Qwen 3.6 35B A3B Affine 4/5/6/8-bit（不含 OptiQ）的文本与图片请求，与 MTP 互斥。详见 [MTP / Assistant](mtp-server-api.md) / [DFlash2](dflash2-server-api.md)。
 
 ## Audio · 音频
 

@@ -3378,6 +3378,8 @@ mod parity_tests {
     async fn byte_parity_qwen() {
         run_parity(VisionInputConfig::Qwen {
             spatial_merge_size: 2,
+            pixel_bounds:
+                ironmlx_lm::models::qwen3_5::image_processor::PixelBounds::PROCESSOR_DEFAULT,
         })
         .await;
     }

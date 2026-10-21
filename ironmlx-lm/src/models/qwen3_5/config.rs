@@ -54,6 +54,22 @@ pub struct VisionConfig {
     pub deepstack_visual_indexes: Vec<i32>,
 }
 
+impl VisionConfig {
+    /// Per-head width of the tower's attention.
+    pub fn head_dim(&self) -> anyhow::Result<usize> {
+        let hidden = usize::try_from(self.hidden_size).ok().filter(|&v| v > 0);
+        let heads = usize::try_from(self.num_heads).ok().filter(|&v| v > 0);
+        match (hidden, heads) {
+            (Some(hidden), Some(heads)) if hidden % heads == 0 => Ok(hidden / heads),
+            _ => Err(anyhow::anyhow!(
+                "vision hidden_size {} is not a positive multiple of num_heads {}",
+                self.hidden_size,
+                self.num_heads
+            )),
+        }
+    }
+}
+
 /// Subset of `config.json["text_config"]` that drives Qwen3.5 inference.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Qwen35Config {

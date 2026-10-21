@@ -709,6 +709,7 @@ impl crate::core::vision::DenseVlMethods for MiniCpmV46Model {
                     .map_err(|_| anyhow!("MiniCPM text hidden_size must be positive"))?,
                 spatial_merge_area: merge_h.saturating_mul(merge_w),
                 activation_bytes: Dtype::Bfloat16.byte_size(),
+                attention: crate::core::vision::VisionAttention::MaterializedScores,
             },
         )
     }

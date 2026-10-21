@@ -92,6 +92,13 @@ fn build_text_request_inputs(tokenizer: &Tokenizer, user_text: &str) -> Vec<u32>
 ///
 /// Eagerly evaluates `pixel_values` so that no lazy MLX ops tagged with the
 /// calling thread's stream survive into cross-thread use (e.g. `spawn_blocking`).
+/// The pixel range a server resizes `QWEN35_MODEL`'s images into.
+fn pixel_bounds() -> image_processor::PixelBounds {
+    let model_dir = std::env::var("QWEN35_MODEL").expect("QWEN35_MODEL env var required");
+    image_processor::PixelBounds::for_model(std::path::Path::new(&model_dir), None)
+        .expect("pixel bounds")
+}
+
 fn build_vl_request_inputs(
     tokenizer: &Tokenizer,
     user_text: &str,
@@ -99,7 +106,7 @@ fn build_vl_request_inputs(
 ) -> (Vec<u32>, Array, Vec<(i32, i32, i32)>) {
     let img_bytes = std::fs::read(image_path).expect("read image");
     let (pixel_values, grid_h, grid_w) =
-        image_processor::preprocess(&img_bytes).expect("preprocess");
+        image_processor::preprocess(&img_bytes, pixel_bounds()).expect("preprocess");
     // Eagerly eval: patchify produces lazy reshape/transpose/broadcast ops tagged
     // with the current thread's MLX stream. After eval the result is a plain
     // data buffer — safe to move to spawn_blocking threads.
@@ -725,8 +732,8 @@ async fn batched_vl_multi_image_per_row() {
     let fixture = std::path::PathBuf::from(FIXTURE_DIR);
     let img_a = std::fs::read(fixture.join("image_0.jpg")).unwrap();
     let img_b = std::fs::read(fixture.join("image_1.jpg")).unwrap();
-    let (pv_a, gh_a, gw_a) = image_processor::preprocess(&img_a).unwrap();
-    let (pv_b, gh_b, gw_b) = image_processor::preprocess(&img_b).unwrap();
+    let (pv_a, gh_a, gw_a) = image_processor::preprocess(&img_a, pixel_bounds()).unwrap();
+    let (pv_b, gh_b, gw_b) = image_processor::preprocess(&img_b, pixel_bounds()).unwrap();
     // Eagerly eval before concatenate so no lazy stream-tagged ops cross thread boundary.
     mlx::transforms::eval(&[&pv_a, &pv_b]).expect("eval pv_a, pv_b");
 

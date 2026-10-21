@@ -28,6 +28,7 @@ fn image_placeholder_string(token_count: usize) -> String {
 fn prepare_fixture_images(
     paths: &[&str],
     spatial_merge_size: i32,
+    pixel_bounds: ironmlx_lm::models::qwen3_5::image_processor::PixelBounds,
 ) -> (Array, Vec<(i32, i32, i32)>, String) {
     let mut pixel_values = Vec::with_capacity(paths.len());
     let mut grids = Vec::with_capacity(paths.len());
@@ -36,7 +37,8 @@ fn prepare_fixture_images(
     for path in paths {
         let bytes = std::fs::read(path).expect("fixture image");
         let (pv, gh, gw) =
-            ironmlx_lm::models::qwen3_5::image_processor::preprocess(&bytes).expect("preprocess");
+            ironmlx_lm::models::qwen3_5::image_processor::preprocess(&bytes, pixel_bounds)
+                .expect("preprocess");
         let token_count = ((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize;
         prompt_prefix.push_str(&image_placeholder_string(token_count));
         pixel_values.push(pv);
@@ -118,6 +120,11 @@ fn qwen36_moe_single_image_generation_smoke_real_checkpoint() {
     let (pixel_values, grids, mut content) = prepare_fixture_images(
         &["../ironmlx/tests/fixtures/qwen35_vl/multi_image/image_0.jpg"],
         merge,
+        ironmlx_lm::models::qwen3_5::image_processor::PixelBounds::for_model(
+            loader.model_dir(),
+            None,
+        )
+        .expect("pixel bounds"),
     );
     content.push_str("Describe this image briefly.");
     let prompt = tokenizer
@@ -163,6 +170,11 @@ fn qwen36_moe_multi_image_generation_smoke_real_checkpoint() {
             "../ironmlx/tests/fixtures/qwen35_vl/multi_image/image_1.jpg",
         ],
         merge,
+        ironmlx_lm::models::qwen3_5::image_processor::PixelBounds::for_model(
+            loader.model_dir(),
+            None,
+        )
+        .expect("pixel bounds"),
     );
     content.push_str("Compare these images in one short sentence.");
     let prompt = tokenizer

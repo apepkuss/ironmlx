@@ -1888,6 +1888,7 @@ fn qwen36_moe_dflash2_actor_admission_first_token_lifecycle() {
                 ),
             ),
             Default::default(),
+            ironmlx_lm::core::vision_input::VisionInputConfig::TextOnly,
         )
         .await
         .expect("DFlash2 engine");
@@ -2010,4 +2011,312 @@ fn qwen36_moe_dflash2_actor_admission_first_token_lifecycle() {
         drop(state);
     });
     mlx::clear_cache();
+}
+
+/// Image prompts and the DFlash2 prefix cache: a prompt that extends an
+/// earlier image prompt and appends another image restores the earlier
+/// prompt (its boundary covers the first image only), encoding only the
+/// appended image: its rows match those it takes when both images are
+/// encoded together, and restoring decodes deterministically. The same
+/// tokens with a different first image of the same grid restore nothing.
+/// The vision encoder loads on demand. (A restored prompt need not decode
+/// as without the cache: the prefill chunks and the vision batch differ,
+/// moving logits enough to flip a near tie.)
+#[test]
+#[serial(mlx_metal)]
+#[ignore = "loads a full local Qwen3.6 MoE target and the incoai DFlash2 draft"]
+fn image_prefix_artifacts_survive_an_appended_image_and_separate_same_grid_images() {
+    use ironmlx_lm::models::qwen3_5::image_processor;
+
+    let Some(fixture) = fixture() else {
+        eprintln!("skipping: QWEN36_MOE_DFLASH2_TARGET or DFLASH2_MODEL is not set");
+        return;
+    };
+    assert!(fixture.target.dflash2_load_vision().expect("load vision"));
+    let target_dir = std::env::var("QWEN36_MOE_DFLASH2_TARGET").expect("target");
+    let pixel_bounds =
+        image_processor::PixelBounds::for_model(std::path::Path::new(&target_dir), None)
+            .expect("pixel bounds");
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ironmlx/tests/fixtures/qwen35_vl");
+    let read = |path: std::path::PathBuf| {
+        let (pixels, h, w) =
+            image_processor::preprocess(&std::fs::read(path).expect("image"), pixel_bounds)
+                .expect("preprocess");
+        mlx::transforms::eval(&[&pixels]).expect("eval pixels");
+        (pixels, (1, h, w))
+    };
+    let (image_a, grid_a) = read(fixtures.join("coco_sample.jpg"));
+    let (image_c, grid_c) = read(fixtures.join("multi_image/image_0.jpg"));
+    // Same grid as A, different content.
+    let image_b = mlx::ops::negative(&image_a).expect("negate");
+    mlx::transforms::eval(&[&image_b]).expect("eval pixels");
+    let image = |(_, h, w): (i32, i32, i32)| {
+        format!(
+            "<|vision_start|>{}<|vision_end|>",
+            "<|image_pad|>".repeat((h * w / 4) as usize)
+        )
+    };
+    let turn1 = format!(
+        "<|im_start|>user\n{}Describe this image in detail.<|im_end|>\n<|im_start|>assistant\n",
+        image(grid_a)
+    );
+    let turn2 = format!(
+        "{turn1}{}Compare this image with the first one.",
+        image(grid_c)
+    );
+    let ids1 = fixture.tokenizer.encode(&turn1, false).expect("encode");
+    let ids2 = fixture.tokenizer.encode(&turn2, false).expect("encode");
+    assert!(ids2.starts_with(&ids1), "turn 2 must extend turn 1");
+
+    let vl_request = |ids: &[u32], images: Vec<(&mlx::Array, (i32, i32, i32))>| {
+        let mut request = request(ids.to_vec(), 24, Vec::new(), Sampler::greedy());
+        request.pixel_values = Some(images.iter().map(|(pixels, _)| (*pixels).clone()).collect());
+        request.image_grid_thw = Some(images.iter().map(|&(_, grid)| grid).collect());
+        request
+    };
+    let run = |request: GenerateRequest, cache: Option<&mut DFlash2PrefixCache>| {
+        let mut stream = DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
+            &fixture.target,
+            &fixture.draft,
+            &fixture.tokenizer,
+            request,
+            DFlash2ExecutionOptions {
+                block_size: 8,
+                p2: DFlash2P2Options::default(),
+            },
+            cache.map(|cache| (cache, "image-prefix-test")),
+            &|| false,
+        )
+        .expect("DFlash2 stream");
+        let hit = stream.prefix_cache_hit_tokens();
+        (drain(|| stream.next_token()), hit)
+    };
+
+    let restored_turn2 = || {
+        let mut cache = DFlash2PrefixCache::new(8 << 30).expect("prefix cache");
+        let (_, hit) = run(
+            vl_request(&ids1, vec![(&image_a, grid_a)]),
+            Some(&mut cache),
+        );
+        assert_eq!(hit, 0);
+        let (cached, hit) = run(
+            vl_request(&ids2, vec![(&image_a, grid_a), (&image_c, grid_c)]),
+            Some(&mut cache),
+        );
+        assert_eq!(hit, ids1.len(), "turn 2 restores turn 1's whole prompt");
+        (cached, cache)
+    };
+    let (cached, mut cache) = restored_turn2();
+    assert_eq!(
+        restored_turn2().0,
+        cached,
+        "a restored image prefix decodes deterministically"
+    );
+
+    // The restored prompt encodes image C alone: its rows are those C takes
+    // when encoded with A, up to batching noise, and not A's.
+    let embeds = |images: &[&mlx::Array], grids: &[(i32, i32, i32)]| {
+        let pixels: Vec<mlx::Array> = images.iter().map(|&image| image.clone()).collect();
+        let rows = fixture
+            .target
+            .dflash2_vision_embeds_on(&pixels, grids, StreamOrDevice::default())
+            .expect("vision embeds");
+        mlx::ops::cast::astype(&rows, mlx::Dtype::Float32)
+            .and_then(|rows| rows.to_vec::<f32>())
+            .expect("embed values")
+    };
+    let joint = embeds(&[&image_a, &image_c], &[grid_a, grid_c]);
+    let alone = embeds(&[&image_c], &[grid_c]);
+    let (rows_a, rows_c) = (
+        (grid_a.1 * grid_a.2 / 4) as usize,
+        (grid_c.1 * grid_c.2 / 4) as usize,
+    );
+    let width = alone.len() / rows_c;
+    let joint_c = &joint[rows_a * width..];
+    assert_eq!(joint_c.len(), alone.len());
+    let relative = |a: &[f32], b: &[f32]| {
+        let diff: f64 = a.iter().zip(b).map(|(x, y)| f64::from(x - y).powi(2)).sum();
+        let norm: f64 = b.iter().map(|y| f64::from(*y).powi(2)).sum();
+        (diff / norm).sqrt()
+    };
+    let batching_noise = relative(joint_c, &alone);
+    let other_image = relative(&joint[..rows_c * width], &alone);
+    eprintln!(
+        "[qwen36-moe-dflash2 image prefix] C alone vs C with A: {batching_noise:.5}, vs A's rows: {other_image:.5}"
+    );
+    // bf16 batching noise through the tower measured 2.2%; distinct images 114%.
+    assert!(
+        batching_noise < 0.05,
+        "C's rows depend on its batch: {batching_noise}"
+    );
+    assert!(other_image > 0.5, "C's rows look like A's: {other_image}");
+    let (_, hit) = run(
+        vl_request(&ids2, vec![(&image_b, grid_a), (&image_c, grid_c)]),
+        Some(&mut cache),
+    );
+    assert_eq!(hit, 0, "a different image of the same grid must not hit");
+    eprintln!(
+        "[qwen36-moe-dflash2 image prefix] turn1 {} tokens, turn2 {} tokens: restored {}",
+        ids1.len(),
+        ids2.len(),
+        ids1.len()
+    );
+}
+
+/// A chat follow-up turn restores turn 1's prompt up to its generation
+/// suffix (which the template drops when it renders the reply as history),
+/// with thinking on and off and across prefill chunks. The boundary state
+/// turn 1 saves before prefilling its suffix is bit-identical to turn 2's
+/// cold prefill state there in the same chunks. (Turn 2 need not decode as
+/// without the cache: prefill logits move by a few tenths with where chunks
+/// end, enough to flip a near tie.)
+#[test]
+#[serial(mlx_metal)]
+#[ignore = "loads a full local Qwen3.6 MoE target and the incoai DFlash2 draft"]
+fn chat_follow_up_turns_restore_the_previous_prompt_up_to_its_generation_suffix() {
+    use crate::core::chat_prefix::ChatTurnBoundary;
+    use ironmlx_lm::core::Message;
+
+    let Some(fixture) = fixture() else {
+        eprintln!("skipping: QWEN36_MOE_DFLASH2_TARGET or DFLASH2_MODEL is not set");
+        return;
+    };
+    let message = |role: &str, content: &str| Message {
+        role: role.to_owned(),
+        content: content.to_owned(),
+    };
+    let run = |ids: &[u32], cache: Option<&mut DFlash2PrefixCache>| {
+        let mut stream = DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
+            &fixture.target,
+            &fixture.draft,
+            &fixture.tokenizer,
+            request(ids.to_vec(), 24, Vec::new(), Sampler::greedy()),
+            DFlash2ExecutionOptions {
+                block_size: 8,
+                p2: DFlash2P2Options::default(),
+            },
+            cache.map(|cache| (cache, "chat-turn-prefix-test")),
+            &|| false,
+        )
+        .expect("DFlash2 stream");
+        let hit = stream.prefix_cache_hit_tokens();
+        (drain(|| stream.next_token()), hit)
+    };
+    let boundary = ChatTurnBoundary::probe(&fixture.tokenizer).expect("generation suffixes");
+    let long_notes =
+        "The survey log records tide heights, bird counts and the weather each morning. "
+            .repeat(200);
+    for kwargs in [None, Some(serde_json::json!({ "enable_thinking": false }))] {
+        for question in [
+            "Describe a lighthouse at night.".to_owned(),
+            format!("{long_notes}Summarize these notes."),
+        ] {
+            let encode = |messages: &[Message]| {
+                let text = fixture
+                    .tokenizer
+                    .apply_chat_template(messages, true, kwargs.as_ref())
+                    .expect("template");
+                fixture.tokenizer.encode(&text, false).expect("encode")
+            };
+            let ids1 = encode(&[message("user", &question)]);
+            let ids2 = encode(&[
+                message("user", &question),
+                message(
+                    "assistant",
+                    "A tall white tower sweeps its beam over dark water.",
+                ),
+                message("user", "Now describe it at dawn."),
+            ]);
+            let reusable = boundary
+                .reusable_len(&ids1)
+                .expect("turn 1 ends in a suffix");
+            assert_eq!(ids2[..reusable], ids1[..reusable]);
+
+            let new_cache = || {
+                DFlash2PrefixCache::new(8 << 30)
+                    .expect("prefix cache")
+                    .with_turn_boundary(Some(boundary.clone()))
+            };
+            let mut cache = new_cache();
+            let (turn1, hit) = run(&ids1, Some(&mut cache));
+            assert_eq!(hit, 0);
+            let (cached, hit) = run(&ids2, Some(&mut cache));
+            assert_eq!(hit, reusable, "turn 2 restores turn 1 up to its suffix");
+            let (repeat, hit) = run(&ids1, Some(&mut cache));
+            assert_eq!(hit, ids1.len(), "an exact repeat restores the whole prompt");
+            assert_eq!(
+                repeat, turn1,
+                "an exact repeat decodes like turn 1 ({kwargs:?})"
+            );
+
+            // The boundary state turn 1 saved before prefilling its suffix
+            // is the state turn 2 reaches cold in the same chunks (ending one
+            // at the boundary, by declaring the rest its generation suffix).
+            let mut reference = DFlash2PrefixCache::new(8 << 30)
+                .expect("prefix cache")
+                .with_turn_boundary(Some(ChatTurnBoundary::from_suffixes(vec![ids2
+                    [reusable..]
+                    .to_vec()])));
+            let (_, hit) = run(&ids2, Some(&mut reference));
+            assert_eq!(hit, 0);
+            let artifact_at = |cache: &DFlash2PrefixCache| {
+                cache
+                    .entries
+                    .iter()
+                    .find(|entry| entry.token_ids.len() == reusable)
+                    .map(artifact_bits)
+                    .expect("artifact at the turn boundary")
+            };
+            assert!(
+                artifact_at(&cache) == artifact_at(&reference),
+                "turn 1's boundary artifact is bit-identical to turn 2's cold state there ({kwargs:?})"
+            );
+            eprintln!(
+                "[qwen36-moe-dflash2 chat turn prefix] {kwargs:?}: turn1 {} tokens, turn2 {} tokens: restored {reusable}; same tokens as without the cache: turn1 {}, turn2 {}",
+                ids1.len(),
+                ids2.len(),
+                turn1 == run(&ids1, None).0,
+                cached == run(&ids2, None).0,
+            );
+        }
+    }
+}
+
+/// Every array of a DFlash2 prefix artifact as bits, for exact comparison.
+fn artifact_bits(artifact: &DFlash2PrefixArtifact) -> Vec<(Vec<i32>, Vec<u32>)> {
+    use ironmlx_lm::core::cache::prefix_payload::PrefixLayerPayload;
+    let mut arrays = vec![&artifact.context_hidden, &artifact.last_hidden];
+    for layer in &artifact.target_cache.main_layers {
+        match layer {
+            PrefixLayerPayload::FullDense { k, v }
+            | PrefixLayerPayload::FullPaged {
+                k_pages: k,
+                v_pages: v,
+            } => arrays.extend([k, v]),
+            PrefixLayerPayload::FullTurboQuantPacked {
+                k_packed,
+                k_norms,
+                v_packed,
+                v_norms,
+            } => arrays.extend([k_packed, k_norms, v_packed, v_norms]),
+            PrefixLayerPayload::Linear {
+                conv_state,
+                recurrent_state,
+            } => arrays.extend([conv_state, recurrent_state]),
+            PrefixLayerPayload::Mla { c_kv, k_pe } => arrays.extend([c_kv, k_pe]),
+        }
+    }
+    arrays
+        .into_iter()
+        .map(|array| {
+            let values = mlx::ops::cast::astype(array, mlx::Dtype::Float32)
+                .and_then(|values| values.to_vec::<f32>())
+                .expect("artifact array values");
+            (
+                array.shape().as_slice().to_vec(),
+                values.into_iter().map(f32::to_bits).collect(),
+            )
+        })
+        .collect()
 }

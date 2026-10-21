@@ -1,12 +1,16 @@
 //! Qwen3.5 ViT block — norm1 → attn (rotary) → norm2 → mlp.
 //! See spec §4.3.
 
+use std::sync::OnceLock;
+
 use anyhow::Result;
+use mlx::compile::{compile, CompiledFn, ShapeMode};
 use mlx::fast::scaled_dot_product_attention;
 use mlx::{ops, Array, StreamOrDevice};
 
 use super::projection::VisionProjection;
-use crate::nn::{gelu_tanh, LayerNorm};
+use crate::nn::activations::{build_gelu_tanh, invoke_gelu_tanh};
+use crate::nn::LayerNorm;
 use ironmlx_core::weights::WeightSource;
 
 /// Two-layer MLP inside each ViT block.
@@ -16,6 +20,7 @@ use ironmlx_core::weights::WeightSource;
 pub struct VitMLP {
     fc1: VisionProjection,
     fc2: VisionProjection,
+    gelu: OnceLock<CompiledFn>,
 }
 
 impl VitMLP {
@@ -29,6 +34,7 @@ impl VitMLP {
         Self {
             fc1: VisionProjection::new_fp(fc1_w, Some(fc1_b)),
             fc2: VisionProjection::new_fp(fc2_w, Some(fc2_b)),
+            gelu: OnceLock::new(),
         }
     }
 
@@ -41,6 +47,7 @@ impl VitMLP {
         Ok(Self {
             fc1: VisionProjection::from_loader(loader, &format!("{prefix}.linear_fc1"))?,
             fc2: VisionProjection::from_loader(loader, &format!("{prefix}.linear_fc2"))?,
+            gelu: OnceLock::new(),
         })
     }
 
@@ -56,6 +63,8 @@ impl VitMLP {
     /// Uses `mx.addmm` (fused bias-matmul) to match mlx-vlm's `nn.Linear` which
     /// internally calls `mx.addmm(bias, x, W.T)`.  This avoids the 1-BF16-ULP
     /// rounding difference that arises when matmul and bias-add are separate ops.
+    /// The GELU runs as one compiled kernel (on the default stream), like
+    /// mlx-vlm's compiled `gelu_approx`.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
 
@@ -63,7 +72,7 @@ impl VitMLP {
         let h = self.fc1.forward_on(x, target)?;
 
         // GELU tanh approx
-        let h = gelu_tanh(&h, target)?;
+        let h = invoke_gelu_tanh(self.gelu.get_or_init(build_gelu_tanh), &h)?;
 
         // fc2: addmm(b2, h, W2.T) → [T, d_model]
         self.fc2.forward_on(&h, target)
@@ -74,57 +83,95 @@ impl VitMLP {
 // Vision rotary helper
 // ---------------------------------------------------------------------------
 
-/// Apply vision rotary position embedding to a tensor of shape
-/// `[seq, num_heads, head_dim]`.
-///
-/// `freqs` shape: `[seq, head_dim/2]` (float32 frequency table).
+/// The vision rotary embedding of one forward pass, computed once and shared
+/// by every block.
 ///
 /// Matches `apply_rotary_pos_emb_vision` from mlx-vlm:
-///   - Build `cos_full = tile(cos(freqs), 2)` → `[seq, 1, head_dim]`
+///   - `cos_full = tile(cos(freqs), 2)`, `sin_full = tile(sin(freqs), 2)`
 ///   - `rotate_half(x) = concat([-x[..., half:], x[..., :half]], axis=-1)`
 ///   - `out = (x * cos_full + rotate_half(x) * sin_full).astype(orig_dtype)`
 ///
-/// Precision: cos/sin remain fp32 for the multiply, matching mlx-vlm's Python
-/// implementation (`output = (tensor * cos) + (rotate_half(tensor) * sin);
-/// return output.astype(orig_dtype)`). MLX promotes bf16×fp32→fp32, computes
-/// in fp32, then we cast back — this avoids the precision loss of a premature
-/// bf16 cast on cos/sin.
-fn apply_rotary_vision(tensor: &Array, freqs: &Array) -> Result<Array> {
-    // tensor: [seq, num_heads, head_dim]
-    // freqs:  [seq, head_dim/2]  (fp32 from VisionRotaryEmbedding)
-    let orig_dtype = tensor.dtype();
-    let shape = tensor.shape();
-    let seq = shape[0];
-    let num_heads = shape[1];
-    let head_dim = shape[2];
-    let half = head_dim / 2;
+/// The sign of `rotate_half` is folded into the sine table
+/// (`sin_signed = concat([-sin, sin])`), which multiplies the swapped halves
+/// `concat([x2, x1])`: `(-x2) * s` and `x2 * (-s)` are the same f32 product.
+/// cos/sin stay f32 for the multiply, as in mlx-vlm (MLX promotes bf16×f32 to
+/// f32, then the result is cast back), avoiding a premature bf16 cast.
+pub struct VisionRotary {
+    /// `[seq, 1, head_dim]` f32.
+    cos: Array,
+    /// `[seq, 1, head_dim]` f32, `concat([-sin, sin])`.
+    sin_signed: Array,
+}
 
-    // cos_half: [seq, half] fp32, sin_half: [seq, half] fp32
-    let cos_half = ops::cos(freqs)?;
-    let sin_half = ops::sin(freqs)?;
+impl VisionRotary {
+    /// From the `[seq, head_dim/2]` f32 frequency table.
+    pub fn new(freqs: &Array) -> Result<Self> {
+        let shape = freqs.shape();
+        let (seq, half) = (shape[0], shape[1]);
+        let head_dim = 2 * half;
+        let cos_half = ops::cos(freqs)?;
+        let sin_half = ops::sin(freqs)?;
+        let neg_sin_half = -&sin_half;
+        let cos = ops::concatenate(&[&cos_half, &cos_half], 1)?;
+        let sin_signed = ops::concatenate(&[&neg_sin_half, &sin_half], 1)?;
+        Ok(Self {
+            cos: ops::shape::reshape(&cos, &[seq, 1, head_dim][..])?,
+            sin_signed: ops::shape::reshape(&sin_signed, &[seq, 1, head_dim][..])?,
+        })
+    }
 
-    // tile along axis=1: [seq, half] → [seq, head_dim] via concat (fp32)
-    let cos_full = ops::concatenate(&[&cos_half, &cos_half], 1)?;
-    let sin_full = ops::concatenate(&[&sin_half, &sin_half], 1)?;
+    /// Rotates `tensor` (`[seq, num_heads, head_dim]`), with `apply` the
+    /// compiled elementwise tail ([`build_rotary_apply`]).
+    fn apply(&self, apply: &CompiledFn, tensor: &Array) -> Result<Array> {
+        let shape = tensor.shape();
+        let (seq, num_heads, head_dim) = (shape[0], shape[1], shape[2]);
+        let half = head_dim / 2;
+        let x1 = ops::slice(tensor, &[0, 0, 0][..], &[seq, num_heads, half][..])?;
+        let x2 = ops::slice(tensor, &[0, 0, half][..], &[seq, num_heads, head_dim][..])?;
+        let swapped = ops::concatenate(&[&x2, &x1], 2)?;
+        let mut outs = apply
+            .invoke(&[tensor, &swapped, &self.cos, &self.sin_signed])
+            .map_err(|e| anyhow::anyhow!("vision rotary invoke failed: {e}"))?;
+        outs.pop()
+            .ok_or_else(|| anyhow::anyhow!("vision rotary returned no outputs"))
+    }
+}
 
-    // expand to [seq, 1, head_dim] for broadcasting with [seq, num_heads, head_dim]
-    // Keep cos/sin in fp32 — mlx promotes bf16*fp32 → fp32 automatically.
-    let cos_bc = ops::shape::reshape(&cos_full, &[seq, 1, head_dim][..])?;
-    let sin_bc = ops::shape::reshape(&sin_full, &[seq, 1, head_dim][..])?;
+/// `(x * cos + swapped * sin_signed).astype(x.dtype)` as one compiled kernel,
+/// so the f32 products are never materialized.
+fn build_rotary_apply() -> CompiledFn {
+    compile(
+        |inputs: &[&Array]| -> mlx::Result<Vec<Array>> {
+            let (x, swapped, cos, sin) = (inputs[0], inputs[1], inputs[2], inputs[3]);
+            let out = &(x * cos) + &(swapped * sin);
+            Ok(vec![ops::cast::astype(&out, x.dtype())?])
+        },
+        ShapeMode::Shapeless,
+    )
+    .expect("vision rotary compile")
+}
 
-    // x1 = tensor[..., :half], x2 = tensor[..., half:]
-    // slice requires ndim-length start/stop
-    let x1 = ops::slice(tensor, &[0, 0, 0][..], &[seq, num_heads, half][..])?;
-    let x2 = ops::slice(tensor, &[0, 0, half][..], &[seq, num_heads, head_dim][..])?;
+/// Head dims MLX's NAX full-attention kernel takes
+/// (`sdpa_full_self_attention_metal`, MLX 73ad5df2).
+const NAX_FULL_ATTENTION_HEAD_DIMS: [i32; 3] = [64, 96, 128];
 
-    // rotate_half = concat([-x2, x1], axis=-1)
-    let neg_x2 = -&x2;
-    let rotated = ops::concatenate(&[&neg_x2, &x1], 2)?;
-
-    // Compute in fp32 (bf16 tensor * fp32 cos → fp32 via mlx auto-promotion),
-    // then cast back to original dtype — matches Python's `.astype(orig_dtype)`.
-    let out_f32 = tensor * &cos_bc + &rotated * &sin_bc;
-    ops::cast::astype(&out_f32, orig_dtype).map_err(anyhow::Error::from)
+/// The head dim to zero-pad q, k and v to so that MLX runs its NAX
+/// full-attention kernel (bf16/f16, query length > 8) instead of its
+/// non-NAX one, which is far slower on chips with NAX: the smallest NAX head
+/// dim above `head_dim`, when NAX is available and `head_dim` is not one.
+/// Zero columns add nothing to `q·k`, so with the scale kept at
+/// `1/sqrt(head_dim)` the first `head_dim` output columns are the attention
+/// output (up to the kernels' accumulation order).
+fn nax_padded_head_dim(head_dim: i32) -> Option<i32> {
+    static NAX: OnceLock<bool> = OnceLock::new();
+    if NAX_FULL_ATTENTION_HEAD_DIMS.contains(&head_dim)
+        || !*NAX.get_or_init(|| mlx::metal::nax_available().unwrap_or(false))
+    {
+        return None;
+    }
+    NAX_FULL_ATTENTION_HEAD_DIMS
+        .into_iter()
+        .find(|&dim| dim > head_dim)
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +192,7 @@ pub struct VitAttention {
     projection: VisionProjection,
     num_heads: i32,
     head_dim: i32,
+    rotary_apply: OnceLock<CompiledFn>,
 }
 
 impl VitAttention {
@@ -165,6 +213,7 @@ impl VitAttention {
             projection: VisionProjection::new_fp(proj_w, Some(proj_b)),
             num_heads,
             head_dim,
+            rotary_apply: OnceLock::new(),
         }
     }
 
@@ -184,15 +233,31 @@ impl VitAttention {
             projection: VisionProjection::from_loader(loader, &format!("{prefix}.proj"))?,
             num_heads,
             head_dim,
+            rotary_apply: OnceLock::new(),
         })
     }
 
     /// Forward pass on the default stream.
     ///
-    /// `rotary_pos_emb`: `[seq, head_dim/2]` float32 frequency table.
+    /// `rotary`: the forward pass's rotary embedding.
     /// `cu_seqlens`: cumulative sequence lengths, e.g. `[0, seq]` for single
     ///   image or `[0, s1, s1+s2, ...]` for multi-image batch.
-    pub fn forward(&self, x: &Array, rotary_pos_emb: &Array, cu_seqlens: &[i32]) -> Result<Array> {
+    pub fn forward(&self, x: &Array, rotary: &VisionRotary, cu_seqlens: &[i32]) -> Result<Array> {
+        let pad_to = nax_padded_head_dim(self.head_dim).filter(|_| {
+            x.dtype() != mlx::Dtype::Float32 && cu_seqlens.windows(2).all(|w| w[1] - w[0] > 8)
+        });
+        self.forward_padded(x, rotary, cu_seqlens, pad_to)
+    }
+
+    /// [`Self::forward`] with the q/k/v head dim zero-padded to `pad_to`
+    /// before attention (`None`: unpadded).
+    fn forward_padded(
+        &self,
+        x: &Array,
+        rotary: &VisionRotary,
+        cu_seqlens: &[i32],
+        pad_to: Option<i32>,
+    ) -> Result<Array> {
         let seq = x.shape()[0];
         let nh = self.num_heads;
         let hd = self.head_dim;
@@ -215,8 +280,9 @@ impl VitAttention {
         let v = ops::shape::squeeze(&parts[2], &[0][..])?;
 
         // Step 4: apply rotary to Q and K
-        let q = apply_rotary_vision(&q, rotary_pos_emb)?;
-        let k = apply_rotary_vision(&k, rotary_pos_emb)?;
+        let rotary_apply = self.rotary_apply.get_or_init(build_rotary_apply);
+        let q = rotary.apply(rotary_apply, &q)?;
+        let k = rotary.apply(rotary_apply, &k)?;
 
         // Step 5: transpose to [nh, seq, hd] then unsqueeze batch → [1, nh, seq, hd] for SDPA
         // MLX fast SDPA requires rank-4 input: [batch, heads, seq, head_dim]
@@ -226,6 +292,19 @@ impl VitAttention {
         let q = ops::shape::expand_dims(&q, &[0][..])?;
         let k = ops::shape::expand_dims(&k, &[0][..])?;
         let v = ops::shape::expand_dims(&v, &[0][..])?;
+
+        // Step 5b: zero-pad the head dim for MLX's NAX attention kernel.
+        let (q, k, v) = match pad_to {
+            Some(padded) => {
+                let zeros = Array::zeros(&[1, nh, seq, padded - hd][..], q.dtype())?;
+                (
+                    ops::concatenate(&[&q, &zeros], 3)?,
+                    ops::concatenate(&[&k, &zeros], 3)?,
+                    ops::concatenate(&[&v, &zeros], 3)?,
+                )
+            }
+            None => (q, k, v),
+        };
 
         // Step 6: SDPA per cu_seqlens segment
         // q/k/v shape: [1, nh, seq, hd]
@@ -249,6 +328,12 @@ impl VitAttention {
             }
             let refs: Vec<&Array> = seg_outputs.iter().collect();
             ops::shape::concatenate(&refs, 2)?
+        };
+
+        // Drop the padded head-dim columns.
+        let output = match pad_to {
+            Some(_) => ops::slice(&output, &[0, 0, 0, 0][..], &[1, nh, seq, hd][..])?,
+            None => output,
         };
 
         // Step 7: squeeze batch dim → [nh, seq, hd], transpose → [seq, nh, hd], reshape [seq, dim]
@@ -317,12 +402,12 @@ impl VitBlock {
 
     /// Forward pass on the default stream.
     ///
-    /// `rotary_pos_emb`: `[seq, head_dim/2]` float32 frequency table.
+    /// `rotary`: the forward pass's rotary embedding.
     /// `cu_seqlens`: cumulative sequence lengths, e.g. `[0, seq]` for a single image.
-    pub fn forward(&self, x: &Array, rotary_pos_emb: &Array, cu_seqlens: &[i32]) -> Result<Array> {
+    pub fn forward(&self, x: &Array, rotary: &VisionRotary, cu_seqlens: &[i32]) -> Result<Array> {
         // h = x + attn(norm1(x))
         let normed1 = self.norm1.forward(x)?;
-        let attn_out = self.attn.forward(&normed1, rotary_pos_emb, cu_seqlens)?;
+        let attn_out = self.attn.forward(&normed1, rotary, cu_seqlens)?;
         let h = x + &attn_out;
 
         // y = h + mlp(norm2(h))
@@ -338,7 +423,7 @@ impl VitBlock {
     pub fn forward_with_name_prefix(
         &self,
         x: &Array,
-        rotary_pos_emb: &Array,
+        rotary: &VisionRotary,
         cu_seqlens: &[i32],
         name_prefix: &str,
     ) -> Result<Array> {
@@ -346,7 +431,7 @@ impl VitBlock {
         // h = x + attn(norm1(x))
         let normed1 = self.norm1.forward(x)?;
         dump_tensor(&format!("{name_prefix}_a_norm1_out"), &normed1);
-        let attn_out = self.attn.forward(&normed1, rotary_pos_emb, cu_seqlens)?;
+        let attn_out = self.attn.forward(&normed1, rotary, cu_seqlens)?;
         let h = x + &attn_out;
         dump_tensor(&format!("{name_prefix}_b_attn_residual"), &h);
 
@@ -363,6 +448,7 @@ impl VitBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nn::gelu_tanh;
     use mlx::{Array, Dtype};
 
     #[test]
@@ -446,7 +532,7 @@ mod tests {
         let block = VitBlock::new(norm1, attn, norm2, mlp);
 
         let x = ops::constructors::ones((8_i32, 1024_i32), Dtype::Bfloat16).unwrap();
-        let rotary = Array::zeros([8, 32], Dtype::Float32).unwrap();
+        let rotary = VisionRotary::new(&Array::zeros([8, 32], Dtype::Float32).unwrap()).unwrap();
         let cu = vec![0_i32, 8];
         let out = block.forward(&x, &rotary, &cu).unwrap();
         // zero-weight attn + mlp ⇒ residual passes through ⇒ out == x
@@ -487,7 +573,7 @@ mod tests {
         // cu_seqlens = [0, 8] — single image with 8 tokens
         let cu_seqlens = [0_i32, 8];
         let got = attn
-            .forward(x, rotary, &cu_seqlens)
+            .forward(x, &VisionRotary::new(rotary).unwrap(), &cu_seqlens)
             .expect("VitAttention::forward failed");
 
         let got_f32_arr = ops::astype(&got, mlx::Dtype::Float32).expect("astype got");
@@ -514,5 +600,102 @@ mod tests {
             max_diff < 0.05,
             "VitAttention output diverges from mlx-vlm reference: max_diff={max_diff}"
         );
+    }
+
+    fn random(shape: &[i32], dtype: Dtype, seed: u64, scale: f64) -> Array {
+        let key = mlx::random::key(seed).unwrap();
+        let x = mlx::random::normal()
+            .shape(shape)
+            .dtype(Dtype::Float32)
+            .scale(scale)
+            .key(&key)
+            .sample()
+            .unwrap();
+        ops::astype(&x, dtype).unwrap()
+    }
+
+    fn bits(a: &Array) -> Vec<u16> {
+        let a = ops::astype(a, Dtype::Float32).unwrap();
+        a.to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .map(|v| (v.to_bits() >> 16) as u16)
+            .collect()
+    }
+
+    /// The compiled rotary (cos/sin computed once, sign folded into the sine
+    /// table) gives mlx-vlm's `apply_rotary_pos_emb_vision` bit for bit, as
+    /// written eagerly with a per-call cos/sin.
+    #[test]
+    fn compiled_rotary_matches_the_eager_formula_bit_for_bit() {
+        crate::models::vision::init_test_metallib();
+        let (seq, heads, head_dim) = (40, 4, 72);
+        let tensor = random(&[seq, heads, head_dim], Dtype::Bfloat16, 1, 1.0);
+        let freqs = random(&[seq, head_dim / 2], Dtype::Float32, 2, 30.0);
+        let rotary = VisionRotary::new(&freqs).unwrap();
+        let got = rotary.apply(&build_rotary_apply(), &tensor).unwrap();
+
+        let half = head_dim / 2;
+        let cos_half = ops::cos(&freqs).unwrap();
+        let sin_half = ops::sin(&freqs).unwrap();
+        let cos = ops::concatenate(&[&cos_half, &cos_half], 1).unwrap();
+        let sin = ops::concatenate(&[&sin_half, &sin_half], 1).unwrap();
+        let cos = ops::shape::reshape(&cos, &[seq, 1, head_dim][..]).unwrap();
+        let sin = ops::shape::reshape(&sin, &[seq, 1, head_dim][..]).unwrap();
+        let x1 = ops::slice(&tensor, &[0, 0, 0][..], &[seq, heads, half][..]).unwrap();
+        let x2 = ops::slice(&tensor, &[0, 0, half][..], &[seq, heads, head_dim][..]).unwrap();
+        let rotated = ops::concatenate(&[&(-&x2), &x1], 2).unwrap();
+        let eager = &(&tensor * &cos) + &(&rotated * &sin);
+        let eager = ops::astype(&eager, Dtype::Bfloat16).unwrap();
+        assert_eq!(got.dtype(), Dtype::Bfloat16);
+        assert_eq!(bits(&got), bits(&eager));
+    }
+
+    /// The compiled GELU gives the eager op-by-op GELU bit for bit.
+    #[test]
+    fn compiled_gelu_matches_the_eager_gelu_bit_for_bit() {
+        crate::models::vision::init_test_metallib();
+        let x = random(&[64, 300], Dtype::Bfloat16, 3, 4.0);
+        let compiled = invoke_gelu_tanh(&build_gelu_tanh(), &x).unwrap();
+        let eager = gelu_tanh(&x, ().into()).unwrap();
+        assert_eq!(compiled.dtype(), Dtype::Bfloat16);
+        assert_eq!(bits(&compiled), bits(&eager));
+    }
+
+    /// Zero-padding the head dim (72 to 96, as for MLX's NAX attention) leaves
+    /// the attention output unchanged up to bf16 accumulation noise, and
+    /// padding is only chosen for head dims MLX's NAX kernel does not take.
+    #[test]
+    fn padded_head_dim_attention_matches_unpadded() {
+        crate::models::vision::init_test_metallib();
+        let (heads, head_dim, seq) = (4, 72, 48);
+        let dim = heads * head_dim;
+        let attn = VitAttention::new(
+            random(&[3 * dim, dim], Dtype::Bfloat16, 4, 0.05),
+            random(&[3 * dim], Dtype::Bfloat16, 5, 0.05),
+            random(&[dim, dim], Dtype::Bfloat16, 6, 0.05),
+            random(&[dim], Dtype::Bfloat16, 7, 0.05),
+            heads,
+            head_dim,
+        );
+        let x = random(&[seq, dim], Dtype::Bfloat16, 8, 1.0);
+        let rotary =
+            VisionRotary::new(&random(&[seq, head_dim / 2], Dtype::Float32, 9, 10.0)).unwrap();
+        for cu in [vec![0, seq], vec![0, 20, seq]] {
+            let plain = attn.forward_padded(&x, &rotary, &cu, None).unwrap();
+            let padded = attn.forward_padded(&x, &rotary, &cu, Some(96)).unwrap();
+            let diff = max_abs_diff(&plain, &padded);
+            let peak = max_abs_diff(&plain, &ops::zeros_like(&plain).unwrap());
+            assert!(
+                diff <= 0.02 * peak,
+                "padded attention differs: {diff} (output max {peak})"
+            );
+        }
+        assert_eq!(nax_padded_head_dim(64), None);
+        assert_eq!(nax_padded_head_dim(96), None);
+        assert_eq!(nax_padded_head_dim(128), None);
+        let nax = mlx::metal::nax_available().unwrap_or(false);
+        assert_eq!(nax_padded_head_dim(72), nax.then_some(96));
+        assert_eq!(nax_padded_head_dim(80), nax.then_some(96));
     }
 }

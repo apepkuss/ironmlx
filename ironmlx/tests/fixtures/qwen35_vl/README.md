@@ -8,7 +8,8 @@ This directory contains reference fixtures for the Qwen3.5-VL integration test s
 |---|---|---|
 | `coco_sample.jpg` | YES | COCO val2017 sample image used as the multimodal input |
 | `coco_sample_normalized.bin` | YES | Raw normalized pixel tensor for the smart-resize path |
-| `smart_resize_golden.txt` | YES | Expected smart-resize output dimensions |
+| `smart_resize_golden.txt` | YES | HF transformers `smart_resize` outputs (factor 32): `height,width,min_pixels,max_pixels,out_height,out_width` |
+| `pil_bicubic_synthetic.bin` | YES | Pillow 12.1.0 BICUBIC resizes of synthetic images, from `gen_pil_bicubic_synthetic.py` |
 | `p6_vit_attn_ref.safetensors` | YES | Vision-transformer attention reference tensors |
 | `p6_pos_ids_ref.safetensors` | YES | Position-IDs reference tensors |
 | `gen_fixture.py` | YES | Script that generates the `expected_*` files below |

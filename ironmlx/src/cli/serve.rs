@@ -150,6 +150,12 @@ pub struct ServeArgs {
     #[arg(long)]
     pub max_cache_cap: Option<usize>,
 
+    /// Most pixels an input image is resized to, within the model's own
+    /// processor limit (Qwen3.x: 16,777,216). Each 32x32 pixels becomes one
+    /// image token. Defaults to 4,194,304 (4096 image tokens).
+    #[arg(long = "max-image-pixels", value_parser = clap::value_parser!(i32).range(1..))]
+    pub max_image_pixels: Option<i32>,
+
     /// Maximum chunk size used by rolling mid-admit while decode rows are active.
     /// Smaller values protect decode cadence under concurrent long-prompt admission;
     /// larger values can reduce queued-request TTFT at the cost of longer decode gaps.
@@ -973,6 +979,14 @@ where
     ))
 }
 
+/// The image input a DFlash2 target serves: the one its checkpoint configures
+/// (DFlash2 targets are causal models, so it is always resolved).
+fn dflash2_vision_input(
+    vision_input: Option<ironmlx_lm::core::vision_input::VisionInputConfig>,
+) -> Result<ironmlx_lm::core::vision_input::VisionInputConfig> {
+    vision_input.context("DFlash2 target has no resolved image input configuration")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn serve_with_dflash2_model<M>(
     model: M,
@@ -982,6 +996,7 @@ fn serve_with_dflash2_model<M>(
     scheduler_config: SchedulerServeConfig,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     mut static_memory_estimate: StaticMemoryEstimate,
+    vision_input: ironmlx_lm::core::vision_input::VisionInputConfig,
 ) -> Result<()>
 where
     M: ironmlx_lm::core::model::Model
@@ -1089,6 +1104,7 @@ where
         prefix_cache,
         scheduler_runtime_profile,
         static_memory_estimate,
+        vision_input,
     ))
 }
 
@@ -1270,6 +1286,7 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
             scheduler_autotune_report: args.scheduler_autotune_report,
             paged_prefix_cache,
             prefix_lru_cache_max_bytes: args.prefix_lru_cache_max_bytes,
+            max_image_pixels: args.max_image_pixels,
             model_ttl,
             memory_limits: ironmlx_runtime::core::engine_pool::EnginePoolMemoryLimits {
                 total_memory_limit_bytes: resolve_memory_limit_bytes(
@@ -1397,12 +1414,13 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
     }
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
     let mut loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
+    let component_bytes = loader.loaded_tensor_component_bytes();
     if dflash2_family.is_some() {
-        // DFlash2 serving rejects image input, so the vision encoder would
-        // only hold resident memory.
+        // DFlash2 serving loads the vision encoder on its first image
+        // request (text-only serving never holds it); its bytes stay in the
+        // estimate as a cold component materialized by that request.
         loader.drop_vision_tower();
     }
-    let component_bytes = loader.loaded_tensor_component_bytes();
     let static_memory_estimate = StaticMemoryEstimate {
         text_cold_bytes: component_bytes.text,
         vision_cold_bytes: component_bytes.vision,
@@ -1438,6 +1456,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
             ironmlx_lm::core::vision_input::VisionInputConfig::from_causal_loader(
                 architecture,
                 &loader,
+                args.max_image_pixels,
             )?,
         )
     };
@@ -1460,6 +1479,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                     scheduler_config,
                     scheduler_runtime_profile,
                     static_memory_estimate,
+                    dflash2_vision_input(vision_input)?,
                 )
             } else if let Some(mtp_config) = mtp_config.clone() {
                 serve_with_mtp_model(
@@ -1500,6 +1520,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                     scheduler_config,
                     scheduler_runtime_profile,
                     static_memory_estimate,
+                    dflash2_vision_input(vision_input)?,
                 );
             }
             match qwen_moe_serve_model(loader.config_raw_value()) {
@@ -1761,6 +1782,7 @@ mod scheduler_profile_tests {
             admission_deadline_ms: None,
             admission_queue_max: None,
             max_cache_cap: None,
+            max_image_pixels: None,
             decode_cadence_mid_chunk_cap: None,
             scheduler_profile: None,
             scheduler_autotune_report: false,
@@ -3186,6 +3208,7 @@ pub(crate) fn engine_runtime_config(
             scheduler_autotune_report: args.scheduler_autotune_report,
             paged_prefix_cache: resolve_engine_paged_prefix_cache_settings(args)?,
             prefix_lru_cache_max_bytes: args.prefix_lru_cache_max_bytes,
+            max_image_pixels: args.max_image_pixels,
             model_ttl: resolve_model_ttl(args)?,
             memory_limits: ironmlx_runtime::core::runtime_config::EnginePoolMemoryLimits {
                 total_memory_limit_bytes: resolve_memory_limit_bytes(

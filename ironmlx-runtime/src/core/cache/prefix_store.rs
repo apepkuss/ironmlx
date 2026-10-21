@@ -12,6 +12,7 @@ use anyhow::Context;
 use mlx::{Array, Dtype};
 use serde::{Deserialize, Serialize};
 
+use crate::core::chat_prefix::ChatTurnBoundary;
 use crate::Result;
 
 const SCHEMA_VERSION: u32 = 7;
@@ -54,6 +55,10 @@ pub struct PagedPrefixCacheConfig {
     pub block_size: i32,
     pub max_pages: i32,
     pub max_disk_bytes: Option<usize>,
+    /// Where a chat prompt's next turn diverges: a prompt ending in its
+    /// template's generation suffix is saved without it (see
+    /// [`ChatTurnBoundary`]).
+    turn_boundary: Option<ChatTurnBoundary>,
 }
 
 impl PagedPrefixCacheConfig {
@@ -79,9 +84,23 @@ impl PagedPrefixCacheConfig {
             block_size,
             max_pages,
             max_disk_bytes,
+            turn_boundary: None,
         };
         config.validate()?;
         Ok(config)
+    }
+
+    pub(crate) fn with_turn_boundary(mut self, turn_boundary: Option<ChatTurnBoundary>) -> Self {
+        self.turn_boundary = turn_boundary;
+        self
+    }
+
+    /// The length of `prompt_ids` a follow-up chat turn shares, when the
+    /// prompt ends in its template's generation suffix.
+    pub(crate) fn turn_reusable_len(&self, prompt_ids: &[u32]) -> Option<usize> {
+        self.turn_boundary
+            .as_ref()
+            .and_then(|boundary| boundary.reusable_len(prompt_ids))
     }
 
     pub fn store(&self) -> PagedPrefixStore {

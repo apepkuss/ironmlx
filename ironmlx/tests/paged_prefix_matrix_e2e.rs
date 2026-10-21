@@ -723,6 +723,40 @@ async fn wait_log_count(server: &ServerProcess, needle: &str, min_count: usize, 
     }
 }
 
+/// Prefix cache hits so far: whole-prefix SSD entries (logged) plus
+/// immutable FullPaged blocks, the reuse path of FullPaged-only text caches
+/// (counted in `/healthz`).
+async fn prefix_hit_count(client: &reqwest::Client, port: u16, server: &ServerProcess) -> usize {
+    let blocks = &healthz(client, port).await["memory"]["immutable_prefix_blocks"];
+    let block_hits = ["active_block_hits", "idle_block_hits", "ssd_block_hits"]
+        .iter()
+        .map(|key| blocks[key].as_u64().unwrap_or(0) as usize)
+        .sum::<usize>();
+    count_log(&server.stderr_text(), "paged SSD prefix cache hit") + block_hits
+}
+
+async fn wait_prefix_hits(
+    client: &reqwest::Client,
+    port: u16,
+    server: &ServerProcess,
+    min_count: usize,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let hits = prefix_hit_count(client, port, server).await;
+        if hits >= min_count {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "prefix cache hits {hits} did not reach {min_count}; stderr:\n{}",
+            server.stderr_text()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn cache_entry_dirs(cache_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for entry in std::fs::read_dir(cache_dir).expect("read prefix cache dir") {
@@ -937,13 +971,7 @@ async fn run_text_exact_hit_case(model_dir: PathBuf, expected_kinds: &[&str], pr
         hit_b["usage"]["prompt_tokens"],
         warm["usage"]["prompt_tokens"]
     );
-    wait_log_count(
-        &server,
-        "paged SSD prefix cache hit",
-        2,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_prefix_hits(&client, port, &server, 2, Duration::from_secs(10)).await;
     assert_cache_kinds(&cache_dir, expected_kinds);
 
     std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
@@ -967,7 +995,7 @@ async fn run_text_concurrent_exact_hit_case(
     let warm = post_chat(&client, port, body.clone()).await;
     assert_cache_kinds(&cache_dir, expected_kinds);
 
-    let hits_before = count_log(&server.stderr_text(), "paged SSD prefix cache hit");
+    let hits_before = prefix_hit_count(&client, port, &server).await;
     let responses = post_same_body_concurrently(&client, port, body, concurrency).await;
     for response in responses {
         assert_eq!(
@@ -975,9 +1003,10 @@ async fn run_text_concurrent_exact_hit_case(
             "concurrent exact-hit prompt token count must stay stable"
         );
     }
-    wait_log_count(
+    wait_prefix_hits(
+        &client,
+        port,
         &server,
-        "paged SSD prefix cache hit",
         hits_before + concurrency,
         Duration::from_secs(20),
     )
@@ -1011,13 +1040,7 @@ async fn run_text_restart_persistence_case(
     wait_ready(&client, port, &mut server).await;
     let hit = post_chat(&client, port, body).await;
     assert_eq!(hit["usage"]["prompt_tokens"], warm_prompt_tokens);
-    wait_log_count(
-        &server,
-        "paged SSD prefix cache hit",
-        1,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_prefix_hits(&client, port, &server, 1, Duration::from_secs(10)).await;
     assert_cache_kinds(&cache_dir, expected_kinds);
 
     std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
@@ -1058,13 +1081,7 @@ async fn run_vl_exact_hit_and_image_miss_case(
         hit_b["usage"]["prompt_tokens"],
         warm["usage"]["prompt_tokens"]
     );
-    wait_log_count(
-        &server,
-        "paged SSD prefix cache hit",
-        2,
-        Duration::from_secs(10),
-    )
-    .await;
+    wait_prefix_hits(&client, port, &server, 2, Duration::from_secs(10)).await;
     let hits_before_negative = count_log(&server.stderr_text(), "paged SSD prefix cache hit");
 
     let negative = post_chat(&client, port, vl_body(&flipped)).await;
@@ -1104,7 +1121,7 @@ async fn run_vl_concurrent_exact_hit_case(
     assert_cache_kinds(&cache_dir, expected_kinds);
     assert_has_vl_fingerprint(&cache_dir);
 
-    let hits_before = count_log(&server.stderr_text(), "paged SSD prefix cache hit");
+    let hits_before = prefix_hit_count(&client, port, &server).await;
     let responses = post_same_body_concurrently(&client, port, body, concurrency).await;
     for response in responses {
         assert_eq!(
@@ -1112,9 +1129,10 @@ async fn run_vl_concurrent_exact_hit_case(
             "concurrent VL exact-hit prompt token count must stay stable"
         );
     }
-    wait_log_count(
+    wait_prefix_hits(
+        &client,
+        port,
         &server,
-        "paged SSD prefix cache hit",
         hits_before + concurrency,
         Duration::from_secs(30),
     )

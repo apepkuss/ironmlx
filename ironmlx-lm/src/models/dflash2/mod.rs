@@ -565,6 +565,45 @@ pub trait DFlash2Target: crate::core::Model {
 
     fn dflash2_embed_on(&self, input_ids: &Array, target: StreamOrDevice) -> Result<Array>;
 
+    /// Whether requests may carry images: the checkpoint has a vision
+    /// encoder, resident or loaded on first use ([`Self::dflash2_load_vision`]).
+    fn dflash2_supports_images(&self) -> bool {
+        false
+    }
+
+    /// Makes the vision encoder resident if it is not yet, on the calling
+    /// thread; `true` when this call loaded it. It stays resident.
+    fn dflash2_load_vision(&self) -> Result<bool> {
+        anyhow::bail!("target does not support image inputs")
+    }
+
+    /// Vision encoder rows `[N, hidden]` of a request's images, in order.
+    fn dflash2_vision_embeds_on(
+        &self,
+        _pixel_values: &[Array],
+        _grid_thw: &[(i32, i32, i32)],
+        _target: StreamOrDevice,
+    ) -> Result<Array> {
+        anyhow::bail!("target does not support image inputs")
+    }
+
+    /// A [`DFlash2TargetForwardMode::Prefill`] forward whose image-pad tokens
+    /// (`image_token_id`) take the rows of `image_embeds` in order; every
+    /// other token is embedded as in [`Self::dflash2_forward_target_on`].
+    #[allow(clippy::too_many_arguments)]
+    fn dflash2_forward_target_vl_on(
+        &self,
+        _input_ids: &Array,
+        _image_embeds: &Array,
+        _image_token_id: i32,
+        _position_ids: &Array,
+        _cache: Option<&mut [LayerCache]>,
+        _target_layer_ids: &[usize],
+        _target: StreamOrDevice,
+    ) -> Result<DFlash2TargetOutput> {
+        anyhow::bail!("target does not support image inputs")
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn dflash2_forward_target_on(
         &self,

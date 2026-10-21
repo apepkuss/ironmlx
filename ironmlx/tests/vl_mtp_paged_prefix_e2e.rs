@@ -59,7 +59,7 @@ impl ServerProcess {
             "127.0.0.1",
             "--port",
             &port.to_string(),
-            "--b-max",
+            "--max-sequences",
             "2",
             "--admission-deadline-ms",
             "200",
@@ -302,6 +302,19 @@ fn cache_entry_dirs(cache_dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// Entries are written by the async prefix store after the save is logged.
+async fn wait_cache_entry_dirs(cache_dir: &Path, min_count: usize, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while cache_entry_dirs(cache_dir).len() < min_count {
+        assert!(
+            Instant::now() < deadline,
+            "different-image miss should save distinct prefix cache entries: {} < {min_count}",
+            cache_entry_dirs(cache_dir).len()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn assert_cache_entries_have_mtp_payload(cache_dir: &Path) {
     let entries = cache_entry_dirs(cache_dir);
     assert!(
@@ -421,10 +434,7 @@ async fn run_vl_mtp_paged_prefix_cache_exact_hit_batch_and_image_miss(
         hits_before_negative,
         "different image must not hit an existing VL prefix cache entry; stderr:\n{final_logs}"
     );
-    assert!(
-        cache_entry_dirs(&cache_dir).len() >= 4,
-        "different-image miss should save distinct prefix cache entries"
-    );
+    wait_cache_entry_dirs(&cache_dir, 4, Duration::from_secs(10)).await;
     assert_cache_entries_have_mtp_payload(&cache_dir);
 
     std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");

@@ -21,7 +21,7 @@ Recorded validation covers:
 | Target (MoE) | `mlx-community/Qwen3.6-35B-A3B-4bit`, `-5bit`, `-6bit` or `-8bit` |
 | Draft (MoE) | `incoai/Qwen3.6-35B-A3B-DFlash2` (BF16) |
 
-Text only: no image/video requests, and the draft cannot be loaded as a normal base model. Qwen3.8 targets must use affine 4-bit or 8-bit; Qwen3.6 35B A3B targets have their own limits, described in [Qwen3.6 35B A3B (MoE)](#qwen36-35b-a3b-moe). Other quantized or unquantized targets are not marked compatible by the App.
+Text and image requests are served; video is not. The target loads its vision encoder on the first image request, and the draft cannot be loaded as a normal base model. Qwen3.8 targets must use affine 4-bit or 8-bit; Qwen3.6 35B A3B targets have their own limits, described in [Qwen3.6 35B A3B (MoE)](#qwen36-35b-a3b-moe). Other quantized or unquantized targets are not marked compatible by the App.
 
 ## Startup example
 
