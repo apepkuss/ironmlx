@@ -1602,13 +1602,24 @@ fn assert_recovers_on_copy_section(fixture: &Fixture, run: &WindowCostRun) {
                 .expect("decode")
                 .contains("The quick brown fox")
         })
-        .expect("the copy section starts");
+        .expect("content premise: the output reaches the copy section");
     let copy_window = (0..run.widths.len())
         .find(|&index| run.window_end[index] >= copy_start)
         .expect("a window reaches the copy section");
     let sustained = (copy_window..run.widths.len())
         .filter(|&index| run.window_start(index) + 1 >= copy_start)
         .find(|&index| run.sustained_drafting_from(index) == Some(index));
+    // Content premise: before the copy the drafts are mostly rejected
+    // (0.42-0.54 of the drafting windows accept their first token on the
+    // M5 affine4 target; patterned or degenerate output is above 0.8).
+    // Otherwise staying on budget 0 is not the right choice and the run says
+    // nothing about the policy.
+    let drafting_before: Vec<usize> = (0..copy_window).filter(|&i| run.widths[i] > 0).collect();
+    let first_accepted = drafting_before
+        .iter()
+        .filter(|&&i| run.records[i].accepted >= 1)
+        .count() as f64
+        / drafting_before.len().max(1) as f64;
     let longest_before_copy = run
         .ordinary_runs()
         .into_iter()
@@ -1640,9 +1651,13 @@ fn assert_recovers_on_copy_section(fixture: &Fixture, run: &WindowCostRun) {
         )
     });
     eprintln!(
-        "[qwen36-moe-dflash2 {label}] copy_start_token={copy_start} longest_ordinary_run_before_copy={longest_before_copy} sustained_drafting_window={sustained:?} \
+        "[qwen36-moe-dflash2 {label}] copy_start_token={copy_start} first_draft_acceptance_before_copy={first_accepted:.3} longest_ordinary_run_before_copy={longest_before_copy} sustained_drafting_window={sustained:?} \
          recovery(delay_tokens,delay_windows,delay_us,tokens_per_drafting_window,us_per_token)={recovery:?} \
          ordinary_median_us={ordinary_median}"
+    );
+    assert!(
+        first_accepted <= 0.7,
+        "{label}: content premise not met: {first_accepted:.2} of the drafting windows before the copy accepted their first token"
     );
     assert!(
         longest_before_copy >= 8,
@@ -1667,6 +1682,14 @@ fn assert_recovers_on_copy_section(fixture: &Fixture, run: &WindowCostRun) {
 const COPY_SECTION: &str = "写完之后，另起一段，把下面这一行原样抄写 40 遍，每遍单独一行，不要编号：\nThe quick brown fox jumps over the lazy dog 0123456789";
 const BASE64_CONTENT: &str =
     "随机生成 20 个互不相同、长度为 44 个字符的 Base64 字符串，每行一个，不要编号也不要解释。";
+/// The Base64 request, then the copy section, as two numbered tasks. With the
+/// copy instruction appended to the same sentence the greedy output degenerates
+/// into one periodic Base64 line that never reaches the copy section (and that
+/// the drafter predicts), so the premise of the copy gates fails; as a separate
+/// task the Base64 lines stay as unpredictable as the request alone.
+fn base64_then_copy() -> String {
+    format!("请完成两件事。\n第一件：{BASE64_CONTENT}\n第二件：{COPY_SECTION}")
+}
 
 #[test]
 #[ignore = "loads a full local Qwen3.6 MoE target and the incoai DFlash2 draft"]
@@ -1676,12 +1699,7 @@ fn qwen36_moe_dflash2_window_cost_resumes_drafting_after_budget_zero() {
         eprintln!("skip: set QWEN36_MOE_DFLASH2_TARGET and DFLASH2_MODEL");
         return;
     };
-    let prompt_ids = chat_prompt(
-        &fixture,
-        &format!(
-            "随机生成 25 个互不相同的 12 位密码，每个由大小写字母、数字和符号混合组成，每行一个，不要编号也不要解释。{COPY_SECTION}"
-        ),
-    );
+    let prompt_ids = chat_prompt(&fixture, &base64_then_copy());
     let run = run_window_cost_tracked(&fixture, "zero-resume", &prompt_ids, 700, false);
     assert_recovers_on_copy_section(&fixture, &run);
 }
@@ -1736,8 +1754,8 @@ fn qwen36_moe_dflash2_window_cost_recovers_on_base64() {
 }
 
 /// Qualification and formal check of the Base64 request followed by a copy
-/// section: budget 0 before the copy, then recovery within the registered
-/// content-change criteria.
+/// section on a warmed process: budget 0 before the copy, then recovery within
+/// the registered content-change criteria.
 #[test]
 #[ignore = "loads a full local Qwen3.6 MoE target and the incoai DFlash2 draft"]
 #[serial(mlx_metal)]
@@ -1746,7 +1764,7 @@ fn qwen36_moe_dflash2_window_cost_recovers_after_base64_on_copy() {
         eprintln!("skip: set QWEN36_MOE_DFLASH2_TARGET and DFLASH2_MODEL");
         return;
     };
-    let prompt_ids = chat_prompt(&fixture, &format!("{BASE64_CONTENT}{COPY_SECTION}"));
+    let prompt_ids = chat_prompt(&fixture, &base64_then_copy());
     let run = run_window_cost_tracked(&fixture, "base64-copy", &prompt_ids, 700, true);
     assert_recovers_on_copy_section(&fixture, &run);
 }
