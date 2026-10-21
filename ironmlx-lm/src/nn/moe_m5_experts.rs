@@ -35,6 +35,9 @@ const HEADER: i32 = 4;
 /// Widest token slice per dispatch chain; wider batches run in slices
 /// (row invariance keeps the result identical).
 const MAX_SLICE_TOKENS: i32 = 2048;
+/// Fewest tokens at which the down pass reads precomputed activation group
+/// sums (one dispatch more, every column tile's sums saved).
+const MIN_ACT_SUM_TOKENS: i32 = 256;
 
 static AB_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -542,7 +545,12 @@ const DOWN: &str = r#"
     auto P = op.template get_destination_cooperative_tensor<decltype(a), decltype(b), float>();
     op.run(a, b, P);
     float xs0, xs1;
+#ifdef IRONMLX_DOWN_SUMS
+    xs0 = fm < rows ? XS[(row0 + fm) * KG + g] : 0.0f;
+    xs1 = fm + 8 < rows ? XS[(row0 + fm + 8) * KG + g] : 0.0f;
+#else
     xsum(g, xs0, xs1);
+#endif
     for (int f = 0; f < NF; f++)
       for (int r = 0; r < 2; r++)
         for (int j = 0; j < 4; j++) {
@@ -565,6 +573,19 @@ const DOWN: &str = r#"
         const int n = n0 + f * 16 + fn;
         for (int j = 0; j < 4; j++) dn[(row0 + m) * N + n + j] = bfloat(C[f * 8 + r * 4 + j]);
       }
+"#;
+
+// Group sums of the activations for the down pass: per row and group of 64,
+// eight vectors of eight added in order from zero, as the pass's own sum.
+const ACT_SUMS: &str = r#"
+  const uint g = thread_position_in_grid.x;
+  const uint r = thread_position_in_grid.y;
+  constexpr uint KG = I / 64;
+  if (g >= KG) return;
+  const device vec<bfloat, 8>* xp = (const device vec<bfloat, 8>*)((const device bfloat*)act + ulong(r) * I + g * 64);
+  float acc = 0.0f;
+  for (int w = 0; w < 8; w++) { const vec<bfloat, 8> v = xp[w]; for (int i = 0; i < 8; i++) acc += float(v[i]); }
+  sums[ulong(r) * KG + g] = acc;
 "#;
 
 const COMBINE: &str = r#"
@@ -709,6 +730,8 @@ fn run(
     static GATHER_K: OnceLock<MetalKernel> = OnceLock::new();
     static GATE_UP_K: OnceLock<MetalKernel> = OnceLock::new();
     static DOWN_K: OnceLock<MetalKernel> = OnceLock::new();
+    static ACT_SUM_K: OnceLock<MetalKernel> = OnceLock::new();
+    static DOWN_SUMS_K: OnceLock<MetalKernel> = OnceLock::new();
     static COMBINE_K: OnceLock<MetalKernel> = OnceLock::new();
 
     let packed = kernel(
@@ -785,12 +808,52 @@ fn run(
     .dispatch()?
     .take_at(0)?;
 
+    // Wide batches: the activation group sums once per row, not per column
+    // tile of the down pass.
+    let act_sums = (t >= MIN_ACT_SUM_TOKENS)
+        .then(|| -> Result<Array> {
+            kernel(
+                &ACT_SUM_K,
+                "ironmlx_moe_m5_act_sums_v1",
+                &["act"],
+                &["sums"],
+                ACT_SUMS.to_string(),
+                false,
+            )?
+            .dispatch_builder()
+            .inputs(&[&act])
+            .output_shapes(&[Shape::from(&[routes, i / 64][..])])
+            .output_dtypes(&[Dtype::Float32])
+            .grid(i / 64, routes, 1)
+            .threadgroup((i / 64).min(256), 1, 1)
+            .template_int("I", i)
+            .stream(target)
+            .dispatch()?
+            .take_at(0)
+            .map_err(Into::into)
+        })
+        .transpose()?;
     let dn = kernel(
-        &DOWN_K,
-        "ironmlx_moe_m5_down_v2",
-        &["X", "packed", "Wd", "SBd", "Wsd", "SBsd"],
+        if act_sums.is_some() {
+            &DOWN_SUMS_K
+        } else {
+            &DOWN_K
+        },
+        if act_sums.is_some() {
+            "ironmlx_moe_m5_down_sums_v1"
+        } else {
+            "ironmlx_moe_m5_down_v2"
+        },
+        &["X", "packed", "Wd", "SBd", "Wsd", "SBsd", "XS"],
         &["dn"],
-        format!("{PROLOGUE}{DOWN}"),
+        format!(
+            "{}{PROLOGUE}{DOWN}",
+            if act_sums.is_some() {
+                "#define IRONMLX_DOWN_SUMS 1\n"
+            } else {
+                ""
+            }
+        ),
         true,
     )?
     .dispatch_builder()
@@ -801,6 +864,7 @@ fn run(
         &w.down.sb,
         &w.shared_down.weight,
         &w.shared_down.sb,
+        act_sums.as_ref().unwrap_or(&act),
     ])
     .output_shapes(&[Shape::from(&[routes, h][..])])
     .output_dtypes(&[Dtype::Bfloat16])
@@ -1039,6 +1103,73 @@ mod tests {
             .sqrt();
         eprintln!("moe m5 experts rel_rms_error={}", err / rms);
         assert!(err / rms < 0.02, "relative rms error {}", err / rms);
+        Ok(())
+    }
+
+    /// A wide batch (down pass reading precomputed activation group sums)
+    /// gives every token the output of narrow batches (sums inside the pass)
+    /// bit for bit.
+    #[test]
+    #[serial(mlx_metal)]
+    fn wide_batch_activation_sums_match_narrow_batches_bit_for_bit() -> Result<()> {
+        if let Ok(root) = std::env::var("MLX_DIR") {
+            mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib"))?;
+        }
+        if !crate::nn::m5_affine4::tensor_unit_available() {
+            return Ok(());
+        }
+        let (e, h, i, kt) = (16_i32, 512_i32, 128_i32, 4_usize);
+        let store = Store::new(native(e, h, i)?).expect("supported");
+        let t = 301_usize;
+        assert!(t as i32 >= MIN_ACT_SUM_TOKENS && (t as i32) < 2 * MIN_ACT_SUM_TOKENS);
+        let x: Vec<f32> = (0..t * h as usize)
+            .map(|v| (((v * 7919) % 211) as f32 - 105.0) * 0.01)
+            .collect();
+        let inds: Vec<u32> = (0..t)
+            .flat_map(|tok| {
+                (0..kt).map(move |j| {
+                    let hot = (tok * 13 + j * 5) % 23;
+                    (if hot < 9 {
+                        j
+                    } else {
+                        (tok * 7 + j * 3) % e as usize
+                    }) as u32
+                })
+            })
+            .collect();
+        let scores: Vec<f32> = (0..t * kt).map(|v| 0.05 + (v % 7) as f32 * 0.03).collect();
+        let gates: Vec<f32> = (0..t).map(|v| 0.3 + (v % 5) as f32 * 0.1).collect();
+        let run_rows = |rows: std::ops::Range<usize>| -> Result<Vec<u32>> {
+            let n = rows.len() as i32;
+            let xa: Array = (
+                &x[rows.start * h as usize..rows.end * h as usize],
+                &[n, h][..],
+            )
+                .try_into()?;
+            let ia: Array =
+                (&inds[rows.start * kt..rows.end * kt], &[n, kt as i32][..]).try_into()?;
+            let sa: Array =
+                (&scores[rows.start * kt..rows.end * kt], &[n, kt as i32][..]).try_into()?;
+            let ga: Array = (&gates[rows.clone()], &[n, 1][..]).try_into()?;
+            let y = forward_on(
+                &store,
+                &astype(&xa, Dtype::Bfloat16)?,
+                &ia,
+                &sa,
+                &astype(&ga, Dtype::Bfloat16)?,
+                None,
+                StreamOrDevice::default(),
+            )?;
+            Ok(astype(&y, Dtype::Float32)?
+                .to_vec::<f32>()?
+                .iter()
+                .map(|v| v.to_bits())
+                .collect())
+        };
+        let wide = run_rows(0..t)?;
+        let mut narrow = run_rows(0..150)?;
+        narrow.extend(run_rows(150..t)?);
+        assert!(wide == narrow, "wide batch differs from narrow batches");
         Ok(())
     }
 

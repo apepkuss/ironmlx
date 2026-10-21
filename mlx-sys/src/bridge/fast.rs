@@ -140,5 +140,37 @@ pub mod ffi {
             device_type: u8,
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        #[allow(clippy::too_many_arguments)]
+        fn fast_tree_attention(
+            queries: &MlxArray,
+            keys: &MlxArray,
+            values: &MlxArray,
+            tail_keys: &MlxArray,
+            tail_values: &MlxArray,
+            limits: &MlxArray,
+            scale: f32,
+            gqa: i32,
+            key_count: i32,
+            tail_from: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        fn fast_decode_block_keys(keys: i32) -> i32;
+
+        fn fast_window_attention(
+            queries: &MlxArray,
+            keys: &MlxArray,
+            values: &MlxArray,
+            scale: f32,
+            window_start: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
     }
 }

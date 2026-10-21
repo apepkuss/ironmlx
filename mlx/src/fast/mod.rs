@@ -209,6 +209,81 @@ pub fn scaled_dot_product_attention(
     scaled_dot_product_attention_on(queries, keys, values, scale, mask_mode, mask_arr, sinks, ())
 }
 
+/// Split-K NAX attention of a short B1 head-dim-128 query block in which
+/// query row `r` sees keys `[window_start + r, keys)` (no mask array).
+/// `Ok(None)` when the shape or device is not supported (or the experimental
+/// attention library is not configured).
+pub fn window_attention_on(
+    queries: &Array,
+    keys: &Array,
+    values: &Array,
+    scale: f32,
+    window_start: i32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Option<Array>> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = mlx_sys::fast::ffi::fast_window_attention(
+        queries.as_inner(),
+        keys.as_inner(),
+        values.as_inner(),
+        scale,
+        window_start,
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
+    Ok((!inner.is_null()).then(|| Array::from_inner(inner)))
+}
+
+/// Split-K D256 NAX attention of a B1 flat draft tree. `queries` are
+/// `[1, Hkv, slots * gqa, 256]` node-major (two slots per 16-row part, both on
+/// one root-to-leaf path); `tail_keys` / `tail_values` `[1, Hkv, parts, TL,
+/// 256]` hold each part's keys from `tail_from` (a multiple of 32) in the
+/// positions a linear verify of the part's path gives them; `limits` (int32
+/// `[slots]`) each slot's key count. Each row equals the row of the linear
+/// split-K verify of its path. `Ok(None)` when unsupported.
+#[allow(clippy::too_many_arguments)]
+pub fn tree_attention_on(
+    queries: &Array,
+    keys: &Array,
+    values: &Array,
+    tail_keys: &Array,
+    tail_values: &Array,
+    limits: &Array,
+    scale: f32,
+    gqa: i32,
+    key_count: i32,
+    tail_from: i32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Option<Array>> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = mlx_sys::fast::ffi::fast_tree_attention(
+        queries.as_inner(),
+        keys.as_inner(),
+        values.as_inner(),
+        tail_keys.as_inner(),
+        tail_values.as_inner(),
+        limits.as_inner(),
+        scale,
+        gqa,
+        key_count,
+        tail_from,
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
+    Ok((!inner.is_null()).then(|| Array::from_inner(inner)))
+}
+
+/// Keys per split-K block of a D256 decode / verify call over `keys` keys.
+pub fn decode_block_keys(keys: i32) -> i32 {
+    mlx_sys::fast::ffi::fast_decode_block_keys(keys)
+}
+
 /// Stream-targeted variant of [`scaled_dot_product_attention`].
 #[allow(clippy::too_many_arguments)]
 pub fn scaled_dot_product_attention_on(

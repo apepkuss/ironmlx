@@ -9,7 +9,7 @@ Compiled by `../build.rs` into `prefill_qmm_mtile.metallib` and
 | library | source | MLX kernel headers | sha256 with Apple metal 32023.883 |
 | --- | --- | --- | --- |
 | QMM M-tile (`ironmlx_qmm_bm128_aligned`) | `qmm_mtile_probe.metal` | `vendor/mlx-0.32.2` | 961833aaa3cc02ab8c41d25aad79cc5ab0c6bbe12da2851f5bc21511ede2b633 |
-| D256 NAX attention (`ironmlx_probe_dsplit_bf16`) | `nax_dsplit_probe.metal` | `vendor/mlx-0.32.3` | 7d9281498c7fcc4047e47fc347c4ee64f8af62786476d0ebb4290fb1db9567c9 |
+| D256 NAX attention (prefill `ironmlx_probe_dsplit_bf16`; split-K decode/verify `ironmlx_splitk_d256_pass1_wm1` + `ironmlx_splitk_d256_pass2`, flat-tree verify `ironmlx_splitk_d256_tree_pass1_wm1` + `ironmlx_splitk_d256_tree_pass2`, drafter window attention `ironmlx_splitk_d128_pass1_wm1` + `ironmlx_splitk_d128_pass2`) | `nax_dsplit_probe.metal` | `vendor/mlx-0.32.3` | c58241a669a871783bd6918059ea9f42484ee64ac71ac67db7b5788a16464d36 |
 
 The source file names are part of the compiled output (static-initializer
 symbol), so they are kept as qualified. `vendor/` holds only the MLX kernel

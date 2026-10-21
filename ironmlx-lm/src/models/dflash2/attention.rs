@@ -14,7 +14,23 @@ pub(super) struct DFlash2KvCache {
     processed: i32,
     max_size: i32,
     batch_size: usize,
+    /// Single-row backing K/V of capacity `max_size + PROPOSAL_ROOM`: the
+    /// retained window is `[start, start + len)` (what `keys`/`values` view)
+    /// and each window writes its context and proposal rows in place after it,
+    /// instead of copying the whole window twice.
+    backing: Option<KvBacking>,
 }
+
+#[derive(Clone)]
+struct KvBacking {
+    keys: Array,
+    values: Array,
+    start: i32,
+}
+
+/// Rows beyond the retained window the backing buffer reserves for appends
+/// and proposals before it is compacted.
+const PROPOSAL_ROOM: i32 = 512;
 
 impl DFlash2KvCache {
     pub(super) fn new(max_size: i32, initial_offset: i32) -> Result<Self> {
@@ -29,6 +45,7 @@ impl DFlash2KvCache {
             processed: initial_offset,
             max_size,
             batch_size: 1,
+            backing: None,
         })
     }
 
@@ -95,6 +112,7 @@ impl DFlash2KvCache {
             processed: first.processed,
             max_size: first.max_size,
             batch_size: rows.len() * first.batch_size,
+            backing: None,
         })
     }
 
@@ -123,6 +141,7 @@ impl DFlash2KvCache {
             processed: self.processed,
             max_size: self.max_size,
             batch_size: 1,
+            backing: None,
         })
     }
 
@@ -149,6 +168,7 @@ impl DFlash2KvCache {
             ));
         }
         let append = keys.shape().as_slice()[2];
+        self.backing = None;
         let mut combined_keys = match &self.keys {
             Some(previous) => mlx::ops::shape::concatenate_on(&[previous, keys], 2, target)?,
             None => keys.clone(),
@@ -187,6 +207,153 @@ impl DFlash2KvCache {
         self.values = Some(combined_values.clone());
         Ok((combined_keys, combined_values))
     }
+
+    /// Append the context K/V like [`Self::append_on`] and return the retained
+    /// window followed by the proposal K/V (`concat(window, proposal)` on the
+    /// sequence axis), written in place into the single-row backing buffer.
+    /// The returned arrays hold exactly the values of the copying path.
+    fn append_with_proposal_on(
+        &mut self,
+        keys: &Array,
+        values: &Array,
+        proposal_keys: &Array,
+        proposal_values: &Array,
+        target: StreamOrDevice,
+    ) -> Result<(Array, Array)> {
+        let dims = keys.shape();
+        let dims = dims.as_slice();
+        let append = dims[2];
+        let proposal = proposal_keys.shape().as_slice()[2];
+        let fits = self.batch_size == 1
+            && dims.len() == 4
+            && dims[0] == 1
+            && values.shape().as_slice() == dims
+            && append + proposal <= PROPOSAL_ROOM
+            && proposal_values.shape().as_slice() == proposal_keys.shape().as_slice();
+        if !fits {
+            let (cached_k, cached_v) = self.append_on(keys, values, target)?;
+            return Ok((
+                mlx::ops::shape::concatenate_on(&[&cached_k, proposal_keys], 2, target)?,
+                mlx::ops::shape::concatenate_on(&[&cached_v, proposal_values], 2, target)?,
+            ));
+        }
+        let capacity = self.max_size + PROPOSAL_ROOM;
+        let len = self.len();
+        let kept = (len + append).min(self.max_size);
+        // Retained rows of the current window that stay after this append.
+        let keep_old = kept - append;
+        let mut backing = match self.backing.take() {
+            Some(backing) if backing.start + len + append + proposal <= capacity => backing,
+            existing => {
+                // (Re)build the buffer from the rows that stay: at start, after
+                // compaction, or when the window was set by a row stack/slice.
+                let old = match (&existing, &self.keys, &self.values) {
+                    (Some(backing), _, _) => Some((
+                        slice_seq(
+                            &backing.keys,
+                            backing.start + len - keep_old,
+                            backing.start + len,
+                            target,
+                        )?,
+                        slice_seq(
+                            &backing.values,
+                            backing.start + len - keep_old,
+                            backing.start + len,
+                            target,
+                        )?,
+                    )),
+                    (None, Some(k), Some(v)) => Some((
+                        slice_seq(k, len - keep_old, len, target)?,
+                        slice_seq(v, len - keep_old, len, target)?,
+                    )),
+                    _ => None,
+                };
+                let pad = |reference: &Array, rows: i32| -> Result<Array> {
+                    let d = reference.shape();
+                    let d = d.as_slice();
+                    Ok(Array::zeros_on(
+                        &[d[0], d[1], rows, d[3]][..],
+                        reference.dtype(),
+                        target,
+                    )?)
+                };
+                let (bk, bv) = match old {
+                    Some((ok, ov)) if keep_old > 0 => (
+                        mlx::ops::shape::concatenate_on(
+                            &[&ok, &pad(keys, capacity - keep_old)?],
+                            2,
+                            target,
+                        )?,
+                        mlx::ops::shape::concatenate_on(
+                            &[&ov, &pad(values, capacity - keep_old)?],
+                            2,
+                            target,
+                        )?,
+                    ),
+                    _ => (pad(keys, capacity)?, pad(values, capacity)?),
+                };
+                // `len` rows conceptually precede the write position: shift
+                // so the kept rows end right where this append starts.
+                KvBacking {
+                    keys: bk,
+                    values: bv,
+                    start: keep_old - len,
+                }
+            }
+        };
+        let write = backing.start + len;
+        let rows_k = mlx::ops::shape::concatenate_on(&[keys, proposal_keys], 2, target)?;
+        let rows_v = mlx::ops::shape::concatenate_on(&[values, proposal_values], 2, target)?;
+        let update = |buffer: &Array, rows: &Array| -> Result<Array> {
+            let d = rows.shape();
+            let d = d.as_slice();
+            Ok(mlx::ops::indexing::slice_update_on(
+                buffer,
+                rows,
+                &[0_i32, 0, write, 0][..],
+                &[d[0], d[1], write + d[2], d[3]][..],
+                &[1_i32, 1, 1, 1][..],
+                target,
+            )?)
+        };
+        backing.keys = update(&backing.keys, &rows_k)?;
+        backing.values = update(&backing.values, &rows_v)?;
+        let first = write + append - kept;
+        let all_k = slice_seq(&backing.keys, first, write + append + proposal, target)?;
+        let all_v = slice_seq(&backing.values, first, write + append + proposal, target)?;
+        self.keys = Some(slice_seq(&backing.keys, first, write + append, target)?);
+        self.values = Some(slice_seq(&backing.values, first, write + append, target)?);
+        backing.start = first;
+        self.backing = Some(backing);
+        self.processed = self
+            .processed
+            .checked_add(append)
+            .ok_or_else(|| anyhow!("DFlash2 cache position overflow"))?;
+        Ok((all_k, all_v))
+    }
+}
+
+/// Whether a context projection of `rows` rows ending at position `end` is a
+/// long-context catch-up (the first window after a long prompt ingests up to
+/// a whole sliding window): it runs the ordinary projection instead of the
+/// product-stable one, whose row-at-a-time accumulation makes thousands of
+/// rows slow. Only draft values change; window-sized contexts and short
+/// prompts keep the product-stable route.
+fn long_context_catch_up(rows: i32, end: i32) -> bool {
+    rows > 64 && end > 8192
+}
+
+/// Rows `[from, to)` of a `[B, H, S, D]` array along the sequence axis.
+fn slice_seq(array: &Array, from: i32, to: i32, target: StreamOrDevice) -> Result<Array> {
+    let d = array.shape();
+    let d = d.as_slice();
+    Ok(mlx::ops::indexing::slice_strided_on(
+        array,
+        &[0_i32, 0, from, 0][..],
+        &[d[0], d[1], to, d[3]][..],
+        &[1_i32, 1, 1, 1][..],
+        target,
+    )?)
 }
 
 pub(super) struct DFlash2Attention {
@@ -371,7 +538,8 @@ impl DFlash2Attention {
         // the fixed-width proposal and MLP projections through the slower
         // product-stable kernel.
         let (context_k, context_v) = {
-            let _product_stable_qmm = crate::nn::product_stable_qmm::scope();
+            let _product_stable_qmm = (!long_context_catch_up(context_len, proposal_start))
+                .then(crate::nn::product_stable_qmm::scope);
             match &self.input_projections {
                 DFlash2InputProjections::Separate { k, v, .. }
                 | DFlash2InputProjections::Fused { k, v, .. } => (
@@ -433,19 +601,38 @@ impl DFlash2Attention {
             target,
         )?;
 
-        let (cached_k, cached_v) = cache.append_on(&context_k, &context_v, target)?;
-        let keys = mlx::ops::shape::concatenate_on(&[&cached_k, &proposal_k], 2, target)?;
-        let values = mlx::ops::shape::concatenate_on(&[&cached_v, &proposal_v], 2, target)?;
-        let output = mlx::fast::scaled_dot_product_attention_on(
+        let (keys, values) = cache.append_with_proposal_on(
+            &context_k,
+            &context_v,
+            &proposal_k,
+            &proposal_v,
+            target,
+        )?;
+        // The split-K NAX window kernel reads each KV head's keys once for its
+        // GQA heads x block rows (the masked vector kernel rereads them per
+        // row); query row r sees keys from the window start + r, as `mask`.
+        let context_after = keys.shape().as_slice()[2] - query_len;
+        let window = mlx::fast::window_attention_on(
             &q,
             &keys,
             &values,
             self.scale,
-            "",
-            Some(mask),
-            None,
+            context_after - cache.max_size(),
             target,
         )?;
+        let output = match window {
+            Some(output) => output,
+            None => mlx::fast::scaled_dot_product_attention_on(
+                &q,
+                &keys,
+                &values,
+                self.scale,
+                "",
+                Some(mask),
+                None,
+                target,
+            )?,
+        };
         let output = output
             .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?
             .reshape_on((batch, query_len, self.num_heads * self.head_dim), target)?;
@@ -550,7 +737,8 @@ impl DFlash2Attention {
                 .reshape_on((1, query_len, self.num_heads, self.head_dim), target)?
                 .transpose_axes_on(&[0_i32, 2, 1, 3][..], target)?;
             let (context_k, context_v) = {
-                let _product_stable_qmm = crate::nn::product_stable_qmm::scope();
+                let _product_stable_qmm = (!long_context_catch_up(context_len, proposal_start))
+                    .then(crate::nn::product_stable_qmm::scope);
                 match &self.input_projections {
                     DFlash2InputProjections::Separate { k, v, .. }
                     | DFlash2InputProjections::Fused { k, v, .. } => (
@@ -645,6 +833,10 @@ impl DFlash2Attention {
             ctx_lens.push(context_len);
         }
         let total_ctx: i32 = ctx_lens.iter().sum();
+        let catch_up = contexts.iter().zip(caches.iter()).all(|(context, cache)| {
+            let context_len = context.shape().as_slice()[1];
+            long_context_catch_up(context_len, cache.processed() + context_len)
+        });
         let q_pos: Array = (&q_pos[..], &[batch * query_len][..]).try_into()?;
         let ctx_pos: Array = (&ctx_pos[..], &[total_ctx][..]).try_into()?;
         let q_all = norm_rope_on(
@@ -667,7 +859,7 @@ impl DFlash2Attention {
         let context_refs = contexts.iter().collect::<Vec<_>>();
         let ctx = mlx::ops::shape::concatenate_on(&context_refs, 1, target)?;
         let (ck, cv) = {
-            let _product_stable_qmm = crate::nn::product_stable_qmm::scope();
+            let _product_stable_qmm = (!catch_up).then(crate::nn::product_stable_qmm::scope);
             match &self.input_projections {
                 DFlash2InputProjections::Separate { k, v, .. }
                 | DFlash2InputProjections::Fused { k, v, .. } => {
@@ -1020,5 +1212,60 @@ mod tests {
             .expect("split fourth empty row");
         assert_eq!(restored.processed(), 4);
         assert_eq!(restored.len(), 0);
+    }
+
+    #[test]
+    fn in_place_draft_cache_returns_the_copying_path_values() {
+        // Window 40, so the 512-row proposal room compacts several times; a
+        // large append and a row restack take the copying path in between.
+        let target = StreamOrDevice::default();
+        let mut seed = 3_u64;
+        let mut rows = |count: i32| -> Array {
+            let values = (0..2 * count * 4)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    (seed >> 40) as f32
+                })
+                .collect::<Vec<_>>();
+            (&values[..], &[1_i32, 2, count, 4][..])
+                .try_into()
+                .expect("rows")
+        };
+        let mut in_place = DFlash2KvCache::new(40, 0).expect("in-place cache");
+        let mut copying = DFlash2KvCache::new(40, 0).expect("copying cache");
+        for step in 0..400 {
+            let append = match step {
+                0 => 30,
+                150 => 600,
+                _ => 1 + (step * 7) % 9,
+            };
+            if step == 220 {
+                in_place = DFlash2KvCache::stack_rows_on(&[&in_place], target)
+                    .and_then(|stacked| stacked.row_on(0, target))
+                    .expect("restack");
+            }
+            let proposal = 1 + step % 8;
+            let (k, v) = (rows(append), rows(append));
+            let (pk, pv) = (rows(proposal), rows(proposal));
+            let (got_k, got_v) = in_place
+                .append_with_proposal_on(&k, &v, &pk, &pv, target)
+                .expect("in-place append");
+            let (cached_k, cached_v) = copying.append_on(&k, &v, target).expect("append");
+            let want_k = mlx::ops::shape::concatenate_on(&[&cached_k, &pk], 2, target).unwrap();
+            let want_v = mlx::ops::shape::concatenate_on(&[&cached_v, &pv], 2, target).unwrap();
+            assert_eq!(got_k.shape(), want_k.shape(), "step {step}");
+            assert_eq!(
+                got_k.to_vec::<f32>().unwrap(),
+                want_k.to_vec::<f32>().unwrap(),
+                "step {step}"
+            );
+            assert_eq!(
+                got_v.to_vec::<f32>().unwrap(),
+                want_v.to_vec::<f32>().unwrap(),
+                "step {step}"
+            );
+            assert_eq!(in_place.processed(), copying.processed());
+            assert_eq!(in_place.len(), copying.len());
+        }
     }
 }

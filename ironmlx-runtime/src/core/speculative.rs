@@ -779,6 +779,20 @@ pub(crate) struct MtpDraftPolicyRegime {
     kv_state: MtpDraftPolicyKvState,
 }
 
+impl MtpDraftPolicyRegime {
+    pub(crate) fn context_bucket(self) -> MtpDraftCapContextBucket {
+        self.context_bucket
+    }
+
+    /// The same execution shape in another context bucket.
+    pub(crate) fn with_context_bucket(self, context_bucket: MtpDraftCapContextBucket) -> Self {
+        Self {
+            context_bucket,
+            ..self
+        }
+    }
+}
+
 impl MtpDraftPolicyWindow {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_stats_delta(

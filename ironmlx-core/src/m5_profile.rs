@@ -48,6 +48,16 @@ pub mod settings {
     pub const PREFILL_CHUNK_CACHE_RESET: &str = "IRONMLX_EXPERIMENTAL_PREFILL_CHUNK_CACHE_RESET";
     pub const PREFILL_QMM_MTILE_METALLIB: &str = "IRONMLX_EXPERIMENTAL_PREFILL_QMM_MTILE_METALLIB";
     pub const PREFILL_D256_NAX_METALLIB: &str = "IRONMLX_EXPERIMENTAL_PREFILL_D256_NAX_METALLIB";
+    /// Fewest keys at which a causal prefill chunk of any GQA layout runs
+    /// the D256 NAX attention (0: only the dense 27B layout).
+    pub const PREFILL_D256_NAX_MIN_KEYS: &str = "IRONMLX_EXPERIMENTAL_PREFILL_D256_NAX_MIN_KEYS";
+    /// Fewest keys at which query blocks of at most 8 rows (decode and
+    /// speculative verify) run the split-K D256 NAX attention (0: never).
+    pub const DECODE_D256_NAX_MIN_KEYS: &str = "IRONMLX_EXPERIMENTAL_DECODE_D256_NAX_MIN_KEYS";
+    /// Prefill QMM of every affine4/g64 chunk shape through the BM128 M-tile
+    /// kernel (bit-identical to MLX's).
+    pub const PREFILL_QMM_MTILE_ANY_SHAPE: &str =
+        "IRONMLX_EXPERIMENTAL_PREFILL_QMM_MTILE_ANY_SHAPE";
     pub const MLX_CACHE_MAX_MIB: &str = "IRONMLX_EXPERIMENTAL_MLX_CACHE_MAX_MIB";
     pub const QEMBEDDING_RUNTIME_COUNT: &str = "IRONMLX_EXPERIMENTAL_QEMBEDDING_RUNTIME_COUNT";
     /// Wire the loaded DFlash2 weights (MLX residency sets) at serve start.
@@ -70,6 +80,14 @@ pub mod settings {
     /// GatedDelta speculative commit: replay only each row's accepted steps,
     /// state only.
     pub const GDN_COMMIT_KERNEL: &str = "IRONMLX_EXPERIMENTAL_GDN_COMMIT_KERNEL";
+    /// First token position whose GatedDeltaNet prefill recurrence runs the
+    /// long-chunk kernel (another summation order; unset: never).
+    pub const GDN_LONG_SCAN_MIN_POSITION: &str = "IRONMLX_EXPERIMENTAL_GDN_LONG_SCAN_MIN_POSITION";
+    /// Long-context B1 DFlash2: a window whose adaptive draft budget is at
+    /// most this many tokens verifies a flat draft tree of that many nodes
+    /// (on the split-K tree attention) instead of a linear draft.
+    pub const DFLASH2_LONG_CONTEXT_TREE_NODES: &str =
+        "IRONMLX_EXPERIMENTAL_DFLASH2_LONG_CONTEXT_TREE_NODES";
     /// DFlash2 drafter projections of ragged multi-request drafts on the M5
     /// affine4 route (single-request drafts keep the native projections).
     pub const DFLASH2_DRAFT_M5: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_DRAFT_M5";
@@ -209,6 +227,10 @@ const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
     (settings::QEMBEDDING_RUNTIME_COUNT, "1"),
     (settings::MLX_CACHE_MAX_MIB, "512"),
     (settings::WIRED_WEIGHTS, "1"),
+    (settings::PREFILL_D256_NAX_MIN_KEYS, "2048"),
+    (settings::DECODE_D256_NAX_MIN_KEYS, "8193"),
+    (settings::GDN_LONG_SCAN_MIN_POSITION, "2048"),
+    (settings::PREFILL_QMM_MTILE_ANY_SHAPE, "1"),
 ];
 
 /// Default flat-tree size of the Qwen3.6 MoE profile when the option is not
@@ -526,22 +548,54 @@ pub fn install_for_target(
         // The prefill kernel libraries and masked softmax belong to the
         // dense lane qualification.
         let active = status == M5ProfileStatus::Active && target == M5ProfileTarget::Qwen35Dense;
+        // Long causal prefill chunks of the MoE target take the D256 NAX
+        // attention from its minimum key count (more accurate than MLX's D256
+        // fallback against an f32 reference, and faster on long prompts).
+        let moe_active = status == M5ProfileStatus::Active && target == M5ProfileTarget::Qwen36Moe;
+        let d256_min_keys = setting_with(
+            std::env::var(settings::PREFILL_D256_NAX_MIN_KEYS).ok(),
+            moe_active.then_some(MOE_PROFILE_VALUES),
+            settings::PREFILL_D256_NAX_MIN_KEYS,
+        )
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|&keys| keys > 0);
+        // Decode and verify query blocks of the MoE target take the split-K
+        // D256 NAX attention from its minimum key count (a verify grouping
+        // boundary, so no query group straddles it).
+        let decode_min_keys = setting_with(
+            std::env::var(settings::DECODE_D256_NAX_MIN_KEYS).ok(),
+            moe_active.then_some(MOE_PROFILE_VALUES),
+            settings::DECODE_D256_NAX_MIN_KEYS,
+        )
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|&keys| keys > 0);
+        // MoE prefill projections take the BM128 QMM M tile at every shape.
+        let qmm_any_shape = setting_with(
+            std::env::var(settings::PREFILL_QMM_MTILE_ANY_SHAPE).ok(),
+            moe_active.then_some(MOE_PROFILE_VALUES),
+            settings::PREFILL_QMM_MTILE_ANY_SHAPE,
+        )
+        .as_deref()
+            == Some("1");
         let prefill_libraries = vec![
             configure_library(
                 "prefill_qmm_mtile",
                 settings::PREFILL_QMM_MTILE_METALLIB,
                 mlx::metal::prefill_shaders::PREFILL_QMM_MTILE_METALLIB,
-                active,
+                active || qmm_any_shape,
                 mlx::metal::set_prefill_qmm_mtile_library,
             ),
             configure_library(
                 "prefill_d256_nax",
                 settings::PREFILL_D256_NAX_METALLIB,
                 mlx::metal::prefill_shaders::PREFILL_D256_NAX_METALLIB,
-                active,
+                active || d256_min_keys.is_some() || decode_min_keys.is_some(),
                 mlx::metal::set_prefill_d256_nax_library,
             ),
         ];
+        mlx::metal::set_prefill_d256_nax_min_keys(d256_min_keys.unwrap_or(0));
+        mlx::metal::set_decode_d256_nax_min_keys(decode_min_keys.unwrap_or(0));
+        mlx::metal::set_prefill_qmm_mtile_any_shape(qmm_any_shape);
         let masked_softmax = setting_with(
             std::env::var(settings::PREFILL_MASKED_SOFTMAX).ok(),
             active.then_some(PROFILE_VALUES),
@@ -856,7 +910,7 @@ mod tests {
         );
         assert_eq!(
             mlx::metal::prefill_shaders::PREFILL_D256_NAX_METALLIB.len(),
-            32_392
+            121_240
         );
     }
 

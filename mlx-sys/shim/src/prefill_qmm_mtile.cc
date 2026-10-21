@@ -41,9 +41,10 @@ class ExperimentalPrefillQMMMtile final : public mx::UnaryPrimitive {
         return;
       }
     }
-    constexpr int m = 2048, bm = 128;
-    const int n = down ? 5120 : 34816;
-    const int k = down ? 17408 : 5120;
+    constexpr int bm = 128;
+    const int k = in[0].shape(-1);
+    const int n = in[1].shape(0);
+    const int m = int(in[0].size() / k);
     out.set_data(mx::allocator::malloc(out.nbytes()));
     auto& d = mx::metal::device(stream().device);
     auto lib = d.get_library("ironmlx_experimental_prefill_qmm_mtile", library_);
@@ -64,7 +65,7 @@ class ExperimentalPrefillQMMMtile final : public mx::UnaryPrimitive {
     enc.set_bytes(k, 5);
     enc.set_bytes(n, 6);
     enc.set_bytes(m, 7);
-    enc.dispatch_threadgroups(MTL::Size(n/64, m/bm, 1), MTL::Size(32, 2, 4));
+    enc.dispatch_threadgroups(MTL::Size(n / 64, (m + bm - 1) / bm, 1), MTL::Size(32, 2, 4));
     static std::once_flag witness[2];
     std::call_once(witness[down ? 1 : 0], [kernel, down] {
       std::fprintf(stderr,
@@ -92,9 +93,17 @@ std::optional<mlx::core::array> experimental_prefill_qmm_mtile(
                     (x.ndim() == 3 && x.shape() == mx::Shape{1, 2048, 5120});
   const bool down = (x.ndim() == 2 && x.shape() == mx::Shape{2048, 17408}) ||
                     (x.ndim() == 3 && x.shape() == mx::Shape{1, 2048, 17408});
-  const int n = down ? 5120 : 34816;
-  const int k = down ? 17408 : 5120;
-  if ((!gate && !down) ||
+  // Any prefill chunk (at least 256 rows) whose output width is a multiple
+  // of the 64-column tile and that MLX itself sends to its NAX QMM (more
+  // than 256 of its 32 x 32 split-K tiles, so no K split): the M tile does
+  // not change any output's reduction, so results equal MLX's bit for bit.
+  const auto rows = x.ndim() >= 2 && x.shape(-1) > 0 ? x.size() / x.shape(-1) : 0;
+  const bool any = prefill_qmm_mtile_any_shape() && x.ndim() >= 2 && w.ndim() == 2 &&
+      x.shape(-1) % 64 == 0 && w.shape(0) % 64 == 0 && rows >= 256 &&
+      ((w.shape(0) + 31) / 32) * ((rows + 31) / 32) > 256;
+  const int n = any ? w.shape(0) : down ? 5120 : 34816;
+  const int k = any ? x.shape(-1) : down ? 17408 : 5120;
+  if ((!gate && !down && !any) ||
       x.dtype() != mx::bfloat16 || w.dtype() != mx::uint32 ||
       scales.dtype() != mx::bfloat16 || biases->dtype() != mx::bfloat16 ||
       w.shape() != mx::Shape{n, k / 8} || scales.shape() != mx::Shape{n, k / 64} ||

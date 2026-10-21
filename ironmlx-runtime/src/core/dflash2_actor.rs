@@ -476,6 +476,37 @@ impl DFlash2Command {
     }
 }
 
+/// Prompts of at least this many tokens wait for the decoding streams
+/// (bounded by [`LONG_ADMISSION_MAX_DEFER`]) before their prefill.
+const LONG_ADMISSION_PROMPT_TOKENS: usize = 8192;
+/// Longest wait of a long prompt for the decoding streams.
+const LONG_ADMISSION_MAX_DEFER: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Whether the front pending request is a long prompt that waits for the
+/// streams decoding now. `deferred_since` tracks its wait; it resets when no
+/// deferral applies.
+fn defer_long_admission<T>(
+    pending: &VecDeque<DFlash2Command>,
+    active: &[T],
+    deferred_since: &mut Option<std::time::Instant>,
+) -> bool {
+    let long_front = pending.front().is_some_and(|command| match command {
+        DFlash2Command::Admit { request, .. } => {
+            request.prompt_ids.len() >= LONG_ADMISSION_PROMPT_TOKENS
+        }
+    });
+    if !long_front || active.is_empty() {
+        *deferred_since = None;
+        return false;
+    }
+    let since = *deferred_since.get_or_insert_with(std::time::Instant::now);
+    if since.elapsed() >= LONG_ADMISSION_MAX_DEFER {
+        *deferred_since = None;
+        return false;
+    }
+    true
+}
+
 fn order_admissions_shortest_first(pending: &mut VecDeque<DFlash2Command>, slots: usize) {
     let Some(priority) = pending.front().map(DFlash2Command::priority) else {
         return;
@@ -916,6 +947,8 @@ where
             crate::core::dflash2_step_diagnostic::DFlash2StepDiagnostic::from_env();
         let mut pending = VecDeque::<DFlash2Command>::new();
         let mut command_channel_open = true;
+        // When the front long prompt's admission was first deferred.
+        let mut long_deferred_since: Option<std::time::Instant> = None;
 
         loop {
             let forming_empty_batch = active.is_empty();
@@ -1062,6 +1095,13 @@ where
                     }
                 }
                 order_admissions_shortest_first(&mut pending, b_max - active.len());
+                // A long prompt's prefill stalls every decoding stream for
+                // seconds: it waits (bounded) until the streams decoding now
+                // have finished, then prefills; those streams keep their
+                // decode rate and their memory is released first.
+                if defer_long_admission(&pending, &active, &mut long_deferred_since) {
+                    break;
+                }
                 let Some(DFlash2Command::Admit { request, reply_tx }) = pending.pop_front() else {
                     break;
                 };
@@ -2427,6 +2467,31 @@ mod tests {
             .reply_is_closed());
         assert_eq!(in_flight.load(Ordering::Acquire), 1);
         assert_eq!(b_queued.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn long_prompt_admission_waits_for_decoding_streams_up_to_its_bound() {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let mut request = test_request();
+        request.prompt_ids = vec![1; LONG_ADMISSION_PROMPT_TOKENS];
+        let long = VecDeque::from([DFlash2Command::Admit { request, reply_tx }]);
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let mut request = test_request();
+        request.prompt_ids = vec![1; LONG_ADMISSION_PROMPT_TOKENS - 1];
+        let short = VecDeque::from([DFlash2Command::Admit { request, reply_tx }]);
+        let mut since = None;
+
+        // No decoding stream, or a shorter prompt: admitted at once.
+        assert!(!defer_long_admission::<()>(&long, &[], &mut since));
+        assert!(!defer_long_admission(&short, &[()], &mut since));
+        assert!(since.is_none());
+        // A long prompt waits while a stream decodes ...
+        assert!(defer_long_admission(&long, &[()], &mut since));
+        assert!(since.is_some());
+        // ... until its wait reaches the bound.
+        since = Some(std::time::Instant::now() - LONG_ADMISSION_MAX_DEFER);
+        assert!(!defer_long_admission(&long, &[()], &mut since));
+        assert!(since.is_none());
     }
 
     #[test]

@@ -51,15 +51,36 @@ mod ffi_bridge {
         /// off). Returns false if the setting was already read.
         fn set_prefill_d256_nax_library(path: &str) -> bool;
 
+        /// Fewest keys at which a causal chunk of any GQA layout takes the
+        /// D256 NAX attention (0: only the dense 27B layout). Returns false
+        /// if the setting was already read.
+        fn set_prefill_d256_nax_min_keys(keys: i32) -> bool;
+
+        /// Fewest keys at which a query block of at most 8 rows takes the
+        /// split-K D256 NAX attention (0: never). Returns false if the
+        /// setting was already read.
+        fn set_decode_d256_nax_min_keys(keys: i32) -> bool;
+
+        /// The split-K D256 NAX minimum key count if that attention can run
+        /// (library configured, NAX available), else 0. Resolves the
+        /// settings: call only after configuring them.
+        fn decode_d256_nax_active_min_keys() -> i32;
+
         /// Enable or disable the masked causal softmax prefill fallback.
         /// Returns false if the setting was already read.
         fn set_prefill_masked_softmax(enabled: bool) -> bool;
+
+        /// Run the BM128 QMM for every affine4/g64 prefill chunk shape.
+        /// Returns false if the setting was already read.
+        fn set_prefill_qmm_mtile_any_shape(enabled: bool) -> bool;
     }
 }
 
 pub mod ffi {
     pub use super::ffi_bridge::{
-        device_architecture, nax_available, set_metallib_path, set_prefill_d256_nax_library,
-        set_prefill_masked_softmax, set_prefill_qmm_mtile_library, start_capture, stop_capture,
+        decode_d256_nax_active_min_keys, device_architecture, nax_available,
+        set_decode_d256_nax_min_keys, set_metallib_path, set_prefill_d256_nax_library,
+        set_prefill_d256_nax_min_keys, set_prefill_masked_softmax, set_prefill_qmm_mtile_any_shape,
+        set_prefill_qmm_mtile_library, start_capture, stop_capture,
     };
 }

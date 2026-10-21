@@ -476,8 +476,12 @@ impl DFlash2DraftModel {
         )
     }
 
+    /// `before_readback` runs once the draft lattice is submitted and before
+    /// the host reads it back (work queued there runs behind the draft).
+    #[allow(clippy::too_many_arguments)]
     pub fn propose_tree_on<T: DFlash2Target>(
         &self,
+        before_readback: &mut dyn FnMut() -> Result<()>,
         target_model: &T,
         input_ids: &Array,
         target_hidden: &Array,
@@ -487,11 +491,19 @@ impl DFlash2DraftModel {
     ) -> Result<DFlash2DraftTree> {
         let target = target.into();
         let _m5_draft = self.m5_scope(false);
-        let (proposal_hidden, logits, _, anchor) =
+        // As greedy proposals: the anchor joins the request's draft vocabulary
+        // before the projection when the target restricts it.
+        if input_ids.shape().as_slice()[0] == 1 && target_model.dflash2_draft_vocab_enabled()? {
+            let anchor = input_ids.to_vec::<u32>()?;
+            cache.note_tokens(target_model, &anchor[..1])?;
+        }
+        let (proposal_hidden, logits, vocab_ids, anchor) =
             self.proposal_lattice_on(target_model, input_ids, target_hidden, cache, target, true)?;
         self.selector.select_tree_on(
+            before_readback,
             &proposal_hidden,
             &logits,
+            vocab_ids.as_ref(),
             &anchor,
             tree.max_nodes,
             tree.children_per_node,
@@ -611,8 +623,9 @@ impl DFlash2DraftModel {
         } else {
             Vec::new()
         };
+        // Trees draft on the draft vocabulary too (when the target has one).
         let (logits, vocab_ids) =
-            draft_logits_on(target_model, &proposal_hidden, !tree, &extra, target)?;
+            draft_logits_on(target_model, &proposal_hidden, true, &extra, target)?;
         let anchor = mlx::ops::indexing::slice_strided_on(
             input_ids,
             &[0_i32, 0][..],

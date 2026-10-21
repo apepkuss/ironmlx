@@ -459,7 +459,13 @@ impl Qwen35MoeTextModel {
                 target,
                 index as i32,
             )?;
-            if staged && (index + 1) % SUBMIT_EVERY_LAYERS == 0 && index + 1 < self.layers.len() {
+            // A tree verify starts after its draft finished: hand the first
+            // layer over at once so the GPU is not idle while the rest builds.
+            let first_tree_layer = index == 0 && crate::nn::dflash_tree::current().is_some();
+            if staged
+                && ((index + 1) % SUBMIT_EVERY_LAYERS == 0 || first_tree_layer)
+                && index + 1 < self.layers.len()
+            {
                 mlx::transforms::async_eval(&[&x])?;
             }
             if target_layer_ids.get(next_capture) == Some(&index) {

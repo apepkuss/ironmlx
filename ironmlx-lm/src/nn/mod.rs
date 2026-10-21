@@ -19,6 +19,7 @@ pub mod fused_norm;
 pub mod gated_attention;
 pub mod gated_delta_net;
 pub mod gdn_prep;
+pub(crate) mod gdn_scan;
 pub(crate) mod gemma4_verify_attention;
 pub mod linear;
 pub(crate) mod m5_affine4;
@@ -39,6 +40,7 @@ pub(crate) mod rs4_qmm;
 pub(crate) mod sequence_stable_gated_delta;
 pub(crate) mod shared_weight_layout;
 pub(crate) mod sorted_moe_weighted_sum;
+pub(crate) mod tree_split_k;
 pub(crate) mod verify_qmm;
 
 pub use attention::{Attention, AttentionConfig};

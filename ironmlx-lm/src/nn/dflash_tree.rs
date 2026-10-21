@@ -12,6 +12,11 @@ pub(crate) struct Plan {
     parents: Array,
     attention_groups: OnceCell<(i32, Vec<AttentionGroup>)>,
     lane_attention: OnceCell<super::m5_tree_attention::Layout>,
+    /// Long-context split-K layout, built once per window (all attention
+    /// layers share the base).
+    pub(crate) split_k: OnceCell<(i32, Option<super::tree_split_k::Prepared>)>,
+    conv_indices: OnceCell<(i32, Array)>,
+    state_indices: OnceCell<(i32, Array)>,
 }
 pub(crate) struct AttentionGroup {
     pub rows: Vec<usize>,
@@ -43,6 +48,9 @@ impl Plan {
             parents: (parents, &[parents.len() as i32][..]).try_into()?,
             attention_groups: OnceCell::new(),
             lane_attention: OnceCell::new(),
+            split_k: OnceCell::new(),
+            conv_indices: OnceCell::new(),
+            state_indices: OnceCell::new(),
         })
     }
     pub fn lane_attention(&self, base: i32) -> Result<&super::m5_tree_attention::Layout> {
@@ -99,16 +107,51 @@ impl Plan {
             &[3, 1, values.len() as i32][..],
         )?)
     }
-    pub fn conv_windows(&self, input: &Array, keep: i32, target: StreamOrDevice) -> Result<Array> {
-        let mut indices = Vec::new();
-        for path in &self.paths {
-            let rows = (0..keep)
-                .chain(path.iter().map(|&r| keep + r))
-                .collect::<Vec<_>>();
-            indices.extend_from_slice(&rows[rows.len() - keep as usize - 1..]);
+    /// Each node's conv state `[nodes, keep, C]`: the `keep` inputs before
+    /// it on its path (`input` is the cache's conv state, then the nodes).
+    pub fn conv_states(&self, input: &Array, keep: i32, target: StreamOrDevice) -> Result<Array> {
+        if self.state_indices.get().is_none() {
+            let mut indices = Vec::new();
+            for path in &self.paths {
+                let rows = (0..keep)
+                    .chain(path.iter().map(|&r| keep + r))
+                    .collect::<Vec<_>>();
+                let end = rows.len() - 1;
+                indices.extend_from_slice(&rows[end - keep as usize..end]);
+            }
+            let indices: Array = (indices.as_slice(), &[indices.len() as i32][..]).try_into()?;
+            let _ = self.state_indices.set((keep, indices));
         }
-        let indices: Array = (indices.as_slice(), &[indices.len() as i32][..]).try_into()?;
-        let x = mlx::ops::indexing::take_on(input, &indices, 1, target)?;
+        let (cached_keep, indices) = self.state_indices.get().unwrap();
+        anyhow::ensure!(
+            *cached_keep == keep,
+            "tree conv states differ across layers"
+        );
+        let x = mlx::ops::indexing::take_on(input, indices, 1, target)?;
+        Ok(x.reshape_on(
+            (self.paths.len() as i32, keep, input.shape().as_slice()[2]),
+            target,
+        )?)
+    }
+
+    pub fn conv_windows(&self, input: &Array, keep: i32, target: StreamOrDevice) -> Result<Array> {
+        if self.conv_indices.get().is_none() {
+            let mut indices = Vec::new();
+            for path in &self.paths {
+                let rows = (0..keep)
+                    .chain(path.iter().map(|&r| keep + r))
+                    .collect::<Vec<_>>();
+                indices.extend_from_slice(&rows[rows.len() - keep as usize - 1..]);
+            }
+            let indices: Array = (indices.as_slice(), &[indices.len() as i32][..]).try_into()?;
+            let _ = self.conv_indices.set((keep, indices));
+        }
+        let (cached_keep, indices) = self.conv_indices.get().unwrap();
+        anyhow::ensure!(
+            *cached_keep == keep,
+            "tree conv windows differ across layers"
+        );
+        let x = mlx::ops::indexing::take_on(input, indices, 1, target)?;
         Ok(x.reshape_on(
             (
                 self.paths.len() as i32,

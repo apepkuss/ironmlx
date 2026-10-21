@@ -97,6 +97,35 @@ pub fn set_prefill_d256_nax_library(path: &str) -> bool {
     mlx_sys::metal::ffi::set_prefill_d256_nax_library(path)
 }
 
+/// Fewest keys at which a causal attention chunk of any GQA layout takes the
+/// D256 NAX prefill attention (0: only the dense 27B layout). Must run
+/// before the first prefill; returns `false` if it is too late.
+pub fn set_prefill_d256_nax_min_keys(keys: i32) -> bool {
+    mlx_sys::metal::ffi::set_prefill_d256_nax_min_keys(keys)
+}
+
+/// Fewest keys at which a query block of at most 8 rows (decode, speculative
+/// verify) takes the split-K D256 NAX attention (0: never; needs the D256 NAX
+/// library). Must run before the first attention; returns `false` if it is
+/// too late.
+pub fn set_decode_d256_nax_min_keys(keys: i32) -> bool {
+    mlx_sys::metal::ffi::set_decode_d256_nax_min_keys(keys)
+}
+
+/// The fewest keys at which short query blocks take the split-K D256 NAX
+/// attention, or 0 if it cannot run. Resolves the settings: call only after
+/// the profile configured them.
+pub fn decode_d256_nax_active_min_keys() -> i32 {
+    mlx_sys::metal::ffi::decode_d256_nax_active_min_keys()
+}
+
+/// Run the BM128 QMM M-tile kernel for every affine4/g64 prefill chunk of at
+/// least 256 rows (bit-identical to MLX's kernel), not only the dense 27B MLP
+/// shapes. Must run before the first QMM; returns `false` if it is too late.
+pub fn set_prefill_qmm_mtile_any_shape(enabled: bool) -> bool {
+    mlx_sys::metal::ffi::set_prefill_qmm_mtile_any_shape(enabled)
+}
+
 /// Enable or disable the masked causal softmax prefill fallback. Must run
 /// before the first prefill; returns `false` if it is too late.
 pub fn set_prefill_masked_softmax(enabled: bool) -> bool {

@@ -1129,6 +1129,19 @@ fn query_position_isolated_attention_bulk_cache_update_on(
             batch == 1 && mask.is_none() && plan.paths.len() == query_len as usize,
             "invalid flat-tree attention shape"
         );
+        // Long contexts: one split-K call whose rows equal the linear verify
+        // rows of their paths.
+        if let Some(output) = super::tree_split_k::attention_on(
+            &rotated_queries,
+            &cached_keys,
+            &cached_values,
+            base_offsets[0],
+            &plan,
+            scale,
+            target,
+        )? {
+            return Ok(output);
+        }
         if std::env::var("IRONMLX_EXPERIMENTAL_TREE_BATCH_ATTN").as_deref() == Ok("1") {
             let mut ordered: Vec<Option<Array>> = vec![None; plan.paths.len()];
             for group in plan.attention_groups(base_offsets[0])? {
@@ -1276,15 +1289,28 @@ fn exact_grouped_attention_on(
         && plain_cache
         && mask.is_none();
     let grouped = dense_grouped || moe_grouped;
+    let gqa = (heads / key_dims[1]).max(1);
     // GQA heads per KV head times grouped queries stay within 32 simdgroups.
-    let max_group = 32 / (heads / key_dims[1]).max(1);
+    let max_group = 32 / gqa;
+    // From its minimum key count the split-K D256 NAX attention takes up to
+    // 64 GQA rows; each row's result is independent of its group there.
+    let split_k_min_keys = if grouped { split_k_min_keys() } else { 0 };
     let mut outputs = Vec::with_capacity(query_len as usize);
     let mut depth = 0;
     while depth < query_len {
-        let group = if grouped {
-            exact_attention_group_len(base_offsets[0] + depth + 1, query_len - depth, max_group)
-        } else {
+        let first_key_len = base_offsets[0] + depth + 1;
+        let group = if !grouped {
             1
+        } else if split_k_min_keys > 0 && first_key_len >= split_k_min_keys {
+            exact_attention_group_len(first_key_len, query_len - depth, 64 / gqa, 8, 0)
+        } else {
+            exact_attention_group_len(
+                first_key_len,
+                query_len - depth,
+                max_group,
+                5,
+                split_k_min_keys,
+            )
         };
         let query = mlx::ops::indexing::slice_strided_on(
             rotated_queries,
@@ -1356,13 +1382,39 @@ fn exact_grouped_attention_on(
     mlx::ops::shape::concatenate_on(&output_refs, 2, target).map_err(Into::into)
 }
 
-fn exact_attention_group_len(first_key_len: i32, remaining: i32, max_group: i32) -> i32 {
-    // GQA heads * grouped queries <= 32 SIMD groups.
-    let group = remaining.min(max_group.min(5));
+/// The split-K D256 NAX attention's minimum key count (0: off), read once.
+fn split_k_min_keys() -> i32 {
+    static VALUE: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(mlx::metal::decode_d256_nax_active_min_keys)
+}
+
+/// Rows of the next verify query group: no group straddles a kernel-regime
+/// boundary (MLX's vector-kernel key partitions, the split-K minimum key count
+/// `extra_boundary` and the split-K block size, which changes with the key
+/// count).
+fn exact_attention_group_len(
+    first_key_len: i32,
+    remaining: i32,
+    max_group: i32,
+    cap: i32,
+    extra_boundary: i32,
+) -> i32 {
+    let group = remaining.min(max_group.min(cap));
     let last = first_key_len + group - 1;
-    if [1024, 1025, 4096, 8193, 16384, 32769, 65536, 65537]
-        .iter()
-        .any(|&boundary| first_key_len < boundary && boundary <= last)
+    if [
+        1024,
+        1025,
+        4096,
+        8193,
+        16384,
+        32769,
+        65536,
+        65537,
+        extra_boundary,
+    ]
+    .iter()
+    .any(|&boundary| first_key_len < boundary && boundary <= last)
+        || mlx::fast::decode_block_keys(first_key_len) != mlx::fast::decode_block_keys(last)
     {
         1
     } else {
@@ -1497,7 +1549,7 @@ mod tests {
             let mut grouped = Vec::new();
             let mut depth = 0;
             while depth < 8 {
-                let group = exact_attention_group_len(prefix + depth + 1, 8 - depth, 5);
+                let group = exact_attention_group_len(prefix + depth + 1, 8 - depth, 5, 5, 0);
                 grouped.push(attend(depth, group)?);
                 depth += group;
             }
