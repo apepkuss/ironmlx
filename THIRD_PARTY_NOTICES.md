@@ -238,7 +238,7 @@ development dependencies excluded, build dependencies retained.
 | rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT | `THIRD_PARTY_LICENSES/rust-license-709e3175b4212f7b.txt` | https://github.com/rustls/rustls |
 | rustls-pemfile | 2.2.0 | Apache-2.0 OR ISC OR MIT | `THIRD_PARTY_LICENSES/rust-license-709e3175b4212f7b.txt` | https://github.com/rustls/pemfile |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-9117d922e6671255.txt` | https://github.com/rustls/pki-types |
-| rustls-webpki | 0.103.15 | ISC | `THIRD_PARTY_LICENSES/rust-license-5b698ca13897be3a.txt` | https://github.com/rustls/webpki |
+| rustls-webpki | 0.103.16 | ISC | `THIRD_PARTY_LICENSES/rust-license-5b698ca13897be3a.txt` | https://github.com/rustls/webpki |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/dtolnay/rustversion |
 | ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 | `THIRD_PARTY_LICENSES/rust-license-074e6e32c86a4c0e.txt` | https://github.com/dtolnay/ryu |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-fb77f0a9c53e473a.txt` | https://github.com/bluss/scopeguard |
@@ -315,7 +315,7 @@ development dependencies excluded, build dependencies retained.
 | uuid | 1.24.0 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-436bc5a105d8e57d.txt` | https://github.com/uuid-rs/uuid |
 | version_check | 0.9.5 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-b7e650f3fce5c532.txt` | https://github.com/SergioBenitez/version_check |
 | want | 0.3.1 | MIT | `THIRD_PARTY_LICENSES/rust-license-96d741569b18c610.txt` | https://github.com/seanmonstar/want |
-| webpki-roots | 1.0.9 | CDLA-Permissive-2.0 | `THIRD_PARTY_LICENSES/rust-license-e271993808fec50a.txt` | https://github.com/rustls/webpki-roots |
+| webpki-roots | 1.0.10 | CDLA-Permissive-2.0 | `THIRD_PARTY_LICENSES/rust-license-e271993808fec50a.txt` | https://github.com/rustls/webpki-roots |
 | writeable | 0.6.3 | Unicode-3.0 | `THIRD_PARTY_LICENSES/rust-license-f367c1b8e1aa2624.txt` | https://github.com/unicode-org/icu4x |
 | yoke | 0.8.3 | Unicode-3.0 | `THIRD_PARTY_LICENSES/rust-license-f367c1b8e1aa2624.txt` | https://github.com/unicode-org/icu4x |
 | yoke-derive | 0.8.2 | Unicode-3.0 | `THIRD_PARTY_LICENSES/rust-license-f367c1b8e1aa2624.txt` | https://github.com/unicode-org/icu4x |
