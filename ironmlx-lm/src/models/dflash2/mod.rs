@@ -36,6 +36,18 @@ pub fn experimental_tree_profile() -> bool {
     })
 }
 
+/// M5 profile setting `DFLASH2_DRAFT_M5_RESIDENT` with the shared weight
+/// layout on a GPU with the tensor unit.
+pub(crate) fn m5_resident_requested() -> bool {
+    static REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *REQUESTED.get_or_init(|| {
+        ironmlx_core::m5_profile::flag(
+            ironmlx_core::m5_profile::settings::DFLASH2_DRAFT_M5_RESIDENT,
+        ) && crate::nn::shared_weight_layout::requested()
+            && crate::nn::m5_affine4::tensor_unit_available()
+    })
+}
+
 fn load_linear(loader: &Loader, prefix: &str, draft_bits: Option<i32>) -> Result<Linear> {
     let Some(bits) = draft_bits else {
         return Linear::from_loader(loader, prefix);
@@ -563,6 +575,30 @@ pub trait DFlash2Target: crate::core::Model {
         mode: DFlash2TargetForwardMode,
         target: StreamOrDevice,
     ) -> Result<DFlash2TargetOutput>;
+
+    /// Device half of a per-row commit from GPU accepted counts (`[B]`
+    /// int32); `None` when unsupported. One flag per layer for
+    /// [`Self::dflash2_finish_target_rows_on`].
+    fn dflash2_commit_target_rows_device_on(
+        &self,
+        _cache: &mut [LayerCache],
+        _counts: &Array,
+        _target: StreamOrDevice,
+    ) -> Result<Option<Vec<bool>>> {
+        Ok(None)
+    }
+
+    /// Host half of a per-row commit started on the device.
+    fn dflash2_finish_target_rows_on(
+        &self,
+        cache: &mut [LayerCache],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+        accepted_lens: &[usize],
+        _device_done: &[bool],
+        target: StreamOrDevice,
+    ) -> Result<()> {
+        self.dflash2_restore_target_prefix_rows_on(cache, snapshots, accepted_lens, target)
+    }
 
     fn dflash2_restore_target_prefix_on(
         &self,

@@ -28,15 +28,21 @@ pub enum LayerCacheSnapshot {
 }
 
 impl LayerCache {
-    /// Diagnostic-only: arrays holding this layer's cache state, used as
-    /// evaluation barriers by `IRONMLX_DIAGNOSTIC_DFLASH2_WINDOW_STAGES`.
-    #[doc(hidden)]
-    pub fn diagnostic_buffers(&self) -> Vec<&mlx::Array> {
+    /// Arrays holding this layer's cache state (KV buffers, or the GatedDelta
+    /// conv and recurrent states), for scheduling their pending updates.
+    pub fn state_arrays(&self) -> Vec<&mlx::Array> {
         match self {
             LayerCache::Full(kv) => kv.diagnostic_buffers(),
             LayerCache::Linear(gd) => vec![gd.conv_state(), gd.recurrent_state()],
             LayerCache::Mla(_) => Vec::new(),
         }
+    }
+
+    /// Diagnostic-only: arrays holding this layer's cache state, used as
+    /// evaluation barriers by `IRONMLX_DIAGNOSTIC_DFLASH2_WINDOW_STAGES`.
+    #[doc(hidden)]
+    pub fn diagnostic_buffers(&self) -> Vec<&mlx::Array> {
+        self.state_arrays()
     }
 
     pub fn begin_speculative_prefix_capture(&mut self) -> anyhow::Result<()> {

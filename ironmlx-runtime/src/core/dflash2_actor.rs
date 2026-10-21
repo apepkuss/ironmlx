@@ -1416,7 +1416,7 @@ where
                     if !request.stream.first_token_publishable() {
                         continue;
                     }
-                    let published = request.stream.next_token_deferred();
+                    let published = request.stream.next_token_id_deferred();
                     #[cfg(test)]
                     let published = published.and_then(|event| {
                         anyhow::ensure!(
@@ -1476,7 +1476,7 @@ where
                     continue;
                 }
                 loop {
-                    match request.stream.next_token_deferred() {
+                    match request.stream.next_token_id_deferred() {
                         Ok(Some(event)) => {
                             outcomes[index].finished = event.finish_reason.is_some();
                             outcomes[index].events.push(event);

@@ -89,6 +89,17 @@ fn per_row_slice_last(
     Ok(mlx::ops::shape::concatenate_on(&row_refs[..], 0, target)?)
 }
 
+/// Whether this load runs the target's dense projections on the M5 affine4
+/// route (`IRONMLX_EXPERIMENTAL_M5_MOE_AFFINE4_PROJECTIONS`, affine4 DFlash2
+/// target, tensor-unit GPU). Decided before the layers load, since the route
+/// uses fused input projections.
+pub(crate) fn m5_affine4_projections_requested(dflash2_target_bits: Option<i32>) -> bool {
+    dflash2_target_bits == Some(4)
+        && ironmlx_core::m5_profile::tensor_unit_flag(
+            ironmlx_core::m5_profile::settings::M5_MOE_AFFINE4_PROJECTIONS,
+        )
+}
+
 impl Qwen35MoeModel {
     pub fn from_loader(loader: &Loader) -> Result<Self> {
         let cfg =
@@ -124,9 +135,11 @@ impl Qwen35MoeModel {
         let dflash2_target_bits =
             crate::models::qwen3_6_moe::qwen36_moe_dflash2_target_bits(loader.config_raw_value())
                 .ok();
-        let mut text = Qwen35MoeTextModel::from_loader(loader, cfg)?;
+        let m5_projections = m5_affine4_projections_requested(dflash2_target_bits);
+        let mut text =
+            Qwen35MoeTextModel::from_loader_with_projections(loader, cfg, m5_projections)?;
         text.set_affine4_fast_paths(dflash2_target_bits == Some(4));
-        Ok(Self {
+        let mut model = Self {
             text,
             exact_batched_verify_profile,
             dflash2_target_bits,
@@ -134,11 +147,113 @@ impl Qwen35MoeModel {
             draft_vocab: std::sync::OnceLock::new(),
             instance: crate::models::dflash2::DFlash2Instance::new(),
             vision,
-        })
+        };
+        if m5_projections {
+            if crate::nn::shared_weight_layout::requested() {
+                model.enable_shared_weight_layout()?;
+            }
+            if crate::nn::m5_affine4::precompile_requested() {
+                model.precompile_m5_affine4()?;
+            }
+        }
+        Ok(model)
+    }
+
+    /// Experimental: one resident affine4 layout per decoder dense
+    /// projection (attention and shared expert; see
+    /// `nn::shared_weight_layout`), so the M5 affine4 route needs no tiled
+    /// copy beside the checkpoint layout. The LM head keeps the checkpoint
+    /// layout and MLX's kernels: the draft vocabulary gathers its rows, and a
+    /// tiled copy of it would cost 0.27 GiB.
+    fn enable_shared_weight_layout(&mut self) -> Result<()> {
+        crate::nn::shared_weight_layout::validate_environment()?;
+        let stores = self.text.share_weight_layout()?;
+        tracing::info!(stores, "M5 shared weight layout enabled (Qwen3.6 MoE)");
+        Ok(())
+    }
+
+    /// Whether the LM head takes the M5 affine4 route: only without the
+    /// shared weight layout (see [`Self::enable_shared_weight_layout`]).
+    pub(crate) fn m5_affine4_head(&self) -> bool {
+        m5_affine4_projections_requested(self.dflash2_target_bits)
+            && (!crate::nn::shared_weight_layout::requested()
+                || ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::M5_MOE_HEAD))
+    }
+
+    /// Experimental (`IRONMLX_EXPERIMENTAL_M5_PRECOMPILE=1`): before serving,
+    /// evaluate every M5 affine4 kernel variant the target's dense
+    /// projections can reach (decoder projections 1..=128 rows; the LM head up
+    /// to one ragged B4 verify window of 32 rows), so the library compile,
+    /// pipeline creation and the shared-layout conversion do not land in the
+    /// first request.
+    fn precompile_m5_affine4(&self) -> Result<()> {
+        use crate::nn::m5_affine4;
+        let started = std::time::Instant::now();
+        let target = StreamOrDevice::default();
+        let _route = m5_affine4::scope();
+        let decoder_rows = m5_affine4::variant_rows(128);
+        let head_rows = m5_affine4::variant_rows(32);
+        let mut sites: Vec<(&Linear, &[i32])> = self
+            .text
+            .activation_projections()
+            .into_iter()
+            .map(|linear| (linear, decoder_rows.as_slice()))
+            .collect();
+        if self.m5_affine4_head() {
+            sites.push((&self.lm_head, head_rows.as_slice()));
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut keys = Vec::new();
+        let mut outputs = Vec::new();
+        for (linear, rows) in sites {
+            if !linear.m5_route_capable() {
+                continue;
+            }
+            let (k, n) = (linear.in_features() as i32, linear.out_features() as i32);
+            for &m in rows {
+                let (tmr, edge) = m5_affine4::kernel_variant(m);
+                // Each kernel key once, and every projection at least once
+                // (its first row variant) so a shared store converts here.
+                if !seen.insert((n, k, tmr, edge)) && m != rows[0] {
+                    continue;
+                }
+                let x = mlx::ops::ones(&[1, m, k][..], mlx::Dtype::Bfloat16)?;
+                outputs.push(linear.forward_on(&x, target)?);
+                keys.push(format!("{n}x{k}/tmr{tmr}/edge{}", u8::from(edge)));
+            }
+            mlx::transforms::eval(&outputs.iter().collect::<Vec<_>>())?;
+            outputs.clear();
+        }
+        mlx::clear_cache();
+        tracing::info!(
+            evaluations = keys.len(),
+            kernels = seen.len(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "M5 affine4 pre-compilation finished (Qwen3.6 MoE)"
+        );
+        Ok(())
     }
 
     pub fn config(&self) -> &Qwen35MoeConfig {
         self.text.config()
+    }
+
+    /// Profile setting `MOE_M5_EXPERTS`: convert every layer's expert
+    /// weights to the M5 tiled layout now rather than in the first forward.
+    /// Call after the loader is dropped (the checkpoint arrays are then the
+    /// only other copy, released layer by layer).
+    pub fn prepare_m5_experts(&self) -> Result<usize> {
+        let started = std::time::Instant::now();
+        let converted = self.text.prepare_m5_experts(StreamOrDevice::default())?;
+        if converted > 0 {
+            mlx::clear_cache();
+            tracing::info!(
+                layers = converted,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "M5 expert layout prepared (Qwen3.6 MoE)"
+            );
+        }
+        Ok(converted)
     }
 
     pub(crate) fn lm_head(&self) -> &Linear {

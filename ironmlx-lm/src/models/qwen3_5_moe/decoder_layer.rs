@@ -52,6 +52,21 @@ impl DecoderLayerMoe {
         cfg: DecoderLayerMoeConfig,
         kind: AttnKind,
     ) -> Result<Self> {
+        Self::from_loader_with_projections(loader, prefix, cfg, kind, false)
+    }
+
+    /// `fuse_projections` loads the attention input projections and the
+    /// shared-expert gate/up as single fused quantized matrices with row
+    /// views (no duplicate weights; each output row keeps its own
+    /// accumulation tree), the form the M5 affine4 route and the shared
+    /// weight layout use.
+    pub(crate) fn from_loader_with_projections(
+        loader: &Loader,
+        prefix: &str,
+        cfg: DecoderLayerMoeConfig,
+        kind: AttnKind,
+        fuse_projections: bool,
+    ) -> Result<Self> {
         let input_layernorm = RmsNorm::from_loader(
             loader,
             &format!("{prefix}.input_layernorm"),
@@ -59,33 +74,37 @@ impl DecoderLayerMoe {
         )?;
         let attn = match kind {
             AttnKind::Full => {
-                let ga = GatedAttention::from_loader(
-                    loader,
-                    &format!("{prefix}.self_attn"),
-                    GatedAttentionConfig {
-                        num_heads: cfg.num_heads,
-                        num_kv_heads: cfg.num_kv_heads,
-                        head_dim: cfg.head_dim,
-                        rms_norm_eps: cfg.rms_norm_eps,
-                        attention_bias: cfg.attention_bias,
-                    },
-                )?;
+                let attention_cfg = GatedAttentionConfig {
+                    num_heads: cfg.num_heads,
+                    num_kv_heads: cfg.num_kv_heads,
+                    head_dim: cfg.head_dim,
+                    rms_norm_eps: cfg.rms_norm_eps,
+                    attention_bias: cfg.attention_bias,
+                };
+                let attention_prefix = format!("{prefix}.self_attn");
+                let ga = if fuse_projections {
+                    GatedAttention::from_loader_dflash2(loader, &attention_prefix, attention_cfg)?
+                } else {
+                    GatedAttention::from_loader(loader, &attention_prefix, attention_cfg)?
+                };
                 AttnPath::Full(Box::new(ga))
             }
             AttnKind::Linear => {
-                let gdn = GatedDeltaNet::from_loader(
-                    loader,
-                    &format!("{prefix}.linear_attn"),
-                    GatedDeltaNetConfig {
-                        hidden_size: cfg.hidden_size,
-                        num_v_heads: cfg.linear_num_value_heads,
-                        num_k_heads: cfg.linear_num_key_heads,
-                        head_k_dim: cfg.linear_key_head_dim,
-                        head_v_dim: cfg.linear_value_head_dim,
-                        conv_kernel_size: cfg.linear_conv_kernel_dim,
-                        rms_norm_eps: cfg.rms_norm_eps,
-                    },
-                )?;
+                let gdn_cfg = GatedDeltaNetConfig {
+                    hidden_size: cfg.hidden_size,
+                    num_v_heads: cfg.linear_num_value_heads,
+                    num_k_heads: cfg.linear_num_key_heads,
+                    head_k_dim: cfg.linear_key_head_dim,
+                    head_v_dim: cfg.linear_value_head_dim,
+                    conv_kernel_size: cfg.linear_conv_kernel_dim,
+                    rms_norm_eps: cfg.rms_norm_eps,
+                };
+                let gdn_prefix = format!("{prefix}.linear_attn");
+                let gdn = if fuse_projections {
+                    GatedDeltaNet::from_loader_dflash2(loader, &gdn_prefix, gdn_cfg)?
+                } else {
+                    GatedDeltaNet::from_loader(loader, &gdn_prefix, gdn_cfg)?
+                };
                 AttnPath::Linear(Box::new(gdn))
             }
         };
@@ -94,11 +113,12 @@ impl DecoderLayerMoe {
             &format!("{prefix}.post_attention_layernorm"),
             cfg.rms_norm_eps,
         )?;
-        let ffn = SparseMoeBlock::from_loader(
+        let ffn = SparseMoeBlock::from_loader_with_projections(
             loader,
             &format!("{prefix}.mlp"),
             cfg.num_experts_per_tok,
             cfg.norm_topk_prob,
+            fuse_projections,
         )?;
         Ok(Self {
             input_layernorm,
@@ -111,6 +131,33 @@ impl DecoderLayerMoe {
 
     pub fn config(&self) -> &DecoderLayerMoeConfig {
         &self.cfg
+    }
+
+    /// Dense projections applied to activations (fused storage when fused):
+    /// the attention projections and the shared expert. Router gates and
+    /// routed experts are not included.
+    pub(crate) fn activation_projections(&self) -> Vec<&crate::nn::linear::Linear> {
+        let mut out = match &self.attn {
+            AttnPath::Full(attention) => attention.activation_projections(),
+            AttnPath::Linear(linear) => linear.activation_projections(),
+        };
+        out.extend(self.ffn.shared_expert_projections());
+        out
+    }
+
+    /// Convert this layer's M5 expert store to its tiled layout now.
+    pub(crate) fn prepare_m5_experts(&self, target: StreamOrDevice) -> Result<bool> {
+        self.ffn.prepare_m5_experts(target)
+    }
+
+    /// Single-resident affine4 layout for this layer's dense projections
+    /// (see `nn::shared_weight_layout`). Returns the number of stores.
+    pub(crate) fn share_weight_layout(&mut self) -> Result<usize> {
+        let attention = match &mut self.attn {
+            AttnPath::Full(attention) => attention.share_weight_layout()?,
+            AttnPath::Linear(linear) => linear.share_weight_layout()?,
+        };
+        Ok(attention + self.ffn.share_shared_expert_layout()?)
     }
 
     pub fn kind(&self) -> AttnKind {
@@ -221,6 +268,26 @@ impl DecoderLayerMoe {
                     }
                 }
             };
+            if crate::nn::fused_norm::requested()
+                && x.dtype() == mlx::Dtype::Bfloat16
+                && attn.dtype() == mlx::Dtype::Bfloat16
+                && x.shape().as_slice()[1] <= 64
+                && x.shape().as_slice()[2] % 128 == 0
+                && x.shape().as_slice()[2] <= 4096
+            {
+                // Residual add + post norm in one dispatch, and the MoE's
+                // residual add in its combine (both bit-identical).
+                let (h, normed_post) = crate::nn::fused_norm::add_rms_norm_on(
+                    x,
+                    &attn,
+                    self.post_attention_layernorm.weight(),
+                    self.post_attention_layernorm.eps(),
+                    target,
+                )?;
+                return self
+                    .ffn
+                    .forward_residual_on(&normed_post, &h, target, layer_idx);
+            }
             let h = x + &attn;
 
             // Block 2: post_norm + SparseMoeBlock + residual
@@ -245,6 +312,42 @@ impl DecoderLayerMoe {
             accepted_len,
             target,
         )
+    }
+
+    /// Device half of a per-row speculative commit (see
+    /// `GatedDeltaNet::commit_speculative_rows_device_on`); full-attention
+    /// layers only move offsets, so they report done.
+    pub(crate) fn commit_speculative_rows_device_on(
+        &self,
+        cache: &mut LayerCache,
+        counts: &Array,
+        target: StreamOrDevice,
+    ) -> Result<bool> {
+        match (&self.attn, cache) {
+            (AttnPath::Linear(attn), LayerCache::Linear(cache)) => {
+                attn.commit_speculative_rows_device_on(cache, counts, target)
+            }
+            (AttnPath::Full(_), LayerCache::Full(_)) => Ok(true),
+            _ => Ok(false),
+        }
+    }
+
+    /// Host half: offsets of a device-committed layer; the full host restore
+    /// otherwise.
+    pub(crate) fn finish_speculative_rows_host_on(
+        &self,
+        cache: &mut LayerCache,
+        base: &crate::core::cache::layer::LayerCacheSnapshot,
+        accepted_lens: &[usize],
+        device_done: bool,
+        target: StreamOrDevice,
+    ) -> Result<()> {
+        match (&self.attn, &mut *cache, device_done) {
+            (AttnPath::Linear(attn), LayerCache::Linear(gdc), true) => {
+                attn.finish_speculative_rows_host(gdc, accepted_lens)
+            }
+            _ => self.restore_speculative_prefix_rows_on(cache, base, accepted_lens, target),
+        }
     }
 
     /// Per-row variant of [`Self::restore_speculative_prefix_on`].

@@ -124,6 +124,9 @@ pub struct DFlash2DraftModel {
     layers: Vec<DFlash2DecoderLayer>,
     norm: RmsNorm,
     selector: DFlash2CandidateSelector,
+    /// Projections live in single-resident M5 stores: every proposal arms
+    /// the M5 route.
+    m5_resident: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,7 +163,29 @@ impl DFlash2DraftModel {
             selector: DFlash2CandidateSelector::from_loader(loader, &config, draft_bits)?,
             layers,
             config,
+            m5_resident: false,
         })
+    }
+
+    /// Profile setting `DFLASH2_DRAFT_M5_RESIDENT`: move the input, layer and
+    /// MLP projections into single-resident M5 stores (call after any
+    /// precision check: shared projections hide their quantized arrays).
+    /// Returns the number of stores created.
+    pub fn share_weight_layout_if_requested(&mut self) -> Result<usize> {
+        if !super::m5_resident_requested() || self.m5_resident {
+            return Ok(0);
+        }
+        let mut stores = usize::from(self.fc.share_whole()?.is_some());
+        for layer in &mut self.layers {
+            stores += layer.share_weight_layout()?;
+        }
+        self.m5_resident = stores > 0;
+        tracing::info!(stores, "DFlash2 drafter projections in resident M5 layout");
+        Ok(stores)
+    }
+
+    fn m5_scope(&self, requested: bool) -> Option<crate::nn::m5_affine4::Scope> {
+        (self.m5_resident || requested).then(crate::nn::m5_affine4::scope)
     }
 
     pub fn config(&self) -> &DFlash2Config {
@@ -275,6 +300,9 @@ impl DFlash2DraftModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        // Single-request drafts take the M5 route when the projections live
+        // in the resident M5 layout.
+        let _m5_draft = self.m5_scope(false);
         let _native_walk = target_model
             .dflash2_draft_fast_paths()
             .then(super::selector::native_walk_scope);
@@ -310,6 +338,10 @@ impl DFlash2DraftModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        // The draft's affine4 projections on the M5 route (profile setting).
+        let _m5_draft = self.m5_scope(ironmlx_core::m5_profile::flag(
+            ironmlx_core::m5_profile::settings::DFLASH2_DRAFT_M5,
+        ));
         let input_shape = input_ids.shape();
         let input_dims = input_shape.as_slice();
         if input_dims.len() != 2
@@ -362,12 +394,41 @@ impl DFlash2DraftModel {
         let mut hidden = target_model.dflash2_embed_on(input_ids, target)?;
         let mut contexts = Vec::with_capacity(rows);
         let mut masks = Vec::with_capacity(rows);
-        for (target_hidden, cache) in target_hiddens.iter().zip(caches.iter()) {
+        // One context projection for every row's new context
+        // (rows are independent), split back per row.
+        let batched_contexts = if ironmlx_core::m5_profile::flag(
+            ironmlx_core::m5_profile::settings::DFLASH2_DRAFT_BATCHED,
+        ) {
+            let refs = target_hiddens.to_vec();
+            let all = mlx::ops::shape::concatenate_on(&refs, 1, target)?;
+            let projected = self
+                .hidden_norm
+                .forward_on(&self.fc.forward_on(&all, target)?, target)?;
+            let mut start = 0_i32;
+            let mut parts = Vec::with_capacity(rows);
+            for hidden in target_hiddens {
+                let len = hidden.shape().as_slice()[1];
+                parts.push(mlx::ops::indexing::slice_strided_on(
+                    &projected,
+                    &[0_i32, start, 0][..],
+                    &[1_i32, start + len, self.config.hidden_size][..],
+                    &[1_i32, 1, 1][..],
+                    target,
+                )?);
+                start += len;
+            }
+            Some(parts)
+        } else {
+            None
+        };
+        for (row, (target_hidden, cache)) in target_hiddens.iter().zip(caches.iter()).enumerate() {
             // The context projection keeps its single-row shape (B=1, S rows).
-            contexts.push(
-                self.hidden_norm
+            contexts.push(match &batched_contexts {
+                Some(parts) => parts[row].clone(),
+                None => self
+                    .hidden_norm
                     .forward_on(&self.fc.forward_on(target_hidden, target)?, target)?,
-            );
+            });
             let context_after =
                 cache.layers[0].len_after_append(target_hidden.shape().as_slice()[1]);
             masks.push(build_block_mask(
@@ -425,6 +486,7 @@ impl DFlash2DraftModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<DFlash2DraftTree> {
         let target = target.into();
+        let _m5_draft = self.m5_scope(false);
         let (proposal_hidden, logits, _, anchor) =
             self.proposal_lattice_on(target_model, input_ids, target_hidden, cache, target, true)?;
         self.selector.select_tree_on(

@@ -59,6 +59,11 @@ struct Args {
     /// per ragged window (0 = never).
     #[arg(long, default_value_t = 0)]
     ordinary_min_width: usize,
+    /// Parity mode with relaxed batched arithmetic: instead of bit equality,
+    /// teacher-force every ragged row through exact B1 decode and report each
+    /// position where the emitted token is not the reference argmax.
+    #[arg(long)]
+    relaxed_check: bool,
 }
 
 fn request(tokenizer: &Tokenizer, prompt: &Value, max_tokens: usize) -> Result<GenerateRequest> {
@@ -84,8 +89,27 @@ fn request(tokenizer: &Tokenizer, prompt: &Value, max_tokens: usize) -> Result<G
     })
 }
 
+/// MLX memory after the target load and now, the M5 tiled copies prepared,
+/// and the shared-layout conversion counters.
+fn memory_report(after_target_load: &mlx::memory::MemorySnapshot) -> Value {
+    let now = mlx::memory::snapshot();
+    let (prepared_count, prepared_bytes) = ironmlx_lm::nn::m5_prepared_totals();
+    let (stores, to_tiled, to_native) = ironmlx_lm::nn::shared_weight_layout_totals();
+    json!({"after_target_load_active": after_target_load.active_bytes,
+        "end_active": now.active_bytes, "peak": now.peak_bytes, "cache": now.cache_bytes,
+        "m5_prepared_count": prepared_count, "m5_prepared_bytes": prepared_bytes,
+        "shared_stores": stores, "shared_to_tiled": to_tiled, "shared_to_native": to_native})
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
+    // Timing attribution only: zero the selected components (outputs invalid).
+    if let Some(flags) = std::env::var("IRONMLX_DIAGNOSTIC_TIMING_ABLATION")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+    {
+        ironmlx_lm::models::qwen3_5_moe::timing_ablation::set(flags);
+    }
     ensure!(
         !args.output.exists(),
         "preserve existing report; choose a new output"
@@ -101,6 +125,7 @@ fn main() -> Result<()> {
     let loader = Loader::open(&args.target)?;
     let tokenizer = Tokenizer::from_loader(&loader)?;
     let target = Qwen35MoeModel::from_loader(&loader)?;
+    let after_target_load = mlx::memory::snapshot();
     drop(loader);
     let loader = Loader::open_dflash2(&args.draft)?;
     let draft = DFlash2DraftModel::from_loader(&loader, target.dflash2_target_spec(), Some(4))?;
@@ -238,6 +263,7 @@ fn main() -> Result<()> {
             let mut windows = Vec::new();
             let mut regroups = Vec::new();
             let mut batched_windows = 0_usize;
+            let ordinary_mode = args.ordinary_min_width >= 2;
             let loop_started = Instant::now();
             loop {
                 for i in 0..n {
@@ -274,7 +300,12 @@ fn main() -> Result<()> {
                     if done[i] {
                         continue;
                     }
-                    if b1_windows[i] < stagger[i] || !streams[i].diagnostic_ragged_eligible() {
+                    let eligible = if ordinary_mode {
+                        streams[i].diagnostic_ragged_ordinary_eligible()
+                    } else {
+                        streams[i].diagnostic_ragged_eligible()
+                    };
+                    if b1_windows[i] < stagger[i] || !eligible {
                         solo.push(i);
                     } else {
                         ready.push(i);
@@ -283,7 +314,12 @@ fn main() -> Result<()> {
                 if solo.is_empty() && ready.is_empty() {
                     break;
                 }
-                let wanted: Vec<usize> = if ready.len() >= 2 {
+                let min_rows = if ordinary_mode {
+                    args.ordinary_min_width
+                } else {
+                    2
+                };
+                let wanted: Vec<usize> = if ready.len() >= min_rows {
                     ready.clone()
                 } else {
                     Vec::new()
@@ -321,10 +357,17 @@ fn main() -> Result<()> {
                 if !wanted.is_empty() {
                     let previous = cache.take().map(|(_, c)| c);
                     let mut picked = pick_rows(&mut streams, &wanted);
-                    let (c, timing) = DFlash2TextGenerationStream::diagnostic_ragged_window_bn(
-                        &mut picked,
-                        previous,
-                    )?;
+                    let (c, timing) = if ordinary_mode {
+                        DFlash2TextGenerationStream::diagnostic_ragged_ordinary_window_bn(
+                            &mut picked,
+                            previous,
+                        )?
+                    } else {
+                        DFlash2TextGenerationStream::diagnostic_ragged_window_bn(
+                            &mut picked,
+                            previous,
+                        )?
+                    };
                     cache = Some((wanted.clone(), c));
                     batched_windows += 1;
                     windows.push(json!({"members": wanted, "timing": timing}));
@@ -337,7 +380,9 @@ fn main() -> Result<()> {
             let wall_s = loop_started.elapsed().as_secs_f64();
             let rows = (0..n)
                 .map(|i| -> Result<Value> {
-                    Ok(json!({"id": prompts[i]["id"], "tokens": tokens[i], "text": tokenizer.decode(&tokens[i], true)?,
+                    let prompt_ids = request(&tokenizer, &prompts[i], args.max_tokens)?.prompt_ids;
+                    Ok(json!({"id": prompts[i]["id"], "prompt_ids": prompt_ids, "tokens": tokens[i],
+                        "text": tokenizer.decode(&tokens[i], true)?,
                         "stop": format!("{:?}", stops[i]), "cancelled": cancelled[i], "solo_windows": b1_windows[i]}))
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -349,7 +394,8 @@ fn main() -> Result<()> {
             write(
                 json!({"rows": rows, "windows": windows, "regroups": regroups, "prefill_s": prefill_s,
                 "wall_s": wall_s, "stagger": stagger, "cancel": args.cancel,
-                "ragged_row_attention_calls": ironmlx_lm::nn::gated_attention::ragged_row_attention_calls()}),
+                "ragged_row_attention_calls": ironmlx_lm::nn::gated_attention::ragged_row_attention_calls(),
+                "memory": memory_report(&after_target_load)}),
             )?;
         }
         "parity" => {
@@ -393,6 +439,8 @@ fn main() -> Result<()> {
             let mut done = vec![false; n];
             let mut cache: Option<(Vec<usize>, DFlash2RaggedBatchCache)> = None;
             let mut batched_windows = 0_usize;
+            let mut stops: Vec<Option<&'static str>> = vec![None; n];
+            let decode_started = Instant::now();
             loop {
                 for i in 0..n {
                     if done[i] {
@@ -403,6 +451,7 @@ fn main() -> Result<()> {
                             Some(event) => {
                                 tokens[i].push(event.token);
                                 if event.finish_reason.is_some() {
+                                    stops[i] = event.finish_reason;
                                     done[i] = true;
                                     break;
                                 }
@@ -473,7 +522,54 @@ fn main() -> Result<()> {
                 let mut picked = pick_rows(&mut streams, &members);
                 c.scatter_to_rows(&mut picked)?;
             }
+            let decode_s = decode_started.elapsed().as_secs_f64();
             let ragged_s = ragged_started.elapsed().as_secs_f64();
+            if args.relaxed_check {
+                let mut rows = Vec::new();
+                for i in 0..n {
+                    let nonfinite = streams[i].diagnostic_target_cache_nonfinite()?;
+                    let mut reference = DFlash2TextGenerationStream::new_text_only_with_options(
+                        &target,
+                        &draft,
+                        &tokenizer,
+                        request(&tokenizer, &prompts[i], args.max_tokens)?,
+                        8,
+                        options,
+                    )?;
+                    let margins = reference.diagnostic_teacher_forced_margins(&tokens[i])?;
+                    let flips: Vec<Value> = margins
+                        .iter()
+                        .enumerate()
+                        .filter(|(k, m)| m.0 != tokens[i][k + 1])
+                        .map(|(k, m)| {
+                            json!({"position": k + 1, "emitted": tokens[i][k + 1], "reference": m.0,
+                                "margin": m.1 - m.2, "reference_gap": m.1 - m.3})
+                        })
+                        .collect();
+                    let first_divergence = tokens[i]
+                        .iter()
+                        .zip(&serial[i].0)
+                        .position(|(a, b)| a != b)
+                        .or((tokens[i].len() != serial[i].0.len())
+                            .then(|| tokens[i].len().min(serial[i].0.len())));
+                    let gaps: Vec<f32> = margins.iter().map(|m| m.1 - m.3).collect();
+                    rows.push(json!({"id": prompts[i]["id"], "tokens": tokens[i].len(),
+                        "stop": format!("{:?}", stops[i]), "cache_nonfinite": nonfinite,
+                        "first_divergence_vs_serial": first_divergence, "flips": flips,
+                        "reference_gaps": gaps, "serial_tokens": serial[i].0, "ragged_tokens": tokens[i],
+                        "text": tokenizer.decode(&tokens[i], true)?}));
+                }
+                let total_tokens: usize = tokens.iter().map(Vec::len).sum();
+                println!(
+                    "relaxed-check rows={n} batched_windows={batched_windows} decode={decode_s:.2}s tokens={total_tokens} flips={}",
+                    rows.iter().map(|r| r["flips"].as_array().map_or(0, Vec::len)).sum::<usize>()
+                );
+                write(
+                    json!({"rows": rows, "batched_windows": batched_windows, "serial_s": serial_s,
+                    "ragged_s": ragged_s, "decode_s": decode_s, "total_tokens": total_tokens}),
+                )?;
+                return Ok(());
+            }
             let mut rows = Vec::new();
             let mut all_equal = true;
             for i in 0..n {

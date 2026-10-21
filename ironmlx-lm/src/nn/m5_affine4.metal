@@ -38,8 +38,22 @@
     op.run(a, b, P);
     for (int t = 0; t < TMR; t++) {
       const bool live = !EDGE || rb + t * 16 < MP;     // EDGE: the last 32-row block passes MP, where XS ends
-      const float xs0 = live ? XS[g * MP + rb + t * 16 + fm] : 0.0f;
-      const float xs1 = live ? XS[g * MP + rb + t * 16 + fm + 8] : 0.0f;
+      float xs0 = 0.0f, xs1 = 0.0f;
+      if (FXS) {
+        // Group sums of x in-kernel, in the separate xsum kernel's order.
+        const int r0 = rb + t * 16 + fm;
+        if (r0 < M) {
+          const device vec<bfloat, 8>* xp = (const device vec<bfloat, 8>*)((const device bfloat*)X + (int64_t)r0 * K + g * 64);
+          for (int w = 0; w < 8; w++) { const vec<bfloat, 8> v = xp[w]; for (int i = 0; i < 8; i++) xs0 += float(v[i]); }
+        }
+        if (r0 + 8 < M) {
+          const device vec<bfloat, 8>* xp = (const device vec<bfloat, 8>*)((const device bfloat*)X + (int64_t)(r0 + 8) * K + g * 64);
+          for (int w = 0; w < 8; w++) { const vec<bfloat, 8> v = xp[w]; for (int i = 0; i < 8; i++) xs1 += float(v[i]); }
+        }
+      } else {
+        xs0 = live ? XS[g * MP + rb + t * 16 + fm] : 0.0f;
+        xs1 = live ? XS[g * MP + rb + t * 16 + fm + 8] : 0.0f;
+      }
       for (int f = 0; f < NF; f++)
         for (int r = 0; r < 2; r++)
           for (int j = 0; j < 4; j++) {

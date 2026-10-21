@@ -296,6 +296,12 @@ impl GatedDeltaCache {
         Ok(())
     }
 
+    /// Put back a capture taken by [`Self::take_speculative_replay`] that the
+    /// caller did not consume.
+    pub(crate) fn put_speculative_replay(&mut self, capture: GatedDeltaReplayCapture) {
+        self.speculative_replay = Some(capture);
+    }
+
     pub(crate) fn take_speculative_replay(&mut self) -> Result<GatedDeltaReplayCapture> {
         self.speculative_base = None;
         self.speculative_replay

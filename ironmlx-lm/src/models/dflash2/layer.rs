@@ -27,6 +27,13 @@ impl DFlash2DecoderLayer {
         out
     }
 
+    pub(super) fn share_weight_layout(&mut self) -> Result<usize> {
+        Ok(self.attention.share_weight_layout()?
+            + self.attention_conv.share_weight_layout()?
+            + self.mlp.share_weight_layout()?
+            + self.mlp_conv.share_weight_layout()?)
+    }
+
     pub(super) fn from_loader(
         loader: &Loader,
         index: i32,

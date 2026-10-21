@@ -1123,18 +1123,31 @@ impl RoutedExperts {
 /// Shared path: standard `Mlp` gated by `sigmoid(shared_expert_gate(x))`.
 pub struct SparseMoeBlock {
     /// Router: Linear(hidden → num_experts) quantized 4-bit, no additive bias.
-    router_gate: Linear,
-    /// Stacked routed expert weights.
-    routed: RoutedExperts,
-    /// Shared expert: standard SwiGLU Mlp.
-    shared_expert: Mlp,
+    /// `None` on the M5 expert route, which uses `tile_router` only.
+    router_gate: Option<Linear>,
+    /// Stacked routed expert weights (MLX layout); `None` when the experts
+    /// live in `m5_experts`.
+    routed: Option<RoutedExperts>,
+    /// Routed and shared experts in the M5 tiled layout
+    /// (`nn::moe_m5_experts`), replacing `routed` for every batch.
+    m5_experts: Option<crate::nn::moe_m5_experts::Store>,
+    num_experts: i32,
+    /// Shared expert: standard SwiGLU Mlp. `None` on the M5 expert route,
+    /// whose store holds the shared expert as one more expert.
+    shared_expert: Option<Mlp>,
     /// Linear(hidden → 1) quantized; `sigmoid(·)` gates the shared expert
-    /// output independently of the routing scores.
-    shared_expert_gate: Linear,
+    /// output independently of the routing scores. `None` on the M5 expert
+    /// route (row `E` of `tile_router`).
+    shared_expert_gate: Option<Linear>,
     /// Number of experts selected per token.
     num_experts_per_tok: i32,
     /// Whether selected expert scores are renormalized across top-k.
     norm_topk_prob: bool,
+    /// Experimental expert-tile route: the shared expert's gate, up and down
+    /// in MLX's affine layout (`nn::moe_tile_experts`).
+    tile_shared: Option<[ExpertQuantProjection; 3]>,
+    /// Router rows followed by the shared expert gate's row (tile route).
+    tile_router: Option<Linear>,
 }
 
 impl SparseMoeBlock {
@@ -1151,30 +1164,188 @@ impl SparseMoeBlock {
         num_experts_per_tok: i32,
         norm_topk_prob: bool,
     ) -> Result<Self> {
+        Self::from_loader_with_projections(
+            loader,
+            prefix,
+            num_experts_per_tok,
+            norm_topk_prob,
+            false,
+        )
+    }
+
+    /// `fuse_projections` loads the shared expert's gate/up as one fused
+    /// quantized matrix with row views.
+    pub(crate) fn from_loader_with_projections(
+        loader: &Loader,
+        prefix: &str,
+        num_experts_per_tok: i32,
+        norm_topk_prob: bool,
+        fuse_projections: bool,
+    ) -> Result<Self> {
         let router_gate = Linear::from_loader(loader, &format!("{prefix}.gate"))
             .context("SparseMoeBlock: loading router gate")?;
-        let routed = RoutedExperts::from_loader(loader, &format!("{prefix}.switch_mlp"))
-            .context("SparseMoeBlock: loading routed experts")?;
-        let shared_expert = Mlp::from_loader(loader, &format!("{prefix}.shared_expert"))
-            .context("SparseMoeBlock: loading shared_expert")?;
+        let shared_prefix = format!("{prefix}.shared_expert");
+        let m5_experts = if crate::nn::moe_m5_experts::requested() {
+            Self::load_m5_experts(loader, prefix)?
+        } else {
+            None
+        };
+        let routed = if m5_experts.is_some() && !crate::nn::moe_m5_experts::ab_both_resident() {
+            None
+        } else {
+            Some(
+                RoutedExperts::from_loader(loader, &format!("{prefix}.switch_mlp"))
+                    .context("SparseMoeBlock: loading routed experts")?,
+            )
+        };
+        let num_experts = loader
+            .tensor(&format!("{prefix}.switch_mlp.gate_proj.weight"))?
+            .shape()
+            .as_slice()[0];
+        // The M5 expert route needs neither the MLX-layout experts nor the
+        // separate shared expert / router projections.
+        let m5_only = m5_experts.is_some() && !crate::nn::moe_m5_experts::ab_both_resident();
+        let shared_expert = if m5_only {
+            None
+        } else {
+            Some(
+                if fuse_projections {
+                    Mlp::from_loader_dflash2(loader, &shared_prefix)
+                } else {
+                    Mlp::from_loader(loader, &shared_prefix)
+                }
+                .context("SparseMoeBlock: loading shared_expert")?,
+            )
+        };
         let shared_expert_gate =
             Linear::from_loader(loader, &format!("{prefix}.shared_expert_gate"))
                 .context("SparseMoeBlock: loading shared_expert_gate")?;
 
+        let tile_router = if crate::nn::moe_tile_experts::requested() || m5_experts.is_some() {
+            Some(Linear::fuse_quantized_outputs(
+                &[&router_gate, &shared_expert_gate],
+                "SparseMoeBlock: tile router",
+            )?)
+        } else {
+            None
+        };
+        let tile_shared = if crate::nn::moe_tile_experts::requested()
+            && (m5_experts.is_none() || crate::nn::moe_m5_experts::ab_both_resident())
+        {
+            let load = |name: &'static str| {
+                RoutedExperts::load_projection(loader, &format!("{shared_prefix}.{name}"), name)
+            };
+            Some([load("gate_proj")?, load("up_proj")?, load("down_proj")?])
+        } else {
+            None
+        };
+
+        let (router_gate, shared_expert_gate) = if m5_only {
+            (None, None)
+        } else {
+            (Some(router_gate), Some(shared_expert_gate))
+        };
         Ok(Self {
             router_gate,
             routed,
+            m5_experts,
+            num_experts,
             shared_expert,
             shared_expert_gate,
             num_experts_per_tok,
             norm_topk_prob,
+            tile_shared,
+            tile_router,
         })
+    }
+
+    /// Checkpoint expert weights for `nn::moe_m5_experts`; `None` when they
+    /// are not affine 4-bit group 64 (MLX's routed experts then).
+    fn load_m5_experts(
+        loader: &Loader,
+        prefix: &str,
+    ) -> Result<Option<crate::nn::moe_m5_experts::Store>> {
+        use crate::nn::moe_m5_experts::{Native, NativeExperts, Store};
+        let native = |name: &str| -> Result<Option<Native>> {
+            let p = format!("{prefix}.{name}");
+            let Some(meta) = loader.quant_meta_for(&p) else {
+                return Ok(None);
+            };
+            if meta.bits != 4
+                || meta.group_size != 64
+                || meta.mode != crate::core::QuantMode::Affine
+            {
+                return Ok(None);
+            }
+            let (Some(weight), Some(scales), Some(biases)) = (
+                loader.tensor_opt(&format!("{p}.weight")),
+                loader.tensor_opt(&format!("{p}.scales")),
+                loader.tensor_opt(&format!("{p}.biases")),
+            ) else {
+                return Ok(None);
+            };
+            Ok(Some(Native {
+                weight: weight.clone(),
+                scales: scales.clone(),
+                biases: biases.clone(),
+            }))
+        };
+        let (
+            Some(gate),
+            Some(up),
+            Some(down),
+            Some(shared_gate),
+            Some(shared_up),
+            Some(shared_down),
+        ) = (
+            native("switch_mlp.gate_proj")?,
+            native("switch_mlp.up_proj")?,
+            native("switch_mlp.down_proj")?,
+            native("shared_expert.gate_proj")?,
+            native("shared_expert.up_proj")?,
+            native("shared_expert.down_proj")?,
+        )
+        else {
+            return Ok(None);
+        };
+        Ok(Store::new(NativeExperts {
+            gate,
+            up,
+            down,
+            shared_gate,
+            shared_up,
+            shared_down,
+        }))
+    }
+
+    /// Convert the M5 expert store to its tiled layout now (start-up).
+    pub(crate) fn prepare_m5_experts(&self, target: StreamOrDevice) -> Result<bool> {
+        match &self.m5_experts {
+            Some(store) => store.prepare(target).map(|()| true),
+            None => Ok(false),
+        }
+    }
+
+    /// The shared expert's projections (fused storage when fused).
+    pub(crate) fn shared_expert_projections(&self) -> Vec<&crate::nn::linear::Linear> {
+        self.shared_expert
+            .as_ref()
+            .map(Mlp::activation_projections)
+            .unwrap_or_default()
+    }
+
+    /// Single-resident affine4 layout for the shared expert's projections.
+    pub(crate) fn share_shared_expert_layout(&mut self) -> Result<usize> {
+        match &mut self.shared_expert {
+            Some(shared) => shared.share_weight_layout(),
+            None => Ok(0),
+        }
     }
 
     /// Routed experts of this block (diagnostics and benchmarks).
     #[doc(hidden)]
-    pub fn routed(&self) -> &RoutedExperts {
-        &self.routed
+    pub fn routed(&self) -> Option<&RoutedExperts> {
+        self.routed.as_ref()
     }
 
     /// Forward pass: `[B, S, H]` → `[B, S, H]`.
@@ -1225,12 +1396,18 @@ impl SparseMoeBlock {
         if super::timing_ablation::skips(super::timing_ablation::SHARED_EXPERT) {
             return Ok(mlx::ops::zeros_like(flat_x)?);
         }
-        let shared_y = self
-            .shared_expert
+        let (Some(shared_expert), Some(shared_expert_gate)) = (
+            self.shared_expert.as_ref(),
+            self.shared_expert_gate.as_ref(),
+        ) else {
+            return Err(anyhow!(
+                "SparseMoeBlock: shared expert held by the M5 expert store only"
+            ));
+        };
+        let shared_y = shared_expert
             .forward_on(flat_x, target)
             .context("SparseMoeBlock: shared_expert forward")?;
-        let gate_logit = self
-            .shared_expert_gate
+        let gate_logit = shared_expert_gate
             .forward_on(flat_x, target)
             .context("SparseMoeBlock: shared_expert_gate forward")?;
         let gate = gate_logit
@@ -1239,18 +1416,107 @@ impl SparseMoeBlock {
         Ok(&shared_y * &gate)
     }
 
+    /// Experimental expert-tile route for narrow batches; `None` when it does
+    /// not apply (flag off, wide batch, or weights it cannot read).
+    fn forward_tile_experts(
+        &self,
+        flat_x: &Array,
+        inds: &Array,
+        scores: &Array,
+        gate: &Array,
+        target: StreamOrDevice,
+    ) -> Result<Option<Array>> {
+        let (Some([sg, su, sd]), Some(routed)) = (&self.tile_shared, &self.routed) else {
+            return Ok(None);
+        };
+        let tokens = flat_x.shape().as_slice()[0];
+        if tokens > crate::nn::moe_tile_experts::MAX_TOKENS
+            || flat_x.dtype() != mlx::Dtype::Bfloat16
+            || !matches!(routed.gate_up, GateUpPath::Fused { .. })
+        {
+            return Ok(None);
+        }
+        let fused = routed.fused_gate_up(target)?;
+        let affine4 = |m: &QuantMeta| {
+            m.bits == 4 && m.group_size == 64 && m.mode == crate::core::QuantMode::Affine
+        };
+        let (Some(gu_b), Some(d_b), Some(sg_b), Some(su_b), Some(sd_b)) = (
+            fused.biases.as_ref(),
+            routed.down_biases.as_ref(),
+            sg.biases.as_ref(),
+            su.biases.as_ref(),
+            sd.biases.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+        if ![&fused.meta, &routed.down_meta, &sg.meta, &su.meta, &sd.meta]
+            .into_iter()
+            .all(affine4)
+        {
+            return Ok(None);
+        }
+        use crate::nn::moe_tile_experts::{Quant, Weights};
+        let q = |weight, scales, biases| Quant {
+            weight,
+            scales,
+            biases,
+        };
+        let weights = Weights {
+            gate_up: q(&fused.weight, &fused.scales, gu_b),
+            down: q(&routed.down_weight, &routed.down_scales, d_b),
+            shared_gate: q(&sg.weight, &sg.scales, sg_b),
+            shared_up: q(&su.weight, &su.scales, su_b),
+            shared_down: q(&sd.weight, &sd.scales, sd_b),
+        };
+        crate::nn::moe_tile_experts::forward_on(flat_x, inds, scores, gate, &weights, target)
+            .map(Some)
+    }
+
+    /// `residual + forward_on(x)` (the decoder layer's residual add); the M5
+    /// expert route adds the residual in its combine dispatch.
+    pub(crate) fn forward_residual_on(
+        &self,
+        x: &Array,
+        residual: &Array,
+        target: StreamOrDevice,
+        layer_idx: i32,
+    ) -> Result<Array> {
+        let dims = x.shape();
+        let s = dims.as_slice().get(1).copied().unwrap_or(0);
+        if crate::nn::position_stable_qmm::is_armed() && s > 1 {
+            return Ok(residual + &self.forward_on(x, target, layer_idx)?);
+        }
+        self.forward_unisolated_residual_on(x, Some(residual), target, layer_idx)
+    }
+
     fn forward_unisolated_on(
         &self,
         x: &Array,
         target: StreamOrDevice,
         layer_idx: i32,
     ) -> Result<Array> {
+        self.forward_unisolated_residual_on(x, None, target, layer_idx)
+    }
+
+    fn forward_unisolated_residual_on(
+        &self,
+        x: &Array,
+        residual: Option<&Array>,
+        target: StreamOrDevice,
+        layer_idx: i32,
+    ) -> Result<Array> {
+        let with_residual = |out: Array| -> Result<Array> {
+            Ok(match residual {
+                Some(r) => r + &out,
+                None => out,
+            })
+        };
         let dims = x.shape();
         let dvec = dims.as_slice();
         let (b, s, h) = (dvec[0], dvec[1], dvec[2]);
         let bs = b * s;
         let k = self.num_experts_per_tok;
-        let num_experts = self.routed.num_experts;
+        let num_experts = self.num_experts;
 
         // --- Flatten [B, S, H] → [BS, H] for routing and expert kernels. ---
         // Setup before the 8 substep spans; not attributed to any substep.
@@ -1262,7 +1528,40 @@ impl SparseMoeBlock {
             let _ = layer_idx;
 
             // (1) Router: Linear -> [BS, E], then top-k expert selection.
-            let logits = self.router_gate.forward_on(&flat_x, target)?; // [BS, E]
+            // The tile route computes the shared expert's gate logit in the
+            // same projection (row E).
+            let m5_route = self.m5_experts.is_some()
+                && !crate::nn::moe_m5_experts::ab_off()
+                && x.dtype() == mlx::Dtype::Bfloat16;
+            let tile_route = m5_route
+                || (self.tile_router.is_some()
+                    && crate::nn::moe_tile_experts::armed()
+                    && bs <= crate::nn::moe_tile_experts::MAX_TOKENS
+                    && x.dtype() == mlx::Dtype::Bfloat16);
+            let (logits, shared_gate) = if tile_route {
+                let all = self
+                    .tile_router
+                    .as_ref()
+                    .expect("checked tile router")
+                    .forward_on(&flat_x, target)?; // [BS, E + 1]
+                let logits = slice_on(&all, vec![0, 0], vec![bs, num_experts], target)?;
+                let gate = slice_on(
+                    &all,
+                    vec![0, num_experts],
+                    vec![bs, num_experts + 1],
+                    target,
+                )?
+                .sigmoid_on(target)?;
+                (logits, Some(gate))
+            } else {
+                (
+                    self.router_gate
+                        .as_ref()
+                        .ok_or_else(|| anyhow!("SparseMoeBlock: M5 experts need bf16 activations"))?
+                        .forward_on(&flat_x, target)?,
+                    None,
+                )
+            };
 
             // (2) Top-k selection via argpartition, plus score normalization
             // matching `norm_topk_prob`.
@@ -1280,6 +1579,40 @@ impl SparseMoeBlock {
                 target,
             )?;
             route_diagnostic::record(layer_idx, &inds_u32);
+            if super::timing_ablation::skips(super::timing_ablation::ROUTED_EXPERTS)
+                && shared_gate.is_some()
+            {
+                return with_residual(mlx::ops::zeros_like(x)?);
+            }
+            if let (true, Some(store), Some(gate)) =
+                (m5_route, self.m5_experts.as_ref(), shared_gate.as_ref())
+            {
+                let flat_residual = residual
+                    .map(|r| mlx::ops::shape::reshape(r, [bs, h]))
+                    .transpose()?;
+                let out = crate::nn::moe_m5_experts::forward_on(
+                    store,
+                    &flat_x,
+                    &inds_u32,
+                    &scores,
+                    gate,
+                    flat_residual.as_ref(),
+                    target,
+                )?;
+                return mlx::ops::shape::reshape(&out, [b, s, h])
+                    .context("SparseMoeBlock: reshape [BS,H] → [B,S,H]");
+            }
+            if let Some(out) = shared_gate
+                .as_ref()
+                .map(|gate| self.forward_tile_experts(&flat_x, &inds_u32, &scores, gate, target))
+                .transpose()?
+                .flatten()
+            {
+                return with_residual(
+                    mlx::ops::shape::reshape(&out, [b, s, h])
+                        .context("SparseMoeBlock: reshape [BS,H] → [B,S,H]")?,
+                );
+            }
 
             // (3) Routed SwiGLU via the shared SwitchGLU-style combine.
             //
@@ -1293,18 +1626,21 @@ impl SparseMoeBlock {
             {
                 mlx::ops::zeros_like(&flat_x)?
             } else {
-                self.routed.apply_experts_inner(
-                    &flat_x,
-                    &inds_u32,
-                    &scores,
-                    target,
-                    RoutedApplyOptions {
-                        layer_idx,
-                        cast_output_to_expert_dtype: false,
-                        activation: RoutedActivation::SwiGlu,
-                        request_layout: Some((b, s)),
-                    },
-                )?
+                self.routed
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("SparseMoeBlock: M5 experts need bf16 activations"))?
+                    .apply_experts_inner(
+                        &flat_x,
+                        &inds_u32,
+                        &scores,
+                        target,
+                        RoutedApplyOptions {
+                            layer_idx,
+                            cast_output_to_expert_dtype: false,
+                            activation: RoutedActivation::SwiGlu,
+                            request_layout: Some((b, s)),
+                        },
+                    )?
             };
 
             // (7) Shared expert with independent sigmoid gate.
@@ -1315,7 +1651,7 @@ impl SparseMoeBlock {
             let out = mlx::ops::shape::reshape(&out_flat, [b, s, h])
                 .context("SparseMoeBlock: reshape [BS,H] → [B,S,H]")?;
 
-            Ok(out)
+            with_residual(out)
         }
     }
 }

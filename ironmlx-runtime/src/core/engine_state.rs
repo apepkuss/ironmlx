@@ -1151,6 +1151,29 @@ where
         dflash2_cache_cost.fixed_bytes_per_sequence,
     )?;
     let tokenizer = Arc::new(tokenizer);
+    let draft = if crate::core::dflash2::startup_warmup_requested() {
+        let model = Arc::clone(&model);
+        let tokenizer = Arc::clone(&tokenizer);
+        let execution = crate::core::dflash2::DFlash2ExecutionOptions {
+            block_size,
+            p2: p2_options,
+        };
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            let guard = model.blocking_lock();
+            crate::core::dflash2::run_dflash2_startup_warmup(
+                &*guard,
+                &draft,
+                &tokenizer,
+                execution,
+                prefill_chunk_size,
+            )?;
+            Ok(draft)
+        })
+        .await
+        .context("DFlash2 startup warmup task")??
+    } else {
+        draft
+    };
     let cold_materialization_tracker =
         crate::core::process_memory::ColdMaterializationTracker::new(static_memory_estimate);
     let dflash2_handle = dflash2_actor::spawn_dflash2_actor(

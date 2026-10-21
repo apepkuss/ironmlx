@@ -998,7 +998,7 @@ where
         .with_context(|| format!("Loader::open_dflash2 {}", draft_dir.display()))?;
     let draft_bits_value = family.resolve_draft_bits(args.dflash2_draft_bits)?;
     let draft_bits = (draft_bits_value != 0).then_some(draft_bits_value);
-    let draft = ironmlx_lm::models::DFlash2DraftModel::from_loader(
+    let mut draft = ironmlx_lm::models::DFlash2DraftModel::from_loader(
         &draft_loader,
         model.dflash2_target_spec(),
         draft_bits,
@@ -1006,6 +1006,9 @@ where
     .context("DFlash2DraftModel::from_loader")?;
     let draft_precision =
         super::dflash2_target::ensure_loaded_draft_precision(&draft, draft_bits_value)?;
+    draft
+        .share_weight_layout_if_requested()
+        .context("DFlash2 drafter resident M5 layout")?;
     let checkpoint_block_size = usize::try_from(draft.config().dflash_config.block_size)
         .context("DFlash2 checkpoint block_size")?;
     family.ensure_tree_supported(&model, dflash2_tree_max_nodes(args))?;
@@ -1394,6 +1397,11 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
     }
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
     let mut loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
+    if dflash2_family.is_some() {
+        // DFlash2 serving rejects image input, so the vision encoder would
+        // only hold resident memory.
+        loader.drop_vision_tower();
+    }
     let component_bytes = loader.loaded_tensor_component_bytes();
     let static_memory_estimate = StaticMemoryEstimate {
         text_cold_bytes: component_bytes.text,

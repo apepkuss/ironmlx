@@ -40,6 +40,10 @@ pub mod settings {
     /// window drafts (keeps speculation measured while batched).
     pub const DFLASH2_RAGGED_PROBE_INTERVAL: &str =
         "IRONMLX_EXPERIMENTAL_DFLASH2_RAGGED_PROBE_INTERVAL";
+    /// Ragged multi-request rows run ordinary batched kernels (values not
+    /// bit-identical to each row's B1 decode); B1 stays row-exact.
+    pub const DFLASH2_RAGGED_FAST_ARITHMETIC: &str =
+        "IRONMLX_EXPERIMENTAL_DFLASH2_RAGGED_FAST_ARITHMETIC";
     pub const PREFILL_MASKED_SOFTMAX: &str = "IRONMLX_EXPERIMENTAL_PREFILL_MASKED_SOFTMAX";
     pub const PREFILL_CHUNK_CACHE_RESET: &str = "IRONMLX_EXPERIMENTAL_PREFILL_CHUNK_CACHE_RESET";
     pub const PREFILL_QMM_MTILE_METALLIB: &str = "IRONMLX_EXPERIMENTAL_PREFILL_QMM_MTILE_METALLIB";
@@ -53,6 +57,50 @@ pub mod settings {
     /// Qwen3.6 MoE affine4: route non-expert projections through the M5
     /// affine4 tensor-unit kernel (changes reduction order versus MLX).
     pub const M5_MOE_AFFINE4_PROJECTIONS: &str = "IRONMLX_EXPERIMENTAL_M5_MOE_AFFINE4_PROJECTIONS";
+    /// Qwen3.6 MoE affine4: the LM head on the M5 affine4 route as well
+    /// (keeps its own tile-layout copy under the shared weight layout).
+    pub const M5_MOE_HEAD: &str = "IRONMLX_EXPERIMENTAL_M5_HEAD";
+    /// Qwen3.6 MoE: routed and shared experts of narrow verify batches as
+    /// expert tiles (`nn::moe_tile_experts`).
+    pub const MOE_TILE_EXPERTS: &str = "IRONMLX_EXPERIMENTAL_MOE_TILE_EXPERTS";
+    /// Qwen3.6 MoE: routed and shared experts of every batch on the M5
+    /// tensor unit with one tiled resident copy of the expert weights
+    /// (`nn::moe_m5_experts`).
+    pub const MOE_M5_EXPERTS: &str = "IRONMLX_EXPERIMENTAL_MOE_M5_EXPERTS";
+    /// GatedDelta speculative commit: replay only each row's accepted steps,
+    /// state only.
+    pub const GDN_COMMIT_KERNEL: &str = "IRONMLX_EXPERIMENTAL_GDN_COMMIT_KERNEL";
+    /// DFlash2 drafter projections of ragged multi-request drafts on the M5
+    /// affine4 route (single-request drafts keep the native projections).
+    pub const DFLASH2_DRAFT_M5: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_DRAFT_M5";
+    /// Ragged drafts with the row-independent work batched across rows
+    /// (context projections, norm + RoPE, attention).
+    pub const DFLASH2_DRAFT_BATCHED: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_DRAFT_BATCHED";
+    /// Rows with fewer remaining tokens than the draft budget stay in the
+    /// ragged batch; the window keeps only the tokens they still need.
+    pub const DFLASH2_RAGGED_TAIL: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_RAGGED_TAIL";
+    /// Ragged windows count accepted tokens on the GPU and submit the cache
+    /// commit right after the head, before the host reads the window.
+    pub const DFLASH2_GPU_COMMIT: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_GPU_COMMIT";
+    /// Fixed draft budget of a request that ran ragged windows and is left
+    /// decoding alone; 0 keeps its adaptive single-request policy.
+    pub const DFLASH2_RAGGED_SOLO_BUDGET: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_RAGGED_SOLO_BUDGET";
+    /// M5 affine4 tensor kernel computes the group sums of x itself instead
+    /// of a separate dependent dispatch per projection (same bits).
+    pub const M5_FUSED_XSUM: &str = "IRONMLX_EXPERIMENTAL_M5_FUSED_XSUM";
+    /// Every DFlash2 drafter projection in one resident M5 tiled layout, and
+    /// every proposal on the M5 route (no checkpoint-layout copy kept).
+    pub const DFLASH2_DRAFT_M5_RESIDENT: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_DRAFT_M5_RESIDENT";
+    /// M5 affine4 kernel: per-shape K-slice counts tuned on the M5 Max.
+    pub const M5_TUNED_SPLIT_K: &str = "IRONMLX_EXPERIMENTAL_M5_TUNED_SPLIT_K";
+    /// Bit-identical single-dispatch decoder glue: GatedDelta input
+    /// preparation and gated norm, residual add + norm, the MoE residual add
+    /// (`nn::fused_norm`, `nn::gdn_prep`).
+    pub const FUSED_GLUE: &str = "IRONMLX_EXPERIMENTAL_FUSED_GLUE";
+    /// DFlash2 serving runs a few short synthetic requests of the prompt
+    /// length classes through the request pipeline before it accepts
+    /// requests, so no shape-specialized kernel compiles inside a request.
+    pub const DFLASH2_STARTUP_WARMUP: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_STARTUP_WARMUP";
 }
 
 /// Model family a DFlash2 profile is qualified for. Each family carries its
@@ -88,10 +136,7 @@ impl M5ProfileTarget {
     /// this family's execution when set explicitly; reported for diagnosis.
     fn experimental_settings(self) -> &'static [&'static str] {
         match self {
-            Self::Qwen36Moe => &[
-                settings::M5_MOE_GROUPED_QMV,
-                settings::M5_MOE_AFFINE4_PROJECTIONS,
-            ],
+            Self::Qwen36Moe => &[settings::M5_MOE_GROUPED_QMV],
             Self::Qwen35Dense | Self::Unqualified => &[],
         }
     }
@@ -111,11 +156,56 @@ impl M5ProfileTarget {
 /// window costs; long-prompt prefill was not measured at this ceiling. Wired
 /// weights removed the intermittent 40-80 ms slower prefills after the idle
 /// gap between requests (0 of 48 against 6 of 24 in the paired sessions).
+///
+/// Concurrent requests decode fully speculatively (no one-token windows):
+/// ragged rows draft 3 tokens with ordinary batched kernels, the affine4
+/// projections, LM head and drafter run on the M5 tensor-unit route, routed
+/// and shared experts run as expert tiles, the draft batches its rows, the
+/// GatedDelta commit replays only accepted steps and is submitted from GPU
+/// accepted counts, and rows near their limit stay in the ragged batch. A
+/// request left alone at the end of a batch keeps the ragged budget instead
+/// of calibrating the single-request policy (whose budget-0 calibration
+/// windows are one-token windows): two interleaved rounds 367.7/365.7 tok/s
+/// against 362.8/364.0 for the adaptive policy. Four-app B4 thermal round:
+/// 364.97 tok/s against 346.3 for Splash 1.3.0; teacher-forced flips
+/// 1.2-2.3% of positions, all within a reference margin of 0.63.
+///
+/// Routed and shared experts of every batch run on the M5 tensor unit from
+/// one tiled resident copy of the expert weights (converted at start-up);
+/// the drafter's projections live in one resident M5 layout and every
+/// proposal takes that route; M5 projections use per-shape K-slice counts and
+/// in-kernel group sums; GatedDelta input preparation, its gated norm and the
+/// decoder's residual add + post norm (and the MoE residual add) are single
+/// dispatches computing the op-by-op values bit for bit. Paired in-process B1
+/// q8 windows: experts -4.3%, glue -2.1%, drafts -0.7%; verify q8 12.7 ->
+/// 11.7 ms with the split counts.
+///
+/// The vision encoder is not loaded (DFlash2 serving rejects image input):
+/// B1 serving footprint 22.23 -> 21.34 GB. Startup warmup requests compile the
+/// prompt-length-specialized kernels before serving: the first run of a new
+/// build no longer stalls 190-240 ms inside a request (prefill of a prompt
+/// over 64 tokens, the drafter's first 33-48-row context projection).
 const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
     (settings::DFLASH2_RAGGED_LINEAR, "1"),
-    (settings::DFLASH2_RAGGED_BUDGET, "2"),
-    (settings::DFLASH2_RAGGED_ORDINARY_MIN_WIDTH, "3"),
-    (settings::DFLASH2_RAGGED_PROBE_INTERVAL, "16"),
+    (settings::DFLASH2_RAGGED_BUDGET, "3"),
+    (settings::DFLASH2_RAGGED_FAST_ARITHMETIC, "1"),
+    (settings::DFLASH2_RAGGED_TAIL, "1"),
+    (settings::DFLASH2_GPU_COMMIT, "1"),
+    (settings::DFLASH2_RAGGED_SOLO_BUDGET, "3"),
+    (settings::DFLASH2_DRAFT_M5, "1"),
+    (settings::DFLASH2_DRAFT_BATCHED, "1"),
+    (settings::M5_MOE_AFFINE4_PROJECTIONS, "1"),
+    (settings::M5_MOE_HEAD, "1"),
+    (settings::M5_SHARED_WEIGHT_LAYOUT, "1"),
+    (settings::M5_PRECOMPILE, "1"),
+    (settings::MOE_TILE_EXPERTS, "1"),
+    (settings::MOE_M5_EXPERTS, "1"),
+    (settings::M5_TUNED_SPLIT_K, "1"),
+    (settings::M5_FUSED_XSUM, "1"),
+    (settings::FUSED_GLUE, "1"),
+    (settings::DFLASH2_DRAFT_M5_RESIDENT, "1"),
+    (settings::GDN_COMMIT_KERNEL, "1"),
+    (settings::DFLASH2_STARTUP_WARMUP, "1"),
     (settings::QEMBEDDING_RUNTIME_COUNT, "1"),
     (settings::MLX_CACHE_MAX_MIB, "512"),
     (settings::WIRED_WEIGHTS, "1"),
@@ -667,6 +757,8 @@ mod tests {
             if *name == settings::QEMBEDDING_RUNTIME_COUNT
                 || *name == settings::MLX_CACHE_MAX_MIB
                 || *name == settings::DFLASH2_RAGGED_LINEAR
+                || *name == settings::M5_SHARED_WEIGHT_LAYOUT
+                || *name == settings::M5_PRECOMPILE
             {
                 continue;
             }
@@ -680,16 +772,44 @@ mod tests {
         );
         assert_eq!(
             setting_with(None, moe, settings::DFLASH2_RAGGED_BUDGET).as_deref(),
-            Some("2")
-        );
-        assert_eq!(
-            setting_with(None, moe, settings::DFLASH2_RAGGED_ORDINARY_MIN_WIDTH).as_deref(),
             Some("3")
         );
         assert_eq!(
-            setting_with(None, moe, settings::DFLASH2_RAGGED_PROBE_INTERVAL).as_deref(),
-            Some("16")
+            setting_with(None, moe, settings::DFLASH2_RAGGED_SOLO_BUDGET).as_deref(),
+            Some("3")
         );
+        // Fully speculative: no batched one-token windows, no probes.
+        for name in [
+            settings::DFLASH2_RAGGED_ORDINARY_MIN_WIDTH,
+            settings::DFLASH2_RAGGED_PROBE_INTERVAL,
+        ] {
+            assert_eq!(setting_with(None, moe, name), None, "{name}");
+        }
+        for name in [
+            settings::DFLASH2_RAGGED_FAST_ARITHMETIC,
+            settings::DFLASH2_RAGGED_TAIL,
+            settings::DFLASH2_GPU_COMMIT,
+            settings::DFLASH2_DRAFT_M5,
+            settings::DFLASH2_DRAFT_BATCHED,
+            settings::M5_MOE_AFFINE4_PROJECTIONS,
+            settings::M5_MOE_HEAD,
+            settings::M5_SHARED_WEIGHT_LAYOUT,
+            settings::M5_PRECOMPILE,
+            settings::MOE_TILE_EXPERTS,
+            settings::MOE_M5_EXPERTS,
+            settings::M5_TUNED_SPLIT_K,
+            settings::M5_FUSED_XSUM,
+            settings::FUSED_GLUE,
+            settings::DFLASH2_DRAFT_M5_RESIDENT,
+            settings::GDN_COMMIT_KERNEL,
+            settings::DFLASH2_STARTUP_WARMUP,
+        ] {
+            assert_eq!(
+                setting_with(None, moe, name).as_deref(),
+                Some("1"),
+                "{name}"
+            );
+        }
         // Shared settings with target-specific values.
         assert_eq!(
             setting_with(None, moe, settings::QEMBEDDING_RUNTIME_COUNT).as_deref(),
@@ -711,14 +831,9 @@ mod tests {
             ),
             None
         );
-        // The experimental MoE settings are reported, never enabled by the
+        // The experimental MoE setting is reported, never enabled by the
         // profile; an explicit value still applies.
-        for name in [
-            settings::M5_MOE_GROUPED_QMV,
-            settings::M5_MOE_AFFINE4_PROJECTIONS,
-        ] {
-            assert_eq!(setting_with(None, moe, name), None, "{name}");
-        }
+        assert_eq!(setting_with(None, moe, settings::M5_MOE_GROUPED_QMV), None);
         assert_eq!(
             setting_with(Some("1".into()), moe, settings::M5_MOE_GROUPED_QMV).as_deref(),
             Some("1")

@@ -514,6 +514,13 @@ impl Loader {
             .ok_or_else(|| anyhow!("Loader: missing tensor key `{key}`"))
     }
 
+    /// Drop the vision-encoder tensors of a multimodal loader before any
+    /// model is built from it, for serving paths that reject image input, so
+    /// the encoder never becomes resident.
+    pub fn drop_vision_tower(&mut self) {
+        self.weights.retain(|key, _| !is_vision_tensor_key(key));
+    }
+
     /// Drop loader-owned references to projections replaced by a
     /// model-private fused tensor. The constructed model must already own the
     /// fused result before this is called.
@@ -2104,9 +2111,14 @@ mod tests {
         assert!(text_loader.contains("model.embed_tokens.weight"));
         assert!(!text_loader.contains("vision_tower.patch_embed.weight"));
 
-        let multimodal_loader = Loader::open_multimodal(&dir).unwrap();
+        let mut multimodal_loader = Loader::open_multimodal(&dir).unwrap();
         assert!(multimodal_loader.contains("model.embed_tokens.weight"));
         assert!(multimodal_loader.contains("vision_tower.patch_embed.weight"));
+
+        multimodal_loader.drop_vision_tower();
+        assert!(multimodal_loader.contains("model.embed_tokens.weight"));
+        assert!(!multimodal_loader.contains("vision_tower.patch_embed.weight"));
+        assert_eq!(multimodal_loader.loaded_tensor_component_bytes().vision, 0);
 
         let _ = std::fs::remove_dir_all(dir);
     }

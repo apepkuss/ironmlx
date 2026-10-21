@@ -79,6 +79,15 @@ fn slice_last_hidden(hidden: &Array, row: i32, pos: i32, target: StreamOrDevice)
 
 impl Qwen35MoeTextModel {
     pub fn from_loader(loader: &Loader, cfg: Qwen35MoeConfig) -> Result<Self> {
+        Self::from_loader_with_projections(loader, cfg, false)
+    }
+
+    /// `fuse_projections`: see [`DecoderLayerMoe::from_loader_with_projections`].
+    pub(crate) fn from_loader_with_projections(
+        loader: &Loader,
+        cfg: Qwen35MoeConfig,
+        fuse_projections: bool,
+    ) -> Result<Self> {
         let embed_tokens = Embedding::from_loader(loader, "model.embed_tokens")?;
 
         let head_dim = cfg.effective_head_dim();
@@ -114,11 +123,12 @@ impl Qwen35MoeTextModel {
                 norm_topk_prob: cfg.norm_topk_prob,
             };
             let kind = cfg.layer_kind(i);
-            layers.push(DecoderLayerMoe::from_loader(
+            layers.push(DecoderLayerMoe::from_loader_with_projections(
                 loader,
                 &format!("model.layers.{i}"),
                 layer_cfg,
                 kind,
+                fuse_projections,
             )?);
         }
         let norm = RmsNorm::from_loader(loader, "model.norm", cfg.rms_norm_eps)?;
@@ -130,6 +140,34 @@ impl Qwen35MoeTextModel {
             cfg,
             affine4_fast_paths: false,
         })
+    }
+
+    /// Dense activation projections of every layer (attention and shared
+    /// expert), for the M5 affine4 pre-compilation.
+    pub(crate) fn activation_projections(&self) -> Vec<&crate::nn::linear::Linear> {
+        self.layers
+            .iter()
+            .flat_map(|layer| layer.activation_projections())
+            .collect()
+    }
+
+    /// Convert every layer's M5 expert store now (start-up); returns the
+    /// number of layers converted.
+    pub(crate) fn prepare_m5_experts(&self, target: StreamOrDevice) -> Result<usize> {
+        let mut converted = 0;
+        for layer in &self.layers {
+            converted += usize::from(layer.prepare_m5_experts(target)?);
+        }
+        Ok(converted)
+    }
+
+    /// Single-resident affine4 layout for every layer's dense projections.
+    pub(crate) fn share_weight_layout(&mut self) -> Result<usize> {
+        let mut stores = 0;
+        for layer in &mut self.layers {
+            stores += layer.share_weight_layout()?;
+        }
+        Ok(stores)
     }
 
     /// Enable the qualified affine4 DFlash2 target's kernel routes.
@@ -268,6 +306,52 @@ impl Qwen35MoeTextModel {
         Ok(())
     }
 
+    /// Device half of the per-row commit for every layer (see the decoder
+    /// layer); one flag per layer.
+    pub(crate) fn commit_dflash2_rows_device_on(
+        &self,
+        cache: &mut [LayerCache],
+        counts: &Array,
+        target: StreamOrDevice,
+    ) -> Result<Vec<bool>> {
+        anyhow::ensure!(
+            cache.len() == self.layers.len(),
+            "DFlash2 commit cache layer count"
+        );
+        self.layers
+            .iter()
+            .zip(cache.iter_mut())
+            .map(|(layer, cache)| layer.commit_speculative_rows_device_on(cache, counts, target))
+            .collect()
+    }
+
+    /// Host half of the per-row commit.
+    pub(crate) fn finish_dflash2_rows_host_on(
+        &self,
+        cache: &mut [LayerCache],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+        accepted_lens: &[usize],
+        device_done: &[bool],
+        target: StreamOrDevice,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            cache.len() == self.layers.len()
+                && snapshots.len() == self.layers.len()
+                && device_done.len() == self.layers.len(),
+            "DFlash2 commit layer count"
+        );
+        for (((layer, cache), snapshot), &done) in self
+            .layers
+            .iter()
+            .zip(cache.iter_mut())
+            .zip(snapshots)
+            .zip(device_done)
+        {
+            layer.finish_speculative_rows_host_on(cache, snapshot, accepted_lens, done, target)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn restore_dflash2_speculative_prefix_rows_on(
         &self,
         cache: &mut [LayerCache],
@@ -381,7 +465,8 @@ impl Qwen35MoeTextModel {
             ));
         }
         let refs = captured.iter().collect::<Vec<_>>();
-        let context_hidden = mlx::ops::shape::concatenate_on(&refs, -1, target)?;
+        // One copy dispatch instead of one strided copy per tapped layer.
+        let context_hidden = crate::nn::concat_last::concat_last_on(&refs, target)?;
         Ok((self.norm.forward_on(&x, target)?, context_hidden))
     }
 
