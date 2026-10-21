@@ -27,14 +27,26 @@ struct IronSplitKParams {
   int NB;       // key blocks
   int kv_heads;
   int causal;
+  int parts;    // row parts per key block (one threadgroup each)
+  int lo;       // row j sees keys >= lo + (j % R) (sliding window); very
+                // negative when unbounded
+  int tail_from; // tree: keys >= tail_from come from the row part's tail
+  int TL;        // tree: keys per part tail
   float scale2; // scale * log2(e)
   int64_t Q_batch;
   int64_t K_strides[3];
   int64_t V_strides[3];
 };
 
-template <int WM>
-[[kernel, max_total_threads_per_threadgroup(WM * 2 * 32)]] void ironmlx_splitk_d256_pass1(
+// TREE: a flat draft tree verified in one call. Query rows are node-major
+// (row j = node slot j / R, R = GQA factor) and each row part (two node
+// slots) lies on one root-to-leaf path. Keys before `tail_from` are the
+// shared prompt; from `tail_from` (chunk aligned) every part reads its own
+// tail: the prompt keys up to the tree base, then its path's nodes at the
+// positions a linear verify of that path gives them. A node row's limit is
+// LIM[slot], so each row computes exactly its linear-verify row.
+template <int WM, int BD, bool TREE>
+[[kernel, max_total_threads_per_threadgroup(WM * 2 * 32)]] void ironmlx_splitk_pass1(
     const device bfloat* Q [[buffer(0)]],
     const device bfloat* K [[buffer(1)]],
     const device bfloat* V [[buffer(2)]],
@@ -42,6 +54,9 @@ template <int WM>
     device float* Mpart [[buffer(4)]],
     device float* Spart [[buffer(5)]],
     const constant IronSplitKParams& p [[buffer(6)]],
+    const device bfloat* TailK [[buffer(7)]],
+    const device bfloat* TailV [[buffer(8)]],
+    const device int* LIM [[buffer(9)]],
     uint simd_lane_id [[thread_index_in_simdgroup]],
     uint simd_group_id [[simdgroup_index_in_threadgroup]],
     uint3 tid [[threadgroup_position_in_grid]]) {
@@ -50,15 +65,17 @@ template <int WM>
   constexpr short kU = 16;
   constexpr short WN = 2;
   constexpr short BK = 32;
-  constexpr short BD = 256;
   constexpr short TK = BK / kU;
   constexpr short TDh = BD / kU / WN;
   constexpr short BDh = BD / WN;
 
-  const int blk = tid.x, h = tid.y, z = tid.z;
+  // Threadgroup x: key block, then its row part (16 * WM rows each),
+  // side by side so a block's parts read its keys while cached.
+  const int blk = tid.x / p.parts, row_part = tid.x % p.parts, part_row0 = row_part * 16 * WM;
+  const int h = tid.y, z = tid.z;
   const short row_group = simd_group_id / WN;
   const short d_group = simd_group_id % WN;
-  const short tm = kU * row_group;
+  const short tm = part_row0 + kU * row_group;
   const int rows = p.rows;
   const short lim_rows_q = short(rows - tm);
 
@@ -69,6 +86,7 @@ template <int WM>
   const int vs = int(p.V_strides[2]);
   K += z * p.K_strides[0] + h * p.K_strides[1] + long(k0) * ks + d_group * BDh;
   V += z * p.V_strides[0] + h * p.V_strides[1] + long(k0) * vs + d_group * BDh;
+  const long tail_base = TREE ? ((long(z) * p.kv_heads + h) * p.parts + row_part) * p.TL * BD + d_group * BDh : 0;
 
   using otile_t = NAXTile<A, 1, TDh>;
   using stile_t = NAXTile<A, 1, TK>;
@@ -88,11 +106,19 @@ template <int WM>
   const short sm = simd_coord.y;
   const short sn = simd_coord.x;
   int row_lim[kRowsPT];
+  int row_lo[kRowsPT];
   for (short i = 0; i < kRowsPT; ++i) {
     const int j = tm + sm + i * stile_t::kFragRowsJump;
-    row_lim[i] = p.causal ? p.N - p.R + (j % p.R) + 1 : p.N;
+    if (TREE) {
+      row_lim[i] = j < rows ? LIM[j / p.R] : 0;
+      row_lo[i] = p.lo;
+    } else {
+      row_lim[i] = p.causal ? p.N - p.R + (j % p.R) + 1 : p.N;
+      row_lo[i] = p.lo + (j % p.R);
+    }
   }
-  const int min_lim = p.causal ? p.N - p.R + 1 : p.N;
+  const int min_lim = TREE ? p.tail_from + 1 : (p.causal ? p.N - p.R + 1 : p.N);
+  const int max_lo = TREE ? p.lo : p.lo + p.R - 1;
 
   NAXTile<T, 1, 1> Qtiles[TDh];
   STEEL_PRAGMA_UNROLL
@@ -106,6 +132,11 @@ template <int WM>
   for (int kc = k0; kc < k1; kc += BK) {
     const short lim_k = short(min(int(BK), k1 - kc));
     const bool full = lim_k == BK;
+    const bool tail = TREE && kc >= p.tail_from;
+    const device T* Kc = tail ? TailK + tail_base + long(kc - p.tail_from) * BD : K;
+    const device T* Vc = tail ? TailV + tail_base + long(kc - p.tail_from) * BD : V;
+    const int kst = tail ? BD : ks;
+    const int vst = tail ? BD : vs;
 
     stile_t Stile;
     Stile.clear();
@@ -114,11 +145,11 @@ template <int WM>
       STEEL_PRAGMA_UNROLL
       for (short id = 0; id < TDh; id++) {
         NAXTile<T, 2, 1> Ktile;
-        const int off = ik * kU * ks + id * kU;
+        const int off = ik * kU * kst + id * kU;
         if (full) {
-          Ktile.load(K + off, ks);
+          Ktile.load(Kc + off, kst);
         } else {
-          Ktile.load_rows(K + off, ks, short(lim_k - ik * kU));
+          Ktile.load_rows(Kc + off, kst, short(lim_k - ik * kU));
         }
         stile_t::NAXFrag_t::mma(
             Stile.frag_at(0, ik),
@@ -158,8 +189,9 @@ template <int WM>
       Stile.elems()[ii] *= p.scale2;
     }
 
-    // Keys past a row's causal limit (and past the cache end) are masked.
-    if (kc + BK > min_lim) {
+    // Keys past a row's causal limit (and past the cache end) or before its
+    // window start are masked.
+    if (kc + BK > min_lim || kc < max_lo) {
       STEEL_PRAGMA_UNROLL
       for (short ik = 0; ik < TK; ik++) {
         thread auto& fg = Stile.frag_at(0, ik);
@@ -169,7 +201,7 @@ template <int WM>
           for (short jj = 0; jj < stile_t::kFragThrCols; jj++) {
             const int c = kc + ik * kU + jj + sn;
             const auto loc = ii * stile_t::kFragThrCols + jj;
-            fg[loc] = c < row_lim[ii] ? fg[loc] : neg_inf;
+            fg[loc] = (c < row_lim[ii] && c >= row_lo[ii]) ? fg[loc] : neg_inf;
           }
         }
       }
@@ -197,11 +229,11 @@ template <int WM>
       STEEL_PRAGMA_UNROLL
       for (short ik = 0; ik < TK; ik++) {
         NAXTile<T, 1, 2> Vtile;
-        const int off = ik * kU * vs + id * kU;
+        const int off = ik * kU * vst + id * kU;
         if (full) {
-          Vtile.load(V + off, vs);
+          Vtile.load(Vc + off, vst);
         } else {
-          Vtile.load_rows(V + off, vs, short(lim_k - ik * kU));
+          Vtile.load_rows(Vc + off, vst, short(lim_k - ik * kU));
         }
         otile_t::NAXFrag_t::mma(
             Otile.frag_at(0, id),
@@ -233,37 +265,44 @@ template <int WM>
   }
 }
 
-[[kernel]] void ironmlx_splitk_d256_pass2(
+template <int BD, bool TREE>
+[[kernel]] void ironmlx_splitk_pass2(
     const device float* Opart [[buffer(0)]],
     const device float* Mpart [[buffer(1)]],
     const device float* Spart [[buffer(2)]],
     device bfloat* O [[buffer(3)]],
     const constant IronSplitKParams& p [[buffer(4)]],
+    const device int* LIM [[buffer(5)]],
     uint3 tid [[threadgroup_position_in_grid]],
     uint lid [[thread_index_in_threadgroup]]) {
   const int j = tid.x, h = tid.y, z = tid.z;
   const int rows = p.rows;
-  const int lim = p.causal ? p.N - p.R + (j % p.R) + 1 : p.N;
+  const int lim = TREE ? LIM[j / p.R] : (p.causal ? p.N - p.R + (j % p.R) + 1 : p.N);
   const int nb = (lim + p.KB - 1) / p.KB;
+  // Blocks wholly before the row's window start hold no key of the row.
+  const int b0 = TREE ? 0 : max(0, p.lo + (j % p.R)) / p.KB;
   const long part0 = (long(z) * p.kv_heads + h) * p.NB;
   float m = Limits<float>::finite_min;
-  for (int b = 0; b < nb; b++) {
+  for (int b = b0; b < nb; b++) {
     m = max(m, Mpart[(part0 + b) * rows + j]);
   }
   float s = 0;
   float acc = 0;
-  for (int b = 0; b < nb; b++) {
+  for (int b = b0; b < nb; b++) {
     const long row = (part0 + b) * rows + j;
     const float w = fast::exp2(Mpart[row] - m);
     s += Spart[row] * w;
-    acc += Opart[row * 256 + lid] * w;
+    acc += Opart[row * BD + lid] * w;
   }
-  O[((long(z) * p.kv_heads + h) * rows + j) * 256 + lid] = static_cast<bfloat>(acc / s);
+  O[((long(z) * p.kv_heads + h) * rows + j) * BD + lid] = static_cast<bfloat>(acc / s);
 }
 
-instantiate_kernel("ironmlx_splitk_d256_pass1_wm1", ironmlx_splitk_d256_pass1, 1)
-instantiate_kernel("ironmlx_splitk_d256_pass1_wm2", ironmlx_splitk_d256_pass1, 2)
-instantiate_kernel("ironmlx_splitk_d256_pass1_wm4", ironmlx_splitk_d256_pass1, 4)
+instantiate_kernel("ironmlx_splitk_d256_pass1_wm1", ironmlx_splitk_pass1, 1, 256, false)
+instantiate_kernel("ironmlx_splitk_d256_pass2", ironmlx_splitk_pass2, 256, false)
+instantiate_kernel("ironmlx_splitk_d256_tree_pass1_wm1", ironmlx_splitk_pass1, 1, 256, true)
+instantiate_kernel("ironmlx_splitk_d256_tree_pass2", ironmlx_splitk_pass2, 256, true)
+instantiate_kernel("ironmlx_splitk_d128_pass1_wm1", ironmlx_splitk_pass1, 1, 128, false)
+instantiate_kernel("ironmlx_splitk_d128_pass2", ironmlx_splitk_pass2, 128, false)
 
 
 

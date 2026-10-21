@@ -1129,6 +1129,19 @@ fn query_position_isolated_attention_bulk_cache_update_on(
             batch == 1 && mask.is_none() && plan.paths.len() == query_len as usize,
             "invalid flat-tree attention shape"
         );
+        // Long contexts: one split-K call whose rows equal the linear verify
+        // rows of their paths.
+        if let Some(output) = super::tree_split_k::attention_on(
+            &rotated_queries,
+            &cached_keys,
+            &cached_values,
+            base_offsets[0],
+            &plan,
+            scale,
+            target,
+        )? {
+            return Ok(output);
+        }
         if std::env::var("IRONMLX_EXPERIMENTAL_TREE_BATCH_ATTN").as_deref() == Ok("1") {
             let mut ordered: Vec<Option<Array>> = vec![None; plan.paths.len()];
             for group in plan.attention_groups(base_offsets[0])? {
@@ -1377,7 +1390,8 @@ fn split_k_min_keys() -> i32 {
 
 /// Rows of the next verify query group: no group straddles a kernel-regime
 /// boundary (MLX's vector-kernel key partitions, the split-K minimum key count
-/// `extra_boundary` and its block-size change at 16384 keys).
+/// `extra_boundary` and the split-K block size, which changes with the key
+/// count).
 fn exact_attention_group_len(
     first_key_len: i32,
     remaining: i32,
@@ -1400,6 +1414,7 @@ fn exact_attention_group_len(
     ]
     .iter()
     .any(|&boundary| first_key_len < boundary && boundary <= last)
+        || mlx::fast::decode_block_keys(first_key_len) != mlx::fast::decode_block_keys(last)
     {
         1
     } else {

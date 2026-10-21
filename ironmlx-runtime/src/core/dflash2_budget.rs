@@ -48,7 +48,8 @@ use std::sync::{Mutex, OnceLock, Weak};
 use anyhow::{anyhow, Result};
 
 use super::speculative::{
-    MtpDraftBudgetChange, MtpDraftPolicyRegime, MtpDraftPolicyWindow, QwenMtpDraftPolicyState,
+    MtpDraftBudgetChange, MtpDraftCapContextBucket, MtpDraftPolicyRegime, MtpDraftPolicyWindow,
+    QwenMtpDraftPolicyState,
 };
 
 /// Diagnostic override of the budget policy for targets qualified for the
@@ -238,6 +239,7 @@ impl DFlash2PolicyDomain {
 #[derive(Default)]
 struct PairMemory {
     cost: HashMap<(MtpDraftPolicyRegime, usize), Vec<CostStat>>,
+    line: HashMap<(MtpDraftPolicyRegime, usize), CostLine>,
     depth: HashMap<usize, Vec<DepthStat>>,
 }
 
@@ -299,6 +301,206 @@ struct CostStat {
     samples: usize,
 }
 
+/// Least-squares fit of window cost over the drafted budget (budgets from
+/// 1) in one long-context regime, exponentially weighted. Past 8192 tokens
+/// the window cost is close to affine in the budget (M5 Max, 30K: about
+/// 10.7 ms + 0.57 ms per budget, residual SD 0.3-0.4 ms) and does not depend
+/// on the accepted tokens, so every window refines the cost of all budgets:
+/// unlike per-budget estimates, a budget measured once (a probe, a first-use
+/// compile, a seed shifted from a shorter context with a different slope)
+/// cannot hold a cost several percent off.
+///
+/// From 61K the steps grow with the budget (61K: 0.45 ms up to b5, then
+/// 0.75 and 0.5 ms), so a line through the windows a request spends at b6-b7
+/// overestimates the unvisited b5 and the request stays on b6-b7. The fit has
+/// a curvature term (shrunk towards zero, so it follows the data only once
+/// windows at three or more budgets support it), and each budget's mean
+/// residual from the fit, shrunk towards zero while it has few windows,
+/// corrects the steps a smooth curve misses.
+#[derive(Debug, Clone, Copy)]
+struct CostLine {
+    /// Forgotten sums of budget^k (k = 0..=4) over windows.
+    budget_moments: [f64; 5],
+    /// Forgotten sums of budget^k * cost (k = 0..=2).
+    cost_moments: [f64; 3],
+    /// Slope the fit shrinks towards while the budgets seen are close.
+    prior_slope: f64,
+    /// Per budget: forgotten window count and residual sum against the fit.
+    residual: [(f64, f64); CostLine::RESIDUAL_BUDGETS],
+    /// Budgets whose first window was seen (and left out).
+    seen: u64,
+}
+
+impl CostLine {
+    /// Per-window forgetting (about two requests of 256 tokens).
+    const FORGET: f64 = 0.995;
+    /// Weight of the prior slope, in windows at one budget from the mean.
+    const PRIOR_WEIGHT: f64 = 4.0;
+    /// Weight of the zero-curvature prior, in windows at one squared budget
+    /// from the mean.
+    const CURVATURE_PRIOR_WEIGHT: f64 = 40.0;
+    /// Windows before the fit predicts.
+    const MIN_WEIGHT: f64 = 4.0;
+    /// Bound on a window's residual (first-use compiles, preemption): about
+    /// three residual SDs.
+    const CLIP_US: f64 = 1_000.0;
+    /// Bound on a window's share of its budget's correction: about two SDs,
+    /// so a first-use compile of a width moves its cost by under 2%.
+    const RESIDUAL_CLIP_US: f64 = 750.0;
+    /// Budgets with a residual correction (larger budgets use the fit).
+    const RESIDUAL_BUDGETS: usize = 16;
+    /// Pseudo-windows of zero residual each budget's correction starts from.
+    const RESIDUAL_PRIOR: f64 = 3.0;
+
+    fn new(prior_slope: f64) -> Self {
+        Self {
+            budget_moments: [0.0; 5],
+            cost_moments: [0.0; 3],
+            prior_slope,
+            residual: [(0.0, 0.0); Self::RESIDUAL_BUDGETS],
+            seen: 0,
+        }
+    }
+
+    /// Intercept, slope and curvature: the weighted least squares with ridge
+    /// priors on the slope (towards `prior_slope`) and the curvature (towards
+    /// zero), solved in budgets centred on their mean.
+    fn fit(&self) -> Option<[f64; 3]> {
+        let [n, s1, s2, s3, s4] = self.budget_moments;
+        if n < Self::MIN_WEIGHT {
+            return None;
+        }
+        let [y0, y1, y2] = self.cost_moments;
+        let m = s1 / n;
+        // Centred moments: sum of x^k and x^k * y for x = budget - m.
+        let c2 = s2 - n * m * m;
+        let c3 = s3 - 3.0 * m * s2 + 2.0 * n * m.powi(3);
+        let c4 = s4 - 4.0 * m * s3 + 6.0 * m * m * s2 - 3.0 * n * m.powi(4);
+        let z1 = y1 - m * y0;
+        let z2 = y2 - 2.0 * m * y1 + m * m * y0;
+        // Normal equations in (a, s, c) for cost = a + s x + c x^2.
+        let mut a = [
+            [n, 0.0, c2, y0],
+            [
+                0.0,
+                c2 + Self::PRIOR_WEIGHT,
+                c3,
+                z1 + Self::PRIOR_WEIGHT * self.prior_slope,
+            ],
+            [c2, c3, c4 + Self::CURVATURE_PRIOR_WEIGHT, z2],
+        ];
+        for col in 0..3 {
+            let pivot = (col..3).max_by(|&l, &r| a[l][col].abs().total_cmp(&a[r][col].abs()))?;
+            a.swap(col, pivot);
+            if a[col][col].abs() < f64::EPSILON {
+                return None;
+            }
+            for row in 0..3 {
+                if row != col {
+                    let factor = a[row][col] / a[col][col];
+                    for k in col..4 {
+                        a[row][k] -= factor * a[col][k];
+                    }
+                }
+            }
+        }
+        let (intercept, slope, curvature) =
+            (a[0][3] / a[0][0], a[1][3] / a[1][1], a[2][3] / a[2][2]);
+        // Back in raw budgets.
+        Some([
+            intercept - slope * m + curvature * m * m,
+            slope - 2.0 * curvature * m,
+            curvature,
+        ])
+    }
+
+    fn line_at(&self, budget: usize) -> Option<f64> {
+        let b = budget as f64;
+        self.fit().map(|[a, s, c]| a + s * b + c * b * b)
+    }
+
+    fn correction(&self, budget: usize) -> f64 {
+        self.residual.get(budget).map_or(0.0, |&(windows, sum)| {
+            sum / (windows + Self::RESIDUAL_PRIOR)
+        })
+    }
+
+    fn predict(&self, budget: usize) -> Option<f64> {
+        self.line_at(budget)
+            .map(|cost| (cost + self.correction(budget)).max(1.0))
+    }
+
+    /// Adds a window; its residual is bounded against the prediction, or
+    /// against `reference` (the per-budget estimate) before the fit predicts.
+    /// The first window of each budget is left out: it pays the width's
+    /// first-use compiles (several ms at long context), and from the far end
+    /// of the budgets even a bounded outlier bends the curvature.
+    fn observe(&mut self, budget: usize, measured_us: f64, reference: Option<f64>) {
+        if let Some(bit) = u32::try_from(budget)
+            .ok()
+            .and_then(|b| 1_u64.checked_shl(b))
+        {
+            if self.seen & bit == 0 {
+                self.seen |= bit;
+                return;
+            }
+        }
+        let line = self.line_at(budget);
+        let us = self
+            .predict(budget)
+            .or(reference)
+            .map_or(measured_us, |predicted| {
+                predicted + (measured_us - predicted).clamp(-Self::CLIP_US, Self::CLIP_US)
+            });
+        for (windows, sum) in &mut self.residual {
+            *windows *= Self::FORGET;
+            *sum *= Self::FORGET;
+        }
+        if let (Some(line), Some((windows, sum))) = (line, self.residual.get_mut(budget)) {
+            *windows += 1.0;
+            *sum += (us - line).clamp(-Self::RESIDUAL_CLIP_US, Self::RESIDUAL_CLIP_US);
+        }
+        let b = budget as f64;
+        let mut power = 1.0;
+        for moment in &mut self.budget_moments {
+            *moment = moment.mul_add(Self::FORGET, power);
+            power *= b;
+        }
+        let mut power = 1.0;
+        for moment in &mut self.cost_moments {
+            *moment = moment.mul_add(Self::FORGET, power * us);
+            power *= b;
+        }
+    }
+}
+
+/// Least-squares slope of the known drafting-budget costs, or 5% of the
+/// mean cost per budget when fewer than two are known.
+fn table_slope(cost: &[CostStat]) -> f64 {
+    let points: Vec<(f64, f64)> = cost
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, cost)| cost.samples > 0)
+        .map(|(budget, cost)| (budget as f64, cost.window_us))
+        .collect();
+    let count = points.len() as f64;
+    let mean_budget = points.iter().map(|(budget, _)| budget).sum::<f64>() / count.max(1.0);
+    let mean_us = points.iter().map(|(_, us)| us).sum::<f64>() / count.max(1.0);
+    if points.len() < 2 {
+        return 0.05 * mean_us;
+    }
+    let spread: f64 = points
+        .iter()
+        .map(|(budget, _)| (budget - mean_budget).powi(2))
+        .sum();
+    let covariance: f64 = points
+        .iter()
+        .map(|(budget, us)| (budget - mean_budget) * (us - mean_us))
+        .sum();
+    (covariance / spread).max(0.0)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct DFlash2WindowCostPolicy {
     max_draft_tokens: usize,
@@ -310,8 +512,16 @@ pub(crate) struct DFlash2WindowCostPolicy {
     regime: Option<MtpDraftPolicyRegime>,
     /// Acceptance of depth `k + 1`.
     depth: Vec<DepthStat>,
+    /// The part of `depth` that is the pooled prior of earlier streams.
+    prior: Vec<DepthStat>,
     /// Window cost of budget `b` in the active regime.
     cost: Vec<CostStat>,
+    /// Cost line of the active regime past 8192 tokens.
+    line: Option<CostLine>,
+    /// Costs of a shorter-context regime of the same shape, shifted by the
+    /// first measured window to stand in for this long-context regime's
+    /// calibration.
+    seed: Option<Vec<CostStat>>,
     windows_since_probe: usize,
     probe_interval: usize,
     probe_up_next: bool,
@@ -333,12 +543,21 @@ impl DFlash2WindowCostPolicy {
     const ACCEPTANCE_ALPHA: f64 = 0.35;
     /// Forgetting applied to depth statistics per speculative window.
     const DEPTH_DECAY: f64 = 0.95;
+    /// Past 8192 tokens a request's acceptance barely drifts (its 20-window
+    /// p1 spread stays within binomial noise) while window costs differ by
+    /// only ~4% per budget, so a short memory mostly follows noise into
+    /// budgets several percent off the best one.
+    const LONG_CONTEXT_DEPTH_DECAY: f64 = 0.98;
     /// Pseudo-count of the depth prior: the previous depth's estimate, or one
     /// half for depth 1.
     const DEPTH_PRIOR_WEIGHT: f64 = 2.0;
     const FIRST_DEPTH_PRIOR: f64 = 0.5;
     /// Relative cost improvement required to leave the current budget.
     const SWITCH_MARGIN: f64 = 0.03;
+    /// Past 8192 tokens the costs come from the cost line (no per-budget
+    /// noise) and neighbouring budgets differ by 1-3% around the best one,
+    /// which a 3% margin would never leave.
+    const LONG_CONTEXT_SWITCH_MARGIN: f64 = 0.01;
     /// Cost samples per calibration budget.
     const CALIBRATION_SAMPLES: usize = 2;
     const INITIAL_PROBE_INTERVAL: usize = 8;
@@ -389,8 +608,11 @@ impl DFlash2WindowCostPolicy {
             next: max_draft_tokens,
             role: DFlash2WindowRole::Calibrate,
             regime: None,
+            seed: None,
+            prior: depth.clone(),
             depth,
             cost: vec![CostStat::default(); max_draft_tokens + 1],
+            line: None,
             windows_since_probe: 0,
             probe_interval: Self::INITIAL_PROBE_INTERVAL,
             probe_up_next: true,
@@ -425,6 +647,74 @@ impl DFlash2WindowCostPolicy {
         unique
     }
 
+    /// A long-context regime (more than 8192 tokens) without measured costs
+    /// starts from the costs of the nearest shorter-context regime of the same
+    /// shape: its windows differ mainly by the attention over the context, a
+    /// shift the first measured window gives, so a long request skips the
+    /// calibration's low-yield windows (budget 0, budget 1 and the midpoint).
+    fn long_context_seed(&self, regime: MtpDraftPolicyRegime) -> Option<Vec<CostStat>> {
+        if regime.context_bucket() < MtpDraftCapContextBucket::UpTo32k
+            || self.cost.iter().any(|cost| cost.samples > 0)
+        {
+            return None;
+        }
+        let domain = self.domain.as_ref()?;
+        let mut memory = shared_memory();
+        let pair = memory.pair(domain)?;
+        [
+            MtpDraftCapContextBucket::UpTo32k,
+            MtpDraftCapContextBucket::UpTo8k,
+            MtpDraftCapContextBucket::UpTo2k,
+        ]
+        .into_iter()
+        .filter(|&bucket| bucket < regime.context_bucket())
+        .find_map(|bucket| {
+            pair.cost
+                .get(&(regime.with_context_bucket(bucket), self.max_draft_tokens))
+                .filter(|costs| {
+                    self.calibration_budgets()
+                        .into_iter()
+                        .all(|budget| costs[budget].samples >= Self::CALIBRATION_SAMPLES)
+                })
+                .cloned()
+        })
+    }
+
+    /// On the first measured window of a seeded regime, every unmeasured
+    /// budget takes the seed's cost shifted by this window's difference from
+    /// the seed at its width, counted as calibrated.
+    fn apply_seed(&mut self, regime: MtpDraftPolicyRegime, width: usize, measured: f64) {
+        let Some(seed) = self.seed.take() else {
+            return;
+        };
+        if seed[width].samples == 0 {
+            self.seed = Some(seed);
+            return;
+        }
+        let shift = measured - seed[width].window_us;
+        for (budget, seeded) in seed.iter().enumerate() {
+            if seeded.samples > 0 && self.cost[budget].samples == 0 && budget != width {
+                self.cost[budget] = CostStat {
+                    window_us: (seeded.window_us + shift).max(1.0),
+                    samples: Self::CALIBRATION_SAMPLES,
+                };
+            }
+        }
+        if let Some(domain) = &self.domain {
+            if let Some(pair) = shared_memory().pair(domain) {
+                let shared = pair
+                    .cost
+                    .entry((regime, self.max_draft_tokens))
+                    .or_insert_with(|| vec![CostStat::default(); self.max_draft_tokens + 1]);
+                for (budget, cost) in self.cost.iter().enumerate() {
+                    if budget != width && shared[budget].samples == 0 {
+                        shared[budget] = *cost;
+                    }
+                }
+            }
+        }
+    }
+
     fn pending_calibration(&self) -> Option<usize> {
         self.calibration_budgets()
             .into_iter()
@@ -453,11 +743,23 @@ impl DFlash2WindowCostPolicy {
             self.windows_since_probe = 0;
             self.probe_interval = Self::INITIAL_PROBE_INTERVAL;
             self.recovery_windows_left = 0;
+            self.seed = self.long_context_seed(regime);
+            self.line = self.domain.as_ref().and_then(|domain| {
+                shared_memory()
+                    .pair(domain)?
+                    .line
+                    .get(&(regime, self.max_draft_tokens))
+                    .copied()
+            });
         }
         let width = window.attempted_draft_tokens.min(self.max_draft_tokens);
         let measured = window.measured_window_us() as f64;
         let catch_up = width > 0 && self.previous_width.is_none_or(|previous| previous == 0);
         if !catch_up {
+            self.apply_seed(regime, width, measured);
+            if width > 0 && self.long_context() {
+                self.observe_line(regime, width, measured);
+            }
             let cost = &mut self.cost[width];
             cost.window_us = if cost.samples == 0 || measured < cost.window_us {
                 measured
@@ -525,7 +827,28 @@ impl DFlash2WindowCostPolicy {
     }
 
     fn record_depths(&mut self, width: usize, accepted: usize) {
-        Self::accumulate_depths(&mut self.depth, Self::DEPTH_DECAY, width, accepted);
+        if self.long_context() {
+            Self::accumulate_depths(
+                &mut self.depth,
+                Self::LONG_CONTEXT_DEPTH_DECAY,
+                width,
+                accepted,
+            );
+            // The pooled prior (other content) keeps fading at the short
+            // rate: kept at the long rate it holds the deep depths of a
+            // low-acceptance request near the previous request's acceptance.
+            let excess = Self::LONG_CONTEXT_DEPTH_DECAY - Self::DEPTH_DECAY;
+            for (depth, prior) in self.depth.iter_mut().zip(&self.prior) {
+                depth.reached = (depth.reached - excess * prior.reached).max(0.0);
+                depth.accepted = (depth.accepted - excess * prior.accepted).max(0.0);
+            }
+        } else {
+            Self::accumulate_depths(&mut self.depth, Self::DEPTH_DECAY, width, accepted);
+        }
+        for prior in &mut self.prior {
+            prior.reached *= Self::DEPTH_DECAY;
+            prior.accepted *= Self::DEPTH_DECAY;
+        }
         let acceptance = accepted as f64 / width as f64;
         self.acceptance_ewma = Some(match self.acceptance_ewma {
             Some(previous) => acceptance.mul_add(
@@ -567,6 +890,11 @@ impl DFlash2WindowCostPolicy {
     /// measured speculative budgets. Budget 0 runs a different (ordinary)
     /// window and is only ever measured.
     fn predicted_window_us(&self, budget: usize) -> Option<f64> {
+        if budget > 0 {
+            if let Some(cost) = self.line.as_ref().and_then(|line| line.predict(budget)) {
+                return Some(cost);
+            }
+        }
         let measured = |b: usize| (self.cost[b].samples > 0).then_some(self.cost[b].window_us);
         if let Some(value) = measured(budget) {
             return Some(value);
@@ -624,7 +952,8 @@ impl DFlash2WindowCostPolicy {
             let current_score = scores[self.current];
             let switch = match (scores[best], current_score) {
                 (Some(best_score), Some(current_score)) => {
-                    best != self.current && best_score < current_score * (1.0 - Self::SWITCH_MARGIN)
+                    best != self.current
+                        && best_score < current_score * (1.0 - self.switch_margin())
                 }
                 (Some(_), None) => true,
                 _ => false,
@@ -657,6 +986,35 @@ impl DFlash2WindowCostPolicy {
             _ => {
                 self.next = self.current;
                 self.role = DFlash2WindowRole::Exploit;
+            }
+        }
+    }
+
+    fn switch_margin(&self) -> f64 {
+        if self.long_context() {
+            Self::LONG_CONTEXT_SWITCH_MARGIN
+        } else {
+            Self::SWITCH_MARGIN
+        }
+    }
+
+    fn long_context(&self) -> bool {
+        self.regime
+            .is_some_and(|regime| regime.context_bucket() >= MtpDraftCapContextBucket::UpTo32k)
+    }
+
+    /// Adds a drafting window to the regime's cost line, starting the line
+    /// (slope prior from the per-budget costs, seeds included) on the first.
+    fn observe_line(&mut self, regime: MtpDraftPolicyRegime, width: usize, measured: f64) {
+        let reference = self.predicted_window_us(width);
+        let line = self
+            .line
+            .get_or_insert_with(|| CostLine::new(table_slope(&self.cost)));
+        line.observe(width, measured, reference);
+        let line = *line;
+        if let Some(domain) = &self.domain {
+            if let Some(pair) = shared_memory().pair(domain) {
+                pair.line.insert((regime, self.max_draft_tokens), line);
             }
         }
     }
@@ -727,6 +1085,12 @@ mod tests {
     pub(crate) struct Scenario {
         pub acceptance: Vec<f64>,
         pub window_us: Vec<u64>,
+        context_tokens: usize,
+        /// Spread of a window's cost (uniform, +/- this much).
+        noise_us: u64,
+        /// Extra cost of the first window of each budget (a first-use compile).
+        first_use_us: u64,
+        used: Vec<bool>,
         state: u64,
     }
 
@@ -735,8 +1099,23 @@ mod tests {
             Self {
                 acceptance: acceptance.to_vec(),
                 window_us: window_us.to_vec(),
+                context_tokens: 256,
+                noise_us: 0,
+                first_use_us: 0,
+                used: vec![false; window_us.len()],
                 state: seed,
             }
+        }
+
+        pub(crate) fn with_noise(mut self, noise_us: u64, first_use_us: u64) -> Self {
+            self.noise_us = noise_us;
+            self.first_use_us = first_use_us;
+            self
+        }
+
+        pub(crate) fn at_context(mut self, tokens: usize) -> Self {
+            self.context_tokens = tokens;
+            self
         }
 
         fn uniform(&mut self) -> f64 {
@@ -752,12 +1131,20 @@ mod tests {
             while accepted < budget && self.uniform() < self.acceptance[accepted] {
                 accepted += 1;
             }
+            let mut window_us = self.window_us[budget];
+            if self.noise_us > 0 {
+                let offset = (self.uniform() * 2.0 - 1.0) * self.noise_us as f64;
+                window_us = (window_us as f64 + offset) as u64;
+            }
+            if !std::mem::replace(&mut self.used[budget], true) {
+                window_us += self.first_use_us;
+            }
             MtpDraftPolicyWindow::from_measured_components(
                 budget,
                 accepted,
                 accepted + 1,
-                self.window_us[budget],
-                256,
+                window_us,
+                self.context_tokens,
                 1,
                 0,
                 0,
@@ -1092,6 +1479,112 @@ mod tests {
             run.cost_per_token(),
             run.histogram(7)
         );
+    }
+
+    /// Window costs past 8192 tokens (M5 Max affine4 MoE at 30K): about
+    /// 0.57 ms per budget over a 10.7 ms base.
+    const LONG_WINDOW_US: [u64; 8] = [
+        9_000, 10_900, 11_900, 12_500, 13_000, 13_500, 14_400, 14_900,
+    ];
+    /// Window costs of a short prompt on the same machine.
+    const SHORT_WINDOW_US: [u64; 8] =
+        [6_800, 9_000, 10_000, 11_200, 11_800, 12_300, 12_600, 13_000];
+    /// Per-depth acceptance of a 30K knowledge answer (fixed b7).
+    const KNOWLEDGE: [f64; 7] = [0.50, 0.51, 0.60, 0.56, 0.80, 0.75, 0.83];
+
+    #[test]
+    fn the_cost_line_follows_the_larger_steps_above_budget_five() {
+        // 61K-like costs: 0.45 ms steps up to b5, then 0.75 and 0.5 ms.
+        let cost = [
+            0.0, 13_100.0, 13_550.0, 14_000.0, 14_450.0, 14_900.0, 15_650.0, 16_150.0,
+        ];
+        let mut line = CostLine::new(450.0);
+        for _ in 0..30 {
+            for budget in [4, 6, 6, 7] {
+                line.observe(budget, cost[budget], None);
+            }
+        }
+        for budget in [4, 6, 7] {
+            let predicted = line.predict(budget).expect("fitted");
+            assert!(
+                (predicted - cost[budget]).abs() < 60.0,
+                "b{budget}: {predicted:.0} vs {:.0}",
+                cost[budget]
+            );
+        }
+        // b5, never measured, follows the convex steps (a line through the
+        // b6-b7 windows would put it near 15 200).
+        let b5 = line.predict(5).expect("fitted");
+        assert!((b5 - cost[5]).abs() < 200.0, "b5 {b5:.0} vs {:.0}", cost[5]);
+    }
+
+    #[test]
+    fn the_cost_line_bounds_a_single_outlier_window() {
+        let affine = |budget: usize| 10_700.0 + 570.0 * budget as f64;
+        let mut line = CostLine::new(400.0);
+        for _ in 0..20 {
+            for budget in [3, 4, 5] {
+                line.observe(budget, affine(budget), None);
+            }
+        }
+        // A first-use compile of an unvisited width, then a preempted window
+        // at a visited one, move no budget's cost by more than ~4%.
+        line.observe(1, 29_500.0, None);
+        line.observe(4, affine(4) + 6_000.0, None);
+        for budget in 1..=7 {
+            let predicted = line.predict(budget).expect("fitted");
+            assert!(
+                (predicted - affine(budget)).abs() < 500.0,
+                "b{budget}: {predicted:.0} vs {:.0}",
+                affine(budget)
+            );
+        }
+    }
+
+    /// A server sequence of one pair: a short warm request, a 30K code
+    /// request (first-use compiles, high acceptance), then a 30K knowledge
+    /// request. Returns the knowledge request's run and its best fixed budget
+    /// and cost per token.
+    fn long_context_sequence(seed: u64) -> (Run, usize, f64) {
+        let (target, draft) = (DFlash2Instance::new(), DFlash2Instance::new());
+        let mut warm = Scenario::new(&CODE, &SHORT_WINDOW_US, seed);
+        simulate(&mut stream(pair(&target, &draft)), &mut warm, 60);
+        let mut code = Scenario::new(&CODE, &LONG_WINDOW_US, seed + 1_000)
+            .at_context(30_000)
+            .with_noise(600, 15_000);
+        simulate(&mut stream(pair(&target, &draft)), &mut code, 70);
+        let mut knowledge = Scenario::new(&KNOWLEDGE, &LONG_WINDOW_US, seed + 2_000)
+            .at_context(30_000)
+            .with_noise(600, 0);
+        let (best, best_cost) = oracle(&knowledge);
+        let run = simulate(&mut stream(pair(&target, &draft)), &mut knowledge, 130);
+        (run, best, best_cost)
+    }
+
+    #[test]
+    #[serial_test::serial(dflash2_policy_memory)]
+    fn past_8192_tokens_a_knowledge_request_after_a_code_request_settles_near_the_best_budget() {
+        // Fixed b3-b5 are within ~1% of each other; the costs carry the
+        // code request's first-use compiles and seeds from the short warm-up,
+        // and the depth prior starts from the code request's acceptance.
+        let seeds = 16_u64;
+        let (mut near, mut windows, mut ratio_sum) = (0, 0, 0.0);
+        for seed in 0..seeds {
+            let (run, best, best_cost) = long_context_sequence(seed);
+            near += run.budgets[16..]
+                .iter()
+                .filter(|&&budget| budget.abs_diff(best) <= 1)
+                .count();
+            windows += run.budgets.len() - 16;
+            ratio_sum += run.cost_per_token() / best_cost;
+        }
+        let near_share = near as f64 / windows as f64;
+        let mean_ratio = ratio_sum / seeds as f64;
+        assert!(
+            near_share >= 0.85,
+            "share near the best budget {near_share:.2}"
+        );
+        assert!(mean_ratio <= 1.03, "mean cost ratio {mean_ratio:.3}");
     }
 
     #[test]

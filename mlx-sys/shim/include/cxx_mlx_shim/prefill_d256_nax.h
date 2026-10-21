@@ -17,4 +17,19 @@ std::optional<mlx::core::array> experimental_decode_d256_nax(
     const mlx::core::array& q, const mlx::core::array& k,
     const mlx::core::array& v, float scale, bool causal,
     mlx::core::StreamOrDevice target);
+// Split-K D256 NAX attention of a B1 flat draft tree: each row computes the
+// row of a linear verify of its own root-to-node path (see the shader).
+std::optional<mlx::core::array> experimental_tree_d256_nax(
+    const mlx::core::array& q, const mlx::core::array& k, const mlx::core::array& v,
+    const mlx::core::array& tk, const mlx::core::array& tv, const mlx::core::array& lims,
+    float scale, int32_t gqa, int32_t keys, int32_t tail_from,
+    mlx::core::StreamOrDevice target);
+// Keys per split-K block of a decode / verify call over `keys` keys.
+int32_t decode_d256_nax_block_keys(int32_t keys);
+// Split-K NAX attention of a B1 head-dim-128 query block (at most 16 rows)
+// where query row r sees keys [window_start + r, keys) (DFlash2 drafter).
+std::optional<mlx::core::array> experimental_window_attention_nax(
+    const mlx::core::array& q, const mlx::core::array& k,
+    const mlx::core::array& v, float scale, int32_t window_start,
+    mlx::core::StreamOrDevice target);
 }  // namespace cxx_mlx

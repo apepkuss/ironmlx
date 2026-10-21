@@ -466,10 +466,22 @@ impl DFlash2Target for Qwen35MoeModel {
         // Keep only the accepted root-to-node path: attention K/V rows are
         // compacted to contiguous positions and GatedDelta replays the path
         // from the pre-verify state.
+        // Every attention layer's path rows are gathered and encoded at once,
+        // so each write then updates its cache in place.
+        let mut gathered = Vec::new();
+        for (live, saved) in cache.iter().zip(snapshots) {
+            if let (LayerCache::Full(kv), LayerCacheSnapshot::Full(saved)) = (live, saved) {
+                gathered.push(kv.gather_tree_rows(saved.offsets()[0], rows, target)?);
+            }
+        }
+        let refs: Vec<&Array> = gathered.iter().flat_map(|(k, v)| [k, v]).collect();
+        mlx::transforms::async_eval(&refs)?;
+        let mut gathered = gathered.into_iter();
         for (live, saved) in cache.iter_mut().zip(snapshots) {
             match (live, saved) {
                 (LayerCache::Full(kv), LayerCacheSnapshot::Full(saved)) => {
-                    kv.commit_tree_rows(saved.offsets()[0], rows, target)?
+                    let (keys, values) = gathered.next().expect("one gather per attention layer");
+                    kv.write_tree_rows(saved.offsets()[0], &keys, &values, target)?
                 }
                 (LayerCache::Linear(gdn), LayerCacheSnapshot::Linear(_)) => {
                     gdn.select_tree_replay_rows(rows, target)?

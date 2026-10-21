@@ -40,6 +40,7 @@ pub(crate) mod rs4_qmm;
 pub(crate) mod sequence_stable_gated_delta;
 pub(crate) mod shared_weight_layout;
 pub(crate) mod sorted_moe_weighted_sum;
+pub(crate) mod tree_split_k;
 pub(crate) mod verify_qmm;
 
 pub use attention::{Attention, AttentionConfig};

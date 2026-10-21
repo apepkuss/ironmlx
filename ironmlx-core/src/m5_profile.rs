@@ -83,6 +83,11 @@ pub mod settings {
     /// First token position whose GatedDeltaNet prefill recurrence runs the
     /// long-chunk kernel (another summation order; unset: never).
     pub const GDN_LONG_SCAN_MIN_POSITION: &str = "IRONMLX_EXPERIMENTAL_GDN_LONG_SCAN_MIN_POSITION";
+    /// Long-context B1 DFlash2: a window whose adaptive draft budget is at
+    /// most this many tokens verifies a flat draft tree of that many nodes
+    /// (on the split-K tree attention) instead of a linear draft.
+    pub const DFLASH2_LONG_CONTEXT_TREE_NODES: &str =
+        "IRONMLX_EXPERIMENTAL_DFLASH2_LONG_CONTEXT_TREE_NODES";
     /// DFlash2 drafter projections of ragged multi-request drafts on the M5
     /// affine4 route (single-request drafts keep the native projections).
     pub const DFLASH2_DRAFT_M5: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_DRAFT_M5";
@@ -905,7 +910,7 @@ mod tests {
         );
         assert_eq!(
             mlx::metal::prefill_shaders::PREFILL_D256_NAX_METALLIB.len(),
-            110_288
+            121_240
         );
     }
 

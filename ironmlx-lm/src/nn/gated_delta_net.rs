@@ -553,6 +553,58 @@ impl GatedDeltaNet {
                     target,
                 )?)
             }
+            // A flat tree: every node is a one-token row whose conv state is
+            // the three inputs before it on its path, so each node's values
+            // are those of decoding it after its path.
+            (Some(output), Some(c))
+                if tree.is_some()
+                    && batch == 1
+                    && super::fused_norm::requested()
+                    && super::moe_fast_path::is_armed()
+                    && mask.is_none()
+                    && !defer_captured_state_commit
+                    && per_row_lens.is_none()
+                    && self.conv1d.bias().is_none()
+                    && self.cfg.head_k_dim == 128
+                    && self.cfg.head_v_dim == 128 =>
+            {
+                let plan = tree.as_ref().expect("checked tree");
+                let z_width = z.shape().as_slice()[2];
+                let conv_dim = self.cfg.conv_dim();
+                let keep = self.cfg.conv_kernel_size - 1;
+                let qkv_rows = mlx::ops::indexing::slice_strided_on(
+                    output,
+                    &[0_i32, 0, 0][..],
+                    &[1, seq, conv_dim][..],
+                    &[1_i32, 1, 1][..],
+                    target,
+                )?;
+                let conv_input = concatenate(&[c.conv_state(), &qkv_rows], 1)?;
+                let states = plan.conv_states(&conv_input, keep, target)?;
+                let width = output.shape().as_slice()[2];
+                let per_node = output.reshape_on((seq, 1, width), target)?;
+                let p = super::gdn_prep::prep_on(
+                    &per_node,
+                    &states,
+                    self.conv1d.weight(),
+                    &self.a_log,
+                    &self.dt_bias,
+                    conv_dim,
+                    z_width,
+                    self.cfg.num_k_heads,
+                    self.cfg.num_v_heads,
+                    target,
+                )?;
+                let (hk, hv) = (self.cfg.num_k_heads, self.cfg.num_v_heads);
+                Some(super::gdn_prep::Prepared {
+                    conv_input,
+                    q: p.q.reshape_on((1, seq, hk, 128), target)?,
+                    k: p.k.reshape_on((1, seq, hk, 128), target)?,
+                    v: p.v.reshape_on((1, seq, hv, 128), target)?,
+                    g: p.g.reshape_on((1, seq, hv), target)?,
+                    beta: p.beta.reshape_on((1, seq, hv), target)?,
+                })
+            }
             _ => None,
         };
         // Step 2a: prepend conv_state
@@ -1043,6 +1095,52 @@ impl GatedDeltaNet {
         cache.restore(&capture.base)?;
 
         let accepted_len_i32 = i32::try_from(accepted_len)?;
+        if let Some(rows) = capture.rows.as_ref() {
+            // A tree's accepted path: replay its rows in place (state only).
+            let batch = capture.k.shape().as_slice()[0];
+            let counts: Array = (&[accepted_len_i32][..], &[1_i32][..]).try_into()?;
+            let new_state = commit_rows_kernel()
+                .dispatch_builder()
+                .inputs(&[
+                    &capture.k,
+                    &capture.v,
+                    &capture.g,
+                    &capture.beta,
+                    cache.recurrent_state(),
+                    &counts,
+                    rows,
+                ])
+                .output_shapes(&[Shape::from((
+                    batch,
+                    self.cfg.num_v_heads,
+                    self.cfg.head_v_dim,
+                    self.cfg.head_k_dim,
+                ))])
+                .output_dtypes(&[Dtype::Float32])
+                .grid(32, self.cfg.head_v_dim, batch * self.cfg.num_v_heads)
+                .threadgroup(32, 4, 1)
+                .template_int("Dk", self.cfg.head_k_dim)
+                .template_int("Dv", self.cfg.head_v_dim)
+                .template_int("Hk", self.cfg.num_k_heads)
+                .template_int("Hv", self.cfg.num_v_heads)
+                .stream(target)
+                .dispatch()?
+                .take_at(0)?;
+            let keep = self.cfg.conv_kernel_size - 1;
+            let conv_dims = capture.conv_input.shape();
+            let conv_dims = conv_dims.as_slice();
+            let new_conv_state = mlx::ops::indexing::slice_strided_on(
+                &capture.conv_input,
+                &[0_i32, accepted_len_i32, 0][..],
+                &[batch, accepted_len_i32 + keep, conv_dims[2]][..],
+                &[1_i32, 1, 1][..],
+                target,
+            )?;
+            cache.update_conv(new_conv_state);
+            cache.update_recurrent(new_state);
+            cache.advance(&vec![accepted_len_i32; batch as usize])?;
+            return Ok(());
+        }
         let q = slice_sequence_prefix_on(&capture.q, accepted_len_i32, target)?;
         let k = slice_sequence_prefix_on(&capture.k, accepted_len_i32, target)?;
         let v = slice_sequence_prefix_on(&capture.v, accepted_len_i32, target)?;
@@ -1181,16 +1279,23 @@ impl GatedDeltaNet {
                     .map(|&accepted| i32::try_from(accepted))
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 let counts: Array = (&counts[..], &[batch][..]).try_into()?;
-                commit_kernel()
+                let mut inputs = vec![
+                    &capture.k,
+                    &capture.v,
+                    &capture.g,
+                    &capture.beta,
+                    cache.recurrent_state(),
+                    &counts,
+                ];
+                inputs.extend(capture.rows.as_ref());
+                let kernel = if capture.rows.is_some() {
+                    commit_rows_kernel()
+                } else {
+                    commit_kernel()
+                };
+                kernel
                     .dispatch_builder()
-                    .inputs(&[
-                        &capture.k,
-                        &capture.v,
-                        &capture.g,
-                        &capture.beta,
-                        cache.recurrent_state(),
-                        &counts,
-                    ])
+                    .inputs(&inputs)
                     .output_shapes(&[Shape::from((
                         batch,
                         self.cfg.num_v_heads,
@@ -1692,7 +1797,7 @@ fn long_scan_min_position() -> Option<i32> {
 }
 
 /// M5 profile setting `GDN_COMMIT_KERNEL`.
-fn commit_kernel_requested() -> bool {
+pub(crate) fn commit_kernel_requested() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::GDN_COMMIT_KERNEL)
@@ -1749,6 +1854,55 @@ fn commit_kernel() -> &'static MetalKernel {
             .ensure_row_contiguous(true)
             .build()
             .expect("build GDN commit kernel")
+    })
+}
+
+/// [`commit_kernel`] over the steps `rows[0..count)` of a single-row verify
+/// (a tree's accepted path), each step's arithmetic unchanged.
+fn commit_rows_kernel() -> &'static MetalKernel {
+    static KERNEL: std::sync::OnceLock<MetalKernel> = std::sync::OnceLock::new();
+    KERNEL.get_or_init(|| {
+        MetalKernel::builder("ironmlx_gated_delta_commit_rows_v1")
+            .inputs(&["k", "v", "g", "beta", "state_in", "counts", "rows"])
+            .outputs(&["state_out"])
+            .source(
+                r#"
+        auto n = thread_position_in_grid.z;
+        auto b_idx = n / Hv;
+        auto hv_idx = n % Hv;
+        auto hk_idx = hv_idx / (Hv / Hk);
+        constexpr int n_per_t = Dk / 32;
+        const int T = k_shape[1];
+        auto dk_idx = thread_position_in_threadgroup.x;
+        auto dv_idx = thread_position_in_grid.y;
+        auto i_state = state_in + (n * Dv + dv_idx) * Dk;
+        auto o_state = state_out + (n * Dv + dv_idx) * Dk;
+        float state[n_per_t];
+        for (int i = 0; i < n_per_t; ++i) state[i] = static_cast<float>(i_state[n_per_t * dk_idx + i]);
+        const int count = counts[b_idx];
+        for (int t = 0; t < count; ++t) {
+          const int r = rows[t];
+          auto k_ = k + (b_idx * T + r) * Hk * Dk + hk_idx * Dk;
+          auto v_ = v + (b_idx * T + r) * Hv * Dv + hv_idx * Dv;
+          auto g_ = g + (b_idx * T + r) * Hv;
+          auto beta_ = beta + (b_idx * T + r) * Hv;
+          float kv_mem = 0.0f;
+          float kk[n_per_t];
+          for (int i = 0; i < n_per_t; ++i) {
+            kk[i] = static_cast<float>(k_[n_per_t * dk_idx + i]);
+            state[i] = state[i] * g_[hv_idx];
+            kv_mem += state[i] * kk[i];
+          }
+          kv_mem = simd_sum(kv_mem);
+          auto delta = (v_[dv_idx] - kv_mem) * beta_[hv_idx];
+          for (int i = 0; i < n_per_t; ++i) state[i] = state[i] + kk[i] * delta;
+        }
+        for (int i = 0; i < n_per_t; ++i) o_state[n_per_t * dk_idx + i] = state[i];
+        "#,
+            )
+            .ensure_row_contiguous(true)
+            .build()
+            .expect("build GDN commit rows kernel")
     })
 }
 

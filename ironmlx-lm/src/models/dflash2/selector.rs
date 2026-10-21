@@ -186,10 +186,13 @@ impl DFlash2CandidateSelector {
     /// extraction and codebook gathers stay on the device; only the compact
     /// `[depth, top_k, rank]` lattice is materialized for the fifteen-node
     /// host priority walk.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn select_tree_on(
         &self,
+        before_readback: &mut dyn FnMut() -> Result<()>,
         hidden: &Array,
         logits: &Array,
+        vocab_ids: Option<&Array>,
         anchor_ids: &Array,
         max_nodes: usize,
         children_per_node: usize,
@@ -206,10 +209,17 @@ impl DFlash2CandidateSelector {
         );
         let shape = logits.shape();
         let dims = shape.as_slice();
+        let width = match vocab_ids {
+            Some(ids) => i32::try_from(ids.size())?,
+            None => self.vocab_size,
+        };
         anyhow::ensure!(
-            dims.len() == 3 && dims[0] == 1 && dims[1] > 0 && dims[2] == self.vocab_size,
-            "DFlash2 tree selector expected logits [1,L,{}], got {dims:?}",
-            self.vocab_size
+            dims.len() == 3
+                && dims[0] == 1
+                && dims[1] > 0
+                && dims[2] == width
+                && width >= self.top_k,
+            "DFlash2 tree selector expected logits [1,L,{width}], got {dims:?}"
         );
         let depth = dims[1] as usize;
         let rank = self.hidden_projection.out_features();
@@ -220,13 +230,17 @@ impl DFlash2CandidateSelector {
             let partition = mlx::ops::sort::argpartition_on(logits, -self.top_k, -1, target)?;
             mlx::ops::indexing::slice_strided_on(
                 &partition,
-                &[0_i32, 0, self.vocab_size - self.top_k][..],
-                &[1_i32, dims[1], self.vocab_size][..],
+                &[0_i32, 0, width - self.top_k][..],
+                &[1_i32, dims[1], width][..],
                 &[1_i32, 1, 1][..],
                 target,
             )?
         };
         let unary = mlx::ops::indexing::take_along_axis_on(logits, &candidates, -1, target)?;
+        let candidates = match vocab_ids {
+            Some(ids) => ids.take_on(&candidates, 0, target)?,
+            None => candidates,
+        };
         let projected = {
             let _product_stable_qmm = crate::nn::product_stable_qmm::scope();
             self.hidden_projection.forward_on(hidden, target)?
@@ -257,7 +271,10 @@ impl DFlash2CandidateSelector {
             &successor,
             &anchor_predecessor,
         ];
-        mlx::transforms::eval(&arrays)?;
+        // Submit the lattice, let the caller queue work behind it, then read
+        // it back (waits for the lattice only).
+        mlx::transforms::async_eval(&arrays)?;
+        before_readback()?;
 
         let lattice = HostDraftLattice {
             depth,

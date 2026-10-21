@@ -46,6 +46,9 @@ pub(crate) struct GatedDeltaReplayCapture {
     pub(crate) g: Array,
     pub(crate) beta: Array,
     pub(crate) mask: Option<Array>,
+    /// Tree commit: the accepted path's rows of `k`, `v`, `g` and `beta`
+    /// (which keep the whole verify), read in place by the commit kernel.
+    pub(crate) rows: Option<Array>,
 }
 
 impl GatedDeltaCacheSnapshot {
@@ -291,6 +294,7 @@ impl GatedDeltaCache {
                 g: g.clone(),
                 beta: beta.clone(),
                 mask: mask.cloned(),
+                rows: None,
             });
         }
         Ok(())
@@ -324,14 +328,32 @@ impl GatedDeltaCache {
             "invalid tree replay rows"
         );
         let idx: Array = (rows, &[rows.len() as i32][..]).try_into()?;
-        for value in [
-            &mut capture.q,
-            &mut capture.k,
-            &mut capture.v,
-            &mut capture.g,
-            &mut capture.beta,
-        ] {
-            *value = mlx::ops::indexing::take_on(value, &idx, 1, target)?;
+        if capture.mask.is_none() && crate::nn::gated_delta_net::commit_kernel_requested() {
+            // The commit kernel reads the path rows in place; `q` only
+            // carries the path length.
+            capture.q = mlx::ops::indexing::slice_strided_on(
+                &capture.q,
+                &[0_i32, 0, 0, 0][..],
+                &[
+                    capture.q.shape().as_slice()[0],
+                    rows.len() as i32,
+                    capture.q.shape().as_slice()[2],
+                    capture.q.shape().as_slice()[3],
+                ][..],
+                &[1_i32, 1, 1, 1][..],
+                target,
+            )?;
+            capture.rows = Some(idx.clone());
+        } else {
+            for value in [
+                &mut capture.q,
+                &mut capture.k,
+                &mut capture.v,
+                &mut capture.g,
+                &mut capture.beta,
+            ] {
+                *value = mlx::ops::indexing::take_on(value, &idx, 1, target)?;
+            }
         }
         let keep = capture.conv_input.shape().as_slice()[1] - width;
         let conv_indices = (0..keep)

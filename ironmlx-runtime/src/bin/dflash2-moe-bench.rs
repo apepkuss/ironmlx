@@ -453,6 +453,7 @@ fn verify_curve(
             mlx::transforms::synchronize()?;
             let started = Instant::now();
             let tree = draft.propose_tree_on(
+                &mut || Ok(()),
                 target,
                 &ids(&block)?,
                 &prefill.context_hidden,

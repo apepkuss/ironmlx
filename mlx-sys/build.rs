@@ -74,6 +74,7 @@ fn main() {
     .file("shim/src/stream.cc")
     .file("shim/src/experiment_config.cc")
     .file("shim/src/fast.cc")
+    .file("shim/src/cached_kernel.cc")
     .file("shim/src/prefill_d256_nax.cc")
     .file("shim/src/prefill_masked_softmax.cc")
     .file("shim/src/prefill_qmm_mtile.cc")

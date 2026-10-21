@@ -616,6 +616,15 @@ where
     pending_tokens: VecDeque<u32>,
     detok: DecodeStream<'m>,
     pending_context_hidden: Array,
+    /// Decayed rate at which the first drafted token (the top candidate
+    /// after the committed token) is accepted, over linear and tree windows.
+    first_accept: Option<f64>,
+    /// The last flat tree's commit (path K/V and GatedDelta replay), queued
+    /// behind the next window's draft (see [`Self::settle_target_cache`]).
+    pending_tree_commit: Option<(
+        Vec<ironmlx_lm::core::cache::layer::LayerCacheSnapshot>,
+        Vec<i32>,
+    )>,
     verify_capabilities: DFlash2VerifyCapabilities,
     draft_policy: DFlash2DraftBudgetPolicy,
     experimental_fixed_budget: Option<usize>,
@@ -1353,6 +1362,8 @@ where
                 pending_tokens,
                 detok: tokenizer.decode_stream(true),
                 pending_context_hidden: row_context,
+                first_accept: None,
+                pending_tree_commit: None,
                 verify_capabilities,
                 draft_policy: DFlash2DraftBudgetPolicy::with_memory(
                     DFlash2BudgetPolicyKind::resolve(
@@ -1715,6 +1726,8 @@ where
             pending_tokens,
             detok: tokenizer.decode_stream(true),
             pending_context_hidden: context_hidden,
+            first_accept: None,
+            pending_tree_commit: None,
             verify_capabilities,
             draft_policy: DFlash2DraftBudgetPolicy::with_memory(
                 DFlash2BudgetPolicyKind::resolve(
@@ -1870,6 +1883,7 @@ where
         }
         if finish_reason.is_some() {
             self.finished = true;
+            self.settle_target_cache()?;
             memory_phase_diagnostic(
                 "generation_finished",
                 i32::try_from(self.history.len()).unwrap_or(i32::MAX),
@@ -2054,7 +2068,9 @@ where
         if self.current_draft_budget() == 0 {
             self.fill_ordinary_window(current_token)
         } else if self.tree_eligible() {
-            self.fill_tree_window(current_token)
+            self.fill_tree_window(current_token, self.p2_options.tree_max_nodes)
+        } else if let Some(nodes) = self.long_tree_nodes() {
+            self.fill_tree_window(current_token, nodes)
         } else {
             if self.p2_options.tree_max_nodes > 0 {
                 if self.counters.tree_fallback_linear_windows == 0 {
@@ -2388,6 +2404,9 @@ where
         cache: Option<DFlash2RaggedBatchCache>,
     ) -> Result<(DFlash2RaggedBatchCache, DFlash2RaggedWindowTiming)> {
         anyhow::ensure!(rows.len() >= 2, "ragged batch needs at least two rows");
+        for row in rows.iter_mut() {
+            row.settle_target_cache()?;
+        }
         let batch_size = rows.len();
         let batch_size_i32 = i32::try_from(batch_size)?;
         let target = StreamOrDevice::default();
@@ -2755,6 +2774,9 @@ where
         cache: Option<DFlash2RaggedBatchCache>,
     ) -> Result<(DFlash2RaggedBatchCache, DFlash2RaggedWindowTiming)> {
         anyhow::ensure!(rows.len() >= 2, "ragged batch needs at least two rows");
+        for row in rows.iter_mut() {
+            row.settle_target_cache()?;
+        }
         let batch_size = rows.len();
         let batch_size_i32 = i32::try_from(batch_size)?;
         let target = StreamOrDevice::default();
@@ -2890,6 +2912,9 @@ where
             rows.len() >= 2,
             "DFlash2 tensor batch requires at least two rows"
         );
+        for row in rows.iter_mut() {
+            row.settle_target_cache()?;
+        }
         let batch_size = rows.len();
         let batch_size_i32 = i32::try_from(batch_size)?;
         let first_key = rows[0]
@@ -3354,7 +3379,71 @@ where
         }
     }
 
-    fn fill_tree_window(&mut self, current_token: u32) -> Result<()> {
+    /// Flat-tree size of the next window when it verifies a long-context
+    /// tree: the adaptive budget, when it is at most the profile's tree size
+    /// (text whose drafts are rarely accepted gains from alternative
+    /// branches; long accepted runs keep linear drafts), for a greedy,
+    /// unconstrained request over a prompt long enough for the split-K tree
+    /// attention, the tree's keys in one block size, on a target that
+    /// certifies the tree.
+    fn long_tree_nodes(&self) -> Option<usize> {
+        static MAX_NODES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let max_nodes = *MAX_NODES.get_or_init(|| {
+            ironmlx_core::m5_profile::setting(
+                ironmlx_core::m5_profile::settings::DFLASH2_LONG_CONTEXT_TREE_NODES,
+            )
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+        });
+        // Trees replace the linear windows of low first-token acceptance
+        // (their alternative branches recover rejected first drafts); the
+        // linear budget policy keeps its state for when acceptance recovers.
+        let budget = self.current_draft_budget();
+        if self
+            .first_accept
+            .is_none_or(|rate| rate >= LONG_TREE_FIRST_ACCEPT)
+            || budget > LONG_TREE_MAX_BUDGET
+        {
+            return None;
+        }
+        let nodes = max_nodes;
+        let min_keys = mlx::metal::decode_d256_nax_active_min_keys();
+        let base = i32::try_from(self.history.len().checked_sub(1)?).ok()?;
+        (nodes > 0
+            && nodes <= self.verify_capabilities.flat_tree_max_nodes
+            && self.request.sampler.is_greedy()
+            && self.constraint.is_none()
+            && self.fixed_draft_budget().is_none()
+            && min_keys > 0
+            && base + 1 >= min_keys
+            && mlx::fast::decode_block_keys(base + 1)
+                == mlx::fast::decode_block_keys(base + 1 + nodes as i32))
+        .then_some(nodes)
+    }
+
+    /// Apply a deferred tree commit, if any.
+    fn settle_target_cache(&mut self) -> Result<()> {
+        if let Some((snapshots, rows)) = self.pending_tree_commit.take() {
+            self.model.dflash2_commit_tree_on(
+                &mut self.target_cache,
+                &snapshots,
+                &rows,
+                StreamOrDevice::default(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn note_first_accept(&mut self, accepted: bool) {
+        const ALPHA: f64 = 0.1;
+        let sample = if accepted { 1.0 } else { 0.0 };
+        self.first_accept = Some(match self.first_accept {
+            Some(rate) => rate + ALPHA * (sample - rate),
+            None => sample,
+        });
+    }
+
+    fn fill_tree_window(&mut self, current_token: u32, max_nodes: usize) -> Result<()> {
         let window_started = Instant::now();
         let counters_before = self.counters.clone();
         let remaining = self
@@ -3378,9 +3467,10 @@ where
         let draft_len = if tf_tree_profile {
             self.p2_options.tree_max_nodes.min(15)
         } else if target_flat_tree {
-            // The lattice depth is bounded by the draft block; the node
-            // budget is bounded by the target's certified flat tree.
-            self.block_size.saturating_sub(1)
+            // The lattice depth is bounded by the draft block and by the
+            // node budget (a tree of `max_nodes` nodes is at most that deep);
+            // the node budget is bounded by the target's certified flat tree.
+            self.block_size.saturating_sub(1).min(max_nodes)
         } else {
             self.current_draft_budget()
         }
@@ -3393,13 +3483,30 @@ where
             (&block[..], &[1_i32, i32::try_from(block.len())?][..]).try_into()?;
 
         let draft_started = Instant::now();
+        let model = self.model;
+        let pending = self.pending_tree_commit.take();
+        let target_cache = &mut self.target_cache;
+        // The previous tree's commit is queued behind this draft, while the
+        // host reads the draft back and builds the tree.
+        let mut settle = || -> Result<()> {
+            if let Some((snapshots, rows)) = pending.as_ref() {
+                model.dflash2_commit_tree_on(
+                    target_cache,
+                    snapshots,
+                    rows,
+                    StreamOrDevice::default(),
+                )?;
+            }
+            Ok(())
+        };
         let tree = self.draft.propose_tree_on(
+            &mut settle,
             self.model,
             &block_arr,
             &self.pending_context_hidden,
             &mut self.draft_cache,
             ironmlx_lm::models::dflash2::DFlash2TreeSpec {
-                max_nodes: self.p2_options.tree_max_nodes,
+                max_nodes,
                 children_per_node: if tf_tree_profile { 4 } else { 2 },
             },
             StreamOrDevice::default(),
@@ -3415,6 +3522,7 @@ where
             return self.fill_flat_tree(
                 current_token,
                 &tree,
+                max_nodes,
                 remaining,
                 window_started,
                 stage_clock,
@@ -3635,6 +3743,7 @@ where
         &mut self,
         current_token: u32,
         tree: &DFlash2DraftTree,
+        max_nodes: usize,
         remaining: usize,
         started: Instant,
         mut stage_clock: Option<StageClock>,
@@ -3645,10 +3754,9 @@ where
             "flat tree requires greedy sampling and a fixed or target-certified tree budget"
         );
         anyhow::ensure!(
-            tree.tokens.len() <= self.p2_options.tree_max_nodes,
-            "DFlash2 flat tree has {} nodes, configured maximum is {}",
+            tree.tokens.len() <= max_nodes,
+            "DFlash2 flat tree has {} nodes, configured maximum is {max_nodes}",
             tree.tokens.len(),
-            self.p2_options.tree_max_nodes
         );
         let history_before = self.history.len();
         let mut tokens = vec![current_token];
@@ -3704,13 +3812,10 @@ where
         }
         let accepted = rows.len() - 1;
         let bonus = predictions[*rows.last().unwrap() as usize];
+        self.note_first_accept(rows.get(1) == Some(&1));
         let begin = Instant::now();
-        self.model.dflash2_commit_tree_on(
-            &mut self.target_cache,
-            &snapshots,
-            &rows,
-            StreamOrDevice::default(),
-        )?;
+        // The commit is queued behind the next window's draft.
+        self.pending_tree_commit = Some((snapshots, rows.clone()));
         let indices: Array = (rows.as_slice(), &[rows.len() as i32][..]).try_into()?;
         self.pending_context_hidden =
             mlx::ops::indexing::take(&verified.context_hidden, &indices, 1)?;
@@ -3753,7 +3858,9 @@ where
         self.counters.drafted_tokens += tree.tokens.len();
         self.counters.accepted_draft_tokens += accepted;
         self.counters.rollback_count += 1;
-        self.counters.window_us += elapsed_us(started);
+        let window_us = elapsed_us(started);
+        self.counters.window_us += window_us;
+        let _ = (max_nodes, window_us);
         Ok(())
     }
 
@@ -3814,6 +3921,8 @@ where
             .counters
             .draft_schedule_us
             .saturating_add(elapsed_us(draft_schedule_started));
+        // A previous tree's commit runs behind this draft.
+        self.settle_target_cache()?;
         let verify_started = Instant::now();
         let current_arr: Array = (&[current_token][..], &[1_i32, 1][..]).try_into()?;
         let verify_arr = mlx::ops::shape::concatenate_on(
@@ -4022,6 +4131,7 @@ where
         }
 
         let accepted_draft_len = resolution.accepted_draft_len;
+        self.note_first_accept(accepted_draft_len > 0);
         let mut tokens_to_append = resolution.tokens_to_append;
         if let Some(stop_index) = tokens_to_append
             .iter()
@@ -4140,6 +4250,7 @@ where
     }
 
     fn fill_ordinary_window(&mut self, current_token: u32) -> Result<()> {
+        self.settle_target_cache()?;
         let window_started = Instant::now();
         let remaining = self
             .request
@@ -4697,6 +4808,13 @@ fn retain_context_tail_batched(
     )
     .map_err(Into::into)
 }
+
+/// Largest linear draft budget a long-context tree window replaces.
+const LONG_TREE_MAX_BUDGET: usize = 5;
+
+/// First-token acceptance below which a long-context window verifies a
+/// flat tree.
+const LONG_TREE_FIRST_ACCEPT: f64 = 0.6;
 
 /// Diagnostic-only DFlash2 window stage accounting
 /// (`IRONMLX_DIAGNOSTIC_DFLASH2_WINDOW_STAGES=1`): evaluates and synchronizes

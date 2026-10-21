@@ -1,5 +1,6 @@
 #include "cxx_mlx_shim/fast.h"
 #include "cxx_mlx_shim/shim_helpers.h"
+#include "cxx_mlx_shim/cached_kernel.h"
 #include "cxx_mlx_shim/prefill_d256_nax.h"
 #include "cxx_mlx_shim/prefill_masked_softmax.h"
 
@@ -103,6 +104,36 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
           target));
 }
 
+std::unique_ptr<MlxArray> fast_window_attention(
+    const MlxArray& queries, const MlxArray& keys, const MlxArray& values,
+    float scale, int32_t window_start,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  if (auto candidate = experimental_window_attention_nax(
+          queries, keys, values, scale, window_start, target)) {
+    return std::make_unique<MlxArray>(std::move(*candidate));
+  }
+  return nullptr;
+}
+
+std::unique_ptr<MlxArray> fast_tree_attention(
+    const MlxArray& queries, const MlxArray& keys, const MlxArray& values,
+    const MlxArray& tail_keys, const MlxArray& tail_values, const MlxArray& limits,
+    float scale, int32_t gqa, int32_t key_count, int32_t tail_from,
+    bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  if (auto candidate = experimental_tree_d256_nax(
+          queries, keys, values, tail_keys, tail_values, limits, scale, gqa, key_count,
+          tail_from, target)) {
+    return std::make_unique<MlxArray>(std::move(*candidate));
+  }
+  return nullptr;
+}
+
+int32_t fast_decode_block_keys(int32_t keys) { return decode_d256_nax_block_keys(keys); }
+
 // === P3a ShapesVec ===
 
 std::unique_ptr<ShapesVec> shapes_vec_new() {
@@ -147,6 +178,7 @@ std::unique_ptr<MetalKernelInner> metal_kernel_build(
       atomic_outputs);
   auto inner = std::make_unique<MetalKernelInner>();
   inner->fn = std::move(kernel);
+  inner->cache = cached_kernel_table_new();
   return inner;
 }
 
@@ -197,7 +229,35 @@ std::unique_ptr<ArrayVec> metal_kernel_dispatch(
   auto target = cxx_mlx::helpers::decode_stream_or_device(
       has_stream, dev_only, dev_type, stream_idx);
 
-  // 6. invoke kernel
+  // 6. invoke kernel: a cached signature skips MLX's per-call source
+  // generation and pipeline lookup (the same kernel runs).
+  std::vector<int64_t> key;
+  if (kernel.cache && !verbose) {
+    key.reserve(4 + 3 * template_args.size() + 3 * ins.size() + out_dtypes.size());
+    key.push_back(init.has_value());
+    for (const auto& t : template_args) {
+      key.push_back(static_cast<int64_t>(
+          std::hash<std::string_view>{}(std::string_view(t.name.data(), t.name.size()))));
+      key.push_back(t.kind);
+      key.push_back(t.kind == 0 ? t.int_val : t.kind == 1 ? t.bool_val : t.dtype_val);
+    }
+    key.push_back(-1);
+    for (const auto& a : ins) {
+      key.push_back(static_cast<int64_t>(a.dtype().val()) * 4 + (a.ndim() == 0 ? 1 : 0) +
+                    (a.size() < 8 ? 2 : 0));
+    }
+    key.push_back(-2);
+    for (const auto& dt : out_dtypes) {
+      key.push_back(static_cast<int64_t>(dt.val()));
+    }
+    if (auto cached = cached_kernel_dispatch(
+            *kernel.cache, key, ins, output_shapes.shapes, out_dtypes,
+            std::make_tuple(gx, gy, gz), std::make_tuple(tx, ty, tz), init, target)) {
+      auto out_vec = std::make_unique<ArrayVec>();
+      out_vec->inner = std::move(*cached);
+      return out_vec;
+    }
+  }
   auto outs = kernel.fn(
       ins,
       output_shapes.shapes,
@@ -208,6 +268,9 @@ std::unique_ptr<ArrayVec> metal_kernel_dispatch(
       init,
       verbose,
       target);
+  if (kernel.cache && !verbose) {
+    cached_kernel_remember(*kernel.cache, key, outs);
+  }
 
   // 7. wrap into ArrayVec (field name is `inner`, not `arrays`)
   auto out_vec = std::make_unique<ArrayVec>();
