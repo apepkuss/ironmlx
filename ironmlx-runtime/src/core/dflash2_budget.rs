@@ -301,8 +301,8 @@ struct CostStat {
     samples: usize,
 }
 
-/// Least-squares fit of window cost over the drafted budget (budgets from
-/// 1) in one long-context regime, exponentially weighted. Past 8192 tokens
+/// Least-squares fit of window cost over the drafted budget (budgets from 1)
+/// in one long-context regime, exponentially weighted. Past 8192 tokens
 /// the window cost is close to affine in the budget (M5 Max, 30K: about
 /// 10.7 ms + 0.57 ms per budget, residual SD 0.3-0.4 ms) and does not depend
 /// on the accepted tokens, so every window refines the cost of all budgets:
@@ -395,11 +395,12 @@ impl CostLine {
             if a[col][col].abs() < f64::EPSILON {
                 return None;
             }
-            for row in 0..3 {
+            let pivot_row = a[col];
+            for (row, values) in a.iter_mut().enumerate() {
                 if row != col {
-                    let factor = a[row][col] / a[col][col];
-                    for k in col..4 {
-                        a[row][k] -= factor * a[col][k];
+                    let factor = values[col] / pivot_row[col];
+                    for (value, pivot) in values.iter_mut().zip(pivot_row).skip(col) {
+                        *value -= factor * pivot;
                     }
                 }
             }
@@ -516,8 +517,9 @@ pub(crate) struct DFlash2WindowCostPolicy {
     prior: Vec<DepthStat>,
     /// Window cost of budget `b` in the active regime.
     cost: Vec<CostStat>,
-    /// Cost line of the active regime past 8192 tokens.
-    line: Option<CostLine>,
+    /// Cost line of the active regime past 8192 tokens (boxed: it is most
+    /// of the policy's size).
+    line: Option<Box<CostLine>>,
     /// Costs of a shorter-context regime of the same shape, shifted by the
     /// first measured window to stand in for this long-context regime's
     /// calibration.
@@ -750,6 +752,7 @@ impl DFlash2WindowCostPolicy {
                     .line
                     .get(&(regime, self.max_draft_tokens))
                     .copied()
+                    .map(Box::new)
             });
         }
         let width = window.attempted_draft_tokens.min(self.max_draft_tokens);
@@ -1009,9 +1012,9 @@ impl DFlash2WindowCostPolicy {
         let reference = self.predicted_window_us(width);
         let line = self
             .line
-            .get_or_insert_with(|| CostLine::new(table_slope(&self.cost)));
+            .get_or_insert_with(|| Box::new(CostLine::new(table_slope(&self.cost))));
         line.observe(width, measured, reference);
-        let line = *line;
+        let line = **line;
         if let Some(domain) = &self.domain {
             if let Some(pair) = shared_memory().pair(domain) {
                 pair.line.insert((regime, self.max_draft_tokens), line);
