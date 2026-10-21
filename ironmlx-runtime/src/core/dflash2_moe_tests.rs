@@ -1108,13 +1108,24 @@ fn qwen36_moe_dflash2_window_cost_recalibrates_across_context_buckets() {
             metrics.rollback_count,
         );
         // The first calibration has one window per calibration budget; a
-        // second regime adds calibration windows for the budgets it has not
-        // measured yet (the window that crossed the boundary already counts).
-        assert!(
-            metrics.budget_calibration_windows > 4,
-            "{label}: no second calibration after crossing the bucket ({} calibration windows)",
-            metrics.budget_calibration_windows
-        );
+        // second regime up to 8192 tokens adds calibration windows for the
+        // budgets it has not measured yet (the window that crossed the
+        // boundary already counts). Past 8192 tokens the regime starts from
+        // the shorter bucket's costs, shifted by its first measured window,
+        // instead of calibrating again.
+        if boundary < 8_192 {
+            assert!(
+                metrics.budget_calibration_windows > 4,
+                "{label}: no second calibration after crossing the bucket ({} calibration windows)",
+                metrics.budget_calibration_windows
+            );
+        } else {
+            assert!(
+                metrics.budget_calibration_windows <= 4,
+                "{label}: calibrated again after entering the long-context bucket ({} calibration windows)",
+                metrics.budget_calibration_windows
+            );
+        }
         assert_committed_cache_matches_teacher_forced(&label, &fixture.target, &stream, prompt_len);
     }
 }
