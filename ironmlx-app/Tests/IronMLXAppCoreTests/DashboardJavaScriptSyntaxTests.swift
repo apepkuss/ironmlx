@@ -74,10 +74,37 @@ struct DashboardJavaScriptSyntaxTests {
             #expect(localeKeys[name] == englishKeys, "\(name) locale keys differ from English")
         }
 
+        let referencedKeys = try translationReferences(in: html)
+        #expect(
+            referencedKeys.isSubset(of: englishKeys),
+            "Dashboard references missing locale keys: \(referencedKeys.subtracting(englishKeys).sorted())"
+        )
+    }
+
+    @Test("translation references distinguish complete keys from concatenated prefixes")
+    func translationReferencesDistinguishCompleteKeysFromPrefixes() throws {
+        let references = try translationReferences(in: """
+            <span data-i18n="known_key" data-i18n-title="title_key"></span>
+            <input data-i18n-placeholder="placeholder_key" data-i18n-aria-label="label_key">
+            t('known_key');
+            t("missing_key");
+            t('fallback_key', 'Default text');
+            t( 'spaced_key' );
+            t('dsh_auto_' + result.code, t('dsh_auto_configuration_failed'));
+            t("omp_auto_" + result.code, t("omp_auto_configuration_failed"));
+            """)
+        #expect(references == [
+            "known_key", "title_key", "placeholder_key", "label_key", "missing_key",
+            "fallback_key", "spaced_key", "dsh_auto_configuration_failed", "omp_auto_configuration_failed",
+        ])
+    }
+
+    private func translationReferences(in html: String) throws -> Set<String> {
         var referencedKeys = Set<String>()
         for pattern in [
             #"data-i18n(?:-placeholder|-aria-label|-title)?="([^"]+)""#,
-            #"\bt\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]"#,
+            // A literal must be the entire first argument, not a dynamic key's prefix.
+            #"\bt\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]\s*(?=[,)])"#,
         ] {
             let referencePattern = try NSRegularExpression(pattern: pattern)
             let range = NSRange(html.startIndex..<html.endIndex, in: html)
@@ -88,10 +115,7 @@ struct DashboardJavaScriptSyntaxTests {
                 referencedKeys.insert(String(html[keyRange]))
             }
         }
-        #expect(
-            referencedKeys.isSubset(of: englishKeys),
-            "Dashboard references missing locale keys: \(referencedKeys.subtracting(englishKeys).sorted())"
-        )
+        return referencedKeys
     }
 
     @Test("dashboard never renders opaque backend errors directly")
