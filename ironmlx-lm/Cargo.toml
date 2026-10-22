@@ -21,6 +21,8 @@ tracing = "0.1"
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 llguidance = { version = "=1.7.6", default-features = false, features = ["ahash", "lark", "referencing"] }
 sha2 = "0.10"
+regex = "1"
+regex-syntax = "0.8"
 anyhow = "1"
 smallvec = "1"
 minijinja = { version = "2", default-features = false, features = ["adjacent_loop_items", "builtins", "loader", "macros", "serde"] }

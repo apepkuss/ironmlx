@@ -1543,6 +1543,8 @@ dependencies = [
  "llguidance",
  "minijinja",
  "mlx",
+ "regex",
+ "regex-syntax",
  "serde",
  "serde_json",
  "serial_test",

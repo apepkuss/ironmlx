@@ -3962,7 +3962,7 @@ mod tests {
                 "name":"answer",
                 "schema":{
                     "type":"object",
-                    "properties":{"answer":{"type":"string","pattern":"x"}},
+                    "properties":{"answer":{"type":"string","format":"email"}},
                     "required":["answer"],
                     "additionalProperties":false
                 }
@@ -3971,7 +3971,7 @@ mod tests {
         }))
         .normalize()
         .unwrap_err();
-        assert!(format!("{unsupported:#}").contains("unsupported JSON Schema keyword `pattern`"));
+        assert!(format!("{unsupported:#}").contains("unsupported JSON Schema keyword `format`"));
     }
 
     #[test]
