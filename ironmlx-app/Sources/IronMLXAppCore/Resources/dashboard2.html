@@ -4572,7 +4572,7 @@
                 <div class="agent-guide-eyebrow" data-i18n="agent_provider_setup">Provider setup</div>
                 <div class="agent-guide-title-row">
                   <h2 class="agent-guide-title">oh-my-pi</h2>
-                  <span class="agent-guide-version-badge"><span data-i18n="agent_applicable_version">Applicable version</span>: <strong>17.2.12+</strong></span>
+                  <span class="agent-guide-version-badge"><span data-i18n="agent_applicable_version">Applicable version</span>: <strong>18.1.16+</strong></span>
                 </div>
                 <p class="agent-guide-description" data-i18n="omp_description">Register IronMLX as a keyless Responses provider, discover the models served by the App, and launch OMP in the intended project directory.</p>
               </div>
@@ -4598,7 +4598,32 @@
               </div>
             </section>
 
-            <section class="agent-guide-section">
+            <section class="agent-guide-section" id="omp-one-click">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="omp_auto_title">One-click setup</h3>
+                  <p class="agent-guide-section-desc" data-i18n="omp_auto_description">Requires oh-my-pi 18.1.16 or later. Configure the default profile and keep other providers.</p>
+                </div>
+                <button id="omp-configure" class="btn-accent" type="button" onclick="configureOMP()" data-i18n="omp_auto_button">One-click setup</button>
+              </div>
+              <div class="agent-guide-fields" style="grid-template-columns:minmax(0,1fr);">
+                <div class="agent-guide-field">
+                  <label for="omp-model-select" data-i18n="agent_model">Model</label>
+                  <select id="omp-model-select" onchange="renderAgentGuideConfiguration()"></select>
+                </div>
+              </div>
+              <div id="omp-feedback" class="agent-setup-feedback" role="status" aria-live="polite" aria-atomic="true" hidden>
+                <span id="omp-feedback-icon" class="agent-setup-feedback-icon" aria-hidden="true">!</span>
+                <div class="agent-setup-feedback-content">
+                  <p id="omp-setup-status" class="agent-setup-feedback-message"></p>
+                  <a id="omp-install" class="agent-setup-feedback-action" href="https://omp.sh/docs/quickstart" target="_blank" rel="noopener noreferrer" hidden onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="omp_auto_install">Install oh-my-pi</span> <span aria-hidden="true">&#8599;</span></a>
+                </div>
+              </div>
+            </section>
+
+            <details class="agent-guide-section" id="omp-manual">
+              <summary class="agent-guide-section-title agent-manual-summary" data-i18n="dsh_manual_configuration">Manual configuration</summary>
+              <div class="agent-manual-body">
               <div class="agent-guide-section-header">
                 <div>
                   <h3 class="agent-guide-section-title" data-i18n="agent_configure_provider">Configure provider</h3>
@@ -4614,19 +4639,14 @@
                 </div>
                 <pre class="agent-code"><code id="omp-config-code"></code></pre>
               </div>
-            </section>
+            </div>
+            </details>
 
             <section class="agent-guide-section">
               <div class="agent-guide-section-header">
                 <div>
                   <h3 class="agent-guide-section-title" data-i18n="agent_refresh_models">Refresh and select a model</h3>
                   <p class="agent-guide-section-desc" data-i18n="omp_refresh_desc">Refresh provider discovery, inspect available models, then start OMP from your project.</p>
-                </div>
-              </div>
-              <div class="agent-guide-fields" style="grid-template-columns:minmax(0,1fr);">
-                <div class="agent-guide-field">
-                  <label for="omp-model-select" data-i18n="agent_model">Model</label>
-                  <select id="omp-model-select" onchange="renderAgentGuideConfiguration()"></select>
                 </div>
               </div>
               <div class="agent-code-wrap">
@@ -5895,6 +5915,22 @@
       omp_description: "Register IronMLX as a keyless Responses provider, discover the models served by the App, and launch OMP in the intended project directory.",
       omp_refresh_desc: "Refresh provider discovery, inspect available models, then start OMP from your project.",
       omp_cwd_note: "Replace the project path before running the command. OMP executes bash tools in the directory supplied by --cwd.",
+      omp_auto_title: "One-click setup",
+      omp_auto_description: "Requires oh-my-pi 18.1.16 or later. Configure the default profile and keep other providers.",
+      omp_auto_button: "One-click setup",
+      omp_auto_pending: "Checking and configuring oh-my-pi…",
+      omp_auto_install: "Install oh-my-pi",
+      omp_auto_not_installed: "oh-my-pi was not found. Install {minimum} or later and retry. No configuration was written.",
+      omp_auto_version_too_old: "Upgrade oh-my-pi {version} to {minimum} or later. No configuration was written.",
+      omp_auto_version_unknown: "Could not verify the oh-my-pi version. Check the installation and retry. No configuration was written.",
+      omp_auto_configured: "Configured the IronMLX provider. Restart open OMP sessions and use the commands below with your project directory.",
+      omp_auto_configuration_failed: "Could not update OMP configuration. Check YAML syntax and file permissions. Existing files are backed up before modification.",
+      omp_auto_initialize_cli: "Legacy models.json needs migration. Launch OMP once, then retry. No configuration was written.",
+      omp_auto_model_unavailable: "Start IronMLX, load and select a conversation model, then retry.",
+      omp_auto_backend_unavailable: "Could not connect to IronMLX. Start the service and retry.",
+      omp_auto_local_only: "One-click setup requires IronMLX local mode.",
+      omp_auto_busy: "OMP setup is already in progress.",
+      omp_auto_native_required: "Open the IronMLX App to use one-click setup.",
       dsh_verified_revision: "Validated master", dsh_description: "Connect DeepSeek Harness CLI to IronMLX through the Responses API. Official desktop support is pending.",
       dsh_save_file: "Save as", dsh_home_default: "(normally ~/.dsh)", dsh_reasoning: "Reasoning", dsh_reasoning_off: "Off",
       dsh_reasoning_minimal: "Minimal", dsh_reasoning_low: "Low", dsh_reasoning_medium: "Medium", dsh_reasoning_high: "High", dsh_reasoning_xhigh: "Extra high", dsh_reasoning_max: "Maximum",
@@ -6522,6 +6558,22 @@
       omp_description: "将 IronMLX 注册为免密钥 Responses Provider，发现 App 提供的模型，并在目标项目目录启动 OMP。",
       omp_refresh_desc: "刷新 Provider 发现、查看可用模型，然后从项目目录启动 OMP。",
       omp_cwd_note: "执行前请替换项目路径。OMP 会在 --cwd 指定的目录中执行 bash 工具。",
+      omp_auto_title: "一键配置",
+      omp_auto_description: "需要 oh-my-pi 18.1.16 或更高版本。为默认配置目录接入 IronMLX，保留其他 Provider。",
+      omp_auto_button: "一键配置",
+      omp_auto_pending: "正在检查并配置 oh-my-pi…",
+      omp_auto_install: "安装 oh-my-pi",
+      omp_auto_not_installed: "未检测到 oh-my-pi。请安装 {minimum} 或更高版本后重试。未写入任何配置。",
+      omp_auto_version_too_old: "已安装 oh-my-pi {version}，请升级至 {minimum} 或更高版本。未写入任何配置。",
+      omp_auto_version_unknown: "无法确认 oh-my-pi 版本，请检查安装后重试。未写入任何配置。",
+      omp_auto_configured: "已配置 IronMLX Provider。请重启已打开的 OMP 会话，并将下方命令中的路径替换为目标项目目录后使用。",
+      omp_auto_configuration_failed: "无法更新 OMP 配置，请检查 YAML 格式和文件权限。修改前会备份已有文件。",
+      omp_auto_initialize_cli: "旧版 models.json 需要迁移。请先启动一次 OMP 后重试。未写入任何配置。",
+      omp_auto_model_unavailable: "请启动 IronMLX，加载并选择对话模型后重试。",
+      omp_auto_backend_unavailable: "无法连接 IronMLX，请启动服务后重试。",
+      omp_auto_local_only: "一键配置需要 IronMLX 处于本地模式。",
+      omp_auto_busy: "OMP 配置正在进行，请稍候。",
+      omp_auto_native_required: "请在 IronMLX App 中使用一键配置。",
       dsh_verified_revision: "已验证 master", dsh_description: "通过 Responses API 将 DeepSeek Harness CLI 接入 IronMLX。官方桌面版尚待适配。",
       dsh_save_file: "保存为", dsh_home_default: "（通常为 ~/.dsh）", dsh_reasoning: "推理模式", dsh_reasoning_off: "关闭",
       dsh_reasoning_minimal: "极低", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "极高", dsh_reasoning_max: "最大",
@@ -7149,6 +7201,22 @@
       omp_description: "將 IronMLX 註冊為免金鑰 Responses Provider，探索 App 提供的模型，並在目標專案目錄啟動 OMP。",
       omp_refresh_desc: "重新整理 Provider 探索、檢視可用模型，然後從專案目錄啟動 OMP。",
       omp_cwd_note: "執行前請替換專案路徑。OMP 會在 --cwd 指定的目錄中執行 bash 工具。",
+      omp_auto_title: "一鍵設定",
+      omp_auto_description: "需要 oh-my-pi 18.1.16 或更新版本。為預設設定目錄接入 IronMLX，保留其他 Provider。",
+      omp_auto_button: "一鍵設定",
+      omp_auto_pending: "正在檢查並設定 oh-my-pi…",
+      omp_auto_install: "安裝 oh-my-pi",
+      omp_auto_not_installed: "未偵測到 oh-my-pi。請安裝 {minimum} 或更新版本後重試。未寫入任何設定。",
+      omp_auto_version_too_old: "已安裝 oh-my-pi {version}，請升級至 {minimum} 或更新版本。未寫入任何設定。",
+      omp_auto_version_unknown: "無法確認 oh-my-pi 版本，請檢查安裝後重試。未寫入任何設定。",
+      omp_auto_configured: "已設定 IronMLX Provider。請重新啟動已開啟的 OMP 工作階段，並將下方指令的路徑替換為目標專案目錄後使用。",
+      omp_auto_configuration_failed: "無法更新 OMP 設定，請檢查 YAML 格式和檔案權限。修改前會備份現有檔案。",
+      omp_auto_initialize_cli: "舊版 models.json 需要遷移。請先啟動一次 OMP 後重試。未寫入任何設定。",
+      omp_auto_model_unavailable: "請啟動 IronMLX，載入並選擇對話模型後重試。",
+      omp_auto_backend_unavailable: "無法連線 IronMLX，請啟動服務後重試。",
+      omp_auto_local_only: "一鍵設定需要 IronMLX 處於本機模式。",
+      omp_auto_busy: "OMP 設定正在進行，請稍候。",
+      omp_auto_native_required: "請在 IronMLX App 中使用一鍵設定。",
       dsh_verified_revision: "已驗證 master", dsh_description: "透過 Responses API 將 DeepSeek Harness CLI 接入 IronMLX。官方桌面版尚待適配。",
       dsh_save_file: "儲存為", dsh_home_default: "（通常為 ~/.dsh）", dsh_reasoning: "推理模式", dsh_reasoning_off: "關閉",
       dsh_reasoning_minimal: "極低", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "極高", dsh_reasoning_max: "最大",
@@ -7779,6 +7847,22 @@
       omp_description: "IronMLX をキー不要の Responses プロバイダーとして登録し、App が提供するモデルを検出して、目的のプロジェクトディレクトリで OMP を起動します。",
       omp_refresh_desc: "プロバイダー検出を更新し、利用可能なモデルを確認してからプロジェクトで OMP を起動します。",
       omp_cwd_note: "実行前にプロジェクトパスを置き換えてください。OMP は --cwd で指定したディレクトリで bash ツールを実行します。",
+      omp_auto_title: "ワンクリック設定",
+      omp_auto_description: "oh-my-pi 18.1.16 以降が必要です。既定のプロファイルを設定し、他のプロバイダーを保持します。",
+      omp_auto_button: "ワンクリック設定",
+      omp_auto_pending: "oh-my-pi を確認・設定中…",
+      omp_auto_install: "oh-my-pi をインストール",
+      omp_auto_not_installed: "oh-my-pi が見つかりません。{minimum} 以降をインストールしてください。設定は未変更です。",
+      omp_auto_version_too_old: "oh-my-pi {version} を {minimum} 以降に更新してください。設定は未変更です。",
+      omp_auto_version_unknown: "oh-my-pi のバージョンを確認できません。インストールを確認してください。設定は未変更です。",
+      omp_auto_configured: "IronMLX プロバイダーを設定しました。OMP セッションを再起動し、下のコマンドのパスを対象プロジェクトに置き換えて実行してください。",
+      omp_auto_configuration_failed: "OMP 設定を更新できません。YAML の形式と権限を確認してください。変更前に既存ファイルをバックアップします。",
+      omp_auto_initialize_cli: "旧 models.json の移行が必要です。OMP を一度起動して再試行してください。設定は未変更です。",
+      omp_auto_model_unavailable: "IronMLX を起動して対話モデルを読み込み、選択してください。",
+      omp_auto_backend_unavailable: "IronMLX に接続できません。サービスを起動してください。",
+      omp_auto_local_only: "IronMLX のローカルモードが必要です。",
+      omp_auto_busy: "OMP 設定を実行中です。",
+      omp_auto_native_required: "IronMLX App でワンクリック設定を使用してください。",
       dsh_verified_revision: "検証済み master", dsh_description: "Responses API 経由で DeepSeek Harness CLI を IronMLX に接続します。公式デスクトップ版は今後対応予定です。",
       dsh_save_file: "保存先", dsh_home_default: "（通常は ~/.dsh）", dsh_reasoning: "推論モード", dsh_reasoning_off: "オフ",
       dsh_reasoning_minimal: "最小", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "非常に高い", dsh_reasoning_max: "最大",
@@ -8409,6 +8493,22 @@
       omp_description: "IronMLX를 키가 필요 없는 Responses 프로바이더로 등록하고 App이 제공하는 모델을 검색한 뒤 원하는 프로젝트 디렉터리에서 OMP를 시작하세요.",
       omp_refresh_desc: "프로바이더 검색을 새로고침하고 사용 가능한 모델을 확인한 다음 프로젝트에서 OMP를 시작하세요.",
       omp_cwd_note: "명령을 실행하기 전에 프로젝트 경로를 바꾸세요. OMP는 --cwd로 지정한 디렉터리에서 bash 도구를 실행합니다.",
+      omp_auto_title: "원클릭 설정",
+      omp_auto_description: "oh-my-pi 18.1.16 이상이 필요합니다. 기본 프로필을 설정하고 다른 제공자는 유지합니다.",
+      omp_auto_button: "원클릭 설정",
+      omp_auto_pending: "oh-my-pi 확인 및 설정 중…",
+      omp_auto_install: "oh-my-pi 설치",
+      omp_auto_not_installed: "oh-my-pi를 찾지 못했습니다. {minimum} 이상을 설치하세요. 설정은 변경되지 않았습니다.",
+      omp_auto_version_too_old: "oh-my-pi {version}을 {minimum} 이상으로 업데이트하세요. 설정은 변경되지 않았습니다.",
+      omp_auto_version_unknown: "oh-my-pi 버전을 확인할 수 없습니다. 설치를 확인하세요. 설정은 변경되지 않았습니다.",
+      omp_auto_configured: "IronMLX 제공자를 설정했습니다. OMP 세션을 다시 시작하고 아래 명령의 경로를 대상 프로젝트로 바꿔 실행하세요.",
+      omp_auto_configuration_failed: "OMP 설정을 업데이트할 수 없습니다. YAML 형식과 권한을 확인하세요. 변경 전에 기존 파일을 백업합니다.",
+      omp_auto_initialize_cli: "이전 models.json을 마이그레이션해야 합니다. OMP를 한 번 실행한 후 다시 시도하세요. 설정은 변경되지 않았습니다.",
+      omp_auto_model_unavailable: "IronMLX를 시작하고 대화 모델을 로드한 후 선택하세요.",
+      omp_auto_backend_unavailable: "IronMLX에 연결할 수 없습니다. 서비스를 시작하세요.",
+      omp_auto_local_only: "IronMLX 로컬 모드가 필요합니다.",
+      omp_auto_busy: "OMP 설정이 진행 중입니다.",
+      omp_auto_native_required: "IronMLX App에서 원클릭 설정을 사용하세요.",
       dsh_verified_revision: "검증된 master", dsh_description: "Responses API를 통해 DeepSeek Harness CLI를 IronMLX에 연결합니다. 공식 데스크톱 버전 지원은 준비 중입니다.",
       dsh_save_file: "다음 이름으로 저장", dsh_home_default: "(일반적으로 ~/.dsh)", dsh_reasoning: "추론 모드", dsh_reasoning_off: "끄기",
       dsh_reasoning_minimal: "최소", dsh_reasoning_low: "낮음", dsh_reasoning_medium: "중간", dsh_reasoning_high: "높음", dsh_reasoning_xhigh: "매우 높음", dsh_reasoning_max: "최대",
@@ -8917,6 +9017,7 @@
       if (select) select.value = i18nLang;
     });
     renderDSHDesktopSetupResult();
+    renderOMPSetupResult();
     updateSettingsSaveBar();
     updateLogLevelControls();
     // Re-render model list to update action buttons text
@@ -13599,6 +13700,44 @@
     renderAgentGuideConfiguration();
   }
 
+  let ompSetupPending = false;
+  let ompSetupResult = null;
+
+  function configureOMP() {
+    if (ompSetupPending) return;
+    if (!window.webkit?.messageHandlers?.fetchAPIPost) {
+      ompSetupResult = { code: 'native_required' };
+      renderOMPSetupResult();
+      return;
+    }
+    ompSetupPending = true;
+    ompSetupResult = null;
+    renderOMPSetupResult();
+    apiPost('/admin/api/agents/omp/configure', {
+      model: document.getElementById('omp-model-select').value
+    });
+  }
+
+  function renderOMPSetupResult() {
+    const button = document.getElementById('omp-configure');
+    button.disabled = ompSetupPending;
+    button.textContent = t(ompSetupPending ? 'omp_auto_pending' : 'omp_auto_button');
+    const result = ompSetupResult;
+    const feedback = document.getElementById('omp-feedback');
+    feedback.hidden = !ompSetupPending && !result;
+    const warnings = ['not_installed', 'version_too_old', 'version_unknown', 'initialize_cli',
+      'model_unavailable', 'local_only', 'busy'];
+    const tone = ompSetupPending ? 'info' : result?.success === true ? 'success'
+      : warnings.includes(result?.code) ? 'warning' : 'error';
+    feedback.dataset.tone = tone;
+    document.getElementById('omp-feedback-icon').textContent = tone === 'success' ? '\u2713' : tone === 'info' ? 'i' : '!';
+    document.getElementById('omp-setup-status').textContent = ompSetupPending ? t('omp_auto_pending') : result
+      ? t('omp_auto_' + result.code, t('omp_auto_configuration_failed'))
+        .replace('{version}', result.installedVersion || '?').replace('{minimum}', result.minimumVersion || '18.1.16') : '';
+    document.getElementById('omp-install').hidden = !result
+      || !['not_installed', 'version_too_old', 'version_unknown'].includes(result.code);
+  }
+
   let dshDesktopSetupPending = false;
   let dshDesktopSetupResult = null;
 
@@ -13799,7 +13938,7 @@
 
     const ompSelector = 'ironmlx/' + ompModel;
     setAgentCode('omp-verify-code', [
-      'omp models refresh',
+      'omp models refresh ironmlx',
       'omp models ironmlx',
       '',
       'omp --cwd /absolute/path/to/project \\',
@@ -15455,7 +15594,11 @@
   function onApiFetchResult(path, jsonStr) {
     const dict = I18N[currentLang] || I18N.en;
     try {
-      if (path === '/admin/api/agents/dsh-desktop/configure') {
+      if (path === '/admin/api/agents/omp/configure') {
+        ompSetupPending = false;
+        ompSetupResult = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };
+        renderOMPSetupResult();
+      } else if (path === '/admin/api/agents/dsh-desktop/configure') {
         dshDesktopSetupPending = false;
         dshDesktopSetupResult = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };
         renderDSHDesktopSetupResult();

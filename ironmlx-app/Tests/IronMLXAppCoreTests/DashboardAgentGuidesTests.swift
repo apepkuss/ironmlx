@@ -41,7 +41,7 @@ import Testing
     #expect(html.contains(#"id="agent-guide-dsh" role="tabpanel""#))
     #expect(html.contains(#"class="agent-guide-version-badge""#))
     #expect(html.contains("<strong>v0.20.0+</strong>"))
-    #expect(html.contains("<strong>17.2.12+</strong>"))
+    #expect(html.contains("<strong>18.1.16+</strong>"))
     #expect(html.contains(#"agent_applicable_version: "适用版本""#))
     #expect(html.components(separatedBy: #"class="agent-code-copy""#).count - 1 == 6)
     #expect(html.components(separatedBy: #"data-copy-label="copy_configuration""#).count - 1 == 3)

@@ -61,6 +61,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private lazy var logLevelController = RuntimeLogLevelController(configStore: configStore, backend: backend)
     private var logLevelChangePending = false
     private var settingsSaveInProgress = false
+    var ompService = OMPIntegrationService()
+    private var ompSetupPending = false
     var dshDesktopService = DSHDesktopIntegrationService()
     private var dshDesktopSetupPending = false
     private var huggingFaceSearchTask: Task<Void, Never>?
@@ -224,7 +226,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             else { return }
             let isHermesGuide = url.host == "hermes-agent.nousresearch.com"
                 && ["/docs/integrations/providers", "/docs/zh-Hans/integrations/providers"].contains(url.path)
-            let isOMPGuide = url.host == "omp.sh" && url.path == "/docs/custom-models"
+            let isOMPGuide = url.host == "omp.sh" && ["/docs/custom-models", "/docs/quickstart"].contains(url.path)
             let isDSHDesktopDownload = Self.isDSHDesktopDownloadURL(url)
             let isDSHGuide = url.host == "deepseek-harness.github.io"
                 && ["/deepseek-harness/guide/providers", "/deepseek-harness/en/guide/providers"].contains(url.path)
@@ -423,6 +425,54 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             && components.query == nil && components.fragment == nil
     }
 
+    private func configureOMP(path: String, modelID: String?) {
+        guard !ompSetupPending else {
+            sendFetchResult(path: path, jsonString: #"{"success":false,"code":"busy"}"#)
+            return
+        }
+        ompSetupPending = true
+        let service = ompService
+        Task {
+            defer { ompSetupPending = false }
+            let installation = await service.inspect()
+            guard installation.result.success else {
+                sendFetchResult(path: path, jsonString: (try? Self.jsonString(installation.result)) ?? "null")
+                return
+            }
+            guard let modelID, !modelID.isEmpty, modelID != "MODEL_ID" else {
+                sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
+                return
+            }
+            let config = configStore.load()
+            guard !config.isLANMode else {
+                sendFetchResult(path: path, jsonString: #"{"success":false,"code":"local_only"}"#)
+                return
+            }
+            do {
+                let client = BackendAPIClient(host: config.host, port: config.port)
+                let loaded = try await client.fetchLoadedModels()
+                guard loaded.contains(where: { $0.id == modelID && $0.capabilities.runtimeKind == "causal" }) else {
+                    sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
+                    return
+                }
+                let data = try await client.fetchData(path: "/v1/models")
+                let response = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let models = response?["data"] as? [[String: Any]] ?? []
+                guard let model = models.first(where: { $0["id"] as? String == modelID }),
+                      let context = model["context_window"] as? Int,
+                      let output = model["max_output_tokens"] as? Int else {
+                    sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
+                    return
+                }
+                let result = await service.configure(model: .init(id: modelID, contextWindow: context,
+                                                                 maxTokens: min(output, context)), port: config.port)
+                sendFetchResult(path: path, jsonString: try Self.jsonString(result))
+            } catch {
+                sendFetchResult(path: path, jsonString: #"{"success":false,"code":"backend_unavailable"}"#)
+            }
+        }
+    }
+
     private func configureDSHDesktop(path: String, modelID: String?) {
         let service = dshDesktopService
         let installation = service.inspect()
@@ -482,6 +532,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
 
         switch payload.path {
+        case "/admin/api/agents/omp/configure":
+            configureOMP(path: payload.path, modelID: payload.body["model"]?.stringValue)
         case "/admin/api/agents/dsh-desktop/configure":
             configureDSHDesktop(path: payload.path, modelID: payload.body["model"]?.stringValue)
         case "/admin/api/incidents/clear":
