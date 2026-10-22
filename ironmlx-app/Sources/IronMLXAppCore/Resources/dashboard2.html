@@ -4483,38 +4483,44 @@
               </div>
             </section>
 
-            <section class="agent-guide-section">
+            <section class="agent-guide-section" id="hermes-one-click">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="hermes_auto_title">One-click setup</h3>
+                  <p class="agent-guide-section-desc" data-i18n="hermes_auto_description">Requires Hermes CLI or local Desktop 0.20.0 or later and at least 64K context. Configure a dedicated ironmlx profile.</p>
+                </div>
+                <button id="hermes-configure" class="btn-accent" type="button" onclick="configureHermes()" data-i18n="hermes_auto_button">One-click setup</button>
+              </div>
+              <div class="agent-guide-fields" style="grid-template-columns:minmax(0,1fr);">
+                <div class="agent-guide-field">
+                  <label for="hermes-model-select" data-i18n="agent_model">Model</label>
+                  <select id="hermes-model-select" onchange="renderAgentGuideConfiguration()"></select>
+                </div>
+              </div>
+              <div id="hermes-feedback" class="agent-setup-feedback" role="status" aria-live="polite" aria-atomic="true" hidden>
+                <span id="hermes-feedback-icon" class="agent-setup-feedback-icon" aria-hidden="true">!</span>
+                <div class="agent-setup-feedback-content">
+                  <p id="hermes-setup-status" class="agent-setup-feedback-message"></p>
+                  <a id="hermes-install" class="agent-setup-feedback-action" href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank" rel="noopener noreferrer" hidden onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="hermes_auto_install">Install Hermes Agent</span> <span aria-hidden="true">&#8599;</span></a>
+                </div>
+              </div>
+            </section>
+
+            <details class="agent-guide-section" id="hermes-manual">
+              <summary class="agent-guide-section-title agent-manual-summary" data-i18n="dsh_manual_configuration">Manual configuration</summary>
+              <div class="agent-manual-body">
               <div class="agent-guide-section-header">
                 <div>
                   <h3 class="agent-guide-section-title" data-i18n="agent_configure_provider">Configure provider</h3>
                   <p class="agent-guide-section-desc"><span data-i18n="agent_configuration_file">Configuration file</span>: <code id="hermes-config-path">~/.hermes/profiles/ironmlx/config.yaml</code></p>
                 </div>
               </div>
-              <fieldset class="agent-profile-options">
-                <legend class="visually-hidden" data-i18n="hermes_profile_scope_label">Hermes profile scope</legend>
-                <label class="agent-profile-option active">
-                  <input class="visually-hidden" type="radio" name="hermes-profile-mode" value="dedicated" data-hermes-profile-mode="dedicated" checked onchange="selectHermesProfileMode('dedicated')">
-                  <span class="agent-profile-option-title">
-                    <span data-i18n="hermes_profile_dedicated">Dedicated ironmlx profile</span>
-                    <span class="agent-profile-option-badge" data-i18n="agent_recommended">Recommended</span>
-                  </span>
-                  <span class="agent-profile-option-desc" data-i18n="hermes_profile_dedicated_desc">Keeps IronMLX configuration and sessions isolated from the default profile.</span>
-                </label>
-                <label class="agent-profile-option">
-                  <input class="visually-hidden" type="radio" name="hermes-profile-mode" value="default" data-hermes-profile-mode="default" onchange="selectHermesProfileMode('default')">
-                  <span class="agent-profile-option-title" data-i18n="hermes_profile_default">Default profile</span>
-                  <span class="agent-profile-option-desc" data-i18n="hermes_profile_default_desc">Simpler, but changes the provider used by the default profile.</span>
-                </label>
-              </fieldset>
+              <p class="agent-guide-section-desc" data-i18n="hermes_profile_note">One-click setup and manual configuration both use the dedicated ironmlx profile.</p>
               <div class="agent-guide-note" id="hermes-profile-create-note">
                 <span aria-hidden="true">i</span>
-                <span><span data-i18n="hermes_profile_create_once">Create the profile once before editing its configuration:</span> <code>hermes profile create ironmlx</code></span>
+                <span><span data-i18n="hermes_profile_create_once">With CLI installed, create the profile only if it does not already exist:</span> <code>hermes profile create ironmlx</code></span>
               </div>
               <div class="agent-guide-fields">
-                <div class="agent-guide-field">
-                  <label for="hermes-model-select" data-i18n="agent_model">Model</label>
-                  <select id="hermes-model-select" onchange="renderAgentGuideConfiguration()"></select>
-                </div>
                 <div class="agent-guide-field">
                   <label for="hermes-context-length" data-i18n="agent_context_length">Context length</label>
                   <input id="hermes-context-length" type="number" min="64000" step="1024" value="64000" onchange="renderAgentGuideConfiguration()">
@@ -4529,6 +4535,10 @@
                 </div>
                 <pre class="agent-code"><code id="hermes-config-code"></code></pre>
               </div>
+              <div class="agent-guide-note">
+                <span aria-hidden="true">i</span>
+                <span data-i18n="hermes_workspace_note">Merge these fields into the existing profile and retain other settings. To choose a terminal workspace, optionally set terminal.cwd to an existing project directory.</span>
+              </div>
               <div class="agent-guide-note warning">
                 <span aria-hidden="true">!</span>
                 <span data-i18n="hermes_context_requirement">Hermes Agent v0.20.0 and later require at least 64K context tokens. Use the model's actual context limit.</span>
@@ -4537,11 +4547,11 @@
                 <span aria-hidden="true">i</span>
                 <span>
                   <span data-i18n="hermes_profile_tui">TUI</span>: <code id="hermes-tui-command">hermes --profile ironmlx --tui</code><br>
-                  <span id="hermes-desktop-dedicated-note" data-i18n="hermes_profile_desktop_dedicated">Desktop: select the ironmlx profile, then start a new chat.</span>
-                  <span id="hermes-desktop-default-note" data-i18n="hermes_profile_desktop_default" hidden>Desktop: use the default profile, then start a new chat.</span>
+                  <span data-i18n="hermes_profile_desktop">Desktop: click the I profile button at the bottom of the sidebar (hover to confirm ironmlx), then start a new chat. Selecting ironmlx in Settings only chooses which profile to edit.</span>
                 </span>
               </div>
-            </section>
+              </div>
+            </details>
 
             <section class="agent-guide-section">
               <div class="agent-guide-section-header">
@@ -5901,20 +5911,34 @@
       agent_tool_boundary: "The agent executes terminal, bash, and MCP tools locally. IronMLX only provides inference and structured tool calls.",
       agent_official_guide: "Official configuration guide",
       hermes_description: "Use IronMLX through Hermes Agent's stateless Responses transport. The configuration below is generated from the current App state.",
-      hermes_profile_scope_label: "Hermes profile scope",
-      hermes_profile_dedicated: "Dedicated ironmlx profile",
-      hermes_profile_dedicated_desc: "Keeps IronMLX configuration and sessions isolated from the default profile.",
-      hermes_profile_default: "Default profile",
-      hermes_profile_default_desc: "Simpler, but changes the provider used by the default profile.",
-      hermes_profile_create_once: "Create the profile once before editing its configuration:",
+      hermes_profile_note: "One-click setup and manual configuration both use the dedicated ironmlx profile.",
+      hermes_profile_create_once: "With CLI installed, create the profile only if it does not already exist:",
       hermes_profile_tui: "TUI",
-      hermes_profile_desktop_dedicated: "Desktop: select the ironmlx profile, then start a new chat.",
-      hermes_profile_desktop_default: "Desktop: use the default profile, then start a new chat.",
+      hermes_profile_desktop: "Desktop: click the I profile button at the bottom of the sidebar (hover to confirm ironmlx), then start a new chat. Selecting ironmlx in Settings only chooses which profile to edit.",
       hermes_context_requirement: "Hermes Agent v0.20.0 and later require at least 64K context tokens. Use the model's actual context limit.",
+      hermes_workspace_note: "Merge these fields into the existing profile and retain other settings. To choose a terminal workspace, optionally set terminal.cwd to an existing project directory.",
       hermes_verify_desc: "Check the service, complete one inference request, then verify a terminal tool call.",
       omp_description: "Register IronMLX as a keyless Responses provider, discover the models served by the App, and launch OMP in the intended project directory.",
       omp_refresh_desc: "Refresh provider discovery, inspect available models, then start OMP from your project.",
       omp_cwd_note: "Replace the project path before running the command. OMP executes bash tools in the directory supplied by --cwd.",
+      hermes_auto_title: "One-click setup",
+      hermes_auto_description: "Requires Hermes CLI or local Desktop 0.20.0 or later and at least 64K context. Configure a dedicated ironmlx profile.",
+      hermes_auto_button: "One-click setup",
+      hermes_auto_pending: "Checking and configuring Hermes Agent…",
+      hermes_auto_install: "Install Hermes Agent",
+      hermes_auto_not_installed: "Hermes CLI and local Desktop were not found. Install {minimum} or later and retry. No configuration was written.",
+      hermes_auto_version_too_old: "Upgrade Hermes Agent {version} to {minimum} or later. No configuration was written.",
+      hermes_auto_version_unknown: "Could not verify the Hermes Agent version. Check the installation and retry. No configuration was written.",
+      hermes_auto_configured: "Configured the ironmlx profile. Restart open Hermes sessions; select ironmlx at the bottom of the Desktop sidebar or use the CLI commands below.",
+      hermes_auto_configuration_failed: "Could not update Hermes configuration. Check YAML syntax and file permissions. Existing configuration is backed up before modification.",
+      hermes_auto_model_unavailable: "Start IronMLX, load and select a conversation model, then retry.",
+      hermes_auto_backend_unavailable: "Could not connect to IronMLX. Start the service and retry.",
+      hermes_auto_local_only: "One-click setup requires IronMLX local mode.",
+      hermes_auto_busy: "Hermes setup is already in progress.",
+      hermes_auto_native_required: "Open the IronMLX App to use one-click setup.",
+      hermes_auto_context_too_small: "Hermes requires at least 64,000 context tokens. Load a model with sufficient actual capacity and retry. No configuration was written.",
+      hermes_auto_custom_home: "A custom Hermes data directory is selected. Use manual configuration for that directory. No configuration was written.",
+      hermes_auto_profile_conflict: "The ironmlx profile is deleted or uses symbolic links. Restore it in Hermes or use manual configuration. No configuration was written.",
       omp_auto_title: "One-click setup",
       omp_auto_description: "Requires oh-my-pi 18.1.16 or later. Configure the default profile and keep other providers.",
       omp_auto_button: "One-click setup",
@@ -6544,20 +6568,34 @@
       agent_tool_boundary: "Agent 在本机执行 terminal、bash 和 MCP 工具；IronMLX 仅提供推理和结构化工具调用。",
       agent_official_guide: "前往官方配置指南",
       hermes_description: "通过 Hermes Agent 的无状态 Responses transport 使用 IronMLX。下方配置根据当前 App 状态生成。",
-      hermes_profile_scope_label: "Hermes profile 范围",
-      hermes_profile_dedicated: "专用 ironmlx profile",
-      hermes_profile_dedicated_desc: "将 IronMLX 配置和会话与默认 profile 隔离。",
-      hermes_profile_default: "默认 profile",
-      hermes_profile_default_desc: "配置更简单，但会修改默认 profile 使用的 Provider。",
-      hermes_profile_create_once: "编辑配置前，仅需创建一次 profile：",
+      hermes_profile_note: "一键配置和手动配置均使用专用 ironmlx Profile。",
+      hermes_profile_create_once: "已安装 CLI 时，仅在 profile 尚不存在时创建；已有配置可跳过：",
       hermes_profile_tui: "TUI",
-      hermes_profile_desktop_dedicated: "Desktop：选择 ironmlx profile，然后新建会话。",
-      hermes_profile_desktop_default: "Desktop：使用默认 profile，然后新建会话。",
+      hermes_profile_desktop: "Desktop：在侧边栏底部点击 I 按钮（悬停确认名称为 ironmlx），然后新建会话。设置页选择 ironmlx 仅决定编辑哪个 profile。",
       hermes_context_requirement: "Hermes Agent v0.20.0 及以上版本需要至少 64K context tokens。请填写模型实际的 context 上限。",
+      hermes_workspace_note: "请将这些字段合并到已有 profile，保留其他设置。如需指定 terminal 工作目录，可将 terminal.cwd 设置为已存在的项目目录。",
       hermes_verify_desc: "检查服务、完成一次推理请求，然后验证一次 terminal 工具调用。",
       omp_description: "将 IronMLX 注册为免密钥 Responses Provider，发现 App 提供的模型，并在目标项目目录启动 OMP。",
       omp_refresh_desc: "刷新 Provider 发现、查看可用模型，然后从项目目录启动 OMP。",
       omp_cwd_note: "执行前请替换项目路径。OMP 会在 --cwd 指定的目录中执行 bash 工具。",
+      hermes_auto_title: "一键配置",
+      hermes_auto_description: "需要 Hermes CLI 或本地 Desktop 0.20.0 及以上版本，模型上下文至少 64K。配置专用 ironmlx Profile。",
+      hermes_auto_button: "一键配置",
+      hermes_auto_pending: "正在检查并配置 Hermes Agent…",
+      hermes_auto_install: "安装 Hermes Agent",
+      hermes_auto_not_installed: "未检测到 Hermes CLI 或本地 Desktop。请安装 {minimum} 或更高版本后重试。未写入任何配置。",
+      hermes_auto_version_too_old: "已安装 Hermes Agent {version}，请升级至 {minimum} 或更高版本。未写入任何配置。",
+      hermes_auto_version_unknown: "无法确认 Hermes Agent 版本，请检查安装后重试。未写入任何配置。",
+      hermes_auto_configured: "已配置 ironmlx Profile。请重启已打开的 Hermes 会话，在 Desktop 侧边栏底部切换到 ironmlx，或使用下方 CLI 命令。",
+      hermes_auto_configuration_failed: "无法更新 Hermes 配置，请检查 YAML 格式和文件权限。修改前会备份已有配置。",
+      hermes_auto_model_unavailable: "请启动 IronMLX，加载并选择对话模型后重试。",
+      hermes_auto_backend_unavailable: "无法连接 IronMLX，请启动服务后重试。",
+      hermes_auto_local_only: "一键配置需要 IronMLX 处于本地模式。",
+      hermes_auto_busy: "Hermes 配置正在进行，请稍候。",
+      hermes_auto_native_required: "请在 IronMLX App 中使用一键配置。",
+      hermes_auto_context_too_small: "Hermes 要求至少 64,000 个上下文 token。请加载实际容量满足要求的模型后重试。未写入任何配置。",
+      hermes_auto_custom_home: "当前指定了自定义 Hermes 数据目录，请针对该目录使用手动配置。未写入任何配置。",
+      hermes_auto_profile_conflict: "ironmlx Profile 已删除或使用了符号链接。请在 Hermes 中恢复，或使用手动配置。未写入任何配置。",
       omp_auto_title: "一键配置",
       omp_auto_description: "需要 oh-my-pi 18.1.16 或更高版本。为默认配置目录接入 IronMLX，保留其他 Provider。",
       omp_auto_button: "一键配置",
@@ -7187,20 +7225,34 @@
       agent_tool_boundary: "Agent 在本機執行 terminal、bash 和 MCP 工具；IronMLX 僅提供推理與結構化工具呼叫。",
       agent_official_guide: "前往官方設定指南",
       hermes_description: "透過 Hermes Agent 的無狀態 Responses transport 使用 IronMLX。下方設定會根據目前 App 狀態產生。",
-      hermes_profile_scope_label: "Hermes profile 範圍",
-      hermes_profile_dedicated: "專用 ironmlx profile",
-      hermes_profile_dedicated_desc: "將 IronMLX 設定與工作階段和預設 profile 隔離。",
-      hermes_profile_default: "預設 profile",
-      hermes_profile_default_desc: "設定較簡單，但會修改預設 profile 使用的 Provider。",
-      hermes_profile_create_once: "編輯設定前，只需建立一次 profile：",
+      hermes_profile_note: "一鍵設定和手動設定均使用專用 ironmlx Profile。",
+      hermes_profile_create_once: "已安裝 CLI 時，僅在 profile 尚不存在時建立；已有設定可略過：",
       hermes_profile_tui: "TUI",
-      hermes_profile_desktop_dedicated: "Desktop：選擇 ironmlx profile，然後建立新工作階段。",
-      hermes_profile_desktop_default: "Desktop：使用預設 profile，然後建立新工作階段。",
+      hermes_profile_desktop: "Desktop：在側邊欄底部點擊 I 按鈕（懸停確認名稱為 ironmlx），然後建立新工作階段。設定頁選擇 ironmlx 只決定編輯哪個 profile。",
       hermes_context_requirement: "Hermes Agent v0.20.0 及以上版本需要至少 64K context tokens。請填寫模型實際的 context 上限。",
+      hermes_workspace_note: "請將這些欄位合併到既有 profile，保留其他設定。如需指定 terminal 工作目錄，可將 terminal.cwd 設為已存在的專案目錄。",
       hermes_verify_desc: "檢查服務、完成一次推理請求，然後驗證一次 terminal 工具呼叫。",
       omp_description: "將 IronMLX 註冊為免金鑰 Responses Provider，探索 App 提供的模型，並在目標專案目錄啟動 OMP。",
       omp_refresh_desc: "重新整理 Provider 探索、檢視可用模型，然後從專案目錄啟動 OMP。",
       omp_cwd_note: "執行前請替換專案路徑。OMP 會在 --cwd 指定的目錄中執行 bash 工具。",
+      hermes_auto_title: "一鍵設定",
+      hermes_auto_description: "需要 Hermes CLI 或本機 Desktop 0.20.0 以上版本，模型上下文至少 64K。設定專用 ironmlx Profile。",
+      hermes_auto_button: "一鍵設定",
+      hermes_auto_pending: "正在檢查並設定 Hermes Agent…",
+      hermes_auto_install: "安裝 Hermes Agent",
+      hermes_auto_not_installed: "未偵測到 Hermes CLI 或本機 Desktop。請安裝 {minimum} 以上版本後重試。未寫入任何設定。",
+      hermes_auto_version_too_old: "已安裝 Hermes Agent {version}，請升級至 {minimum} 以上版本。未寫入任何設定。",
+      hermes_auto_version_unknown: "無法確認 Hermes Agent 版本，請檢查安裝後重試。未寫入任何設定。",
+      hermes_auto_configured: "已設定 ironmlx Profile。請重新啟動已開啟的 Hermes 工作階段，在 Desktop 側邊欄底部切換至 ironmlx，或使用下方 CLI 命令。",
+      hermes_auto_configuration_failed: "無法更新 Hermes 設定，請檢查 YAML 格式和檔案權限。變更前會備份現有設定。",
+      hermes_auto_model_unavailable: "請啟動 IronMLX，載入並選擇對話模型後重試。",
+      hermes_auto_backend_unavailable: "無法連線 IronMLX，請啟動服務後重試。",
+      hermes_auto_local_only: "一鍵設定需要 IronMLX 處於本機模式。",
+      hermes_auto_busy: "Hermes 設定正在進行，請稍候。",
+      hermes_auto_native_required: "請在 IronMLX App 中使用一鍵設定。",
+      hermes_auto_context_too_small: "Hermes 要求至少 64,000 個上下文 token。請載入實際容量符合要求的模型後重試。未寫入任何設定。",
+      hermes_auto_custom_home: "目前指定了自訂 Hermes 資料目錄，請對該目錄使用手動設定。未寫入任何設定。",
+      hermes_auto_profile_conflict: "ironmlx Profile 已刪除或使用符號連結。請在 Hermes 還原，或使用手動設定。未寫入任何設定。",
       omp_auto_title: "一鍵設定",
       omp_auto_description: "需要 oh-my-pi 18.1.16 或更新版本。為預設設定目錄接入 IronMLX，保留其他 Provider。",
       omp_auto_button: "一鍵設定",
@@ -7833,20 +7885,34 @@
       agent_tool_boundary: "エージェントが terminal、bash、MCP ツールをローカルで実行します。IronMLX は推論と構造化ツール呼び出しのみを提供します。",
       agent_official_guide: "公式設定ガイドへ",
       hermes_description: "Hermes Agent のステートレス Responses トランスポートから IronMLX を使用します。以下の設定は現在の App の状態から生成されます。",
-      hermes_profile_scope_label: "Hermes profile の範囲",
-      hermes_profile_dedicated: "専用 ironmlx profile",
-      hermes_profile_dedicated_desc: "IronMLX の設定とセッションをデフォルト profile から分離します。",
-      hermes_profile_default: "デフォルト profile",
-      hermes_profile_default_desc: "簡単ですが、デフォルト profile のプロバイダーが変更されます。",
-      hermes_profile_create_once: "設定を編集する前に profile を一度だけ作成します：",
+      hermes_profile_note: "ワンクリック設定と手動設定は、どちらも専用の ironmlx profile を使用します。",
+      hermes_profile_create_once: "CLI がある場合、profile がまだ存在しないときだけ作成します：",
       hermes_profile_tui: "TUI",
-      hermes_profile_desktop_dedicated: "Desktop：ironmlx profile を選択して、新しいチャットを開始します。",
-      hermes_profile_desktop_default: "Desktop：デフォルト profile を使用して、新しいチャットを開始します。",
+      hermes_profile_desktop: "Desktop：サイドバー下部の I ボタンにポインタを合わせて ironmlx と確認し、クリックして新しいチャットを開始します。設定画面の選択は編集対象のみを切り替えます。",
       hermes_context_requirement: "Hermes Agent v0.20.0 以降では 64K 以上のコンテキストトークンが必要です。モデルの実際のコンテキスト上限を指定してください。",
+      hermes_workspace_note: "既存の profile にこれらの項目をマージし、他の設定を保持してください。terminal の作業場所を指定する場合は、terminal.cwd に実在するプロジェクトディレクトリを設定します。",
       hermes_verify_desc: "サービスを確認し、推論リクエストを 1 回実行してから terminal ツール呼び出しを検証します。",
       omp_description: "IronMLX をキー不要の Responses プロバイダーとして登録し、App が提供するモデルを検出して、目的のプロジェクトディレクトリで OMP を起動します。",
       omp_refresh_desc: "プロバイダー検出を更新し、利用可能なモデルを確認してからプロジェクトで OMP を起動します。",
       omp_cwd_note: "実行前にプロジェクトパスを置き換えてください。OMP は --cwd で指定したディレクトリで bash ツールを実行します。",
+      hermes_auto_title: "ワンクリック設定",
+      hermes_auto_description: "Hermes CLI またはローカル Desktop 0.20.0 以降と 64K 以上のコンテキストが必要です。専用 ironmlx プロファイルを設定します。",
+      hermes_auto_button: "ワンクリック設定",
+      hermes_auto_pending: "Hermes Agent を確認・設定中…",
+      hermes_auto_install: "Hermes Agent をインストール",
+      hermes_auto_not_installed: "Hermes CLI またはローカル Desktop が見つかりません。{minimum} 以降をインストールしてください。設定は未変更です。",
+      hermes_auto_version_too_old: "Hermes Agent {version} を {minimum} 以降に更新してください。設定は未変更です。",
+      hermes_auto_version_unknown: "Hermes Agent のバージョンを確認できません。インストールを確認してください。設定は未変更です。",
+      hermes_auto_configured: "ironmlx profile を設定しました。開いている Hermes セッションを再起動し、Desktop のサイドバー下部で ironmlx に切り替えるか、以下の CLI コマンドを使ってください。",
+      hermes_auto_configuration_failed: "Hermes 設定を更新できません。YAML の形式と権限を確認してください。変更前に既存設定をバックアップします。",
+      hermes_auto_model_unavailable: "IronMLX を起動して対話モデルを読み込み、選択してください。",
+      hermes_auto_backend_unavailable: "IronMLX に接続できません。サービスを起動してください。",
+      hermes_auto_local_only: "IronMLX のローカルモードが必要です。",
+      hermes_auto_busy: "Hermes 設定を実行中です。",
+      hermes_auto_native_required: "IronMLX App でワンクリック設定を使用してください。",
+      hermes_auto_context_too_small: "Hermes は 64,000 以上のコンテキストトークンが必要です。十分な実容量のモデルを読み込んでください。設定は未変更です。",
+      hermes_auto_custom_home: "カスタム Hermes データディレクトリは手動で設定してください。設定は未変更です。",
+      hermes_auto_profile_conflict: "ironmlx プロファイルは削除済みかシンボリックリンクを使用しています。Hermes で復元するか手動で設定してください。設定は未変更です。",
       omp_auto_title: "ワンクリック設定",
       omp_auto_description: "oh-my-pi 18.1.16 以降が必要です。既定のプロファイルを設定し、他のプロバイダーを保持します。",
       omp_auto_button: "ワンクリック設定",
@@ -8479,20 +8545,34 @@
       agent_tool_boundary: "에이전트는 terminal, bash 및 MCP 도구를 로컬에서 실행합니다. IronMLX는 추론과 구조화된 도구 호출만 제공합니다.",
       agent_official_guide: "공식 설정 가이드 열기",
       hermes_description: "Hermes Agent의 상태 비저장 Responses 전송을 통해 IronMLX를 사용합니다. 아래 설정은 현재 App 상태에서 생성됩니다.",
-      hermes_profile_scope_label: "Hermes profile 범위",
-      hermes_profile_dedicated: "전용 ironmlx profile",
-      hermes_profile_dedicated_desc: "IronMLX 설정과 세션을 기본 profile에서 분리합니다.",
-      hermes_profile_default: "기본 profile",
-      hermes_profile_default_desc: "간단하지만 기본 profile에서 사용하는 프로바이더가 변경됩니다.",
-      hermes_profile_create_once: "설정을 편집하기 전에 profile을 한 번만 생성하세요:",
+      hermes_profile_note: "원클릭 설정과 수동 설정 모두 전용 ironmlx profile을 사용합니다.",
+      hermes_profile_create_once: "CLI가 설치되어 있고 profile이 아직 없을 때만 생성하세요:",
       hermes_profile_tui: "TUI",
-      hermes_profile_desktop_dedicated: "Desktop: ironmlx profile을 선택한 다음 새 채팅을 시작하세요.",
-      hermes_profile_desktop_default: "Desktop: 기본 profile을 사용한 다음 새 채팅을 시작하세요.",
+      hermes_profile_desktop: "Desktop: 사이드바 하단의 I 버튼 위에 마우스를 올려 ironmlx인지 확인한 후 클릭하고 새 채팅을 시작하세요. 설정 화면의 선택은 편집할 profile만 바꿉니다.",
       hermes_context_requirement: "Hermes Agent v0.20.0 이상은 최소 64K 컨텍스트 토큰이 필요합니다. 모델의 실제 컨텍스트 한도를 입력하세요.",
+      hermes_workspace_note: "기존 profile에 이 필드를 병합하고 다른 설정은 유지하세요. terminal 작업 폴더를 지정하려면 terminal.cwd를 실제 프로젝트 디렉터리로 설정하세요.",
       hermes_verify_desc: "서비스를 확인하고 추론 요청 한 번을 완료한 다음 terminal 도구 호출을 검증하세요.",
       omp_description: "IronMLX를 키가 필요 없는 Responses 프로바이더로 등록하고 App이 제공하는 모델을 검색한 뒤 원하는 프로젝트 디렉터리에서 OMP를 시작하세요.",
       omp_refresh_desc: "프로바이더 검색을 새로고침하고 사용 가능한 모델을 확인한 다음 프로젝트에서 OMP를 시작하세요.",
       omp_cwd_note: "명령을 실행하기 전에 프로젝트 경로를 바꾸세요. OMP는 --cwd로 지정한 디렉터리에서 bash 도구를 실행합니다.",
+      hermes_auto_title: "원클릭 설정",
+      hermes_auto_description: "Hermes CLI 또는 로컬 Desktop 0.20.0 이상과 64K 이상의 컨텍스트가 필요합니다. 전용 ironmlx 프로필을 설정합니다.",
+      hermes_auto_button: "원클릭 설정",
+      hermes_auto_pending: "Hermes Agent 확인 및 설정 중…",
+      hermes_auto_install: "Hermes Agent 설치",
+      hermes_auto_not_installed: "Hermes CLI 또는 로컬 Desktop을 찾지 못했습니다. {minimum} 이상을 설치하세요. 설정은 변경되지 않았습니다.",
+      hermes_auto_version_too_old: "Hermes Agent {version}을 {minimum} 이상으로 업데이트하세요. 설정은 변경되지 않았습니다.",
+      hermes_auto_version_unknown: "Hermes Agent 버전을 확인할 수 없습니다. 설치를 확인하세요. 설정은 변경되지 않았습니다.",
+      hermes_auto_configured: "ironmlx profile을 설정했습니다. 열린 Hermes 세션을 다시 시작하고 Desktop 사이드바 하단에서 ironmlx로 전환하거나 아래 CLI 명령을 사용하세요.",
+      hermes_auto_configuration_failed: "Hermes 설정을 업데이트할 수 없습니다. YAML 형식과 권한을 확인하세요. 변경 전에 기존 설정을 백업합니다.",
+      hermes_auto_model_unavailable: "IronMLX를 시작하고 대화 모델을 로드한 후 선택하세요.",
+      hermes_auto_backend_unavailable: "IronMLX에 연결할 수 없습니다. 서비스를 시작하세요.",
+      hermes_auto_local_only: "IronMLX 로컬 모드가 필요합니다.",
+      hermes_auto_busy: "Hermes 설정이 진행 중입니다.",
+      hermes_auto_native_required: "IronMLX App에서 원클릭 설정을 사용하세요.",
+      hermes_auto_context_too_small: "Hermes에는 최소 64,000 컨텍스트 토큰이 필요합니다. 실제 용량이 충분한 모델을 로드하세요. 설정은 변경되지 않았습니다.",
+      hermes_auto_custom_home: "사용자 지정 Hermes 데이터 디렉터리는 수동으로 설정하세요. 설정은 변경되지 않았습니다.",
+      hermes_auto_profile_conflict: "ironmlx 프로필이 삭제되었거나 심볼릭 링크를 사용합니다. Hermes에서 복원하거나 수동으로 설정하세요. 설정은 변경되지 않았습니다.",
       omp_auto_title: "원클릭 설정",
       omp_auto_description: "oh-my-pi 18.1.16 이상이 필요합니다. 기본 프로필을 설정하고 다른 제공자는 유지합니다.",
       omp_auto_button: "원클릭 설정",
@@ -9018,6 +9098,7 @@
     });
     renderDSHDesktopSetupResult();
     renderOMPSetupResult();
+    renderHermesSetupResult();
     updateSettingsSaveBar();
     updateLogLevelControls();
     // Re-render model list to update action buttons text
@@ -13607,7 +13688,6 @@
 
   // ── Agent provider guides ──
   let currentAgentGuide = null;
-  let hermesProfileMode = 'dedicated';
   let dshSetupMode = 'cli';
   let dshModelCapacities = new Map();
   let dshConfiguredModel = null;
@@ -13673,18 +13753,6 @@
     renderAgentGuideConfiguration();
   }
 
-  function selectHermesProfileMode(mode) {
-    if (mode !== 'dedicated' && mode !== 'default') return;
-    hermesProfileMode = mode;
-    document.querySelectorAll('[data-hermes-profile-mode]').forEach(function(input) {
-      const selected = input.dataset.hermesProfileMode === mode;
-      input.checked = selected;
-      const option = input.closest('.agent-profile-option');
-      if (option) option.classList.toggle('active', selected);
-    });
-    renderAgentGuideConfiguration();
-  }
-
   function selectDshSetupMode(mode) {
     if (mode !== 'cli' && mode !== 'desktop') return;
     dshSetupMode = mode;
@@ -13698,6 +13766,44 @@
       panel.hidden = panel.dataset.dshSetupPanel !== mode;
     });
     renderAgentGuideConfiguration();
+  }
+
+  let hermesSetupPending = false;
+  let hermesSetupResult = null;
+
+  function configureHermes() {
+    if (hermesSetupPending) return;
+    if (!window.webkit?.messageHandlers?.fetchAPIPost) {
+      hermesSetupResult = { code: 'native_required' };
+      renderHermesSetupResult();
+      return;
+    }
+    hermesSetupPending = true;
+    hermesSetupResult = null;
+    renderHermesSetupResult();
+    apiPost('/admin/api/agents/hermes/configure', {
+      model: document.getElementById('hermes-model-select').value
+    });
+  }
+
+  function renderHermesSetupResult() {
+    const button = document.getElementById('hermes-configure');
+    button.disabled = hermesSetupPending;
+    button.textContent = t(hermesSetupPending ? 'hermes_auto_pending' : 'hermes_auto_button');
+    const result = hermesSetupResult;
+    const feedback = document.getElementById('hermes-feedback');
+    feedback.hidden = !hermesSetupPending && !result;
+    const warnings = ['not_installed', 'version_too_old', 'version_unknown',
+      'model_unavailable', 'local_only', 'busy', 'context_too_small', 'custom_home', 'profile_conflict'];
+    const tone = hermesSetupPending ? 'info' : result?.success === true ? 'success'
+      : warnings.includes(result?.code) ? 'warning' : 'error';
+    feedback.dataset.tone = tone;
+    document.getElementById('hermes-feedback-icon').textContent = tone === 'success' ? '\u2713' : tone === 'info' ? 'i' : '!';
+    document.getElementById('hermes-setup-status').textContent = hermesSetupPending ? t('hermes_auto_pending') : result
+      ? t('hermes_auto_' + result.code, t('hermes_auto_configuration_failed'))
+        .replace('{version}', result.installedVersion || '?').replace('{minimum}', result.minimumVersion || '0.20.0') : '';
+    document.getElementById('hermes-install').hidden = !result
+      || !['not_installed', 'version_too_old', 'version_unknown'].includes(result.code);
   }
 
   let ompSetupPending = false;
@@ -13884,40 +13990,24 @@
       contextInput.value = String(contextLength);
     }
 
-    const dedicatedHermesProfile = hermesProfileMode === 'dedicated';
-    const hermesCommand = dedicatedHermesProfile
-      ? 'hermes --profile ironmlx'
-      : 'hermes --profile default';
-    const hermesConfigPath = document.getElementById('hermes-config-path');
-    const hermesCreateNote = document.getElementById('hermes-profile-create-note');
-    const hermesTuiCommand = document.getElementById('hermes-tui-command');
-    const hermesDesktopDedicatedNote = document.getElementById('hermes-desktop-dedicated-note');
-    const hermesDesktopDefaultNote = document.getElementById('hermes-desktop-default-note');
-    if (hermesConfigPath) {
-      hermesConfigPath.textContent = dedicatedHermesProfile
-        ? '~/.hermes/profiles/ironmlx/config.yaml'
-        : '~/.hermes/config.yaml';
-    }
-    if (hermesCreateNote) hermesCreateNote.hidden = !dedicatedHermesProfile;
-    if (hermesTuiCommand) hermesTuiCommand.textContent = hermesCommand + ' --tui';
-    if (hermesDesktopDedicatedNote) hermesDesktopDedicatedNote.hidden = !dedicatedHermesProfile;
-    if (hermesDesktopDefaultNote) hermesDesktopDefaultNote.hidden = dedicatedHermesProfile;
+    const hermesCommand = 'hermes --profile ironmlx';
 
     setAgentCode('hermes-config-code', [
       'model:',
       '  default: ' + yamlDoubleQuoted(hermesModel),
       '  provider: "custom:ironmlx-responses"',
       '  context_length: ' + contextLength,
+      '  base_url: ' + yamlDoubleQuoted(endpoint),
+      '  api_mode: "codex_responses"',
       '',
       'providers:',
       '  ironmlx-responses:',
       '    api: ' + yamlDoubleQuoted(endpoint),
+      '    base_url: ' + yamlDoubleQuoted(endpoint),
       '    transport: "codex_responses"',
+      '    api_mode: "codex_responses"',
       '    discover_models: false',
-      '',
-      'terminal:',
-      '  env_type: "local"',
-      '  cwd: "/absolute/path/to/agent-workspace"'
+      '    enabled: true'
     ].join('\n'));
 
     setAgentCode('hermes-verify-code', [
@@ -15594,7 +15684,11 @@
   function onApiFetchResult(path, jsonStr) {
     const dict = I18N[currentLang] || I18N.en;
     try {
-      if (path === '/admin/api/agents/omp/configure') {
+      if (path === '/admin/api/agents/hermes/configure') {
+        hermesSetupPending = false;
+        hermesSetupResult = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };
+        renderHermesSetupResult();
+      } else if (path === '/admin/api/agents/omp/configure') {
         ompSetupPending = false;
         ompSetupResult = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };
         renderOMPSetupResult();
