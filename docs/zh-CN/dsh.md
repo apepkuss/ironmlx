@@ -11,11 +11,29 @@ DeepSeek Harness 可通过 Responses API 将 IronMLX 用作推理服务。本指
 
 ## DSH Desktop App 配置
 
+这里的 DSH Desktop 是从 [dshdesktop.com](https://dshdesktop.com/en/) 下载的社区版（macOS bundle ID：`io.dsh.desktop`），不是 DeepSeek 官方桌面应用。
+
+Dashboard 中的社区版 **DSH Desktop** 使用独立卡片；**DeepSeek Harness** 卡片保留 CLI，官方桌面版入口标为“尚未支持”，不提供配置功能。
+
+### 一键配置
+
+在 IronMLX App 内打开 **Dashboard → Agent → DSH Desktop**，选择模型后点击 **一键配置**。安装检查先于模型检查：未安装社区版、版本低于 `0.12.1` 或无法识别版本时，向导提示安装／升级并停止，不创建或修改任何 DSH 配置。安装后可再次点击，重新检测。
+
+`0.12.1` 是此适配器采用的首个配置格式基线。检测通过后，请先退出 DSH Desktop，并在 IronMLX 本机模式中加载对话 LLM。适配器将 IronMLX provider 合并到 `~/Library/Application Support/dsh-desktop/harness/profiles/web/cordis.patch.yml`，并在同一 Harness home 的 `.credentials.yaml` 中保存本机占位凭据引用。旧版 `settings.yaml` 尚待迁移时，会提示先启动一次社区版完成迁移。
+
+已有文件在修改前保存为同目录下的 `*.ironmlx-backup-<UUID>`；保留其他 provider 和设置，YAML 格式及注释可能被规范化，原始文本可从备份恢复。重复应用相同配置不重复生成备份。单轮输出预算最多采用 `4096` tokens，并受模型公布容量限制。
+
+“配置已保存”只表示写入完成。打开社区版 DSH Desktop，新建会话并选择 **IronMLX / 你的模型**，按下文验证连接。本机未安装时的提示已通过原生 Dashboard 测试；已安装路径使用临时配置验证，真实社区版应用的端到端验证仍待安装后完成。
+
+### 手动配置
+
+Dashboard 中的手动说明默认折叠，需要自定义地址、LAN 接入或排障时可展开；“验证连接”作为一键配置和手动配置的共用步骤单独展示。
+
 DSH Desktop 通过 GUI 保存提供方配置，不会自动加载 CLI overlay，也不需要修改 `DSH_HOME`。
 
 ### 获取连接信息
 
-在 IronMLX Dashboard 的 **Agent** 页选择 **DeepSeek Harness → DSH Desktop**。向导会提供当前本机 endpoint 对应的连接字段和 GUI 操作步骤。
+在 IronMLX Dashboard 的 **Agent** 页选择 **DSH Desktop**。向导会提供当前本机 endpoint 对应的连接字段和 GUI 操作步骤。
 
 ### 创建自定义提供方
 

@@ -218,6 +218,24 @@
       "source_path": "LICENSE",
       "source_url": "https://github.com/Blaizzy/mlx-vlm/blob/3d87e88402f307efbf68e568971aa887ee7d9ed0/LICENSE",
       "usage": "Required attribution for adapted embedding encoder implementations distributed with the server."
+    },
+    {
+      "bundled_path": "ironmlx-app/Sources/IronMLXAppCore/Resources/dsh-desktop-logo.png",
+      "bundled_sha256": "4fa81f05eef51cf6b4388539de436085939f26b88f4f2a0095896bc48a172424",
+      "bundled_modifications": "None; copied byte-for-byte from the community Desktop application icon.",
+      "component": "DSH Desktop community logo",
+      "copyright": "Copyright (c) 2026 DataElement",
+      "license": "MIT",
+      "license_file": "asset-dsh-desktop-mit.txt",
+      "license_sha256": "434c81c99d0154715e5bdfca16fe5fcc4473346d34a329e19d2aea4ef73cb29e",
+      "license_source": "compliance/license-sources/dsh-desktop-MIT.txt",
+      "license_url": "https://github.com/dataelement/dsh-desktop/blob/a170609b2c6426222cd9275d047f9409dcc753b0/LICENSE",
+      "repository": "https://github.com/dataelement/dsh-desktop",
+      "revision": "a170609b2c6426222cd9275d047f9409dcc753b0",
+      "source_path": "build/app-icon.png",
+      "source_url": "https://github.com/dataelement/dsh-desktop/blob/a170609b2c6426222cd9275d047f9409dcc753b0/build/app-icon.png",
+      "upstream_sha256": "4fa81f05eef51cf6b4388539de436085939f26b88f4f2a0095896bc48a172424",
+      "usage": "Identifies the community DSH Desktop integration, distinct from DeepSeek official applications."
     }
   ],
   "schema_version": 1

@@ -174,6 +174,7 @@ for resource in \
   supported-models.json \
   deepseek-harness-logo-dark.svg \
   deepseek-harness-logo.svg \
+  dsh-desktop-logo.png \
   hermes-agent-logo.svg \
   logo.png \
   menubar-icon.png \

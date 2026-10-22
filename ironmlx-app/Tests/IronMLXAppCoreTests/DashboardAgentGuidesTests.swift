@@ -30,6 +30,8 @@ import Testing
     #expect(html.contains(#"data-agent-logo="omp" src="oh-my-pi-logo.svg""#))
     #expect(html.contains(#"data-agent-logo="dsh" src="deepseek-harness-logo.svg""#))
     #expect(html.contains(#"srcset="deepseek-harness-logo-dark.svg""#))
+    #expect(html.contains(#"data-agent-logo="dsh-desktop" src="dsh-desktop-logo.png""#))
+    #expect(!html.contains("agent-guide-mark-community"))
     #expect(!html.contains(#"class="agent-guide-mark" aria-hidden="true">H</span>"#))
     #expect(!html.contains(#"aria-hidden="true">π</span>"#))
     #expect(html.contains(#"<svg data-nav-icon="agent""#))
@@ -53,15 +55,15 @@ import Testing
     #expect(html.contains("function selectHermesProfileMode(mode)"))
     #expect(html.contains("function selectDshSetupMode(mode)"))
     #expect(html.contains("function renderAgentGuideConfiguration()"))
-    #expect(html.contains("['hermes', 'omp', 'dsh'].forEach"))
-    #expect(html.contains(#"data-dsh-setup-mode="desktop" checked"#))
-    #expect(html.contains(#"data-dsh-setup-mode="cli" onchange"#))
-    #expect(html.contains(#"data-dsh-setup-panel="cli" hidden"#))
-    #expect(html.contains(#"data-dsh-setup-panel="desktop">"#))
-    #expect(html.contains("let dshSetupMode = 'desktop';"))
+    #expect(html.contains("['hermes', 'omp', 'dsh', 'dsh-desktop'].forEach"))
+    #expect(html.contains(#"data-dsh-setup-mode="desktop" onchange"#))
+    #expect(html.contains(#"data-dsh-setup-mode="cli" checked"#))
+    #expect(html.contains(#"data-dsh-setup-panel="cli">"#))
+    #expect(html.contains(#"data-dsh-setup-panel="desktop" hidden"#))
+    #expect(html.contains("let dshSetupMode = 'cli';"))
     let desktopSetupOption = try #require(html.range(of: #"data-dsh-setup-mode="desktop""#))
     let cliSetupOption = try #require(html.range(of: #"data-dsh-setup-mode="cli""#))
-    #expect(desktopSetupOption.lowerBound < cliSetupOption.lowerBound)
+    #expect(cliSetupOption.lowerBound < desktopSetupOption.lowerBound)
 
     let resourcesDirectory = "Sources/IronMLXAppCore/Resources"
     let bundleBuildScript = try String(contentsOfFile: "../scripts/build-app-bundle.sh", encoding: .utf8)
@@ -69,6 +71,7 @@ import Testing
     for logo in [
         "deepseek-harness-logo-dark.svg",
         "deepseek-harness-logo.svg",
+        "dsh-desktop-logo.png",
         "hermes-agent-logo.svg",
         "oh-my-pi-logo.svg",
     ] {
@@ -109,8 +112,8 @@ import Testing
     #expect(html.contains("https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-provider"))
     #expect(html.contains("if (dshGuide) dshGuide.href = lang === 'zh-Hans'"))
     #expect(html.contains(#"id="dsh-desktop-full-guide" class="agent-guide-docs-link""#))
-    #expect(html.contains("https://github.com/apepkuss/ironmlx/blob/dev/docs/dsh.md#dsh-desktop-gui-setup"))
-    #expect(html.contains("https://github.com/apepkuss/ironmlx/blob/dev/docs/zh-CN/dsh.md#dsh-desktop-gui-%E9%85%8D%E7%BD%AE"))
+    #expect(html.contains("https://github.com/apepkuss/ironmlx/blob/dev/docs/dsh.md#dsh-desktop-app-configuration"))
+    #expect(html.contains("https://github.com/apepkuss/ironmlx/blob/dev/docs/zh-CN/dsh.md#dsh-desktop-app-%E9%85%8D%E7%BD%AE"))
     #expect(html.contains("if (dshDesktopGuide) dshDesktopGuide.href = lang === 'zh-Hans' || lang === 'zh-Hant'"))
     #expect(html.contains(#"id="dsh-desktop-endpoint""#))
     #expect(html.contains("dshDesktopEndpoint.textContent = endpoint"))

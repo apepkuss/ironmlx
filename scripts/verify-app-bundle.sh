@@ -61,6 +61,7 @@ for file in \
   Contents/Resources/indextts25-preparation.json \
   Contents/Resources/deepseek-harness-logo-dark.svg \
   Contents/Resources/deepseek-harness-logo.svg \
+  Contents/Resources/dsh-desktop-logo.png \
   Contents/Resources/hermes-agent-logo.svg \
   Contents/Resources/oh-my-pi-logo.svg \
   Contents/Resources/AppIcon.icns \

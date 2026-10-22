@@ -11,11 +11,29 @@ Choose the configuration path for the DSH client you use:
 
 ## DSH Desktop App configuration
 
+DSH Desktop here means the community application from [dshdesktop.com](https://dshdesktop.com/en/) (macOS bundle ID `io.dsh.desktop`), rather than DeepSeek's official desktop app.
+
+Community **DSH Desktop** has its own Dashboard card. **DeepSeek Harness** retains the CLI guide; its official desktop entry is marked **Not supported yet** and has no configuration action.
+
+### One-click setup
+
+In the IronMLX App, open **Dashboard → Agent → DSH Desktop**, select a model, and click **One-click setup**. Installation checks run before model checks. Missing community installations, versions below `0.12.1`, and unverifiable versions stop setup without creating or changing DSH configuration, and show the community installation link. Click again after installation or upgrading to repeat detection.
+
+`0.12.1` is the adapter's initial configuration-format baseline. Quit DSH Desktop and load a conversation LLM in IronMLX local mode before applying configuration. The adapter merges the provider into `~/Library/Application Support/dsh-desktop/harness/profiles/web/cordis.patch.yml` and a local placeholder credential reference into `.credentials.yaml` in the same Harness home. If legacy `settings.yaml` needs migration, launch the community app once to finish migration first.
+
+Existing files are backed up beside the originals as `*.ironmlx-backup-<UUID>` before modification. Other providers and settings are retained; YAML formatting and comments may be normalized, with original text retained in backups. Reapplying unchanged configuration does not create more backups. The output budget is capped at 4096 tokens and bounded by advertised model capacity.
+
+Configuration saved is separate from connection verified: open community DSH Desktop, start a new chat, select **IronMLX / your model**, and run the verification below. Native Dashboard tests cover the uninstalled machine; configuration writes are tested in temporary fixtures. End-to-end verification with the installed community application is pending.
+
+### Manual setup
+
+The Dashboard keeps manual instructions collapsed by default for custom endpoints, LAN access, or troubleshooting. Connection verification is shown separately and applies to both setup methods.
+
 DSH Desktop stores this provider through its GUI. It does not load the CLI overlay, and you do not need to change `DSH_HOME`.
 
 ### Get connection details
 
-On the IronMLX Dashboard **Agent** page, select **DeepSeek Harness → DSH Desktop**. The guide provides the connection fields for the current local endpoint and the GUI setup steps.
+On the IronMLX Dashboard **Agent** page, select **DSH Desktop**. The guide provides the connection fields for the current local endpoint and the GUI setup steps.
 
 ### Create a custom provider
 

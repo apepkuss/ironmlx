@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -20,6 +21,30 @@ SPEC.loader.exec_module(GENERATOR)
 
 def sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
+
+
+
+class SwiftMaterialsTests(unittest.TestCase):
+    def test_resolves_swiftpm_repository_case_on_case_sensitive_volumes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            checkout = root / "checkouts" / "Yams"
+            checkout.mkdir(parents=True)
+            license_text = b"MIT fixture\n"
+            (checkout / "LICENSE").write_bytes(license_text)
+            output = root / "licenses"
+            output.mkdir()
+            entry = {
+                "component": "Yams", "identity": "yams", "license": "MIT",
+                "license_file": "swift-yams-license.txt", "license_source": "LICENSE",
+                "license_sha256": sha256(license_text), "version": "6.2.2",
+                "revision": "fixture", "repository": "https://github.com/jpsim/Yams.git",
+            }
+            pins = {"pins": [{"identity": "yams", "state": {"version": "6.2.2", "revision": "fixture"}}]}
+            with mock.patch.object(GENERATOR.subprocess, "run", return_value=mock.Mock(stdout="fixture\n")):
+                result = GENERATOR.swift_materials({"dependencies": [entry]}, pins, root / "checkouts", output)
+            self.assertEqual(result[0]["component"], "Yams")
+            self.assertEqual((output / entry["license_file"]).read_bytes(), license_text)
 
 
 class RustMaterialsTests(unittest.TestCase):

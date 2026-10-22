@@ -12,6 +12,7 @@ let package = Package(
         .executable(name: "ironmlx-model-migrate", targets: ["IronMLXModelMigrate"]),
     ],
     dependencies: [
+        .package(url: "https://github.com/jpsim/Yams.git", exact: "6.2.2"),
         .package(
             url: "https://github.com/sparkle-project/Sparkle.git",
             exact: "2.9.6"
@@ -33,6 +34,7 @@ let package = Package(
         .target(
             name: "IronMLXAppCore",
             dependencies: [
+                .product(name: "Yams", package: "Yams"),
                 .product(name: "Sparkle", package: "Sparkle"),
                 .product(name: "ZIPFoundation", package: "ZIPFoundation"),
             ],
@@ -42,6 +44,7 @@ let package = Package(
                 .copy("Resources/supported-models.json"),
                 .copy("Resources/deepseek-harness-logo-dark.svg"),
                 .copy("Resources/deepseek-harness-logo.svg"),
+                .copy("Resources/dsh-desktop-logo.png"),
                 .copy("Resources/hermes-agent-logo.svg"),
                 .copy("Resources/logo.png"),
                 .copy("Resources/menubar-icon.png"),

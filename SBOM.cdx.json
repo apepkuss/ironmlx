@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:db6c72da-023a-52a8-86eb-57e17fd4cb92",
+  "serialNumber": "urn:uuid:d1cdd4c6-3b03-5ce9-9059-413aaf463543",
   "version": 1,
   "metadata": {
     "component": {
@@ -76,6 +76,51 @@
         {
           "type": "vcs",
           "url": "https://github.com/apepkuss/ironmlx"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "bom-ref": "asset:DSH Desktop community logo@a170609b2c6426222cd9275d047f9409dcc753b0",
+      "name": "DSH Desktop community logo",
+      "version": "a170609b2c6426222cd9275d047f9409dcc753b0",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "4fa81f05eef51cf6b4388539de436085939f26b88f4f2a0095896bc48a172424"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:bundled-path",
+          "value": "ironmlx-app/Sources/IronMLXAppCore/Resources/dsh-desktop-logo.png"
+        },
+        {
+          "name": "ironmlx:source-path",
+          "value": "build/app-icon.png"
+        },
+        {
+          "name": "ironmlx:hash-scope",
+          "value": "entire-file"
+        },
+        {
+          "name": "ironmlx:license-file",
+          "value": "asset-dsh-desktop-mit.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/dataelement/dsh-desktop/blob/a170609b2c6426222cd9275d047f9409dcc753b0/build/app-icon.png"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/dataelement/dsh-desktop"
         }
       ]
     },
@@ -9443,6 +9488,38 @@
         }
       ],
       "purl": "pkg:github/sparkle-project/Sparkle@ac2def288cbff5cfc7df3ffef6abdf45b72bcb0a"
+    },
+    {
+      "type": "library",
+      "bom-ref": "swift:yams@6.2.2",
+      "name": "Yams",
+      "version": "6.2.2",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:identity",
+          "value": "yams"
+        },
+        {
+          "name": "ironmlx:revision",
+          "value": "a27b21e0c81c5bf42049b897a62aaf387e80f279"
+        },
+        {
+          "name": "ironmlx:license-file",
+          "value": "swift-yams-license.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/jpsim/Yams.git"
+        }
+      ],
+      "purl": "pkg:github/jpsim/Yams@a27b21e0c81c5bf42049b897a62aaf387e80f279"
     },
     {
       "type": "library",

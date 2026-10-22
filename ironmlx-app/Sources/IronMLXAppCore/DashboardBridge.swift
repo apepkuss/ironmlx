@@ -61,6 +61,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private lazy var logLevelController = RuntimeLogLevelController(configStore: configStore, backend: backend)
     private var logLevelChangePending = false
     private var settingsSaveInProgress = false
+    var dshDesktopService = DSHDesktopIntegrationService()
+    private var dshDesktopSetupPending = false
     private var huggingFaceSearchTask: Task<Void, Never>?
     private var pendingModelImport: ModelImportPreview?
     private var modelImportInspectionTask: Task<ModelImportPreview, Error>?
@@ -223,11 +225,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             let isHermesGuide = url.host == "hermes-agent.nousresearch.com"
                 && ["/docs/integrations/providers", "/docs/zh-Hans/integrations/providers"].contains(url.path)
             let isOMPGuide = url.host == "omp.sh" && url.path == "/docs/custom-models"
+            let isDSHDesktopDownload = Self.isDSHDesktopDownloadURL(url)
             let isDSHGuide = url.host == "deepseek-harness.github.io"
                 && ["/deepseek-harness/guide/providers", "/deepseek-harness/en/guide/providers"].contains(url.path)
             let isIronMLXDSHGuide = url.host == "github.com"
                 && ["/apepkuss/ironmlx/blob/dev/docs/dsh.md", "/apepkuss/ironmlx/blob/dev/docs/zh-CN/dsh.md"].contains(url.path)
-            guard isHermesGuide || isOMPGuide || isDSHGuide || isIronMLXDSHGuide else { return }
+            guard isHermesGuide || isOMPGuide || isDSHGuide || isIronMLXDSHGuide || isDSHDesktopDownload else { return }
             NSWorkspace.shared.open(url)
         case "setLanguage":
             updateConfig { $0.language = stringBody(body) }
@@ -411,6 +414,66 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    nonisolated static func isDSHDesktopDownloadURL(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        // URL.path drops trailing slashes; URLComponents preserves the site's language routes.
+        return components.scheme == "https" && components.host == "dshdesktop.com"
+            && ["/zh/", "/en/"].contains(components.path)
+            && components.user == nil && components.password == nil && components.port == nil
+            && components.query == nil && components.fragment == nil
+    }
+
+    private func configureDSHDesktop(path: String, modelID: String?) {
+        let service = dshDesktopService
+        let installation = service.inspect()
+        // Installation gates take precedence over model/backend availability.
+        guard installation.success else {
+            sendFetchResult(path: path, jsonString: (try? Self.jsonString(installation)) ?? "null")
+            return
+        }
+        guard !dshDesktopSetupPending else {
+            sendFetchResult(path: path, jsonString: #"{"success":false,"code":"busy"}"#)
+            return
+        }
+        guard let modelID, !modelID.isEmpty, modelID != "MODEL_ID" else {
+            sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
+            return
+        }
+        let config = configStore.load()
+        guard !config.isLANMode else {
+            sendFetchResult(path: path, jsonString: #"{"success":false,"code":"local_only"}"#)
+            return
+        }
+        dshDesktopSetupPending = true
+        Task {
+            defer { dshDesktopSetupPending = false }
+            do {
+                let client = BackendAPIClient(host: config.host, port: config.port)
+                let loaded = try await client.fetchLoadedModels()
+                guard loaded.contains(where: { $0.id == modelID && $0.capabilities.runtimeKind == "causal" }) else {
+                    sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
+                    return
+                }
+                let data = try await client.fetchData(path: "/v1/models")
+                let response = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let models = response?["data"] as? [[String: Any]] ?? []
+                guard let model = models.first(where: { $0["id"] as? String == modelID }),
+                      let context = model["context_window"] as? Int,
+                      let output = model["max_output_tokens"] as? Int else {
+                    sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
+                    return
+                }
+                let result = service.configure(
+                    model: .init(id: modelID, contextWindow: context, maxTokens: min(output, context)),
+                    port: config.port
+                )
+                sendFetchResult(path: path, jsonString: try Self.jsonString(result))
+            } catch {
+                sendFetchResult(path: path, jsonString: #"{"success":false,"code":"backend_unavailable"}"#)
+            }
+        }
+    }
+
     private func handlePost(json: String) {
         guard let data = json.data(using: .utf8),
               let payload = try? JSONDecoder().decode(APIPostPayload.self, from: data)
@@ -419,6 +482,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
 
         switch payload.path {
+        case "/admin/api/agents/dsh-desktop/configure":
+            configureDSHDesktop(path: payload.path, modelID: payload.body["model"]?.stringValue)
         case "/admin/api/incidents/clear":
             clearIncidentHistory(path: payload.path)
         case "/admin/api/models/reveal":
