@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::core::constrained::{
-    schema_accepts_string, schema_is_string_only, validate_gemma_model_tool_schemas,
-    validate_schema_value, validate_strict_tool_schema, validate_tool_schemas,
+    schema_accepts_string, schema_is_string_only, schema_union_branches,
+    validate_gemma_model_tool_schemas, validate_schema_value, validate_strict_tool_schema,
+    validate_tool_schemas,
 };
 use crate::core::generated_output::GeneratedOutputEvent;
 
@@ -237,8 +238,9 @@ fn lower_gemma_schema(schema: &Value) -> anyhow::Result<Value> {
     let object = schema
         .as_object()
         .ok_or_else(|| anyhow!("schema node must be an object"))?;
-    if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+    if let Some(branches) = schema_union_branches(object) {
         let mut lowered = object.clone();
+        lowered.remove("oneOf");
         lowered.insert(
             "anyOf".to_owned(),
             Value::Array(
@@ -380,13 +382,13 @@ fn gemma_entries_property_name(properties: &Map<String, Value>) -> String {
 
 fn lower_gemma_value(schema: &Value, value: &Value) -> anyhow::Result<Value> {
     let object = schema.as_object().expect("validated schema");
-    if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+    if let Some(branches) = schema_union_branches(object) {
         for branch in branches {
             if validate_schema_value(branch, value).is_ok() {
                 return lower_gemma_value(branch, value);
             }
         }
-        bail!("value does not match any anyOf branch");
+        bail!("value does not match any union branch");
     }
     if let Some(kinds) = object.get("type").and_then(Value::as_array) {
         if kinds.len() > 1 {
@@ -488,7 +490,7 @@ fn lower_gemma_dynamic_entries(
 
 fn restore_gemma_value(schema: &Value, value: &Value) -> anyhow::Result<Value> {
     let object = schema.as_object().expect("validated schema");
-    if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+    if let Some(branches) = schema_union_branches(object) {
         for branch in branches {
             let lowered = lower_gemma_schema(branch)?;
             if validate_schema_value(&lowered, value).is_ok() {
@@ -499,7 +501,7 @@ fn restore_gemma_value(schema: &Value, value: &Value) -> anyhow::Result<Value> {
                 }
             }
         }
-        bail!("lowered value does not match any original anyOf branch");
+        bail!("lowered value does not match any original union branch");
     }
     if let Some(kinds) = object.get("type").and_then(Value::as_array) {
         if kinds.len() > 1 {

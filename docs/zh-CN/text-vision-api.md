@@ -749,7 +749,7 @@ Responses 响应中的有效 tier 为 `default` 或 `flex`。
 
 ### JSON Schema
 
-支持类型：object、array、string、number、integer、boolean、null 和可空类型数组。支持关键字：properties、required、items、enum、const、anyOf、minItems/maxItems、minLength/maxLength、minimum/maximum、exclusiveMinimum/exclusiveMaximum。最大嵌套深度为 8。
+支持类型：object、array、string、number、integer、boolean、null 和可空类型数组。支持关键字：properties、required、items、enum、const、anyOf、minItems/maxItems、minLength/maxLength、minimum/maximum、exclusiveMinimum/exclusiveMaximum。最大嵌套深度为 8。`oneOf` 要求各分支声明明确且互斥的 JSON 类型（integer 与 number 视为重叠），同层只允许说明性关键字；类型重叠或未声明类型的分支会被拒绝。
 
 strict:true 要求每层 object 设置 additionalProperties:false，且所有属性列入 required。顶层工具参数对象必须封闭。非 strict 工具可在嵌套对象使用 additionalProperties:true 或受支持的值 Schema。不支持的关键字在生成前返回 400，strict 约束不静默降级。
 

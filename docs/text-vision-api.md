@@ -669,7 +669,7 @@ Replace <Base64> with actual image data and include the block alongside text in 
 
 ### JSON Schema
 
-Supported types: object, array, string, number, integer, boolean, null and nullable type arrays. Supported keywords: properties, required, items, enum, const, anyOf, minItems/maxItems, minLength/maxLength, minimum/maximum and exclusiveMinimum/exclusiveMaximum. Maximum nesting depth is 8.
+Supported types: object, array, string, number, integer, boolean, null and nullable type arrays. Supported keywords: properties, required, items, enum, const, anyOf, minItems/maxItems, minLength/maxLength, minimum/maximum and exclusiveMinimum/exclusiveMaximum. Maximum nesting depth is 8. `oneOf` is supported when every branch declares explicit, mutually disjoint JSON types (integer and number overlap). Only annotation siblings are allowed; overlapping or untyped branches are rejected.
 
 strict:true requires additionalProperties:false and every property in required at each object level. Top-level tool parameter objects must be closed. Non-strict tools can use nested additionalProperties:true or a supported value schema. Unsupported keywords return 400 before generation; strict constraints do not silently downgrade.
 
