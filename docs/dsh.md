@@ -6,14 +6,37 @@ DeepSeek Harness can use IronMLX as an inference provider through the Responses 
 
 Choose the configuration path for the DSH client you use:
 
+- [Official DeepSeek Harness one-click setup](#official-deepseek-harness-one-click-setup): configure official CLI and Desktop separately.
 - [DSH Desktop App](#dsh-desktop-app-configuration): create a provider and select models through the GUI.
 - [DSH CLI](#dsh-cli-configuration): generate or write an overlay, then launch with `--patch`.
+
+## Official DeepSeek Harness one-click setup
+
+Open **Dashboard → Agent → DeepSeek Harness**, choose the application (default: **Official desktop app**, with **DSH CLI** also available), select a loaded conversation model, and click **Configure**. The adapter targets the `0.2.1-rc.2` format at official source revision `687f282e86`; this is the minimum supported version. Stable and subsequent RC releases qualify; development/test/alpha builds do not. Follow the [official DeepSeek repository](https://github.com/deepseek-ai/deepseek-harness) for CLI installation, or use the [official DeepSeek download page](https://www.deepseek.com/en/download/) for Desktop.
+
+The CLI must expose a directly executable `dsh` command, for example by installing the official npm package with `npm install -g @deepseek-ai/dsh`. An `npx` cache alone does not count as an installed CLI.
+
+Installation and version checks precede model, backend, and file operations. With only community DSH Desktop installed, both official modes stop with an installation prompt and do not create `~/.dsh`. The official Desktop bundle ID is `com.deepseek.dsh`; community `io.dsh.desktop` does not qualify. CLI detection requires the `dsh` entry of an official `@deepseek-ai/dsh` package or the official Desktop-installed command link. A runtime bundled inside community Desktop does not count as an official CLI installation.
+
+| Application | One-click configuration paths | Start using it |
+| --- | --- | --- |
+| Official CLI | `~/.dsh/profiles/web/cordis.patch.yml`, `~/.dsh/profiles/headless/cordis.patch.yml` | `dsh web` or `dsh --profile headless "Hi"` |
+| Official Desktop | `~/.dsh/profiles/desktop/cordis.patch.yml` | Reopen the official app and start a new chat with IronMLX |
+| Community DSH Desktop | `~/Library/Application Support/dsh-desktop/harness/profiles/web/cordis.patch.yml` | Use the separate DSH Desktop card |
+
+The official modes share `~/.dsh/.credentials.yaml`, with a dedicated `IRONMLX_HARNESS_API_KEY` reference holding the local placeholder `local`. One-click setup requires local mode, uses the model's advertised context window, caps output at `4096` tokens, uses SSE, and declares no reasoning levels by default. It merges existing providers and models and selects IronMLX as the new-session default for the selected profiles. Other profiles, existing sessions, and community configuration are unchanged. Existing files are backed up before modification and written with `0600` permissions; unchanged files are neither rewritten nor backed up again, and a failed write attempts to restore modified files. YAML comments and formatting may normalize; backups retain the original bytes.
+
+Only the default `~/.dsh` is supported. A custom process or CLI login-shell `DSH_HOME` stops setup; symlinks into community directories are not followed. Close official Desktop and running `dsh` sessions first. Profile locks, legacy `settings.yaml`, home-level model/provider/credential-store overrides in `cordis.patch.yml`, and YAML that cannot be safely merged stop setup. Resolve the conflict or configure manually. The first official launch initializes profile package manifests; one-click setup does not install plugins.
+
+Manual instructions are collapsed by default. The independent CLI `ironmlx.patch.yml` below remains an advanced per-invocation alternative; one-click setup does not require `--patch`. For official Desktop manual setup, open **Settings → Models → Custom model API**, enter `ironmlx-local`, `OpenAI Responses`, the IronMLX `/v1` endpoint, and `local`, then fetch/add the model and select it in a new chat.
+
+Official missing-installation prompts and isolation were verified with only community Desktop installed. After installing official Desktop `0.2.1-rc.2`, its signed distribution identity `com.deepseek.dsh` and real installation detection were verified. Successful writes, version gates, merges, backups, repeated setup, and stop conditions are tested in temporary directories. Official Desktop `0.2.1-rc.2` has also passed real configuration writes through the same native service, including backup permissions, default model, preserved settings, and community isolation. After reopening official Desktop, its default selection used IronMLX with Qwen3.5-4B-MLX-4bit, and a Hi message received a normal reply. Real CLI chat verification remains pending installation; a saved-configuration result alone does not certify a chat turn.
 
 ## DSH Desktop App configuration
 
 DSH Desktop here means the community application from [dshdesktop.com](https://dshdesktop.com/en/) (macOS bundle ID `io.dsh.desktop`), rather than DeepSeek's official desktop app.
 
-Community **DSH Desktop** has its own Dashboard card. **DeepSeek Harness** retains the CLI guide; its official desktop entry is marked **Not supported yet** and has no configuration action.
+Community **DSH Desktop** and official **DeepSeek Harness** have separate Dashboard cards and installation checks. The official card configures CLI and official Desktop separately.
 
 ### One-click setup
 

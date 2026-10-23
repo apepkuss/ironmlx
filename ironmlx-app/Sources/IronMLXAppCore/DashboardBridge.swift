@@ -66,6 +66,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     var ompService = OMPIntegrationService()
     private var ompSetupPending = false
     var dshDesktopService = DSHDesktopIntegrationService()
+    var deepSeekHarnessService = DeepSeekHarnessIntegrationService()
+    private var deepSeekHarnessSetupPending = false
     private var dshDesktopSetupPending = false
     private var huggingFaceSearchTask: Task<Void, Never>?
     private var pendingModelImport: ModelImportPreview?
@@ -231,11 +233,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     "/docs/getting-started/installation"].contains(url.path)
             let isOMPGuide = url.host == "omp.sh" && ["/docs/custom-models", "/docs/quickstart"].contains(url.path)
             let isDSHDesktopDownload = Self.isDSHDesktopDownloadURL(url)
+            let isOfficialDSHInstallation = Self.isOfficialDSHInstallationURL(url)
             let isDSHGuide = url.host == "deepseek-harness.github.io"
                 && ["/deepseek-harness/guide/providers", "/deepseek-harness/en/guide/providers"].contains(url.path)
             let isIronMLXDSHGuide = url.host == "github.com"
                 && ["/apepkuss/ironmlx/blob/dev/docs/dsh.md", "/apepkuss/ironmlx/blob/dev/docs/zh-CN/dsh.md"].contains(url.path)
-            guard isHermesGuide || isOMPGuide || isDSHGuide || isIronMLXDSHGuide || isDSHDesktopDownload else { return }
+            guard isHermesGuide || isOMPGuide || isDSHGuide || isIronMLXDSHGuide || isDSHDesktopDownload || isOfficialDSHInstallation else { return }
             NSWorkspace.shared.open(url)
         case "setLanguage":
             updateConfig { $0.language = stringBody(body) }
@@ -428,6 +431,66 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             && components.query == nil && components.fragment == nil
     }
 
+    nonisolated static func isOfficialDSHInstallationURL(_ url: URL) -> Bool {
+        guard let c = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              c.scheme == "https", c.user == nil, c.password == nil, c.port == nil,
+              c.query == nil, c.fragment == nil else { return false }
+        return (c.host == "www.deepseek.com" && ["/zh/download/", "/en/download/"].contains(c.path))
+            || (c.host == "github.com" && c.path == "/deepseek-ai/deepseek-harness")
+    }
+
+    private func configureDeepSeekHarness(path: String, modelID: String?, mode: String?) {
+        guard let mode, let selectedMode = DeepSeekHarnessIntegrationService.Mode(rawValue: mode) else {
+            sendFetchResult(path: path, jsonString: #"{"success":false,"code":"invalid_mode"}"#)
+            return
+        }
+        guard !deepSeekHarnessSetupPending else {
+            sendFetchResult(path: path, jsonString: #"{"success":false,"code":"busy"}"#)
+            return
+        }
+        deepSeekHarnessSetupPending = true
+        let service = deepSeekHarnessService
+        Task {
+            defer { deepSeekHarnessSetupPending = false }
+            let installation = await service.inspect(mode: selectedMode)
+            guard installation.success else {
+                sendFetchResult(path: path, jsonString: (try? Self.jsonString(installation)) ?? "null")
+                return
+            }
+            guard let modelID, !modelID.isEmpty, modelID != "MODEL_ID" else {
+                sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
+                return
+            }
+            let config = configStore.load()
+            guard !config.isLANMode else {
+                sendFetchResult(path: path, jsonString: #"{"success":false,"code":"local_only"}"#)
+                return
+            }
+            do {
+                let client = BackendAPIClient(host: config.host, port: config.port)
+                let loaded = try await client.fetchLoadedModels()
+                guard loaded.contains(where: { $0.id == modelID && $0.capabilities.runtimeKind == "causal" }) else {
+                    sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
+                    return
+                }
+                let data = try await client.fetchData(path: "/v1/models")
+                let response = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let models = response?["data"] as? [[String: Any]] ?? []
+                guard let model = models.first(where: { $0["id"] as? String == modelID }),
+                      let context = model["context_window"] as? Int,
+                      let output = model["max_output_tokens"] as? Int else {
+                    sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
+                    return
+                }
+                let result = await service.configure(mode: selectedMode,
+                    model: .init(id: modelID, contextWindow: context, maxTokens: min(output, context)), port: config.port)
+                sendFetchResult(path: path, jsonString: try Self.jsonString(result))
+            } catch {
+                sendFetchResult(path: path, jsonString: #"{"success":false,"code":"backend_unavailable"}"#)
+            }
+        }
+    }
+
     private func configureHermes(path: String, modelID: String?) {
         guard !hermesSetupPending else {
             sendFetchResult(path: path, jsonString: #"{"success":false,"code":"busy"}"#)
@@ -581,6 +644,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
 
         switch payload.path {
+        case "/admin/api/agents/dsh/configure":
+            configureDeepSeekHarness(path: payload.path, modelID: payload.body["model"]?.stringValue,
+                                     mode: payload.body["mode"]?.stringValue)
         case "/admin/api/agents/hermes/configure":
             configureHermes(path: payload.path, modelID: payload.body["model"]?.stringValue)
         case "/admin/api/agents/omp/configure":

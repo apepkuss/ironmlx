@@ -6,14 +6,37 @@ DeepSeek Harness 可通过 Responses API 将 IronMLX 用作推理服务。本指
 
 根据你使用的 DSH 客户端，选择对应的配置方式：
 
+- [官方 DeepSeek Harness 一键配置](#官方-deepseek-harness-一键配置)：分别配置官方 CLI 和 Desktop。
 - [DSH Desktop App](#dsh-desktop-app-配置)：通过图形界面创建提供方并选择模型。
 - [DSH CLI](#dsh-cli-配置)：生成或编写 overlay，通过 `--patch` 启动。
+
+## 官方 DeepSeek Harness 一键配置
+
+在 **Dashboard → Agent → DeepSeek Harness** 中选择应用（默认 **官方桌面版**，也可切换为 **DSH CLI**），选择已加载的对话模型，然后点击 **一键配置**。适配器依据官方仓库 `687f282e86` 的 `0.2.1-rc.2` 配置格式实现；这是最低支持版本，稳定版及后续 RC 可用，开发／测试／alpha 构建不能通过检测。官方 CLI 安装说明见 [DeepSeek 官方仓库](https://github.com/deepseek-ai/deepseek-harness)，桌面版从 [DeepSeek 官方下载页](https://www.deepseek.com/zh/download/) 安装。
+
+CLI 需提供可直接执行的 `dsh` 命令，例如按官方 npm 包安装：`npm install -g @deepseek-ai/dsh`。仅存在 `npx` 缓存不视为已安装 CLI。
+
+安装和版本检查先于模型、后端及配置写入。仅安装社区 DSH Desktop 时，官方 CLI 和 Desktop 都提示未安装并停止，不创建 `~/.dsh`。官方 Desktop 通过 bundle ID `com.deepseek.dsh` 识别；社区版的 `io.dsh.desktop` 不能通过。CLI 要求可找到官方 `@deepseek-ai/dsh` 包的 `dsh` 入口，或官方 Desktop 提供的命令链接；社区应用内携带的同名 runtime 不算官方 CLI。
+
+| 应用 | 一键配置位置 | 使用方式 |
+| --- | --- | --- |
+| 官方 CLI | `~/.dsh/profiles/web/cordis.patch.yml`、`~/.dsh/profiles/headless/cordis.patch.yml` | `dsh web` 或 `dsh --profile headless "Hi"` |
+| 官方 Desktop | `~/.dsh/profiles/desktop/cordis.patch.yml` | 重新打开官方应用，以 IronMLX 开始新会话 |
+| 社区 DSH Desktop | `~/Library/Application Support/dsh-desktop/harness/profiles/web/cordis.patch.yml` | 使用独立 DSH Desktop 卡片 |
+
+官方两个入口共享 `~/.dsh/.credentials.yaml`，使用独立引用 `IRONMLX_HARNESS_API_KEY` 保存本机占位值 `local`。一键配置只适用于本机模式，采用当前模型公布的 context window，输出预算不超过 `4096` tokens，使用 SSE，默认不声明 reasoning 档位。它合并已有 Provider 和模型，选择 IronMLX 作为对应 profile 的新会话默认模型；其他 profile、已有会话和社区配置不变。修改前备份现有文件，文件权限设为 `0600`；不更改的文件不重写、不重复备份，写入失败时尝试恢复已修改文件。YAML 注释和格式可能规范化，原始内容保留在备份中。
+
+仅支持默认 `~/.dsh`。检测到进程或 CLI 登录 Shell 的自定义 `DSH_HOME` 时停止；不会跟随符号链接写入社区目录。请先关闭官方 Desktop 与运行中的 `dsh`。检测到 profile 锁、旧 `settings.yaml`、home 级 `cordis.patch.yml` 对模型／Provider／凭据存储的覆盖，或不能安全合并的 YAML 时停止，改用手动配置或先处理冲突。首次启动官方应用负责初始化 profile 的 package manifest，一键配置不会代为安装插件。
+
+手动配置默认折叠。下文 CLI 的独立 `ironmlx.patch.yml` 是按次使用的高级替代方式；一键配置不需要 `--patch`。官方 Desktop 的手动方式是 **设置 → 模型 → 自定义模型 API**，填写 `ironmlx-local`、`OpenAI Responses`、IronMLX `/v1` 地址和 `local`，获取并添加模型后在新会话选择它。
+
+已验证仅安装社区版时的官方未安装提示与配置隔离；安装官方 Desktop `0.2.1-rc.2` 后，已核对签名发布包标识 `com.deepseek.dsh` 并通过真实安装检测。成功写入、旧版本、合并、备份、重复执行和阻止条件通过临时目录验证。官方 Desktop `0.2.1-rc.2` 已通过同一原生配置服务的真实写入验证，确认备份权限、默认模型、原有设置和社区版配置均符合预期。重新打开官方 Desktop 后，已确认默认使用 IronMLX 的 Qwen3.5-4B-MLX-4bit，并发送“Hi”收到正常回复。官方 CLI 的真实聊天验证仍待安装；配置成功提示本身不代表已完成聊天验证。
 
 ## DSH Desktop App 配置
 
 这里的 DSH Desktop 是从 [dshdesktop.com](https://dshdesktop.com/en/) 下载的社区版（macOS bundle ID：`io.dsh.desktop`），不是 DeepSeek 官方桌面应用。
 
-Dashboard 中的社区版 **DSH Desktop** 使用独立卡片；**DeepSeek Harness** 卡片保留 CLI，官方桌面版入口标为“尚未支持”，不提供配置功能。
+社区版 **DSH Desktop** 与官方 **DeepSeek Harness** 使用独立 Dashboard 卡片和安装检测。官方卡片可分别配置 CLI 与官方 Desktop。
 
 ### 一键配置
 
@@ -65,7 +88,7 @@ DSH Desktop 通过 GUI 保存提供方配置，不会自动加载 CLI overlay，
 
 ## DSH CLI 配置
 
-CLI 可以使用 Dashboard 生成的 overlay，也可以按下面的示例手动编写。保存配置后，通过 `--patch` 启动并验证请求。
+CLI 优先使用上述一键配置。需要独立 overlay 时，可展开 Dashboard 手动配置或使用下面的示例，通过 `--patch` 启动并验证请求。
 
 ### 使用 Dashboard 生成配置
 

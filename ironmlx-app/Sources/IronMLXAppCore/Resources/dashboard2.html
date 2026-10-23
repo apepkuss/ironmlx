@@ -4684,11 +4684,11 @@
                 <div class="agent-guide-eyebrow" data-i18n="agent_provider_setup">Provider setup</div>
                 <div class="agent-guide-title-row">
                   <h2 class="agent-guide-title">DeepSeek Harness</h2>
-                  <span class="agent-guide-version-badge"><span data-i18n="dsh_verified_revision">Validated master</span>: <strong>ddefc45fbc</strong></span>
+                  <span class="agent-guide-version-badge">0.2.1-rc.2+</span>
                 </div>
-                <p class="agent-guide-description" data-i18n="dsh_description">Connect DeepSeek Harness CLI to IronMLX through the Responses API. Official desktop support is pending.</p>
+                <p class="agent-guide-description" data-i18n="dsh_description">Connect official DeepSeek Harness CLI or Desktop to IronMLX through the Responses API.</p>
               </div>
-              <a id="dsh-official-guide" class="agent-guide-docs-link" href="https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-provider" target="_blank" rel="noopener noreferrer" onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="agent_official_guide">Official configuration guide</span> <span aria-hidden="true">↗</span></a>
+              <a id="dsh-official-guide" class="agent-guide-docs-link" href="https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-model-api" target="_blank" rel="noopener noreferrer" onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="agent_official_guide">Official configuration guide</span> <span aria-hidden="true">↗</span></a>
             </header>
 
             <section class="agent-guide-section">
@@ -4713,30 +4713,55 @@
             <section class="agent-guide-section">
               <div class="agent-guide-section-header">
                 <div>
-                  <h3 class="agent-guide-section-title" data-i18n="dsh_setup_method">Choose a setup method</h3>
-                  <p class="agent-guide-section-desc" data-i18n="dsh_setup_method_desc">Configure DSH CLI or view the support status of the official desktop app.</p>
+                  <h3 class="agent-guide-section-title" data-i18n="dsh_setup_method">Choose an application</h3>
+                  <p class="agent-guide-section-desc" data-i18n="dsh_setup_method_desc">Choose the official application to check and configure.</p>
                 </div>
               </div>
               <fieldset class="agent-profile-options">
-                <legend class="visually-hidden" data-i18n="dsh_setup_method">Choose a setup method</legend>
+                <legend class="visually-hidden" data-i18n="dsh_setup_method">Choose an application</legend>
                 <label class="agent-profile-option active">
-                  <input class="visually-hidden" type="radio" name="dsh-setup-mode" value="cli" data-dsh-setup-mode="cli" checked onchange="selectDshSetupMode('cli')">
-                  <span class="agent-profile-option-title" data-i18n="dsh_cli">DSH CLI</span>
-                  <span class="agent-profile-option-desc" data-i18n="dsh_cli_desc">Generate a scoped overlay and pass it only to dsh runs that should use IronMLX.</span>
-                </label>
-                <label class="agent-profile-option">
-                  <input class="visually-hidden" type="radio" name="dsh-setup-mode" value="desktop" data-dsh-setup-mode="desktop" onchange="selectDshSetupMode('desktop')">
+                  <input class="visually-hidden" type="radio" name="dsh-setup-mode" value="desktop" data-dsh-setup-mode="desktop" checked onchange="selectDshSetupMode('desktop')">
                   <span class="agent-profile-option-title">
                     <span data-i18n="dsh_official_desktop">Official desktop app</span>
-                    <span class="agent-profile-option-badge" data-i18n="dsh_official_pending">Not supported yet</span>
                   </span>
-                  <span class="agent-profile-option-desc" data-i18n="dsh_official_pending_desc">The official DeepSeek desktop app is not supported yet. Configure community DSH Desktop from its own card.</span>
+                  <span class="agent-profile-option-desc" data-i18n="dsh_harness_desktop_option">Configure the official DeepSeek Harness Desktop profile; community DSH Desktop has its own card.</span>
+                </label>
+                <label class="agent-profile-option">
+                  <input class="visually-hidden" type="radio" name="dsh-setup-mode" value="cli" data-dsh-setup-mode="cli" onchange="selectDshSetupMode('cli')">
+                  <span class="agent-profile-option-title" data-i18n="dsh_cli">DSH CLI</span>
+                  <span class="agent-profile-option-desc" data-i18n="dsh_cli_desc">Configure the official CLI Web and Headless profiles.</span>
                 </label>
               </fieldset>
             </section>
 
-            <div class="agent-guide-mode-panel" data-dsh-setup-panel="cli">
             <section class="agent-guide-section">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="dsh_harness_title">One-click setup</h3>
+                  <p id="dsh-harness-setup-desc" class="agent-guide-section-desc"></p>
+                </div>
+                <button id="dsh-harness-configure" class="btn-accent" type="button" onclick="configureDeepSeekHarness()" data-i18n="dsh_harness_button">Configure</button>
+              </div>
+              <div class="agent-guide-fields">
+                <div class="agent-guide-field">
+                  <label for="dsh-harness-model-select" data-i18n="agent_model">Model</label>
+                  <select id="dsh-harness-model-select"></select>
+                </div>
+              </div>
+              <div id="dsh-harness-feedback" class="agent-setup-feedback" role="status" aria-live="polite" aria-atomic="true" hidden>
+                <span id="dsh-harness-feedback-icon" class="agent-setup-feedback-icon" aria-hidden="true">!</span>
+                <div class="agent-setup-feedback-content">
+                  <p id="dsh-harness-setup-status" class="agent-setup-feedback-message"></p>
+                  <a id="dsh-harness-install" class="agent-setup-feedback-action" href="https://www.deepseek.com/en/download/" target="_blank" rel="noopener noreferrer" hidden onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span id="dsh-harness-install-label"></span> <span aria-hidden="true">↗</span></a>
+                </div>
+              </div>
+            </section>
+
+            <div class="agent-guide-mode-panel" data-dsh-setup-panel="cli" hidden>
+            <details class="agent-guide-section" id="dsh-harness-cli-manual">
+              <summary class="agent-guide-section-title agent-manual-summary" data-i18n="dsh_manual_configuration">Manual configuration</summary>
+              <div class="agent-manual-body">
+            <section>
               <div class="agent-guide-section-header">
                 <div>
                   <h3 class="agent-guide-section-title" data-i18n="agent_configure_provider">Configure provider</h3>
@@ -4817,18 +4842,18 @@
                 <span data-i18n="agent_tool_boundary">The agent executes terminal, bash, and MCP tools locally. IronMLX only provides inference and structured tool calls.</span>
               </div>
             </section>
+              </div>
+            </details>
             </div>
 
-            <div class="agent-guide-mode-panel" data-dsh-setup-panel="desktop" hidden>
-              <section class="agent-guide-section">
-                <div class="agent-guide-section-header">
-                  <div>
-                    <h3 class="agent-guide-section-title" data-i18n="dsh_official_desktop">Official desktop app</h3>
-                    <p class="agent-guide-section-desc" data-i18n="dsh_official_pending_desc">The official DeepSeek desktop app is not supported yet. Configure community DSH Desktop from its own card.</p>
-                  </div>
-                  <span class="agent-guide-version-badge" data-i18n="dsh_official_pending">Not supported yet</span>
+            <div class="agent-guide-mode-panel" data-dsh-setup-panel="desktop">
+              <details class="agent-guide-section" id="dsh-harness-desktop-manual">
+                <summary class="agent-guide-section-title agent-manual-summary" data-i18n="dsh_manual_configuration">Manual configuration</summary>
+                <div class="agent-manual-body">
+                  <p class="agent-guide-section-desc" data-i18n="dsh_harness_desktop_manual">Open Settings → Models, add a custom model API with provider ID ironmlx-local, protocol OpenAI Responses, the endpoint below, and placeholder key local. Fetch models, add the loaded model, and create the provider. Select IronMLX in a new chat.</p>
+                  <p class="agent-guide-description"><code data-agent-endpoint>http://127.0.0.1:9068/v1</code></p>
                 </div>
-              </section>
+              </details>
             </div>
           </article>
           <article id="agent-guide-dsh-desktop" role="tabpanel" aria-label="DSH Desktop" hidden>
@@ -5742,8 +5767,6 @@
       dsh_verify_connection: "Verify connection",
       dsh_verify_shared_desc: "Use these steps after either one-click or manual configuration.",
 
-      dsh_official_pending_desc: "The official DeepSeek desktop app is not supported yet. Configure community DSH Desktop from its own card.",
-      dsh_official_pending: "Not supported yet",
       dsh_official_desktop: "Official desktop app",
       dsh_community_website: "Community website",
       dsh_community_description: "Connect the community DSH Desktop from dshdesktop.com to IronMLX.",
@@ -5955,7 +5978,33 @@
       omp_auto_local_only: "One-click setup requires IronMLX local mode.",
       omp_auto_busy: "OMP setup is already in progress.",
       omp_auto_native_required: "Open the IronMLX App to use one-click setup.",
-      dsh_verified_revision: "Validated master", dsh_description: "Connect DeepSeek Harness CLI to IronMLX through the Responses API. Official desktop support is pending.",
+      dsh_harness_desktop_option: "Configure the official DeepSeek Harness desktop app.",
+      dsh_harness_title: "One-click setup",
+      dsh_harness_button: "Configure",
+      dsh_harness_pending: "Checking and configuring…",
+      dsh_harness_cli_desc: "Requires official DSH CLI 0.2.1-rc.2 or later. Adds IronMLX to Web and Headless modes.",
+      dsh_harness_desktop_desc: "Requires official DeepSeek Harness Desktop 0.2.1-rc.2 or later. Use the separate DSH Desktop card for the community app.",
+      dsh_harness_desktop_manual: "Open Settings → Models, add a custom model API with provider ID ironmlx-local, protocol OpenAI Responses, the endpoint below, and placeholder key local. Fetch models, add the loaded model, and create the provider. Select IronMLX in a new chat.",
+      dsh_harness_not_installed: "{app} was not found. Install the official app and try again. Setup stopped; no configuration was written.",
+      dsh_harness_version_too_old: "Installed version {version} requires an upgrade to {minimum} or later. Setup stopped; no configuration was written.",
+      dsh_harness_version_unknown: "The official app version could not be verified. Install a supported official release and try again. No configuration was written.",
+      dsh_harness_cli_unrecognized: "The dsh command is not a recognized official installation. Community DSH Desktop does not qualify. Install the official CLI and try again. No configuration was written.",
+      dsh_harness_custom_home: "DSH_HOME uses a custom directory. Automatic setup supports ~/.dsh only; use manual configuration. No configuration was written.",
+      dsh_harness_home_unknown: "The CLI configuration directory could not be verified. Check the login shell or use manual configuration. No configuration was written.",
+      dsh_harness_home_conflict: "~/.dsh/cordis.patch.yml overrides the model, provider, or credential store. Resolve that override or configure manually. No configuration was written.",
+      dsh_harness_close_app: "Close official DeepSeek Harness Desktop and running dsh sessions, then try again. An active profile lock prevents configuration.",
+      dsh_harness_initialize_app: "Legacy settings.yaml needs migration. Start the selected official app once, close it, and try again. No configuration was written.",
+      dsh_harness_model_unavailable: "Start IronMLX and load a conversation model, then try again.",
+      dsh_harness_local_only: "One-click setup requires local mode.",
+      dsh_harness_busy: "Setup is already running.",
+      dsh_harness_native_required: "One-click setup is available in the IronMLX macOS app.",
+      dsh_harness_configuration_failed: "Configuration failed. Check the profile YAML, file permissions, and symbolic links. Existing backups can be used for recovery.",
+      dsh_harness_invalid_mode: "Choose CLI or the official desktop app.",
+      dsh_harness_configured_cli: "Configured the Web and Headless profiles. Run dsh web, or dsh --profile headless \"Hi\". New sessions use IronMLX; existing providers were preserved.",
+      dsh_harness_configured_desktop: "Configured the official Desktop profile. Reopen DeepSeek Harness and start a new chat with IronMLX. Community DSH Desktop was unchanged.",
+      dsh_harness_install_cli: "Install DSH CLI",
+      dsh_harness_install_desktop: "Install DeepSeek Harness",
+      dsh_verified_revision: "Validated master", dsh_description: "Connect official DeepSeek Harness CLI or Desktop to IronMLX through the Responses API.",
       dsh_save_file: "Save as", dsh_home_default: "(normally ~/.dsh)", dsh_reasoning: "Reasoning", dsh_reasoning_off: "Off",
       dsh_reasoning_minimal: "Minimal", dsh_reasoning_low: "Low", dsh_reasoning_medium: "Medium", dsh_reasoning_high: "High", dsh_reasoning_xhigh: "Extra high", dsh_reasoning_max: "Maximum",
       dsh_context_window: "Context window", dsh_output_budget: "Output budget (tokens)",
@@ -5965,11 +6014,11 @@
       dsh_capacity_ready: "Limits were prefilled from /v1/models. Review the output budget before copying.",
       dsh_invalid_capacity: "Enter positive whole-number limits. Output must fit within context and the capacities reported by /v1/models.",
       dsh_budget_note: "The output budget defaults to at most 4096 tokens, not automatically to the service's maximum. Reasoning and visible text share it; adjust it for your workload.",
-      dsh_settings_note: "If dsh settings.yaml already selects a default model or overrides llm-pi-ai, update those conflicting settings; user settings take precedence over this overlay.",
+      dsh_settings_note: "Legacy settings.yaml is migrated on startup. Start dsh once before manual setup; home and command-line patches can override profile settings.",
       dsh_verify_desc: "Set a local placeholder key, run a text turn, then check a real file-reading tool call.",
       dsh_key_note: "The placeholder key only satisfies dsh's credential lookup on the local keyless endpoint. It is not a LAN API key.",
-      dsh_setup_method: "Choose a setup method", dsh_setup_method_desc: "Configure DSH CLI or view the support status of the official desktop app.",
-      dsh_cli: "DSH CLI", dsh_cli_desc: "Generate a scoped overlay and pass it only to dsh runs that should use IronMLX.",
+      dsh_setup_method: "Choose an application", dsh_setup_method_desc: "Choose the official application to check and configure.",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "Configure the official CLI Web and Headless profiles.",
       dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "Add IronMLX as a custom provider from DSH Desktop settings.",
       dsh_desktop_configure: "Configure DSH Desktop", dsh_desktop_configure_desc: "Create a custom provider in the Desktop app; no overlay file or DSH_HOME change is required.",
       dsh_desktop_full_guide: "Full DSH Desktop guide",
@@ -6399,8 +6448,6 @@
       dsh_verify_connection: "验证连接",
       dsh_verify_shared_desc: "一键配置或手动配置完成后，使用以下步骤验证连接。",
 
-      dsh_official_pending_desc: "DeepSeek 官方桌面版尚未适配，当前不提供配置功能。社区版请在独立的 DSH Desktop 卡片中配置。",
-      dsh_official_pending: "尚未支持",
       dsh_official_desktop: "官方桌面版",
       dsh_community_website: "社区版网站",
       dsh_community_description: "将从 dshdesktop.com 下载的社区版 DSH Desktop 接入 IronMLX。",
@@ -6612,7 +6659,33 @@
       omp_auto_local_only: "一键配置需要 IronMLX 处于本地模式。",
       omp_auto_busy: "OMP 配置正在进行，请稍候。",
       omp_auto_native_required: "请在 IronMLX App 中使用一键配置。",
-      dsh_verified_revision: "已验证 master", dsh_description: "通过 Responses API 将 DeepSeek Harness CLI 接入 IronMLX。官方桌面版尚待适配。",
+      dsh_harness_desktop_option: "配置 DeepSeek 官方桌面应用。",
+      dsh_harness_title: "一键配置",
+      dsh_harness_button: "一键配置",
+      dsh_harness_pending: "正在检查并配置…",
+      dsh_harness_cli_desc: "需要官方 DSH CLI 0.2.1-rc.2 或更高版本。将 IronMLX 添加到 Web 和 Headless 模式。",
+      dsh_harness_desktop_desc: "需要官方 DeepSeek Harness Desktop 0.2.1-rc.2 或更高版本。社区版请使用独立的 DSH Desktop 卡片。",
+      dsh_harness_desktop_manual: "打开设置 → 模型，添加自定义模型 API：Provider ID 为 ironmlx-local，协议为 OpenAI Responses，地址使用下方 Endpoint，API Key 填 local。获取并添加已加载模型，创建 Provider，然后在新会话中选择 IronMLX。",
+      dsh_harness_not_installed: "未检测到{app}。请安装官方应用后重试。一键配置已停止，未写入任何配置。",
+      dsh_harness_version_too_old: "当前版本为 {version}，需要 {minimum} 或更高版本。请升级后重试，未写入任何配置。",
+      dsh_harness_version_unknown: "无法确认官方应用版本。请安装受支持的官方版本后重试，未写入任何配置。",
+      dsh_harness_cli_unrecognized: "当前 dsh 命令无法确认为官方安装。社区版 DSH Desktop 不满足此要求。请安装官方 CLI 后重试，未写入任何配置。",
+      dsh_harness_custom_home: "检测到自定义 DSH_HOME。一键配置仅支持 ~/.dsh，请使用手动配置，未写入任何配置。",
+      dsh_harness_home_unknown: "无法确认 CLI 配置目录。请检查登录 Shell 或使用手动配置，未写入任何配置。",
+      dsh_harness_home_conflict: "~/.dsh/cordis.patch.yml 中存在模型、Provider 或凭据存储覆盖项。请先处理覆盖项或手动配置，未写入任何配置。",
+      dsh_harness_close_app: "请先关闭官方 DeepSeek Harness Desktop 和运行中的 dsh 会话，再重试。检测到 profile 锁时不会写入配置。",
+      dsh_harness_initialize_app: "检测到旧版 settings.yaml。请先启动所选官方应用完成迁移，关闭后重试，未写入任何配置。",
+      dsh_harness_model_unavailable: "请启动 IronMLX 并加载对话模型后重试。",
+      dsh_harness_local_only: "一键配置需要 IronMLX 处于本地模式。",
+      dsh_harness_busy: "配置正在进行，请稍候。",
+      dsh_harness_native_required: "请在 IronMLX macOS App 中使用一键配置。",
+      dsh_harness_configuration_failed: "配置失败。请检查 profile YAML、文件权限和符号链接；已有备份可用于恢复。",
+      dsh_harness_invalid_mode: "请选择 CLI 或官方桌面版。",
+      dsh_harness_configured_cli: "已配置 Web 和 Headless profile。运行 dsh web，或 dsh --profile headless \"Hi\" 即可使用。新会话默认使用 IronMLX，已有 Provider 已保留。",
+      dsh_harness_configured_desktop: "已配置官方 Desktop profile。请重新打开 DeepSeek Harness，并使用 IronMLX 开始新会话。社区版 DSH Desktop 未改动。",
+      dsh_harness_install_cli: "安装 DSH CLI",
+      dsh_harness_install_desktop: "安装 DeepSeek Harness",
+      dsh_verified_revision: "已验证 master", dsh_description: "通过 Responses API 将官方 DeepSeek Harness CLI 或 Desktop 接入 IronMLX。",
       dsh_save_file: "保存为", dsh_home_default: "（通常为 ~/.dsh）", dsh_reasoning: "推理模式", dsh_reasoning_off: "关闭",
       dsh_reasoning_minimal: "极低", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "极高", dsh_reasoning_max: "最大",
       dsh_context_window: "上下文容量", dsh_output_budget: "单轮输出预算（tokens）",
@@ -6622,11 +6695,11 @@
       dsh_capacity_ready: "已根据 /v1/models 预填容量；复制前请检查输出预算。",
       dsh_invalid_capacity: "请输入正整数；输出预算不得超过上下文容量或 /v1/models 公布的上限。",
       dsh_budget_note: "输出预算默认不超过 4096 tokens，不会一律取服务端硬上限。reasoning 与正文共同消耗它，请按任务需要调整。",
-      dsh_settings_note: "若 dsh 的 settings.yaml 已指定默认模型或覆盖 llm-pi-ai，请更新这些冲突的设置；用户设置的优先级高于此 overlay。",
+      dsh_settings_note: "旧版 settings.yaml 会在启动时迁移。手动配置前请先启动一次 dsh；home 级和命令行补丁可能覆盖 profile 设置。",
       dsh_verify_desc: "设置本地占位密钥，完成一轮文本请求，再验证真实的文件读取工具调用。",
       dsh_key_note: "占位密钥仅满足 dsh 对本地免鉴权 endpoint 的凭据查询；它不是 LAN API Key。",
-      dsh_setup_method: "选择配置方式", dsh_setup_method_desc: "配置 DSH CLI，或查看官方桌面版的支持状态。",
-      dsh_cli: "DSH CLI", dsh_cli_desc: "生成独立 overlay，仅在需要使用 IronMLX 的 dsh 运行中加载。",
+      dsh_setup_method: "选择应用", dsh_setup_method_desc: "选择需要检查并配置的官方应用。",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "配置官方 CLI 的 Web 和 Headless profile。",
       dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "从 DSH Desktop 设置中将 IronMLX 添加为自定义提供方。",
       dsh_desktop_configure: "配置 DSH Desktop", dsh_desktop_configure_desc: "在桌面应用中创建自定义提供方；无需 overlay 文件，也无需修改 DSH_HOME。",
       dsh_desktop_full_guide: "完整 DSH Desktop 指南",
@@ -7056,8 +7129,6 @@
       dsh_verify_connection: "驗證連線",
       dsh_verify_shared_desc: "完成一鍵設定或手動設定後，使用以下步驟驗證連線。",
 
-      dsh_official_pending_desc: "DeepSeek 官方桌面版尚未適配，目前不提供設定功能。社群版請在獨立的 DSH Desktop 卡片中設定。",
-      dsh_official_pending: "尚未支援",
       dsh_official_desktop: "官方桌面版",
       dsh_community_website: "社群版網站",
       dsh_community_description: "將從 dshdesktop.com 下載的社群版 DSH Desktop 接入 IronMLX。",
@@ -7269,7 +7340,33 @@
       omp_auto_local_only: "一鍵設定需要 IronMLX 處於本機模式。",
       omp_auto_busy: "OMP 設定正在進行，請稍候。",
       omp_auto_native_required: "請在 IronMLX App 中使用一鍵設定。",
-      dsh_verified_revision: "已驗證 master", dsh_description: "透過 Responses API 將 DeepSeek Harness CLI 接入 IronMLX。官方桌面版尚待適配。",
+      dsh_harness_desktop_option: "設定 DeepSeek 官方桌面應用程式。",
+      dsh_harness_title: "一鍵設定",
+      dsh_harness_button: "一鍵設定",
+      dsh_harness_pending: "正在檢查並設定…",
+      dsh_harness_cli_desc: "需要官方 DSH CLI 0.2.1-rc.2 或更新版本。將 IronMLX 新增至 Web 與 Headless 模式。",
+      dsh_harness_desktop_desc: "需要官方 DeepSeek Harness Desktop 0.2.1-rc.2 或更新版本。社群版請使用獨立的 DSH Desktop 卡片。",
+      dsh_harness_desktop_manual: "開啟設定 → 模型，新增自訂模型 API：Provider ID 為 ironmlx-local，協定為 OpenAI Responses，位址使用下方 Endpoint，API Key 填 local。取得並新增已載入模型，建立 Provider，然後在新對話選擇 IronMLX。",
+      dsh_harness_not_installed: "未偵測到{app}。請安裝官方應用程式後重試。設定已停止，未寫入任何設定。",
+      dsh_harness_version_too_old: "目前版本為 {version}，需要 {minimum} 或更新版本。請升級後重試，未寫入任何設定。",
+      dsh_harness_version_unknown: "無法確認官方應用程式版本。請安裝支援的官方版本後重試，未寫入任何設定。",
+      dsh_harness_cli_unrecognized: "目前 dsh 命令無法確認為官方安裝。社群版 DSH Desktop 不符合此要求。請安裝官方 CLI 後重試，未寫入任何設定。",
+      dsh_harness_custom_home: "偵測到自訂 DSH_HOME。一鍵設定僅支援 ~/.dsh，請使用手動設定，未寫入任何設定。",
+      dsh_harness_home_unknown: "無法確認 CLI 設定目錄。請檢查登入 Shell 或使用手動設定，未寫入任何設定。",
+      dsh_harness_home_conflict: "~/.dsh/cordis.patch.yml 中存在模型、Provider 或憑證儲存覆寫項。請先處理或手動設定，未寫入任何設定。",
+      dsh_harness_close_app: "請先關閉官方 DeepSeek Harness Desktop 與執行中的 dsh 工作階段，再重試。偵測到 profile 鎖時不會寫入設定。",
+      dsh_harness_initialize_app: "偵測到舊版 settings.yaml。請先啟動所選官方應用程式完成移轉，關閉後重試，未寫入任何設定。",
+      dsh_harness_model_unavailable: "請啟動 IronMLX 並載入對話模型後重試。",
+      dsh_harness_local_only: "一鍵設定需要 IronMLX 處於本機模式。",
+      dsh_harness_busy: "正在設定，請稍候。",
+      dsh_harness_native_required: "請在 IronMLX macOS App 中使用一鍵設定。",
+      dsh_harness_configuration_failed: "設定失敗。請檢查 profile YAML、檔案權限與符號連結；現有備份可用於還原。",
+      dsh_harness_invalid_mode: "請選擇 CLI 或官方桌面版。",
+      dsh_harness_configured_cli: "已設定 Web 與 Headless profile。執行 dsh web，或 dsh --profile headless \"Hi\" 即可使用。新對話預設使用 IronMLX，現有 Provider 已保留。",
+      dsh_harness_configured_desktop: "已設定官方 Desktop profile。請重新開啟 DeepSeek Harness，並使用 IronMLX 開始新對話。社群版 DSH Desktop 未變動。",
+      dsh_harness_install_cli: "安裝 DSH CLI",
+      dsh_harness_install_desktop: "安裝 DeepSeek Harness",
+      dsh_verified_revision: "已驗證 master", dsh_description: "透過 Responses API 將官方 DeepSeek Harness CLI 或 Desktop 接入 IronMLX。",
       dsh_save_file: "儲存為", dsh_home_default: "（通常為 ~/.dsh）", dsh_reasoning: "推理模式", dsh_reasoning_off: "關閉",
       dsh_reasoning_minimal: "極低", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "極高", dsh_reasoning_max: "最大",
       dsh_context_window: "上下文容量", dsh_output_budget: "單輪輸出預算（tokens）",
@@ -7279,11 +7376,11 @@
       dsh_capacity_ready: "已根據 /v1/models 預填容量；複製前請檢查輸出預算。",
       dsh_invalid_capacity: "請輸入正整數；輸出預算不得超過上下文容量或 /v1/models 公布的上限。",
       dsh_budget_note: "輸出預算預設不超過 4096 tokens，不會一律採用伺服器硬上限。reasoning 與正文共用預算，請依工作需要調整。",
-      dsh_settings_note: "若 dsh 的 settings.yaml 已指定預設模型或覆蓋 llm-pi-ai，請更新這些衝突的設定；使用者設定的優先順序高於此 overlay。",
+      dsh_settings_note: "舊版 settings.yaml 會在啟動時移轉。手動設定前請先啟動一次 dsh；home 層與命令列補丁可能覆寫 profile 設定。",
       dsh_verify_desc: "設定本機佔位金鑰，完成一輪文字請求，再驗證實際的檔案讀取工具呼叫。",
       dsh_key_note: "佔位金鑰僅滿足 dsh 對本機免驗證 endpoint 的憑證查詢；它不是 LAN API Key。",
-      dsh_setup_method: "選擇設定方式", dsh_setup_method_desc: "設定 DSH CLI，或查看官方桌面版的支援狀態。",
-      dsh_cli: "DSH CLI", dsh_cli_desc: "產生獨立 overlay，只在需要使用 IronMLX 的 dsh 執行中載入。",
+      dsh_setup_method: "選擇應用程式", dsh_setup_method_desc: "選擇要檢查並設定的官方應用程式。",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "設定官方 CLI 的 Web 與 Headless profile。",
       dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "從 DSH Desktop 設定中將 IronMLX 加入為自訂提供者。",
       dsh_desktop_configure: "設定 DSH Desktop", dsh_desktop_configure_desc: "在桌面應用程式中建立自訂提供者；不需要 overlay 檔案，也不需要修改 DSH_HOME。",
       dsh_desktop_full_guide: "完整 DSH Desktop 指南",
@@ -7716,8 +7813,6 @@
       dsh_verify_connection: "接続を確認",
       dsh_verify_shared_desc: "ワンクリック設定または手動設定の完了後、次の手順で接続を確認してください。",
 
-      dsh_official_pending_desc: "DeepSeek 公式デスクトップ版にはまだ対応していません。コミュニティ版は専用の DSH Desktop カードで設定してください。",
-      dsh_official_pending: "未対応",
       dsh_official_desktop: "公式デスクトップ版",
       dsh_community_website: "コミュニティサイト",
       dsh_community_description: "dshdesktop.com のコミュニティ版 DSH Desktop を IronMLX に接続します。",
@@ -7929,7 +8024,33 @@
       omp_auto_local_only: "IronMLX のローカルモードが必要です。",
       omp_auto_busy: "OMP 設定を実行中です。",
       omp_auto_native_required: "IronMLX App でワンクリック設定を使用してください。",
-      dsh_verified_revision: "検証済み master", dsh_description: "Responses API 経由で DeepSeek Harness CLI を IronMLX に接続します。公式デスクトップ版は今後対応予定です。",
+      dsh_harness_desktop_option: "公式 DeepSeek Harness デスクトップアプリを設定します。",
+      dsh_harness_title: "ワンクリック設定",
+      dsh_harness_button: "設定する",
+      dsh_harness_pending: "確認・設定中…",
+      dsh_harness_cli_desc: "公式 DSH CLI 0.2.1-rc.2 以降が必要です。Web と Headless モードに IronMLX を追加します。",
+      dsh_harness_desktop_desc: "公式 DeepSeek Harness Desktop 0.2.1-rc.2 以降が必要です。コミュニティ版は専用の DSH Desktop カードを使用してください。",
+      dsh_harness_desktop_manual: "設定 → モデルでカスタムモデル API を追加します。Provider ID は ironmlx-local、プロトコルは OpenAI Responses、URL は下記 Endpoint、API Key は local とします。読み込み済みモデルを取得・追加して Provider を作成し、新しいチャットで IronMLX を選択してください。",
+      dsh_harness_not_installed: "{app} が見つかりません。公式アプリをインストールして再試行してください。設定は停止し、ファイルは書き込んでいません。",
+      dsh_harness_version_too_old: "現在のバージョン {version} は {minimum} 以降への更新が必要です。設定は書き込んでいません。",
+      dsh_harness_version_unknown: "公式アプリのバージョンを確認できません。対応する公式リリースをインストールしてください。設定は書き込んでいません。",
+      dsh_harness_cli_unrecognized: "dsh コマンドを公式インストールと確認できません。コミュニティ版 DSH Desktop は対象外です。公式 CLI をインストールしてください。設定は書き込んでいません。",
+      dsh_harness_custom_home: "カスタム DSH_HOME を検出しました。自動設定は ~/.dsh のみに対応します。手動で設定してください。書き込みは行っていません。",
+      dsh_harness_home_unknown: "CLI の設定ディレクトリを確認できません。ログインシェルを確認するか手動で設定してください。書き込みは行っていません。",
+      dsh_harness_home_conflict: "~/.dsh/cordis.patch.yml にモデル、Provider、認証ストアの上書きがあります。上書きを解消するか手動で設定してください。書き込みは行っていません。",
+      dsh_harness_close_app: "公式 DeepSeek Harness Desktop と実行中の dsh を終了して再試行してください。profile ロックがある場合は書き込みません。",
+      dsh_harness_initialize_app: "旧 settings.yaml の移行が必要です。選択した公式アプリを起動し、終了してから再試行してください。書き込みは行っていません。",
+      dsh_harness_model_unavailable: "IronMLX を起動して会話モデルを読み込んでください。",
+      dsh_harness_local_only: "自動設定にはローカルモードが必要です。",
+      dsh_harness_busy: "設定が既に進行中です。",
+      dsh_harness_native_required: "IronMLX macOS アプリで利用できます。",
+      dsh_harness_configuration_failed: "設定に失敗しました。profile YAML、権限、シンボリックリンクを確認してください。既存のバックアップから復元できます。",
+      dsh_harness_invalid_mode: "CLI または公式デスクトップを選択してください。",
+      dsh_harness_configured_cli: "Web と Headless profile を設定しました。dsh web または dsh --profile headless \"Hi\" を実行してください。新規セッションは IronMLX を使用し、既存 Provider は保持されます。",
+      dsh_harness_configured_desktop: "公式 Desktop profile を設定しました。DeepSeek Harness を再起動し、IronMLX で新しいチャットを開始してください。コミュニティ版は変更していません。",
+      dsh_harness_install_cli: "DSH CLI をインストール",
+      dsh_harness_install_desktop: "DeepSeek Harness をインストール",
+      dsh_verified_revision: "検証済み master", dsh_description: "公式 DeepSeek Harness CLI または Desktop を Responses API で IronMLX に接続します。",
       dsh_save_file: "保存先", dsh_home_default: "（通常は ~/.dsh）", dsh_reasoning: "推論モード", dsh_reasoning_off: "オフ",
       dsh_reasoning_minimal: "最小", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "非常に高い", dsh_reasoning_max: "最大",
       dsh_context_window: "コンテキスト容量", dsh_output_budget: "回答ごとの出力予算（tokens）",
@@ -7939,11 +8060,11 @@
       dsh_capacity_ready: "/v1/models の容量を入力しました。コピーする前に出力予算を確認してください。",
       dsh_invalid_capacity: "正の整数を入力してください。出力予算はコンテキスト容量と /v1/models の上限以下にしてください。",
       dsh_budget_note: "出力予算は最大 4096 tokens で初期入力され、サーバー上限を常に使うわけではありません。推論と本文は同じ予算を消費するため、用途に合わせて調整してください。",
-      dsh_settings_note: "dsh の settings.yaml が既定のモデルを指定するか llm-pi-ai を上書きしている場合は、競合する設定を更新してください。ユーザー設定がこの overlay より優先されます。",
+      dsh_settings_note: "旧 settings.yaml は起動時に移行されます。手動設定前に dsh を一度起動してください。home とコマンドラインのパッチは profile 設定を上書きします。",
       dsh_verify_desc: "ローカルの仮キーを設定し、テキストの応答と実際のファイル読み取りツール呼び出しを確認します。",
       dsh_key_note: "仮キーは認証不要のローカル endpoint で dsh の認証情報照会を満たすためだけのものです。LAN API Key ではありません。",
-      dsh_setup_method: "設定方法を選択", dsh_setup_method_desc: "DSH CLI を設定するか、公式デスクトップ版の対応状況を確認します。",
-      dsh_cli: "DSH CLI", dsh_cli_desc: "専用 overlay を生成し、IronMLX を使う dsh 実行にだけ渡します。",
+      dsh_setup_method: "アプリを選択", dsh_setup_method_desc: "確認・設定する公式アプリを選択します。",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "公式 CLI の Web と Headless profile を設定します。",
       dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "DSH Desktop の設定から IronMLX をカスタムプロバイダーとして追加します。",
       dsh_desktop_configure: "DSH Desktop を設定", dsh_desktop_configure_desc: "デスクトップアプリでカスタムプロバイダーを作成します。overlay ファイルや DSH_HOME の変更は不要です。",
       dsh_desktop_full_guide: "DSH Desktop の完全ガイド",
@@ -8376,8 +8497,6 @@
       dsh_verify_connection: "연결 확인",
       dsh_verify_shared_desc: "원클릭 또는 수동 설정을 완료한 후 아래 단계로 연결을 확인하세요.",
 
-      dsh_official_pending_desc: "DeepSeek 공식 데스크톱 버전은 아직 지원하지 않습니다. 커뮤니티 버전은 별도의 DSH Desktop 카드에서 설정하세요.",
-      dsh_official_pending: "아직 지원하지 않음",
       dsh_official_desktop: "공식 데스크톱 버전",
       dsh_community_website: "커뮤니티 웹사이트",
       dsh_community_description: "dshdesktop.com의 커뮤니티 DSH Desktop을 IronMLX에 연결합니다.",
@@ -8589,7 +8708,33 @@
       omp_auto_local_only: "IronMLX 로컬 모드가 필요합니다.",
       omp_auto_busy: "OMP 설정이 진행 중입니다.",
       omp_auto_native_required: "IronMLX App에서 원클릭 설정을 사용하세요.",
-      dsh_verified_revision: "검증된 master", dsh_description: "Responses API를 통해 DeepSeek Harness CLI를 IronMLX에 연결합니다. 공식 데스크톱 버전 지원은 준비 중입니다.",
+      dsh_harness_desktop_option: "공식 DeepSeek Harness 데스크톱 앱을 설정합니다.",
+      dsh_harness_title: "원클릭 설정",
+      dsh_harness_button: "설정",
+      dsh_harness_pending: "확인 및 설정 중…",
+      dsh_harness_cli_desc: "공식 DSH CLI 0.2.1-rc.2 이상이 필요합니다. Web 및 Headless 모드에 IronMLX를 추가합니다.",
+      dsh_harness_desktop_desc: "공식 DeepSeek Harness Desktop 0.2.1-rc.2 이상이 필요합니다. 커뮤니티 앱은 별도의 DSH Desktop 카드를 사용하세요.",
+      dsh_harness_desktop_manual: "설정 → 모델에서 사용자 지정 모델 API를 추가하세요. Provider ID는 ironmlx-local, 프로토콜은 OpenAI Responses, 주소는 아래 Endpoint, API Key는 local입니다. 로드된 모델을 가져와 추가하고 Provider를 만든 후 새 채팅에서 IronMLX를 선택하세요.",
+      dsh_harness_not_installed: "{app}을 찾을 수 없습니다. 공식 앱을 설치한 후 다시 시도하세요. 설정이 중단되었으며 파일을 쓰지 않았습니다.",
+      dsh_harness_version_too_old: "설치 버전 {version}을 {minimum} 이상으로 업그레이드하세요. 설정을 쓰지 않았습니다.",
+      dsh_harness_version_unknown: "공식 앱 버전을 확인할 수 없습니다. 지원되는 공식 버전을 설치하세요. 설정을 쓰지 않았습니다.",
+      dsh_harness_cli_unrecognized: "dsh 명령을 공식 설치로 확인할 수 없습니다. 커뮤니티 DSH Desktop은 해당하지 않습니다. 공식 CLI를 설치하세요. 설정을 쓰지 않았습니다.",
+      dsh_harness_custom_home: "사용자 지정 DSH_HOME을 감지했습니다. 자동 설정은 ~/.dsh만 지원합니다. 수동으로 설정하세요. 파일을 쓰지 않았습니다.",
+      dsh_harness_home_unknown: "CLI 설정 디렉터리를 확인할 수 없습니다. 로그인 셸을 확인하거나 수동으로 설정하세요. 파일을 쓰지 않았습니다.",
+      dsh_harness_home_conflict: "~/.dsh/cordis.patch.yml에 모델, Provider 또는 자격 증명 저장소 재정의가 있습니다. 이를 해결하거나 수동으로 설정하세요. 파일을 쓰지 않았습니다.",
+      dsh_harness_close_app: "공식 DeepSeek Harness Desktop과 실행 중인 dsh 세션을 종료한 후 다시 시도하세요. profile 잠금이 있으면 파일을 쓰지 않습니다.",
+      dsh_harness_initialize_app: "이전 settings.yaml을 마이그레이션해야 합니다. 선택한 공식 앱을 시작한 후 종료하고 다시 시도하세요. 파일을 쓰지 않았습니다.",
+      dsh_harness_model_unavailable: "IronMLX를 시작하고 대화 모델을 로드하세요.",
+      dsh_harness_local_only: "원클릭 설정은 로컬 모드가 필요합니다.",
+      dsh_harness_busy: "설정이 이미 진행 중입니다.",
+      dsh_harness_native_required: "IronMLX macOS 앱에서 사용할 수 있습니다.",
+      dsh_harness_configuration_failed: "설정에 실패했습니다. profile YAML, 파일 권한 및 심볼릭 링크를 확인하세요. 기존 백업으로 복구할 수 있습니다.",
+      dsh_harness_invalid_mode: "CLI 또는 공식 데스크톱 앱을 선택하세요.",
+      dsh_harness_configured_cli: "Web 및 Headless profile을 설정했습니다. dsh web 또는 dsh --profile headless \"Hi\"를 실행하세요. 새 세션은 IronMLX를 사용하며 기존 Provider는 유지됩니다.",
+      dsh_harness_configured_desktop: "공식 Desktop profile을 설정했습니다. DeepSeek Harness를 다시 열고 IronMLX로 새 채팅을 시작하세요. 커뮤니티 버전은 변경하지 않았습니다.",
+      dsh_harness_install_cli: "DSH CLI 설치",
+      dsh_harness_install_desktop: "DeepSeek Harness 설치",
+      dsh_verified_revision: "검증된 master", dsh_description: "공식 DeepSeek Harness CLI 또는 Desktop을 Responses API로 IronMLX에 연결합니다.",
       dsh_save_file: "다음 이름으로 저장", dsh_home_default: "(일반적으로 ~/.dsh)", dsh_reasoning: "추론 모드", dsh_reasoning_off: "끄기",
       dsh_reasoning_minimal: "최소", dsh_reasoning_low: "낮음", dsh_reasoning_medium: "중간", dsh_reasoning_high: "높음", dsh_reasoning_xhigh: "매우 높음", dsh_reasoning_max: "최대",
       dsh_context_window: "컨텍스트 용량", dsh_output_budget: "응답당 출력 예산(tokens)",
@@ -8599,11 +8744,11 @@
       dsh_capacity_ready: "/v1/models의 용량을 채웠습니다. 복사하기 전에 출력 예산을 확인하세요.",
       dsh_invalid_capacity: "양의 정수를 입력하세요. 출력 예산은 컨텍스트 용량과 /v1/models의 상한을 넘을 수 없습니다.",
       dsh_budget_note: "출력 예산은 최대 4096 tokens로 초기 설정되며 항상 서버 최대값을 사용하지는 않습니다. 추론과 본문이 같은 예산을 사용하므로 작업에 맞게 조정하세요.",
-      dsh_settings_note: "dsh settings.yaml이 기본 모델을 지정하거나 llm-pi-ai를 덮어쓰는 경우 충돌하는 설정을 수정하세요. 사용자 설정이 이 overlay보다 우선합니다.",
+      dsh_settings_note: "이전 settings.yaml은 시작 시 마이그레이션됩니다. 수동 설정 전에 dsh를 한 번 시작하세요. home 및 명령줄 패치가 profile 설정을 재정의할 수 있습니다.",
       dsh_verify_desc: "로컬 임시 키를 설정하고 텍스트 응답과 실제 파일 읽기 도구 호출을 확인하세요.",
       dsh_key_note: "임시 키는 인증이 필요 없는 로컬 endpoint에서 dsh의 자격 증명 조회만 충족합니다. LAN API Key가 아닙니다.",
-      dsh_setup_method: "설정 방법 선택", dsh_setup_method_desc: "DSH CLI를 설정하거나 공식 데스크톱 버전의 지원 상태를 확인하세요.",
-      dsh_cli: "DSH CLI", dsh_cli_desc: "전용 overlay를 생성하여 IronMLX를 사용할 dsh 실행에만 전달합니다.",
+      dsh_setup_method: "앱 선택", dsh_setup_method_desc: "확인하고 설정할 공식 앱을 선택하세요.",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "공식 CLI의 Web 및 Headless profile을 설정합니다.",
       dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "DSH Desktop 설정에서 IronMLX를 사용자 지정 제공자로 추가합니다.",
       dsh_desktop_configure: "DSH Desktop 설정", dsh_desktop_configure_desc: "데스크톱 앱에서 사용자 지정 제공자를 만드세요. overlay 파일이나 DSH_HOME 변경은 필요하지 않습니다.",
       dsh_desktop_full_guide: "전체 DSH Desktop 가이드",
@@ -9048,8 +9193,8 @@
       : 'https://hermes-agent.nousresearch.com/docs/integrations/providers#custom--self-hosted-llm-providers';
     const dshGuide = document.getElementById('dsh-official-guide');
     if (dshGuide) dshGuide.href = lang === 'zh-Hans'
-      ? 'https://deepseek-harness.github.io/deepseek-harness/guide/providers#%E6%B7%BB%E5%8A%A0%E8%87%AA%E5%AE%9A%E4%B9%89%E6%8F%90%E4%BE%9B%E6%96%B9'
-      : 'https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-provider';
+      ? 'https://deepseek-harness.github.io/deepseek-harness/guide/providers#%E6%B7%BB%E5%8A%A0%E8%87%AA%E5%AE%9A%E4%B9%89%E6%A8%A1%E5%9E%8B-api'
+      : 'https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-model-api';
     document.querySelectorAll('[data-dsh-desktop-website]').forEach(function(link) {
       link.href = dshDesktopWebsiteURL(lang);
     });
@@ -9097,6 +9242,7 @@
       if (select) select.value = i18nLang;
     });
     renderDSHDesktopSetupResult();
+    renderDeepSeekHarnessSetupResult();
     renderOMPSetupResult();
     renderHermesSetupResult();
     updateSettingsSaveBar();
@@ -13688,7 +13834,7 @@
 
   // ── Agent provider guides ──
   let currentAgentGuide = null;
-  let dshSetupMode = 'cli';
+  let dshSetupMode = 'desktop';
   let dshModelCapacities = new Map();
   let dshConfiguredModel = null;
 
@@ -13755,6 +13901,7 @@
 
   function selectDshSetupMode(mode) {
     if (mode !== 'cli' && mode !== 'desktop') return;
+    if (deepSeekHarnessSetupPending) return;
     dshSetupMode = mode;
     document.querySelectorAll('[data-dsh-setup-mode]').forEach(function(input) {
       const selected = input.dataset.dshSetupMode === mode;
@@ -13765,6 +13912,7 @@
     document.querySelectorAll('[data-dsh-setup-panel]').forEach(function(panel) {
       panel.hidden = panel.dataset.dshSetupPanel !== mode;
     });
+    renderDeepSeekHarnessSetupResult();
     renderAgentGuideConfiguration();
   }
 
@@ -13842,6 +13990,58 @@
         .replace('{version}', result.installedVersion || '?').replace('{minimum}', result.minimumVersion || '18.1.16') : '';
     document.getElementById('omp-install').hidden = !result
       || !['not_installed', 'version_too_old', 'version_unknown'].includes(result.code);
+  }
+
+  let deepSeekHarnessSetupPending = false;
+  let deepSeekHarnessSetupMode = null;
+  const deepSeekHarnessSetupResults = {};
+
+  function configureDeepSeekHarness() {
+    if (deepSeekHarnessSetupPending) return;
+    if (!window.webkit?.messageHandlers?.fetchAPIPost) {
+      deepSeekHarnessSetupResults[dshSetupMode] = { code: 'native_required' };
+      renderDeepSeekHarnessSetupResult();
+      return;
+    }
+    deepSeekHarnessSetupPending = true;
+    deepSeekHarnessSetupMode = dshSetupMode;
+    delete deepSeekHarnessSetupResults[dshSetupMode];
+    renderDeepSeekHarnessSetupResult();
+    apiPost('/admin/api/agents/dsh/configure', {
+      mode: dshSetupMode,
+      model: document.getElementById('dsh-harness-model-select').value
+    });
+  }
+
+  function officialHarnessInstallationURL(mode, language) {
+    if (mode === 'cli') return 'https://github.com/deepseek-ai/deepseek-harness';
+    return 'https://www.deepseek.com/' + (String(language).toLowerCase().startsWith('zh') ? 'zh/' : 'en/') + 'download/';
+  }
+
+  function renderDeepSeekHarnessSetupResult() {
+    const button = document.getElementById('dsh-harness-configure');
+    button.disabled = deepSeekHarnessSetupPending;
+    button.textContent = t(deepSeekHarnessSetupPending ? 'dsh_harness_pending' : 'dsh_harness_button');
+    document.querySelectorAll('[data-dsh-setup-mode]').forEach(function(input) { input.disabled = deepSeekHarnessSetupPending; });
+    document.getElementById('dsh-harness-setup-desc').textContent = t('dsh_harness_' + dshSetupMode + '_desc');
+    const result = deepSeekHarnessSetupResults[dshSetupMode];
+    const feedback = document.getElementById('dsh-harness-feedback');
+    feedback.hidden = !deepSeekHarnessSetupPending && !result;
+    const warnings = ['not_installed', 'version_too_old', 'version_unknown', 'cli_unrecognized',
+      'custom_home', 'home_unknown', 'home_conflict', 'close_app', 'initialize_app', 'model_unavailable', 'local_only', 'busy'];
+    const tone = deepSeekHarnessSetupPending ? 'info' : result?.success === true ? 'success'
+      : warnings.includes(result?.code) ? 'warning' : 'error';
+    feedback.dataset.tone = tone;
+    document.getElementById('dsh-harness-feedback-icon').textContent = tone === 'success' ? '✓' : tone === 'info' ? 'i' : '!';
+    const code = result?.code === 'configured' ? 'configured_' + dshSetupMode : result?.code;
+    document.getElementById('dsh-harness-setup-status').textContent = deepSeekHarnessSetupPending ? t('dsh_harness_pending') : result
+      ? t('dsh_harness_' + code, t('dsh_harness_configuration_failed'))
+        .replace('{app}', t(dshSetupMode === 'cli' ? 'dsh_cli' : 'dsh_official_desktop'))
+        .replace('{version}', result.installedVersion || '?').replace('{minimum}', result.minimumVersion || '0.2.1-rc.2') : '';
+    const install = document.getElementById('dsh-harness-install');
+    install.hidden = !result || !['not_installed', 'version_too_old', 'version_unknown', 'cli_unrecognized'].includes(result.code);
+    install.href = officialHarnessInstallationURL(dshSetupMode, currentLang);
+    document.getElementById('dsh-harness-install-label').textContent = t('dsh_harness_install_' + dshSetupMode);
   }
 
   let dshDesktopSetupPending = false;
@@ -13966,6 +14166,7 @@
     const ompModel = updateAgentModelSelect(document.getElementById('omp-model-select'), models);
     const dshModel = updateAgentModelSelect(document.getElementById('dsh-model-select'), models);
     updateAgentModelSelect(document.getElementById('dsh-desktop-model-select'), models);
+    updateAgentModelSelect(document.getElementById('dsh-harness-model-select'), models);
     const modelStatus = models.length
       ? models.join(', ')
       : t('agent_no_model', 'No model loaded');
@@ -15692,6 +15893,10 @@
         ompSetupPending = false;
         ompSetupResult = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };
         renderOMPSetupResult();
+      } else if (path === '/admin/api/agents/dsh/configure') {
+        deepSeekHarnessSetupResults[deepSeekHarnessSetupMode] = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };
+        deepSeekHarnessSetupPending = false;
+        renderDeepSeekHarnessSetupResult();
       } else if (path === '/admin/api/agents/dsh-desktop/configure') {
         dshDesktopSetupPending = false;
         dshDesktopSetupResult = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };

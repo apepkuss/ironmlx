@@ -251,7 +251,7 @@ private struct DSHFixture {
     // Official Desktop has a status placeholder; community configuration stays in its own panel.
     _ = try await webView.evaluateJavaScript("selectAgentGuide('dsh'); selectDshSetupMode('desktop')")
     #expect(try await webView.evaluateJavaScript("document.getElementById('agent-guide-dsh-desktop').hidden") as? Bool == true)
-    #expect(try await webView.evaluateJavaScript("document.querySelector('#agent-guide-dsh [data-dsh-setup-panel=desktop]').textContent.includes('尚未适配')") as? Bool == true)
+    #expect(try await webView.evaluateJavaScript("document.querySelector('#agent-guide-dsh #dsh-harness-desktop-manual') !== null") as? Bool == true)
     #expect(try await webView.evaluateJavaScript("document.querySelector('#agent-guide-dsh #dsh-desktop-configure') === null") as? Bool == true)
     _ = try await webView.evaluateJavaScript("selectDshSetupMode('cli')")
     #expect(try await webView.evaluateJavaScript("document.querySelector('#agent-guide-dsh [data-dsh-setup-panel=cli]').hidden") as? Bool == false)
