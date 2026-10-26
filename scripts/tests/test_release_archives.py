@@ -50,6 +50,17 @@ class ArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must be empty"):
             archives.assemble(self.repo, self.app, self.output, self.package)
 
+    def test_optional_installer_is_covered_by_the_final_manifest(self):
+        installer = self.output / "IronMLX.pkg"
+        installer.write_bytes(b"installer fixture; content verified by installer gate")
+        manifest = self.output / "SHA256SUMS"
+        manifest.write_text(archives.checksums(self.repo, self.output, self.package))
+        self.assertIn("  IronMLX.pkg\n", manifest.read_text())
+        archives.verify(self.repo, self.app, self.output, self.package)
+        installer.write_bytes(b"changed installer")
+        with self.assertRaisesRegex(ValueError, "coverage"):
+            archives.verify(self.repo, self.app, self.output, self.package)
+
     def test_incomplete_manifest(self):
         manifest = self.output / "SHA256SUMS"
         manifest.write_text("\n".join(manifest.read_text().splitlines()[1:]) + "\n")

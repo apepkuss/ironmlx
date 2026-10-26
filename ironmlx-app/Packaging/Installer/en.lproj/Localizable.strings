@@ -1,0 +1,6 @@
+"ironmlx.description" = "IronMLX inference service (required). Configure model connections after installation in Dashboard → Agent.";
+"harness.install" = "Optional: install DeepSeek Harness Desktop for chat and Agent tasks. Clear this checkbox to use another client. No model or provider configuration is changed during installation. A compatible or newer installed copy is reused. Recognized older releases in /Applications are upgraded; unrecognized installations are preserved and skipped.";
+"harness.reuse" = "A compatible or newer official DeepSeek Harness Desktop is already installed. It will be reused; the bundled copy will not be installed.";
+"harness.upgrade" = "Upgrade the older official DeepSeek Harness Desktop in /Applications to the bundled version. Existing user data is retained. Clear this checkbox to keep the current version.";
+"harness.blocked" = "The existing application cannot be safely upgraded. It will be preserved and Harness installation will be skipped. Resolve its version or location before using one-click setup.";
+"startup.volume" = "Install IronMLX on the startup disk.";

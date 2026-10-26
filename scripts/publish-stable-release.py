@@ -118,6 +118,13 @@ def main():
     version = (root / 'VERSION').read_text().strip()
     assets = [root / '.build/stable-release' / ('IronMLX.dmg' if kind == 'dmg' else f'IronMLX-{version}.zip')
               for kind in ('dmg', 'zip')]
+    installer = root / '.build/stable-release/IronMLX.pkg'
+    run('python3', root / 'scripts/package-installer.py', 'verify', root / 'dist/IronMLX.app',
+        root / '.build/harness/DeepSeek Harness.app', installer)
+    run('pkgutil', '--check-signature', installer)
+    run('xcrun', 'stapler', 'validate', installer)
+    run('spctl', '--assess', '--type', 'install', installer)
+    assets.append(installer)
     update = root / '.build/app-update'
     data = json.loads((update / 'update.json').read_text())
     require(data['tag'] == args.tag and data['channel'] == ('release-candidate' if args.candidate else 'stable'), 'update identity mismatch')

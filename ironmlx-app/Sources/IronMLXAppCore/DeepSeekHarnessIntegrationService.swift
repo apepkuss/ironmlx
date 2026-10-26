@@ -69,6 +69,54 @@ struct DeepSeekHarnessIntegrationService {
         return Result(code: "version_unknown")
     }
 
+    /// Resolve the same supported installation that will be opened, never by URL scheme alone.
+    func desktopApplicationURL() -> URL? {
+        applicationURLs().first { url in
+            guard let info = Self.applicationInfo(url),
+                  info["CFBundleIdentifier"] as? String == Self.bundleIdentifier,
+                  let version = info["CFBundleShortVersionString"] as? String else { return false }
+            return Self.supports(version)
+        }
+    }
+
+    /// Read-only preflight. Configuration stays owned by the existing one-click setup flow.
+    func desktopConfigurationIsReady(modelIDs: [String], port: UInt16) -> Bool {
+        let override = (environment["DSH_HOME"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let defaultHome = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".dsh").path
+        guard override.isEmpty || override == defaultHome || override == "~/.dsh" else { return false }
+        do {
+            let patch = harnessHome.appendingPathComponent("profiles/desktop/cordis.patch.yml")
+            let credentials = harnessHome.appendingPathComponent(".credentials.yaml")
+            let homePatch = harnessHome.appendingPathComponent("cordis.patch.yml")
+            for url in [patch, credentials, homePatch] { try checkPath(url) }
+            guard !FileManager.default.fileExists(atPath: harnessHome.appendingPathComponent("settings.yaml").path),
+                  !Self.containsManagedEntry(try rows(readIfPresent(homePatch)) ?? []),
+                  let entries = try rows(readIfPresent(patch)),
+                  entries.filter({ $0["id"] as? String == "agent-default-model" }).count == 1,
+                  entries.filter({ $0["id"] as? String == "llm-pi-ai" }).count == 1,
+                  let defaultEntry = entries.first(where: { $0["id"] as? String == "agent-default-model" }),
+                  defaultEntry["disabled"] == nil || defaultEntry["disabled"] as? Bool == false,
+                  let selected = defaultEntry["config"] as? [String: Any],
+                  selected["provider"] as? String == "ironmlx-local",
+                  let model = selected["model"] as? String, modelIDs.contains(model),
+                  let llm = entries.first(where: { $0["id"] as? String == "llm-pi-ai" }),
+                  llm["disabled"] == nil || llm["disabled"] as? Bool == false,
+                  let config = llm["config"] as? [String: Any],
+                  let providers = config["providers"] as? [String: Any],
+                  let provider = providers["ironmlx-local"] as? [String: Any],
+                  provider["api"] as? String == "openai-responses",
+                  provider["baseURL"] as? String == "http://127.0.0.1:\(port)/v1",
+                  provider["apiKeyEnv"] as? String == Self.credentialReference,
+                  provider["apiKey"] == nil, provider["baseURLEnv"] == nil,
+                  let models = provider["models"] as? [[String: Any]],
+                  models.contains(where: { $0["id"] as? String == model }),
+                  let document = try yaml(readIfPresent(credentials)) as? [String: Any],
+                  let refs = document["refs"] as? [String: String],
+                  refs[Self.credentialReference] == "local" else { return false }
+            return true
+        } catch { return false }
+    }
+
     private static func applicationInfo(_ url: URL) -> [String: Any]? {
         guard let data = try? Data(contentsOf: url.appendingPathComponent("Contents/Info.plist")) else { return nil }
         return try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]

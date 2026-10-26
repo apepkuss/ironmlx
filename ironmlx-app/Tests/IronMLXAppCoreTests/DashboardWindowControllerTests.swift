@@ -1,3 +1,4 @@
+import JavaScriptCore
 import AppKit
 import Testing
 import WebKit
@@ -253,4 +254,27 @@ import WebKit
     #expect(script.contains("window.__IRONMLX_COLD_CACHE_CAPACITY__"))
     #expect(script.contains(#""default_gb":10"#))
     #expect(script.contains(#""min_gb":1"#))
+}
+
+@MainActor
+@Test func harnessRouteSelectsOfficialDesktopWithoutChangingAgentPage() throws {
+    let context = try #require(JSContext())
+    context.evaluateScript("""
+        var calls = [];
+        var document = { readyState: 'complete' };
+        function setTimeout(callback) { callback(); }
+        function navigateTo(page) { calls.push('page:' + page); }
+        function selectAgentGuide(guide) { calls.push('guide:' + guide); }
+        function selectDshSetupMode(mode) { calls.push('mode:' + mode); }
+        """)
+    let htmlURL = try #require(IronMLXAppResourceResolver.url(forResource: "dashboard2", withExtension: "html"))
+    let html = try String(contentsOf: htmlURL, encoding: .utf8)
+    #expect(html.contains("data-page=\"chat\""))
+    #expect(html.contains("id=\"page-chat\""))
+    context.evaluateScript(DashboardWindowController.routeScript(for: .harness))
+    #expect(context.exception == nil)
+    #expect(context.evaluateScript("calls.join(',')")?.toString() == "page:chat,guide:dsh,mode:desktop")
+    context.evaluateScript("calls = []")
+    context.evaluateScript(DashboardWindowController.routeScript(for: .serviceStatus))
+    #expect(context.evaluateScript("calls.join(',')")?.toString() == "page:status")
 }

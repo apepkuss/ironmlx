@@ -314,13 +314,23 @@ public final class DashboardWindowController {
         }
     }
 
-    private static func routeScript(for route: DashboardInitialRoute) -> String {
+    static func routeScript(for route: DashboardInitialRoute) -> String {
         let routeValue = DashboardBridge.jsStringLiteral(route.rawValue)
         return """
         (function() {
           var route = \(routeValue);
           function applyInitialRoute() {
+            if (route === 'serviceStatus') {
+              if (typeof navigateTo === 'function') navigateTo('status');
+              return;
+            }
             if (route === 'status') {
+              return;
+            }
+            if (route === 'harness') {
+              if (typeof navigateTo === 'function') navigateTo('chat');
+              if (typeof selectAgentGuide === 'function') selectAgentGuide('dsh');
+              if (typeof selectDshSetupMode === 'function') selectDshSetupMode('desktop');
               return;
             }
             if (route === 'onboarding' && typeof showOnboarding === 'function') {

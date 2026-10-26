@@ -1,0 +1,6 @@
+"ironmlx.description" = "IronMLX 推論服務（必選）。安裝後在儀表板 → Agent 中設定模型連線。";
+"harness.install" = "可選：安裝 DeepSeek Harness Desktop，用於對話和 Agent 任務。使用其他用戶端時可取消勾選。安裝時不修改模型或 Provider 設定。 已有相容或較新版本則沿用；僅升級 /Applications 中可辨識的舊版本；無法辨識的安裝將保留並略過。";
+"harness.reuse" = "已安裝相容或較新的官方 DeepSeek Harness Desktop，將沿用現有應用程式，不安裝隨附副本。";
+"harness.upgrade" = "將 /Applications 中較舊的官方 DeepSeek Harness Desktop 升級為隨附版本，保留使用者資料。取消勾選可保留目前版本。";
+"harness.blocked" = "現有應用程式無法安全升級，將保留並略過 Harness 安裝。請處理版本或安裝位置後使用一鍵設定。";
+"startup.volume" = "請將 IronMLX 安裝到啟動磁碟。";

@@ -343,3 +343,109 @@ private final class HarnessLinkRecorder: NSObject, WKScriptMessageHandler {
     #expect(try String(contentsOf: f.patch("web"), encoding: .utf8) == original)
     #expect(!FileManager.default.fileExists(atPath: f.home.appendingPathComponent(".credentials.yaml").path))
 }
+
+@MainActor
+@Test func harnessChatPreflightNeverWritesAndOpensTheResolvedApplication() async throws {
+    let f = HarnessFixture()
+    defer { f.clean() }
+    var service = HarnessChatService(integration: f.service(), runningApplications: { [] },
+        loadedModelIDs: { _ in ["test/model"] }, openApplication: { _ in Issue.record("unexpected launch") })
+    var config = AppConfig()
+    #expect(await service.open(config: config, backendState: .running) == .notInstalled)
+    #expect(!FileManager.default.fileExists(atPath: f.home.path))
+    try f.installApp()
+    #expect(await service.open(config: config, backendState: .stopped) == .backendUnavailable)
+    #expect(await service.open(config: config, backendState: .running) == .configurationRequired)
+    #expect(!FileManager.default.fileExists(atPath: f.home.path))
+    let result = await f.service().configure(mode: .desktop, model: f.model, port: config.port)
+    #expect(result.success)
+    let patchBefore = try Data(contentsOf: f.patch("desktop"))
+    var opened: [URL] = []
+    service.openApplication = { opened.append($0) }
+    #expect(await service.open(config: config, backendState: .running) == nil)
+    #expect(opened == [f.app])
+    #expect(try Data(contentsOf: f.patch("desktop")) == patchBefore)
+    config.port += 1
+    #expect(await service.open(config: config, backendState: .running) == .configurationRequired)
+    config.port -= 1
+    service.loadedModelIDs = { _ in [] }
+    #expect(await service.open(config: config, backendState: .running) == .modelUnavailable)
+    service.loadedModelIDs = { _ in ["other/model"] }
+    #expect(await service.open(config: config, backendState: .running) == .configurationRequired)
+    service.loadedModelIDs = { _ in throw URLError(.cannotConnectToHost) }
+    #expect(await service.open(config: config, backendState: .running) == .backendUnavailable)
+    #expect(opened.count == 1)
+}
+
+@MainActor
+@Test func harnessChatPreservesRunningCopyOwnershipAndReportsLaunchFailure() async throws {
+    let f = HarnessFixture()
+    defer { f.clean() }
+    try f.installApp()
+    let config = AppConfig()
+    #expect(await f.service().configure(mode: .desktop, model: f.model, port: config.port).success)
+    var service = HarnessChatService(integration: f.service(), runningApplications: { [] },
+        loadedModelIDs: { _ in ["test/model"] }, openApplication: { _ in throw URLError(.fileDoesNotExist) })
+    #expect(await service.open(config: config, backendState: .running) == .launchFailed)
+    let other = f.root.appendingPathComponent("old/DeepSeek Harness.app")
+    try f.write(#"<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.deepseek.dsh</string><key>CFBundleShortVersionString</key><string>0.1.0</string></dict></plist>"#,
+        other.appendingPathComponent("Contents/Info.plist"))
+    service.runningApplications = { [other] }
+    #expect(await service.open(config: config, backendState: .running) == .incompatibleVersion)
+    service.runningApplications = { [f.app] }
+    var opened: URL?
+    service.openApplication = { opened = $0 }
+    #expect(await service.open(config: config, backendState: .running) == nil)
+    #expect(opened == f.app)
+}
+
+@MainActor
+@Test func harnessChatRejectsCredentialAndHomeOverridesWithoutModifyingThem() async throws {
+    let f = HarnessFixture()
+    defer { f.clean() }
+    try f.installApp()
+    let config = AppConfig()
+    var integration = f.service()
+    #expect(await integration.configure(mode: .desktop, model: f.model, port: config.port).success)
+    #expect(integration.desktopConfigurationIsReady(modelIDs: [f.model.id], port: config.port))
+    integration.environment = ["DSH_HOME": "/tmp/custom-harness"]
+    #expect(!integration.desktopConfigurationIsReady(modelIDs: [f.model.id], port: config.port))
+    integration.environment = [:]
+    try f.write("version: 1\nrefs: {}\n", f.home.appendingPathComponent(".credentials.yaml"))
+    #expect(!integration.desktopConfigurationIsReady(modelIDs: [f.model.id], port: config.port))
+}
+
+@MainActor
+@Test(.enabled(if: ProcessInfo.processInfo.environment["IRONMLX_TEST_HARNESS_CHAT_LIVE"] == "1"))
+func harnessChatOpensExistingConfiguredDesktopAgainstLiveLocalService() async throws {
+    let service = HarnessChatService()
+    let issue = await service.open(config: AppConfig(), backendState: .running)
+    #expect(issue == nil)
+    if issue == nil {
+        #expect(!NSRunningApplication.runningApplications(
+            withBundleIdentifier: DeepSeekHarnessIntegrationService.bundleIdentifier).isEmpty)
+    }
+}
+
+@MainActor
+@Test func harnessMenuLaunchForwardsToServiceAndIgnoresDuplicateClicks() async throws {
+    let f = HarnessFixture()
+    defer { f.clean() }
+    try f.installApp()
+    let store = AppConfigStore(url: f.root.appendingPathComponent("app_config.json"))
+    let config = store.load()
+    #expect(await f.service().configure(mode: .desktop, model: f.model, port: config.port).success)
+    let backend = TestRuntimeBackend(state: .running, isRunning: true)
+    let dashboard = DashboardWindowController(configStore: store, backend: backend)
+    let controller = MenuBarController(configStore: store, backend: backend, dashboard: dashboard)
+    var opened: [URL] = []
+    controller.harnessChatService = HarnessChatService(integration: f.service(), runningApplications: { [] },
+        loadedModelIDs: { _ in ["test/model"] }, openApplication: { opened.append($0) })
+    controller.chatWithDSH(NSMenuItem())
+    controller.chatWithDSH(NSMenuItem())
+    for _ in 0..<50 {
+        if !opened.isEmpty { break }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(opened == [f.app])
+}

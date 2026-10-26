@@ -1,6 +1,6 @@
 **{{RELEASE_STATUS_EN}} This build is for {{PURPOSE_EN}} Requires Apple Silicon and macOS {{MIN_MACOS}} or later.**
 
-**[Download DMG]({{DMG_URL}})** · [ZIP alternative]({{ZIP_URL}})
+**[Download installer]({{PKG_URL}})** · [App-only DMG]({{DMG_URL}}) · [ZIP alternative]({{ZIP_URL}})
 
 Model weights are downloaded separately. Memory requirements depend on the model, quantization and context length.
 
@@ -24,7 +24,7 @@ Compatibility depends on the specific architecture, weights and runtime mode. Ch
 
 **{{RELEASE_STATUS_ZH}}此版本用于{{PURPOSE_ZH}}，需要 Apple Silicon 和 macOS {{MIN_MACOS}} 或更高版本。**
 
-**[下载 DMG 安装包]({{DMG_URL}})** · [ZIP 备选]({{ZIP_URL}})
+**[下载安装器]({{PKG_URL}})** · [仅安装主应用的 DMG]({{DMG_URL}}) · [ZIP 备选]({{ZIP_URL}})
 
 模型权重需要另行下载；内存需求取决于模型、量化方式和上下文长度。
 

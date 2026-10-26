@@ -57,6 +57,7 @@ def render(root: Path, repository: str, tag: str, candidate: bool) -> str:
         "RELEASE_STATUS_ZH": f"{tag} 是预发布版本。" if candidate else f"{tag} 是正式版本。",
         "PURPOSE_ZH": "测试与反馈" if candidate else "日常使用",
         "MIN_MACOS": "26.4",
+        "PKG_URL": f"{release_url}/IronMLX.pkg",
         "DMG_URL": f"{release_url}/IronMLX.dmg",
         "ZIP_URL": f"{release_url}/IronMLX-{version}.zip",
         "SUPPORTED_MODELS_URL": f"{base}/blob/{tag}/docs/supported-models.md",

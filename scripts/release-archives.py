@@ -70,14 +70,15 @@ def check_materials(repo, root):
             and (root / "THIRD_PARTY_LICENSES").is_dir(), "license directory mismatch")
 
 
-def asset_names(repo, package):
-    return sorted([f"{package}.zip", "IronMLX.dmg", *MATERIALS] + [
+def asset_names(repo, package, output=None):
+    return sorted([f"{package}.zip", "IronMLX.dmg", *MATERIALS] +
+                  (["IronMLX.pkg"] if output and (output / "IronMLX.pkg").exists() else []) + [
         f"THIRD_PARTY_LICENSES/{path.relative_to(repo / 'THIRD_PARTY_LICENSES').as_posix()}"
         for path in (repo / "THIRD_PARTY_LICENSES").rglob("*") if path.is_file()])
 
 
 def checksums(repo, output, package):
-    return "".join(f"{digest(output / name)}  {name}\n" for name in asset_names(repo, package))
+    return "".join(f"{digest(output / name)}  {name}\n" for name in asset_names(repo, package, output))
 
 
 def verify(repo, app, output, package):
@@ -86,7 +87,8 @@ def verify(repo, app, output, package):
             "SHA256SUMS mismatch or incomplete coverage")
     check_materials(repo, output)
     require({p.name for p in output.iterdir()} == {
-        f"{package}.zip", "IronMLX.dmg", "SHA256SUMS", *MATERIALS, "THIRD_PARTY_LICENSES"},
+        f"{package}.zip", "IronMLX.dmg", "SHA256SUMS", *MATERIALS, "THIRD_PARTY_LICENSES",
+        *(["IronMLX.pkg"] if (output / "IronMLX.pkg").exists() else [])},
         "unexpected standalone assets")
     expected = inventory(app)
 
@@ -165,7 +167,7 @@ def assemble(repo, app, output, package):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("assemble", "verify", "finalize-dmg"))
+    parser.add_argument("action", choices=("assemble", "verify", "finalize-dmg", "finalize-installer"))
     parser.add_argument("app", type=Path, help="reference App already checked by the caller")
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
@@ -184,6 +186,12 @@ def main():
         run("codesign", "--verify", "--strict", dmg)
         run("xcrun", "stapler", "validate", dmg)
         run("spctl", "--assess", "--type", "open", "--context", "context:primary-signature", dmg)
+        (output / "SHA256SUMS").write_text(checksums(repo, output, f"IronMLX-{version}"))
+    if args.action == "finalize-installer":
+        installer = output / "IronMLX.pkg"
+        run("pkgutil", "--check-signature", installer)
+        run("xcrun", "stapler", "validate", installer)
+        run("spctl", "--assess", "--type", "install", installer)
         (output / "SHA256SUMS").write_text(checksums(repo, output, f"IronMLX-{version}"))
     operation = assemble if args.action == "assemble" else verify
     operation(repo, app, output, f"IronMLX-{version}")

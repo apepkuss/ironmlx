@@ -116,18 +116,22 @@ if name == 'security' and args == ['list-keychains', '-d', 'user']:
     print('    "/Users/test/Library/Keychains/login with spaces.keychain-db"')
 if name == 'security' and args[:2] == ['find-identity', '-v']:
     if os.environ['TEST_IDENTITY'] == 'valid':
-        print('  1) ' + 'A'*40 + ' "Developer ID Application: Test (TESTTEAM)"')
+        print('  1) ' + 'A'*40 + ' "Developer ID ' + os.environ.get('TEST_CERT_KIND', 'Application') + ': Test (TESTTEAM)"')
     elif os.environ['TEST_IDENTITY'] == 'mismatch':
         print('  1) ' + 'B'*40 + ' "Developer ID Application: Other (TESTTEAM)"')
     else:
         print('     0 valid identities found')
+if name == 'productsign':
+    import shutil
+    shutil.copyfile(args[-2], args[-1])
+if name == 'pkgutil': print('Developer ID Installer: Test (TESTTEAM)')
 if name == 'openssl': print('temporary-test-password')
 if name == 'codesign' and '-dv' in args: print('TeamIdentifier=TESTTEAM')
 if name == 'xcrun' and args[:2] == ['notarytool', 'submit']:
     print(json.dumps({'status': os.environ['NOTARY_STATUS']}))
 ''')
             shim.chmod(0o755)
-            for name in ('security', 'openssl', 'xcrun', 'codesign', 'plutil', 'ditto', 'spctl', 'curl'):
+            for name in ('security', 'openssl', 'xcrun', 'codesign', 'plutil', 'ditto', 'spctl', 'curl', 'productsign', 'pkgutil'):
                 (bindir / name).symlink_to(shim)
             env = os.environ.copy()
             env.update(PATH=f'{bindir}:{env["PATH"]}', RUNNER_TEMP=tmp, CALL_LOG=str(log), NOTARY_STATUS=status, TEST_IDENTITY=identity,
@@ -135,6 +139,10 @@ if name == 'xcrun' and args[:2] == ['notarytool', 'submit']:
                        IRONMLX_SIGNING_IDENTITY='Developer ID Application: Test (TESTTEAM)',
                        IRONMLX_APPLE_TEAM_ID='TESTTEAM', IRONMLX_NOTARY_KEY_ID='test',
                        IRONMLX_NOTARY_ISSUER_ID='test', IRONMLX_NOTARY_PRIVATE_KEY='test')
+            if kind == 'pkg':
+                env.update(TEST_CERT_KIND='Installer', IRONMLX_INSTALLER_ID_P12_BASE64='dGVzdA==',
+                           IRONMLX_INSTALLER_ID_P12_PASSWORD='test',
+                           IRONMLX_INSTALLER_SIGNING_IDENTITY='Developer ID Installer: Test (TESTTEAM)')
             # Copy script/resources so simulated receipts stay outside the repository.
             scripts = root / 'scripts'
             scripts.mkdir()
@@ -154,8 +162,11 @@ if name == 'xcrun' and args[:2] == ['notarytool', 'submit']:
                 self.assertIn(b'expected one valid Developer ID identity', result.stderr)
                 self.assertFalse(any(c[0] in ('codesign', 'plutil', 'xcrun') for c in calls))
                 return
+            if kind == 'pkg':
+                self.assertTrue(any(c[:5] == ['security', 'find-identity', '-v', '-p', 'basic'] for c in calls))
+                self.assertTrue(any(c[:4] == ['spctl', '--assess', '--type', 'install'] for c in calls) == (status == 'Accepted'))
             self.assertTrue(all(c[c.index('--sign') + 1] == 'A'*40 for c in calls if '--sign' in c))
-            signed = [i for i, c in enumerate(calls) if c[:2] == ['codesign', '--force']]
+            signed = [i for i, c in enumerate(calls) if c[:2] == ['codesign', '--force'] or c[0] == 'productsign']
             self.assertEqual(len(signed), 8 if kind == "app" else 1)
             self.assertTrue(all(i < signed[0] for i, c in enumerate(calls) if c[0] == 'plutil'))
             if kind == 'app':
@@ -163,6 +174,10 @@ if name == 'xcrun' and args[:2] == ['notarytool', 'submit']:
                 self.assertIn('--entitlements', calls[signed[1]])
             submit = next(i for i, c in enumerate(calls) if c[:3] == ['xcrun', 'notarytool', 'submit'])
             self.assertGreater(submit, signed[-1])
+
+    def test_installer_uses_installer_identity_and_install_assessment(self):
+        self.scenario('Accepted', kind='pkg')
+        self.scenario('Invalid', kind='pkg')
 
     def test_missing_credentials_fail_before_keychain_creation(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -7,8 +7,18 @@ readonly APP="$(realpath "${1:?App or DMG path required}")"
 case "$APP" in
   *.app) kind=app ;;
   *.dmg) kind=dmg ;;
-  *) echo 'error: expected App or DMG' >&2; exit 1 ;;
+  *.pkg) kind=pkg ;;
+  *) echo 'error: expected App, DMG or PKG' >&2; exit 1 ;;
 esac
+certificate_kind="Developer ID Application"
+identity_policy=codesigning
+if [ "$kind" = pkg ]; then
+  certificate_kind="Developer ID Installer"
+  identity_policy=basic
+  IRONMLX_DEVELOPER_ID_P12_BASE64="${IRONMLX_INSTALLER_ID_P12_BASE64:-}"
+  IRONMLX_DEVELOPER_ID_P12_PASSWORD="${IRONMLX_INSTALLER_ID_P12_PASSWORD:-}"
+  IRONMLX_SIGNING_IDENTITY="${IRONMLX_INSTALLER_SIGNING_IDENTITY:-}"
+fi
 readonly CHANNEL="${2:-stable}"
 case "$CHANNEL" in stable|release-candidate) ;; *) echo 'error: invalid signing channel' >&2; exit 1 ;; esac
 readonly WORK="${RUNNER_TEMP:?RUNNER_TEMP required}/ironmlx-signing"
@@ -16,8 +26,8 @@ readonly KEYCHAIN="$WORK/signing.keychain-db"
 for name in IRONMLX_DEVELOPER_ID_P12_BASE64 IRONMLX_DEVELOPER_ID_P12_PASSWORD IRONMLX_SIGNING_IDENTITY IRONMLX_APPLE_TEAM_ID IRONMLX_NOTARY_KEY_ID IRONMLX_NOTARY_ISSUER_ID IRONMLX_NOTARY_PRIVATE_KEY; do
   [ -n "${!name:-}" ] || { echo "error: missing $name" >&2; exit 1; }
 done
-[[ "$IRONMLX_SIGNING_IDENTITY" = "Developer ID Application: "*" ($IRONMLX_APPLE_TEAM_ID)" ]] || {
-  echo 'error: expected Developer ID Application identity for configured team' >&2; exit 1;
+[[ "$IRONMLX_SIGNING_IDENTITY" = "$certificate_kind: "*" ($IRONMLX_APPLE_TEAM_ID)" ]] || {
+  echo 'error: expected matching Developer ID identity for configured team' >&2; exit 1;
 }
 [ ! -e "$WORK" ] || { echo 'error: signing workspace already exists' >&2; exit 1; }
 umask 077
@@ -46,7 +56,7 @@ search_list_changed=true
 security list-keychains -d user -s "$KEYCHAIN" ${original_keychains[@]+"${original_keychains[@]}"}
 security set-keychain-settings -lut 21600 "$KEYCHAIN"
 security unlock-keychain -p "$keychain_password" "$KEYCHAIN"
-security import "$WORK/certificate.p12" -k "$KEYCHAIN" -P "$IRONMLX_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign >/dev/null
+security import "$WORK/certificate.p12" -k "$KEYCHAIN" -P "$IRONMLX_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/productsign >/dev/null
 # Provision Apple's Developer ID intermediates in this isolated keychain.
 # Importing certificates does not override macOS trust policy.
 for certificate in DeveloperIDCA DeveloperIDG2CA; do
@@ -56,7 +66,7 @@ for certificate in DeveloperIDCA DeveloperIDG2CA; do
 done
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$KEYCHAIN" >/dev/null
 # A successful PKCS#12 import alone does not prove a usable signing identity.
-security find-identity -v -p codesigning "$KEYCHAIN" > "$WORK/identities.txt"
+security find-identity -v -p "$identity_policy" "$KEYCHAIN" > "$WORK/identities.txt"
 signing_identity_sha="$(python3 - "$WORK/identities.txt" "$IRONMLX_SIGNING_IDENTITY" <<'PYIDENTITY'
 import re, sys
 matches = [m.group(1) for line in open(sys.argv[1])
@@ -90,11 +100,19 @@ if [ "$kind" = app ]; then
   sign "$APP/Contents/Helpers/ironmlx"
   sign "$APP/Contents/Helpers/iron-bench"
   sign "$APP"
+elif [ "$kind" = pkg ]; then
+  productsign --sign "$signing_identity_sha" --keychain "$KEYCHAIN" --timestamp "$APP" "$WORK/signed.pkg"
+  mv "$WORK/signed.pkg" "$APP"
 else
   codesign --force --sign "$signing_identity_sha" --keychain "$KEYCHAIN" --timestamp "$APP"
 fi
-codesign --verify --deep --strict "$APP"
-codesign -dv "$APP" 2>&1 | grep -Fx "TeamIdentifier=$IRONMLX_APPLE_TEAM_ID"
+if [ "$kind" = pkg ]; then
+  pkgutil --check-signature "$APP" > "$WORK/pkg-signature.txt"
+  grep -F "$IRONMLX_SIGNING_IDENTITY" "$WORK/pkg-signature.txt" >/dev/null
+else
+  codesign --verify --deep --strict "$APP"
+  codesign -dv "$APP" 2>&1 | grep -Fx "TeamIdentifier=$IRONMLX_APPLE_TEAM_ID"
+fi
 
 payload="$APP"
 if [ "$kind" = app ]; then
@@ -113,8 +131,11 @@ if result.get('status') != 'Accepted':
 PY
 xcrun stapler staple "$APP"
 xcrun stapler validate "$APP"
-codesign --verify --deep --strict "$APP"
-if [ "$kind" = app ]; then
+if [ "$kind" != pkg ]; then codesign --verify --deep --strict "$APP"; fi
+if [ "$kind" = pkg ]; then
+  pkgutil --check-signature "$APP"
+  spctl --assess --type install --verbose=4 "$APP"
+elif [ "$kind" = app ]; then
   spctl --assess --type execute --verbose=4 "$APP"
 else
   spctl --assess --type open --context context:primary-signature --verbose=4 "$APP"

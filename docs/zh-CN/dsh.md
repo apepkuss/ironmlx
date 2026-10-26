@@ -2,13 +2,15 @@
 
 [English](../dsh.md)
 
-DeepSeek Harness 可通过 Responses API 将 IronMLX 用作推理服务。本指南已使用 dsh `master` 的 `ddefc45fbc` 与本地 Qwen3.8-27B-4bit + DFlash2 组合验证；其他 dsh 版本和模型的行为可能不同。请先启动 IronMLX 并加载目标模型；dsh 需按其项目说明单独安装。
+DeepSeek Harness 可通过 Responses API 将 IronMLX 用作推理服务。本指南已使用 dsh `master` 的 `ddefc45fbc` 与本地 Qwen3.8-27B-4bit + DFlash2 组合验证；其他 dsh 版本和模型的行为可能不同。请先启动 IronMLX 并加载目标模型；dsh 可通过安装器的可选组件安装，也可按其项目说明自行安装。
 
 根据你使用的 DSH 客户端，选择对应的配置方式：
 
 - [官方 DeepSeek Harness 一键配置](#官方-deepseek-harness-一键配置)：分别配置官方 CLI 和 Desktop。
 - [DSH Desktop App](#dsh-desktop-app-配置)：通过图形界面创建提供方并选择模型。
 - [DSH CLI](#dsh-cli-配置)：生成或编写 overlay，通过 `--patch` 启动。
+
+`IronMLX.pkg` 安装器提供默认勾选的官方 DeepSeek Harness Desktop 可选组件；使用其他 Agent 客户端时可以取消。之后自行安装 Harness，仍可使用现有一键配置。加载对话模型并在 Agent 页面配置官方桌面版后，从 IronMLX 菜单栏图标选择 **与 DSH 对话**，悬浮提示为 **打开 DeepSeek Harness**。入口会打开或唤起官方窗口；缺安装、模型、服务或配置时提供与界面语言一致的引导，不自动改写配置。
 
 ## 官方 DeepSeek Harness 一键配置
 

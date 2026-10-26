@@ -319,6 +319,9 @@ jobs:
           IRONMLX_SPEECH_CLIENT="$RUNNER_TEMP/ironmlx-speech-client" \
             python3 -m unittest discover -s scripts/tests -p test_speech_client.py -v
 
+      - name: Test optional Harness installer
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_harness_installer.py -v
+
       - name: Test stable release failure boundaries
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_stable_release.py -v
 

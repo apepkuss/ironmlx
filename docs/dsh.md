@@ -2,13 +2,15 @@
 
 [简体中文](zh-CN/dsh.md)
 
-DeepSeek Harness can use IronMLX as an inference provider through the Responses API. This guide was verified with dsh `master` at `ddefc45fbc` and a local Qwen3.8-27B-4bit + DFlash2 service. Other dsh revisions and models may behave differently. Start IronMLX and load the intended model first; install dsh separately following its own project instructions.
+DeepSeek Harness can use IronMLX as an inference provider through the Responses API. This guide was verified with dsh `master` at `ddefc45fbc` and a local Qwen3.8-27B-4bit + DFlash2 service. Other dsh revisions and models may behave differently. Start IronMLX and load the intended model first; install dsh through the optional installer component or following its own project instructions.
 
 Choose the configuration path for the DSH client you use:
 
 - [Official DeepSeek Harness one-click setup](#official-deepseek-harness-one-click-setup): configure official CLI and Desktop separately.
 - [DSH Desktop App](#dsh-desktop-app-configuration): create a provider and select models through the GUI.
 - [DSH CLI](#dsh-cli-configuration): generate or write an overlay, then launch with `--patch`.
+
+The `IronMLX.pkg` installer offers official DeepSeek Harness Desktop as an optional component selected by default. Clear the checkbox if you use another Agent client. You can also install Harness yourself later; the existing one-click setup remains available. After loading a chat model, configure the official Desktop on the Agent page, then choose **Chat with DSH** from the IronMLX menu bar icon. Its tooltip is **Open DeepSeek Harness**. The entry opens or activates the official window; missing installation, model, service or configuration leads to localized guidance without automatically rewriting configuration.
 
 ## Official DeepSeek Harness one-click setup
 

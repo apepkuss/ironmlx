@@ -1,0 +1,6 @@
+"ironmlx.description" = "IronMLX 推論サービス（必須）。インストール後、ダッシュボード → Agent でモデル接続を設定します。";
+"harness.install" = "任意：対話と Agent タスク用に DeepSeek Harness Desktop をインストールします。別のクライアントを使用する場合は選択を解除できます。モデルや Provider の設定は変更しません。 対応版または新しい既存版はそのまま使用します。/Applications 内の確認可能な旧版のみ更新し、不明なインストールは保持してスキップします。";
+"harness.reuse" = "対応版または新しい公式 DeepSeek Harness Desktop がインストール済みです。既存のアプリを使用し、同梱版はインストールしません。";
+"harness.upgrade" = "/Applications 内の古い公式 DeepSeek Harness Desktop を同梱版に更新します。ユーザーデータは保持されます。現在のバージョンを保持するには選択を解除してください。";
+"harness.blocked" = "既存のアプリを安全に更新できません。アプリを保持し、Harness のインストールをスキップします。バージョンまたは場所を確認してからワンクリック設定を実行してください。";
+"startup.volume" = "IronMLX を起動ディスクにインストールしてください。";

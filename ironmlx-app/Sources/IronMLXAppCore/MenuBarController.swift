@@ -64,6 +64,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     private var loadedModelRefreshGeneration: UInt64 = 0
     private var loadedModelRefreshTask: Task<Void, Never>?
     private var refreshTimer: Timer?
+    private var harnessChatPending = false
+    var harnessChatService = HarnessChatService()
 
     public init(
         configStore: AppConfigStore,
@@ -119,6 +121,36 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc public func openDashboard(_ sender: NSMenuItem) {
         dashboard.show()
+    }
+
+    @objc public func chatWithDSH(_ sender: NSMenuItem) {
+        guard !harnessChatPending else { return }
+        harnessChatPending = true
+        Task {
+            defer { harnessChatPending = false }
+            let config = configStore.load()
+            let result = await harnessChatService.open(config: config, backendState: backend.state)
+            guard let issue = result else { return }
+            let text = HarnessChatText(language: config.language)
+            let alert = NSAlert()
+            alert.messageText = text.tooltip
+            alert.informativeText = text.message(issue)
+            alert.addButton(withTitle: issue == .notInstalled ? text.download : text.dashboard)
+            alert.addButton(withTitle: text.cancel)
+            NSApp.activate(ignoringOtherApps: true)
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            if issue == .notInstalled {
+                let path = config.language.hasPrefix("zh") ? "zh" : "en"
+                NSWorkspace.shared.open(URL(string: "https://www.deepseek.com/\(path)/download/")!)
+            } else {
+                let route: DashboardInitialRoute = switch issue {
+                case .modelUnavailable: .modelsManage
+                case .backendUnavailable: .serviceStatus
+                default: .harness
+                }
+                dashboard.show(route: route)
+            }
+        }
     }
 
     @objc public func startServer(_ sender: NSMenuItem) {

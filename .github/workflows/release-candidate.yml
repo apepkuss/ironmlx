@@ -87,12 +87,17 @@ jobs:
           set -euo pipefail
           env -u GITHUB_REF_TYPE -u GITHUB_REF_NAME scripts/build-app-bundle.sh
 
+      - name: Prepare pinned official Harness Desktop
+        run: python3 scripts/prepare-harness-desktop.py ".build/harness/DeepSeek Harness.app"
+
       - name: Validate identity and archive contents without Apple credentials
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
           python3 scripts/verify-release-identity.py --candidate "$RELEASE_TAG" dist/IronMLX.app
           python3 scripts/release-archives.py assemble dist/IronMLX.app .build/stable-validation
+          python3 scripts/package-installer.py assemble dist/IronMLX.app ".build/harness/DeepSeek Harness.app" .build/installer-validation/IronMLX.pkg
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_harness_installer.py -v
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_stable_release.py -v
 
       - name: Authorize production artifact transfer
@@ -101,14 +106,18 @@ jobs:
 
       - name: Preserve validated App including signatures and symlinks
         if: github.event_name == 'workflow_dispatch' && inputs.publish
-        run: ditto -c -k --sequesterRsrc --keepParent dist/IronMLX.app .build/rc-candidate.zip
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent dist/IronMLX.app .build/rc-candidate.zip
+          ditto -c -k --sequesterRsrc --keepParent ".build/harness/DeepSeek Harness.app" .build/harness-candidate.zip
 
       - name: Transfer validated candidate
         if: github.event_name == 'workflow_dispatch' && inputs.publish
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rc-candidate-${{ steps.release.outputs.tag }}
-          path: .build/rc-candidate.zip
+          path: |
+            .build/rc-candidate.zip
+            .build/harness-candidate.zip
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -148,6 +157,8 @@ jobs:
           RELEASE_TAG: ${{ needs.package-rc.outputs.tag }}
         run: |
           ditto -x -k .build/validated-candidate/rc-candidate.zip dist
+          ditto -x -k .build/validated-candidate/harness-candidate.zip .build/harness
+          python3 scripts/prepare-harness-desktop.py ".build/harness/DeepSeek Harness.app" --verify-only
           python3 scripts/verify-release-identity.py --candidate "$RELEASE_TAG" dist/IronMLX.app
           scripts/release-legal-gate.sh
           scripts/verify-app-bundle.sh dist/IronMLX.app
@@ -180,6 +191,22 @@ jobs:
         run: |
           scripts/sign-notarize-app.sh .build/stable-release/*.dmg
           python3 scripts/release-archives.py finalize-dmg dist/IronMLX.app .build/stable-release
+
+      - name: Build optional-component installer
+        run: python3 scripts/package-installer.py assemble dist/IronMLX.app ".build/harness/DeepSeek Harness.app" .build/stable-release/IronMLX.pkg
+
+      - name: Sign and notarize installer
+        env:
+          IRONMLX_INSTALLER_ID_P12_BASE64: ${{ secrets.IRONMLX_INSTALLER_ID_P12_BASE64 }}
+          IRONMLX_INSTALLER_ID_P12_PASSWORD: ${{ secrets.IRONMLX_INSTALLER_ID_P12_PASSWORD }}
+          IRONMLX_INSTALLER_SIGNING_IDENTITY: ${{ vars.IRONMLX_INSTALLER_SIGNING_IDENTITY }}
+          IRONMLX_APPLE_TEAM_ID: ${{ vars.IRONMLX_APPLE_TEAM_ID }}
+          IRONMLX_NOTARY_KEY_ID: ${{ secrets.IRONMLX_NOTARY_KEY_ID }}
+          IRONMLX_NOTARY_ISSUER_ID: ${{ secrets.IRONMLX_NOTARY_ISSUER_ID }}
+          IRONMLX_NOTARY_PRIVATE_KEY: ${{ secrets.IRONMLX_NOTARY_PRIVATE_KEY }}
+        run: |
+          scripts/sign-notarize-app.sh .build/stable-release/IronMLX.pkg release-candidate
+          python3 scripts/release-archives.py finalize-installer dist/IronMLX.app .build/stable-release
 
       - name: Prepare signed RC update payload
         env:
