@@ -10,6 +10,8 @@ Choose the configuration path for the DSH client you use:
 - [DSH Desktop App](#dsh-desktop-app-configuration): configure the community app with one click or through its GUI.
 - [DSH CLI](#dsh-cli-configuration): generate or write an overlay, then launch with `--patch`.
 
+The `IronMLX.pkg` installer offers official DeepSeek Harness Desktop as an optional component selected by default. Clear the checkbox if you use another Agent client. You can also install Harness yourself later; the existing one-click setup remains available. After loading a chat model, configure the official Desktop on the Agent page, then choose **Chat with DSH** from the IronMLX menu bar icon. Its tooltip is **Open DeepSeek Harness**. The entry opens or activates the official window; missing installation, model, service or configuration leads to localized guidance without automatically rewriting configuration.
+
 ## Official DeepSeek Harness one-click setup
 
 Open **Dashboard → Agent → DeepSeek Harness**, choose the application (default: **Official desktop app**, with **DSH CLI** also available), select a loaded conversation model, and click **Configure**. The adapter targets the `0.2.1-rc.2` format at official source revision `687f282e86`; this is the minimum supported version. Stable and subsequent RC releases qualify; development/test/alpha builds do not. Follow the [official DeepSeek repository](https://github.com/deepseek-ai/deepseek-harness) for CLI installation, or use the [official DeepSeek download page](https://www.deepseek.com/en/download/) for Desktop.

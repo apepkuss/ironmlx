@@ -2,6 +2,8 @@ import Foundation
 
 public enum DashboardInitialRoute: String, Equatable {
     case status
+    case harness
+    case serviceStatus
     case onboarding
     case modelsManage
     case modelsDownload

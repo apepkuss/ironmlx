@@ -20,6 +20,7 @@ import Testing
         "—",
         "-",
         "Dashboard",
+        "Chat with DSH",
         "-",
         "Start Server",
         "Restart Server",
@@ -53,6 +54,7 @@ import Testing
         "Qwen3-0.6B-4bit",
         "-",
         "Dashboard",
+        "Chat with DSH",
         "-",
         "Stop Server",
         "Restart Server",
@@ -105,6 +107,7 @@ import Testing
         "Qwen3-0.6B-4bit",
         "-",
         "仪表盘",
+        "与 DSH 对话",
         "-",
         "停止服务",
         "重启服务",
@@ -132,6 +135,7 @@ import Testing
         "—",
         "-",
         "ダッシュボード",
+        "DSH とチャット",
         "-",
         "サーバー開始",
         "サーバー再起動",
@@ -224,4 +228,25 @@ import Testing
 
 private func menuTitles(_ menu: NSMenu) -> [String] {
     menu.items.map { $0.isSeparatorItem ? "-" : $0.title }
+}
+
+@MainActor
+@Test func harnessChatMenuAndTooltipFollowAllDashboardLanguages() {
+    for (language, title, tooltip) in [
+        ("en", "Chat with DSH", "Open DeepSeek Harness"),
+        ("zh-Hans", "与 DSH 对话", "打开 DeepSeek Harness"),
+        ("zh-Hant", "與 DSH 對話", "開啟 DeepSeek Harness"),
+        ("ja", "DSH とチャット", "DeepSeek Harness を開く"),
+        ("ko", "DSH와 대화", "DeepSeek Harness 열기"),
+    ] {
+        let menu = MenuBarMenuBuilder.makeMenu(snapshot: .init(state: .stopped,
+            modelNames: [], updatesEnabled: false, language: language), target: nil)
+        let chat = menu.item(withTitle: title)
+        #expect(chat?.action == #selector(MenuBarController.chatWithDSH(_:)))
+        #expect(chat?.toolTip == tooltip)
+        #expect(chat?.isEnabled == true) // Missing prerequisites must lead to guidance, not a dead menu item.
+        let text = HarnessChatText(language: language)
+        #expect(!text.message(.configurationRequired).isEmpty)
+        #expect(!text.message(.notInstalled).isEmpty)
+    }
 }

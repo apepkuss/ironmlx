@@ -34,11 +34,12 @@ def version_key(release: dict) -> tuple[int, int, int, int, int]:
     return (major, minor, patch, 1 if rc == 0 and "-rc." not in release["tag_name"] else 0, rc)
 
 
-def dmg_url(release: dict) -> str | None:
+def installer_url(release: dict) -> str | None:
     assets = release.get("assets", [])
     # Prefer the unified filename, while accepting older releases that used
     # the version in the DMG filename.
-    candidates = [a for a in assets if a.get("name") == "IronMLX.dmg"]
+    candidates = [a for a in assets if a.get("name") == "IronMLX.pkg"]
+    candidates += [a for a in assets if a.get("name") == "IronMLX.dmg"]
     candidates += [
         a for a in assets
         if a.get("name", "").startswith("IronMLX-") and a.get("name", "").endswith(".dmg")
@@ -61,7 +62,7 @@ def main() -> None:
     newest = max(candidates, key=version_key)
     stable = [r for r in candidates if not r.get("prerelease") and "-rc." not in r["tag_name"]]
     stable_release = max(stable, key=version_key) if stable else None
-    stable_url = dmg_url(stable_release) if stable_release else None
+    stable_url = installer_url(stable_release) if stable_release else None
     stable_button_en = (
         f'<a class="button primary" href="{html.escape(stable_url, quote=True)}">Download stable release</a>'
         if stable_url
@@ -75,7 +76,7 @@ def main() -> None:
 
     tag = newest["tag_name"]
     is_rc = bool(newest.get("prerelease")) or "-rc." in tag
-    rc_url = dmg_url(newest) if is_rc else None
+    rc_url = installer_url(newest) if is_rc else None
     rc_en = (
         f'<a href="{html.escape(rc_url, quote=True)}">Try {html.escape(tag)}</a>'
         if rc_url

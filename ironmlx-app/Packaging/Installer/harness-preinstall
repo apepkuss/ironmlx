@@ -1,0 +1,18 @@
+#!/bin/bash
+# Recheck the destination immediately before payload extraction. Abort on races;
+# never overwrite an already compatible, newer, unknown, or unrelated application.
+set -euo pipefail
+target="${3%/}/Applications/DeepSeek Harness.app"
+[ ! -L "${3%/}/Applications" ] && [ ! -L "$target" ] || exit 1
+[ -e "$target" ] || exit 0
+info="$target/Contents/Info.plist"
+identifier=$(/usr/bin/plutil -extract CFBundleIdentifier raw "$info")
+[ "$identifier" = com.deepseek.dsh ] || exit 1
+version=$(/usr/bin/plutil -extract CFBundleShortVersionString raw "$info")
+# Permit only recognized releases strictly older than the supported baseline.
+[[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$ ]] || exit 1
+major=${BASH_REMATCH[1]}; minor=${BASH_REMATCH[2]}; patch=${BASH_REMATCH[3]}; rc=${BASH_REMATCH[5]:-}
+if (( major == 0 && (minor < 2 || (minor == 2 && patch < 1)) )); then exit 0; fi
+if (( major == 0 && minor == 2 && patch == 1 )) && [ -n "$rc" ] && (( rc < 2 )); then exit 0; fi
+echo 'Harness changed since installation choices were evaluated. Reopen the installer to reuse it.' >&2
+exit 1

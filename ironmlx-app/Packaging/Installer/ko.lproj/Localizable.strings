@@ -1,0 +1,6 @@
+"ironmlx.description" = "IronMLX 추론 서비스(필수). 설치 후 대시보드 → Agent에서 모델 연결을 설정하세요.";
+"harness.install" = "선택 사항: 대화와 Agent 작업용 DeepSeek Harness Desktop을 설치합니다. 다른 클라이언트를 사용하려면 선택을 해제하세요. 모델이나 Provider 설정은 변경하지 않습니다. 호환되거나 더 최신인 기존 앱은 그대로 사용합니다. /Applications의 확인 가능한 이전 버전만 업그레이드하며 확인할 수 없는 설치는 유지하고 건너뜁니다.";
+"harness.reuse" = "호환되거나 더 최신인 공식 DeepSeek Harness Desktop이 설치되어 있습니다. 기존 앱을 사용하며 포함된 사본은 설치하지 않습니다.";
+"harness.upgrade" = "/Applications의 이전 공식 DeepSeek Harness Desktop을 포함된 버전으로 업그레이드합니다. 사용자 데이터는 유지됩니다. 현재 버전을 유지하려면 선택을 해제하세요.";
+"harness.blocked" = "기존 앱을 안전하게 업그레이드할 수 없습니다. 앱을 유지하고 Harness 설치를 건너뜁니다. 버전이나 설치 위치를 확인한 후 원클릭 설정을 사용하세요.";
+"startup.volume" = "IronMLX를 시동 디스크에 설치하세요.";

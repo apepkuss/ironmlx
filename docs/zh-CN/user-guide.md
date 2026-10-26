@@ -10,6 +10,8 @@
 
 ## 安装与启动
 
+推荐从同一发布页面下载 **IronMLX.pkg**：IronMLX 必选，官方 DeepSeek Harness Desktop 默认勾选、可以取消；已有兼容 Harness 时复用。模型下载和 Agent 一键配置在安装后进行。下面的 DMG、ZIP 备选包仅包含 IronMLX。
+
 1. 从 [IronMLX GitHub Releases 页面](https://github.com/apepkuss/ironmlx/releases/latest)
    下载最新的 Apple Silicon 版 DMG 或 ZIP；
 2. 可选：使用同一 Release 页面提供的 `RELEASE-SHA256SUMS` 校验下载的归档文件；

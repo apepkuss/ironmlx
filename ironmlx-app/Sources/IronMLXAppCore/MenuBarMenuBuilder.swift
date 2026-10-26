@@ -72,6 +72,13 @@ public enum MenuBarMenuBuilder {
                 symbol: "square.grid.2x2"
             )
         )
+        let chat = item(
+            HarnessChatText.menu(language: snapshot.language),
+            #selector(MenuBarController.chatWithDSH(_:)),
+            "", target: target, symbol: "bubble.left.and.bubble.right"
+        )
+        chat.toolTip = HarnessChatText.tooltip(language: snapshot.language)
+        menu.addItem(chat)
         menu.addItem(.separator())
 
         addBackendControlItems(snapshot.state, language: snapshot.language, target: target, to: menu)

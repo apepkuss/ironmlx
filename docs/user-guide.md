@@ -12,6 +12,8 @@ The status page shows a running local endpoint, the loaded
 
 ## Install and start
 
+For guided installation, use **IronMLX.pkg** from the same release. IronMLX is required; official DeepSeek Harness Desktop is selected by default and can be deselected. Compatible existing Harness installations are reused. Model downloads and Agent one-click configuration happen after installation. The DMG and ZIP alternatives below contain IronMLX only.
+
 1. Download the latest Apple Silicon DMG or ZIP from the
    [IronMLX GitHub Releases page](https://github.com/apepkuss/ironmlx/releases/latest).
 2. Optionally verify the downloaded archive with the `RELEASE-SHA256SUMS`

@@ -152,3 +152,13 @@ ZIP、挂载 DMG，并核对归档中的材料与源码目录一致。
 
 `test_app_updates.py` 检查通道/build 规则和真实 Sparkle 签名，包括错误密钥与篡改拒绝。`validate-update-installation.py` 使用隔离 App 和 localhost HTTPS，结束后移除临时钥匙串信任；它不加载生产模型，也不证明完整生产升级通过。
 本地 Apple/GitHub 失败路径测试验证顺序与清理，不等于远端验收。实际公证、Gatekeeper、安装、模型恢复和数据保留证据应绑定候选包单独记录；本文不声明某个版本已经完成验收。
+
+## 可选 Harness 安装器
+
+RC 和正式发布流程新增 `IronMLX.pkg`：IronMLX 必选，官方 DeepSeek Harness Desktop 默认勾选、可取消，安装器始终展示组件选择页面。已有兼容或更新的可识别官方版本时复用；默认路径 `/Applications/DeepSeek Harness.app` 的可识别旧版本可升级；无法识别的应用或位于其他位置的不兼容副本保留并跳过。取消勾选后不运行 Harness 组件或其脚本。安装器不写入用户的模型、Provider 或凭据配置。
+
+`scripts/harness-desktop-source.json` 固定官方 arm64 ZIP 的 URL、版本、SHA-256 和签名团队。准备脚本在解压前校验哈希，并检查应用身份、架构、签名和 Gatekeeper。官方资源及第三方许可原样保留。打包脚本解包真实 PKG，将两个应用的完整文件清单与参考应用比对，并检查组件规则、来源记录和五种语言资源。写入前再次检查目标，防止安装选项评估后应用发生变化而被覆盖。安装器定义包含 Harness 来源记录和上游 MIT 许可，完整依赖许可仍在原样分发的官方应用中。
+
+发布新增 secrets `IRONMLX_INSTALLER_ID_P12_BASE64`、`IRONMLX_INSTALLER_ID_P12_PASSWORD`，以及仓库变量 `IRONMLX_INSTALLER_SIGNING_IDENTITY`。该身份必须为与现有 Apple 团队一致的 `Developer ID Installer`，与应用的 `Developer ID Application` 身份分别管理。PKG 必须通过签名、公证、staple 和安装评估，再加入校验清单及发布下载验证。
+
+DMG、ZIP 继续作为只包含 IronMLX 的备选包。Sparkle 自动更新仍只更新 IronMLX，不会顺带安装或升级独立的 Harness。自动化覆盖原生安装选项评估、临时应用 payload 和条件安装矩阵；真实全新系统安装及正式签名需相应环境和凭据，不能由这些测试替代。
