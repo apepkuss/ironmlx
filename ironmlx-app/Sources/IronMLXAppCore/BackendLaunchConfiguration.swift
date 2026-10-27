@@ -43,6 +43,8 @@ public struct BackendLaunchOptions: Equatable {
     public var activeKvOffload: Bool
     /// M5 DFlash2 profile (`--m5-dflash2-profile auto`); false passes `off`.
     public var m5DFlash2Profile: Bool
+    /// Neural Engine use (`--ane auto`); false passes `off`.
+    public var ane: Bool
     public var maxLoadedModels: Int?
     public var modelTtlMinutes: Int?
     public var memoryLimitTotalGB: Int?
@@ -63,6 +65,7 @@ public struct BackendLaunchOptions: Equatable {
         ssdPrefixCacheMaxGB: Int? = nil,
         activeKvOffload: Bool = false,
         m5DFlash2Profile: Bool = true,
+        ane: Bool = true,
         maxLoadedModels: Int? = nil,
         modelTtlMinutes: Int? = nil,
         memoryLimitTotalGB: Int? = nil,
@@ -82,6 +85,7 @@ public struct BackendLaunchOptions: Equatable {
         self.ssdPrefixCacheMaxGB = ssdPrefixCacheMaxGB
         self.activeKvOffload = activeKvOffload
         self.m5DFlash2Profile = m5DFlash2Profile
+        self.ane = ane
         self.maxLoadedModels = maxLoadedModels
         self.modelTtlMinutes = modelTtlMinutes
         self.memoryLimitTotalGB = Self.positiveGigabytes(memoryLimitTotalGB)
@@ -117,6 +121,7 @@ public struct BackendLaunchOptions: Equatable {
             ssdPrefixCacheMaxGB: ssdPrefixCacheMaxGB,
             activeKvOffload: config.activeKvOffload == true,
             m5DFlash2Profile: config.m5Dflash2Profile != false,
+            ane: config.ane != false,
             maxLoadedModels: config.maxModels,
             modelTtlMinutes: config.modelTtlMinutes ?? Self.defaultModelTtlMinutes,
             memoryLimitTotalGB: config.memLimitTotal,
@@ -275,6 +280,9 @@ public struct BackendLaunchConfiguration: Equatable {
             appendIntegerFlag("--prefix-lru-cache-max-bytes", options.prefixLruCacheMaxBytes, to: &arguments)
             if !options.m5DFlash2Profile {
                 arguments += ["--m5-dflash2-profile", "off"]
+            }
+            if !options.ane {
+                arguments += ["--ane", "off"]
             }
             return arguments
         }

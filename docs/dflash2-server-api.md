@@ -46,6 +46,8 @@ ironmlx serve \
 | `--max-sequences` | Positive active-request limit |
 | `--model-id` | Stable public ID; defaults to the model path if omitted |
 | `--dflash2-tensor-batch-max-width` | Positive tensor-group width limit; default 4; 1 disables cross-request tensor batching, not request concurrency |
+| `--m5-dflash2-profile` | `auto` (default) or `off`; `auto` turns on the qualified M5 settings of the target's family on Apple GPU generation 17 or newer (`healthz.dflash2.m5_profile`) |
+| `--ane` | `auto` (default) or `off`. With the M5 profile active, Qwen3.8 prefill MLPs of full 2048-token chunks starting below position 65,536 give 12 of their 34 channel units to the Neural Engine (W8A8); shorter prompts, decoding and MoE targets never use it. `off` keeps all computation on the GPU. `healthz.dflash2.m5_profile.ane_status` reports `active`, `disabled`, `not_applicable` or `inactive`. |
 
 Actual group width is the minimum of max sequences, tensor width limit and the number of ready requests with compatible execution shapes. The width limit does not increase active slots or replace max sequences.
 
@@ -75,14 +77,13 @@ The MoE combination runs through its own target implementation and qualification
 | Tree | `--dflash2-tree-max-nodes` 1–15 enables the flat tree for greedy, unconstrained requests. Sampled requests and requests with a constraint (including the reasoning budget attached to thinking-enabled requests) run linear windows instead; `tree_fallback_linear_windows` counts them and the server logs the reason once. |
 | Sampling | Exact speculative sampling is supported. `--dflash2-position-keyed-sampling` is rejected for this target. |
 
-Every greedy result, linear or tree, is token-identical to ordinary decoding of the same target (except with the affine4 projection variable below). Linear windows are the default because the tree measured slower than linear windows at every bit width on M5 Max.
+Every greedy result, linear or tree, is token-identical to ordinary decoding of the same target, except where the M5 profile's affine4 projections run (below). Linear windows are the default because the tree measured slower than linear windows at every bit width on M5 Max.
 
-The M5 profile (`--m5-dflash2-profile`) uses its own MoE table, which is currently empty: no MoE setting showed an end-to-end gain, so the profile does not change MoE execution. `status=active` only means the profile is installed for this GPU; what it turns on is the startup log's `effective_settings` (`none` for MoE by default) and the non-null values in `healthz.dflash2.m5_profile.settings`. `healthz.dflash2.m5_profile.target` reports `qwen36-moe`, `status` is `target_not_qualified` for a target outside the qualified recipes, and `settings` lists two experimental opt-in variables:
+The M5 profile (`--m5-dflash2-profile`) uses its own MoE table and never inherits the Qwen3.8 settings. When active it turns on, among others, the M5 tensor-unit affine4 projections and expert kernels, batched drafting, ragged linear batching of concurrent requests, D256 NAX attention for long prompts (prefill from 2,048 keys, decode and verify from 8,193) with tuned split-K, startup warmup and wired weights. The startup log's `effective_settings` and the non-null values in `healthz.dflash2.m5_profile.settings` list exactly what is on. The affine4 projections are deterministic, but their output differs from ordinary MLX decoding; the execution fingerprint reports `projections=m5-affine4-v1`. MoE targets have no dense MLP, so they never use the Neural Engine (`ane_status` is `not_applicable`). `healthz.dflash2.m5_profile.target` reports `qwen36-moe`, and `status` is `target_not_qualified` for a target outside the qualified recipes. One experimental opt-in variable stays outside the table:
 
 | Variable | Effect |
 | --- | --- |
 | `IRONMLX_EXPERIMENTAL_M5_MOE_GROUPED_QMV=1` | Shares each routed expert's weights across verify rows (affine6/8, 8+ rows). Bit-identical to ordinary decoding. |
-| `IRONMLX_EXPERIMENTAL_M5_MOE_AFFINE4_PROJECTIONS=1` | M5 tensor-unit projections for the affine4 target. Deterministic, but output differs from ordinary MLX decoding; the execution fingerprint reports `projections=m5-affine4-v1`. Needs a real Apple GPU of generation 17 or newer: elsewhere the variable is ignored with a warning, the generic projections run, and `settings` reports it as null. |
 
 ## Execution and concurrency
 

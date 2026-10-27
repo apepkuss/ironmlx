@@ -436,6 +436,28 @@ private func dflash2LaunchArguments(config appConfig: AppConfig) -> [String] {
     #expect(argumentValue("--m5-dflash2-profile", in: arguments) == "off")
 }
 
+@Test func dflash2ArgumentsKeepAneAutomaticByDefaultAndPassOffWhenDisabled() {
+    #expect(!dflash2LaunchArguments(config: AppConfig()).contains("--ane"))
+    #expect(!dflash2LaunchArguments(config: AppConfig(ane: true)).contains("--ane"))
+    let arguments = dflash2LaunchArguments(config: AppConfig(ane: false))
+    #expect(argumentValue("--ane", in: arguments) == "off")
+    // Independent of the M5 profile choice.
+    let both = dflash2LaunchArguments(config: AppConfig(m5Dflash2Profile: false, ane: false))
+    #expect(argumentValue("--m5-dflash2-profile", in: both) == "off")
+    #expect(argumentValue("--ane", in: both) == "off")
+}
+
+@Test func appConfigRoundTripsAneSetting() throws {
+    let encoded = try JSONEncoder().encode(AppConfig(ane: false))
+    let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+    #expect(object?["ane"] as? Bool == false)
+    let decoded = try JSONDecoder().decode(AppConfig.self, from: encoded)
+    #expect(decoded.ane == false)
+    // A config saved before the setting existed keeps it unset (auto).
+    let unset = try JSONDecoder().decode(AppConfig.self, from: JSONEncoder().encode(AppConfig()))
+    #expect(unset.ane == nil)
+}
+
 @Test func appConfigRoundTripsM5ProfileSetting() throws {
     let encoded = try JSONEncoder().encode(AppConfig(m5Dflash2Profile: false))
     let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]

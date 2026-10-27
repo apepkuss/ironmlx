@@ -212,15 +212,23 @@ pub struct ServeArgs {
     /// kernels) when the GPU supports them; each feature still falls back
     /// when its quantization, shape or request checks do not hold. Those
     /// settings belong to Qwen3.8 dense targets; Qwen3.6 MoE targets use
-    /// their own table, which currently turns nothing on (the startup log's
-    /// `effective_settings` shows what is on). `off` keeps the generic
-    /// defaults.
+    /// their own table (tensor-unit affine4 expert and projection kernels,
+    /// batched drafting and verify, NAX attention and split-K verify for
+    /// long prompts; the startup log's `effective_settings` shows what is
+    /// on). `off` keeps the generic defaults.
     #[arg(
         long = "m5-dflash2-profile",
         default_value = "auto",
         value_parser = parse_m5_profile_mode
     )]
     pub m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode,
+
+    /// Neural Engine use. `auto` follows the M5 DFlash2 profile: Dense
+    /// targets' prefill MLPs of full 2048-token chunks share part of their
+    /// channels with the Neural Engine (MoE targets have no dense MLP and
+    /// never use it). `off` keeps all computation on the GPU.
+    #[arg(long = "ane", default_value = "auto", value_parser = parse_ane_mode)]
+    pub ane: ironmlx_core::m5_profile::AneMode,
 
     /// Use versioned position-keyed sampling for DFlash2 requests. This changes
     /// same-seed output and is never enabled by default.
@@ -635,12 +643,17 @@ fn parse_m5_profile_mode(value: &str) -> Result<ironmlx_core::m5_profile::M5Prof
     value.parse()
 }
 
+fn parse_ane_mode(value: &str) -> Result<ironmlx_core::m5_profile::AneMode, String> {
+    value.parse()
+}
+
 /// Install the process M5 DFlash2 profile and apply its serve defaults to
 /// options that were not given explicitly.
 fn install_m5_profile(args: &mut ServeArgs, dflash2: bool, family: Option<DFlash2TargetFamily>) {
     use ironmlx_core::m5_profile;
-    let profile = m5_profile::install_for_target(
+    let profile = m5_profile::install_for_target_with_ane(
         args.m5_dflash2_profile,
+        args.ane,
         dflash2,
         family
             .map(DFlash2TargetFamily::m5_profile_target)
@@ -676,6 +689,8 @@ fn install_m5_profile(args: &mut ServeArgs, dflash2: bool, family: Option<DFlash
         target = profile.target.as_str(),
         architecture = profile.architecture.as_deref().unwrap_or("unknown"),
         effective_settings = profile.effective_settings_summary(),
+        ane = profile.ane.as_str(),
+        ane_status = profile.ane_status().as_str(),
         "M5 DFlash2 profile"
     );
 }
@@ -1793,6 +1808,7 @@ mod scheduler_profile_tests {
             dflash2_draft_bits: None,
             dflash2_tree_max_nodes: None,
             m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode::Auto,
+            ane: ironmlx_core::m5_profile::AneMode::Auto,
             dflash2_position_keyed_sampling: false,
             dflash2_tensor_batch_max_width: None,
             prompt_lookup: false,
@@ -1939,6 +1955,23 @@ mod scheduler_profile_tests {
             ironmlx_core::m5_profile::M5ProfileMode::Off
         );
         assert!(Wrapper::try_parse_from(["serve", "--m5-dflash2-profile", "on"]).is_err());
+    }
+
+    #[test]
+    fn ane_flag_defaults_to_auto_and_parses_off() {
+        use ironmlx_core::m5_profile::AneMode;
+        #[derive(Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: ServeArgs,
+        }
+        let default = Wrapper::try_parse_from(["serve"]).expect("defaults parse");
+        assert_eq!(default.args.ane, AneMode::Auto);
+        let off = Wrapper::try_parse_from(["serve", "--ane", "off"]).expect("off parses");
+        assert_eq!(off.args.ane, AneMode::Off);
+        let auto = Wrapper::try_parse_from(["serve", "--ane", "auto"]).expect("auto parses");
+        assert_eq!(auto.args.ane, AneMode::Auto);
+        assert!(Wrapper::try_parse_from(["serve", "--ane", "on"]).is_err());
     }
 
     #[test]

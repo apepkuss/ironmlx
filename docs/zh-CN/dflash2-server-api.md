@@ -47,6 +47,13 @@ draft checkpoint 声明的宽度，并以已资格化的 Q8 作为默认上限�
 `8`，其中 `0` 表示保持 draft BF16。`--max-sequences` 必须大于零。`--model-id`
 用于把稳定的公开模型 ID 与本地 target 路径分离；省略时沿用 `--model` 的值。
 
+`--m5-dflash2-profile` 接受 `auto`（默认）或 `off`；`auto` 在 Apple GPU 第 17 代及更新机型上启用
+target 所属模型族已认定的 M5 设置（见 `healthz.dflash2.m5_profile`）。
+`--ane` 接受 `auto`（默认）或 `off`：M5 profile 生效时，Qwen3.8 在预填充起点低于 65,536 的完整 2048
+token 分块中，把 MLP 34 个通道单元中的 12 个交给神经引擎计算（W8A8）；更短的提示、解码阶段和 MoE target
+都不使用神经引擎。`off` 让全部计算留在 GPU 上。`healthz.dflash2.m5_profile.ane_status` 报告 `active`、
+`disabled`、`not_applicable` 或 `inactive`。
+
 `--dflash2-tree-max-nodes` 接受 `0..=15`：默认 `0` 保持稳定的线性提议路径，正值仅为
 affine-4、无约束、B1 请求显式启用有界 best-first 草稿树。
 `--dflash2-position-keyed-sampling` 为正温度请求显式启用版本化的设备端位置键采样；
@@ -103,20 +110,21 @@ draft 精度选项或批处理设置。
 | Tree | `--dflash2-tree-max-nodes` 取 1–15 时，对 greedy 且无约束的请求启用 flat tree。采样请求和带约束的请求（包括开启 thinking 时附带的 reasoning budget）改走线性窗口，`tree_fallback_linear_windows` 计数，服务端日志记录一次原因。 |
 | 采样 | 支持精确推测采样。该 target 拒绝 `--dflash2-position-keyed-sampling`。 |
 
-所有 greedy 结果（线性或 tree）都与同一 target 的普通解码逐 token 一致（下面的 affine4 投影变量除外）。默认使用线性窗口，
+所有 greedy 结果（线性或 tree）都与同一 target 的普通解码逐 token 一致，M5 profile 的 affine4 投影生效时除外（见下文）。默认使用线性窗口，
 因为在 M5 Max 上每个位宽的 tree 都比线性窗口慢。
 
-M5 profile（`--m5-dflash2-profile`）使用独立的 MoE 设置表，目前为空：没有任何 MoE 设置测出
-端到端收益，所以该 profile 不改变 MoE 执行。`status=active` 只表示该 GPU 上已安装 profile；
-实际开启了什么，以启动日志的 `effective_settings`（MoE 默认为 `none`）和
-`healthz.dflash2.m5_profile.settings` 中的非 null 值为准。`healthz.dflash2.m5_profile.target` 显示
-`qwen36-moe`；target 不在已认定配方内时 `status` 为 `target_not_qualified`；`settings` 列出两个
-需显式开启的实验变量：
+M5 profile（`--m5-dflash2-profile`）使用独立的 MoE 设置表，不继承 Qwen3.8 的设置。生效时开启的内容包括：
+M5 tensor-unit affine4 投影与专家 kernel、批量草稿、并发请求的 ragged 线性合批、长提示的 D256 NAX
+注意力（预填充从 2,048 个 key 起，解码与 verify 从 8,193 个 key 起）及调优的 split-K、启动预热和 wired
+权重。实际开启了什么，以启动日志的 `effective_settings` 和 `healthz.dflash2.m5_profile.settings` 中的
+非 null 值为准。affine4 投影结果确定，但与普通 MLX 解码输出不同；执行指纹显示
+`projections=m5-affine4-v1`。MoE target 没有稠密 MLP，因此从不使用神经引擎（`ane_status` 为
+`not_applicable`）。`healthz.dflash2.m5_profile.target` 显示 `qwen36-moe`；target 不在已认定配方内时
+`status` 为 `target_not_qualified`。表外仍有一个需显式开启的实验变量：
 
 | 变量 | 作用 |
 |---|---|
 | `IRONMLX_EXPERIMENTAL_M5_MOE_GROUPED_QMV=1` | 同一路由专家的权重在多个 verify 行间复用（affine6/8、8 行及以上）。与普通解码逐位一致。 |
-| `IRONMLX_EXPERIMENTAL_M5_MOE_AFFINE4_PROJECTIONS=1` | affine4 target 使用 M5 tensor-unit 投影。结果确定，但与普通 MLX 解码输出不同；执行指纹显示 `projections=m5-affine4-v1`。需要真实的 Apple GPU 第 17 代及以上；其他硬件上该变量被忽略并打印警告，改走通用投影，`settings` 中显示为 null。 |
 
 ## 执行与并发语义
 

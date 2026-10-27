@@ -2498,6 +2498,7 @@ mod tests {
             dflash2_tensor_batch_max_width: None,
             dflash2_tree_max_nodes: None,
             m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode::Auto,
+            ane: ironmlx_core::m5_profile::AneMode::Auto,
             dflash2_position_keyed_sampling: false,
             prompt_lookup: false,
             prompt_lookup_min_ngram: None,

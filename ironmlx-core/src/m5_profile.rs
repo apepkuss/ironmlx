@@ -477,6 +477,75 @@ impl std::str::FromStr for M5ProfileMode {
     }
 }
 
+/// Neural Engine use (`--ane`): `auto` follows the active profile (the Dense
+/// prefill MLP share of full chunks), `off` keeps all computation on the GPU.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AneMode {
+    #[default]
+    Auto,
+    Off,
+}
+
+impl AneMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+        }
+    }
+}
+
+impl std::str::FromStr for AneMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "off" => Ok(Self::Off),
+            other => Err(format!("expected `auto` or `off`, got `{other}`")),
+        }
+    }
+}
+
+/// Whether the Neural Engine takes part in serving.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AneStatus {
+    /// Dense prefill MLPs share full chunks with the Neural Engine.
+    Active,
+    /// `--ane off`.
+    Disabled,
+    /// The profile is not active for a Dense target (MoE targets have no
+    /// dense MLP to share), so nothing would use the Neural Engine.
+    NotApplicable,
+    /// Applicable, but the effective share is zero (an explicit variable).
+    Inactive,
+}
+
+impl AneStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Disabled => "disabled",
+            Self::NotApplicable => "not_applicable",
+            Self::Inactive => "inactive",
+        }
+    }
+}
+
+/// Pure Neural Engine decision from the mode, whether the Dense profile is
+/// active, and the effective share in units.
+pub fn resolve_ane(ane: AneMode, dense_profile_active: bool, units: usize) -> AneStatus {
+    if ane == AneMode::Off {
+        AneStatus::Disabled
+    } else if !dense_profile_active {
+        AneStatus::NotApplicable
+    } else if units == 0 {
+        AneStatus::Inactive
+    } else {
+        AneStatus::Active
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum M5ProfileStatus {
     Active,
@@ -564,11 +633,24 @@ pub struct M5Profile {
     pub status: M5ProfileStatus,
     pub target: M5ProfileTarget,
     pub prefill_libraries: Vec<PrefillLibrary>,
+    pub ane: AneMode,
 }
 
 impl M5Profile {
     pub fn is_active(&self) -> bool {
         self.status == M5ProfileStatus::Active
+    }
+
+    /// Whether the Neural Engine takes part (see [`AneStatus`]).
+    pub fn ane_status(&self) -> AneStatus {
+        let units = setting(settings::DENSE_PREFILL_ANE_FFN_UNITS)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        resolve_ane(
+            self.ane,
+            self.is_active() && self.target == M5ProfileTarget::Qwen35Dense,
+            units,
+        )
     }
 
     /// Effective value of every profile setting, followed by the family's
@@ -639,11 +721,21 @@ fn setting_with(
         .map(|(_, value)| (*value).to_owned())
 }
 
-/// Effective value of a profile setting: an explicitly set variable,
-/// otherwise the active profile's value for its target family, otherwise
-/// unset.
+/// `--ane off` keeps every Neural Engine share at zero, above an explicit
+/// variable and the profile table.
+fn ane_override(ane: AneMode, name: &str) -> Option<String> {
+    (ane == AneMode::Off && name == settings::DENSE_PREFILL_ANE_FFN_UNITS).then(|| "0".to_owned())
+}
+
+/// Effective value of a profile setting: `--ane off` for the Neural Engine
+/// share, otherwise an explicitly set variable, otherwise the active
+/// profile's value for its target family, otherwise unset.
 pub fn setting(name: &str) -> Option<String> {
-    let active_values = installed()
+    let profile = installed();
+    if let Some(value) = profile.and_then(|profile| ane_override(profile.ane, name)) {
+        return Some(value);
+    }
+    let active_values = profile
         .filter(|profile| profile.is_active())
         .map(|profile| profile.target.values());
     setting_with(std::env::var(name).ok(), active_values, name)
@@ -714,6 +806,16 @@ pub fn install(mode: M5ProfileMode, dflash2: bool) -> &'static M5Profile {
 /// every profile setting off; each qualified family uses only its own table.
 pub fn install_for_target(
     mode: M5ProfileMode,
+    dflash2: bool,
+    target: M5ProfileTarget,
+) -> &'static M5Profile {
+    install_for_target_with_ane(mode, AneMode::Auto, dflash2, target)
+}
+
+/// [`install_for_target`] with the Neural Engine mode (`--ane`).
+pub fn install_for_target_with_ane(
+    mode: M5ProfileMode,
+    ane: AneMode,
     dflash2: bool,
     target: M5ProfileTarget,
 ) -> &'static M5Profile {
@@ -797,6 +899,7 @@ pub fn install_for_target(
             status,
             target,
             prefill_libraries,
+            ane,
         }
     })
 }
@@ -989,6 +1092,38 @@ mod tests {
             setting_with(None, dense, settings::PREFILL_QMM_MTILE_METALLIB),
             None
         );
+    }
+
+    #[test]
+    fn ane_mode_parses_and_off_zeroes_only_the_neural_engine_share() {
+        assert_eq!("auto".parse::<AneMode>(), Ok(AneMode::Auto));
+        assert_eq!("off".parse::<AneMode>(), Ok(AneMode::Off));
+        assert!("on".parse::<AneMode>().is_err());
+        assert_eq!(AneMode::default(), AneMode::Auto);
+        let units = settings::DENSE_PREFILL_ANE_FFN_UNITS;
+        assert_eq!(ane_override(AneMode::Off, units).as_deref(), Some("0"));
+        assert_eq!(ane_override(AneMode::Auto, units), None);
+        assert_eq!(
+            ane_override(AneMode::Off, settings::DENSE_PREFILL_ANE_FFN_PIPELINE),
+            None
+        );
+        assert_eq!(ane_override(AneMode::Off, settings::M5_LANE_ATTN), None);
+        // `auto` keeps the Dense table's share.
+        let dense = Some(M5ProfileTarget::Qwen35Dense.values());
+        assert_eq!(setting_with(None, dense, units).as_deref(), Some("12"));
+    }
+
+    #[test]
+    fn ane_status_follows_mode_profile_and_share() {
+        assert_eq!(resolve_ane(AneMode::Auto, true, 12), AneStatus::Active);
+        assert_eq!(resolve_ane(AneMode::Off, true, 12), AneStatus::Disabled);
+        assert_eq!(resolve_ane(AneMode::Off, false, 0), AneStatus::Disabled);
+        assert_eq!(
+            resolve_ane(AneMode::Auto, false, 12),
+            AneStatus::NotApplicable
+        );
+        assert_eq!(resolve_ane(AneMode::Auto, true, 0), AneStatus::Inactive);
+        assert_eq!(AneStatus::NotApplicable.as_str(), "not_applicable");
     }
 
     #[test]

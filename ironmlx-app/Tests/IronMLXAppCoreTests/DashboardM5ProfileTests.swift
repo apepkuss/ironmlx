@@ -161,7 +161,8 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     }
     let en = try await layout(language: "en")
     #expect(en["cardKey"] as? String == "advanced")
-    #expect(en["lastRowInCard"] as? Bool == true)
+    // The Neural Engine row that depends on it follows it as the card's last row.
+    #expect(en["lastRowInCard"] as? Bool == false)
     #expect(en["inCacheCard"] as? Bool == false)
     #expect(en["label"] as? String == "M5 DFlash2 Profile")
     #expect(en["desc"] as? String == "Automatically optimizes DFlash2 inference on supported devices.")
@@ -171,7 +172,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     #expect(en["ariaLabel"] as? String == "M5 DFlash2 Profile help")
     #expect(en["role"] as? String == "tooltip")
     #expect(en["title"] as? String == "About the M5 DFlash2 Profile")
-    #expect(en["body"] as? String == "On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings. Qwen 3.6 35B A3B currently uses the generic path.")
+    #expect(en["body"] as? String == "On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings. Qwen 3.6 35B A3B uses its own tuned settings.")
     #expect(en["hiddenOpacity"] as? String == "0")
     #expect(en["focusOpen"] as? Bool == true)
     #expect(en["shownOpacity"] as? String == "1")
@@ -185,7 +186,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     #expect(zh["desc"] as? String == "在支持的设备上自动优化 DFlash2 推理。")
     #expect(zh["ariaLabel"] as? String == "M5 DFlash2 优化配置说明")
     #expect(zh["title"] as? String == "关于 M5 DFlash2 优化配置")
-    #expect(zh["body"] as? String == "在 Apple M5（GPU 第 17 代）及更新机型上，DFlash2 服务启用针对 M5 调优的内核、树式草稿和负载下的合批；各项不适用时自动回退。关闭后使用通用设置。Qwen 3.6 35B A3B 目前使用通用路径。")
+    #expect(zh["body"] as? String == "在 Apple M5（GPU 第 17 代）及更新机型上，DFlash2 服务启用针对 M5 调优的内核、树式草稿和负载下的合批；各项不适用时自动回退。关闭后使用通用设置。Qwen 3.6 35B A3B 使用其专属的调优设置。")
     try await snapshot(webView, named: "settings-m5-advanced-help-zh")
 
     // Hover opens the same tooltip; Escape closes it.
@@ -296,6 +297,142 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     let offIndex = try #require(off.firstIndex(of: "--m5-dflash2-profile"))
     #expect(off[offIndex + 1] == "off")
     #expect(!arguments(existing).contains("--m5-dflash2-profile"))
+}
+
+@MainActor
+@Test func dashboardAneToggleDefaultsOnFollowsM5ProfileAndSavesOffWithRestart() async throws {
+    let messages = CapturedSettingsMessages()
+    let webView = try await loadedDashboard(config: AppConfig(), messages: messages)
+    defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
+    let result = try await webView.evaluateJavaScript("""
+    (() => {
+      navigateTo('settings'); setLanguage('en');
+      const style = document.createElement('style');
+      style.textContent = '*, *::before, *::after { transition: none !important; }';
+      document.head.appendChild(style);
+      const ane = document.getElementById('cfg-ane');
+      const m5 = document.getElementById('cfg-m5-dflash2-profile');
+      const row = ane.closest('.settings-row');
+      const card = row.closest('.card-settings');
+      const rows = [...card.querySelectorAll(':scope > .settings-row')];
+      const note = document.getElementById('ane-requires-m5-profile');
+      const trigger = row.querySelector('.profile-help-trigger');
+      const tooltip = document.getElementById(trigger.getAttribute('aria-describedby'));
+      const out = {
+        defaultChecked: ane.checked, defaultEnabled: !ane.disabled, noteHidden: note.hidden,
+        cardKey: card.querySelector('.card-header [data-i18n]').dataset.i18n,
+        lastRow: rows[rows.length - 1] === row,
+        afterM5: rows[rows.length - 2] === m5.closest('.settings-row'),
+        label: row.querySelector('[data-i18n="ane_acceleration"]').textContent,
+        title: tooltip.querySelector('.profile-help-tooltip-title').textContent,
+        restartField: RESTART_FIELDS.includes('cfg-ane'),
+      };
+      m5.click();
+      out.disabledWithoutM5 = ane.disabled;
+      out.noteShownWithoutM5 = !note.hidden;
+      out.noteText = note.textContent;
+      out.checkedKeptWithoutM5 = ane.checked;
+      m5.click();
+      out.enabledAgain = !ane.disabled && note.hidden;
+      settingsBackendRunning = true;
+      ane.click();
+      out.afterToggleChecked = ane.checked;
+      out.buttonText = document.getElementById('settings-save-button').textContent;
+      setLanguage('zh');
+      out.zhLabel = row.querySelector('[data-i18n="ane_acceleration"]').textContent;
+      setLanguage('en');
+      row.scrollIntoView({block: 'center'});
+      return JSON.stringify(out);
+    })()
+    """) as? String
+    let state = try #require(result.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] })
+    #expect(state["defaultChecked"] as? Bool == true)
+    #expect(state["defaultEnabled"] as? Bool == true)
+    #expect(state["noteHidden"] as? Bool == true)
+    #expect(state["cardKey"] as? String == "advanced")
+    #expect(state["lastRow"] as? Bool == true)
+    #expect(state["afterM5"] as? Bool == true)
+    #expect(state["label"] as? String == "Neural Engine (ANE) Acceleration")
+    #expect(state["title"] as? String == "About Neural Engine Acceleration")
+    #expect(state["restartField"] as? Bool == true)
+    #expect(state["disabledWithoutM5"] as? Bool == true)
+    #expect(state["noteShownWithoutM5"] as? Bool == true)
+    #expect(state["noteText"] as? String == "Takes effect only with the M5 DFlash2 Profile on.")
+    #expect(state["checkedKeptWithoutM5"] as? Bool == true)
+    #expect(state["enabledAgain"] as? Bool == true)
+    #expect(state["afterToggleChecked"] as? Bool == false)
+    #expect(state["buttonText"] as? String == "Save and restart service")
+    #expect(state["zhLabel"] as? String == "神经引擎（ANE）加速")
+    try await snapshot(webView, named: "settings-ane-toggle-off-en")
+
+    _ = try await webView.evaluateJavaScript("saveSettings(); void 0")
+    let deadline = Date().addingTimeInterval(5)
+    while messages.bodies.isEmpty && Date() < deadline {
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    let payload = try #require(messages.bodies.last.flatMap {
+        try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+    })
+    #expect(payload["ane"] as? Bool == false)
+    #expect(payload["m5_dflash2_profile"] as? Bool == true)
+
+    let missing = try await webView.evaluateJavaScript("""
+    JSON.stringify(Object.entries(I18N).flatMap(([lang, dict]) =>
+      ['ane_acceleration', 'ane_acceleration_desc', 'ane_help_title', 'ane_help_body', 'ane_help_label',
+       'ane_requires_m5_profile', 'runtime_ane', 'ane_status_active', 'ane_status_disabled', 'ane_status_inactive']
+        .filter(key => !dict[key]).map(key => lang + ':' + key)))
+    """) as? String
+    #expect(missing == "[]")
+}
+
+@MainActor
+@Test func dashboardAneToggleReflectsSavedOffSetting() async throws {
+    let messages = CapturedSettingsMessages()
+    let webView = try await loadedDashboard(config: AppConfig(ane: false), messages: messages)
+    defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
+    let checked = try await webView.evaluateJavaScript(
+        "navigateTo('settings'); document.getElementById('cfg-ane').checked") as? Bool
+    #expect(checked == false)
+}
+
+@MainActor
+@Test func dashboardRuntimeStatusShowsAneStatusExceptWhenNotApplicable() async throws {
+    let messages = CapturedSettingsMessages()
+    let webView = try await loadedDashboard(config: AppConfig(), messages: messages)
+    defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
+    func meta(ane: String, language: String) async throws -> String? {
+        try await webView.evaluateJavaScript("""
+        (() => {
+          setLanguage('\(language)'); navigateTo('status');
+          renderRuntimeModels([{id: 'benchmark', model: 'benchmark', loaded: true,
+            dflash2_draft_model: 'z-lab/Qwen3.8-27B-DFlash2',
+            dflash2: {enabled: true, block_size: 8, draft_quantization_bits: 4, windows: 97,
+                      rollback_count: 0, exact_residual_corrections: 0, latest_acceptance_rate: 0.6,
+                      tree_max_nodes: 15,
+                      m5_profile: {installed: true, mode: 'auto', status: 'active',
+                                   architecture: 'applegpu_g17s', ane_mode: 'auto', ane_status: '\(ane)'}}}]);
+          const metas = [...document.querySelectorAll('#runtime-model-health .runtime-section-meta')];
+          const meta = metas.find(m => m.textContent.includes('Block 8'));
+          return meta ? meta.textContent : null;
+        })()
+        """) as? String
+    }
+    #expect(try await meta(ane: "active", language: "en")?.contains("M5 profile active · ANE on") == true)
+    #expect(try await meta(ane: "disabled", language: "en")?.contains("ANE off") == true)
+    #expect(try await meta(ane: "not_applicable", language: "en")?.contains("ANE") == false)
+    #expect(try await meta(ane: "disabled", language: "zh")?.contains("神经引擎：已关闭") == true)
+}
+
+@MainActor
+@Test func dashboardAneSettingRestartsBackend() throws {
+    let existing = AppConfig()
+    let updated = try DashboardBridge.config(applyingSettingsJSON: #"{"ane":false}"#, to: existing)
+    #expect(updated.ane == false)
+    #expect(updated.m5Dflash2Profile == existing.m5Dflash2Profile)
+    #expect(DashboardBridge.backendRestartRequired(from: existing, to: updated))
+    let unchanged = try DashboardBridge.config(applyingSettingsJSON: #"{"verify_model_on_load":true}"#, to: updated)
+    #expect(unchanged.ane == false)
+    #expect(!DashboardBridge.backendRestartRequired(from: updated, to: unchanged))
 }
 
 @MainActor

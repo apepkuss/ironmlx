@@ -193,6 +193,10 @@ pub struct M5ProfileHealth {
     /// Effective value of each profile setting (null = off).
     pub settings: Vec<M5ProfileSetting>,
     pub prefill_libraries: Vec<M5PrefillLibraryHealth>,
+    /// Neural Engine mode (`--ane`): `auto` or `off`.
+    pub ane_mode: Option<&'static str>,
+    /// `active`, `disabled`, `not_applicable` or `inactive`.
+    pub ane_status: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -233,6 +237,8 @@ impl M5ProfileHealth {
                     error: library.error.clone(),
                 })
                 .collect(),
+            ane_mode: Some(profile.ane.as_str()),
+            ane_status: Some(profile.ane_status().as_str()),
         }
     }
 }
