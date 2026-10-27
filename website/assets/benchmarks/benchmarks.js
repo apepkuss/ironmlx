@@ -12,7 +12,7 @@
   const T = zh ? {
     focus: "IronMLX",
     others: "其他应用",
-    ranges: "线段：四轮范围",
+    ranges: (n) => `线段：${n} 轮范围`,
     lowerRight: "越靠右下越好 ↘",
     throughput: "四请求整批吞吐（tok/s）",
     ttftMedian: "首字时间中位数（ms）",
@@ -22,7 +22,7 @@
     done: "回复完成",
     tipThroughput: "整批吞吐",
     tipTtft: "首字中位",
-    tipRange: "四轮范围",
+    tipRange: (n) => `${n} 轮范围`,
     tipFirst: "四个请求的首字",
     tipDone: "四个请求的完成",
     kpis: [
@@ -46,14 +46,14 @@
     },
     rank: (r, n) => `${n} 个中第 ${r}`,
     firstIn: (k, n) => (k === n ? `${n} 轮都第一` : `${n} 轮中 ${k} 轮第一`),
-    tied: (r, name, rounds) => `与 ${name} 并列第 ${r}（四轮 ${rounds}）`,
+    tied: (r, name, rounds, n) => `与 ${name} 并列第 ${r}（${n} 轮 ${rounds}）`,
     lower: (pct) => `比第 1 低 ${pct}%`,
     more: (pct) => `比第 1 多 ${pct}%`,
     slower: (pct) => `比第 1 慢 ${pct}%`,
   } : {
     focus: "IronMLX",
     others: "Other applications",
-    ranges: "Lines: range over four rounds",
+    ranges: (n) => `Lines: range over ${n} rounds`,
     lowerRight: "Better: lower right ↘",
     throughput: "4-request batch throughput (tok/s)",
     ttftMedian: "Median time to first token (ms)",
@@ -63,7 +63,7 @@
     done: "Reply complete",
     tipThroughput: "Batch throughput",
     tipTtft: "Median first token",
-    tipRange: "Range over 4 rounds",
+    tipRange: (n) => `Range over ${n} rounds`,
     tipFirst: "First tokens (4 requests)",
     tipDone: "Completions (4 requests)",
     kpis: [
@@ -86,8 +86,8 @@
       tipTtft: "Time to first token",
     },
     rank: (r, n) => `#${r} of ${n}`,
-    firstIn: (k, n) => (k === n ? `first in all ${n} rounds` : `first in ${k} of ${n} rounds`),
-    tied: (r, name, rounds) => `Tied #${r} with ${name} (${rounds} in rounds)`,
+    firstIn: (k, n) => (k === n ? (n === 2 ? "first in both rounds" : `first in all ${n} rounds`) : `first in ${k} of ${n} rounds`),
+    tied: (r, name, rounds, n) => `Tied #${r} with ${name} (${rounds} in ${n} rounds)`,
     lower: (pct) => `${pct}% below #1`,
     more: (pct) => `${pct}% more than #1`,
     slower: (pct) => `${pct}% slower than #1`,
@@ -148,7 +148,7 @@
 
   const legend = (items) => html("div", "bench-legend", items.map((item) => `<span>${item}</span>`).join(""));
 
-  // Headline cards for IronMLX: value, rank by the four-round median, and how the rounds split.
+  // Headline cards for IronMLX: value, rank by the median over the rounds, and how the rounds split.
   const kpis = (host, data) => {
     const M = metrics(data);
     const n = data.apps.length;
@@ -168,7 +168,7 @@
       let lead = false;
       if (tie) {
         const top = Math.min(rank, sorted.indexOf(tie) + 1);
-        note = T.tied(top, tie.name, `${ahead(FOCUS, tie.key)}–${ahead(tie.key, FOCUS)}`);
+        note = T.tied(top, tie.name, `${ahead(FOCUS, tie.key)}–${ahead(tie.key, FOCUS)}`, rounds);
         lead = top === 1;
       } else if (rank === 1) {
         note = `${T.rank(1, n)} · ${T.firstIn(perRound.filter((order) => order[0] === FOCUS).length, rounds)}`;
@@ -184,13 +184,14 @@
     host.appendChild(grid);
   };
 
-  // Throughput vs. time to first token: one point per configuration with four-round ranges.
+  // Throughput vs. time to first token: one point per configuration with its range over the rounds.
   // A data set may set its own axes ([min, max, step]) and label offsets in `scatter`.
   const scatter = (host, data) => {
     const M = metrics(data);
     const axes = data.scatter || {};
+    const rounds = Object.keys(Object.values(data.round_ranks)[0]).length;
     host.classList.add("bench-panel");
-    host.appendChild(legend([`<i class="key-dot focus"></i>${T.focus}`, `<i class="key-dot"></i>${T.others}`, T.ranges, T.lowerRight]));
+    host.appendChild(legend([`<i class="key-dot focus"></i>${T.focus}`, `<i class="key-dot"></i>${T.others}`, T.ranges(rounds), T.lowerRight]));
     const chart = html("div", "bench-chart");
     host.appendChild(chart);
     const W = 760, H = 430, m = { l: 64, r: 112, t: 34, b: 56 };
@@ -233,9 +234,9 @@
       const hit = el("circle", { cx, cy, r: 16, class: "hit" }, g);
       const content = `<strong>${app.name}</strong>`
         + tipRow(M.tipThroughput, `${fmt(tp.median, 1)} tok/s`)
-        + tipRow(T.tipRange, `${fmt(tp.range[0], 1)}–${fmt(tp.range[1], 1)}`)
+        + tipRow(T.tipRange(rounds), `${fmt(tp.range[0], 1)}–${fmt(tp.range[1], 1)}`)
         + tipRow(M.tipTtft, `${fmt(tt.median, yDigits)} ${yUnit}`)
-        + tipRow(T.tipRange, `${fmt(tt.range[0], yDigits)}–${fmt(tt.range[1], yDigits)}`);
+        + tipRow(T.tipRange(rounds), `${fmt(tt.range[0], yDigits)}–${fmt(tt.range[1], yDigits)}`);
       hit.addEventListener("mousemove", (e) => tip.show(content, e));
       hit.addEventListener("mouseleave", () => tip.hide());
     });
