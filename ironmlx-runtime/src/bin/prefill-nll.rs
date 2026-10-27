@@ -33,6 +33,9 @@ struct Args {
     /// Output JSON (must not exist).
     #[arg(long)]
     output: PathBuf,
+    /// Install the qualified Dense M5 profile (its settings as defaults).
+    #[arg(long)]
+    m5_profile: bool,
 }
 
 fn positions(start: i32, len: i32) -> Result<Array> {
@@ -44,6 +47,16 @@ fn positions(start: i32, len: i32) -> Result<Array> {
 fn main() -> Result<()> {
     let args = Args::parse();
     ensure!(!args.output.exists(), "preserve an existing result");
+    let profile = ironmlx_core::m5_profile::install_for_target(
+        if args.m5_profile {
+            ironmlx_core::m5_profile::M5ProfileMode::Auto
+        } else {
+            ironmlx_core::m5_profile::M5ProfileMode::Off
+        },
+        true,
+        ironmlx_core::m5_profile::M5ProfileTarget::Qwen35Dense,
+    );
+    println!("m5 profile {}", profile.status.as_str());
     let mlx_dir = std::env::var("MLX_DIR").context("MLX_DIR")?;
     mlx::metal::set_metallib_path(&format!("{mlx_dir}/lib/mlx.metallib"))?;
     mlx::set_default_device(mlx::Device::gpu(0));
@@ -51,6 +64,7 @@ fn main() -> Result<()> {
     let tokenizer = Tokenizer::from_loader(&loader)?;
     let model = Qwen35Model::from_loader_dflash2(&mut loader)?;
     drop(loader);
+    model.dflash2_prewarm()?;
     let target = StreamOrDevice::default();
     let mut results = Vec::new();
     for path in &args.text {
@@ -65,6 +79,7 @@ fn main() -> Result<()> {
         ids.truncate(args.tokens);
         let mut cache = model.make_cache(1, (args.tokens + 64) as i32, model.cache_dtype())?;
         let mut nll = Vec::with_capacity(args.tokens - 1);
+        let mut top1: Vec<i32> = Vec::with_capacity(args.tokens - 1);
         let mut position = 0usize;
         let started = std::time::Instant::now();
         while position < ids.len() {
@@ -102,6 +117,10 @@ fn main() -> Result<()> {
                 let picked = mlx::ops::take_along_axis(&logits, &next, -1)?;
                 let values = (&lse - &picked).to_vec::<f32>()?;
                 nll.extend(values);
+                top1.extend(
+                    mlx::ops::astype(&logits.argmax(&[-1][..], false)?, Dtype::Int32)?
+                        .to_vec::<i32>()?,
+                );
                 row += n;
             }
             position += len;
@@ -115,7 +134,7 @@ fn main() -> Result<()> {
         );
         results.push(
             json!({"path": path, "tokens": ids.len(), "scored": nll.len(),
-                            "mean_nll": mean, "nll": nll}),
+                            "mean_nll": mean, "nll": nll, "top1": top1}),
         );
     }
     std::fs::write(

@@ -6,11 +6,14 @@
 
 pub(crate) mod activations;
 pub(crate) use activations::gelu_tanh;
+pub(crate) mod ane_ffn;
 pub mod attention;
 pub(crate) mod batch_stable_qmm;
 pub mod concat_last;
 pub mod conv;
 pub mod decoder_layer;
+pub(crate) mod dense_fast_path;
+pub(crate) mod dense_prefill_kernels;
 pub(crate) mod dflash2_drafter_fusion;
 pub(crate) mod dflash_tree;
 pub mod embedding;
@@ -116,6 +119,13 @@ pub fn exact_affine8_b4_q2_scope() -> impl Drop {
 #[doc(hidden)]
 pub fn affine8_b4_q2_exact_supported() -> bool {
     verify_qmm::affine8_b4_q2_exact_supported()
+}
+
+/// `Err` when the Neural Engine share of a Dense prefill MLP evaluated since
+/// the last call failed (its outputs are NaN); call after evaluating a
+/// prefill's results, before using them.
+pub fn dense_ane_ffn_check() -> crate::Result<()> {
+    ane_ffn::check()
 }
 
 /// Diagnostic accounting of persistent M5 decode-layout weight copies.

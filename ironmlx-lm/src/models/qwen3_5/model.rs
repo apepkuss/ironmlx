@@ -1599,6 +1599,33 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
             target,
         )
     }
+
+    // Dense GPU commit (`DFLASH2_GPU_COMMIT`): the GatedDelta replay and conv
+    // gather are submitted from GPU accepted counts before the host reads the
+    // window; the same kernels as the host path's commit.
+    fn dflash2_commit_target_rows_device_on(
+        &self,
+        cache: &mut [LayerCache],
+        counts: &mlx::Array,
+        target: StreamOrDevice,
+    ) -> crate::Result<Option<Vec<bool>>> {
+        Ok(Some(
+            self.text
+                .commit_dflash2_rows_device_on(cache, counts, target)?,
+        ))
+    }
+
+    fn dflash2_finish_target_rows_on(
+        &self,
+        cache: &mut [LayerCache],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+        accepted_lens: &[usize],
+        device_done: &[bool],
+        target: StreamOrDevice,
+    ) -> crate::Result<()> {
+        self.text
+            .finish_dflash2_rows_host_on(cache, snapshots, accepted_lens, device_done, target)
+    }
 }
 
 impl Qwen35Model {
@@ -1620,6 +1647,28 @@ impl Qwen35Model {
                 == super::speculative::ExactBatchedVerifyProfile::Affine4
             && crate::nn::m5_affine4::enabled())
         .then(crate::nn::m5_affine4::scope);
+        let _dense_gdn = (_m5_lane.is_some() && crate::nn::dense_fast_path::requested())
+            .then(crate::nn::dense_fast_path::scope);
+        let _dense_prefill = (_m5_lane.is_some()
+            && mode == crate::models::dflash2::DFlash2TargetForwardMode::Prefill
+            && crate::nn::dense_fast_path::prefill_dequant_requested())
+        .then(crate::nn::dense_fast_path::prefill_scope);
+        let chunk_start = cache.as_deref().and_then(|layers| {
+            layers.iter().find_map(|layer| match layer {
+                crate::core::cache::layer::LayerCache::Linear(c) => c.offsets().first().copied(),
+                _ => None,
+            })
+        });
+        let _dense_ane = (_dense_prefill.is_some()
+            && crate::nn::dense_fast_path::prefill_ane_ffn_units() > 0
+            && match (
+                crate::nn::dense_fast_path::prefill_ane_ffn_max_position(),
+                chunk_start,
+            ) {
+                (Some(limit), Some(start)) => start < limit,
+                _ => true,
+            })
+        .then(crate::nn::dense_fast_path::ane_scope);
         let input_shape = input_ids.shape();
         let input_dims = input_shape.as_slice();
         let batch_width = input_dims.first().copied().unwrap_or(0) as usize;

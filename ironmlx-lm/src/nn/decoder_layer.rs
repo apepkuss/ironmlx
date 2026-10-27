@@ -22,6 +22,13 @@ use crate::nn::{
 };
 use crate::Result;
 
+/// A half's MLP in [`DecoderLayer::forward_pair_on`]: shared with the ANE,
+/// or (its input) kept on the GPU.
+enum HalfMlp {
+    Ane(crate::nn::mlp::AneHalf),
+    Gpu(Array),
+}
+
 #[derive(Clone, Copy)]
 struct DecodeLayerTurboProfileEvent {
     stage: &'static str,
@@ -64,6 +71,14 @@ fn prefill_stages_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED
         .get_or_init(|| std::env::var("IRONMLX_DIAGNOSTIC_PREFILL_STAGES").as_deref() == Ok("1"))
+        || verify_stages_enabled()
+}
+
+/// Diagnostic-only (`IRONMLX_DIAGNOSTIC_VERIFY_STAGES=1`): the prefill stage
+/// boundaries at any row count (decode and verify windows too).
+fn verify_stages_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("IRONMLX_DIAGNOSTIC_VERIFY_STAGES").as_deref() == Ok("1"))
 }
 
 /// Diagnostic-only prefill stage boundary (`IRONMLX_DIAGNOSTIC_PREFILL_STAGES=1`,
@@ -78,8 +93,12 @@ pub(crate) fn prefill_stage(stage: &'static str, arrays: &[&Array]) -> Result<()
     let start = std::time::Instant::now();
     mlx::transforms::eval(arrays).map_err(|e| anyhow!("{e}"))?;
     eprintln!(
-        "prefill_stage layer={layer_idx} kind={kind} stage={stage} elapsed_us={}",
-        start.elapsed().as_micros()
+        "prefill_stage layer={layer_idx} kind={kind} stage={stage} elapsed_us={} shape={:?}",
+        start.elapsed().as_micros(),
+        arrays
+            .first()
+            .map(|a| a.shape().as_slice().to_vec())
+            .unwrap_or_default()
     );
     Ok(())
 }
@@ -89,7 +108,7 @@ fn profile_decode_layer_turbo_stage(
     arrays: &[&Array],
     shape: DecodeLayerTurboProfileShape,
 ) -> Result<()> {
-    if shape.seq > 128 {
+    if shape.seq > 128 || verify_stages_enabled() {
         return prefill_stage(stage, arrays);
     }
     if shape.seq != 1 || std::env::var_os("IRONMLX_TURBOQUANT_ATTN_PROFILE").is_none() {
@@ -256,6 +275,42 @@ impl DecoderLayer {
         restore_attn_speculative_prefix_rows_on(&self.attn, cache, base, accepted_lens, target)
     }
 
+    /// Device half of a per-row speculative commit (see
+    /// `GatedDeltaNet::commit_speculative_rows_device_on`); full-attention
+    /// layers only move offsets, so they report done.
+    pub(crate) fn commit_speculative_rows_device_on(
+        &self,
+        cache: &mut LayerCache,
+        counts: &Array,
+        target: StreamOrDevice,
+    ) -> Result<bool> {
+        match (&self.attn, cache) {
+            (AttnPath::Linear(attn), LayerCache::Linear(cache)) => {
+                attn.commit_speculative_rows_device_on(cache, counts, target)
+            }
+            (AttnPath::Full(_), LayerCache::Full(_)) => Ok(true),
+            _ => Ok(false),
+        }
+    }
+
+    /// Host half: offsets of a device-committed layer; the full host restore
+    /// otherwise.
+    pub(crate) fn finish_speculative_rows_host_on(
+        &self,
+        cache: &mut LayerCache,
+        base: &LayerCacheSnapshot,
+        accepted_lens: &[usize],
+        device_done: bool,
+        target: StreamOrDevice,
+    ) -> Result<()> {
+        match (&self.attn, &mut *cache, device_done) {
+            (AttnPath::Linear(attn), LayerCache::Linear(gdc), true) => {
+                attn.finish_speculative_rows_host(gdc, accepted_lens)
+            }
+            _ => self.restore_speculative_prefix_rows_on(cache, base, accepted_lens, target),
+        }
+    }
+
     /// Pre-flight: enforce rank-3 input + last-axis matches `cfg.hidden_size`.
     /// `caller` is embedded in the diagnostic so callers (forward_on,
     /// forward_on_full_kv) surface in the error string.
@@ -367,7 +422,7 @@ impl DecoderLayer {
             seq: dims[1],
             hidden_size: dims[2],
         };
-        if dims[1] > 128 && prefill_stages_enabled() {
+        if (dims[1] > 128 || verify_stages_enabled()) && prefill_stages_enabled() {
             PREFILL_STAGE_LAYER.with(|cell| cell.set((layer_idx, profile_shape.attn_kind)));
         }
         profile_decode_layer_turbo_stage("decode_layer_input", &[x], profile_shape)?;
@@ -461,6 +516,97 @@ impl DecoderLayer {
         profile_decode_layer_turbo_stage("decode_layer_output", &[&out], profile_shape)?;
         PREFILL_STAGE_LAYER.with(|cell| cell.set((-1, "")));
         Ok(out)
+    }
+
+    /// The half-chunk pipeline's layer (`DENSE_PREFILL_ANE_FFN_PIPELINE`):
+    /// the two consecutive halves `xs[0]`, `xs[1]` of one sequence's chunk
+    /// (`cos` / `sin` each half's), in order through the attention and its
+    /// cache, each MLP handed half to the Neural Engine
+    /// ([`Mlp::ane_half_begin_on`]). Both halves' GPU MLP channels are
+    /// submitted before either awaits the ANE, so the ANE computes half 0
+    /// while the GPU runs half 1's attention and both halves' channels, and
+    /// half 1 while the GPU joins half 0 and starts the next layer. Without
+    /// the ANE the halves' MLPs run on the GPU.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_pair_on(
+        &self,
+        xs: [&Array; 2],
+        mrope: &Mrope,
+        cos: [&Array; 2],
+        sin: [&Array; 2],
+        cache: &mut LayerCache,
+        target: StreamOrDevice,
+        layer_idx: i32,
+    ) -> Result<[Array; 2]> {
+        let mut residual = Vec::with_capacity(2);
+        let mut halves = Vec::with_capacity(2);
+        for half in 0..2 {
+            let x = xs[half];
+            self.preflight_x(x, "DecoderLayer::forward_pair_on")?;
+            let normed_in = self.input_layernorm.forward_on(x, target)?;
+            let attn = match (&self.attn, &mut *cache) {
+                (AttnPath::Full(a), LayerCache::Full(kv)) => a.forward_on(
+                    &normed_in,
+                    mrope,
+                    cos[half],
+                    sin[half],
+                    None,
+                    None,
+                    None,
+                    Some(kv),
+                    target,
+                    layer_idx,
+                )?,
+                (AttnPath::Linear(a), LayerCache::Linear(gdc)) => {
+                    a.forward_on(&normed_in, None, None, Some(gdc), target, layer_idx)?
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "DecoderLayer::forward_pair_on: cache kind does not match the layer"
+                    ));
+                }
+            };
+            let h = x + &attn;
+            let normed_post = self.post_attention_layernorm.forward_on(&h, target)?;
+            // Half 1 follows half 0 onto the ANE only if half 0 went there.
+            let on_ane = half == 0 || matches!(halves[0], HalfMlp::Ane(_));
+            let started = if on_ane {
+                self.mlp.ane_half_begin_on(&normed_post, half, target)?
+            } else {
+                None
+            };
+            anyhow::ensure!(
+                half == 0 || started.is_some() == on_ane,
+                "DecoderLayer::forward_pair_on: half 1 left the ANE after half 0"
+            );
+            halves.push(match started {
+                Some(started) => HalfMlp::Ane(started),
+                None => HalfMlp::Gpu(normed_post),
+            });
+            residual.push(h);
+        }
+        let partials: Vec<&Array> = halves
+            .iter()
+            .filter_map(|half| match half {
+                HalfMlp::Ane(started) => Some(&started.partial),
+                HalfMlp::Gpu(_) => None,
+            })
+            .collect();
+        if !partials.is_empty() {
+            mlx::transforms::async_eval(&partials)?;
+        }
+        let mut outs = Vec::with_capacity(2);
+        for (h, half) in residual.iter().zip(halves) {
+            let mlp_out = match half {
+                HalfMlp::Ane(started) => self.mlp.ane_half_finish_on(started, target)?,
+                HalfMlp::Gpu(normed_post) => self.mlp.forward_on(&normed_post, target)?,
+            };
+            outs.push(h + &mlp_out);
+        }
+        let [a, b]: [Array; 2] = outs
+            .try_into()
+            .map_err(|_| anyhow!("DecoderLayer::forward_pair_on: two halves"))?;
+        Ok([a, b])
     }
 
     /// Production constructor. `kind` selects which attention path to load

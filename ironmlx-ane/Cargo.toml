@@ -1,0 +1,16 @@
+[package]
+name = "ironmlx-ane"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Apple Neural Engine programs (private AppleNeuralEngine.framework) for IronMLX prefill offload"
+publish = false
+
+[dependencies]
+anyhow = "1"
+
+[build-dependencies]
+cc = "1"

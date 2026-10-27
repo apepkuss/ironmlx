@@ -394,8 +394,7 @@ impl GatedDeltaNet {
             && mask.is_none()
             && tree.is_none()
             && !capture_active
-            && super::moe_fast_path::is_armed()
-            && super::fused_norm::requested()
+            && super::dense_fast_path::gdn_fused_prep_armed()
             && per_row_lens.is_none_or(|lens| lens.iter().all(|&l| l == seq))
             && cache
                 .as_deref()
@@ -521,8 +520,7 @@ impl GatedDeltaNet {
         let fused_prep = match (fused_output.as_ref(), cache.as_deref()) {
             // Bit-identical to the fast-path chain (IronQkNorm, IronGdnGates).
             (Some(output), Some(c))
-                if super::fused_norm::requested()
-                    && super::moe_fast_path::is_armed()
+                if super::dense_fast_path::gdn_fused_prep_armed()
                     && mask.is_none()
                     && tree.is_none()
                     && !defer_captured_state_commit
@@ -559,10 +557,12 @@ impl GatedDeltaNet {
             (Some(output), Some(c))
                 if tree.is_some()
                     && batch == 1
-                    && super::fused_norm::requested()
-                    && super::moe_fast_path::is_armed()
+                    && super::dense_fast_path::gdn_fused_prep_armed()
                     && mask.is_none()
-                    && !defer_captured_state_commit
+                    // A flat tree always defers its state commit; under the
+                    // Dense scope the recorded replay inputs are the same
+                    // values (conv input, q/k/v, gates), so it may prepare.
+                    && (!defer_captured_state_commit || super::dense_fast_path::is_armed())
                     && per_row_lens.is_none()
                     && self.conv1d.bias().is_none()
                     && self.cfg.head_k_dim == 128
@@ -733,7 +733,7 @@ impl GatedDeltaNet {
             };
 
             // Step 4: q/k rms_norm (no weight)
-            let (q_scaled, k_scaled) = if super::moe_fast_path::is_armed()
+            let (q_scaled, k_scaled) = if super::dense_fast_path::gdn_kernels_armed()
                 && conv_out.dtype() == Dtype::Bfloat16
                 && self.cfg.head_k_dim == 128
             {
@@ -761,7 +761,7 @@ impl GatedDeltaNet {
             };
 
             // Steps 5-6: g = exp(-exp(A_log) * softplus(a + dt_bias)), beta = sigmoid(b).
-            let (g, beta) = if super::moe_fast_path::is_armed()
+            let (g, beta) = if super::dense_fast_path::gdn_kernels_armed()
                 && a.dtype() == Dtype::Bfloat16
                 && b.dtype() == Dtype::Bfloat16
                 && self.a_log.dtype() == Dtype::Bfloat16
@@ -819,7 +819,16 @@ impl GatedDeltaNet {
                 Some(c) => c.offsets().iter().all(|&o| o == 0),
                 None => true,
             };
-            let omit_state_output = defer_captured_state_commit && !zero_state;
+            // A captured multi-token linear window (no tree): every commit
+            // restores the capture's base state and replays the accepted
+            // steps, so the window's final state is never read
+            // (`DENSE_VERIFY_OMIT_GDN_STATE`; offsets still advance).
+            let omit_window_state = capture_active
+                && tree.is_none()
+                && seq > 1
+                && super::dense_fast_path::verify_omit_gdn_state_requested();
+            let omit_state_output =
+                (defer_captured_state_commit || omit_window_state) && !zero_state;
             let kernel = if omit_state_output {
                 if mask.is_some() {
                     self.kernel_no_state_masked.get_or_init(|| {
@@ -1001,8 +1010,12 @@ impl GatedDeltaNet {
             };
 
             // Step 7e: update cache recurrent_state, advance offset
-            if let (Some(c), Some(new_state)) = (cache.as_mut(), new_state) {
-                c.update_recurrent(new_state);
+            let advance =
+                new_state.is_some() || (omit_window_state && !defer_captured_state_commit);
+            if let (Some(c), true) = (cache.as_mut(), advance) {
+                if let Some(new_state) = new_state {
+                    c.update_recurrent(new_state);
+                }
                 let lens_owned: Vec<i32>;
                 let lens_ref: &[i32] = match per_row_lens {
                     Some(l) => l,
@@ -1036,9 +1049,9 @@ impl GatedDeltaNet {
         // Step 8: RmsNormGated(y, z) + reshape + out_proj
         let gated_in_place = match (fused_output.as_ref(), self.norm.weight()) {
             (Some(output), weight)
-                if super::fused_norm::requested()
+                if (super::fused_norm::requested() || super::dense_fast_path::is_armed())
                     && mask.is_none()
-                    && tree.is_none()
+                    && (tree.is_none() || super::dense_fast_path::is_armed())
                     && self.cfg.head_v_dim == 128
                     && (seq <= 64 || long_prefill) =>
             {

@@ -84,6 +84,7 @@ fn main() {
     .file("shim/src/quantization.cc")
     .file("shim/src/row_stable_affine4.cc")
     .file("shim/src/random.cc")
+    .file("shim/src/external_buffer.cc")
     .include("shim/include")
     .include(&include_dir)
     .include(include_dir.join("metal_cpp"))

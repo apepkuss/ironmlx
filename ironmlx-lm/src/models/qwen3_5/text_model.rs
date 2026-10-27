@@ -294,6 +294,52 @@ impl Qwen35TextModel {
         Ok(())
     }
 
+    /// Device half of the per-row commit for every layer (see the decoder
+    /// layer); one flag per layer.
+    pub(crate) fn commit_dflash2_rows_device_on(
+        &self,
+        cache: &mut [LayerCache],
+        counts: &Array,
+        target: StreamOrDevice,
+    ) -> Result<Vec<bool>> {
+        anyhow::ensure!(
+            cache.len() == self.layers.len(),
+            "DFlash2 commit cache layer count"
+        );
+        self.layers
+            .iter()
+            .zip(cache.iter_mut())
+            .map(|(layer, cache)| layer.commit_speculative_rows_device_on(cache, counts, target))
+            .collect()
+    }
+
+    /// Host half of the per-row commit.
+    pub(crate) fn finish_dflash2_rows_host_on(
+        &self,
+        cache: &mut [LayerCache],
+        snapshots: &[crate::core::cache::layer::LayerCacheSnapshot],
+        accepted_lens: &[usize],
+        device_done: &[bool],
+        target: StreamOrDevice,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            cache.len() == self.layers.len()
+                && snapshots.len() == self.layers.len()
+                && device_done.len() == self.layers.len(),
+            "DFlash2 commit layer count"
+        );
+        for (((layer, cache), snapshot), &done) in self
+            .layers
+            .iter()
+            .zip(cache.iter_mut())
+            .zip(snapshots)
+            .zip(device_done)
+        {
+            layer.finish_speculative_rows_host_on(cache, snapshot, accepted_lens, done, target)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn restore_dflash2_speculative_prefix_rows_on(
         &self,
         cache: &mut [LayerCache],
@@ -389,7 +435,49 @@ impl Qwen35TextModel {
         let mut x = hidden;
         let mut captured = Vec::with_capacity(target_layer_ids.len());
         let mut next_capture = 0_usize;
+        let dims = x.shape().as_slice().to_vec();
+        let pipelined = crate::nn::dense_fast_path::ane_armed()
+            && crate::nn::dense_fast_path::prefill_ane_ffn_pipelined()
+            && dims[0] == 1
+            && dims[1] as usize == crate::nn::dense_fast_path::PREFILL_DEQUANT_ROWS;
         match cache {
+            Some(cache) if pipelined => {
+                // Half-chunk pipeline (`DENSE_PREFILL_ANE_FFN_PIPELINE`): the
+                // two halves interleaved layer by layer.
+                let half = dims[1] / 2;
+                let rows = |a: &Array, start: i32, end: i32| -> Result<Array> {
+                    let mut lo = vec![0; a.ndim()];
+                    let mut hi = a.shape().as_slice().to_vec();
+                    lo[1] = start;
+                    hi[1] = end;
+                    Ok(mlx::ops::indexing::slice_on(a, &lo[..], &hi[..], target)?)
+                };
+                let cos = [rows(&cos, 0, half)?, rows(&cos, half, dims[1])?];
+                let sin = [rows(&sin, 0, half)?, rows(&sin, half, dims[1])?];
+                let mut xs = [rows(&x, 0, half)?, rows(&x, half, dims[1])?];
+                for (index, (layer, layer_cache)) in
+                    self.layers.iter().zip(cache.iter_mut()).enumerate()
+                {
+                    xs = layer.forward_pair_on(
+                        [&xs[0], &xs[1]],
+                        &self.mrope,
+                        [&cos[0], &cos[1]],
+                        [&sin[0], &sin[1]],
+                        layer_cache,
+                        target,
+                        index as i32,
+                    )?;
+                    if target_layer_ids.get(next_capture) == Some(&index) {
+                        captured.push(mlx::ops::shape::concatenate_on(
+                            &[&xs[0], &xs[1]],
+                            1,
+                            target,
+                        )?);
+                        next_capture += 1;
+                    }
+                }
+                x = mlx::ops::shape::concatenate_on(&[&xs[0], &xs[1]], 1, target)?;
+            }
             Some(cache) => {
                 for (index, (layer, layer_cache)) in
                     self.layers.iter().zip(cache.iter_mut()).enumerate()

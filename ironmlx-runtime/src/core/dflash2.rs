@@ -840,9 +840,23 @@ impl DFlash2TensorBatchCache {
 /// aligned and unaligned prefill tiles, longer prompts).
 const STARTUP_WARMUP_PROMPT_LENGTHS: [usize; 11] =
     [12, 24, 40, 56, 72, 100, 128, 136, 200, 264, 520];
+/// Prompt length of the extra warmup request when the Dense prefill MLPs
+/// share full chunks with the Neural Engine (`DENSE_PREFILL_ANE_FFN_UNITS`)
+/// or with `DFLASH2_STARTUP_FULL_CHUNK_WARMUP`: one full 2048-row chunk, so
+/// the ANE program is compiled and loaded and the full-chunk kernels built
+/// before serving.
+const STARTUP_WARMUP_FULL_CHUNK_LENGTH: usize = 2100;
 /// Generated tokens per warmup request: the prefill, the first proposal over
 /// the prompt context, first-token sampling and the first verify windows.
 const STARTUP_WARMUP_NEW_TOKENS: usize = 4;
+/// Ragged (B4) warmup: one group per batch width the actor forms on a
+/// four-sequence server, rows at different context lengths, two linear
+/// windows each. The batched draft and verify kernels are specialized to the
+/// group's rows (a first budget-7 window of four rows compiled for ~0.5 s).
+const STARTUP_WARMUP_RAGGED_WIDTHS: [usize; 3] = [4, 3, 2];
+const STARTUP_WARMUP_RAGGED_LENGTHS: [usize; 4] = [40, 72, 100, 136];
+const STARTUP_WARMUP_RAGGED_WINDOWS: usize = 2;
+const STARTUP_WARMUP_RAGGED_NEW_TOKENS: usize = 48;
 
 /// M5 profile setting `DFLASH2_STARTUP_WARMUP`.
 pub(crate) fn startup_warmup_requested() -> bool {
@@ -865,24 +879,38 @@ where
     M: DFlash2Target,
 {
     let started = Instant::now();
-    for &length in &STARTUP_WARMUP_PROMPT_LENGTHS {
-        let request = GenerateRequest {
-            priority: Default::default(),
-            prompt_ids: (0..length as u32)
-                .map(|i| 1000 + (i * 7919) % 50_000)
-                .collect(),
-            max_new_tokens: STARTUP_WARMUP_NEW_TOKENS,
-            sampler: ironmlx_core::sampler::Sampler::greedy(),
-            stop_token_ids: Vec::new(),
-            prefill_chunk_size,
-            decode_cadence_mid_chunk_cap: 1,
-            kv_cache_turboquant_bits: None,
-            pixel_values: None,
-            image_grid_thw: None,
-            image_spatial_merge_size: 2,
-            image_token_id: ironmlx_lm::core::model_input::IMAGE_TOKEN_ID,
-            constraint: None,
-        };
+    let full_chunk = ironmlx_core::m5_profile::setting(
+        ironmlx_core::m5_profile::settings::DENSE_PREFILL_ANE_FFN_UNITS,
+    )
+    .and_then(|v| v.parse::<usize>().ok())
+    .is_some_and(|units| units > 0)
+        || ironmlx_core::m5_profile::flag(
+            ironmlx_core::m5_profile::settings::DFLASH2_STARTUP_FULL_CHUNK_WARMUP,
+        );
+    let lengths: Vec<usize> = STARTUP_WARMUP_PROMPT_LENGTHS
+        .iter()
+        .copied()
+        .chain(full_chunk.then_some(STARTUP_WARMUP_FULL_CHUNK_LENGTH))
+        .collect();
+    let warmup_request = |length: usize, salt: u32, max_new_tokens: usize| GenerateRequest {
+        priority: Default::default(),
+        prompt_ids: (0..length as u32)
+            .map(|i| 1000 + (i * 7919 + salt * 104_729) % 50_000)
+            .collect(),
+        max_new_tokens,
+        sampler: ironmlx_core::sampler::Sampler::greedy(),
+        stop_token_ids: Vec::new(),
+        prefill_chunk_size,
+        decode_cadence_mid_chunk_cap: 1,
+        kv_cache_turboquant_bits: None,
+        pixel_values: None,
+        image_grid_thw: None,
+        image_spatial_merge_size: 2,
+        image_token_id: ironmlx_lm::core::model_input::IMAGE_TOKEN_ID,
+        constraint: None,
+    };
+    for &length in &lengths {
+        let request = warmup_request(length, 0, STARTUP_WARMUP_NEW_TOKENS);
         let mut stream = DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
             model,
             draft,
@@ -899,9 +927,60 @@ where
             }
         }
     }
+    let mut ragged_windows = 0;
+    let ragged = ironmlx_core::m5_profile::flag(
+        ironmlx_core::m5_profile::settings::DFLASH2_STARTUP_RAGGED_WARMUP,
+    );
+    for &width in STARTUP_WARMUP_RAGGED_WIDTHS.iter().filter(|_| ragged) {
+        let mut streams = Vec::with_capacity(width);
+        for (row, &length) in STARTUP_WARMUP_RAGGED_LENGTHS[..width].iter().enumerate() {
+            let request = warmup_request(length, row as u32 + 1, STARTUP_WARMUP_RAGGED_NEW_TOKENS);
+            streams.push(
+                DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
+                    model,
+                    draft,
+                    tokenizer,
+                    request,
+                    execution,
+                    None,
+                    &|| false,
+                )
+                .with_context(|| format!("DFlash2 startup ragged warmup (width {width})"))?,
+            );
+        }
+        if streams[0].ragged_draft_budget().is_none() {
+            break;
+        }
+        let mut cache = None;
+        for _ in 0..STARTUP_WARMUP_RAGGED_WINDOWS {
+            for stream in &mut streams {
+                while !stream.finished && !stream.pending_tokens.is_empty() {
+                    stream.next_token_deferred()?;
+                }
+            }
+            if streams
+                .iter()
+                .any(|stream| stream.finished || !stream.ragged_linear_eligible())
+            {
+                break;
+            }
+            let mut rows: Vec<&mut DFlash2TextGenerationStream<'_, M>> =
+                streams.iter_mut().collect();
+            let (batched, _) =
+                DFlash2TextGenerationStream::fill_ragged_linear_window_bn(&mut rows, cache.take())?;
+            cache = Some(batched);
+            ragged_windows += 1;
+        }
+        if let Some(batched) = cache {
+            let mut rows: Vec<&mut DFlash2TextGenerationStream<'_, M>> =
+                streams.iter_mut().collect();
+            batched.scatter_to_rows(&mut rows)?;
+        }
+    }
     mlx::clear_cache();
     tracing::info!(
-        requests = STARTUP_WARMUP_PROMPT_LENGTHS.len(),
+        requests = lengths.len(),
+        ragged_windows,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "DFlash2 startup warmup finished"
     );
@@ -2005,10 +2084,12 @@ where
     /// row: greedy, unconstrained, fixed positive draft budget, and enough
     /// remaining tokens for a full linear block. Other rows keep their own
     /// window path.
-    /// Draft budget of this row in a ragged linear batch: the fixed budget
-    /// when one is set, otherwise the shared ragged budget.
+    /// Draft budget of this row in a ragged linear batch: the shared ragged
+    /// budget when one is set (the Dense profile keeps a fixed budget of 7
+    /// for single linear windows and verifies ragged rows at 3), otherwise
+    /// the fixed budget.
     pub(crate) fn ragged_draft_budget(&self) -> Option<usize> {
-        self.experimental_fixed_budget.or(self.ragged_budget)
+        self.ragged_budget.or(self.experimental_fixed_budget)
     }
 
     /// Batch widths certified for this row's ragged verify width.
@@ -2381,6 +2462,140 @@ where
         Ok(out)
     }
 
+    /// Diagnostic: GPU time of a ragged linear window's parts at these rows'
+    /// state, each part evaluated alone and repeated (`iters` samples, medians
+    /// in microseconds): the batched draft (on copies of the draft caches),
+    /// the target verify forward of `draft_len + 1` tokens per row (cache
+    /// restored after each pass), and the head (vocabulary projection +
+    /// argmax). The rows' state is unchanged.
+    #[doc(hidden)]
+    pub fn diagnostic_ragged_window_bench(
+        rows: &mut [&mut Self],
+        draft_len: usize,
+        iters: usize,
+    ) -> Result<Vec<(&'static str, u64)>> {
+        let target = StreamOrDevice::default();
+        let batch_size = rows.len();
+        let b = i32::try_from(batch_size)?;
+        let verify_len = draft_len + 1;
+        let mask_token = rows[0].draft.config().dflash_config.mask_token_id;
+        let mut batch_cache = Self::ragged_batch_cache(rows, None)?;
+        let current: Vec<u32> = rows
+            .iter()
+            .map(|r| {
+                r.history
+                    .last()
+                    .copied()
+                    .ok_or_else(|| anyhow!("empty history"))
+            })
+            .collect::<Result<_>>()?;
+        let positions_before = rows.iter().map(|r| r.history.len() - 1).collect::<Vec<_>>();
+        let mut blocks = Vec::with_capacity(batch_size * verify_len);
+        for &c in &current {
+            blocks.push(c);
+            blocks.resize(blocks.len() + draft_len, mask_token);
+        }
+        let blocks_arr: Array = (&blocks[..], &[b, i32::try_from(verify_len)?][..]).try_into()?;
+        let position_rows = positions_before
+            .iter()
+            .zip(rows.iter())
+            .map(|(&start, row)| {
+                build_position_ids(
+                    i32::try_from(start)? + row.rope_delta,
+                    i32::try_from(verify_len)?,
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let position_refs = position_rows.iter().collect::<Vec<_>>();
+        let positions = mlx::ops::shape::concatenate_on(&position_refs, 1, target)?;
+        let (draft_model, model) = (rows[0].draft, rows[0].model);
+        let layer_ids = rows[0]
+            .draft
+            .config()
+            .dflash_config
+            .target_layer_ids
+            .clone();
+        let mode = dflash2_target_forward_mode(rows[0].request.sampler);
+        let median = |mut v: Vec<u64>| -> u64 {
+            v.sort_unstable();
+            v[v.len() / 2]
+        };
+        let (mut t_draft, mut t_verify, mut t_head) = (Vec::new(), Vec::new(), Vec::new());
+        for pass in 0..iters + 2 {
+            let mut caches = rows
+                .iter()
+                .map(|r| r.draft_cache.clone())
+                .collect::<Vec<_>>();
+            let hiddens = rows
+                .iter()
+                .map(|r| &r.pending_context_hidden)
+                .collect::<Vec<_>>();
+            mlx::transforms::synchronize()?;
+            let started = Instant::now();
+            let mut cache_refs = caches.iter_mut().collect::<Vec<_>>();
+            let drafted = draft_model.propose_greedy_ragged_on(
+                model,
+                &blocks_arr,
+                &hiddens,
+                &mut cache_refs,
+                target,
+            )?;
+            mlx::transforms::eval(&[&drafted])?;
+            mlx::transforms::synchronize()?;
+            let d = elapsed_us(started);
+            let current_arr: Array = (&current[..], &[b, 1][..]).try_into()?;
+            let verify_arr = mlx::ops::shape::concatenate_on(&[&current_arr, &drafted], 1, target)?;
+            mlx::transforms::eval(&[&verify_arr])?;
+            let snapshots = batch_cache
+                .target
+                .iter()
+                .map(LayerCache::dflash2_transaction_snapshot)
+                .collect::<Result<Vec<_>>>()?;
+            for layer in &mut batch_cache.target {
+                layer.begin_speculative_prefix_capture()?;
+            }
+            mlx::transforms::synchronize()?;
+            let started = Instant::now();
+            let verified = {
+                let _ragged = ironmlx_lm::nn::gated_attention::ragged_rows_scope();
+                model.dflash2_forward_target_on(
+                    &verify_arr,
+                    &positions,
+                    Some(&mut batch_cache.target),
+                    &layer_ids,
+                    mode,
+                    target,
+                )?
+            };
+            mlx::transforms::eval(&[&verified.hidden, &verified.context_hidden])?;
+            mlx::transforms::synchronize()?;
+            let v = elapsed_us(started);
+            let started = Instant::now();
+            let logits = model.dflash2_project_hidden_on(&verified.hidden, target)?;
+            let tokens = argmax_last(&logits)?;
+            mlx::transforms::eval(&[&tokens])?;
+            mlx::transforms::synchronize()?;
+            let h = elapsed_us(started);
+            for layer in &mut batch_cache.target {
+                layer.discard_speculative_prefix_capture();
+            }
+            for (layer, snapshot) in batch_cache.target.iter_mut().zip(&snapshots) {
+                layer.restore(snapshot)?;
+            }
+            if pass >= 2 {
+                t_draft.push(d);
+                t_verify.push(v);
+                t_head.push(h);
+            }
+        }
+        batch_cache.scatter_to_rows(rows)?;
+        Ok(vec![
+            ("draft", median(t_draft)),
+            ("verify", median(t_verify)),
+            ("head", median(t_head)),
+        ])
+    }
+
     /// Prototype, default off: one linear draft/verify window for rows at
     /// different context lengths (greedy, equal draft budget). Drafts run per
     /// row (the draft cache has one shared position per batch); the target
@@ -2412,12 +2627,12 @@ where
         let target = StreamOrDevice::default();
         let start_uptime_ns = uptime_ns();
         let window_started = Instant::now();
-        let draft_len = rows[0].ragged_draft_budget().unwrap_or(0);
+        let base_len = rows[0].ragged_draft_budget().unwrap_or(0);
         for (i, row) in rows.iter().enumerate() {
             anyhow::ensure!(
-                row.ragged_linear_eligible() && row.ragged_draft_budget() == Some(draft_len),
+                row.ragged_linear_eligible() && row.ragged_draft_budget() == Some(base_len),
                 "ragged row {i} is not an eligible greedy linear row (fixed budget {:?}, \
-                 budget {:?} vs {draft_len}, pending {}, finished {}, emitted {}/{})",
+                 budget {:?} vs {base_len}, pending {}, finished {}, emitted {}/{})",
                 row.experimental_fixed_budget,
                 row.ragged_draft_budget(),
                 row.pending_tokens.len(),
@@ -2426,6 +2641,7 @@ where
                 row.request.max_new_tokens,
             );
         }
+        let draft_len = ragged_window_draft_len(base_len, batch_size, rows[0].block_size);
         anyhow::ensure!(draft_len > 0, "ragged batch needs a positive draft budget");
         DFlash2VerifyPlan::build(&rows[0].verify_capabilities, batch_size, draft_len)?;
         let verify_len = draft_len + 1;
@@ -2434,42 +2650,7 @@ where
 
         // Persistent batched target cache.
         let cache_started = Instant::now();
-        let mut batch_cache = match cache {
-            Some(cache) => {
-                anyhow::ensure!(cache.batch_size == batch_size, "ragged cache width changed");
-                cache
-            }
-            None => {
-                let cap = i32::try_from(ragged_batch_cache_cap(
-                    rows.iter().map(|row| row.ragged_cache_tokens()),
-                ))?;
-                let mut target_cache =
-                    rows[0]
-                        .model
-                        .make_cache(batch_size_i32, cap, rows[0].model.cache_dtype())?;
-                for (batch_row, row) in rows.iter().enumerate() {
-                    ironmlx_lm::core::cache::layer::adopt_layer_cache_rows(
-                        &mut target_cache,
-                        &row.target_cache,
-                        batch_row,
-                        0,
-                    )?;
-                }
-                release_row_target_caches(rows)?;
-                if window_stages_enabled() {
-                    let arrays: Vec<&Array> = target_cache
-                        .iter()
-                        .flat_map(LayerCache::diagnostic_buffers)
-                        .collect();
-                    mlx::transforms::eval(&arrays)?;
-                    mlx::transforms::synchronize()?;
-                }
-                DFlash2RaggedBatchCache {
-                    target: target_cache,
-                    batch_size,
-                }
-            }
-        };
+        let mut batch_cache = Self::ragged_batch_cache(rows, cache)?;
         let cache_build_us = elapsed_us(cache_started);
         let mut stage_clock = StageClock::start()?;
 
@@ -2762,6 +2943,52 @@ where
             end_uptime_ns: uptime_ns(),
         };
         Ok((batch_cache, timing))
+    }
+
+    /// The persistent batched target cache of a ragged window: `cache` when
+    /// membership is unchanged, else one built from the rows' caches.
+    fn ragged_batch_cache(
+        rows: &mut [&mut Self],
+        cache: Option<DFlash2RaggedBatchCache>,
+    ) -> Result<DFlash2RaggedBatchCache> {
+        let batch_size = rows.len();
+        let batch_size_i32 = i32::try_from(batch_size)?;
+        Ok(match cache {
+            Some(cache) => {
+                anyhow::ensure!(cache.batch_size == batch_size, "ragged cache width changed");
+                cache
+            }
+            None => {
+                let cap = i32::try_from(ragged_batch_cache_cap(
+                    rows.iter().map(|row| row.ragged_cache_tokens()),
+                ))?;
+                let mut target_cache =
+                    rows[0]
+                        .model
+                        .make_cache(batch_size_i32, cap, rows[0].model.cache_dtype())?;
+                for (batch_row, row) in rows.iter().enumerate() {
+                    ironmlx_lm::core::cache::layer::adopt_layer_cache_rows(
+                        &mut target_cache,
+                        &row.target_cache,
+                        batch_row,
+                        0,
+                    )?;
+                }
+                release_row_target_caches(rows)?;
+                if window_stages_enabled() {
+                    let arrays: Vec<&Array> = target_cache
+                        .iter()
+                        .flat_map(LayerCache::diagnostic_buffers)
+                        .collect();
+                    mlx::transforms::eval(&arrays)?;
+                    mlx::transforms::synchronize()?;
+                }
+                DFlash2RaggedBatchCache {
+                    target: target_cache,
+                    batch_size,
+                }
+            }
+        })
     }
 
     /// One ragged multi-request decode step without drafts: every row feeds
@@ -4484,6 +4711,9 @@ fn sample_initial_token(
     prng_state: &mut Array,
     constraint: &mut Option<ConstraintSession>,
 ) -> Result<u32> {
+    // The prefill behind `logits` is evaluated: a failed Neural Engine share
+    // left NaN there.
+    ironmlx_lm::nn::dense_ane_ffn_check()?;
     let shape = logits.shape();
     let dims = shape.as_slice();
     if dims.len() != 3 || dims[0] != 1 || dims[1] != 1 {
@@ -4848,6 +5078,29 @@ fn ragged_timeline_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED
         .get_or_init(|| std::env::var("IRONMLX_DIAGNOSTIC_RAGGED_TIMELINE").as_deref() == Ok("1"))
+}
+
+/// Draft length of a ragged linear window of `width` rows sharing the draft
+/// budget `base` (`DFLASH2_RAGGED_FILL_ROWS`, with `DFLASH2_RAGGED_TAIL` so a
+/// row near its limit keeps only the tokens it still needs): narrower windows
+/// draft more, up to the fill rows in all and the draft block. Depends on the
+/// width only, so every row's tokens are those of the budget-`base` path
+/// (verify rows are width-invariant).
+fn ragged_window_draft_len(base: usize, width: usize, block_size: usize) -> usize {
+    static FILL: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let fill = *FILL.get_or_init(|| {
+        ironmlx_core::m5_profile::setting(
+            ironmlx_core::m5_profile::settings::DFLASH2_RAGGED_FILL_ROWS,
+        )
+        .and_then(|v| v.parse().ok())
+        .filter(|_| ragged_tail_requested())
+    });
+    match fill {
+        Some(rows) if width > 0 && base > 0 => base
+            .max((rows / width).saturating_sub(1))
+            .min(block_size.saturating_sub(1).max(base)),
+        _ => base,
+    }
 }
 
 /// M5 profile setting `DFLASH2_RAGGED_TAIL`: rows with fewer remaining

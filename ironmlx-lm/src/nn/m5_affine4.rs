@@ -50,8 +50,8 @@ pub(crate) fn enabled() -> bool {
 }
 
 pub(crate) struct Prepared {
-    weight: Array,
-    sb: Array,
+    pub(crate) weight: Array,
+    pub(crate) sb: Array,
 }
 
 // Diagnostic accounting only: counts persistent decode-layout copies.
@@ -63,10 +63,12 @@ pub fn prepared_totals() -> (usize, usize) {
     use std::sync::atomic::Ordering::Relaxed;
     (PREPARED_COUNT.load(Relaxed), PREPARED_BYTES.load(Relaxed))
 }
-fn tile_width(n: i32) -> i32 {
+/// Columns per tile of the tiled layout of an `n`-column projection.
+pub(crate) fn tile_width(n: i32) -> i32 {
     static COOP: OnceLock<bool> = OnceLock::new();
-    if *COOP.get_or_init(|| std::env::var("IRONMLX_EXPERIMENTAL_M5_QMM_COOP").as_deref() == Ok("1"))
-        && n % 64 == 0
+    if *COOP.get_or_init(|| {
+        ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::M5_QMM_COOP)
+    }) && n % 64 == 0
     {
         64
     } else {
@@ -150,7 +152,7 @@ fn compatible(x: &Array, p: &QuantizedLinearParts<'_>) -> bool {
         && w.as_slice()[1] * 8 == x.shape().as_slice()[x.ndim() - 1]
 }
 
-fn prepare(p: &QuantizedLinearParts<'_>, target: StreamOrDevice) -> Result<Prepared> {
+pub(crate) fn prepare(p: &QuantizedLinearParts<'_>, target: StreamOrDevice) -> Result<Prepared> {
     use mlx::ops::shape::*;
     let shape = p.weight.shape();
     let (n, kw) = (shape.as_slice()[0], shape.as_slice()[1]);
@@ -331,8 +333,6 @@ pub(crate) fn forward_tiled(
     run_prepared(x, n, m, prepared, bias, target)
 }
 
-/// Kernel variant `(tmr, edge)` used for `m` activation rows (part of the
-/// compiled kernel key together with N and K).
 pub(crate) fn kernel_variant(m: i32) -> (i32, bool) {
     let mp = ((m + 15) / 16) * 16;
     let block = mp.min(32);
@@ -613,6 +613,292 @@ mod tests {
         Ok(())
     }
 
+    /// Diagnostic: peak tensor-unit throughput of MPP matmul2d per operand
+    /// type (bfloat x bfloat, half x half, int8 x int8 -> int32), each
+    /// simdgroup repeating a rows x 32 x 32 multiply-accumulate from
+    /// threadgroup operands. Run with --ignored.
+    #[test]
+    #[ignore]
+    #[serial(mlx_metal)]
+    fn tensor_unit_peak_by_type() -> Result<()> {
+        if let Ok(root) = std::env::var("MLX_DIR") {
+            mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib"))?;
+        }
+        let target = StreamOrDevice::default();
+        // (name, left type, right type, right in device memory, accumulator).
+        for (name, in_t, right_t, right_device, acc_t) in [
+            ("bf16", "bfloat", "bfloat", false, "float"),
+            ("f16", "half", "half", false, "float"),
+            ("i8", "int8_t", "int8_t", false, "int"),
+            ("i8xi4_tg", "int8_t", "int4b_format", false, "int"),
+            ("i8xi4_dv", "int8_t", "int4b_format", true, "int"),
+            ("bf16xu4_dv", "bfloat", "uint4b_format", true, "float"),
+            ("u8xu4_dv", "uint8_t", "uint4b_format", true, "int"),
+        ] {
+            for rows in [32, 64] {
+                let iters = 4096;
+                let packed = right_t.ends_with("4b_format");
+                let right_decl = if right_device {
+                    format!("tensor<device {right_t}, dextents<int32_t, 2>, tensor_inline> tb((device uchar*)X, dextents<int32_t, 2>(32, 32));")
+                } else if packed {
+                    format!(
+                        "threadgroup uchar sb[4][32 * 32 / 2];\n\
+                         for (int i = lane; i < 32 * 32 / 2; i += 32) sb[sg][i] = uchar(i * 37);\n\
+                         tensor<threadgroup {right_t}, dextents<int32_t, 2>, tensor_inline> tb((threadgroup uchar*)sb[sg], dextents<int32_t, 2>(32, 32));"
+                    )
+                } else {
+                    format!(
+                        "threadgroup {right_t} sb[4][32 * 32];\n\
+                         for (int i = lane; i < 32 * 32; i += 32) sb[sg][i] = {right_t}((i % 5) - 2);\n\
+                         tensor<threadgroup {right_t}, dextents<int32_t, 2>, tensor_inline> tb(sb[sg], dextents<int32_t, 2>(32, 32));"
+                    )
+                };
+                let src = format!(
+                    "constexpr auto desc = matmul2d_descriptor({rows}, 32, 32, false, true, false, matmul2d_descriptor::mode::multiply_accumulate);\n\
+                     matmul2d<desc, execution_simdgroup> op;\n\
+                     threadgroup {in_t} sa[4][{rows} * 32];\n\
+                     const ushort sg = simdgroup_index_in_threadgroup, lane = thread_index_in_simdgroup;\n\
+                     for (int i = lane; i < {rows} * 32; i += 32) sa[sg][i] = {in_t}((i % 7) - 3);\n\
+                     {right_decl}\n\
+                     simdgroup_barrier(mem_flags::mem_threadgroup);\n\
+                     tensor<threadgroup {in_t}, dextents<int32_t, 2>, tensor_inline> ta(sa[sg], dextents<int32_t, 2>(32, {rows}));\n\
+                     auto P = op.template get_destination_cooperative_tensor<decltype(ta), decltype(tb), {acc_t}>();\n\
+                     for (int i = 0; i < P.get_capacity(); i++) P[i] = 0;\n\
+                     for (int it = 0; it < {iters}; it++) op.run(ta, tb, P);\n\
+                     {acc_t} s = 0; for (int i = 0; i < P.get_capacity(); i++) s += P[i];\n\
+                     Y[threadgroup_position_in_grid.x * 128 + sg * 32 + lane] = float(s);"
+                );
+                let kernel = MetalKernel::builder(format!("ironmlx_tensor_peak_{name}_{rows}"))
+                    .inputs(&["X"])
+                    .outputs(&["Y"])
+                    .header("#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>\nusing namespace mpp::tensor_ops;")
+                    .source(src)
+                    .build()?;
+                let bytes: Vec<u8> = (0..512u32).map(|i| (i * 37) as u8).collect();
+                let x: Array = (bytes.as_slice(), &[512][..]).try_into()?;
+                let groups = 40 * 32;
+                let mut runs = Vec::new();
+                for _ in 0..5 {
+                    let started = std::time::Instant::now();
+                    let y = kernel
+                        .dispatch_builder()
+                        .inputs(&[&x])
+                        .output_shapes(&[Shape::from(&[groups * 128][..])])
+                        .output_dtypes(&[Dtype::Float32])
+                        .grid(groups * 128, 1, 1)
+                        .threadgroup(128, 1, 1)
+                        .stream(target)
+                        .dispatch()?
+                        .take_at(0)?;
+                    mlx::transforms::eval(&[&y])?;
+                    runs.push(started.elapsed().as_secs_f64());
+                }
+                runs.sort_by(f64::total_cmp);
+                let t = runs[runs.len() / 2];
+                let ops = 2.0 * rows as f64 * 32.0 * 32.0 * iters as f64 * (groups * 4) as f64;
+                eprintln!(
+                    "PEAK {name} rows={rows}: {:.2} ms, {:.1} TOPS",
+                    t * 1e3,
+                    ops / t / 1e12
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Diagnostic: Dense causal prefill attention of the last 2048-row chunk
+    /// (24 query / 4 KV heads, D256) over long caches, under the installed
+    /// M5 Dense profile (D256 NAX prefill attention). The tile variant comes
+    /// from IRONMLX_EXPERIMENTAL_PREFILL_NAX_TILE (read once per process);
+    /// CHECK prints the output's max difference against an f32 reference of
+    /// one query head. Run with --ignored.
+    #[test]
+    #[ignore]
+    #[serial(mlx_metal)]
+    fn dense_prefill_attention_throughput() -> Result<()> {
+        if let Ok(root) = std::env::var("MLX_DIR") {
+            mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib"))?;
+        }
+        ironmlx_core::m5_profile::install_for_target(
+            ironmlx_core::m5_profile::M5ProfileMode::Auto,
+            true,
+            ironmlx_core::m5_profile::M5ProfileTarget::Qwen35Dense,
+        );
+        use mlx::ops::cast::astype;
+        let rows = 2048;
+        let tile = std::env::var("IRONMLX_EXPERIMENTAL_PREFILL_NAX_TILE").unwrap_or_default();
+        for keys in [8192, 32768, 65536, 131072] {
+            let normal = |shape: &[i32], seed: u64| -> Result<Array> {
+                let a = mlx::random::normal()
+                    .shape(shape)
+                    .scale(1.0)
+                    .key(&mlx::random::key(seed)?)
+                    .sample()?;
+                Ok(astype(&a, Dtype::Bfloat16)?)
+            };
+            let q = normal(&[1, 24, rows, 256], 1)?;
+            let k = normal(&[1, 4, keys, 256], 2)?;
+            let v = normal(&[1, 4, keys, 256], 3)?;
+            mlx::transforms::eval(&[&q, &k, &v])?;
+            let mut runs = Vec::new();
+            let mut out = None;
+            for _ in 0..7 {
+                let started = std::time::Instant::now();
+                let o = mlx::fast::scaled_dot_product_attention(
+                    &q, &k, &v, 0.0625, "causal", None, None,
+                )?;
+                mlx::transforms::eval(&[&o])?;
+                runs.push(started.elapsed().as_secs_f64());
+                out = Some(o);
+            }
+            runs.sort_by(f64::total_cmp);
+            let t = runs[runs.len() / 2];
+            // Causal last chunk: row r sees keys - rows + r + 1 keys.
+            let pairs =
+                rows as f64 * (keys - rows) as f64 + rows as f64 * (rows as f64 + 1.0) / 2.0;
+            let flops = 4.0 * 24.0 * 256.0 * pairs;
+            // f32 reference of query head 0 (KV head 0).
+            let q0 = astype(
+                &mlx::ops::indexing::slice(&q, &[0, 0, 0, 0][..], &[1, 1, rows, 256][..])?,
+                Dtype::Float32,
+            )?;
+            let k0 = astype(
+                &mlx::ops::indexing::slice(&k, &[0, 0, 0, 0][..], &[1, 1, keys, 256][..])?,
+                Dtype::Float32,
+            )?;
+            let v0 = astype(
+                &mlx::ops::indexing::slice(&v, &[0, 0, 0, 0][..], &[1, 1, keys, 256][..])?,
+                Dtype::Float32,
+            )?;
+            let reference = mlx::fast::scaled_dot_product_attention(
+                &q0, &k0, &v0, 0.0625, "causal", None, None,
+            )?;
+            let o0 = astype(
+                &mlx::ops::indexing::slice(
+                    out.as_ref().unwrap(),
+                    &[0, 0, 0, 0][..],
+                    &[1, 1, rows, 256][..],
+                )?,
+                Dtype::Float32,
+            )?;
+            let diff = mlx::ops::reduction::max(
+                &mlx::ops::unary::abs(&(&o0 - &reference))?,
+                mlx::ops::reduction::All,
+                false,
+            )?
+            .item::<f32>()?;
+            eprintln!(
+                "PREFILL attention tile={} keys={keys} rows={rows}: {:.2} ms {:.1} TFLOPS | CHECK max|o-ref| head0 {:.3e}",
+                if tile.is_empty() { "default" } else { tile.as_str() },
+                t * 1e3,
+                flops / t / 1e12,
+                diff
+            );
+        }
+        Ok(())
+    }
+
+    /// Diagnostic: throughput of the Dense prefill projections at a 2048-row
+    /// chunk, the installed quantized matmul (M5 Dense profile: MLX NAX QMM
+    /// with the BM128 M tile) against a BF16 matmul of the same shape. Run
+    /// with --ignored.
+    #[test]
+    #[ignore]
+    #[serial(mlx_metal)]
+    fn dense_prefill_projection_throughput() -> Result<()> {
+        if let Ok(root) = std::env::var("MLX_DIR") {
+            mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib"))?;
+        }
+        ironmlx_core::m5_profile::install_for_target(
+            ironmlx_core::m5_profile::M5ProfileMode::Auto,
+            true,
+            ironmlx_core::m5_profile::M5ProfileTarget::Qwen35Dense,
+        );
+        use mlx::ops::cast::astype;
+        for m in [2048, 4096] {
+            for (n, k) in [
+                (34816, 5120),
+                (5120, 17408),
+                (16480, 5120),
+                (12288, 5120),
+                (5120, 6144),
+            ] {
+                let key = mlx::random::key(11)?;
+                let w = mlx::random::normal()
+                    .shape(&[n, k][..])
+                    .scale(0.02)
+                    .key(&key)
+                    .sample()?;
+                let w = astype(&w, Dtype::Bfloat16)?;
+                let q = mlx::quantization::quantize(&w, Some(64), Some(4), "affine", None)?;
+                let x = mlx::random::normal()
+                    .shape(&[m, k][..])
+                    .scale(0.5)
+                    .key(&mlx::random::key(12)?)
+                    .sample()?;
+                let x = astype(&x, Dtype::Bfloat16)?;
+                let wt = mlx::ops::shape::transpose(&w)?;
+                let wt = mlx::ops::shape::contiguous(&wt, false)?;
+                mlx::transforms::eval(&[&q[0], &q[1], &q[2], &x, &wt])?;
+                let flops = 2.0 * m as f64 * n as f64 * k as f64;
+                let time = |f: &dyn Fn() -> Result<Array>| -> Result<f64> {
+                    let mut runs = Vec::new();
+                    for _ in 0..12 {
+                        let started = std::time::Instant::now();
+                        let mut outs = Vec::new();
+                        for _ in 0..4 {
+                            outs.push(f()?);
+                            mlx::transforms::eval(&[outs.last().unwrap()])?;
+                        }
+                        runs.push(started.elapsed().as_secs_f64() / 4.0);
+                    }
+                    runs.sort_by(f64::total_cmp);
+                    Ok(runs[runs.len() / 2])
+                };
+                let tq = time(&|| {
+                    Ok(mlx::quantization::quantized_matmul(
+                        &x,
+                        &q[0],
+                        &q[1],
+                        Some(&q[2]),
+                        true,
+                        Some(64),
+                        Some(4),
+                        "affine",
+                    )?)
+                })?;
+                let tb = time(&|| Ok(mlx::ops::matmul::matmul(&x, &wt)?))?;
+                // Dequantize to BF16 inside the call, then a BF16 matmul.
+                let td = time(&|| {
+                    let w = mlx::quantization::dequantize(
+                        &q[0],
+                        &q[1],
+                        Some(&q[2]),
+                        Some(64),
+                        Some(4),
+                        "affine",
+                        None,
+                        None,
+                    )?;
+                    Ok(mlx::ops::matmul::matmul(
+                        &x,
+                        &mlx::ops::shape::transpose(&w)?,
+                    )?)
+                })?;
+                eprintln!(
+                "PREFILL n={n} k={k} m={m}: qmm {:.2} ms {:.1} TFLOPS | bf16 matmul {:.2} ms {:.1} TFLOPS | dequant+matmul {:.2} ms {:.1} TFLOPS",
+                tq * 1e3,
+                flops / tq / 1e12,
+                tb * 1e3,
+                flops / tb / 1e12,
+                td * 1e3,
+                flops / td / 1e12
+            );
+            }
+        }
+        Ok(())
+    }
+
     /// Diagnostic: per-shape split-K sweep in a dependent chain of the
     /// production projection shapes (the source of `tuned_split_k`). Run
     /// with --ignored.
@@ -625,18 +911,35 @@ mod tests {
         }
         use mlx::ops::cast::astype;
         let target = StreamOrDevice::default();
-        let shapes = [
-            (2048, 4096),
-            (12352, 2048),
-            (9216, 2048),
-            (6144, 2048),
-            (12288, 2048),
-            (2048, 6144),
-            (2048, 16384),
-            (512, 2048),
-            (248320, 2048),
-        ];
-        for (n, k) in shapes {
+        // SPLIT_K_SWEEP_SHAPES=dense sweeps the Qwen3.8 Dense target shapes
+        // (fused gate/up, fused GatedDelta input, attention q+gate / k / v,
+        // the three 5120-wide output projections, LM head) at its verify rows.
+        let dense = std::env::var("SPLIT_K_SWEEP_SHAPES").as_deref() == Ok("dense");
+        let shapes: &[(i32, i32)] = if dense {
+            &[
+                (34816, 5120),
+                (16480, 5120),
+                (12288, 5120),
+                (1024, 5120),
+                (5120, 6144),
+                (5120, 17408),
+                (248320, 5120),
+            ]
+        } else {
+            &[
+                (2048, 4096),
+                (12352, 2048),
+                (9216, 2048),
+                (6144, 2048),
+                (12288, 2048),
+                (2048, 6144),
+                (2048, 16384),
+                (512, 2048),
+                (248320, 2048),
+            ]
+        };
+        let rows: &[i32] = if dense { &[1, 16, 32] } else { &[1, 8, 16] };
+        for &(n, k) in shapes {
             let bytes_one = (n as f64) * (k as f64) * (0.5 + 4.0 / 64.0);
             let layers = ((1.5e9 / bytes_one) as usize).clamp(2, 40);
             let mut weights = Vec::new();
@@ -653,13 +956,17 @@ mod tests {
                 mlx::transforms::eval(&[&p.weight, &p.sb])?;
                 weights.push(p);
             }
-            for m in [1, 8, 16] {
+            for &m in rows {
                 let x0: Vec<f32> = (0..m * k).map(|v| ((v % 13) as f32 - 6.0) * 0.05).collect();
                 let x0: Array = (x0.as_slice(), &[m, k][..]).try_into()?;
                 let x0 = astype(&x0, Dtype::Bfloat16)?;
                 let mut line = format!("N=sk n={n} k={k} m={m}");
                 for sk in [1, 2, 4, 8, 16] {
-                    if sk > k / 64 {
+                    let sk_max: i32 = std::env::var("SPLIT_K_MAX")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(16);
+                    if sk > k / 64 || sk > sk_max {
                         continue;
                     }
                     force_split_k(sk);
@@ -679,8 +986,18 @@ mod tests {
                             x = if n >= k {
                                 y
                             } else {
-                                let reps = vec![&y; (k / n) as usize];
-                                mlx::ops::shape::concatenate_on(&reps, 1, target)?
+                                let reps = vec![&y; ((k + n - 1) / n) as usize];
+                                let tiled = mlx::ops::shape::concatenate_on(&reps, 1, target)?;
+                                if k % n == 0 {
+                                    tiled
+                                } else {
+                                    mlx::ops::indexing::slice_on(
+                                        &tiled,
+                                        &[0, 0][..],
+                                        &[m, k][..],
+                                        target,
+                                    )?
+                                }
                             };
                         }
                         mlx::transforms::eval(&[&x])?;

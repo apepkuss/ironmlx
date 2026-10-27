@@ -84,6 +84,52 @@ impl Linear {
         self.inner.quantized_parts()
     }
 
+    /// Affine4/g64 `(weight, scales, biases)` in the checkpoint layout, from
+    /// this Linear or its shared store (`None` for other formats).
+    pub(crate) fn native_affine4_arrays(
+        &self,
+        target: StreamOrDevice,
+    ) -> Result<Option<(Array, Array, Array)>> {
+        if let Some(shared) = &self.shared {
+            return Ok(Some(shared.native_arrays(target)?));
+        }
+        Ok(self.inner.quantized_parts().and_then(|p| {
+            (p.bits == 4 && p.group_size == 64 && p.mode == QuantMode::Affine)
+                .then(|| {
+                    p.biases
+                        .map(|b| (p.weight.clone(), p.scales.clone(), b.clone()))
+                })
+                .flatten()
+        }))
+    }
+
+    /// `run` over this projection's single-resident store in the M5 tiled
+    /// layout, or `None` when it has none (or is a row view / has a bias).
+    pub(crate) fn with_tiled_prepared<T>(
+        &self,
+        target: StreamOrDevice,
+        run: impl FnOnce(&super::m5_affine4::Prepared) -> Result<T>,
+    ) -> Result<Option<T>> {
+        match &self.shared {
+            Some(shared) => shared.with_tiled_prepared(target, run),
+            None => Ok(None),
+        }
+    }
+
+    /// SwiGLU of a fused gate / up projection's halves straight from the
+    /// shared layout's tiled prefill GEMM (`DENSE_PREFILL_FUSED_SWIGLU`), or
+    /// `None` when that route does not take `x`.
+    pub(crate) fn prefill_swiglu_on(
+        &self,
+        x: &Array,
+        target: StreamOrDevice,
+    ) -> Result<Option<Array>> {
+        match &self.shared {
+            Some(shared) => shared.prefill_swiglu_on(x, target),
+            None => Ok(None),
+        }
+    }
+
     fn shared_placeholder(shared: super::shared_weight_layout::Shared) -> Result<Self> {
         let empty: Array = (&[0.0_f32][..], &[1, 1][..]).try_into()?;
         Ok(Self {
@@ -312,11 +358,55 @@ impl Linear {
         }
     }
 
+    /// Dense long-prefill route (`dense_fast_path::prefill_dequant_armed`):
+    /// a full chunk of an affine4/g64 projection runs as BF16 dequantize +
+    /// matmul; inputs wider than the limit (the MLP down projection) keep the
+    /// quantized matmul. `None` when the shape or format differs.
+    fn forward_dequant_gemm_on(&self, x: &Array, target: StreamOrDevice) -> Result<Option<Array>> {
+        let Some(p) = self.quantized_parts() else {
+            return Ok(None);
+        };
+        let k = *x.shape().as_slice().last().unwrap_or(&0);
+        if p.bits != 4
+            || p.group_size != 64
+            || p.mode != QuantMode::Affine
+            || p.biases.is_none()
+            || x.dtype() != mlx::Dtype::Bfloat16
+            || k == 0
+            || x.size() / k as usize != super::dense_fast_path::PREFILL_DEQUANT_ROWS
+            || k > super::dense_fast_path::PREFILL_DEQUANT_MAX_K
+        {
+            return Ok(None);
+        }
+        let w = mlx::quantization::dequantize_on(
+            p.weight,
+            p.scales,
+            p.biases,
+            Some(64),
+            Some(4),
+            "affine",
+            None,
+            Some(mlx::Dtype::Bfloat16),
+            target,
+        )?;
+        let wt = mlx::ops::shape::transpose_on(&w, target)?;
+        let mut y = mlx::ops::matmul::matmul_on(x, &wt, target)?;
+        if let Some(bias) = p.bias {
+            y = &y + bias;
+        }
+        Ok(Some(y))
+    }
+
     /// Stream-targeted forward pass.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
         if let Some(shared) = &self.shared {
             return shared.forward_on(x, target);
+        }
+        if super::dense_fast_path::prefill_dequant_armed() {
+            if let Some(y) = self.forward_dequant_gemm_on(x, target)? {
+                return Ok(y);
+            }
         }
         if super::rs4_qmm::is_armed() {
             if let Some(parts) = self.quantized_parts() {

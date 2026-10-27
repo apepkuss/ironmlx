@@ -13,6 +13,7 @@ members = [
     "iron-bench",
     "ironmlx-bench-kernel",
     "turboquant",
+    "ironmlx-ane",
 ]
 
 [workspace.package]

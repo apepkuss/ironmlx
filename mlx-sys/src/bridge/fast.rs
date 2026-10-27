@@ -31,6 +31,7 @@ pub mod ffi {
 
     unsafe extern "C++" {
         include!("cxx_mlx_shim/fast.h");
+        include!("cxx_mlx_shim/external_buffer.h");
 
         type MlxArray = crate::bridge::array::ffi::MlxArray;
         type MetalKernelInner;
@@ -158,6 +159,54 @@ pub mod ffi {
             device_type: u8,
             stream_index: i32,
         ) -> Result<UniquePtr<MlxArray>>;
+
+        /// An array over caller-owned, page-aligned memory (no copy); the
+        /// memory must outlive every array that uses it.
+        fn array_from_external_buffer(
+            address: usize,
+            nbytes: usize,
+            shape: &[i32],
+            dtype_repr: u8,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        /// GPU copy of `src` into the memory of the external array `dst`,
+        /// after every array of `after`.
+        fn copy_into_external(
+            src: &MlxArray,
+            dst: &MlxArray,
+            after: &ArrayVec,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        /// A Metal shared event handing work between the GPU and a CPU thread.
+        type HandoffEvent;
+        fn handoff_event_new() -> Result<UniquePtr<HandoffEvent>>;
+        fn handoff_signal_after(
+            x: &MlxArray,
+            after: &ArrayVec,
+            event: &HandoffEvent,
+            value: u64,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn handoff_wait_before(
+            x: &MlxArray,
+            after: &ArrayVec,
+            event: &HandoffEvent,
+            value: u64,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+        fn handoff_cpu_wait(event: &HandoffEvent, value: u64, timeout_ms: u64) -> Result<bool>;
+        fn handoff_cpu_signal(event: &HandoffEvent, value: u64) -> Result<()>;
+        fn handoff_signaled_value(event: &HandoffEvent) -> Result<u64>;
 
         fn fast_decode_block_keys(keys: i32) -> i32;
 

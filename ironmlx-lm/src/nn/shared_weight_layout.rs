@@ -42,7 +42,6 @@ pub(crate) fn validate_environment() -> Result<()> {
     for name in [
         "IRONMLX_EXPERIMENTAL_PREFILL_PREPARED_GEMM",
         "IRONMLX_EXPERIMENTAL_PREFILL_DEQUANT_GEMM",
-        "IRONMLX_EXPERIMENTAL_M5_QMM_COOP",
     ] {
         if std::env::var(name).is_ok_and(|value| !value.is_empty() && value != "0") {
             return Err(anyhow!(
@@ -105,6 +104,59 @@ impl Store {
         }
     }
 
+    /// The store in the tiled layout (converted once if native), for `run`.
+    fn with_tiled<T>(
+        &self,
+        target: StreamOrDevice,
+        run: impl FnOnce(&Prepared) -> Result<T>,
+    ) -> Result<T> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("shared layout poisoned"))?;
+        if let State::Native {
+            weight,
+            scales,
+            biases,
+        } = &*state
+        {
+            let prepared = m5_affine4::tiled_from_native(weight, scales, biases, target)?;
+            *state = State::Tiled(prepared);
+            TO_TILED.fetch_add(1, Relaxed);
+        }
+        match &*state {
+            State::Tiled(prepared) => run(prepared),
+            State::Native { .. } => unreachable!("converted above"),
+        }
+    }
+
+    /// `DENSE_PREFILL_TILED_GEMM`: a prefill activation of more than 128 rows
+    /// on the tiled layout.
+    fn tiled_prefill(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
+        let bias = self.bias()?;
+        let y = self.with_tiled(target, |prepared| {
+            super::dense_prefill_kernels::prefill_tiled_gemm(x, prepared, target)
+        })?;
+        Ok(match bias {
+            Some(bias) => &y + &bias,
+            None => y,
+        })
+    }
+
+    /// `DENSE_PREFILL_FUSED_SWIGLU`: SwiGLU of a fused gate / up store's
+    /// halves in the tiled prefill GEMM.
+    fn tiled_prefill_swiglu(&self, x: &Array, target: StreamOrDevice) -> Result<Option<Array>> {
+        if self.bias()?.is_some() {
+            return Ok(None);
+        }
+        self.with_tiled(target, |prepared| {
+            if prepared.weight.shape().as_slice()[0] % 64 != 0 {
+                return Ok(None);
+            }
+            super::dense_prefill_kernels::prefill_tiled_swiglu(x, prepared, target).map(Some)
+        })
+    }
+
     fn tiled_forward(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
         let mut state = self
             .state
@@ -146,6 +198,25 @@ impl Shared {
 
     pub(crate) fn out_features(&self) -> usize {
         self.out_features
+    }
+
+    /// Checkpoint-layout `(weight, scales, biases)` of this view (the whole
+    /// store, or its row range), converting the store to native if needed.
+    pub(crate) fn native_arrays(&self, target: StreamOrDevice) -> Result<(Array, Array, Array)> {
+        let (weight, scales, biases) = self.store.native(target)?;
+        let Some((start, len)) = self.rows else {
+            return Ok((weight, scales, biases));
+        };
+        let rows = |array: &Array| -> Result<Array> {
+            let width = array.shape().as_slice()[1];
+            Ok(mlx::ops::indexing::slice_on(
+                array,
+                &[start, 0][..],
+                &[start + len, width][..],
+                target,
+            )?)
+        };
+        Ok((rows(&weight)?, rows(&scales)?, rows(&biases)?))
     }
 
     /// Ordinary Linear holding the current checkpoint-layout arrays (row
@@ -192,7 +263,39 @@ impl Shared {
         if self.rows.is_none() && m5_affine4::routes_activation(x, self.store.kw) {
             return self.store.tiled_forward(x, target);
         }
+        if self.rows.is_none() && tiled_prefill_routes(x, self.store.kw) {
+            return self.store.tiled_prefill(x, target);
+        }
         self.native_linear(target)?.forward_on(x, target)
+    }
+
+    /// SwiGLU of this whole fused gate / up view's two halves when the tiled
+    /// prefill route takes `x` and `DENSE_PREFILL_FUSED_SWIGLU` is set.
+    /// `run` over this whole view's store in the tiled layout (converted
+    /// once if native); `None` for a row view or a store with a bias.
+    pub(crate) fn with_tiled_prepared<T>(
+        &self,
+        target: StreamOrDevice,
+        run: impl FnOnce(&Prepared) -> Result<T>,
+    ) -> Result<Option<T>> {
+        if self.rows.is_some() || self.store.bias()?.is_some() {
+            return Ok(None);
+        }
+        self.store.with_tiled(target, run).map(Some)
+    }
+
+    pub(crate) fn prefill_swiglu_on(
+        &self,
+        x: &Array,
+        target: StreamOrDevice,
+    ) -> Result<Option<Array>> {
+        if self.rows.is_some()
+            || !super::dense_fast_path::prefill_fused_swiglu_requested()
+            || !tiled_prefill_routes(x, self.store.kw)
+        {
+            return Ok(None);
+        }
+        self.store.tiled_prefill_swiglu(x, target)
     }
 
     pub(crate) fn forward_positions_isolated_on(
@@ -207,6 +310,20 @@ impl Shared {
     pub(crate) fn forward_mtp_verify_on(&self, x: &Array, target: StreamOrDevice) -> Result<Array> {
         self.native_linear(target)?.forward_mtp_verify_on(x, target)
     }
+}
+
+/// `DENSE_PREFILL_TILED_GEMM` under the M5 route scope: a BF16 activation of
+/// more than 128 rows (fewer take the M5 decode kernel) for this store.
+fn tiled_prefill_routes(x: &Array, kw: i32) -> bool {
+    if !super::dense_fast_path::prefill_tiled_requested()
+        || !m5_affine4::armed()
+        || x.ndim() < 2
+        || x.dtype() != mlx::Dtype::Bfloat16
+    {
+        return false;
+    }
+    let k = x.shape().as_slice()[x.ndim() - 1];
+    k % 64 == 0 && kw * 8 == k && x.size() / k as usize > 128
 }
 
 /// Move a quantized projection's arrays into a new store. Returns `None`

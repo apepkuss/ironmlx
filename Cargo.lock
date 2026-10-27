@@ -1463,6 +1463,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironmlx-ane"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "cc",
+]
+
+[[package]]
 name = "ironmlx-audio"
 version = "0.2.0"
 dependencies = [
@@ -1538,6 +1546,7 @@ dependencies = [
  "clap",
  "dirs",
  "image",
+ "ironmlx-ane",
  "ironmlx-audio",
  "ironmlx-core",
  "llguidance",

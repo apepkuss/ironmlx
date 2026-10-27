@@ -482,25 +482,85 @@ const LONG_ADMISSION_PROMPT_TOKENS: usize = 8192;
 /// Longest wait of a long prompt for the decoding streams.
 const LONG_ADMISSION_MAX_DEFER: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// M5 profile setting `DFLASH2_LONG_PREFILL_SINGLE`: long prompts of equal
+/// length are prefilled one at a time instead of as one B=N graph, so each
+/// request publishes its first token and decodes right after its own prefill.
+fn long_prefill_single() -> bool {
+    static SINGLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SINGLE.get_or_init(|| {
+        ironmlx_core::m5_profile::flag(
+            ironmlx_core::m5_profile::settings::DFLASH2_LONG_PREFILL_SINGLE,
+        )
+    })
+}
+
+/// M5 profile setting `DFLASH2_LONG_ADMISSION_LAST_DEFER_MS`.
+fn long_admission_last_defer() -> Option<std::time::Duration> {
+    static BOUND: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *BOUND.get_or_init(|| {
+        ironmlx_core::m5_profile::setting(
+            ironmlx_core::m5_profile::settings::DFLASH2_LONG_ADMISSION_LAST_DEFER_MS,
+        )
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+    })
+}
+
+/// M5 profile setting `DFLASH2_LONG_ADMISSION_DEFER_US_PER_TOKEN`.
+fn long_admission_defer_per_token() -> Option<std::time::Duration> {
+    static PER_TOKEN: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
+    *PER_TOKEN.get_or_init(|| {
+        ironmlx_core::m5_profile::setting(
+            ironmlx_core::m5_profile::settings::DFLASH2_LONG_ADMISSION_DEFER_US_PER_TOKEN,
+        )
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(std::time::Duration::from_micros)
+    })
+}
+
+/// Bounds of a long prompt's wait for the decoding streams.
+#[derive(Clone, Copy, Default)]
+struct LongAdmissionDefer {
+    /// When no other request waits behind it.
+    last: Option<std::time::Duration>,
+    /// Per prompt token past [`LONG_ADMISSION_PROMPT_TOKENS`], when longer
+    /// than [`LONG_ADMISSION_MAX_DEFER`].
+    per_token: Option<std::time::Duration>,
+}
+
 /// Whether the front pending request is a long prompt that waits for the
 /// streams decoding now. `deferred_since` tracks its wait; it resets when no
-/// deferral applies.
+/// deferral applies. The wait is bounded by [`LONG_ADMISSION_MAX_DEFER`] or
+/// the prompt's per-token bound, whichever is longer, and by at least
+/// `defer.last` when no other request waits behind it.
 fn defer_long_admission<T>(
     pending: &VecDeque<DFlash2Command>,
     active: &[T],
     deferred_since: &mut Option<std::time::Instant>,
+    defer: LongAdmissionDefer,
 ) -> bool {
-    let long_front = pending.front().is_some_and(|command| match command {
-        DFlash2Command::Admit { request, .. } => {
-            request.prompt_ids.len() >= LONG_ADMISSION_PROMPT_TOKENS
-        }
+    let long_front = pending.front().and_then(|command| match command {
+        DFlash2Command::Admit { request, .. } => (request.prompt_ids.len()
+            >= LONG_ADMISSION_PROMPT_TOKENS)
+            .then_some(request.prompt_ids.len()),
     });
-    if !long_front || active.is_empty() {
+    let Some(prompt_tokens) = long_front.filter(|_| !active.is_empty()) else {
         *deferred_since = None;
         return false;
-    }
+    };
     let since = *deferred_since.get_or_insert_with(std::time::Instant::now);
-    if since.elapsed() >= LONG_ADMISSION_MAX_DEFER {
+    let scaled = defer
+        .per_token
+        .map(|per_token| {
+            let past = prompt_tokens - LONG_ADMISSION_PROMPT_TOKENS;
+            per_token * u32::try_from(past).unwrap_or(u32::MAX)
+        })
+        .unwrap_or_default();
+    let mut bound = LONG_ADMISSION_MAX_DEFER.max(scaled);
+    if let Some(last) = defer.last.filter(|_| pending.len() == 1) {
+        bound = bound.max(last);
+    }
+    if since.elapsed() >= bound {
         *deferred_since = None;
         return false;
     }
@@ -1099,7 +1159,15 @@ where
                 // seconds: it waits (bounded) until the streams decoding now
                 // have finished, then prefills; those streams keep their
                 // decode rate and their memory is released first.
-                if defer_long_admission(&pending, &active, &mut long_deferred_since) {
+                if defer_long_admission(
+                    &pending,
+                    &active,
+                    &mut long_deferred_since,
+                    LongAdmissionDefer {
+                        last: long_admission_last_defer(),
+                        per_token: long_admission_defer_per_token(),
+                    },
+                ) {
                     break;
                 }
                 let Some(DFlash2Command::Admit { request, reply_tx }) = pending.pop_front() else {
@@ -1292,6 +1360,7 @@ where
                 while tensor_batching
                     && batch_is_text
                     && prefix_cache.is_none()
+                    && !(long_prefill_single() && batch_prompt_len >= LONG_ADMISSION_PROMPT_TOKENS)
                     && active.len() + admission_requests.len() < b_max
                     && pending.front().is_some_and(|command| match command {
                         DFlash2Command::Admit { request, .. } => {
@@ -2482,16 +2551,52 @@ mod tests {
         let mut since = None;
 
         // No decoding stream, or a shorter prompt: admitted at once.
-        assert!(!defer_long_admission::<()>(&long, &[], &mut since));
-        assert!(!defer_long_admission(&short, &[()], &mut since));
+        let none = LongAdmissionDefer::default();
+        assert!(!defer_long_admission::<()>(&long, &[], &mut since, none));
+        assert!(!defer_long_admission(&short, &[()], &mut since, none));
         assert!(since.is_none());
         // A long prompt waits while a stream decodes ...
-        assert!(defer_long_admission(&long, &[()], &mut since));
+        assert!(defer_long_admission(&long, &[()], &mut since, none));
         assert!(since.is_some());
         // ... until its wait reaches the bound.
         since = Some(std::time::Instant::now() - LONG_ADMISSION_MAX_DEFER);
-        assert!(!defer_long_admission(&long, &[()], &mut since));
+        assert!(!defer_long_admission(&long, &[()], &mut since, none));
         assert!(since.is_none());
+
+        // With a last-request bound, the only waiting long prompt waits past
+        // the shared bound up to its own.
+        let last = LongAdmissionDefer {
+            last: Some(std::time::Duration::from_secs(10)),
+            per_token: None,
+        };
+        since = Some(std::time::Instant::now() - LONG_ADMISSION_MAX_DEFER);
+        assert!(defer_long_admission(&long, &[()], &mut since, last));
+        since = Some(std::time::Instant::now() - std::time::Duration::from_secs(10));
+        assert!(!defer_long_admission(&long, &[()], &mut since, last));
+        // Another request behind it keeps the shared bound.
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let mut request = test_request();
+        request.prompt_ids = vec![1; LONG_ADMISSION_PROMPT_TOKENS];
+        let mut two = long;
+        two.push_back(DFlash2Command::Admit { request, reply_tx });
+        since = Some(std::time::Instant::now() - LONG_ADMISSION_MAX_DEFER);
+        assert!(!defer_long_admission(&two, &[()], &mut since, last));
+
+        // A per-token bound longer than the shared one: 131072 tokens at
+        // 100 us past 8192 wait about 12.3 s, even with a request behind them.
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let mut request = test_request();
+        request.prompt_ids = vec![1; 131_072];
+        let mut huge = VecDeque::from([DFlash2Command::Admit { request, reply_tx }]);
+        huge.extend(two.into_iter().skip(1));
+        let scaled = LongAdmissionDefer {
+            last: None,
+            per_token: Some(std::time::Duration::from_micros(100)),
+        };
+        since = Some(std::time::Instant::now() - std::time::Duration::from_secs(12));
+        assert!(defer_long_admission(&huge, &[()], &mut since, scaled));
+        since = Some(std::time::Instant::now() - std::time::Duration::from_secs(14));
+        assert!(!defer_long_admission(&huge, &[()], &mut since, scaled));
     }
 
     #[test]

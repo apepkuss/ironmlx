@@ -51,6 +51,9 @@ struct Args {
     widths: Vec<usize>,
     #[arg(long, default_value_t = 20)]
     iters: usize,
+    /// Install the qualified Dense M5 profile (its settings as defaults).
+    #[arg(long)]
+    m5_profile: bool,
 }
 
 fn request(tokenizer: &Tokenizer, prompt: &Value, max_tokens: usize) -> Result<GenerateRequest> {
@@ -82,12 +85,23 @@ fn main() -> Result<()> {
         !args.output.exists(),
         "preserve existing report; choose a new output"
     );
+    if args.m5_profile {
+        let profile = ironmlx_core::m5_profile::install_for_target(
+            ironmlx_core::m5_profile::M5ProfileMode::Auto,
+            true,
+            ironmlx_core::m5_profile::M5ProfileTarget::Qwen35Dense,
+        );
+        println!("m5 profile {}", profile.status.as_str());
+    }
     let root = std::env::var("MLX_DIR")?;
     mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib"))?;
     let mut loader = Loader::open(&args.target)?;
     let tokenizer = Tokenizer::from_loader(&loader)?;
     let target = Qwen35Model::from_loader_dflash2(&mut loader)?;
     drop(loader);
+    if args.m5_profile {
+        ironmlx_lm::models::dflash2::DFlash2Target::dflash2_prewarm(&target)?;
+    }
     let loader = Loader::open_dflash2(&args.draft)?;
     let draft = DFlash2DraftModel::from_loader(&loader, target.config(), Some(4))?;
     drop(loader);
@@ -299,6 +313,29 @@ fn main() -> Result<()> {
                 }) {
                     streams[i].diagnostic_fill_b1()?;
                     b1_windows[i] += 1;
+                }
+                // Diagnostic `IRONMLX_DIAGNOSTIC_WINDOW_BENCH=W,LEN,ITERS`: after W
+                // batched windows, time the window parts at draft length LEN.
+                if let Ok(spec) = std::env::var("IRONMLX_DIAGNOSTIC_WINDOW_BENCH") {
+                    let v: Vec<usize> = spec.split(',').map(|x| x.parse().unwrap()).collect();
+                    if batched_windows == v[0] && !wanted.is_empty() {
+                        if let Some((members, c)) = cache.take() {
+                            let mut picked = pick_rows(&mut streams, &members);
+                            c.scatter_to_rows(&mut picked)?;
+                        }
+                        let mut picked = pick_rows(&mut streams, &wanted);
+                        let parts = DFlash2TextGenerationStream::diagnostic_ragged_window_bench(
+                            &mut picked,
+                            v[1],
+                            v[2],
+                        )?;
+                        println!(
+                            "WINDOW_BENCH rows={} draft_len={} {parts:?}",
+                            wanted.len(),
+                            v[1]
+                        );
+                        return Ok(());
+                    }
                 }
                 if !wanted.is_empty() {
                     let previous = cache.take().map(|(_, c)| c);

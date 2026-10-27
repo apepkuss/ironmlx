@@ -237,6 +237,137 @@ pub fn window_attention_on(
     Ok((!inner.is_null()).then(|| Array::from_inner(inner)))
 }
 
+/// An array over caller-owned memory (for example an IOSurface shared with
+/// the Neural Engine), wrapped without a copy as a shared Metal buffer.
+///
+/// # Safety
+/// `address` must be page aligned (16 KiB) and point to `nbytes` (a multiple
+/// of 16 KiB) of memory that stays valid and is not freed while the returned
+/// array, or any array computed from it, may still be evaluated or read.
+pub unsafe fn array_from_external_buffer(
+    address: usize,
+    nbytes: usize,
+    shape: &[i32],
+    dtype: crate::Dtype,
+) -> Result<Array> {
+    let inner =
+        mlx_sys::fast::ffi::array_from_external_buffer(address, nbytes, shape, dtype.as_u8())
+            .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+fn array_vec(arrays: &[&Array]) -> cxx::UniquePtr<mlx_sys::compile::ffi::ArrayVec> {
+    let mut vec = mlx_sys::compile::ffi::array_vec_new();
+    for array in arrays {
+        mlx_sys::compile::ffi::array_vec_push(vec.pin_mut(), array.as_inner());
+    }
+    vec
+}
+
+/// GPU copy of `src` (any strides; same shape and dtype) into the memory of
+/// the external array `dst`, after every array of `after`; the result aliases
+/// `dst`'s memory and holds the copy once it is evaluated.
+pub fn copy_into_external_on(
+    src: &Array,
+    dst: &Array,
+    after: &[&Array],
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    let inner = mlx_sys::fast::ffi::copy_into_external(
+        src.as_inner(),
+        dst.as_inner(),
+        &array_vec(after),
+        has,
+        dev_only,
+        dev_t,
+        idx,
+    )
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
+/// A Metal shared event that hands work between the GPU stream and a CPU
+/// thread (for example one driving the Neural Engine): the GPU signals or
+/// waits on its values inside its command buffers, the thread waits on or
+/// signals them. Values only grow.
+pub struct HandoffEvent(cxx::UniquePtr<mlx_sys::fast::ffi::HandoffEvent>);
+
+// SAFETY: the event wraps an MTLSharedEvent, whose signaling and waiting are
+// thread safe; the C++ object is never mutated after construction.
+unsafe impl Send for HandoffEvent {}
+unsafe impl Sync for HandoffEvent {}
+
+impl HandoffEvent {
+    pub fn new() -> Result<Self> {
+        Ok(Self(
+            mlx_sys::fast::ffi::handoff_event_new().map_err(Error::from)?,
+        ))
+    }
+
+    /// `x` (aliased, no copy) once every array of `after` is complete and the
+    /// GPU has signaled `value`.
+    pub fn signal_after_on(
+        &self,
+        x: &Array,
+        after: &[&Array],
+        value: u64,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = target.into().encode();
+        let inner = mlx_sys::fast::ffi::handoff_signal_after(
+            x.as_inner(),
+            &array_vec(after),
+            &self.0,
+            value,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        )
+        .map_err(Error::from)?;
+        Ok(Array::from_inner(inner))
+    }
+
+    /// `x` (aliased, no copy), which the GPU reads only after every array of
+    /// `after` and once the event has reached `value`.
+    pub fn wait_before_on(
+        &self,
+        x: &Array,
+        value: u64,
+        after: &[&Array],
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        let (has, dev_only, dev_t, idx) = target.into().encode();
+        let inner = mlx_sys::fast::ffi::handoff_wait_before(
+            x.as_inner(),
+            &array_vec(after),
+            &self.0,
+            value,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        )
+        .map_err(Error::from)?;
+        Ok(Array::from_inner(inner))
+    }
+
+    /// Blocks until the event reaches `value` or `timeout_ms` passes; whether
+    /// it was reached.
+    pub fn cpu_wait(&self, value: u64, timeout_ms: u64) -> Result<bool> {
+        mlx_sys::fast::ffi::handoff_cpu_wait(&self.0, value, timeout_ms).map_err(Error::from)
+    }
+
+    pub fn cpu_signal(&self, value: u64) -> Result<()> {
+        mlx_sys::fast::ffi::handoff_cpu_signal(&self.0, value).map_err(Error::from)
+    }
+
+    pub fn signaled_value(&self) -> Result<u64> {
+        mlx_sys::fast::ffi::handoff_signaled_value(&self.0).map_err(Error::from)
+    }
+}
+
 /// Split-K D256 NAX attention of a B1 flat draft tree. `queries` are
 /// `[1, Hkv, slots * gqa, 256]` node-major (two slots per 16-row part, both on
 /// one root-to-leaf path); `tail_keys` / `tail_values` `[1, Hkv, parts, TL,

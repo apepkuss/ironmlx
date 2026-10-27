@@ -119,6 +119,79 @@ pub mod settings {
     /// length classes through the request pipeline before it accepts
     /// requests, so no shape-specialized kernel compiles inside a request.
     pub const DFLASH2_STARTUP_WARMUP: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_STARTUP_WARMUP";
+    /// Dense Qwen3.8 GatedDeltaNet layers take the single-dispatch preparation,
+    /// q/k norm, gate and gated-norm kernels of the MoE fast path (same values).
+    pub const DENSE_GDN_FAST_PATH: &str = "IRONMLX_EXPERIMENTAL_DENSE_GDN_FAST_PATH";
+    /// Long prompts of equal length prefill one request at a time (each
+    /// first token and its decoding start right after its own prefill).
+    pub const DFLASH2_LONG_PREFILL_SINGLE: &str =
+        "IRONMLX_EXPERIMENTAL_DFLASH2_LONG_PREFILL_SINGLE";
+    /// Longest wait (milliseconds) of a long prompt for the decoding streams
+    /// when no other request waits behind it (unset: the shared 3 s bound).
+    /// Its wait delays only its own first token, while a stream still
+    /// decoding when its prefill starts stalls for the whole prefill.
+    pub const DFLASH2_LONG_ADMISSION_LAST_DEFER_MS: &str =
+        "IRONMLX_EXPERIMENTAL_DFLASH2_LONG_ADMISSION_LAST_DEFER_MS";
+    /// A long prompt waits for the decoding streams up to this many
+    /// microseconds per prompt token past the long-prompt threshold (8192)
+    /// when that is longer than the shared 3 s bound: its prefill stalls them
+    /// for a time that grows with its length.
+    pub const DFLASH2_LONG_ADMISSION_DEFER_US_PER_TOKEN: &str =
+        "IRONMLX_EXPERIMENTAL_DFLASH2_LONG_ADMISSION_DEFER_US_PER_TOKEN";
+    /// Dense prefill projections of full 2048-row chunks (inputs up to 8192
+    /// wide) run as BF16 dequantize + matmul instead of the quantized matmul.
+    pub const DENSE_PREFILL_DEQUANT_GEMM: &str = "IRONMLX_EXPERIMENTAL_DENSE_PREFILL_DEQUANT_GEMM";
+    /// Dense prefill MLPs of full 2048-row chunks give the Neural Engine this
+    /// many 512-channel units of their intermediate channels (W8A8, rotated
+    /// int8 operands), run alongside the GPU's; unset or 0 keeps them all on
+    /// the GPU.
+    pub const DENSE_PREFILL_ANE_FFN_UNITS: &str =
+        "IRONMLX_EXPERIMENTAL_DENSE_PREFILL_ANE_FFN_UNITS";
+    /// Prefill chunks starting at or past this token position keep their MLP
+    /// on the GPU alone (unset: no limit).
+    pub const DENSE_PREFILL_ANE_FFN_MAX_POSITION: &str =
+        "IRONMLX_EXPERIMENTAL_DENSE_PREFILL_ANE_FFN_MAX_POSITION";
+    /// With `DENSE_PREFILL_ANE_FFN_UNITS`, a single-sequence full chunk runs
+    /// its decoder layers as two 1024-row halves, interleaved layer by layer,
+    /// so the Neural Engine computes one half's MLP share while the GPU runs
+    /// the other half's attention and MLP; other chunks keep the MLP on the
+    /// GPU.
+    pub const DENSE_PREFILL_ANE_FFN_PIPELINE: &str =
+        "IRONMLX_EXPERIMENTAL_DENSE_PREFILL_ANE_FFN_PIPELINE";
+    /// Dense prefill projections of more than 128 rows read the single-resident
+    /// M5 tiled weight layout with a fused dequantize + tensor-unit GEMM (MLX's
+    /// dequantized values), so prefill and decode share one layout and no
+    /// projection converts between them.
+    pub const DENSE_PREFILL_TILED_GEMM: &str = "IRONMLX_EXPERIMENTAL_DENSE_PREFILL_TILED_GEMM";
+    /// With `DENSE_PREFILL_TILED_GEMM`, a fused gate / up MLP projection's
+    /// tiled GEMM applies SwiGLU in its epilogue (MLX's compiled SwiGLU of the
+    /// rounded products, bit for bit) instead of writing both products.
+    pub const DENSE_PREFILL_FUSED_SWIGLU: &str = "IRONMLX_EXPERIMENTAL_DENSE_PREFILL_FUSED_SWIGLU";
+    /// Projections whose output width is a multiple of 64 keep 64-column
+    /// tiles in the M5 tiled layout and take the 64-column (two-simdgroup)
+    /// tensor-unit kernel for 1..=128 rows; the same per-group integer
+    /// products and f32 scale / bias as the 32-column kernel.
+    pub const M5_QMM_COOP: &str = "IRONMLX_EXPERIMENTAL_M5_QMM_COOP";
+    /// The startup warmup also runs ragged (B4) linear windows at each batch
+    /// width of a four-sequence server, so their batch-specialized draft and
+    /// verify kernels compile before serving.
+    pub const DFLASH2_STARTUP_RAGGED_WARMUP: &str =
+        "IRONMLX_EXPERIMENTAL_DFLASH2_STARTUP_RAGGED_WARMUP";
+    /// The startup warmup also runs one full prefill chunk (as it does with
+    /// `DENSE_PREFILL_ANE_FFN_UNITS`), so the full-chunk kernels compile
+    /// before serving.
+    pub const DFLASH2_STARTUP_FULL_CHUNK_WARMUP: &str =
+        "IRONMLX_EXPERIMENTAL_DFLASH2_STARTUP_FULL_CHUNK_WARMUP";
+    /// Captured multi-token linear verify windows run the GatedDeltaNet
+    /// recurrence without its state output (the commit replays the accepted
+    /// steps from the capture's base state); same outputs.
+    pub const DENSE_VERIFY_OMIT_GDN_STATE: &str =
+        "IRONMLX_EXPERIMENTAL_DENSE_VERIFY_OMIT_GDN_STATE";
+    /// Ragged linear windows of fewer rows draft more tokens, up to this many
+    /// verify rows in all (the row block the verify projections run at the
+    /// same cost) and at most the draft block: a window of w rows drafts
+    /// max(budget, rows / w - 1). Needs `DFLASH2_RAGGED_TAIL`.
+    pub const DFLASH2_RAGGED_FILL_ROWS: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_RAGGED_FILL_ROWS";
 }
 
 /// Model family a DFlash2 profile is qualified for. Each family carries its
@@ -240,10 +313,36 @@ pub const MOE_DFLASH2_TREE_MAX_NODES: usize = 0;
 
 /// Profile values of the settings (the qualified candidate configuration).
 /// The prefill kernel libraries are set to the embedded copies at install.
+///
+/// Drafter and GatedDeltaNet routes (same target values; same-text paired
+/// B1 windows on M5 Max, six tasks, token ids unchanged): the drafter's
+/// projections run from one resident M5 layout (52.7 -> 48.7 ms per tree
+/// window), and the GatedDeltaNet layers take the fused preparation, q/k
+/// norm, gate and gated-norm kernels, tree windows included (48.8 -> 47.0
+/// ms). Concurrent requests verify ragged rows at a draft budget of 3 with
+/// batched M5 drafts: B4 throughput 165.9 -> 180.0 tok/s and per-request
+/// decode 51.9 -> 57.9 tok/s against budget 7 (outputs unchanged); single
+/// linear windows keep the fixed budget 7.
+///
+/// Long prompts: causal prefill chunks from 2048 keys take the D256 NAX
+/// attention (the exact 2048-row rule stopped at 40960 keys), GatedDeltaNet
+/// prefill chunks from position 2048 take the long-chunk scan, and prefill
+/// projections take the BM128 M tile at every shape (in-process code-1 TTFT:
+/// 30K 42.3 -> 41.2 s, 61K 103.6 -> 94.8 s, 128K 327.2 -> 272.6 s; short
+/// prompts' outputs unchanged). Equal-length long prompts prefill one at a
+/// time, so each request decodes right after its own prefill. Full
+/// 2048-row prefill chunks of the projections up to 8192 inputs wide run as
+/// BF16 dequantize + matmul (30K 40.9 -> 38.9 s, 61K 95.6 -> 92.0 s), and
+/// GatedDeltaNet chunks from position 2048 take the fused preparation and
+/// gated norm. Startup warmup requests compile the prompt-length-specialized
+/// prefill kernels before serving (the short code-3 prompt's TTFT had risen to
+/// 278 ms from an in-request compile). Lane attention groups six 16-row
+/// tiles per threadgroup, so a 15-node tree's 96 query rows read the keys once
+/// (128K code-1 tree windows 107.2 -> 98.8 ms; same token ids).
 const PROFILE_VALUES: &[(&str, &str)] = &[
     (settings::M5_DFLASH2_QMM, "1"),
     (settings::M5_LANE_ATTN, "1"),
-    (settings::M5_ATTN_GROUP_TILES, "4"),
+    (settings::M5_ATTN_GROUP_TILES, "6"),
     (settings::M5_SHARED_WEIGHT_LAYOUT, "1"),
     (settings::M5_PRECOMPILE, "1"),
     (settings::DFLASH2_FIXED_BUDGET, "7"),
@@ -254,8 +353,89 @@ const PROFILE_VALUES: &[(&str, &str)] = &[
     (settings::DFLASH2_RAGGED_LINEAR, "1"),
     (settings::PREFILL_MASKED_SOFTMAX, "1"),
     (settings::PREFILL_CHUNK_CACHE_RESET, "1"),
-    (settings::MLX_CACHE_MAX_MIB, "4096"),
+    // 2048 MiB buffer-cache ceiling: short B4 peak 20.41 -> 18.86 GiB at
+    // -1% throughput (512 MiB: 17.47 GiB but windows +9%, buffer churn).
+    (settings::MLX_CACHE_MAX_MIB, "2048"),
     (settings::QEMBEDDING_RUNTIME_COUNT, "1"),
+    (settings::DFLASH2_DRAFT_M5_RESIDENT, "1"),
+    (settings::DENSE_GDN_FAST_PATH, "1"),
+    (settings::DFLASH2_RAGGED_BUDGET, "3"),
+    (settings::DFLASH2_DRAFT_M5, "1"),
+    (settings::DFLASH2_DRAFT_BATCHED, "1"),
+    (settings::PREFILL_D256_NAX_MIN_KEYS, "2048"),
+    (settings::GDN_LONG_SCAN_MIN_POSITION, "2048"),
+    (settings::PREFILL_QMM_MTILE_ANY_SHAPE, "1"),
+    (settings::DFLASH2_LONG_PREFILL_SINGLE, "1"),
+    (settings::DENSE_PREFILL_DEQUANT_GEMM, "1"),
+    (settings::DFLASH2_STARTUP_WARMUP, "1"),
+    // Full 2048-row prefill chunks give the Neural Engine 12 of the 34
+    // 512-channel MLP units (W8A8, rotated int8 operands; nn::ane_ffn). With
+    // 9 units over whole chunks: 30K in-process TTFT 37.7 -> 35.5 s; NLL
+    // (28672 tokens each of C++ source and English docs) moves -0.0002 /
+    // +0.0002 with top-1 agreement 99.55% / 99.16%, as a split computing the
+    // ANE's channels on the GPU does (-0.0002 / -0.0000, 99.52% / 99.32%).
+    (settings::DENSE_PREFILL_ANE_FFN_UNITS, "12"),
+    // The halves of a full chunk interleave layer by layer, so the ANE's
+    // share of one half overlaps the other half's attention and MLP; 12
+    // units (14 / 16 equal or ANE-bound, more units for the full-attention
+    // layers alone slower). Paired in-process 30K TTFT 30.7 / 30.8 s (9 units,
+    // whole chunks) -> 29.6 / 29.7 s, 61K 74.4 / 75.2 -> 73.2 / 73.8 s. NLL as
+    // above: -0.0003 / -0.0003, top-1 99.55% / 99.26%.
+    (settings::DENSE_PREFILL_ANE_FFN_PIPELINE, "1"),
+    // Chunks from token 65536 on keep the MLP on the GPU: in-process 61K
+    // TTFT 91.7 -> 86.3 s with the split, but a 128K prompt lost the first
+    // half's gain in its second (264.5 s with this limit, 263.2 s without the
+    // split, 272 s with it throughout).
+    (settings::DENSE_PREFILL_ANE_FFN_MAX_POSITION, "65536"),
+    // Prefill projections read the single-resident tiled layout with a fused
+    // dequantize + tensor-unit GEMM (MLX's dequantized values: relative error
+    // against an f32 reference equal to MLX's dequantize + matmul; natural-text
+    // NLL -0.00014 / +0.00008, top-1 99.85% / 99.74%). 2048 x 5120 -> 34816
+    // 13.8 -> 11.9 ms, down 2048 x 17408 -> 5120 ~7.8 -> 6.1 ms; no layout
+    // conversion between prefill and decode. ANE off, three consecutive 30K
+    // prefills in one process: 124.6 / 123.2 -> 108.2 / 108.2 s.
+    (settings::DENSE_PREFILL_TILED_GEMM, "1"),
+    // 64-column tiles and kernel for projections of a multiple of 64 outputs
+    // (row-invariant, the same integer products and f32 scale / bias): DRAM-
+    // cold 32-row 34816 x 5120 0.302 -> 0.246 ms, 5120 x 17408 0.166 -> 0.127
+    // ms; 1 and 16 rows no slower.
+    (settings::M5_QMM_COOP, "1"),
+    // Ragged (B4) windows at batch widths 4/3/2 in the startup warmup: a
+    // first budget-7 four-row window had compiled for 0.5 s inside a request.
+    (settings::DFLASH2_STARTUP_RAGGED_WARMUP, "1"),
+    // One full prefill chunk in the startup warmup with the Neural Engine off
+    // too: the full-tile prefill kernels otherwise compile inside the first
+    // long prompt.
+    (settings::DFLASH2_STARTUP_FULL_CHUNK_WARMUP, "1"),
+    // Ragged (B4) linear verify windows skip the GatedDeltaNet state output
+    // their commit never reads (12.6 MB per layer at four rows); same tokens.
+    (settings::DENSE_VERIFY_OMIT_GDN_STATE, "1"),
+    // The MoE family's B4 commit path and glue: the GatedDelta commit replays
+    // only accepted steps and is submitted from GPU accepted counts, residual
+    // add + post norm run as one dispatch (same bits), rows near their limit
+    // stay in the ragged batch. Short B4: windows 45.33 -> 44.44 ms, 190.7 ->
+    // 193.8 tok/s, six-task outputs unchanged.
+    (settings::GDN_COMMIT_KERNEL, "1"),
+    (settings::DFLASH2_GPU_COMMIT, "1"),
+    (settings::FUSED_GLUE, "1"),
+    (settings::DFLASH2_RAGGED_TAIL, "1"),
+    // Narrower ragged windows fill 16 verify rows (budgets 3 / 4 / 7 at four /
+    // three / two rows; the verify projections cost the same up to 16 rows):
+    // short B4 194.1 -> 197.1 tok/s, 2.60 -> 2.65 tokens per window, outputs
+    // unchanged.
+    (settings::DFLASH2_RAGGED_FILL_ROWS, "16"),
+    // The last waiting long prompt waits up to 10 s for the decoding streams
+    // (B4 30K: a low-acceptance stream needs ~6 s for its 256 tokens; past
+    // the 3 s bound it stalled for a whole 37 s prefill).
+    (settings::DFLASH2_LONG_ADMISSION_LAST_DEFER_MS, "10000"),
+    // Long prompts wait up to 0.14 ms per prompt token past 8192 (30K ~3.1 s,
+    // 61K ~7.4 s, 128K ~17 s): a stream decoding 256 tokens needs up to ~7 s
+    // at 61K and ~11 s at 128K, and past 3 s it stalled for a whole prefill
+    // (B4 128K E2E median 836 -> 642 s with 0.1 ms per token).
+    (settings::DFLASH2_LONG_ADMISSION_DEFER_US_PER_TOKEN, "140"),
+    // SwiGLU in the gate / up tiled GEMM's epilogue (same bits): 2048 x 5120
+    // -> 34816 + SwiGLU 12.67 -> 12.12 ms.
+    (settings::DENSE_PREFILL_FUSED_SWIGLU, "1"),
 ];
 
 /// DFlash2 serve defaults of the profile, applied only when the
@@ -552,9 +732,16 @@ pub fn install_for_target(
         // attention from its minimum key count (more accurate than MLX's D256
         // fallback against an f32 reference, and faster on long prompts).
         let moe_active = status == M5ProfileStatus::Active && target == M5ProfileTarget::Qwen36Moe;
+        // The long-prompt prefill settings below come from the active
+        // family's table: the MoE table, or the Dense one.
+        let long_prefill_values = if moe_active {
+            Some(MOE_PROFILE_VALUES)
+        } else {
+            active.then_some(PROFILE_VALUES)
+        };
         let d256_min_keys = setting_with(
             std::env::var(settings::PREFILL_D256_NAX_MIN_KEYS).ok(),
-            moe_active.then_some(MOE_PROFILE_VALUES),
+            long_prefill_values,
             settings::PREFILL_D256_NAX_MIN_KEYS,
         )
         .and_then(|value| value.parse::<i32>().ok())
@@ -564,7 +751,7 @@ pub fn install_for_target(
         // boundary, so no query group straddles it).
         let decode_min_keys = setting_with(
             std::env::var(settings::DECODE_D256_NAX_MIN_KEYS).ok(),
-            moe_active.then_some(MOE_PROFILE_VALUES),
+            long_prefill_values,
             settings::DECODE_D256_NAX_MIN_KEYS,
         )
         .and_then(|value| value.parse::<i32>().ok())
@@ -572,7 +759,7 @@ pub fn install_for_target(
         // MoE prefill projections take the BM128 QMM M tile at every shape.
         let qmm_any_shape = setting_with(
             std::env::var(settings::PREFILL_QMM_MTILE_ANY_SHAPE).ok(),
-            moe_active.then_some(MOE_PROFILE_VALUES),
+            long_prefill_values,
             settings::PREFILL_QMM_MTILE_ANY_SHAPE,
         )
         .as_deref()
@@ -813,6 +1000,18 @@ mod tests {
                 || *name == settings::DFLASH2_RAGGED_LINEAR
                 || *name == settings::M5_SHARED_WEIGHT_LAYOUT
                 || *name == settings::M5_PRECOMPILE
+                || *name == settings::DFLASH2_DRAFT_M5_RESIDENT
+                || *name == settings::DFLASH2_RAGGED_BUDGET
+                || *name == settings::DFLASH2_DRAFT_M5
+                || *name == settings::DFLASH2_DRAFT_BATCHED
+                || *name == settings::PREFILL_D256_NAX_MIN_KEYS
+                || *name == settings::GDN_LONG_SCAN_MIN_POSITION
+                || *name == settings::PREFILL_QMM_MTILE_ANY_SHAPE
+                || *name == settings::DFLASH2_STARTUP_WARMUP
+                || *name == settings::GDN_COMMIT_KERNEL
+                || *name == settings::DFLASH2_GPU_COMMIT
+                || *name == settings::FUSED_GLUE
+                || *name == settings::DFLASH2_RAGGED_TAIL
             {
                 continue;
             }

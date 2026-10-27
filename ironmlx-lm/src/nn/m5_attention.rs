@@ -38,7 +38,6 @@ pub(crate) fn attend(
     scale: f32,
     target: StreamOrDevice,
 ) -> Result<Array> {
-    use mlx::ops::shape::*;
     anyhow::ensure!(
         compatible(q, k, v) && [q, k, v].iter().all(|a| a.dtype() == Dtype::Bfloat16),
         "incompatible M5 attention"
@@ -55,11 +54,29 @@ pub(crate) fn attend(
             target,
         );
     }
+    let sga = (t * 6 + 15) / 16;
+    attend_rows(q, k, v, scale, group_tiles(sga), 512, target)
+}
+
+/// [`attend`]'s lane kernels for any query row count: `sg` 16-row tiles per
+/// threadgroup, keys in chunks of `ck` (one chunk when `ck >= L`, so the
+/// merge only normalizes).
+pub(crate) fn attend_rows(
+    q: &Array,
+    k: &Array,
+    v: &Array,
+    scale: f32,
+    sg: i32,
+    ck: i32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    use mlx::ops::shape::*;
+    let t = q.shape().as_slice()[2];
+    let l = k.shape().as_slice()[2];
     let r = t * 6;
     let rp = (r + 15) / 16 * 16;
     let sga = rp / 16;
-    let sg = group_tiles(sga);
-    let nch = (l + 511) / 512;
+    let nch = (l + ck - 1) / ck;
     let qp = reshape_on(q, &[4, 6, t, 256][..], target)?;
     let qp = transpose_axes_on(&qp, &[0, 2, 1, 3][..], target)?;
     let mut qp = reshape_on(&qp, &[4, r, 256][..], target)?;
@@ -72,6 +89,7 @@ pub(crate) fn attend(
     let scale: Array = (&[scale][..], &[1][..]).try_into()?;
     static PARTIAL: OnceLock<MetalKernel> = OnceLock::new();
     static MERGE: OnceLock<MetalKernel> = OnceLock::new();
+    let sg = sg.min(sga).max(1);
     if PARTIAL.get().is_none() {
         let kernel=MetalKernel::builder("ironmlx_m5_lane_attention_partial_v1")
             .inputs(&["Qp","K","V","scale","dims"]).outputs(&["PO","PM","PL"])
@@ -95,7 +113,7 @@ pub(crate) fn attend(
         .template_int("G", 6)
         .template_int("D", 256)
         .template_int("SG", sg)
-        .template_int("CK", 512)
+        .template_int("CK", ck)
         .template_int("TK", 64)
         .output_shapes(&[
             Shape::from(&[4, nch, rp, 256][..]),
@@ -187,6 +205,108 @@ mod tests {
                     astype(&slice(&wide, 24, row, row + 1)?, Dtype::Float32)?.to_vec::<f32>()?;
                 assert_eq!(one, wr, "prefix={prefix} row={row}");
             }
+        }
+        Ok(())
+    }
+
+    /// Diagnostic: the lane kernels at prefill shapes (2048 query rows) against
+    /// MLX's SDPA, time and max error against an f32 reference of head 0.
+    /// Env `LANE_PREFILL` = "sg,ck;..." (default "6,1048576;8,1048576").
+    #[test]
+    #[ignore]
+    #[serial_test::serial(mlx_metal)]
+    fn lane_attention_prefill_throughput() -> Result<()> {
+        if let Ok(root) = std::env::var("MLX_DIR") {
+            mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib"))?;
+        }
+        use mlx::ops::cast::astype;
+        let target = StreamOrDevice::default();
+        let rows = 2048;
+        let spec = std::env::var("LANE_PREFILL").unwrap_or_else(|_| "6,1048576;8,1048576".into());
+        let configs: Vec<(i32, i32)> = spec
+            .split(';')
+            .map(|c| {
+                let v: Vec<i32> = c.split(',').map(|x| x.trim().parse().unwrap()).collect();
+                (v[0], v[1])
+            })
+            .collect();
+        for keys in [8192, 32768, 65536, 131072] {
+            let normal = |shape: &[i32], seed: u64| -> Result<Array> {
+                let a = mlx::random::normal()
+                    .shape(shape)
+                    .scale(1.0)
+                    .key(&mlx::random::key(seed)?)
+                    .sample()?;
+                Ok(astype(&a, Dtype::Bfloat16)?)
+            };
+            let q = normal(&[1, 24, rows, 256], 1)?;
+            let k = normal(&[1, 4, keys, 256], 2)?;
+            let v = normal(&[1, 4, keys, 256], 3)?;
+            mlx::transforms::eval(&[&q, &k, &v])?;
+            let pairs =
+                rows as f64 * (keys - rows) as f64 + rows as f64 * (rows as f64 + 1.0) / 2.0;
+            let flops = 4.0 * 24.0 * 256.0 * pairs;
+            let time = |f: &dyn Fn() -> Result<Array>| -> Result<(f64, Array)> {
+                let mut runs = Vec::new();
+                let mut out = None;
+                for _ in 0..5 {
+                    let started = std::time::Instant::now();
+                    let o = f()?;
+                    mlx::transforms::eval(&[&o])?;
+                    runs.push(started.elapsed().as_secs_f64());
+                    out = Some(o);
+                }
+                runs.sort_by(f64::total_cmp);
+                Ok((runs[runs.len() / 2], out.unwrap()))
+            };
+            let q0 = astype(
+                &mlx::ops::indexing::slice(&q, &[0, 0, 0, 0][..], &[1, 1, rows, 256][..])?,
+                Dtype::Float32,
+            )?;
+            let k0 = astype(
+                &mlx::ops::indexing::slice(&k, &[0, 0, 0, 0][..], &[1, 1, keys, 256][..])?,
+                Dtype::Float32,
+            )?;
+            let v0 = astype(
+                &mlx::ops::indexing::slice(&v, &[0, 0, 0, 0][..], &[1, 1, keys, 256][..])?,
+                Dtype::Float32,
+            )?;
+            let reference = mlx::fast::scaled_dot_product_attention(
+                &q0, &k0, &v0, 0.0625, "causal", None, None,
+            )?;
+            let err = |o: &Array| -> Result<f32> {
+                let o0 = astype(
+                    &mlx::ops::indexing::slice(o, &[0, 0, 0, 0][..], &[1, 1, rows, 256][..])?,
+                    Dtype::Float32,
+                )?;
+                Ok(mlx::ops::reduction::max(
+                    &mlx::ops::unary::abs(&(&o0 - &reference))?,
+                    mlx::ops::reduction::All,
+                    false,
+                )?
+                .item::<f32>()?)
+            };
+            let (tm, om) = time(&|| {
+                Ok(mlx::fast::scaled_dot_product_attention(
+                    &q, &k, &v, 0.0625, "causal", None, None,
+                )?)
+            })?;
+            let mut line = format!(
+                "LANE keys={keys}: mlx {:.2} ms {:.1} TF err {:.2e}",
+                tm * 1e3,
+                flops / tm / 1e12,
+                err(&om)?
+            );
+            for &(sg, ck) in &configs {
+                let (tl, ol) = time(&|| attend_rows(&q, &k, &v, 0.0625, sg, ck, target))?;
+                line += &format!(
+                    " | lane sg{sg} ck{ck} {:.2} ms {:.1} TF err {:.2e}",
+                    tl * 1e3,
+                    flops / tl / 1e12,
+                    err(&ol)?
+                );
+            }
+            eprintln!("{line}");
         }
         Ok(())
     }

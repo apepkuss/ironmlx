@@ -13,6 +13,7 @@ publish = false
 ironmlx-audio = { path = "../ironmlx-audio" }
 clap = { version = "4", features = ["derive"], optional = true }
 ironmlx-core = { path = "../ironmlx-core" }
+ironmlx-ane = { path = "../ironmlx-ane" }
 mlx = { path = "../mlx" }
 turboquant = { path = "../turboquant" }
 serde = { version = "1", features = ["derive"] }
