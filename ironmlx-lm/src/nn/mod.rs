@@ -30,7 +30,6 @@ pub(crate) mod m5_attention;
 pub(crate) mod m5_tree_attention;
 pub mod mlp;
 pub(crate) mod moe_fast_path;
-pub mod moe_grouped_qmv;
 pub mod moe_m5_experts;
 pub(crate) mod moe_tile_experts;
 pub mod mrope;

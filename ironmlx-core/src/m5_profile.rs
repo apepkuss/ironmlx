@@ -63,7 +63,6 @@ pub mod settings {
     /// Wire the loaded DFlash2 weights (MLX residency sets) at serve start.
     pub const WIRED_WEIGHTS: &str = "IRONMLX_EXPERIMENTAL_WIRED_WEIGHTS";
     /// Qwen3.6 MoE: expert-grouped gather qmv for multi-token verification.
-    pub const M5_MOE_GROUPED_QMV: &str = "IRONMLX_EXPERIMENTAL_M5_MOE_GROUPED_QMV";
     /// Qwen3.6 MoE affine4: route non-expert projections through the M5
     /// affine4 tensor-unit kernel (changes reduction order versus MLX).
     pub const M5_MOE_AFFINE4_PROJECTIONS: &str = "IRONMLX_EXPERIMENTAL_M5_MOE_AFFINE4_PROJECTIONS";
@@ -222,24 +221,14 @@ impl M5ProfileTarget {
             Self::Unqualified => &[],
         }
     }
-
-    /// Experimental settings outside the profile table that still change
-    /// this family's execution when set explicitly; reported for diagnosis.
-    fn experimental_settings(self) -> &'static [&'static str] {
-        match self {
-            Self::Qwen36Moe => &[settings::M5_MOE_GROUPED_QMV],
-            Self::Qwen35Dense | Self::Unqualified => &[],
-        }
-    }
 }
 
 /// Qwen3.6 MoE profile values. Only settings whose MoE correctness and
-/// end-to-end benefit were measured are listed. The expert-grouped gather
-/// qmv is exact but runs only at 8+ verify rows: on M5 Max (same-process A/B,
-/// affine6/affine8) adaptive linear windows showed no measurable gain and the
-/// wide shapes that use it gained at most ~2.6% while staying slower than
-/// adaptive linear. The affine4 projections were slower. Both stay explicit
-/// experimental settings. The runtime-count quantized embedding has identical
+/// end-to-end benefit were measured are listed. (An exact expert-grouped
+/// gather qmv for 8+ verify rows was removed: on M5 Max, same-process A/B on
+/// affine6/affine8, adaptive linear windows showed no measurable gain and the
+/// wide shapes that used it stayed slower than adaptive linear.) The
+/// runtime-count quantized embedding has identical
 /// arithmetic and removes a Metal library compile on every new prompt length
 /// (affine4 short prompts: six-task outputs unchanged, first-use prefill
 /// spikes of 35-116 ms gone). A 512 MiB MLX buffer-cache ceiling (default
@@ -653,31 +642,25 @@ impl M5Profile {
         )
     }
 
-    /// Effective value of every profile setting, followed by the family's
-    /// experimental settings (`None` = off/unset).
+    /// Effective value of every profile setting of the family (`None` =
+    /// off/unset).
     pub fn settings(&self) -> Vec<(&'static str, Option<String>)> {
         self.target
             .values()
             .iter()
-            .map(|(name, _)| *name)
-            .chain(self.target.experimental_settings().iter().copied())
-            .map(|name| (name, effective_setting(name)))
+            .map(|(name, _)| (*name, effective_setting(name)))
             .collect()
     }
 
-    /// Settings requested with `1` that do not take effect because the real
-    /// GPU lacks the tensor units they need.
+    /// Settings of the family requested with `1` that do not take effect
+    /// because the real GPU lacks the tensor units they need (for example an
+    /// explicit variable on a GPU older than generation 17).
     pub fn hardware_ignored_settings(&self) -> Vec<&'static str> {
-        self.target
-            .experimental_settings()
-            .iter()
-            .copied()
-            .filter(|name| {
-                TENSOR_UNIT_SETTINGS.contains(name)
-                    && setting(name).as_deref() == Some("1")
-                    && !tensor_unit_flag(name)
-            })
-            .collect()
+        hardware_ignored(
+            self.target.values().iter().map(|(name, _)| *name),
+            setting,
+            hardware_architecture().as_deref(),
+        )
     }
 
     /// `name=value` of every setting with an effective value, or `none`:
@@ -768,6 +751,23 @@ fn tensor_unit_setting_effective(value: Option<&str>, hardware_architecture: Opt
         && hardware_architecture
             .and_then(gpu_generation)
             .is_some_and(|generation| generation >= MIN_GPU_GENERATION)
+}
+
+/// Names among `names` that are tensor-unit settings requested with `1` (per
+/// `value_of`) but that `hardware_architecture` cannot run.
+fn hardware_ignored(
+    names: impl Iterator<Item = &'static str>,
+    value_of: impl Fn(&str) -> Option<String>,
+    hardware_architecture: Option<&str>,
+) -> Vec<&'static str> {
+    names
+        .filter(|name| {
+            let value = value_of(name);
+            TENSOR_UNIT_SETTINGS.contains(name)
+                && value.as_deref() == Some("1")
+                && !tensor_unit_setting_effective(value.as_deref(), hardware_architecture)
+        })
+        .collect()
 }
 
 /// [`flag`] for a setting that runs M5 tensor-unit kernels: an explicit
@@ -995,12 +995,43 @@ mod tests {
             Some("0"),
             Some("applegpu_g17s")
         ));
-        // Only the MoE affine4 projections are gated; the grouped qmv kernel
-        // uses ordinary Metal and the dense settings keep their own gates.
+        // Only the MoE affine4 projections are gated; the dense settings keep
+        // their own gates.
         assert_eq!(
             TENSOR_UNIT_SETTINGS,
             &[settings::M5_MOE_AFFINE4_PROJECTIONS]
         );
+    }
+
+    #[test]
+    fn hardware_ignored_reports_tensor_unit_settings_the_gpu_cannot_run() {
+        let moe = || {
+            M5ProfileTarget::Qwen36Moe
+                .values()
+                .iter()
+                .map(|(name, _)| *name)
+        };
+        let dense = || {
+            M5ProfileTarget::Qwen35Dense
+                .values()
+                .iter()
+                .map(|(name, _)| *name)
+        };
+        let requested =
+            |name: &str| (name == settings::M5_MOE_AFFINE4_PROJECTIONS).then(|| "1".to_owned());
+        // An explicit MoE affine4 request on a GPU without tensor units.
+        assert_eq!(
+            hardware_ignored(moe(), requested, Some("applegpu_g13p")),
+            vec![settings::M5_MOE_AFFINE4_PROJECTIONS]
+        );
+        assert_eq!(
+            hardware_ignored(moe(), requested, None),
+            vec![settings::M5_MOE_AFFINE4_PROJECTIONS]
+        );
+        // The GPU runs it, it is not requested, or the family does not use it.
+        assert!(hardware_ignored(moe(), requested, Some("applegpu_g17s")).is_empty());
+        assert!(hardware_ignored(moe(), |_| None, Some("applegpu_g13p")).is_empty());
+        assert!(hardware_ignored(dense(), requested, Some("applegpu_g13p")).is_empty());
     }
 
     #[test]
@@ -1217,18 +1248,6 @@ mod tests {
                 Some(M5ProfileTarget::Qwen35Dense.values()),
                 settings::WIRED_WEIGHTS
             ),
-            None
-        );
-        // The experimental MoE setting is reported, never enabled by the
-        // profile; an explicit value still applies.
-        assert_eq!(setting_with(None, moe, settings::M5_MOE_GROUPED_QMV), None);
-        assert_eq!(
-            setting_with(Some("1".into()), moe, settings::M5_MOE_GROUPED_QMV).as_deref(),
-            Some("1")
-        );
-        let dense = Some(M5ProfileTarget::Qwen35Dense.values());
-        assert_eq!(
-            setting_with(None, dense, settings::M5_MOE_GROUPED_QMV),
             None
         );
         assert!(M5ProfileTarget::Unqualified.values().is_empty());

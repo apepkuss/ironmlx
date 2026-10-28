@@ -122,11 +122,7 @@ M5 tensor-unit affine4 投影与专家 kernel、批量草稿、并发请求的 r
 非 null 值为准。affine4 投影只用于 affine4 target，结果确定，但与普通 MLX 解码输出不同；执行指纹显示
 `projections=m5-affine4-v1`（其他位宽显示 `product-stable-v2`）。MoE target 没有稠密 MLP，因此从不使用神经引擎（`ane_status` 为
 `not_applicable`，使用 `--ane off` 时为 `disabled`）。`healthz.dflash2.m5_profile.target` 显示 `qwen36-moe`；不在已认定配方内的 target
-在启动时即被拒绝。表外仍有一个需显式开启的实验变量：
-
-| 变量 | 作用 |
-|---|---|
-| `IRONMLX_EXPERIMENTAL_M5_MOE_GROUPED_QMV=1` | 同一路由专家的权重在多个 verify 行间复用（affine6/8、8 行及以上；ragged 行不会达到 8 行）。与普通解码逐位一致。 |
+在启动时即被拒绝。
 
 ## 执行与并发语义
 

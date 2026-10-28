@@ -1,12 +1,12 @@
-//! Experimental single-resident affine4 weight storage for the Qwen3.8
-//! DFlash2 M5 lane.
+//! Single-resident affine4 weight storage for the DFlash2 M5 routes (the
+//! Qwen3.8 lane and the Qwen3.6 MoE target).
 //!
 //! Baseline keeps the checkpoint layout for bulk prefill (M > 128) and lazily
 //! adds a persistent tiled copy for the M5 decode/verify kernel (M <= 128), so
 //! both layouts stay resident. Here a store holds exactly one layout and
 //! converts on demand with an exact byte permutation; the kernels, dispatch
-//! decisions and accumulation order are those of the baseline. Default off:
-//! `IRONMLX_EXPERIMENTAL_M5_SHARED_WEIGHT_LAYOUT=1`.
+//! decisions and accumulation order are those of the baseline. Both M5 profile
+//! tables turn it on (`IRONMLX_EXPERIMENTAL_M5_SHARED_WEIGHT_LAYOUT`).
 use super::linear::{Linear, QuantizedLinearParts};
 use super::m5_affine4::{self, Prepared};
 use crate::core::QuantMode;
@@ -34,22 +34,6 @@ pub(crate) fn requested() -> bool {
     *REQUESTED.get_or_init(|| {
         ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::M5_SHARED_WEIGHT_LAYOUT)
     })
-}
-
-/// Fail closed on experiment combinations whose route order precedes M5 or
-/// that change the tiled layout.
-pub(crate) fn validate_environment() -> Result<()> {
-    for name in [
-        "IRONMLX_EXPERIMENTAL_PREFILL_PREPARED_GEMM",
-        "IRONMLX_EXPERIMENTAL_PREFILL_DEQUANT_GEMM",
-    ] {
-        if std::env::var(name).is_ok_and(|value| !value.is_empty() && value != "0") {
-            return Err(anyhow!(
-                "experimental shared weight layout cannot be combined with {name}"
-            ));
-        }
-    }
-    Ok(())
 }
 
 enum State {

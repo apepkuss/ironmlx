@@ -59,23 +59,6 @@ fn ragged_fast_arithmetic() -> bool {
     )
 }
 
-/// Whether the explicit experimental setting arms the expert-grouped gather
-/// qmv for multi-token verification (not part of the M5 MoE profile).
-fn m5_grouped_experts() -> bool {
-    ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::M5_MOE_GROUPED_QMV)
-}
-
-/// Narrowest verify (rows) for which the M5 expert-grouped route runs, per
-/// target bit width. Measured on M5 Max: it is faster than MLX's sorted
-/// gather only for affine6/affine8 from eight rows up, and slower for
-/// affine4/affine5 at every width, so those keep MLX's route.
-pub(crate) fn qwen36_moe_grouped_experts_min_rows(bits: i32) -> Option<usize> {
-    match bits {
-        6 | 8 => Some(8),
-        _ => None,
-    }
-}
-
 impl Qwen35MoeModel {
     /// Default affine bit width of a DFlash2-qualified Qwen3.6 MoE target,
     /// `None` for every other MoE checkpoint.
@@ -137,10 +120,6 @@ impl Qwen35MoeModel {
         let _m5_affine4 = self
             .m5_affine4_projections()
             .then(crate::nn::m5_affine4::scope);
-        // M5 MoE route: rows of every expert share one weight stream while
-        // each row keeps the MLX gather_qmv_fast arithmetic.
-        let _grouped_experts = (mode.is_verify() && self.m5_grouped_route(verify_width))
-            .then(crate::nn::moe_grouped_qmv::scope);
         // Expert tiles for every decode-side forward (verify and one-token
         // ordinary windows; not prefill): per-row tile arithmetic does not
         // depend on the window width, so a single request's output does not
@@ -172,16 +151,6 @@ impl Qwen35MoeModel {
     /// the product-stable projections run and the fingerprint says so.
     fn m5_affine4_projections(&self) -> bool {
         super::model::m5_affine4_projections_requested(self.dflash2_target_bits)
-    }
-
-    /// Whether a verify of `rows` target rows runs the M5 expert-grouped
-    /// route on this target.
-    fn m5_grouped_route(&self, rows: usize) -> bool {
-        m5_grouped_experts()
-            && self
-                .dflash2_target_bits
-                .and_then(qwen36_moe_grouped_experts_min_rows)
-                .is_some_and(|min_rows| rows >= min_rows)
     }
 
     fn dflash2_max_verify_width(&self) -> usize {
@@ -361,15 +330,6 @@ impl DFlash2Target for Qwen35MoeModel {
         let certified = !supported_shapes.is_empty();
         DFlash2VerifyCapabilities {
             profile: match self.dflash2_target_bits {
-                Some(bits)
-                    if m5_grouped_experts()
-                        && qwen36_moe_grouped_experts_min_rows(bits).is_some() =>
-                {
-                    format!(
-                        "qwen36-moe-affine{bits}-b1-v1+m5-grouped-experts-v2-q{}",
-                        qwen36_moe_grouped_experts_min_rows(bits).unwrap_or(0)
-                    )
-                }
                 Some(bits) if ragged_fast_arithmetic() => {
                     format!("qwen36-moe-affine{bits}-ragged-b4-relaxed-v1")
                 }
@@ -390,15 +350,7 @@ impl DFlash2Target for Qwen35MoeModel {
     }
 
     fn dflash2_execution_fingerprint(&self) -> String {
-        let experts = match self
-            .dflash2_target_bits
-            .and_then(qwen36_moe_grouped_experts_min_rows)
-        {
-            Some(min_rows) if m5_grouped_experts() => {
-                format!("expert-grouped-gather-qmv-v2-from-q{min_rows}")
-            }
-            _ => "gather-qmm-unisolated".to_owned(),
-        };
+        let experts = "gather-qmm-unisolated";
         let projections = if self.m5_affine4_projections() {
             "m5-affine4-v1"
         } else {
@@ -1152,14 +1104,6 @@ mod tests {
                 }
             }
         }
-        if model.m5_grouped_route(crate::nn::moe_grouped_qmv::MAX_RUN as usize) {
-            let dispatches = crate::nn::moe_grouped_qmv::dispatch_count();
-            assert!(
-                dispatches > 0,
-                "grouped expert route was armed but never dispatched"
-            );
-            eprintln!("[qwen36-moe-dflash2 affine{bits}] grouped expert dispatches={dispatches}");
-        }
     }
 
     /// Flat-tree shapes (parents of nodes 1..; node 0 is the root). Chain,
@@ -1418,16 +1362,6 @@ mod tests {
                     eprintln!("[qwen36-moe-dflash2-tree affine{bits}] {label}: exact");
                 }
             }
-        }
-        if model.m5_grouped_route(crate::nn::moe_grouped_qmv::MAX_RUN as usize) {
-            let dispatches = crate::nn::moe_grouped_qmv::dispatch_count();
-            assert!(
-                dispatches > 0,
-                "grouped expert route was armed but never dispatched"
-            );
-            eprintln!(
-                "[qwen36-moe-dflash2-tree affine{bits}] grouped expert dispatches={dispatches}"
-            );
         }
     }
 }

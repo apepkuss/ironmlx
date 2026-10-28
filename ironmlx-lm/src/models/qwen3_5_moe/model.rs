@@ -160,7 +160,6 @@ impl Qwen35MoeModel {
     /// layout and MLX's kernels: the draft vocabulary gathers its rows, and a
     /// tiled copy of it would cost 0.27 GiB.
     fn enable_shared_weight_layout(&mut self) -> Result<()> {
-        crate::nn::shared_weight_layout::validate_environment()?;
         let stores = self.text.share_weight_layout()?;
         tracing::info!(stores, "M5 shared weight layout enabled (Qwen3.6 MoE)");
         Ok(())

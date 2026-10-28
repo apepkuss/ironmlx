@@ -1268,19 +1268,10 @@ fn exact_grouped_attention_on(
     let value_dims = cached_values.shape();
     let value_dims = value_dims.as_slice();
     let mask_shape = mask.map(Array::shape);
-    // Experimental MLX 0.32.2 grouping, adapted from TensorFold exact_attention.
-    // Keep every query in the same vector-kernel/key-partition regime as Q1.
-    // Restrict to the audited B1, GQA=6, BF16 route; all other cases stay serial.
-    let dense_grouped = super::m5_affine4::armed()
-        && std::env::var("IRONMLX_EXPERIMENTAL_GROUPED_VERIFY_ATTN").as_deref() == Ok("1")
-        && batch == 1
-        && heads == 24
-        && key_dims[1] == 4
-        && head_dim == 256
-        && cached_keys.dtype() == mlx::Dtype::Bfloat16
-        && plain_cache
-        && mask.is_none();
-    let moe_grouped = super::moe_fast_path::is_armed()
+    // MLX 0.32.2 grouping, adapted from TensorFold exact_attention: keep every
+    // query in the same vector-kernel/key-partition regime as Q1. Restricted to
+    // the audited Qwen3.6 MoE B1, GQA=8, BF16 route; all other cases stay serial.
+    let grouped = super::moe_fast_path::is_armed()
         && batch == 1
         && heads == 16
         && key_dims[1] == 2
@@ -1288,7 +1279,6 @@ fn exact_grouped_attention_on(
         && cached_keys.dtype() == mlx::Dtype::Bfloat16
         && plain_cache
         && mask.is_none();
-    let grouped = dense_grouped || moe_grouped;
     let gqa = (heads / key_dims[1]).max(1);
     // GQA heads per KV head times grouped queries stay within 32 simdgroups.
     let max_group = 32 / gqa;

@@ -1,5 +1,6 @@
-//! Opt-in DFlash2 affine4 tensor-unit experiment. The route is scoped to a
-//! target forward, including Q1, so verify and serial use the same arithmetic.
+//! DFlash2 affine4 tensor-unit projections (on by the M5 profile). The route is
+//! scoped to a target forward, including Q1, so verify and serial use the same
+//! arithmetic.
 //! Packed values are unchanged; reduction order differs from ordinary MLX.
 use super::linear::QuantizedLinearParts;
 use crate::{core::QuantMode, Result};
@@ -112,16 +113,7 @@ fn split_k(n: i32, k: i32) -> i32 {
     if let Some(sk) = tuned_split_k(n, k) {
         return sk;
     }
-    static SHAPE: OnceLock<bool> = OnceLock::new();
-    if *SHAPE.get_or_init(|| {
-        std::env::var("IRONMLX_EXPERIMENTAL_M5_QMM_SHAPE_SPLIT").as_deref() == Ok("1")
-    }) {
-        let mut sk = 1;
-        while sk < 8 && (n / 32) * sk < 1024 && (k / 64) / (sk * 2) >= 8 {
-            sk *= 2;
-        }
-        sk
-    } else if k >= 2048 {
+    if k >= 2048 {
         4
     } else {
         1
@@ -129,10 +121,8 @@ fn split_k(n: i32, k: i32) -> i32 {
 }
 pub(crate) fn fingerprint() -> String {
     format!(
-        "experimental-m5-affine4-v2;tile64={};shape-split={};grouped-attn={};lane-attn={}",
+        "experimental-m5-affine4-v2;tile64={};lane-attn={}",
         tile_width(64) == 64,
-        split_k(34816, 5120) == 1,
-        std::env::var("IRONMLX_EXPERIMENTAL_GROUPED_VERIFY_ATTN").as_deref() == Ok("1"),
         ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::M5_LANE_ATTN)
     )
 }
@@ -708,10 +698,9 @@ mod tests {
 
     /// Diagnostic: Dense causal prefill attention of the last 2048-row chunk
     /// (24 query / 4 KV heads, D256) over long caches, under the installed
-    /// M5 Dense profile (D256 NAX prefill attention). The tile variant comes
-    /// from IRONMLX_EXPERIMENTAL_PREFILL_NAX_TILE (read once per process);
-    /// CHECK prints the output's max difference against an f32 reference of
-    /// one query head. Run with --ignored.
+    /// M5 Dense profile (D256 NAX prefill attention). CHECK prints the
+    /// output's max difference against an f32 reference of one query head.
+    /// Run with --ignored.
     #[test]
     #[ignore]
     #[serial(mlx_metal)]
@@ -726,7 +715,6 @@ mod tests {
         );
         use mlx::ops::cast::astype;
         let rows = 2048;
-        let tile = std::env::var("IRONMLX_EXPERIMENTAL_PREFILL_NAX_TILE").unwrap_or_default();
         for keys in [8192, 32768, 65536, 131072] {
             let normal = |shape: &[i32], seed: u64| -> Result<Array> {
                 let a = mlx::random::normal()
@@ -788,8 +776,7 @@ mod tests {
             )?
             .item::<f32>()?;
             eprintln!(
-                "PREFILL attention tile={} keys={keys} rows={rows}: {:.2} ms {:.1} TFLOPS | CHECK max|o-ref| head0 {:.3e}",
-                if tile.is_empty() { "default" } else { tile.as_str() },
+                "PREFILL attention keys={keys} rows={rows}: {:.2} ms {:.1} TFLOPS | CHECK max|o-ref| head0 {:.3e}",
                 t * 1e3,
                 flops / t / 1e12,
                 diff

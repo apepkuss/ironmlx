@@ -326,19 +326,6 @@ impl ExpertQuantProjection {
         target: StreamOrDevice,
         context: &'static str,
     ) -> Result<Array> {
-        if let Some(grouped) = grouped_gather(
-            lhs,
-            &self.weight,
-            &self.scales,
-            self.biases.as_ref(),
-            rhs_indices,
-            sorted_indices,
-            self.meta,
-            target,
-        ) {
-            return grouped
-                .with_context(|| format!("RoutedExperts::apply_experts: grouped {context}"));
-        }
         let lhs_indices = cached_lhs_indices(lhs, rhs_indices, &self.weight, sorted_indices)?;
         mlx::quantization::gather_quantized_matmul_on(
             lhs,
@@ -356,41 +343,6 @@ impl ExpertQuantProjection {
         )
         .with_context(|| format!("RoutedExperts::apply_experts: {context}"))
     }
-}
-
-/// Route a sorted gather through the expert-grouped kernel when a target
-/// scope armed it and MLX would run the same rows through gather_qmv_fast.
-#[allow(clippy::too_many_arguments)]
-fn grouped_gather(
-    lhs: &Array,
-    weight: &Array,
-    scales: &Array,
-    biases: Option<&Array>,
-    rhs_indices: &Array,
-    sorted_indices: bool,
-    meta: QuantMeta,
-    target: StreamOrDevice,
-) -> Option<Result<Array>> {
-    if !sorted_indices || !crate::nn::moe_grouped_qmv::is_armed() {
-        return None;
-    }
-    let biases = biases?;
-    let k = *lhs.shape().as_slice().last()?;
-    let n = weight.shape().as_slice().get(1).copied()?;
-    let affine = meta.mode == crate::core::QuantMode::Affine;
-    if !crate::nn::moe_grouped_qmv::supported(meta.bits, meta.group_size, affine, k, n) {
-        return None;
-    }
-    Some(crate::nn::moe_grouped_qmv::forward_on(
-        lhs,
-        weight,
-        scales,
-        biases,
-        rhs_indices,
-        meta.bits,
-        meta.group_size,
-        target,
-    ))
 }
 
 enum GateUpPath {
@@ -729,36 +681,21 @@ impl RoutedExperts {
         match &self.gate_up {
             GateUpPath::Fused { .. } => {
                 let fused = self.fused_gate_up(target)?;
-                let gate_up_out = match grouped_gather(
+                let gate_up_out = mlx::quantization::gather_quantized_matmul_on(
                     lhs,
                     &fused.weight,
                     &fused.scales,
                     fused.biases.as_ref(),
-                    rhs_indices,
+                    cached_lhs_indices(lhs, rhs_indices, &fused.weight, sorted_indices)?.as_ref(),
+                    Some(rhs_indices),
+                    true,
+                    Some(fused.meta.group_size),
+                    Some(fused.meta.bits),
+                    fused.meta.mode.mlx_backend_mode(),
                     sorted_indices,
-                    fused.meta,
                     target,
-                ) {
-                    Some(grouped) => {
-                        grouped.context("RoutedExperts::apply_experts: grouped gate_up gather")?
-                    }
-                    None => mlx::quantization::gather_quantized_matmul_on(
-                        lhs,
-                        &fused.weight,
-                        &fused.scales,
-                        fused.biases.as_ref(),
-                        cached_lhs_indices(lhs, rhs_indices, &fused.weight, sorted_indices)?
-                            .as_ref(),
-                        Some(rhs_indices),
-                        true,
-                        Some(fused.meta.group_size),
-                        Some(fused.meta.bits),
-                        fused.meta.mode.mlx_backend_mode(),
-                        sorted_indices,
-                        target,
-                    )
-                    .context("RoutedExperts::apply_experts: gate_up gather_qmm")?,
-                };
+                )
+                .context("RoutedExperts::apply_experts: gate_up gather_qmm")?;
                 let out_shape = gate_up_out.shape();
                 let out_shape = out_shape.as_slice();
                 let i = self.moe_intermediate;
@@ -917,12 +854,7 @@ impl RoutedExperts {
         }
         let k = ivec[1];
         let bs_k = bs * k;
-        // The expert-grouped kernel needs rows grouped by expert, so it also
-        // sorts the narrower multi-token verifies it is armed for.
-        let use_sorted = bs_k >= SORTED_ROUTING_MIN_BS_K
-            || (crate::nn::moe_grouped_qmv::is_armed()
-                && bs > 1
-                && bs <= crate::nn::moe_grouped_qmv::MAX_RUN);
+        let use_sorted = bs_k >= SORTED_ROUTING_MIN_BS_K;
         let child_spans_enabled = false;
 
         let (gate_out, up_out, rhs_idx_used, sorted_flag, sort_perm_opt) =
@@ -1018,36 +950,22 @@ impl RoutedExperts {
             "glm_moe_routed_down_gather_qmm",
             options.layer_idx,
             || -> Result<(Array, bool)> {
-                let down_out_raw = match grouped_gather(
+                let down_out_raw = mlx::quantization::gather_quantized_matmul_on(
                     &act,
                     &self.down_weight,
                     &self.down_scales,
                     self.down_biases.as_ref(),
-                    &rhs_idx_used,
+                    cached_lhs_indices(&act, &rhs_idx_used, &self.down_weight, sorted_flag)?
+                        .as_ref(),
+                    Some(&rhs_idx_used),
+                    true,
+                    Some(self.down_meta.group_size),
+                    Some(self.down_meta.bits),
+                    self.down_meta.mode.mlx_backend_mode(),
                     sorted_flag,
-                    self.down_meta,
                     target,
-                ) {
-                    Some(grouped) => {
-                        grouped.context("RoutedExperts::apply_experts: grouped down_proj gather")?
-                    }
-                    None => mlx::quantization::gather_quantized_matmul_on(
-                        &act,
-                        &self.down_weight,
-                        &self.down_scales,
-                        self.down_biases.as_ref(),
-                        cached_lhs_indices(&act, &rhs_idx_used, &self.down_weight, sorted_flag)?
-                            .as_ref(),
-                        Some(&rhs_idx_used),
-                        true,
-                        Some(self.down_meta.group_size),
-                        Some(self.down_meta.bits),
-                        self.down_meta.mode.mlx_backend_mode(),
-                        sorted_flag,
-                        target,
-                    )
-                    .context("RoutedExperts::apply_experts: down_proj gather_qmm")?,
-                };
+                )
+                .context("RoutedExperts::apply_experts: down_proj gather_qmm")?;
 
                 // The sorted path can consume expert output in route-sorted order,
                 // avoiding the [BS,k,H] scatter and expanded intermediate.
