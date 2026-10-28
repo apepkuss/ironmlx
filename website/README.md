@@ -57,6 +57,40 @@ from the UTF-8 Mermaid block with leading/trailing whitespace stripped. When
 changing a diagram, render and verify the updated Mermaid source, then save the
 SVG under its new hash; the build rejects diagrams without a matching asset.
 
+Benchmark pages live under `docs/benchmarks/` (Chinese sources under
+`docs/zh-CN/benchmarks/`) and form the Benchmarks group after Getting started,
+split into Dense models and MoE models subsections in the sidebar and the
+overview (`SUBGROUPS` in `scripts/build-website-docs.py`, by page-name prefix).
+Results tables stay in Markdown. A line `<!-- benchmark:<figure> <id> -->`, where
+the figure is `kpis`, `scatter`, or `timeline`, places a chart rendered by
+`assets/benchmarks/benchmarks.js` from the data registered in
+`assets/benchmarks/<id>.js`; only pages with such a line load the chart assets,
+and the build rejects a figure whose data file is missing. Data files are
+generated from a completed benchmark run's analysis and are not edited by hand.
+A data file may set `scatter.x` and `scatter.y` (`[min, max, step]`; tick labels
+take as many decimals as the step) and `scatter.placement` (label offsets per
+application key) when its values fall outside the default axes. A data file with `mode: "b1"` (one request at a time)
+shows time to first token, decode speed, completion time, and memory in the
+`kpis` cards and plots decode speed against time to first token in the
+`scatter` chart; the `timeline` figure applies to B4 data only. `kpi_digits`
+(decimal places per card key) overrides a card's default precision, and
+`ttft_unit: "s"` shows first-token values (stored in ms) in seconds on the cards
+and the scatter axis, for long-prompt pages whose first tokens take seconds. The
+`timeline` grid is every 2 s and becomes coarser (5, 10, 20 s, …) for timelines
+longer than 24 s, so it keeps about ten lines. A B4 data file with
+`x_metric: "prefill_tps"` (long prompts, where the batch time is mostly prefill)
+plots batch prefill speed instead of batch throughput on the `scatter` x axis and
+shows it in place of batch throughput in the `kpis` cards. In a results table whose
+header has an IronMLX column, `benchmarks.js` tints that column and shades each
+bold body cell (the best value of its row): deeper in the IronMLX column, grey
+elsewhere; mark the best value in bold in the Markdown. Each
+benchmark page opens with a note listing its series for the same model
+only: the current page first without a link, then the same model's other
+workload (B1 or B4); the note also links the same model's pages with the
+other prompt length (short or 30K). Readers switch models through the Dense
+models and MoE models subsections of the navigation. List items inside a
+`> [!NOTE]` callout render as a list.
+
 `docs.css` contains the responsive documentation layout. `docs.js` provides local
 full-text search (loaded on demand), keyboard navigation, code highlighting and
 copying, and the current-section indicator. Search needs no external service or
