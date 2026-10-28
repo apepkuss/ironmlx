@@ -3,6 +3,7 @@
 // and loads assets/benchmarks/<id>.js, which registers window.IRONMLX_BENCHMARKS[<id>].
 // A data set with mode "b1" (single requests) uses the B1 metrics for the cards and the scatter axes.
 // A data set with ttft_unit "s" keeps its first-token values in ms but shows them in seconds.
+// The timeline grid is every 2 s for short timelines and coarser for long ones.
 (() => {
   const registry = window.IRONMLX_BENCHMARKS || {};
   const zh = document.documentElement.lang.startsWith("zh");
@@ -16,6 +17,7 @@
     lowerRight: "越靠右下越好 ↘",
     throughput: "四请求整批吞吐（tok/s）",
     ttftMedian: "首字时间中位数（ms）",
+    ttftMedianSeconds: "首字时间中位数（s）",
     offScale: (v) => `${v} s，超出范围（排队）`,
     seconds: "从同时发出算起的时间（秒）",
     firstToken: "首字",
@@ -57,6 +59,7 @@
     lowerRight: "Better: lower right ↘",
     throughput: "4-request batch throughput (tok/s)",
     ttftMedian: "Median time to first token (ms)",
+    ttftMedianSeconds: "Median time to first token (s)",
     offScale: (v) => `${v} s, off scale (queued)`,
     seconds: "Seconds after the four requests are sent",
     firstToken: "First token",
@@ -121,7 +124,7 @@
   // Labels and metric keys for a data set: B4 (default) or B1.
   const metrics = (data) => (data.mode === "b1"
     ? { ...T, ...T.b1, x: "decode_tps", y: "ttft_ms", ...(data.ttft_unit === "s" ? { ttftMedian: T.b1.ttftSeconds } : {}) }
-    : { ...T, x: "throughput_tps", y: "ttft_median_ms" });
+    : { ...T, x: "throughput_tps", y: "ttft_median_ms", ...(data.ttft_unit === "s" ? { ttftMedian: T.ttftMedianSeconds } : {}) });
   // Display scale and unit of a card or axis: first-token values in seconds when the data set asks for it.
   const shown = (data, key, unit) => (data.ttft_unit === "s" && key.startsWith("ttft") ? [0.001, "s"] : [1, unit]);
   const tipRow = (label, value) => `<div class="tip-row"><span>${label}</span><b>${value}</b></div>`;
@@ -253,10 +256,13 @@
     host.appendChild(chart);
     const W = 760, rowH = 46, m = { l: 150, r: 24, t: 10, b: 48 };
     const H = m.t + rowH * data.apps.length + m.b;
-    const xMax = Math.ceil(Math.max(...data.apps.map((a) => a.order_e2e_s[3])) / 2) * 2;
+    // Grid every 2 s for short timelines; longer ones (long prompts) take a step that keeps about ten lines.
+    const last = Math.max(...data.apps.map((a) => a.order_e2e_s[3]));
+    const step = [2, 5, 10, 20, 25, 50, 100].find((v) => last / v <= 12) || 100;
+    const xMax = Math.ceil(last / step) * step;
     const sx = (v) => m.l + v / xMax * (W - m.l - m.r);
     const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": T.seconds });
-    for (let v = 0; v <= xMax; v += 2) {
+    for (let v = 0; v <= xMax; v += step) {
       el("line", { x1: sx(v), x2: sx(v), y1: m.t, y2: H - m.b, class: "grid" }, svg);
       text(svg, sx(v), H - m.b + 20, fmt(v, 0), { "text-anchor": "middle" });
     }

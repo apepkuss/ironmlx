@@ -3,12 +3,11 @@
 [简体中文](../zh-CN/benchmarks/qwen36-moe-b1-30k.md)
 
 > [!NOTE]
-> This page compares single requests with 30K-token prompts. Short-prompt performance comparison series:
+> This page compares single requests with 30K-token prompts. For short prompts, see [Qwen3.6 35B A3B B1 single request](qwen36-moe-b1-short.md) and [Qwen3.6 35B A3B B4 concurrency](qwen36-moe-b4-short.md). 30K-prompt performance comparison series:
 >
-> - [Qwen3.6 35B A3B B1 single request](qwen36-moe-b1-short.md)
-> - [Qwen3.6 35B A3B B4 concurrency](qwen36-moe-b4-short.md)
-> - [Qwen3.8 27B B1 single request](qwen38-dense-b1-short.md)
-> - [Qwen3.8 27B B4 concurrency](qwen38-dense-b4-short.md)
+> - Qwen3.6 35B A3B B1 single request
+> - [Qwen3.8 27B B1 single request](qwen38-dense-b1-30k.md)
+> - [Qwen3.8 27B B4 concurrency](qwen38-dense-b4-30k.md)
 
 The B1 single-request comparison benchmarks IronMLX against the leading inference applications on Apple Silicon today. It has two purposes: to help developers identify IronMLX's strengths and weaknesses and set the direction for further optimization, and to show users how IronMLX actually performs so they can judge whether it fits their use case.
 

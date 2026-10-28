@@ -73,11 +73,14 @@ shows time to first token, decode speed, completion time, and memory in the
 `scatter` chart; the `timeline` figure applies to B4 data only. `kpi_digits`
 (decimal places per card key) overrides a card's default precision, and
 `ttft_unit: "s"` shows first-token values (stored in ms) in seconds on the cards
-and the scatter axis, for long-prompt pages whose first tokens take seconds. Each
+and the scatter axis, for long-prompt pages whose first tokens take seconds. The
+`timeline` grid is every 2 s and becomes coarser (5, 10, 20 s, …) for timelines
+longer than 24 s, so it keeps about ten lines. Each
 benchmark page opens with a note listing the series: the current page first
 without a link, then the same model's other workload, then the other model's B1
-and B4 pages. The long-prompt page (`qwen36-moe-b1-30k`) lists its own series
-and links the short-prompt pages from that note. List items inside a
+and B4 pages. The 30K-prompt pages (`qwen38-dense-b1-30k`, `qwen38-dense-b4-30k`,
+`qwen36-moe-b1-30k`) list their own series in the same way and link the same
+model's short-prompt pages from that note. List items inside a
 `> [!NOTE]` callout render as a list.
 
 `docs.css` contains the responsive documentation layout. `docs.js` provides local
