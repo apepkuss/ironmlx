@@ -250,3 +250,46 @@ html[data-theme="dark"] .docs-benchmark-page {
     padding: 14px 10px 10px;
   }
 }
+
+/* Results tables (classes set by benchmarks.js): the IronMLX column is tinted, and each row's best value is
+   shaded, deeper in the IronMLX column and grey elsewhere. Layered as background images over the table's own
+   backgrounds (header and row colors stay underneath). */
+.docs-benchmark-page {
+  --bench-col-focus: rgb(0 107 214 / 6%);
+  --bench-best-focus: rgb(0 107 214 / 15%);
+  --bench-best-other: rgb(120 130 145 / 14%);
+}
+
+html[data-theme="dark"] .docs-benchmark-page {
+  --bench-col-focus: rgb(99 173 255 / 7%);
+  --bench-best-focus: rgb(99 173 255 / 18%);
+  --bench-best-other: rgb(150 160 175 / 16%);
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme="system"] .docs-benchmark-page {
+    --bench-col-focus: rgb(99 173 255 / 7%);
+    --bench-best-focus: rgb(99 173 255 / 18%);
+    --bench-best-other: rgb(150 160 175 / 16%);
+  }
+}
+
+.doc-content .bench-focus-col {
+  background-image: linear-gradient(var(--bench-col-focus), var(--bench-col-focus));
+}
+
+.doc-content th.bench-focus-col {
+  color: var(--viz-focus);
+}
+
+.doc-content td.bench-best {
+  background-image: linear-gradient(var(--bench-best-other), var(--bench-best-other));
+}
+
+.doc-content td.bench-focus-col.bench-best {
+  background-image: linear-gradient(var(--bench-best-focus), var(--bench-best-focus));
+}
+
+.doc-content td.bench-focus-col strong {
+  color: var(--viz-focus);
+}

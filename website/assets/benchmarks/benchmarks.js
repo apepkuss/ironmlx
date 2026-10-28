@@ -315,4 +315,23 @@
     const render = figures[host.dataset.benchmark];
     if (data && render) render(host, data);
   });
+
+  // Results tables: in a table whose header has an IronMLX column, tint that column and shade each body cell
+  // whose value is bold (the best value of its row); tables without an IronMLX column are left as they are.
+  document.querySelectorAll(".doc-content table").forEach((table) => {
+    const head = table.tHead ? table.tHead.rows[0] : table.rows[0];
+    if (!head) return;
+    const focus = [...head.cells].findIndex((cell) => cell.textContent.trim().startsWith("IronMLX"));
+    if (focus < 0) return;
+    [...table.rows].forEach((row) => {
+      const body = row.parentElement.tagName === "TBODY";
+      [...row.cells].forEach((cell, i) => {
+        if (i === focus) cell.classList.add("bench-focus-col");
+        const first = cell.firstElementChild;
+        if (body && i > 0 && first && first.tagName === "STRONG" && cell.textContent.trim().startsWith(first.textContent.trim())) {
+          cell.classList.add("bench-best");
+        }
+      });
+    });
+  });
 })();
