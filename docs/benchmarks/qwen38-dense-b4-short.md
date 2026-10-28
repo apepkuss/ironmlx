@@ -44,9 +44,13 @@ The table below lists the results of each application for each metric. Values ar
 | Slowest request's completion (s)¹ | **5.24** (5.20–⁠5.27) | 9.90 (9.80–⁠10.00) | 5.34 (5.29–⁠5.39) | 6.30 (6.17–⁠6.43) |
 | Peak memory while serving (GiB) | **19.4** (19.4–⁠19.4) | 22.8 (22.8–⁠22.8) | 20.1 (20.1–⁠20.1) | 22.5 (22.4–⁠22.6) |
 | Per-request decode speed (tok/s, auxiliary) | 62.6 (61.7–⁠63.5) | 33.6 (32.9–⁠34.3) | 70.8 (70.6–⁠71.0) | 59.7 (59.7–⁠59.8) |
+| Decode concurrency (auxiliary)² | 3.46 (3.46–⁠3.46) | 3.19 (3.16–⁠3.21) | 3.03 (3.00–⁠3.05) | 3.11 (3.11–⁠3.12) |
 
 > [!NOTE]
 > ¹ Batch throughput is derived from the batch completion time (1,024 tokens ÷ batch completion time), and the batch completion time differs from the slowest request's completion time only by the gap between the requests' send times (at most 1.5 ms), so these two rows reflect the same result and should not be counted as two separate advantages.
+
+> [!NOTE]
+> ² Decode concurrency was derived after the test from the client timestamps of each scored batch; it is not part of the test protocol written beforehand. It is the four requests' decode times added up ÷ the total time during which at least one request was decoding (each request counts as decoding from its first output to `[DONE]`). 1 means no two requests ever decoded at the same time; 4 means all four decoded together throughout. All four applications are at 3.0–3.5, so with short prompts the four requests are decoded mostly together; for the contrast with 30K-token prompts, see [Qwen3.8 27B B4 30K-prompt concurrency performance comparison](qwen38-dense-b4-30k.md).
 
 ### Request response timeline
 
@@ -69,7 +73,6 @@ Concurrent requests from the client do not guarantee batching inside the engine.
 |---|---|
 | Computer | MacBook Pro (Mac17,6), Apple M5 Max with a 40-core GPU, 128 GB unified memory |
 | Operating system | macOS 26.4 (25E246) |
-| Power | Connected to AC power for every session |
 | Test date | October 27, 2026 (12:08–13:03 UTC) |
 | Isolation | One inference server at a time; no other inference server or GPU compute job ran during the test. The benchmark client ran on the same Mac and connected over `127.0.0.1` |
 | Thermal control | Before every session the Mac stayed idle for at least two minutes after the previous server stopped, and macOS thermal pressure had read nominal for the last 60 seconds in a row. Thermal pressure was sampled every second during each session and stayed nominal throughout |
@@ -101,7 +104,7 @@ Common settings for all applications: 4-bit draft model, 8,192-token context, ca
 - **Prompts:** six short prompts (three coding, three knowledge; 40–83 input tokens) in three sets of four, so every batch has four different prompts.
 - **Sessions:** each session starts a fresh server, sends one warm-up batch of four, then one scored batch of four released together (largest send spread 1.5 ms), then stops the server. Two rounds × four applications × three prompt sets = 24 sessions; the application orders of the two rounds are ABCE and ECBA (reversed), so each application has the same average position, and the order of the three prompt sets rotates by round.
 - **Caching:** prefix and disk caches were off or verified unused for every batch; speculative decoding was verified active from each server's counters or logs.
-- **Metrics:** time to first token runs from the send to the first content; completion runs from the send to `[DONE]`, including any queueing; batch throughput is 1,024 tokens divided by the time from the first send to the last `[DONE]`. Memory is the process-tree physical footprint, sampled every 50 ms during the scored batch.
+- **Metrics:** time to first token runs from the send to the first content; completion runs from the send to `[DONE]`, including any queueing; batch throughput is 1,024 tokens divided by the time from the first send to the last `[DONE]`. Memory is the process-tree physical footprint, sampled every 50 ms during the scored batch. Decode concurrency was derived after the test from the same timestamps, without a rerun; see the notes under [Comparison by metric](#comparison-by-metric) for its definition.
 - **Validity:** 24 of 24 sessions and 96 of 96 scored requests passed every check; no session was retried or dropped.
 
 ## Scope and limitations

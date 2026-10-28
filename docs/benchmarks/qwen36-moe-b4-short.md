@@ -75,7 +75,6 @@ Concurrent requests from the client do not guarantee batching inside the engine.
 |---|---|
 | Computer | MacBook Pro (Mac17,6), Apple M5 Max with a 40-core GPU, 128 GB unified memory |
 | Operating system | macOS 26.4 (25E246) |
-| Power | Connected to AC power for every session |
 | Test date | October 13, 2026 (12:26–14:58 UTC) |
 | Isolation | One inference server at a time; no other inference server or GPU compute job ran during the test. The benchmark client ran on the same Mac and connected over `127.0.0.1` |
 | Thermal control | Before every session the Mac stayed idle for at least two minutes after the previous server stopped, then until macOS thermal pressure had read nominal for 60 seconds in a row. Thermal pressure was sampled every second during each session and stayed nominal throughout |

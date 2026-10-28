@@ -57,9 +57,11 @@ The order was the same in both rounds for median time to first token, memory, ou
 > - Batch prefill speed: the four requests' input tokens (server counts, 122,928 in total) ÷ the time from the earliest request send to the last request's first output.
 > - Output speed while decoding: the batch's tokens actually output ÷ the total time during which at least one request was decoding (each request counts as decoding from its first output to `[DONE]`; the union of the four intervals). Other requests' inputs may be read during this time, so it is the effective decode speed under load.
 > - Decode concurrency: the four requests' decode times added up ÷ that union. 1 means no two requests ever decoded at the same time; 4 means all four decoded together throughout.
->
+
+> [!NOTE]
 > ² Batch throughput is the batch's tokens actually output ÷ the batch completion time (from the earliest send to the last `[DONE]`). At 30K the batch time is mostly spent reading inputs, so this metric mainly reflects prefill speed and is shown for reference only. IronMLX's Knowledge 3 ended naturally at token 235, so batches with Knowledge 3 output 1,002 tokens; in one oMLX batch, Knowledge 3 ended naturally at token 250; every other batch output 1,024 tokens. The batch completion time differs from the slowest request's completion time only by the gap between the requests' send times (at most 2.4 ms).
->
+
+> [!NOTE]
 > ³ Per-request decode speed depends on how each application schedules the four requests: a request that decodes on its own while the others are still being read runs close to single-request speed, while one that alternates with the other requests' prefill runs much slower.
 
 > [!NOTE]
@@ -86,7 +88,6 @@ Concurrent requests from the client do not guarantee batching inside the engine.
 |---|---|
 | Computer | MacBook Pro (Mac17,6), Apple M5 Max with a 40-core GPU, 128 GB unified memory |
 | Operating system | macOS 26.4 (25E246) |
-| Power | Connected to AC power for every session |
 | Test date | October 28, 2026 (00:36–02:46 UTC) |
 | Isolation | One inference server at a time; no other inference server or GPU compute job ran during the test. The benchmark client ran on the same Mac and connected over `127.0.0.1` |
 | Thermal control | Before every session the Mac stayed idle for at least two minutes after the previous server stopped, and macOS thermal pressure had read nominal for the last 60 seconds in a row. Thermal pressure was sampled every second during each session: it stayed nominal during every warm-up batch, and the prefill of four 30K inputs heated the Mac enough that pressure rose to a high level during every scored batch of every application |

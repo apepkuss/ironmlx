@@ -103,7 +103,6 @@ Every application uses the external DFlash2 draft model for speculative decoding
 |---|---|
 | Computer | MacBook Pro (Mac17,6), Apple M5 Max with a 40-core GPU, 128 GB unified memory |
 | Operating system | macOS 26.4 (25E246) |
-| Power | Connected to AC power for every session |
 | Test date | October 27, 2026 (17:23–19:13 UTC) |
 | Isolation | One inference server at a time; no other inference server or GPU compute job ran during the test. The benchmark client ran on the same Mac and connected over `127.0.0.1` |
 | Thermal control | Before every session the Mac stayed idle for at least two minutes after the previous server stopped, and macOS thermal pressure had read nominal for the last 60 seconds in a row. Thermal pressure was sampled every second during each session. The prefill of the 30K inputs heats the Mac noticeably: the scored requests are sent in the fixed order Coding 1 to Knowledge 3, and every application stayed nominal for the first one or two of them; pressure then rose to a high level from Coding 3 on for IronMLX and Splash and from Coding 2 on for TensorFold, while oMLX read moderate at Coding 2 and high from Coding 3 on |

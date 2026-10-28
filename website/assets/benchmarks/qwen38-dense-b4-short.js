@@ -127,7 +127,18 @@ window.IRONMLX_BENCHMARKS["qwen38-dense-b4-short"] = {
     4.632229811977595,
     5.237292082980275
    ],
-   "batches": 6
+   "batches": 6,
+   "decode_concurrency": {
+    "median": 3.4577693847377726,
+    "range": [
+     3.456217787116733,
+     3.459320982358812
+    ],
+    "rounds": [
+     3.456217787116733,
+     3.459320982358812
+    ]
+   }
   },
   {
    "key": "B",
@@ -221,7 +232,18 @@ window.IRONMLX_BENCHMARKS["qwen38-dense-b4-short"] = {
     8.922114354092628,
     9.903029479086399
    ],
-   "batches": 6
+   "batches": 6,
+   "decode_concurrency": {
+    "median": 3.185078960039438,
+    "range": [
+     3.155282586066919,
+     3.214875334011957
+    ],
+    "rounds": [
+     3.155282586066919,
+     3.214875334011957
+    ]
+   }
   },
   {
    "key": "C",
@@ -315,7 +337,18 @@ window.IRONMLX_BENCHMARKS["qwen38-dense-b4-short"] = {
     4.79824195895344,
     5.342557083349675
    ],
-   "batches": 6
+   "batches": 6,
+   "decode_concurrency": {
+    "median": 3.0285640764186463,
+    "range": [
+     3.002999263751522,
+     3.0541288890857707
+    ],
+    "rounds": [
+     3.002999263751522,
+     3.0541288890857707
+    ]
+   }
   },
   {
    "key": "E",
@@ -409,7 +442,18 @@ window.IRONMLX_BENCHMARKS["qwen38-dense-b4-short"] = {
     5.491775666363537,
     6.257953979540616
    ],
-   "batches": 6
+   "batches": 6,
+   "decode_concurrency": {
+    "median": 3.1141688007970885,
+    "range": [
+     3.110855937737732,
+     3.117481663856445
+    ],
+    "rounds": [
+     3.117481663856445,
+     3.110855937737732
+    ]
+   }
   }
  ],
  "round_ranks": {
