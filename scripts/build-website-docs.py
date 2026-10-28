@@ -20,10 +20,10 @@ PAGES = (
     ("benchmarks/qwen38-dense-b4-short.md", "Qwen3.8 27B B4 concurrency performance comparison (short prompts)", "Qwen3.8 27B B4 短 prompt 并发性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold when four short-prompt requests arrive together.", "四个短 prompt 请求同时到达时，对比 IronMLX 与 oMLX、Splash、TensorFold。"),
     ("benchmarks/qwen38-dense-b1-30k.md", "Qwen3.8 27B B1 30K-prompt performance comparison", "Qwen3.8 27B B1 30K prompt 性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold when one request with a 30K-token prompt is served at a time.", "每次处理一个 30K token 长 prompt 请求时，对比 IronMLX 与 oMLX、Splash、TensorFold。"),
     ("benchmarks/qwen38-dense-b4-30k.md", "Qwen3.8 27B B4 30K-prompt concurrency performance comparison", "Qwen3.8 27B B4 30K prompt 并发性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold when four requests with 30K-token prompts arrive together.", "四个 30K token 长 prompt 请求同时到达时，对比 IronMLX 与 oMLX、Splash、TensorFold。"),
-    ("benchmarks/qwen36-moe-b1-short.md", "Qwen3.6 35B A3B B1 single-request performance comparison (short prompts)", "Qwen3.6 35B A3B B1 短 prompt 单请求性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold on a mixture-of-experts model when one short-prompt request is served at a time.", "每次处理一个短 prompt 请求时，在混合专家模型上对比 IronMLX 与 oMLX、Splash、TensorFold。"),
-    ("benchmarks/qwen36-moe-b4-short.md", "Qwen3.6 35B A3B B4 concurrency performance comparison (short prompts)", "Qwen3.6 35B A3B B4 短 prompt 并发性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold on a mixture-of-experts model when four short-prompt requests arrive together.", "四个短 prompt 请求同时到达时，在混合专家模型上对比 IronMLX 与 oMLX、Splash、TensorFold。"),
-    ("benchmarks/qwen36-moe-b1-30k.md", "Qwen3.6 35B A3B B1 30K-prompt performance comparison", "Qwen3.6 35B A3B B1 30K prompt 性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold on a mixture-of-experts model when one request with a 30K-token prompt is served at a time.", "每次处理一个 30K token 长 prompt 请求时，在混合专家模型上对比 IronMLX 与 oMLX、Splash、TensorFold。"),
-    ("benchmarks/qwen36-moe-b4-30k.md", "Qwen3.6 35B A3B B4 30K-prompt concurrency performance comparison", "Qwen3.6 35B A3B B4 30K prompt 并发性能对比", "Compare IronMLX with oMLX, Splash, and TensorFold on a mixture-of-experts model when four requests with 30K-token prompts arrive together.", "四个 30K token 长 prompt 请求同时到达时，在混合专家模型上对比 IronMLX 与 oMLX、Splash、TensorFold。"),
+    ("benchmarks/qwen36-moe-b1-short.md", "Qwen3.6 35B A3B B1 single-request performance comparison (short prompts)", "Qwen3.6 35B A3B B1 短 prompt 单请求性能对比", "Compare IronMLX with oMLX and Splash on a mixture-of-experts model when one short-prompt request is served at a time.", "每次处理一个短 prompt 请求时，在混合专家模型上对比 IronMLX 与 oMLX、Splash。"),
+    ("benchmarks/qwen36-moe-b4-short.md", "Qwen3.6 35B A3B B4 concurrency performance comparison (short prompts)", "Qwen3.6 35B A3B B4 短 prompt 并发性能对比", "Compare IronMLX with oMLX and Splash on a mixture-of-experts model when four short-prompt requests arrive together.", "四个短 prompt 请求同时到达时，在混合专家模型上对比 IronMLX 与 oMLX、Splash。"),
+    ("benchmarks/qwen36-moe-b1-30k.md", "Qwen3.6 35B A3B B1 30K-prompt performance comparison", "Qwen3.6 35B A3B B1 30K prompt 性能对比", "Compare IronMLX with oMLX and Splash on a mixture-of-experts model when one request with a 30K-token prompt is served at a time.", "每次处理一个 30K token 长 prompt 请求时，在混合专家模型上对比 IronMLX 与 oMLX、Splash。"),
+    ("benchmarks/qwen36-moe-b4-30k.md", "Qwen3.6 35B A3B B4 30K-prompt concurrency performance comparison", "Qwen3.6 35B A3B B4 30K prompt 并发性能对比", "Compare IronMLX with oMLX and Splash on a mixture-of-experts model when four requests with 30K-token prompts arrive together.", "四个 30K token 长 prompt 请求同时到达时，在混合专家模型上对比 IronMLX 与 oMLX、Splash。"),
     ("api-reference.md", "API reference", "API 参考", "Find every documented endpoint and choose an API topic.", "查找全部已公开文档的端点，按能力进入 API 专题。"),
     ("service-api.md", "Service and management API", "服务与管理 API", "Look up shared access conventions, health, model discovery, and management endpoints.", "查阅公共访问约定、健康检查、模型发现与管理接口。"),
     ("text-vision-api.md", "Text and vision API", "文本与视觉 API", "Use Responses, Chat Completions, and Messages for text and image understanding.", "查阅文本与图片理解、思考、工具、结构化输出和流式协议。"),
@@ -68,6 +68,23 @@ GROUPS = (
 )
 PAGE_MAP = {entry[0]: entry for entry in PAGES}
 GROUP_MAP = {entry[0]: group for group in GROUPS for entry in group[5]}
+# Subsections of a group (English, Chinese, page-name prefix) in the sidebar and the overview; every page of the
+# group must fall in exactly one.
+SUBGROUPS = {"benchmarks": (
+    ("Dense models", "Dense 模型", "benchmarks/qwen38-dense-"),
+    ("MoE models", "MoE 模型", "benchmarks/qwen36-moe-"),
+)}
+
+
+def group_sections(group):
+    """The group's pages as (English label, Chinese label, entries) sections; one unlabelled section without subsections."""
+    if group[0] not in SUBGROUPS:
+        return ((None, None, group[5]),)
+    sections = tuple((en, zh, tuple(entry for entry in group[5] if entry[0].startswith(prefix)))
+                     for en, zh, prefix in SUBGROUPS[group[0]])
+    if sorted(entry[0] for section in sections for entry in section[2]) != sorted(entry[0] for entry in group[5]):
+        raise ValueError(f"group {group[0]}: every page must fall in exactly one subsection")
+    return sections
 PAGE_PARENT = {filename: "api-reference.md" for filename in (
     "service-api.md", "text-vision-api.md", "text-embeddings.md", "audio-speech-api.md",
     "image-generation-api.md", "laya-systemone-api.md", "openai-decisions-api.md",
@@ -377,15 +394,21 @@ def sidebar(language, output, target, current):
 
     for group in GROUPS:
         result.append(f'<section class="sidebar-group"><h2>{localized(group[1], group[2], language)}</h2><ul>')
-        for entry in group[5]:
-            if entry[0] in PAGE_PARENT:
-                continue
-            result.append(f'<li>{entry_link(entry)}')
-            if entry[0] in CHILD_PAGES:
-                result.append('<ul class="sidebar-children">')
-                result.extend(f'<li>{entry_link(child)}</li>' for child in CHILD_PAGES[entry[0]])
-                result.append('</ul>')
-            result.append('</li>')
+        for en, zh, entries in group_sections(group):
+            # A subsection is drawn like a parent page with its children: its label at entry level, its pages indented.
+            if en:
+                result.append(f'<li><span class="sidebar-subgroup-label">{localized(en, zh, language)}</span><ul class="sidebar-children">')
+            for entry in entries:
+                if entry[0] in PAGE_PARENT:
+                    continue
+                result.append(f'<li>{entry_link(entry)}')
+                if entry[0] in CHILD_PAGES:
+                    result.append('<ul class="sidebar-children">')
+                    result.extend(f'<li>{entry_link(child)}</li>' for child in CHILD_PAGES[entry[0]])
+                    result.append('</ul>')
+                result.append('</li>')
+            if en:
+                result.append('</ul></li>')
         result.append("</ul></section>")
     result.append("</nav>")
     return "".join(result)
@@ -485,13 +508,18 @@ def overview(language):
         html.append(f'<a class="docs-entry" href="{href}"><span class="docs-entry-icon">{icon(symbol)}</span><h2>{localized(en_title, zh_title, language)}{icon("arrow")}</h2><p>{localized(en_desc, zh_desc, language)}</p></a>')
     html.append('</div><div class="docs-categories">')
     for group in GROUPS:
-        html.append(f'<section class="docs-category" id="{group[0]}"><h2>{icon(group[0])}{localized(group[1], group[2], language)}</h2><p class="category-description">{localized(group[3], group[4], language)}</p><ul>')
-        for entry in group[5]:
-            if entry[0] in PAGE_PARENT:
-                continue
-            href = Path(entry[0]).with_suffix(".html").as_posix()
-            html.append(f'<li><a href="{href}"><span class="category-link-title">{localized(entry[1], entry[2], language)}<span aria-hidden="true">↗</span></span><span class="category-link-description">{localized(entry[3], entry[4], language)}</span></a></li>')
-        html.append("</ul></section>")
+        html.append(f'<section class="docs-category" id="{group[0]}"><h2>{icon(group[0])}{localized(group[1], group[2], language)}</h2><p class="category-description">{localized(group[3], group[4], language)}</p>')
+        for en, zh, entries in group_sections(group):
+            if en:
+                html.append(f'<h3 class="category-subheading">{localized(en, zh, language)}</h3>')
+            html.append('<ul>')
+            for entry in entries:
+                if entry[0] in PAGE_PARENT:
+                    continue
+                href = Path(entry[0]).with_suffix(".html").as_posix()
+                html.append(f'<li><a href="{href}"><span class="category-link-title">{localized(entry[1], entry[2], language)}<span aria-hidden="true">↗</span></span><span class="category-link-description">{localized(entry[3], entry[4], language)}</span></a></li>')
+            html.append("</ul>")
+        html.append("</section>")
     html.append("</div>")
     return "\n".join(html)
 

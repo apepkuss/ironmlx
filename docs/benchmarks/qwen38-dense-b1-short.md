@@ -3,16 +3,14 @@
 [简体中文](../zh-CN/benchmarks/qwen38-dense-b1-short.md)
 
 > [!NOTE]
-> Short-prompt performance comparison series:
+> This page compares single requests with short prompts. For 30K-token prompts, see [Qwen3.8 27B B1 single request](qwen38-dense-b1-30k.md) and [Qwen3.8 27B B4 concurrency](qwen38-dense-b4-30k.md). Short-prompt performance comparison series:
 >
 > - Qwen3.8 27B B1 single request
 > - [Qwen3.8 27B B4 concurrency](qwen38-dense-b4-short.md)
-> - [Qwen3.6 35B A3B B1 single request](qwen36-moe-b1-short.md)
-> - [Qwen3.6 35B A3B B4 concurrency](qwen36-moe-b4-short.md)
 
 The B1 single-request comparison benchmarks IronMLX against the leading inference applications on Apple Silicon today. It has two purposes: to help developers identify IronMLX's strengths and weaknesses and set the direction for further optimization, and to show users how IronMLX actually performs so they can judge whether it fits their use case.
 
-This page covers the dense Qwen3.8-27B model with one request at a time. All requests use short prompts (40–83 input tokens) with a fixed 256-token output, and the conclusions on this page apply to this workload only. The local inference applications in this comparison are oMLX, Splash, TensorFold, and IronMLX. See [Applications and configuration](#applications-and-configuration) for details on each. For the test environment setup, test method, and other details, see [Method](#method).
+This page covers the dense Qwen3.8-27B model with one request at a time. All requests use short prompts (40–83 input tokens) with an output limit of 256 tokens, and the conclusions on this page apply to this workload only. The local inference applications in this comparison are oMLX, Splash, TensorFold, and IronMLX. See [Applications and configuration](#applications-and-configuration) for details on each. For the test environment setup, test method, and other details, see [Method](#method).
 
 ## Summary
 
@@ -43,6 +41,9 @@ The table below lists the results of each application for each metric. Values ar
 | Peak memory while serving (GiB) | **17.9** (17.9–⁠18.0) | 21.7 (21.7–⁠21.8) | 19.3 (19.2–⁠19.3) | 19.8 (19.8–⁠19.8) |
 
 The order of the applications was identical in both rounds for all four metrics: IronMLX, Splash, TensorFold, oMLX for decode speed, completion time, and memory; TensorFold, IronMLX, Splash, oMLX for time to first token.
+
+> [!NOTE]
+> Peak memory while serving is measured during the six scored requests. While loading the model and warming up, IronMLX peaks at about 28.2 GiB, well above its serving peak and above every other application's serving peak; oMLX peaks at about 22.0 GiB, Splash 19.4 GiB, and TensorFold 19.8 GiB. This page does not compare memory during loading.
 
 ### Results by task
 
@@ -77,7 +78,7 @@ Every application uses the external DFlash2 draft model for speculative decoding
 - **IronMLX dev (c6ef14ec2):** each verification window uses a 15-node draft tree, verifies 16 rows at once, and has a fixed draft budget of 7; every window was a tree window.
 - **oMLX 0.7.2:** the log records the speculative decoding acceptance for every request.
 - **Splash 1.4.1:** the drafted and accepted counters on its status page grow with every request.
-- **TensorFold 1.1.6:** native engine (`qwen27`); each round verifies 16 rows.
+- **TensorFold 1.1.6:** native engine (`qwen27`); each round verifies at least 16 rows (the server reports a minimum of 16 rows a round for every request).
 
 ## Method
 
@@ -98,7 +99,7 @@ Every application uses the external DFlash2 draft model for speculative decoding
 | IronMLX dev (c6ef14ec2) | Release build (`cargo build --locked --release`) of commit `c6ef14ec2` on the `dev` branch; server and MLX Metal runtime frozen together | Started as the app starts it; `--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none` (block size 8 is the same as leaving it unset, which uses the draft model's own block size of 8); default M5 profile (ANE `auto`; short prompts do not use the ANE), no tuning switches |
 | oMLX 0.7.2 | Official app (`oMLX-0.7.2-macos26-27.dmg`) | `--no-cache --max-concurrent-requests 4`; context 8,192 and DFlash2 draft quantized to 4 bits (group 64) in its settings |
 | Splash 1.4.1 | Official bottle | `--max-context 8192`; KV cache kept at its default int8; the default 32 GiB non-persistent disk KV cache stays on (every session is a fresh process, and the cache hit counters were verified unchanged for every request); the draft model is always quantized to 4 bits at load (built-in Splash behavior, no setting) |
-| TensorFold 1.1.6 | Official native release (sha256 `0cd208ba…`), tag `v1.1.6` → `eea9dc9` | `--drafter-bits 4 --parallel 4`, prompt cache and snapshots off, default keep-warm |
+| TensorFold 1.1.6 | Official native release (sha256 `0cd208ba…`), tag `v1.1.6` → `eea9dc9` | `--drafter-bits 4 --parallel 4 --context 8192`, prompt cache and snapshots off, default keep-warm |
 
 Common settings for all applications: 4-bit draft model, 8,192-token context, capacity 4 where configurable (the client sends one request at a time), and reusable cross-request prefix caching off; BF16 KV cache for all applications except Splash, which keeps its default int8; each application otherwise keeps its own default strategy.
 
@@ -131,4 +132,4 @@ The conclusions on this page apply only under the conditions described in [Metho
 - Tail latency or statistical significance: two rounds on one machine are not enough for either.
 - Answer quality. This test compares speed and memory only and does not evaluate answer quality. Outputs are not identical across applications, and every scored request generated 256 tokens.
 - A warm machine. Every session on this page started from nominal thermal pressure; sustained operation on a hot machine is not covered.
-- Run-to-run variation. Between requests with identical work, IronMLX's time to first token varied more than any other application's: across the two rounds of the same task it differed by up to 50 ms (Coding 1: 93 to 143 ms), against at most 32 ms for Splash and 16 ms for oMLX and TensorFold. Its decode speed differed by up to 5.7% for the same task, against at most 2.5% for the others. The order of the applications did not change.
+- Run-to-run variation. Between requests with identical work, IronMLX's time to first token varied more than any other application's: across the two rounds of the same task it differed by up to 50 ms (Coding 1: 93 to 143 ms), against at most 32 ms for Splash, 15 ms for oMLX, and 10 ms for TensorFold. Its decode speed differed by up to 5.7% for the same task, against at most 2.5% for the others. The order of the applications did not change.

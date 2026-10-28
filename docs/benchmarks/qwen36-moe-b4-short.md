@@ -3,12 +3,10 @@
 [简体中文](../zh-CN/benchmarks/qwen36-moe-b4-short.md)
 
 > [!NOTE]
-> Short-prompt performance comparison series:
+> This page compares concurrent requests with short prompts. For 30K-token prompts, see [Qwen3.6 35B A3B B1 single request](qwen36-moe-b1-30k.md) and [Qwen3.6 35B A3B B4 concurrency](qwen36-moe-b4-30k.md). Short-prompt performance comparison series:
 >
 > - Qwen3.6 35B A3B B4 concurrency
 > - [Qwen3.6 35B A3B B1 single request](qwen36-moe-b1-short.md)
-> - [Qwen3.8 27B B1 single request](qwen38-dense-b1-short.md)
-> - [Qwen3.8 27B B4 concurrency](qwen38-dense-b4-short.md)
 
 The B4 concurrency comparison benchmarks IronMLX against the leading inference applications on Apple Silicon today. It has two purposes: to help developers identify IronMLX's strengths and weaknesses and set the direction for further optimization, and to show users how IronMLX actually performs so they can judge whether it fits their use case.
 
@@ -18,7 +16,7 @@ This page covers the Qwen3.6-35B-A3B mixture-of-experts model with four requests
 > Splash was tested in two settings on this page, named after the value of `--verify-rows`:
 >
 > - **Splash auto**: the default setting (`--verify-rows auto`). Faster, but on this model its greedy output may differ from run to run.
-> - **Splash all**: `--verify-rows all`, which verifies the whole draft block in every cycle; the output is reproducible.
+> - **Splash all**: `--verify-rows all`, which verifies the whole draft block in every cycle; its output is reproducible for single requests but not fully under the concurrent load of this page (see [Workload and procedure](#workload-and-procedure)).
 
 ## Summary
 
@@ -74,7 +72,7 @@ The chart below shows, for four requests sent at the same moment, when each requ
 
 Concurrent requests from the client do not guarantee batching inside the engine. According to the timeline and each server's own logs and status pages, the four requests were handled as follows:
 
-- **IronMLX dev (c6ef14ec2):** the four requests receive their first tokens at about 48, 87, 125, and 167 ms; the requests being decoded are then verified together in ragged linear batches (no draft tree for this model). About 96% of all verification windows batched several requests, and the rest served a single remaining request; every window carried drafts. The four requests complete between about 1.8 and 2.4 s.
+- **IronMLX dev (c6ef14ec2):** the four requests receive their first tokens at about 48, 87, 125, and 167 ms; the requests being decoded are then verified together in ragged linear batches (no draft tree for this model). About 87% of the verification windows batched several requests (about 96% counted per request), and the rest served a single remaining request; every window carried drafts. The four requests complete between about 1.8 and 2.4 s.
 - **oMLX 0.7.2:** runs batched speculative decoding for the four requests (its log names this batched path "Lightning MTP"); first tokens arrive between about 177 and 410 ms, and its decode concurrency is the highest (3.51). During batching it calibrates batched against standard decoding, and individual requests switch to standard decoding for a stretch; in this run 3 requests finished on standard decoding after being parked.
 - **Splash 1.4.1 auto and all:** in each batch one request receives its first token first (about 45 ms), and the other three receive theirs at the same moment (about 150 ms); the first request completes earliest, and the whole batch completes at about 2.5 s (default setting) and 2.7 s (`--verify-rows all`).
 
@@ -88,7 +86,7 @@ Concurrent requests from the client do not guarantee batching inside the engine.
 | Operating system | macOS 26.4 (25E246) |
 | Test date | October 28, 2026 (07:29–08:21 UTC) |
 | Isolation | One inference server at a time; no other inference server or GPU compute job ran during the test. The benchmark client ran on the same Mac and connected over `127.0.0.1` |
-| Thermal control | Before every session the Mac stayed idle for at least two minutes after the previous server stopped, and macOS thermal pressure had read nominal for the last 60 seconds in a row. Thermal pressure was sampled every second during each session and stayed nominal throughout |
+| Thermal control | Before every session the Mac stayed idle for at least two minutes after the previous server stopped, and macOS thermal pressure had read nominal for the last 60 seconds in a row; the first session of the formal run was the exception, waiting for the thermal condition only and starting about 83 s after the previous run's server stopped. Thermal pressure was sampled every second during each session and stayed nominal throughout |
 
 ### Applications and configuration
 
@@ -118,7 +116,7 @@ Common settings for all applications: 4-bit draft model, 8,192-token context, ca
 - **Prompts:** six short prompts (three coding, three knowledge; 40–83 input tokens) in three sets of four, so every batch has four different prompts.
 - **Sessions:** each session starts a fresh server, sends one warm-up batch of four, then one scored batch of four released together (largest send spread 1.3 ms), then stops the server. Two rounds × four configurations × three prompt sets = 24 sessions; the orders of the two rounds are ABCS and SCBA (reversed; A is IronMLX, B oMLX, C Splash auto, and S Splash all), so each configuration has the same average position, and the order of the three prompt sets rotates by round.
 - **Caching:** prefix and disk caches were off or verified unused for every batch; speculative decoding was verified active from each server's counters or logs.
-- **Metrics:** time to first token runs from the send to the first content; completion runs from the send to `[DONE]`, including any queueing; batch throughput is the number of tokens actually output (counted on the client with the target tokenizer) divided by the time from the first send to the last `[DONE]`. Memory is the process-tree physical footprint, sampled every 50 ms during the scored batch. Decode concurrency was derived after the test from the same timestamps, without a rerun; see the notes under [Comparison by metric](#comparison-by-metric) for its definition.
+- **Metrics:** time to first token runs from the send to the first content; completion runs from the send to `[DONE]`, including any queueing; batch throughput is the number of tokens actually output (counted on the client with the target tokenizer; a request that ends by length counts 256) divided by the time from the first send to the last `[DONE]`. Memory is the process-tree physical footprint, sampled every 50 ms during the scored batch. Decode concurrency was derived after the test from the same timestamps, without a rerun; see the notes under [Comparison by metric](#comparison-by-metric) for its definition.
 - **Validity:** 24 of 24 sessions and 96 of 96 scored requests passed every check; no session was retried or dropped.
 - **Output reproducibility:** on the same prompt set across the two rounds, all 12 IronMLX requests were byte-identical; 2 requests of Splash all, 9 of Splash auto, and 11 of oMLX differed between the rounds. IronMLX's output also did not depend on the other requests in the batch (the same prompt gave the same output in batches of different composition), but on this model it is not identical to the output when served alone on the [B1 page](qwen36-moe-b1-short.md) (4 of 6 tasks differ): on this model IronMLX verifies batched requests with different arithmetic than a single request.
 
@@ -126,12 +124,12 @@ Common settings for all applications: 4-bit draft model, 8,192-token context, ca
 
 The conclusions on this page apply only under the conditions described in [Method](#method). The following are not covered by this comparison or need to be kept in mind:
 
-- **Not an overall verdict on any application.** These results reflect the listed versions on this model, this workload, and this Mac only; they do not show that any application is better or worse overall. Apart from the common settings listed in Method, each application ran its default strategy without tuning for this test (Splash all is an additional configuration for reproducible output); with other models, other workloads, or each application's recommended settings, the results and their order may differ. TensorFold is not included because its current release does not support this model, which says nothing about its performance on other models. If you think an application's configuration is unfair, please let us know through [GitHub Issues](https://github.com/apepkuss/ironmlx/issues).
+- **Not an overall verdict on any application.** These results reflect the listed versions on this model, this workload, and this Mac only; they do not show that any application is better or worse overall. Apart from the common settings listed in Method, each application ran its default strategy without tuning for this test (Splash all is an additional configuration that verifies the whole draft block in every cycle); with other models, other workloads, or each application's recommended settings, the results and their order may differ. TensorFold is not included because its current release does not support this model, which says nothing about its performance on other models. If you think an application's configuration is unfair, please let us know through [GitHub Issues](https://github.com/apepkuss/ironmlx/issues).
 - **IronMLX is a development build.** The IronMLX on this page is a build of the `dev` branch, not a release; a release may perform differently.
 - **The two completion measures point different ways.** IronMLX finishes the whole batch first (shortest slowest-request completion), but its median request completes later than with Splash auto; the two reflect "all four requests done" and "a typical request done", and should be read together.
 - **The throughput lead depends on the prompt set.** On the first of the three prompt sets, Splash all (462.2 and 454.6 tok/s in the two rounds) and Splash auto (442.0 and 455.6) matched or exceeded IronMLX (442.0 and 448.0); IronMLX led both Splash settings on the second and third sets. With other prompts, the throughput order may differ.
-- Long prompts, other models, other concurrency levels, or real multi-user traffic.
+- Long prompts, other models, other concurrency levels, or real multi-user traffic. For concurrent requests with prompts of about 30K tokens, see [Qwen3.6 35B A3B B4 30K-prompt concurrency performance comparison](qwen36-moe-b4-30k.md).
 - Tail latency or statistical significance: two rounds on one machine are not enough for either.
 - Answer quality. This test compares speed and memory only and does not evaluate answer quality.
 - A warm machine. Every session on this page started from nominal thermal pressure; sustained operation on a hot machine is not covered.
-- Batch-to-batch variation. Across the two rounds on the same prompt set, oMLX's batch throughput differed by up to 12.6% (first set: 219.9 to 251.5 tok/s), Splash auto by 4.4%, and IronMLX and Splash all by at most 1.6%.
+- Batch-to-batch variation. Across the two rounds on the same prompt set, oMLX's batch throughput differed by up to 14.4% (first set: 219.9 to 251.5 tok/s), Splash auto by 4.6%, Splash all by 1.7%, and IronMLX by 1.5%.

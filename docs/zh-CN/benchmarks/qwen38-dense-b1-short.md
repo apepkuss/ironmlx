@@ -3,16 +3,14 @@
 [English](../../benchmarks/qwen38-dense-b1-short.md)
 
 > [!NOTE]
-> 短 prompt 性能对比测试系列：
+> 本页是短 prompt 的单请求性能对比；30K 长 prompt 的对比见 [Qwen3.8 27B B1 单请求](qwen38-dense-b1-30k.md)和 [Qwen3.8 27B B4 并发](qwen38-dense-b4-30k.md)。短 prompt 性能对比测试系列：
 >
 > - Qwen3.8 27B B1 单请求
 > - [Qwen3.8 27B B4 并发](qwen38-dense-b4-short.md)
-> - [Qwen3.6 35B A3B B1 单请求](qwen36-moe-b1-short.md)
-> - [Qwen3.6 35B A3B B4 并发](qwen36-moe-b4-short.md)
 
 B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平台最优秀推理应用的对比，一方面，帮助开发者定位 IronMLX 的优势和劣势，为后续优化提供方向；另一方面，让用户更了解 IronMLX 实际表现，判断是否适合他们的使用场景。
 
-本页针对 Qwen3.8-27B 稠密模型，服务每次只处理一个请求。所有请求都使用短 prompt（输入 40–83 token），输出固定为 256 token；本页结论只适用于这种负载。参与本次单请求性能对比的本地推理应用有 oMLX、Splash、TensorFold 和 IronMLX。各应用的具体信息见[参测应用与配置](#参测应用与配置)。关于本次性能对比验证的环境搭建、测试方法等信息，请详见[方法](#方法)。
+本页针对 Qwen3.8-27B 稠密模型，服务每次只处理一个请求。所有请求都使用短 prompt（输入 40–83 token），输出上限为 256 token；本页结论只适用于这种负载。参与本次单请求性能对比的本地推理应用有 oMLX、Splash、TensorFold 和 IronMLX。各应用的具体信息见[参测应用与配置](#参测应用与配置)。关于本次性能对比验证的环境搭建、测试方法等信息，请详见[方法](#方法)。
 
 ## 结论
 
@@ -43,6 +41,9 @@ B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平�
 | 服务时内存峰值（GiB） | **17.9** (17.9–⁠18.0) | 21.7 (21.7–⁠21.8) | 19.3 (19.2–⁠19.3) | 19.8 (19.8–⁠19.8) |
 
 四项指标中，各应用的先后在两轮中完全一致：解码速度、完成时间和内存都是 IronMLX、Splash、TensorFold、oMLX；首字时间是 TensorFold、IronMLX、Splash、oMLX。
+
+> [!NOTE]
+> 服务时内存峰值在六个计分请求期间测量。加载模型和预热阶段，IronMLX 的峰值（约 28.2 GiB）明显高于服务时，也高于其他应用服务时的峰值；oMLX 约 22.0 GiB，Splash 约 19.4 GiB，TensorFold 约 19.8 GiB。本页不比较加载阶段的内存。
 
 ### 各任务结果
 
@@ -77,7 +78,7 @@ IronMLX 在五个任务上完成最快、解码最快；TensorFold 在编程 2 �
 - **IronMLX dev (c6ef14ec2)：** 每个验证窗口用 15 节点的草稿树，一次验证 16 行，草稿预算固定为 7；全部窗口都是树验证。
 - **oMLX 0.7.2：** 每个请求的日志都记录了推测解码的接受情况。
 - **Splash 1.4.1：** 状态接口中的草稿与接受计数随每个请求增加。
-- **TensorFold 1.1.6：** 原生引擎（`qwen27`）；每轮验证 16 行。
+- **TensorFold 1.1.6：** 原生引擎（`qwen27`）；每轮至少验证 16 行（服务端对每个请求报告的每轮最少行数都是 16）。
 
 ## 方法
 
@@ -98,7 +99,7 @@ IronMLX 在五个任务上完成最快、解码最快；TensorFold 在编程 2 �
 | IronMLX dev (c6ef14ec2) | `dev` 分支提交 `c6ef14ec2` 的 release 构建（`cargo build --locked --release`），服务程序与 MLX Metal 运行时一起冻结 | 按 App 的方式启动；`--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none`（block size 8 与不设置时相同：默认取草稿模型自身的 block size 8）；M5 默认配置（含 ANE `auto`；短 prompt 不触发 ANE），不加任何调优开关 |
 | oMLX 0.7.2 | 官方 App（`oMLX-0.7.2-macos26-27.dmg`） | `--no-cache --max-concurrent-requests 4`；设置中上下文 8,192，DFlash2 草稿按 4-bit（group 64）量化 |
 | Splash 1.4.1 | 官方 bottle | `--max-context 8192`；KV 缓存保持默认的 int8；默认 32 GiB 非持久磁盘 KV 缓存保持开启（每个会话都是新进程，每个请求都核对缓存命中计数不变）；草稿模型在加载时固定量化为 4-bit（Splash 内置行为，无需设置） |
-| TensorFold 1.1.6 | 官方原生发布包（sha256 `0cd208ba…`），tag `v1.1.6` → `eea9dc9` | `--drafter-bits 4 --parallel 4`，prompt 缓存与快照关闭，keep-warm 保持默认 |
+| TensorFold 1.1.6 | 官方原生发布包（sha256 `0cd208ba…`），tag `v1.1.6` → `eea9dc9` | `--drafter-bits 4 --parallel 4 --context 8192`，prompt 缓存与快照关闭，keep-warm 保持默认 |
 
 所有应用的共同设置：草稿模型 4-bit、上下文 8,192 token、可配置容量的设为 4（测试客户端每次只发一个请求）、可跨请求复用的前缀缓存关闭；KV 缓存除 Splash 使用其默认 int8 外均为 BF16；其余保持各应用自己的默认策略。
 
@@ -131,4 +132,4 @@ IronMLX 在五个任务上完成最快、解码最快；TensorFold 在编程 2 �
 - 尾延迟或统计显著性：单台机器上的两轮数据不足以支持这两类结论。
 - 回答质量。本测试只比较速度和内存，没有评估回答质量。各应用的输出不完全相同，每个计分请求都生成 256 个 token。
 - 机器发热时的表现。本页每个会话都从正常热压力开始，没有覆盖机器持续发热时的情况。
-- 轮间波动。工作量完全相同的请求之间，IronMLX 首字时间的波动比其他应用都大：同一任务两轮之间最多相差 50 ms（编程 1：93 到 143 ms），Splash 最多相差 32 ms，oMLX 和 TensorFold 不超过 16 ms。解码速度方面，IronMLX 同一任务两轮最多相差 5.7%，其他应用不超过 2.5%。各应用的先后没有因此改变。
+- 轮间波动。工作量完全相同的请求之间，IronMLX 首字时间的波动比其他应用都大：同一任务两轮之间最多相差 50 ms（编程 1：93 到 143 ms），Splash 最多相差 32 ms，oMLX 15 ms，TensorFold 10 ms。解码速度方面，IronMLX 同一任务两轮最多相差 5.7%，其他应用不超过 2.5%。各应用的先后没有因此改变。

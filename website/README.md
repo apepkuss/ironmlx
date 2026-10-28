@@ -58,7 +58,9 @@ changing a diagram, render and verify the updated Mermaid source, then save the
 SVG under its new hash; the build rejects diagrams without a matching asset.
 
 Benchmark pages live under `docs/benchmarks/` (Chinese sources under
-`docs/zh-CN/benchmarks/`) and form the Benchmarks group after Getting started.
+`docs/zh-CN/benchmarks/`) and form the Benchmarks group after Getting started,
+split into Dense models and MoE models subsections in the sidebar and the
+overview (`SUBGROUPS` in `scripts/build-website-docs.py`, by page-name prefix).
 Results tables stay in Markdown. A line `<!-- benchmark:<figure> <id> -->`, where
 the figure is `kpis`, `scatter`, or `timeline`, places a chart rendered by
 `assets/benchmarks/benchmarks.js` from the data registered in
@@ -82,11 +84,11 @@ shows it in place of batch throughput in the `kpis` cards. In a results table wh
 header has an IronMLX column, `benchmarks.js` tints that column and shades each
 bold body cell (the best value of its row): deeper in the IronMLX column, grey
 elsewhere; mark the best value in bold in the Markdown. Each
-benchmark page opens with a note listing the series: the current page first
-without a link, then the same model's other workload, then the other model's B1
-and B4 pages. The 30K-prompt pages (`qwen38-dense-b1-30k`, `qwen38-dense-b4-30k`,
-`qwen36-moe-b1-30k`, `qwen36-moe-b4-30k`) list their own series in the same way and link the same
-model's short-prompt pages from that note. List items inside a
+benchmark page opens with a note listing its series for the same model
+only: the current page first without a link, then the same model's other
+workload (B1 or B4); the note also links the same model's pages with the
+other prompt length (short or 30K). Readers switch models through the Dense
+models and MoE models subsections of the navigation. List items inside a
 `> [!NOTE]` callout render as a list.
 
 `docs.css` contains the responsive documentation layout. `docs.js` provides local

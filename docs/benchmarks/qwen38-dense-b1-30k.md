@@ -7,8 +7,6 @@
 >
 > - Qwen3.8 27B B1 single request
 > - [Qwen3.8 27B B4 concurrency](qwen38-dense-b4-30k.md)
-> - [Qwen3.6 35B A3B B1 single request](qwen36-moe-b1-30k.md)
-> - [Qwen3.6 35B A3B B4 concurrency](qwen36-moe-b4-30k.md)
 
 The B1 single-request comparison benchmarks IronMLX against the leading inference applications on Apple Silicon today. It has two purposes: to help developers identify IronMLX's strengths and weaknesses and set the direction for further optimization, and to show users how IronMLX actually performs so they can judge whether it fits their use case.
 
@@ -87,14 +85,14 @@ Decode speed (tok/s, higher is better):
 > [!NOTE]
 > ¹ On Knowledge 3, IronMLX ended naturally at token 235 (the model emitted its end-of-sequence token) in all four rounds, while every other application generated the full 256 tokens, so this task's completion time favors IronMLX. Knowledge 3 is already IronMLX's slowest task, so it does not move the median of the six tasks, and the overall completion time in the table above is unaffected.
 
-IronMLX has the shortest time to first token on the three coding tasks and Splash on the three knowledge tasks, 0.2–0.7 s apart on each task. IronMLX decodes fastest on Coding 1, Coding 2, and Knowledge 3, and Splash on the other three. Every application's time to first token grows from Coding 1 to Knowledge 3 (IronMLX: 30.5 s to 38.6 s); the six inputs are equally long, and thermal pressure rose over the same stretch of each session, as described under thermal control in [Hardware and software](#hardware-and-software).
+IronMLX has the shortest time to first token on the three coding tasks and Splash on the three knowledge tasks, 0.2–0.7 s apart on each task. IronMLX decodes fastest on Coding 1, Coding 2, and Knowledge 3, and Splash on the other three. Every application's time to first token broadly grows from Coding 1 to Knowledge 3 (IronMLX: 30.5 s to 38.6 s; Splash's Coding 3 is slightly shorter than its Coding 2, and TensorFold's Knowledge 3 about equals its Knowledge 2); the six inputs are equally long, and thermal pressure rose over the same stretch of each session, as described under thermal control in [Hardware and software](#hardware-and-software).
 
 Every application uses the external DFlash2 draft model for speculative decoding when serving a single request, and every scored request had drafts accepted. According to each server's own logs and status pages:
 
 - **IronMLX dev (c6ef14ec2):** each verification window uses a 15-node draft tree, verifies 16 rows at once, and has a fixed draft budget of 7; every window was a tree window. The prefill of the 30K inputs hands part of the MLP computation to the ANE under the default ANE `auto` (the status page shows the ANE as active).
 - **oMLX 0.7.2:** the log records the speculative decoding acceptance for every request.
 - **Splash 1.4.1:** the drafted and accepted counters on its status page grow with every request; by default, the prefill of long inputs hands part of the FFN computation to the Neural Engine (recorded in its log).
-- **TensorFold 1.1.6:** native engine (`qwen27`); each round verifies 16 rows.
+- **TensorFold 1.1.6:** native engine (`qwen27`); each round verifies at least 16 rows (the server reports a minimum of 16 rows a round for every request).
 
 ## Method
 

@@ -7,8 +7,6 @@
 >
 > - Qwen3.6 35B A3B B1 单请求
 > - [Qwen3.6 35B A3B B4 并发](qwen36-moe-b4-30k.md)
-> - [Qwen3.8 27B B1 单请求](qwen38-dense-b1-30k.md)
-> - [Qwen3.8 27B B4 并发](qwen38-dense-b4-30k.md)
 
 B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平台最优秀推理应用的对比，一方面，帮助开发者定位 IronMLX 的优势和劣势，为后续优化提供方向；另一方面，让用户更了解 IronMLX 实际表现，判断是否适合他们的使用场景。
 
@@ -29,7 +27,7 @@ B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平�
 - **内存最低。** 服务时内存峰值为 22.1 GiB，四轮都最低；Splash 两种设置都是 23.1 GiB，oMLX 为 23.4 GiB。
 - **解码速度第二。** 解码速度中位数为 184.3 tok/s，四轮都是第二：比 Splash auto（194.0）低 5.0%，比 Splash all（176.8）高 4.3%，比 oMLX（152.4）高 21.0%。
 - **首字时间最长。** 首字时间中位数为 7.13 s，四轮都最长；Splash all（6.32 s）和 Splash auto（6.34 s）并列最短，IronMLX 比它们长 12.5–12.8%，oMLX 为 6.70 s。在 30K 输入下，首字时间的大部分是读入长输入的 prefill。
-- **完成时间最长。** 一个请求从发出到完成的时间中位数为 8.57 s，四轮都最长；Splash auto 最短（7.71 s），IronMLX 比它长 11.1%。Splash all 为 7.85 s，oMLX 为 8.35 s。解码速度的领先不足以抵消 prefill 的差距。
+- **完成时间最长。** 一个请求从发出到完成的时间中位数为 8.57 s，四轮都最长；Splash auto 最短（7.71 s），IronMLX 比它长 11.1%。Splash all 为 7.85 s，oMLX 为 8.35 s。IronMLX 的解码速度虽然高于 Splash all 和 oMLX，但不足以抵消 prefill 上的差距。
 - **输出可复现。** IronMLX 和 Splash all 的每个任务四轮输出都逐字节相同；oMLX 有 4 个任务、Splash auto 有 6 个任务的四轮输出不完全相同。
 
 ### 解码速度与首字时间
@@ -49,7 +47,7 @@ B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平�
 | 完成时间（s） | 8.57 (8.52–⁠8.73) | 8.35 (8.17–⁠8.41) | **7.71** (7.61–⁠7.82) | 7.85 (7.70–⁠7.92) |
 | 服务时内存峰值（GiB） | **22.1** (22.1–⁠22.1) | 23.4 (23.3–⁠23.4) | 23.1 (23.0–⁠23.1) | 23.1 (23.1–⁠23.1) |
 
-解码速度和完成时间的先后四轮完全一致：解码速度为 Splash auto、IronMLX、Splash all、oMLX；完成时间为 Splash auto、Splash all、oMLX、IronMLX。首字时间四轮都是 oMLX 第三、IronMLX 第四，Splash 两种设置在第 1、2 轮是 auto 领先，第 3、4 轮是 all 领先。内存四轮都是 IronMLX 最低、oMLX 最高，Splash 两种设置相差不到 0.01 GiB。
+解码速度和完成时间的先后四轮完全一致：解码速度为 Splash auto、IronMLX、Splash all、oMLX；完成时间为 Splash auto、Splash all、oMLX、IronMLX。首字时间四轮都是 oMLX 第三、IronMLX 第四，Splash 两种设置在第 1、2 轮是 auto 领先，第 3、4 轮是 all 领先。内存四轮都是 IronMLX 最低、oMLX 最高，Splash 两种设置每轮相差不超过 0.02 GiB。
 
 > [!NOTE]
 > 服务时内存峰值在六个计分请求期间测量，包含 30K 输入的 KV 缓存。加载模型和预热阶段的峰值：IronMLX 约 22.1 GiB，与服务时相当；oMLX 约 21.5 GiB，Splash 两种设置约 21.0 GiB。本页不比较加载阶段的内存。

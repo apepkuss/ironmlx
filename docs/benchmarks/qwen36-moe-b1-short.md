@@ -3,12 +3,10 @@
 [简体中文](../zh-CN/benchmarks/qwen36-moe-b1-short.md)
 
 > [!NOTE]
-> Short-prompt performance comparison series:
+> This page compares single requests with short prompts. For 30K-token prompts, see [Qwen3.6 35B A3B B1 single request](qwen36-moe-b1-30k.md) and [Qwen3.6 35B A3B B4 concurrency](qwen36-moe-b4-30k.md). Short-prompt performance comparison series:
 >
 > - Qwen3.6 35B A3B B1 single request
 > - [Qwen3.6 35B A3B B4 concurrency](qwen36-moe-b4-short.md)
-> - [Qwen3.8 27B B1 single request](qwen38-dense-b1-short.md)
-> - [Qwen3.8 27B B4 concurrency](qwen38-dense-b4-short.md)
 
 The B1 single-request comparison benchmarks IronMLX against the leading inference applications on Apple Silicon today. It has two purposes: to help developers identify IronMLX's strengths and weaknesses and set the direction for further optimization, and to show users how IronMLX actually performs so they can judge whether it fits their use case.
 
@@ -105,7 +103,7 @@ Every configuration uses the external DFlash2 draft model for speculative decodi
 | Operating system | macOS 26.4 (25E246) |
 | Test date | October 28, 2026 (05:55–06:32 UTC) |
 | Isolation | One inference server at a time; no other inference server or GPU compute job ran during the test. The benchmark client ran on the same Mac and connected over `127.0.0.1` |
-| Thermal control | Before every session the Mac stayed idle for at least two minutes after the previous server stopped, and macOS thermal pressure had read nominal for the last 60 seconds in a row. Thermal pressure was sampled every second during each session and stayed nominal throughout |
+| Thermal control | Before every session the Mac stayed idle for at least two minutes after the previous server stopped, and macOS thermal pressure had read nominal for the last 60 seconds in a row; the first session of each of the two formal runs was the exception, waiting for the thermal condition only and starting about 100 s and 82 s after the previous run's server stopped. Thermal pressure was sampled every second during each session and stayed nominal throughout |
 
 ### Applications and configuration
 
@@ -133,7 +131,7 @@ Common settings for all applications: 4-bit draft model, 8,192-token context, ca
 
 - **Requests:** streaming `/v1/chat/completions`, one user message, temperature 0, thinking off, `max_tokens` 256, no `ignore_eos` (oMLX does not support it). A scored request may end by length (exactly 256 tokens counted by the server) or naturally (200–256 tokens counted by the server); in this run every scored request ended by length with exactly 256 tokens counted by the server.
 - **Prompts:** six short prompts (three coding, three knowledge; 40–83 input tokens), all different from each other and from the warm-up prompts.
-- **Sessions:** each session starts a fresh server, sends two warm-up requests, then the six scored requests one at a time (each sent 1 second after the previous one finished), then stops the server. A rule fixed before the test ran two rounds first (orders ABCS and SCBA, where A is IronMLX, B oMLX, C Splash auto, and S Splash all) and added two more rounds (BASC and CSAB) right after if, in any metric, two adjacent configurations swapped order between the rounds or their two-round ranges overlapped. Time to first token (the two Splash settings) and decode speed (Splash auto and IronMLX) swapped order over the first two rounds, so the rounds were added: four rounds × four configurations = 16 sessions, with the same average position for each configuration.
+- **Sessions:** each session starts a fresh server, sends two warm-up requests, then the six scored requests one at a time (each sent 1 second after the previous one finished), then stops the server. A rule fixed before the test ran two rounds first (orders ABCS and SCBA, where A is IronMLX, B oMLX, C Splash auto, and S Splash all) and added two more rounds (BASC and CSAB) right after if, in any metric, two adjacent configurations swapped order between the rounds or their two-round ranges overlapped. Time to first token (the two Splash settings) and decode speed (Splash auto and IronMLX) swapped order over the first two rounds, and the two-round ranges of completion time (Splash auto and IronMLX) and memory (the two Splash settings) overlapped, so the rounds were added: four rounds × four configurations = 16 sessions, with the same average position for each configuration.
 - **Caching:** prefix and disk caches were off or verified unused for every request; speculative decoding was verified active from each server's counters or logs.
 - **Metrics:** time to first token runs from the send to the first non-empty content; decode speed is (output tokens − tokens in the first content) ÷ (time between the first and last content), counted on the client with the target tokenizer; completion runs from the send to `[DONE]`. Each round takes the median of the six tasks, and the table takes the median of the four rounds. Memory is the peak process-tree physical footprint, sampled every 50 ms while the six scored requests ran (including the gaps between them).
 - **Validity:** 16 of 16 sessions and 96 of 96 scored requests passed every check; no session was retried or dropped.

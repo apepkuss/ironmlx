@@ -7,8 +7,6 @@
 >
 > - Qwen3.6 35B A3B B1 single request
 > - [Qwen3.6 35B A3B B4 concurrency](qwen36-moe-b4-30k.md)
-> - [Qwen3.8 27B B1 single request](qwen38-dense-b1-30k.md)
-> - [Qwen3.8 27B B4 concurrency](qwen38-dense-b4-30k.md)
 
 The B1 single-request comparison benchmarks IronMLX against the leading inference applications on Apple Silicon today. It has two purposes: to help developers identify IronMLX's strengths and weaknesses and set the direction for further optimization, and to show users how IronMLX actually performs so they can judge whether it fits their use case.
 
@@ -28,8 +26,8 @@ Based on all data collected in the 30K-prompt B1 single-request comparison, Iron
 
 - **Lowest memory.** Peak memory while serving is 22.1 GiB, the lowest in all four rounds; both Splash settings use 23.1 GiB and oMLX 23.4 GiB.
 - **Second in decode speed.** The median decode speed is 184.3 tok/s, second in all four rounds: 5.0% below Splash auto (194.0), 4.3% above Splash all (176.8), and 21.0% above oMLX (152.4).
-- **Longest time to first token.** The median time to first token is 7.13 s, the longest in all four rounds; Splash all (6.32 s) and Splash auto (6.34 s) tie for the shortest, 12.5–12.8% shorter than IronMLX, and oMLX takes 6.70 s. With 30K inputs, most of the time to first token is the prefill that reads the long input.
-- **Longest completion time.** The median time from sending a request to its completion is 8.57 s, the longest in all four rounds; Splash auto is the shortest (7.71 s), and IronMLX takes 11.1% longer. Splash all takes 7.85 s and oMLX 8.35 s. IronMLX's lead in decode speed is not enough to make up for the gap in prefill.
+- **Longest time to first token.** The median time to first token is 7.13 s, the longest in all four rounds; Splash all (6.32 s) and Splash auto (6.34 s) tie for the shortest (IronMLX takes 12.5–12.8% longer), and oMLX takes 6.70 s. With 30K inputs, most of the time to first token is the prefill that reads the long input.
+- **Longest completion time.** The median time from sending a request to its completion is 8.57 s, the longest in all four rounds; Splash auto is the shortest (7.71 s), and IronMLX takes 11.1% longer. Splash all takes 7.85 s and oMLX 8.35 s. IronMLX decodes faster than Splash all and oMLX, but not enough to make up for the gap in prefill.
 - **Reproducible output.** For IronMLX and for Splash all, each task's output was byte-identical in all four rounds; oMLX differed between rounds on four tasks and Splash auto on six.
 
 ### Decode speed vs. time to first token
@@ -49,7 +47,7 @@ The table below lists the results of each configuration for each metric. Values 
 | Completion time (s) | 8.57 (8.52–⁠8.73) | 8.35 (8.17–⁠8.41) | **7.71** (7.61–⁠7.82) | 7.85 (7.70–⁠7.92) |
 | Peak memory while serving (GiB) | **22.1** (22.1–⁠22.1) | 23.4 (23.3–⁠23.4) | 23.1 (23.0–⁠23.1) | 23.1 (23.1–⁠23.1) |
 
-The order of decode speed and completion time was the same in all four rounds: Splash auto, IronMLX, Splash all, and oMLX for decode speed; Splash auto, Splash all, oMLX, and IronMLX for completion time. In time to first token, oMLX was third and IronMLX fourth in all four rounds, while of the two Splash settings auto led in rounds 1 and 2 and all in rounds 3 and 4. IronMLX used the least memory and oMLX the most in all four rounds; the two Splash settings differ by less than 0.01 GiB.
+The order of decode speed and completion time was the same in all four rounds: Splash auto, IronMLX, Splash all, and oMLX for decode speed; Splash auto, Splash all, oMLX, and IronMLX for completion time. In time to first token, oMLX was third and IronMLX fourth in all four rounds, while of the two Splash settings auto led in rounds 1 and 2 and all in rounds 3 and 4. IronMLX used the least memory and oMLX the most in all four rounds; the two Splash settings differ by at most 0.02 GiB in any round.
 
 > [!NOTE]
 > Peak memory while serving is measured during the six scored requests and includes the KV cache of a 30K input. Peaks while loading the model and warming up: about 22.1 GiB for IronMLX, about the same as while serving; about 21.5 GiB for oMLX and 21.0 GiB for both Splash settings. This page does not compare memory during loading.

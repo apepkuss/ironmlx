@@ -3,16 +3,14 @@
 [简体中文](../zh-CN/benchmarks/qwen38-dense-b4-short.md)
 
 > [!NOTE]
-> Short-prompt performance comparison series:
+> This page compares concurrent requests with short prompts. For 30K-token prompts, see [Qwen3.8 27B B1 single request](qwen38-dense-b1-30k.md) and [Qwen3.8 27B B4 concurrency](qwen38-dense-b4-30k.md). Short-prompt performance comparison series:
 >
 > - Qwen3.8 27B B4 concurrency
 > - [Qwen3.8 27B B1 single request](qwen38-dense-b1-short.md)
-> - [Qwen3.6 35B A3B B1 single request](qwen36-moe-b1-short.md)
-> - [Qwen3.6 35B A3B B4 concurrency](qwen36-moe-b4-short.md)
 
 The B4 concurrency comparison benchmarks IronMLX against the leading inference applications on Apple Silicon today. It has two purposes: to help developers identify IronMLX's strengths and weaknesses and set the direction for further optimization, and to show users how IronMLX actually performs so they can judge whether it fits their use case.
 
-This page covers the dense Qwen3.8-27B model with four requests arriving together. All requests use short prompts (40–83 input tokens) with a fixed 256-token output, and the conclusions on this page apply to this workload only. The local inference applications in this comparison are oMLX, Splash, TensorFold, and IronMLX. See [Applications and configuration](#applications-and-configuration) for details on each. For the test environment setup, test method, and other details, see [Method](#method).
+This page covers the dense Qwen3.8-27B model with four requests arriving together. All requests use short prompts (40–83 input tokens) with an output limit of 256 tokens, and the conclusions on this page apply to this workload only. The local inference applications in this comparison are oMLX, Splash, TensorFold, and IronMLX. See [Applications and configuration](#applications-and-configuration) for details on each. For the test environment setup, test method, and other details, see [Method](#method).
 
 ## Summary
 
@@ -52,6 +50,9 @@ The table below lists the results of each application for each metric. Values ar
 > [!NOTE]
 > ² Decode concurrency was derived after the test from the client timestamps of each scored batch; it is not part of the test protocol written beforehand. It is the four requests' decode times added up ÷ the total time during which at least one request was decoding (each request counts as decoding from its first output to `[DONE]`). 1 means no two requests ever decoded at the same time; 4 means all four decoded together throughout. All four applications are at 3.0–3.5, so with short prompts the four requests are decoded mostly together; for the contrast with 30K-token prompts, see [Qwen3.8 27B B4 30K-prompt concurrency performance comparison](qwen38-dense-b4-30k.md).
 
+> [!NOTE]
+> Peak memory while serving is measured during the scored batch. While loading the model and warming up, IronMLX peaks at about 28.1–28.2 GiB, well above its serving peak and above every other application's serving peak; oMLX peaks at about 22.4–23.0 GiB, Splash 19.4 GiB, and TensorFold 22.0–22.1 GiB. This page does not compare memory during loading.
+
 ### Request response timeline
 
 The chart below shows, for four requests sent at the same moment, when each request receives its first output and when it completes, to show how each application schedules the four requests under concurrent load. The horizontal axis is the time since the requests were sent; ticks mark when a request receives its first output, and dots mark when a request completes. In each batch, the four first-token times and the four completion times are sorted separately from earliest to latest, and each position shows the median of that position over 6 batches. Ticks and dots are therefore sorted independently, and a tick and a dot at the same position do not necessarily belong to the same request.
@@ -84,7 +85,7 @@ Concurrent requests from the client do not guarantee batching inside the engine.
 | IronMLX dev (c6ef14ec2) | Release build (`cargo build --locked --release`) of commit `c6ef14ec2` on the `dev` branch; server and MLX Metal runtime frozen together | Started as the app starts it; `--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none` (block size 8 is the same as leaving it unset, which uses the draft model's own block size of 8); default M5 profile (ANE `auto`; short prompts do not use the ANE), no tuning switches |
 | oMLX 0.7.2 | Official app (`oMLX-0.7.2-macos26-27.dmg`) | `--no-cache --max-concurrent-requests 4`; context 8,192 and DFlash2 draft quantized to 4 bits (group 64) in its settings |
 | Splash 1.4.1 | Official bottle | `--max-context 8192`; KV cache kept at its default int8; the default 32 GiB non-persistent disk KV cache stays on (every session is a fresh process, and the cache hit counters were verified unchanged for every batch); the draft model is always quantized to 4 bits at load (built-in Splash behavior, no setting) |
-| TensorFold 1.1.6 | Official native release (sha256 `0cd208ba…`), tag `v1.1.6` → `eea9dc9` | `--drafter-bits 4 --parallel 4`, prompt cache and snapshots off, default keep-warm |
+| TensorFold 1.1.6 | Official native release (sha256 `0cd208ba…`), tag `v1.1.6` → `eea9dc9` | `--drafter-bits 4 --parallel 4 --context 8192`, prompt cache and snapshots off, default keep-warm |
 
 Common settings for all applications: 4-bit draft model, 8,192-token context, capacity 4 where configurable, and reusable cross-request prefix caching off; BF16 KV cache for all applications except Splash, which keeps its default int8; each application otherwise keeps its own default strategy.
 

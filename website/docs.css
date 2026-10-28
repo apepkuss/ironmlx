@@ -200,6 +200,14 @@
   line-height: 1.5;
 }
 
+.sidebar-subgroup-label {
+  display: block;
+  padding: 6px 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .sidebar-group ul {
   margin: 0;
   padding: 0;
@@ -712,6 +720,15 @@
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.doc-content .category-subheading {
+  margin: 14px 0 0;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .doc-content .docs-category li {
