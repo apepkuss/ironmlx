@@ -4,6 +4,7 @@
 // A data set with mode "b1" (single requests) uses the B1 metrics for the cards and the scatter axes.
 // A data set with ttft_unit "s" keeps its first-token values in ms but shows them in seconds.
 // The timeline grid is every 2 s for short timelines and coarser for long ones.
+// A B4 data set with x_metric "prefill_tps" shows batch prefill speed in place of batch throughput.
 (() => {
   const registry = window.IRONMLX_BENCHMARKS || {};
   const zh = document.documentElement.lang.startsWith("zh");
@@ -18,6 +19,11 @@
     throughput: "四请求整批吞吐（tok/s）",
     ttftMedian: "首字时间中位数（ms）",
     ttftMedianSeconds: "首字时间中位数（s）",
+    prefill: {
+      card: ["prefill_tps", "四个请求的整批 prefill 速度", "tok/s", 0, "max"],
+      throughput: "整批 prefill 速度（输入 tok/s）",
+      tipThroughput: "整批 prefill",
+    },
     offScale: (v) => `${v} s，超出范围（排队）`,
     seconds: "从同时发出算起的时间（秒）",
     firstToken: "首字",
@@ -60,6 +66,11 @@
     throughput: "4-request batch throughput (tok/s)",
     ttftMedian: "Median time to first token (ms)",
     ttftMedianSeconds: "Median time to first token (s)",
+    prefill: {
+      card: ["prefill_tps", "Prefill speed for four requests together", "tok/s", 0, "max"],
+      throughput: "Batch prefill speed (input tok/s)",
+      tipThroughput: "Batch prefill",
+    },
     offScale: (v) => `${v} s, off scale (queued)`,
     seconds: "Seconds after the four requests are sent",
     firstToken: "First token",
@@ -122,9 +133,19 @@
 
   const kind = (app) => (app.key === FOCUS ? "focus" : "other");
   // Labels and metric keys for a data set: B4 (default) or B1.
-  const metrics = (data) => (data.mode === "b1"
-    ? { ...T, ...T.b1, x: "decode_tps", y: "ttft_ms", ...(data.ttft_unit === "s" ? { ttftMedian: T.b1.ttftSeconds } : {}) }
-    : { ...T, x: "throughput_tps", y: "ttft_median_ms", ...(data.ttft_unit === "s" ? { ttftMedian: T.ttftMedianSeconds } : {}) });
+  // A B4 data set with x_metric "prefill_tps" (long prompts) shows batch prefill speed in place of batch
+  // throughput on the scatter's x axis and in the throughput card.
+  const metrics = (data) => {
+    if (data.mode === "b1") {
+      return { ...T, ...T.b1, x: "decode_tps", y: "ttft_ms", ...(data.ttft_unit === "s" ? { ttftMedian: T.b1.ttftSeconds } : {}) };
+    }
+    const M = { ...T, x: "throughput_tps", y: "ttft_median_ms", ...(data.ttft_unit === "s" ? { ttftMedian: T.ttftMedianSeconds } : {}) };
+    if (data.x_metric !== "prefill_tps") return M;
+    return {
+      ...M, x: "prefill_tps", throughput: T.prefill.throughput, tipThroughput: T.prefill.tipThroughput,
+      kpis: T.kpis.map((k) => (k[0] === "throughput_tps" ? T.prefill.card : k)),
+    };
+  };
   // Display scale and unit of a card or axis: first-token values in seconds when the data set asks for it.
   const shown = (data, key, unit) => (data.ttft_unit === "s" && key.startsWith("ttft") ? [0.001, "s"] : [1, unit]);
   const tipRow = (label, value) => `<div class="tip-row"><span>${label}</span><b>${value}</b></div>`;

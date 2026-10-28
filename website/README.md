@@ -75,7 +75,10 @@ shows time to first token, decode speed, completion time, and memory in the
 `ttft_unit: "s"` shows first-token values (stored in ms) in seconds on the cards
 and the scatter axis, for long-prompt pages whose first tokens take seconds. The
 `timeline` grid is every 2 s and becomes coarser (5, 10, 20 s, …) for timelines
-longer than 24 s, so it keeps about ten lines. Each
+longer than 24 s, so it keeps about ten lines. A B4 data file with
+`x_metric: "prefill_tps"` (long prompts, where the batch time is mostly prefill)
+plots batch prefill speed instead of batch throughput on the `scatter` x axis and
+shows it in place of batch throughput in the `kpis` cards. Each
 benchmark page opens with a note listing the series: the current page first
 without a link, then the same model's other workload, then the other model's B1
 and B4 pages. The 30K-prompt pages (`qwen38-dense-b1-30k`, `qwen38-dense-b4-30k`,
