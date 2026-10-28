@@ -8,6 +8,7 @@
 > - Qwen3.8 27B B4 concurrency
 > - [Qwen3.8 27B B1 single request](qwen38-dense-b1-30k.md)
 > - [Qwen3.6 35B A3B B1 single request](qwen36-moe-b1-30k.md)
+> - [Qwen3.6 35B A3B B4 concurrency](qwen36-moe-b4-30k.md)
 
 The B4 concurrency comparison benchmarks IronMLX against the leading inference applications on Apple Silicon today. It has two purposes: to help developers identify IronMLX's strengths and weaknesses and set the direction for further optimization, and to show users how IronMLX actually performs so they can judge whether it fits their use case.
 
@@ -96,7 +97,7 @@ Concurrent requests from the client do not guarantee batching inside the engine.
 
 | Application | Source | Configuration |
 |---|---|---|
-| IronMLX dev (c6ef14ec2) | Release build (`cargo build --locked --release`) of commit `c6ef14ec2` on the `dev` branch; server and MLX Metal runtime frozen together | Started as the app starts it; `--dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 32768 --kv-quant none`; default M5 profile (ANE `auto`, active for 30K inputs), no tuning switches |
+| IronMLX dev (c6ef14ec2) | Release build (`cargo build --locked --release`) of commit `c6ef14ec2` on the `dev` branch; server and MLX Metal runtime frozen together | Started as the app starts it; `--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 32768 --kv-quant none` (block size 8 is the same as leaving it unset, which uses the draft model's own block size of 8); default M5 profile (ANE `auto`, active for 30K inputs), no tuning switches |
 | oMLX 0.7.2 | Official app (`oMLX-0.7.2-macos26-27.dmg`) | `--no-cache --max-concurrent-requests 4`; context 32,768 and DFlash2 draft quantized to 4 bits (group 64) in its settings |
 | Splash 1.4.1 | Official bottle | `--max-context 32768`; KV cache kept at its default int8; Neural Engine left on by default; the default 32 GiB non-persistent disk KV cache stays on (every session is a fresh process, and the cache hit counters were verified unchanged for every batch); the draft model is always quantized to 4 bits at load (built-in Splash behavior, no setting) |
 | TensorFold 1.1.6 | Official native release (sha256 `0cd208ba…`), tag `v1.1.6` → `eea9dc9` | `--drafter-bits 4 --parallel 4 --context 32768`, prompt cache and snapshots off, default keep-warm |

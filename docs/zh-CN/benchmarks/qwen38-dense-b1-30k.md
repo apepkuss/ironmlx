@@ -8,6 +8,7 @@
 > - Qwen3.8 27B B1 单请求
 > - [Qwen3.8 27B B4 并发](qwen38-dense-b4-30k.md)
 > - [Qwen3.6 35B A3B B1 单请求](qwen36-moe-b1-30k.md)
+> - [Qwen3.6 35B A3B B4 并发](qwen36-moe-b4-30k.md)
 
 B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平台最优秀推理应用的对比，一方面，帮助开发者定位 IronMLX 的优势和劣势，为后续优化提供方向；另一方面，让用户更了解 IronMLX 实际表现，判断是否适合他们的使用场景。
 

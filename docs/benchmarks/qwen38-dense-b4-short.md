@@ -81,7 +81,7 @@ Concurrent requests from the client do not guarantee batching inside the engine.
 
 | Application | Source | Configuration |
 |---|---|---|
-| IronMLX dev (c6ef14ec2) | Release build (`cargo build --locked --release`) of commit `c6ef14ec2` on the `dev` branch; server and MLX Metal runtime frozen together | Started as the app starts it; `--dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none`; default M5 profile (ANE `auto`; short prompts do not use the ANE), no tuning switches |
+| IronMLX dev (c6ef14ec2) | Release build (`cargo build --locked --release`) of commit `c6ef14ec2` on the `dev` branch; server and MLX Metal runtime frozen together | Started as the app starts it; `--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none` (block size 8 is the same as leaving it unset, which uses the draft model's own block size of 8); default M5 profile (ANE `auto`; short prompts do not use the ANE), no tuning switches |
 | oMLX 0.7.2 | Official app (`oMLX-0.7.2-macos26-27.dmg`) | `--no-cache --max-concurrent-requests 4`; context 8,192 and DFlash2 draft quantized to 4 bits (group 64) in its settings |
 | Splash 1.4.1 | Official bottle | `--max-context 8192`; KV cache kept at its default int8; the default 32 GiB non-persistent disk KV cache stays on (every session is a fresh process, and the cache hit counters were verified unchanged for every batch); the draft model is always quantized to 4 bits at load (built-in Splash behavior, no setting) |
 | TensorFold 1.1.6 | Official native release (sha256 `0cd208ba…`), tag `v1.1.6` → `eea9dc9` | `--drafter-bits 4 --parallel 4`, prompt cache and snapshots off, default keep-warm |

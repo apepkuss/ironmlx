@@ -65,9 +65,9 @@ the figure is `kpis`, `scatter`, or `timeline`, places a chart rendered by
 `assets/benchmarks/<id>.js`; only pages with such a line load the chart assets,
 and the build rejects a figure whose data file is missing. Data files are
 generated from a completed benchmark run's analysis and are not edited by hand.
-A data file may set `scatter.x` and `scatter.y` (`[min, max, step]`) and
-`scatter.placement` (label offsets per application key) when its values fall
-outside the default axes. A data file with `mode: "b1"` (one request at a time)
+A data file may set `scatter.x` and `scatter.y` (`[min, max, step]`; tick labels
+take as many decimals as the step) and `scatter.placement` (label offsets per
+application key) when its values fall outside the default axes. A data file with `mode: "b1"` (one request at a time)
 shows time to first token, decode speed, completion time, and memory in the
 `kpis` cards and plots decode speed against time to first token in the
 `scatter` chart; the `timeline` figure applies to B4 data only. `kpi_digits`
@@ -85,7 +85,7 @@ elsewhere; mark the best value in bold in the Markdown. Each
 benchmark page opens with a note listing the series: the current page first
 without a link, then the same model's other workload, then the other model's B1
 and B4 pages. The 30K-prompt pages (`qwen38-dense-b1-30k`, `qwen38-dense-b4-30k`,
-`qwen36-moe-b1-30k`) list their own series in the same way and link the same
+`qwen36-moe-b1-30k`, `qwen36-moe-b4-30k`) list their own series in the same way and link the same
 model's short-prompt pages from that note. List items inside a
 `> [!NOTE]` callout render as a list.
 

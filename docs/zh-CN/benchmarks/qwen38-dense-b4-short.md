@@ -81,7 +81,7 @@ B4 并发性能对比验证的目的是，通过与当前 Apple Silicon 平台�
 
 | 应用 | 来源 | 配置 |
 |---|---|---|
-| IronMLX dev (c6ef14ec2) | `dev` 分支提交 `c6ef14ec2` 的 release 构建（`cargo build --locked --release`），服务程序与 MLX Metal 运行时一起冻结 | 按 App 的方式启动；`--dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none`；M5 默认配置（含 ANE `auto`；短 prompt 不触发 ANE），不加任何调优开关 |
+| IronMLX dev (c6ef14ec2) | `dev` 分支提交 `c6ef14ec2` 的 release 构建（`cargo build --locked --release`），服务程序与 MLX Metal 运行时一起冻结 | 按 App 的方式启动；`--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none`（block size 8 与不设置时相同：默认取草稿模型自身的 block size 8）；M5 默认配置（含 ANE `auto`；短 prompt 不触发 ANE），不加任何调优开关 |
 | oMLX 0.7.2 | 官方 App（`oMLX-0.7.2-macos26-27.dmg`） | `--no-cache --max-concurrent-requests 4`；设置中上下文 8,192，DFlash2 草稿按 4-bit（group 64）量化 |
 | Splash 1.4.1 | 官方 bottle | `--max-context 8192`；KV 缓存保持默认的 int8；默认 32 GiB 非持久磁盘 KV 缓存保持开启（每个会话都是新进程，每批都核对缓存命中计数不变）；草稿模型在加载时固定量化为 4-bit（Splash 内置行为，无需设置） |
 | TensorFold 1.1.6 | 官方原生发布包（sha256 `0cd208ba…`），tag `v1.1.6` → `eea9dc9` | `--drafter-bits 4 --parallel 4`，prompt 缓存与快照关闭，keep-warm 保持默认 |

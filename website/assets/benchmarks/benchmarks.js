@@ -224,13 +224,15 @@
     const sx = (v) => m.l + (v - x0) / (x1 - x0) * (W - m.l - m.r);
     const sy = (v) => H - m.b - (v - y0) / (y1 - y0) * (H - m.t - m.b);
     const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${M.throughput} / ${M.ttftMedian}` });
+    // Tick labels take as many decimals as the axis step (a 0.5 s step shows 6.5).
+    const stepDigits = (step) => (String(step).split(".")[1] || "").length;
     for (let v = y0; v <= y1; v += yStep) {
       el("line", { x1: m.l, x2: W - m.r, y1: sy(v), y2: sy(v), class: "grid" }, svg);
-      text(svg, m.l - 10, sy(v) + 4, fmt(v, 0), { "text-anchor": "end" });
+      text(svg, m.l - 10, sy(v) + 4, fmt(v, stepDigits(yStep)), { "text-anchor": "end" });
     }
     for (let v = x0; v <= x1; v += xStep) {
       el("line", { x1: sx(v), x2: sx(v), y1: m.t, y2: H - m.b, class: "grid" }, svg);
-      text(svg, sx(v), H - m.b + 20, fmt(v, 0), { "text-anchor": "middle" });
+      text(svg, sx(v), H - m.b + 20, fmt(v, stepDigits(xStep)), { "text-anchor": "middle" });
     }
     text(svg, (m.l + W - m.r) / 2, H - 12, M.throughput, { "text-anchor": "middle", class: "axis-title" });
     text(svg, 14, m.t - 14, M.ttftMedian, { class: "axis-title" });

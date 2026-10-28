@@ -94,7 +94,7 @@ Splash 两种设置的含义见 [B1 页](qwen36-moe-b1-short.md#splash-的两种
 
 | 应用 | 来源 | 配置 |
 |---|---|---|
-| IronMLX dev (c6ef14ec2) | `dev` 分支提交 `c6ef14ec2` 的 release 构建（`cargo build --locked --release`），服务程序与 MLX Metal 运行时一起冻结 | 按 App 的方式启动；`--dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none`；M5 默认配置（ANE 对这个模型不适用），不加任何调优开关 |
+| IronMLX dev (c6ef14ec2) | `dev` 分支提交 `c6ef14ec2` 的 release 构建（`cargo build --locked --release`），服务程序与 MLX Metal 运行时一起冻结 | 按 App 的方式启动；`--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none`（block size 8 与不设置时相同：默认取草稿模型自身的 block size 8）；M5 默认配置（ANE 对这个模型不适用），不加任何调优开关 |
 | oMLX 0.7.2 | 官方 App（`oMLX-0.7.2-macos26-27.dmg`） | `--no-cache --max-concurrent-requests 4`；设置中上下文 8,192，DFlash2 草稿按 4-bit（group 64）量化，DFlash 验证模式保持默认的 `adaptive` |
 | Splash 1.4.1 auto | 官方 bottle | `--max-context 8192`；KV 缓存保持默认的 int8；`--verify-rows` 保持默认的 `auto`；默认 32 GiB 非持久磁盘 KV 缓存保持开启（每个会话都是新进程，每批都核对缓存命中计数不变）；草稿模型在加载时固定量化为 4-bit（Splash 内置行为，无需设置） |
 | Splash 1.4.1 all | 同上 | 与 Splash 1.4.1 auto 相同，另加 `--verify-rows all`；启动后核对 Splash 引擎进程确实带有该参数（Splash 1.4.1 auto 的引擎进程不带） |
