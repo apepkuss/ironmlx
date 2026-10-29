@@ -2120,12 +2120,12 @@ where
     }
 
     /// Whether the next window may run as a one-token row of a ragged
-    /// multi-request decode: greedy, unconstrained, nothing pending.
+    /// multi-request decode: greedy, nothing pending (a constrained row
+    /// takes its mask inside the window).
     pub(crate) fn ragged_ordinary_eligible(&self) -> bool {
         !self.finished
             && self.pending_tokens.is_empty()
             && self.request.sampler.is_greedy()
-            && self.constraint.is_none()
             && self.request.max_new_tokens > self.emitted_new_tokens
     }
 
@@ -2137,7 +2137,6 @@ where
             && self.pending_tokens.is_empty()
             && draft_len > 0
             && self.request.sampler.is_greedy()
-            && self.constraint.is_none()
             && self
                 .request
                 .max_new_tokens
@@ -2774,7 +2773,57 @@ where
         let logits = rows[0]
             .model
             .dflash2_project_hidden_on(&verified.hidden, target)?;
-        let verified_tokens_arr = argmax_last(&logits)?;
+        // Constrained rows (a tool or JSON grammar, the native reasoning
+        // budget): their verified logits take the row's speculative masks
+        // before the argmax, as a single-request window's do. The verify is
+        // submitted first, so the GPU runs it while the host reads the draft
+        // tokens and computes the rows' masks (one grammar walk per row, in
+        // parallel).
+        let early_draft_tokens = rows
+            .iter()
+            .any(|row| row.constraint.is_some())
+            .then(|| -> Result<Vec<Vec<u32>>> {
+                mlx::transforms::async_eval(&[&logits])?;
+                materialize_dflash2_draft_tokens(
+                    &draft_tokens_arr,
+                    batch_size,
+                    draft_len,
+                    mask_token,
+                )
+            })
+            .transpose()?;
+        let mut row_masks = None;
+        let verified_logits = match early_draft_tokens.as_ref() {
+            Some(draft_tokens) => {
+                let masks = std::thread::scope(|scope| {
+                    let workers = rows
+                        .iter()
+                        .zip(draft_tokens)
+                        .map(|(row, tokens)| {
+                            let constraint = row.constraint.as_ref();
+                            scope.spawn(move || {
+                                constraint
+                                    .map(|constraint| constraint.speculative_masks(tokens))
+                                    .transpose()
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    workers
+                        .into_iter()
+                        .map(|worker| {
+                            worker
+                                .join()
+                                .map_err(|_| anyhow!("ragged constraint mask thread panicked"))?
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })?;
+                let masked = apply_speculative_token_masks(&logits, &masks)?;
+                row_masks = Some(masks);
+                masked
+            }
+            None => logits,
+        };
+        let verified_tokens_arr = argmax_last(&verified_logits)?;
         mlx::transforms::async_eval(&[&verified_tokens_arr, &verified.context_hidden])?;
         mark("t_head_submitted");
         // Accepted counts on the GPU and the cache commit submitted now,
@@ -2815,8 +2864,15 @@ where
         } else {
             None
         };
-        let draft_tokens =
-            materialize_dflash2_draft_tokens(&draft_tokens_arr, batch_size, draft_len, mask_token)?;
+        let draft_tokens = match early_draft_tokens {
+            Some(draft_tokens) => draft_tokens,
+            None => materialize_dflash2_draft_tokens(
+                &draft_tokens_arr,
+                batch_size,
+                draft_len,
+                mask_token,
+            )?,
+        };
         mark("t_draft_read");
         let greedy = verified_tokens_arr.to_vec::<u32>()?;
         mark("t_sync_done");
@@ -2923,6 +2979,17 @@ where
                 tokens_to_append.truncate(stop_index + 1);
             }
             tokens_to_append.truncate(remaining);
+            // The masks that shaped this row's verified logits decide its
+            // tokens' validity (no second grammar walk).
+            if let Some(masks) = row_masks
+                .as_ref()
+                .and_then(|masks| masks[batch_row].as_ref())
+            {
+                ConstraintSession::truncate_invalid_speculative_bonus_with_masks(
+                    masks,
+                    &mut tokens_to_append,
+                )?;
+            }
             anyhow::ensure!(
                 !tokens_to_append.contains(&mask_token),
                 "ragged verification emitted the mask token"
@@ -2930,6 +2997,7 @@ where
             accepted.push(resolution.accepted_draft_len);
             emitted.push(tokens_to_append.len());
             for token in tokens_to_append {
+                commit_constraint_token(&mut row.constraint, token)?;
                 row.history.push(token);
                 row.pending_tokens.push_back(token);
             }
@@ -3095,6 +3163,38 @@ where
         let logits = rows[0]
             .model
             .dflash2_project_hidden_on(&output.hidden, target)?;
+        // Constrained rows (a tool or JSON grammar, the native reasoning
+        // budget): their logits take the row's current mask before the
+        // argmax, as a single-request one-token window's do. The projection
+        // is submitted first, so the GPU runs it while the rows' masks are
+        // computed (one grammar walk per row, in parallel).
+        let logits = if rows.iter().any(|row| row.constraint.is_some()) {
+            mlx::transforms::async_eval(&[&logits])?;
+            let masks = std::thread::scope(|scope| {
+                let workers = rows
+                    .iter_mut()
+                    .map(|row| {
+                        let constraint = row.constraint.as_mut();
+                        scope.spawn(move || {
+                            constraint
+                                .map(|constraint| constraint.compute_mask().map(|mask| vec![mask]))
+                                .transpose()
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                workers
+                    .into_iter()
+                    .map(|worker| {
+                        worker
+                            .join()
+                            .map_err(|_| anyhow!("ragged constraint mask thread panicked"))?
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })?;
+            apply_speculative_token_masks(&logits, &masks)?
+        } else {
+            logits
+        };
         let next_arr = mlx::ops::reduction::argmax(&logits, -1, false)?;
         mlx::transforms::async_eval(&[&next_arr, &output.context_hidden])?;
         let next_tokens = next_arr.to_vec::<u32>()?;
@@ -3116,6 +3216,7 @@ where
                 i32::MAX,
                 target,
             )?;
+            commit_constraint_token(&mut row.constraint, next_token)?;
             row.history.push(next_token);
             row.pending_tokens.push_back(next_token);
             row.counters.windows += 1;
@@ -4206,6 +4307,8 @@ where
             .model
             .dflash2_project_hidden_on(&verified.hidden, StreamOrDevice::default())?;
         let constrained_draft_tokens = if self.constraint.is_some() {
+            // The GPU runs the verify while the host walks the grammar.
+            mlx::transforms::async_eval(&[&verified_logits])?;
             let host_sync_started = Instant::now();
             let tokens = draft_tokens_arr.to_vec::<u32>()?;
             self.counters.host_sync_us = self

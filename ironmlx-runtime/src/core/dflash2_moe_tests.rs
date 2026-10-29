@@ -1910,6 +1910,159 @@ fn qwen36_moe_dflash2_ragged_windows_match_ordinary() {
     );
 }
 
+/// Rows under the native reasoning budget (what a chat request with thinking
+/// enabled carries) decode together in ragged one-token windows (the budget-0
+/// regime) with the token IDs of their own single-request one-token windows,
+/// and every row closes its thought.
+#[test]
+#[ignore = "loads a full local Qwen3.6 MoE target and the incoai DFlash2 draft"]
+#[serial(mlx_metal)]
+fn qwen36_moe_dflash2_ragged_one_token_windows_take_constrained_rows() {
+    let Some(fixture) = fixture() else {
+        eprintln!("skip: set QWEN36_MOE_DFLASH2_TARGET and DFLASH2_MODEL");
+        return;
+    };
+    let max_new_tokens = 48;
+    let native = fixture
+        .tokenizer
+        .native_output_decoder_config(None)
+        .expect("native output config")
+        .expect("Qwen3.6 has a native output dialect");
+    assert!(native.reasoning_enabled, "thinking is on by default");
+    let prompt_ids = PROMPTS
+        .iter()
+        .map(|prompt| fixture.tokenizer.encode(prompt, true).expect("encode"))
+        .collect::<Vec<_>>();
+    let rows = prompt_ids.len();
+    let constrained_stream = |ids: &Vec<u32>| {
+        let mut request = request(ids.clone(), max_new_tokens, Vec::new(), Sampler::greedy());
+        request.constraint = fixture
+            .tokenizer
+            .apply_reasoning_budget(None, Some(native), max_new_tokens)
+            .expect("reasoning budget");
+        assert!(request.constraint.is_some());
+        let mut stream = DFlash2TextGenerationStream::new_text_only_with_options(
+            &fixture.target,
+            &fixture.draft,
+            &fixture.tokenizer,
+            request,
+            8,
+            DFlash2P2Options::default(),
+        )
+        .expect("DFlash2 stream");
+        stream.experimental_fixed_budget = Some(0);
+        stream
+    };
+    // Reference: each row alone, in single-request one-token windows.
+    let solo = prompt_ids
+        .iter()
+        .map(|ids| {
+            let mut stream = constrained_stream(ids);
+            drain(|| {
+                if stream.pending_tokens.is_empty() {
+                    stream.fill_deferred_window_b1()?;
+                }
+                stream.next_token_deferred()
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut streams = prompt_ids
+        .iter()
+        .map(constrained_stream)
+        .collect::<Vec<_>>();
+    let mut events = vec![Vec::new(); rows];
+    let mut done = vec![false; rows];
+    let mut group: Option<(Vec<usize>, DFlash2RaggedBatchCache)> = None;
+    let mut ragged_windows = 0_usize;
+    fn pick<'a, 'm, M: DFlash2Target>(
+        streams: &'a mut [DFlash2TextGenerationStream<'m, M>],
+        indices: &[usize],
+    ) -> Vec<&'a mut DFlash2TextGenerationStream<'m, M>> {
+        let mut slots = streams.iter_mut().map(Some).collect::<Vec<_>>();
+        indices
+            .iter()
+            .map(|&index| slots[index].take().expect("distinct rows"))
+            .collect()
+    }
+    loop {
+        for row in 0..rows {
+            while !done[row] && !streams[row].pending_tokens.is_empty() {
+                let event = streams[row]
+                    .next_token_deferred()
+                    .expect("next token")
+                    .expect("event");
+                let finished = event.finish_reason.is_some();
+                events[row].push((
+                    event.token,
+                    event.finish_reason.map(|reason| format!("{reason:?}")),
+                ));
+                done[row] = finished;
+            }
+        }
+        let ready = (0..rows)
+            .filter(|&row| !done[row] && streams[row].ragged_ordinary_eligible())
+            .collect::<Vec<_>>();
+        let solo_rows = (0..rows)
+            .filter(|&row| !done[row] && !ready.contains(&row))
+            .collect::<Vec<_>>();
+        if ready.is_empty() && solo_rows.is_empty() {
+            break;
+        }
+        let wanted = if ready.len() >= 2 {
+            ready.clone()
+        } else {
+            Vec::new()
+        };
+        if group
+            .as_ref()
+            .is_some_and(|(members, _)| *members != wanted)
+        {
+            let (members, cache) = group.take().expect("group");
+            cache
+                .scatter_to_rows(&mut pick(&mut streams, &members))
+                .expect("scatter");
+        }
+        for &row in solo_rows.iter().chain(if wanted.is_empty() {
+            ready.iter()
+        } else {
+            [].iter()
+        }) {
+            streams[row].fill_deferred_window_b1().expect("B1 window");
+        }
+        if !wanted.is_empty() {
+            let previous = group.take().map(|(_, cache)| cache);
+            let mut picked = pick(&mut streams, &wanted);
+            let (cache, _) =
+                DFlash2TextGenerationStream::fill_ragged_ordinary_window_bn(&mut picked, previous)
+                    .expect("ragged one-token window");
+            ragged_windows += 1;
+            group = Some((wanted, cache));
+        }
+    }
+    if let Some((members, cache)) = group.take() {
+        cache
+            .scatter_to_rows(&mut pick(&mut streams, &members))
+            .expect("scatter");
+    }
+    assert!(ragged_windows > 0, "no ragged one-token window ran");
+    for row in 0..rows {
+        assert_eq!(
+            events[row], solo[row],
+            "row {row} tokens differ from its single-request one-token windows"
+        );
+        let tokens = events[row]
+            .iter()
+            .map(|(token, _)| *token)
+            .collect::<Vec<_>>();
+        let text = fixture.tokenizer.decode(&tokens, false).expect("decode");
+        assert!(
+            text.contains("</think>"),
+            "row {row} did not close its thought: {text:?}"
+        );
+    }
+    eprintln!("[qwen36-moe-dflash2-ragged-constrained] rows={rows} ragged_one_token_windows={ragged_windows}");
+}
+
 /// First-token publication at admission, through the DFlash2 actor: a
 /// published first token and the rest of each request (alone, or admitted
 /// together) match the same request decoded by a directly driven scheduler-B1

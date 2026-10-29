@@ -819,13 +819,16 @@ impl GatedDeltaNet {
                 Some(c) => c.offsets().iter().all(|&o| o == 0),
                 None => true,
             };
-            // A captured multi-token linear window (no tree): every commit
-            // restores the capture's base state and replays the accepted
-            // steps, so the window's final state is never read
-            // (`DENSE_VERIFY_OMIT_GDN_STATE`; offsets still advance).
+            // A captured multi-token ragged window (no tree): its commit
+            // always restores the capture's base state and replays the
+            // accepted steps, so the window's final state is never read
+            // (`DENSE_VERIFY_OMIT_GDN_STATE`; offsets still advance). A
+            // single-request linear window keeps its state output: a fully
+            // accepted window discards the capture without a replay.
             let omit_window_state = capture_active
                 && tree.is_none()
                 && seq > 1
+                && super::gated_attention::ragged_rows_armed_pub()
                 && super::dense_fast_path::verify_omit_gdn_state_requested();
             let omit_state_output =
                 (defer_captured_state_commit || omit_window_state) && !zero_state;

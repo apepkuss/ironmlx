@@ -713,6 +713,31 @@ impl ConstraintSession {
         Ok(())
     }
 
+    /// [`Self::truncate_invalid_speculative_bonus`] for a window whose
+    /// `masks` ([`Self::speculative_masks`] of its draft) shaped the verified
+    /// logits: `tokens` (the accepted draft prefix and the target's token
+    /// after it) are checked against the mask of their position, without
+    /// walking the grammar again.
+    pub fn truncate_invalid_speculative_bonus_with_masks(
+        masks: &[SimpleVob],
+        tokens: &mut Vec<u32>,
+    ) -> Result<()> {
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        let valid_prefix = speculative_valid_prefix(masks, tokens);
+        anyhow::ensure!(
+            valid_prefix >= tokens.len().saturating_sub(1),
+            "speculative resolution violates the decoding constraint before its final token"
+        );
+        tokens.truncate(valid_prefix);
+        anyhow::ensure!(
+            !tokens.is_empty(),
+            "speculative resolution contains no constraint-valid token"
+        );
+        Ok(())
+    }
+
     pub fn commit_tokens(&mut self, tokens: &[u32]) -> Result<()> {
         for token in tokens {
             self.commit_token(*token)
@@ -738,6 +763,16 @@ impl ConstraintSession {
         self.committed_tokens -= tokens;
         Ok(())
     }
+}
+
+/// Number of leading `tokens` allowed by the mask of their position (a
+/// token past the masks is not allowed).
+pub fn speculative_valid_prefix(masks: &[SimpleVob], tokens: &[u32]) -> usize {
+    tokens
+        .iter()
+        .zip(masks)
+        .take_while(|(token, mask)| mask.is_allowed(**token))
+        .count()
 }
 
 /// Apply a request-local token mask to one vocabulary logit vector.
@@ -825,7 +860,13 @@ pub fn apply_speculative_token_masks(
     if masks.iter().all(Option::is_none) {
         return Ok(logits.clone());
     }
-    let mut additive = vec![0.0_f32; batch * steps * vocab];
+    // The disallowed entries alone, as indices into the flattened logits:
+    // a mask shorter than the vocabulary disallows the tail. Their logits
+    // become -inf (as adding -inf would make them); every other logit is
+    // untouched. A grammar's masks disallow a few hundred tokens of a
+    // vocabulary of hundreds of thousands, so this is far cheaper than a
+    // dense additive mask over every row and step.
+    let mut disallowed: Vec<u32> = Vec::new();
     for (row, row_masks) in masks.iter().enumerate() {
         let Some(row_masks) = row_masks else {
             continue;
@@ -841,23 +882,21 @@ pub fn apply_speculative_token_masks(
                 "row {row} step {step} constraint mask vocabulary {} exceeds logits vocabulary {vocab}",
                 mask.len()
             );
-            for token in 0..mask.len() {
-                if !mask.is_allowed(token as u32) {
-                    additive[(row * steps + step) * vocab + token] = f32::NEG_INFINITY;
-                }
-            }
-            for token in mask.len()..vocab {
-                additive[(row * steps + step) * vocab + token] = f32::NEG_INFINITY;
-            }
+            let base = u32::try_from((row * steps + step) * vocab)?;
+            mask.iter_unset_entries(|token| disallowed.push(base + token as u32));
+            disallowed.extend((mask.len()..vocab).map(|token| base + token as u32));
         }
     }
-    let additive: Array = (
-        &additive[..],
-        &[batch as i32, steps as i32, vocab as i32][..],
-    )
-        .try_into()?;
-    let additive = mlx::ops::cast::astype(&additive, logits.dtype())?;
-    mlx::ops::binary::add(logits, &additive).map_err(anyhow::Error::from)
+    if disallowed.is_empty() {
+        return Ok(logits.clone());
+    }
+    let flat = mlx::ops::shape::reshape(logits, &[-1][..])?;
+    let indices: Array = (&disallowed[..], &[disallowed.len() as i32][..]).try_into()?;
+    let values = vec![f32::NEG_INFINITY; disallowed.len()];
+    let values: Array = (&values[..], &[disallowed.len() as i32][..]).try_into()?;
+    let values = mlx::ops::cast::astype(&values, logits.dtype())?;
+    let masked = mlx::ops::indexing::put_along_axis(&flat, &indices, &values, 0)?;
+    mlx::ops::shape::reshape(&masked, shape.as_slice()).map_err(anyhow::Error::from)
 }
 
 /// Apply prefix-conditioned masks for one block-diffusion canvas.
@@ -3802,6 +3841,59 @@ mod tests {
             .unwrap();
         assert_eq!(resolved, vec![256]);
         session.commit_tokens(&resolved).unwrap();
+    }
+
+    #[test]
+    fn speculative_valid_prefix_follows_the_masks_by_position() {
+        let mut open = SimpleVob::alloc_ones(8);
+        open.disallow_token(3);
+        let mut closed = SimpleVob::alloc(8);
+        closed.allow_token(5);
+        let masks = vec![open.clone(), open.clone(), closed];
+        assert_eq!(speculative_valid_prefix(&masks, &[1, 2, 5]), 3);
+        assert_eq!(speculative_valid_prefix(&masks, &[1, 3, 5]), 1);
+        assert_eq!(speculative_valid_prefix(&masks, &[1, 2, 4]), 2);
+        // A fourth token has no mask.
+        assert_eq!(speculative_valid_prefix(&masks, &[1, 2, 5, 1]), 3);
+        let mut tokens = vec![1, 2, 4];
+        ConstraintSession::truncate_invalid_speculative_bonus_with_masks(&masks, &mut tokens)
+            .unwrap();
+        assert_eq!(tokens, vec![1, 2]);
+        let mut tokens = vec![1, 3, 5];
+        assert!(
+            ConstraintSession::truncate_invalid_speculative_bonus_with_masks(&masks, &mut tokens)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn speculative_masks_write_only_the_disallowed_entries() {
+        // [2 rows, 2 steps, 6 tokens]: row 0 constrained (step 0 disallows
+        // tokens 1 and 4; step 1 is a shorter mask, so token 5 is disallowed
+        // with it), row 1 unconstrained.
+        let values: Vec<f32> = (0..24).map(|v| v as f32).collect();
+        let logits: Array = (&values[..], &[2_i32, 2, 6][..]).try_into().unwrap();
+        let mut step0 = SimpleVob::alloc_ones(6);
+        step0.disallow_token(1);
+        step0.disallow_token(4);
+        let mut step1 = SimpleVob::alloc_ones(5);
+        step1.disallow_token(0);
+        let masked =
+            apply_speculative_token_masks(&logits, &[Some(vec![step0, step1]), None]).unwrap();
+        let out = masked.to_vec::<f32>().unwrap();
+        for (i, (got, want)) in out.iter().zip(&values).enumerate() {
+            let disallowed = matches!(i, 1 | 4 | 6 | 11);
+            if disallowed {
+                assert_eq!(*got, f32::NEG_INFINITY, "entry {i}");
+            } else {
+                assert_eq!(got, want, "entry {i}");
+            }
+        }
+        // Nothing disallowed: the logits come back unchanged.
+        let open =
+            apply_speculative_token_masks(&logits, &[Some(vec![SimpleVob::alloc_ones(6)]), None])
+                .unwrap();
+        assert_eq!(open.to_vec::<f32>().unwrap(), values);
     }
 
     #[test]
