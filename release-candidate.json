@@ -1,11 +1,11 @@
 {
   "channel": "release-candidate",
-  "tag": "v0.2.0-rc.2",
-  "build": 6,
-  "source_commit": "0ef3c55db33a6b2db0ce0c5d79263807d9b4b131",
+  "tag": "v0.2.0-rc.3",
+  "build": 7,
+  "source_commit": "2d5186bb04058f831e037fe56cda75dc3c3d747e",
   "feed_url": "https://raw.githubusercontent.com/apepkuss/ironmlx/updates/release-candidate.xml",
-  "archive": "IronMLX-v0.2.0-rc.2-update.zip",
-  "archive_sha256": "d9d3abfc83f141df0e1fd4d319a93a48b59aba7ecf9090ce178249dec91d64c8",
+  "archive": "IronMLX-v0.2.0-rc.3-update.zip",
+  "archive_sha256": "70735dbcb9d5ffeaba62c8cef4da4e818e857dd832034681fbda9d5f55268c82",
   "feed": "release-candidate.xml",
-  "feed_sha256": "698b9b76753b6af7581cb72307cfb8f77e723f81698d749aacbbbe61ddcbcc12"
+  "feed_sha256": "9dac0386980e80e9225b1b13ae31878d48c596f413be65b29908a97dc34f8406"
 }
