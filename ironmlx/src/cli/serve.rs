@@ -719,11 +719,18 @@ fn dflash2_tree_max_nodes(args: &ServeArgs) -> usize {
     args.dflash2_tree_max_nodes.unwrap_or(0)
 }
 
-fn resolve_dflash2_tensor_batch_width(args: &ServeArgs, b_max: usize) -> (usize, usize) {
+/// Requested and effective cross-request tensor-group width. A target whose
+/// verify capabilities do not certify tensor batching (the Qwen3.6 MoE target
+/// batches ragged rows only) runs width 1, as the engine enforces.
+fn resolve_dflash2_tensor_batch_width(
+    args: &ServeArgs,
+    b_max: usize,
+    tensor_batching: bool,
+) -> (usize, usize) {
     let requested = args
         .dflash2_tensor_batch_max_width
         .unwrap_or(DEFAULT_DFLASH2_TENSOR_BATCH_MAX_WIDTH);
-    let effective = if dflash2_tree_max_nodes(args) > 0 {
+    let effective = if dflash2_tree_max_nodes(args) > 0 || !tensor_batching {
         1
     } else {
         requested.min(b_max)
@@ -1079,7 +1086,13 @@ where
     let model_id = single_model_id(args)?;
     let prefix_cache = resolve_dflash2_prefix_lru_cache_config(args)?;
     let (tensor_batch_requested_max_width, tensor_batch_max_width) =
-        resolve_dflash2_tensor_batch_width(args, scheduler_config.b_max);
+        resolve_dflash2_tensor_batch_width(
+            args,
+            scheduler_config.b_max,
+            model
+                .dflash2_verify_capabilities()
+                .certifies_tensor_batching(),
+        );
     tracing::info!(
         "ironmlx serve: DFlash2 enabled model_dir={} target_profile={} checkpoint_block_size={} resolved_block_size={} block_size_source={} draft_bits={} draft_loaded_precision={} draft_projections={} tree_max_nodes={} position_keyed_sampling={} max_sequences={} tensor_batch_requested_max_width={} tensor_batch_effective_max_width={} prefix_cache_max_bytes={:?}",
         draft_dir.display(),
@@ -1977,18 +1990,20 @@ mod scheduler_profile_tests {
     #[test]
     fn dflash2_tensor_batch_width_uses_certified_default_and_max_sequence_cap() {
         let mut args = base_args();
-        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8), (4, 4));
-        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 2), (4, 2));
+        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8, true), (4, 4));
+        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 2, true), (4, 2));
+        // A target without certified tensor batching (Qwen3.6 MoE) runs width 1.
+        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8, false), (4, 1));
 
         args.dflash2_tensor_batch_max_width = Some(6);
-        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 3), (6, 3));
+        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 3, true), (6, 3));
 
         args.dflash2_tensor_batch_max_width = Some(1);
-        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8), (1, 1));
+        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8, true), (1, 1));
 
         args.dflash2_tensor_batch_max_width = Some(6);
         args.dflash2_tree_max_nodes = Some(15);
-        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8), (6, 1));
+        assert_eq!(resolve_dflash2_tensor_batch_width(&args, 8, true), (6, 1));
     }
 
     #[test]

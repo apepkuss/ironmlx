@@ -27,11 +27,9 @@ struct Args {
     /// JSON list of {"id", "prompt"} objects.
     #[arg(long)]
     prompts: PathBuf,
-    /// Modes: ordinary, linear, tree<N> (for example tree7). A `-generic`
-    /// suffix (for example linear-generic) runs that mode with the M5
-    /// expert-grouped route explicitly off, and a final `@b<N>` suffix (for
-    /// example linear@b7 or linear-generic@b7) with a fixed draft budget N
-    /// instead of the adaptive policy, for same-process A/B comparisons.
+    /// Modes: ordinary, linear, tree<N> (for example tree7). A final `@b<N>`
+    /// suffix (for example linear@b7) runs that mode with a fixed draft budget
+    /// N instead of the adaptive policy, for same-process A/B comparisons.
     #[arg(long, value_delimiter = ',', default_value = "ordinary,linear")]
     modes: Vec<String>,
     #[arg(long, default_value_t = 256)]
@@ -1083,8 +1081,6 @@ fn main() -> Result<()> {
     };
     let eos = tokenizer.eos_token_ids().to_vec();
     // Process-level values of the settings a mode suffix may override.
-    let grouped_setting =
-        std::env::var(ironmlx_core::m5_profile::settings::M5_MOE_GROUPED_QMV).ok();
     let budget_setting =
         std::env::var(ironmlx_core::m5_profile::settings::DFLASH2_FIXED_BUDGET).ok();
     let restore = |name: &str, value: &Option<String>| match value {
@@ -1133,19 +1129,7 @@ fn main() -> Result<()> {
                     None => (mode_name, false),
                 };
                 ironmlx_lm::nn::fused_norm::set_ab_off(no_prep);
-                let (base_mode, generic) = match mode_name.strip_suffix("-generic") {
-                    Some(base) => (base, true),
-                    None => (mode_name, false),
-                };
-                if generic {
-                    std::env::set_var(ironmlx_core::m5_profile::settings::M5_MOE_GROUPED_QMV, "0");
-                } else {
-                    restore(
-                        ironmlx_core::m5_profile::settings::M5_MOE_GROUPED_QMV,
-                        &grouped_setting,
-                    );
-                }
-                let grouped_before = ironmlx_lm::nn::moe_grouped_qmv::dispatch_count();
+                let base_mode = mode_name;
                 let started = Instant::now();
                 let (tokens, ttft, e2e, finish, metrics) = if base_mode == "ordinary" {
                     let mut stream = GenerationStream::new_text_only(
@@ -1219,8 +1203,6 @@ fn main() -> Result<()> {
                         "mlx_active": mlx::memory::snapshot().active_bytes,
                         "mlx_peak": mlx::memory::snapshot().peak_bytes,
                         "metrics": metrics,
-                        "grouped_expert_dispatches":
-                            ironmlx_lm::nn::moe_grouped_qmv::dispatch_count() - grouped_before,
                         "window_stages": ironmlx_runtime::core::dflash2::take_window_stage_records(),
                     })
                 )?;

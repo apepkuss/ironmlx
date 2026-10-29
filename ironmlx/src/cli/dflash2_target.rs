@@ -21,9 +21,11 @@ const MOE_DEFAULT_DRAFT_BITS: i32 = 4;
 pub(crate) enum DFlash2TargetFamily {
     /// Dense Qwen3.5-family targets (the Qwen3.8 lane and its qualification).
     Qwen35Dense,
-    /// Qwen3.6-35B-A3B MoE with an exactly qualified affine recipe. The
-    /// execution scope is B1 and linear proposals, with the BF16 draft run
-    /// either quantized at load to affine 4-bit (default) or kept in BF16.
+    /// Qwen3.6-35B-A3B MoE with an exactly qualified affine recipe. Requests
+    /// verify one at a time, or as ragged rows of up to four requests when
+    /// the M5 profile enables ragged linear batching (never as tensor groups);
+    /// windows are linear unless the flat tree is opted into. The BF16 draft
+    /// runs either quantized at load to affine 4-bit (default) or kept in BF16.
     Qwen36Moe { bits: i32 },
 }
 

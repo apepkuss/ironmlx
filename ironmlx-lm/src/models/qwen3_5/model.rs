@@ -349,11 +349,10 @@ impl Qwen35Model {
         Ok(())
     }
 
-    /// Experimental, default-off: keep one resident affine4 layout per
-    /// projection (see `nn::shared_weight_layout`). Only the Qwen3.8-27B
+    /// Keep one resident affine4 layout per projection (see
+    /// `nn::shared_weight_layout`; on by the M5 profile). Only the Qwen3.8-27B
     /// affine4 M5 DFlash2 lane is admitted; anything else fails closed.
     fn enable_shared_weight_layout(&mut self) -> Result<()> {
-        crate::nn::shared_weight_layout::validate_environment()?;
         anyhow::ensure!(
             super::dflash2_lane::is_qwen38_27b(self.config())
                 && self.exact_batched_verify_profile

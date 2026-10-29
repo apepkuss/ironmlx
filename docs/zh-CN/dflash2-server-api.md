@@ -64,7 +64,8 @@ affine-4、无约束、B1 请求显式启用有界 best-first 草稿树。
 但不关闭 actor 的请求级并发。实际宽度为
 `min(max_sequences, tensor_batch_max_width, 当前就绪且执行形态兼容的请求数)`。
 因此该参数只限制一次 tensor 操作合并的行数，不增加活动请求数，也不替代
-`--max-sequences`。
+`--max-sequences`。该参数只作用于 Qwen3.8：Qwen3.6 MoE target 接受该参数，但从不组成 tensor group
+（见 [Qwen3.6 35B A3B（MoE）](#qwen36-35b-a3bmoe)）。
 
 当前已验收的 `z-lab/Qwen3.8-27B-DFlash2` checkpoint 声明的 block size 为 `8`，
 因此不能覆盖 Q16 提议。Q16 采用 fail-closed 资格：target 的 affine-4 B1 verify lane 与
@@ -106,25 +107,22 @@ draft 精度选项或批处理设置。
 | Target 量化配方 | Affine、group size 64、4/5/6/8 bit，且只带 mlx-community checkpoint 自带的 `mlp.gate` 与 `shared_expert_gate` 8-bit 覆盖。其他配方（包括 OptiQ）在加载时拒绝。 |
 | Draft 精度 | 默认在加载时把 BF16 checkpoint 量化为 affine 4-bit（group size 64，`--dflash2-draft-bits 4`）；`0` 保持 BF16；`8` 会被拒绝。App 提供 4-bit（默认）和 BF16。启动日志的 `draft_loaded_precision` 是从已加载投影层读回的实际精度。 |
 | Verify 宽度 | 所有位宽最多 8。省略 `--dflash2-block-size` 时 checkpoint 宽度被限制到 8；显式传入大于 8 的值直接报错。 |
-| 执行方式 | 仅 B1。`--max-sequences` 仍限制同时活跃的请求数，但每次 target forward 只处理一个请求：活跃请求按窗口轮流推进，不做跨请求 tensor 合批。 |
-| Tree | `--dflash2-tree-max-nodes` 取 1–15 时，对 greedy 且无约束的请求启用 flat tree。采样请求和带约束的请求（包括开启 thinking 时附带的 reasoning budget）改走线性窗口，`tree_fallback_linear_windows` 计数，服务端日志记录一次原因。 |
+| 执行方式 | 未启用 M5 profile 时仅 B1：`--max-sequences` 仍限制同时活跃的请求数，但每次 target forward 只处理一个请求，活跃请求按窗口轮流推进。M5 profile 生效时，在同一窗口边界就绪的 greedy、无约束请求作为 ragged 线性行一起 verify，每次 forward 最多 `--max-sequences` 与 4 中较小者个请求；采样请求和带约束的请求仍单独推进。两种情况都不组成 Qwen3.8 的 tensor group：`--dflash2-tensor-batch-max-width` 被接受但不起作用，health 报告的 tensor 宽度上限为 1。 |
+| 草稿预算 | 单独推进的请求使用自适应的窗口成本策略：以普通的单 token 窗口为基准校准，按实测成本决定每个窗口的草稿数。M5 profile 下的 ragged 行固定起草 3 个 token（verify 宽度 4），参与过 ragged 窗口后单独剩下的请求沿用这一预算。草稿预算没有 CLI 选项。 |
+| Tree | `--dflash2-tree-max-nodes` 取 1–15 时，对 greedy 且无约束的请求启用 flat tree。采样请求和带约束的请求（包括开启 thinking 时附带的 reasoning budget）改走线性窗口，`tree_fallback_linear_windows` 统计这些窗口，服务端日志对每个请求记录一次原因。M5 profile 生效时，配置 tree 不会停止 ragged 合批：并发的 greedy 请求走 ragged 线性窗口，单独推进的请求走 tree 窗口。 |
 | 采样 | 支持精确推测采样。该 target 拒绝 `--dflash2-position-keyed-sampling`。 |
 
-所有 greedy 结果（线性或 tree）都与同一 target 的普通解码逐 token 一致，M5 profile 的 affine4 投影生效时除外（见下文）。默认使用线性窗口，
+未启用 M5 profile 时，所有 greedy 结果（线性或 tree）都与同一 target 的普通解码逐 token 一致。M5 profile 生效时，greedy 输出可能在三方面与普通解码不同：ragged 行使用普通的批量 kernel，数值与该行单独 B1 解码不逐位一致，因此请求的输出可能取决于与哪些请求合批；affine4 target 使用 M5 affine4 投影；超过 2,048 token 的提示使用 D256 NAX 注意力和长分块 GatedDeltaNet 扫描，求和顺序不同。单独处理的请求每次运行输出相同。默认使用线性窗口，
 因为在 M5 Max 上每个位宽的 tree 都比线性窗口慢。
 
 M5 profile（`--m5-dflash2-profile`）使用独立的 MoE 设置表，不继承 Qwen3.8 的设置。生效时开启的内容包括：
 M5 tensor-unit affine4 投影与专家 kernel、批量草稿、并发请求的 ragged 线性合批、长提示的 D256 NAX
-注意力（预填充从 2,048 个 key 起，解码与 verify 从 8,193 个 key 起）及调优的 split-K、启动预热和 wired
+注意力（预填充从 2,048 个 key 起，解码与 verify 从 8,193 个 key 起）、affine4 投影按形状选择的 split-K、启动预热和 wired
 权重。实际开启了什么，以启动日志的 `effective_settings` 和 `healthz.dflash2.m5_profile.settings` 中的
-非 null 值为准。affine4 投影结果确定，但与普通 MLX 解码输出不同；执行指纹显示
-`projections=m5-affine4-v1`。MoE target 没有稠密 MLP，因此从不使用神经引擎（`ane_status` 为
-`not_applicable`）。`healthz.dflash2.m5_profile.target` 显示 `qwen36-moe`；target 不在已认定配方内时
-`status` 为 `target_not_qualified`。表外仍有一个需显式开启的实验变量：
-
-| 变量 | 作用 |
-|---|---|
-| `IRONMLX_EXPERIMENTAL_M5_MOE_GROUPED_QMV=1` | 同一路由专家的权重在多个 verify 行间复用（affine6/8、8 行及以上）。与普通解码逐位一致。 |
+非 null 值为准。affine4 投影只用于 affine4 target，结果确定，但与普通 MLX 解码输出不同；执行指纹显示
+`projections=m5-affine4-v1`（其他位宽显示 `product-stable-v2`）。MoE target 没有稠密 MLP，因此从不使用神经引擎（`ane_status` 为
+`not_applicable`，使用 `--ane off` 时为 `disabled`）。`healthz.dflash2.m5_profile.target` 显示 `qwen36-moe`；不在已认定配方内的 target
+在启动时即被拒绝。
 
 ## 执行与并发语义
 
@@ -132,14 +130,16 @@ DFlash2 server 使用独立 actor，不进入普通 Scheduler、MTP 或 Prompt L
 执行路径。每个活动请求独立持有 target cache、draft cache、sampler 和 PRNG 状态。
 
 当 `--max-sequences=1` 时，actor 只推进一个请求；当值大于 1 时，actor 最多维护
-对应数量的活动请求。执行 key 相同的就绪请求会在 Tensor Batch 上限内组成一个
-`B=N` MLX tensor group；超出上限的请求组成后续 group，并由 actor 轮转推进。
+对应数量的活动请求。对 Qwen3.8 target，执行 key 相同的就绪请求会在 Tensor Batch 上限内组成一个
+`B=N` MLX tensor group（Qwen3.6 MoE target 改为 ragged 行合批，见
+[Qwen3.6 35B A3B（MoE）](#qwen36-35b-a3bmoe)）；超出上限的请求组成后续 group，并由 actor 轮转推进。
 不同约束、采样形态或 cache 状态的请求保持独立；组内接受长度分歧时拆回请求级 cache，
 后续满足条件时可重新建组。`batch>1` 的实际收益仍取决于硬件、请求形态和接受率。
 
 可选草稿树从候选 lattice 中 best-first 选择最多 15 个节点，把最多 8 条根到叶路径放入
-一次 target verify forward，并只提交实际接受路径对应行的事务性 cache 状态。启用树后，
-跨请求 tensor batch 的生效宽度固定为 `1`，因为 batch lane 被树路径占用。
+一次 target verify forward，并只提交实际接受路径对应行的事务性 cache 状态。对 Qwen3.8，启用树后
+跨请求 tensor batch 的生效宽度固定为 `1`，因为 batch lane 被树路径占用；Qwen3.6 MoE 的 flat tree 在
+每个已认定位宽上都用一次 forward verify 全部节点。
 `tree_windows` 和 `tree_drafted_nodes` 分别记录实际执行的树窗口与草稿节点数。
 
 活动槽满后，请求进入 `--admission-queue-max` 控制的等待队列。活动槽和队列都满时，
