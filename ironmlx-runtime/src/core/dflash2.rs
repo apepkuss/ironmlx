@@ -846,6 +846,13 @@ const STARTUP_WARMUP_PROMPT_LENGTHS: [usize; 11] =
 /// the ANE program is compiled and loaded and the full-chunk kernels built
 /// before serving.
 const STARTUP_WARMUP_FULL_CHUNK_LENGTH: usize = 2100;
+/// Prompt length of the extra warmup request when prefill projections take
+/// the tiled GEMM (`DENSE_PREFILL_TILED_GEMM`) without the full-chunk
+/// request: its full-tile kernel serves every prefill chunk of a multiple of
+/// 128 rows past 128 (a full chunk included) and otherwise compiles inside
+/// the first such prompt (~145 ms on M5 Max). The B1 scheduler prefills a
+/// single-chunk prompt but its last token, so 257 tokens prefill 256 rows.
+const STARTUP_WARMUP_ALIGNED_TILE_LENGTH: usize = 257;
 /// Generated tokens per warmup request: the prefill, the first proposal over
 /// the prompt context, first-token sampling and the first verify windows.
 const STARTUP_WARMUP_NEW_TOKENS: usize = 4;
@@ -887,10 +894,15 @@ where
         || ironmlx_core::m5_profile::flag(
             ironmlx_core::m5_profile::settings::DFLASH2_STARTUP_FULL_CHUNK_WARMUP,
         );
+    let aligned_tile = !full_chunk
+        && ironmlx_core::m5_profile::flag(
+            ironmlx_core::m5_profile::settings::DENSE_PREFILL_TILED_GEMM,
+        );
     let lengths: Vec<usize> = STARTUP_WARMUP_PROMPT_LENGTHS
         .iter()
         .copied()
         .chain(full_chunk.then_some(STARTUP_WARMUP_FULL_CHUNK_LENGTH))
+        .chain(aligned_tile.then_some(STARTUP_WARMUP_ALIGNED_TILE_LENGTH))
         .collect();
     let warmup_request = |length: usize, salt: u32, max_new_tokens: usize| GenerateRequest {
         priority: Default::default(),

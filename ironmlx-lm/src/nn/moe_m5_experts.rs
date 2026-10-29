@@ -10,9 +10,12 @@
 //! column tile. Five dispatches per layer: group, gather (+ group sums),
 //! gate/up + SwiGLU, down, weighted combine (+ the decoder residual).
 //!
-//! A row's output depends only on its own input (the tensor op is row
-//! invariant and every reduction runs in a fixed order), so results do not
-//! depend on batch width, block composition or route order.
+//! A row's output depends only on its own input and on the batch's width
+//! class (the tensor op is row invariant and every reduction runs in a fixed
+//! order): calls of fewer than 256 tokens (decode, verify, short prefill)
+//! split each pass's K across threadgroup slices, wider calls (prefill) do
+//! not. Within a class results do not depend on batch width, block
+//! composition or route order.
 //!
 //! M5 profile setting `MOE_M5_EXPERTS`; affine 4-bit, group 64 only.
 
@@ -31,13 +34,28 @@ const DOWN_TILE: i32 = 32;
 /// K slices per threadgroup (best in a dependent 40-layer chain, M5 Max).
 const GATE_UP_SPLIT_K: i32 = 4;
 const DOWN_SPLIT_K: i32 = 2;
+/// K slices per threadgroup of wide calls (at least [`WIDE_TOKENS`]): one
+/// slice keeps more threadgroups per block resident. Dependent 40-layer
+/// chain, uniform routing, M5 Max: 2048 tokens 3.95 -> 3.51 ms per layer,
+/// 1024 2.24 -> 2.00, 512 1.36 -> 1.26, 256-384 equal, 136 0.90 -> 0.93
+/// (so narrower calls keep the split). In-process prefill: six 30K prompts
+/// TTFT -0.52 s (-5.3%), natural 291-5934-token prompts 0 to -4.5%. The
+/// changed summation order moves
+/// teacher-forced NLL as any other valid split does (natural English,
+/// Chinese, Rust: mean +0.0003 / +0.084 / -0.040 against 2/2 +0.064 /
+/// -0.021 / -0.079 and 4/1 +0.022 / +0.019 / -0.071; top-1 agreement
+/// 92-94% for all three, MoE routing amplifies the last-bit differences).
+const WIDE_GATE_UP_SPLIT_K: i32 = 1;
+const WIDE_DOWN_SPLIT_K: i32 = 1;
 const HEADER: i32 = 4;
 /// Widest token slice per dispatch chain; wider batches run in slices
 /// (row invariance keeps the result identical).
 const MAX_SLICE_TOKENS: i32 = 2048;
-/// Fewest tokens at which the down pass reads precomputed activation group
-/// sums (one dispatch more, every column tile's sums saved).
-const MIN_ACT_SUM_TOKENS: i32 = 256;
+/// Fewest tokens of a wide call: the split-K counts above drop to one and
+/// the down pass reads precomputed activation group sums (one dispatch more,
+/// every column tile's sums saved). Decided per call, so the slices of a
+/// call wider than [`MAX_SLICE_TOKENS`] share the class.
+const WIDE_TOKENS: i32 = 256;
 
 static AB_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -671,6 +689,7 @@ pub(crate) fn forward_on(
         is.as_slice()
     );
     let tiled = store.tiled(target)?;
+    let wide = t >= WIDE_TOKENS;
     if t <= MAX_SLICE_TOKENS {
         return run(
             store,
@@ -680,6 +699,7 @@ pub(crate) fn forward_on(
             scores,
             shared_gate,
             residual,
+            wide,
             target,
         );
     }
@@ -699,6 +719,7 @@ pub(crate) fn forward_on(
             &rows(scores, kt)?,
             &rows(&gate, 1)?,
             res.as_ref(),
+            wide,
             target,
         )?);
         start = stop;
@@ -716,9 +737,15 @@ fn run(
     scores: &Array,
     shared_gate: &Array,
     residual: Option<&Array>,
+    wide: bool,
     target: StreamOrDevice,
 ) -> Result<Array> {
     let (e, h, i) = (store.experts, store.hidden, store.intermediate);
+    let (gate_up_sk, down_sk) = if wide {
+        (WIDE_GATE_UP_SPLIT_K, WIDE_DOWN_SPLIT_K)
+    } else {
+        (GATE_UP_SPLIT_K, DOWN_SPLIT_K)
+    };
     let shape = inds.shape();
     let (t, kt) = (shape.as_slice()[0], shape.as_slice()[1]);
     let routes = t * (kt + 1);
@@ -797,20 +824,20 @@ fn run(
     ])
     .output_shapes(&[Shape::from(&[routes, i][..])])
     .output_dtypes(&[Dtype::Bfloat16])
-    .grid(2 * i / GATE_UP_TILE * 32 * GATE_UP_SPLIT_K, mb, 1)
-    .threadgroup(32 * GATE_UP_SPLIT_K, 1, 1)
+    .grid(2 * i / GATE_UP_TILE * 32 * gate_up_sk, mb, 1)
+    .threadgroup(32 * gate_up_sk, 1, 1)
     .template_int("K", h)
     .template_int("I", i)
     .template_int("E", e)
-    .template_int("SK", GATE_UP_SPLIT_K)
+    .template_int("SK", gate_up_sk)
     .template_int("NT", GATE_UP_TILE)
     .stream(target)
     .dispatch()?
     .take_at(0)?;
 
-    // Wide batches: the activation group sums once per row, not per column
+    // Wide calls: the activation group sums once per row, not per column
     // tile of the down pass.
-    let act_sums = (t >= MIN_ACT_SUM_TOKENS)
+    let act_sums = wide
         .then(|| -> Result<Array> {
             kernel(
                 &ACT_SUM_K,
@@ -868,12 +895,12 @@ fn run(
     ])
     .output_shapes(&[Shape::from(&[routes, h][..])])
     .output_dtypes(&[Dtype::Bfloat16])
-    .grid(h / DOWN_TILE * 32 * DOWN_SPLIT_K, mb, 1)
-    .threadgroup(32 * DOWN_SPLIT_K, 1, 1)
+    .grid(h / DOWN_TILE * 32 * down_sk, mb, 1)
+    .threadgroup(32 * down_sk, 1, 1)
     .template_int("K", i)
     .template_int("N", h)
     .template_int("E", e)
-    .template_int("SK", DOWN_SPLIT_K)
+    .template_int("SK", down_sk)
     .template_int("NT", DOWN_TILE)
     .stream(target)
     .dispatch()?
@@ -1106,12 +1133,14 @@ mod tests {
         Ok(())
     }
 
-    /// A wide batch (down pass reading precomputed activation group sums)
-    /// gives every token the output of narrow batches (sums inside the pass)
-    /// bit for bit.
+    /// Wide calls (one K slice, down pass reading precomputed activation
+    /// group sums) match the float32 reference as narrow calls do, give
+    /// every token the same bits in any wide call, and keep the class for
+    /// the slices of a call wider than `MAX_SLICE_TOKENS` (its 60-token
+    /// tail slice included).
     #[test]
     #[serial(mlx_metal)]
-    fn wide_batch_activation_sums_match_narrow_batches_bit_for_bit() -> Result<()> {
+    fn wide_calls_match_reference_and_are_batch_invariant() -> Result<()> {
         if let Ok(root) = std::env::var("MLX_DIR") {
             mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib"))?;
         }
@@ -1120,8 +1149,8 @@ mod tests {
         }
         let (e, h, i, kt) = (16_i32, 512_i32, 128_i32, 4_usize);
         let store = Store::new(native(e, h, i)?).expect("supported");
-        let t = 301_usize;
-        assert!(t as i32 >= MIN_ACT_SUM_TOKENS && (t as i32) < 2 * MIN_ACT_SUM_TOKENS);
+        let reference_weights = native(e, h, i)?;
+        let t = (MAX_SLICE_TOKENS + 60) as usize;
         let x: Vec<f32> = (0..t * h as usize)
             .map(|v| (((v * 7919) % 211) as f32 - 105.0) * 0.01)
             .collect();
@@ -1139,7 +1168,7 @@ mod tests {
             .collect();
         let scores: Vec<f32> = (0..t * kt).map(|v| 0.05 + (v % 7) as f32 * 0.03).collect();
         let gates: Vec<f32> = (0..t).map(|v| 0.3 + (v % 5) as f32 * 0.1).collect();
-        let run_rows = |rows: std::ops::Range<usize>| -> Result<Vec<u32>> {
+        let run_rows = |rows: std::ops::Range<usize>| -> Result<Vec<f32>> {
             let n = rows.len() as i32;
             let xa: Array = (
                 &x[rows.start * h as usize..rows.end * h as usize],
@@ -1160,16 +1189,52 @@ mod tests {
                 None,
                 StreamOrDevice::default(),
             )?;
-            Ok(astype(&y, Dtype::Float32)?
-                .to_vec::<f32>()?
-                .iter()
-                .map(|v| v.to_bits())
-                .collect())
+            Ok(astype(&y, Dtype::Float32)?.to_vec::<f32>()?)
         };
-        let wide = run_rows(0..t)?;
-        let mut narrow = run_rows(0..150)?;
-        narrow.extend(run_rows(150..t)?);
-        assert!(wide == narrow, "wide batch differs from narrow batches");
+        let bits = |v: &[f32]| v.iter().map(|v| v.to_bits()).collect::<Vec<u32>>();
+        let wide = 520_usize;
+        assert!(wide as i32 >= 2 * WIDE_TOKENS);
+        let all = run_rows(0..wide)?;
+        let mut halves = run_rows(0..wide / 2)?;
+        halves.extend(run_rows(wide / 2..wide)?);
+        assert!(bits(&all) == bits(&halves), "wide calls differ by width");
+        // Sliced call: the 60-token tail slice stays in the wide class.
+        let sliced = run_rows(0..t)?;
+        let last = t - WIDE_TOKENS as usize;
+        assert!(
+            bits(&sliced[last * h as usize..]) == bits(&run_rows(last..t)?),
+            "a slice of a wide call left the wide class"
+        );
+        assert!(bits(&sliced[..wide * h as usize]) == bits(&all));
+        // Accuracy against a float32 reference (bf16 inputs).
+        let xb: Vec<f32> = {
+            let xa: Array = (&x[..wide * h as usize], &[wide as i32, h][..]).try_into()?;
+            astype(&astype(&xa, Dtype::Bfloat16)?, Dtype::Float32)?.to_vec::<f32>()?
+        };
+        let gb: Vec<f32> = {
+            let ga: Array = (&gates[..wide], &[wide as i32][..]).try_into()?;
+            astype(&astype(&ga, Dtype::Bfloat16)?, Dtype::Float32)?.to_vec::<f32>()?
+        };
+        let want = reference(
+            &reference_weights,
+            &xb,
+            &inds[..wide * kt],
+            &scores[..wide * kt],
+            &gb,
+            h as usize,
+            i as usize,
+            kt,
+        )?;
+        let rms = (want.iter().map(|v| v * v).sum::<f32>() / want.len() as f32).sqrt();
+        let err = (all
+            .iter()
+            .zip(&want)
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum::<f32>()
+            / want.len() as f32)
+            .sqrt();
+        eprintln!("moe m5 experts wide rel_rms_error={}", err / rms);
+        assert!(err / rms < 0.02, "relative rms error {}", err / rms);
         Ok(())
     }
 

@@ -157,7 +157,7 @@ pub mod settings {
     /// GPU.
     pub const DENSE_PREFILL_ANE_FFN_PIPELINE: &str =
         "IRONMLX_EXPERIMENTAL_DENSE_PREFILL_ANE_FFN_PIPELINE";
-    /// Dense prefill projections of more than 128 rows read the single-resident
+    /// Prefill projections of more than 128 rows read the single-resident
     /// M5 tiled weight layout with a fused dequantize + tensor-unit GEMM (MLX's
     /// dequantized values), so prefill and decode share one layout and no
     /// projection converts between them.
@@ -293,6 +293,14 @@ const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
     (settings::DECODE_D256_NAX_MIN_KEYS, "8193"),
     (settings::GDN_LONG_SCAN_MIN_POSITION, "2048"),
     (settings::PREFILL_QMM_MTILE_ANY_SHAPE, "1"),
+    // Prefill projections of more than 128 rows take the tiled layout's
+    // fused dequantize + tensor-unit GEMM (MLX's dequantized values):
+    // 12352 x 2048 2.14 -> 1.72 ms, 9216 x 2048 1.57 -> 1.30 ms, 2048 x 4096
+    // 0.74 -> 0.60 ms per 2048-row chunk. In-process prefill: six 30K
+    // prompts TTFT -0.38 s (-4.0%), natural 291-5934-token prompts -3.7 to
+    // -5.8%; token ids unchanged and teacher-forced NLL bit-identical (30K
+    // synthetic and natural English, Chinese, Rust).
+    (settings::DENSE_PREFILL_TILED_GEMM, "1"),
 ];
 
 /// Default flat-tree size of the Qwen3.6 MoE profile when the option is not
@@ -1178,6 +1186,7 @@ mod tests {
                 || *name == settings::DFLASH2_GPU_COMMIT
                 || *name == settings::FUSED_GLUE
                 || *name == settings::DFLASH2_RAGGED_TAIL
+                || *name == settings::DENSE_PREFILL_TILED_GEMM
             {
                 continue;
             }
@@ -1222,6 +1231,7 @@ mod tests {
             settings::DFLASH2_DRAFT_M5_RESIDENT,
             settings::GDN_COMMIT_KERNEL,
             settings::DFLASH2_STARTUP_WARMUP,
+            settings::DENSE_PREFILL_TILED_GEMM,
         ] {
             assert_eq!(
                 setting_with(None, moe, name).as_deref(),
