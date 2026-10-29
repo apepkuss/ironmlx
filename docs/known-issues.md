@@ -9,7 +9,7 @@ For changes in this release line, see the [0.2.0 release notes](release-notes/0.
 
 - Image requests accept JPEG/PNG/WebP base64 content, not remote image URLs.
 - Text, image and audio embeddings are limited to EmbeddingGemma 2 BF16 and affine4; video embeddings are unsupported. See the [Embedding API](text-embeddings.md). Other embedding, reranker and ASR metadata recognition does not imply runtime support. Speech synthesis is limited to the documented IndexTTS 2.5 profile and its separate audio runtime.
-- Decision serving is limited to the documented Laya model and System One contract. It is not a generic classifier or embedding runtime.
+- Decision serving is limited to the documented Laya model and System One / Decisions contracts; Decisions inputs are text-only. It is not a generic classifier or embedding runtime.
 - DiffusionGemma does not support KV cache, Prompt Lookup or MTP and has a smaller sampling-parameter set.
 - MTP and auxiliary drafter support depends on the Qwen or Gemma model and a compatible auxiliary model. DFlash2 has a separate set of combination limits; see [Supported models](supported-models.md).
 - Cross-request Prompt Lookup assumes one trusted domain; it is not a multi-tenant isolation mechanism.
