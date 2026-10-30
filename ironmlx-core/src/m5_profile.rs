@@ -102,6 +102,13 @@ pub mod settings {
     /// Fixed draft budget of a request that ran ragged windows and is left
     /// decoding alone; 0 keeps its adaptive single-request policy.
     pub const DFLASH2_RAGGED_SOLO_BUDGET: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_RAGGED_SOLO_BUDGET";
+    /// Single-request greedy linear windows draft the whole block and verify
+    /// only its leading draft tokens whose drafter confidence (probability of
+    /// the drafted token) is at least this value in per mille (1..=1000); at
+    /// least one row is verified. Unset or 0 keeps the window-cost budget
+    /// policy. The accepted tokens are the same either way: a shorter draft
+    /// can only end the window's accepted prefix earlier.
+    pub const DFLASH2_CONFIDENCE_VERIFY: &str = "IRONMLX_EXPERIMENTAL_DFLASH2_CONFIDENCE_VERIFY";
     /// M5 affine4 tensor kernel computes the group sums of x itself instead
     /// of a separate dependent dispatch per projection (same bits).
     pub const M5_FUSED_XSUM: &str = "IRONMLX_EXPERIMENTAL_M5_FUSED_XSUM";
@@ -301,6 +308,14 @@ const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
     // -5.8%; token ids unchanged and teacher-forced NLL bit-identical (30K
     // synthetic and natural English, Chinese, Rust).
     (settings::DENSE_PREFILL_TILED_GEMM, "1"),
+    // Single-request linear windows verify the confident draft prefix: the
+    // draft costs the same at any width (one block pass, 1.5 ms) while each
+    // verify row adds ~0.58 ms, and the drafter's token probability predicts
+    // acceptance (>= 0.9: 65-96% accepted, < 0.8: mostly under 50%). Paired
+    // in-process rounds against the window-cost policy, same token ids: six
+    // short prompts +4.7% generation (knowledge tasks +6-9%), six 30K
+    // prompts +6.2%; thresholds 0.7 / 0.85 gave +4.3% / +2.4%.
+    (settings::DFLASH2_CONFIDENCE_VERIFY, "500"),
 ];
 
 /// Default flat-tree size of the Qwen3.6 MoE profile when the option is not
@@ -1187,6 +1202,7 @@ mod tests {
                 || *name == settings::FUSED_GLUE
                 || *name == settings::DFLASH2_RAGGED_TAIL
                 || *name == settings::DENSE_PREFILL_TILED_GEMM
+                || *name == settings::DFLASH2_CONFIDENCE_VERIFY
             {
                 continue;
             }
@@ -1205,6 +1221,18 @@ mod tests {
         assert_eq!(
             setting_with(None, moe, settings::DFLASH2_RAGGED_SOLO_BUDGET).as_deref(),
             Some("3")
+        );
+        assert_eq!(
+            setting_with(None, moe, settings::DFLASH2_CONFIDENCE_VERIFY).as_deref(),
+            Some("500")
+        );
+        assert_eq!(
+            setting_with(
+                None,
+                Some(PROFILE_VALUES),
+                settings::DFLASH2_CONFIDENCE_VERIFY
+            ),
+            None
         );
         // Fully speculative: no batched one-token windows, no probes.
         for name in [

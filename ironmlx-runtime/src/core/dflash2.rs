@@ -586,6 +586,37 @@ fn ragged_solo_budget(maximum: usize) -> Result<Option<usize>> {
     Ok((value > 0).then_some(value.min(maximum)))
 }
 
+/// M5 profile setting `DFLASH2_CONFIDENCE_VERIFY`: the confidence threshold
+/// (probability) above which a drafted token is verified, with the draft
+/// width such windows use; `None` keeps the window-cost budget policy.
+fn confidence_verify(maximum: usize) -> Result<Option<(f32, usize)>> {
+    let Some(raw) = ironmlx_core::m5_profile::setting(
+        ironmlx_core::m5_profile::settings::DFLASH2_CONFIDENCE_VERIFY,
+    ) else {
+        return Ok(None);
+    };
+    let per_mille: u32 = raw.parse().map_err(|_| {
+        anyhow!("DFlash2 confidence verify threshold must be an integer in per mille")
+    })?;
+    anyhow::ensure!(
+        per_mille <= 1000,
+        "DFlash2 confidence verify threshold {per_mille} exceeds 1000 per mille"
+    );
+    Ok((per_mille > 0 && maximum > 0).then(|| (per_mille as f32 / 1000.0, maximum)))
+}
+
+/// Number of leading draft positions whose confidence (log-probability)
+/// reaches `threshold` (a probability), at least one when there is a draft:
+/// the rows a confidence-verify window verifies.
+fn confident_prefix_len(confidence: &[f32], threshold: f32) -> usize {
+    let log_threshold = threshold.ln();
+    let prefix = confidence
+        .iter()
+        .take_while(|value| **value >= log_threshold)
+        .count();
+    prefix.max(1).min(confidence.len())
+}
+
 fn experimental_fixed_budget(maximum: usize) -> Result<Option<usize>> {
     let Some(raw) =
         ironmlx_core::m5_profile::setting(ironmlx_core::m5_profile::settings::DFLASH2_FIXED_BUDGET)
@@ -628,6 +659,8 @@ where
     verify_capabilities: DFlash2VerifyCapabilities,
     draft_policy: DFlash2DraftBudgetPolicy,
     experimental_fixed_budget: Option<usize>,
+    /// Confidence-verify threshold and draft width (see [`confidence_verify`]).
+    confidence_verify: Option<(f32, usize)>,
     /// Shared budget of a ragged linear batch (see [`ragged_group_budget`]).
     ragged_budget: Option<usize>,
     ragged_solo_budget: Option<usize>,
@@ -1465,6 +1498,7 @@ where
                     policy_domain(model, draft),
                 ),
                 experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
+                confidence_verify: confidence_verify(max_draft_tokens)?,
                 ragged_budget: ragged_group_budget(max_draft_tokens)?,
                 ragged_solo_budget: ragged_solo_budget(max_draft_tokens)?,
                 prng_state,
@@ -1829,6 +1863,7 @@ where
                 policy_domain(model, draft),
             ),
             experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
+            confidence_verify: confidence_verify(max_draft_tokens)?,
             ragged_budget: ragged_group_budget(max_draft_tokens)?,
             ragged_solo_budget: ragged_solo_budget(max_draft_tokens)?,
             prng_state,
@@ -4237,12 +4272,14 @@ where
         block.resize(draft_len + 1, mask_token);
         let block_arr: Array = (&block[..], &[1_i32, block.len() as i32][..]).try_into()?;
         let draft_started = Instant::now();
-        let draft_tokens_arr = self.draft.propose_greedy_on(
+        let confidence_verify = self.confidence_verify_policy();
+        let (draft_tokens_arr, confidence) = self.draft.propose_greedy_with_confidence_on(
             self.model,
             &block_arr,
             &self.pending_context_hidden,
             &mut self.draft_cache,
             StreamOrDevice::default(),
+            confidence_verify.is_some(),
         )?;
         self.counters.draft_build_us = self
             .counters
@@ -4254,6 +4291,37 @@ where
                 draft_tokens_arr.shape().as_slice()
             ));
         }
+        // Confidence verify: only the leading confident draft tokens enter
+        // the verify (the rest could only be rejected or never reached).
+        // Reading the confidence waits for the draft, which the verify needs
+        // anyway; a window's draft width is then its verified prefix.
+        let (draft_tokens_arr, draft_len) = match (confidence_verify, confidence) {
+            (Some((threshold, _)), Some(confidence)) => {
+                let host_sync_started = Instant::now();
+                let confidence = confidence.to_vec::<f32>()?;
+                self.counters.host_sync_us = self
+                    .counters
+                    .host_sync_us
+                    .saturating_add(elapsed_us(host_sync_started));
+                let rows =
+                    confident_prefix_len(&confidence[..draft_len.min(confidence.len())], threshold);
+                if rows < draft_len {
+                    DFlash2VerifyPlan::build(&self.verify_capabilities, 1, rows)?;
+                    (
+                        mlx::ops::indexing::slice_on(
+                            &draft_tokens_arr,
+                            &[0_i32, 0][..],
+                            &[1_i32, i32::try_from(rows)?][..],
+                            StreamOrDevice::default(),
+                        )?,
+                        rows,
+                    )
+                } else {
+                    (draft_tokens_arr, draft_len)
+                }
+            }
+            _ => (draft_tokens_arr, draft_len),
+        };
         StageClock::mark(&mut stage_clock, "draft", &[&draft_tokens_arr])?;
         let draft_schedule_started = Instant::now();
         mlx::transforms::async_eval(&[&draft_tokens_arr])?;
@@ -4556,9 +4624,23 @@ where
         })
     }
 
+    /// The confidence-verify policy of this request's single-request greedy
+    /// linear windows: (threshold, draft width), when it applies.
+    fn confidence_verify_policy(&self) -> Option<(f32, usize)> {
+        self.confidence_verify.filter(|_| {
+            self.fixed_draft_budget().is_none()
+                && self.request.sampler.temperature <= 0.0
+                && !self.request.sampler.uses_position_keyed_v1()
+                && self.constraint.is_none()
+        })
+    }
+
     fn current_draft_budget(&self) -> usize {
-        self.fixed_draft_budget()
-            .unwrap_or_else(|| self.draft_policy.current_budget())
+        self.fixed_draft_budget().unwrap_or_else(|| {
+            self.confidence_verify_policy()
+                .map(|(_, width)| width)
+                .unwrap_or_else(|| self.draft_policy.current_budget())
+        })
     }
 
     fn observe_adaptive_window(&mut self, window: MtpDraftPolicyWindow) {
@@ -6668,6 +6750,23 @@ mod tests {
             .to_vec::<f32>()
             .expect("materialize");
         assert_eq!(retained, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn confident_prefix_counts_leading_rows_above_the_threshold() {
+        let p = |v: f32| v.ln();
+        // Leading rows at or above the threshold, stopping at the first below.
+        assert_eq!(
+            confident_prefix_len(&[p(0.9), p(0.6), p(0.3), p(0.95)], 0.5),
+            2
+        );
+        assert_eq!(confident_prefix_len(&[p(0.5), p(0.5), p(0.5)], 0.5), 3);
+        // At least one row is verified even when nothing is confident.
+        assert_eq!(confident_prefix_len(&[p(0.1), p(0.9)], 0.5), 1);
+        assert_eq!(confident_prefix_len(&[], 0.5), 0);
+        // A threshold of 1.0 verifies one row unless the draft is certain.
+        assert_eq!(confident_prefix_len(&[p(0.99), p(0.99)], 1.0), 1);
+        assert_eq!(confident_prefix_len(&[0.0, 0.0, p(0.5)], 1.0), 2);
     }
 
     #[test]

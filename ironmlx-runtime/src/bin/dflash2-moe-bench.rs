@@ -1083,6 +1083,8 @@ fn main() -> Result<()> {
     // Process-level values of the settings a mode suffix may override.
     let budget_setting =
         std::env::var(ironmlx_core::m5_profile::settings::DFLASH2_FIXED_BUDGET).ok();
+    let confidence_setting =
+        std::env::var(ironmlx_core::m5_profile::settings::DFLASH2_CONFIDENCE_VERIFY).ok();
     let restore = |name: &str, value: &Option<String>| match value {
         Some(value) => std::env::set_var(name, value),
         None => std::env::remove_var(name),
@@ -1101,11 +1103,30 @@ fn main() -> Result<()> {
             }
             for mode in modes {
                 mlx::clear_cache();
+                // `<mode>-cv<per mille>` runs the mode with that confidence-verify
+                // threshold (0 = the window-cost policy); the explicit setting
+                // is read when the stream is created.
+                let (mode_base, confidence_verify) = match mode.rsplit_once("-cv") {
+                    Some((base, value)) if value.parse::<u32>().is_ok() => {
+                        (base.to_owned(), Some(value.to_owned()))
+                    }
+                    _ => (mode.clone(), None),
+                };
+                match confidence_verify {
+                    Some(value) => std::env::set_var(
+                        ironmlx_core::m5_profile::settings::DFLASH2_CONFIDENCE_VERIFY,
+                        value,
+                    ),
+                    None => restore(
+                        ironmlx_core::m5_profile::settings::DFLASH2_CONFIDENCE_VERIFY,
+                        &confidence_setting,
+                    ),
+                }
                 // An explicit setting overrides the profile value and is read
                 // at every target forward; the bench is single-request.
-                let (mode_name, fixed_budget) = match mode.split_once("@b") {
+                let (mode_name, fixed_budget) = match mode_base.split_once("@b") {
                     Some((base, budget)) => (base, Some(budget)),
-                    None => (mode.as_str(), None),
+                    None => (mode_base.as_str(), None),
                 };
                 match fixed_budget {
                     Some(budget) => std::env::set_var(

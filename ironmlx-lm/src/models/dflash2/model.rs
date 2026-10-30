@@ -299,6 +299,32 @@ impl DFlash2DraftModel {
         cache: &mut DFlash2DraftCache,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
+        Ok(self
+            .propose_greedy_with_confidence_on(
+                target_model,
+                input_ids,
+                target_hidden,
+                cache,
+                target,
+                false,
+            )?
+            .0)
+    }
+
+    /// [`Self::propose_greedy_on`] that also returns, when `with_confidence`,
+    /// the drafter's log-probability of its most likely token at every draft
+    /// position (`[L]`, f32; the selector's lattice walk may pick a different
+    /// token, so this is a confidence in the position, not in the chosen
+    /// token). `None` otherwise.
+    pub fn propose_greedy_with_confidence_on<T: DFlash2Target>(
+        &self,
+        target_model: &T,
+        input_ids: &Array,
+        target_hidden: &Array,
+        cache: &mut DFlash2DraftCache,
+        target: impl Into<StreamOrDevice>,
+        with_confidence: bool,
+    ) -> Result<(Array, Option<Array>)> {
         let target = target.into();
         // Single-request drafts take the M5 route when the projections live
         // in the resident M5 layout.
@@ -315,13 +341,22 @@ impl DFlash2DraftModel {
         }
         let (proposal_hidden, logits, vocab_ids, anchor) =
             self.proposal_lattice_on(target_model, input_ids, target_hidden, cache, target, false)?;
-        self.selector.select_greedy_on(
+        let confidence = if with_confidence {
+            let logits = mlx::ops::cast::astype_on(&logits, mlx::Dtype::Float32, target)?;
+            let top = mlx::ops::reduction::max_on(&logits, &[-1][..], false, target)?;
+            let total = mlx::ops::reduction::logsumexp_on(&logits, &[-1][..], false, target)?;
+            Some((&top - &total).reshape_on((-1,), target)?)
+        } else {
+            None
+        };
+        let tokens = self.selector.select_greedy_on(
             &proposal_hidden,
             &logits,
             vocab_ids.as_ref(),
             &anchor,
             target,
-        )
+        )?;
+        Ok((tokens, confidence))
     }
 
     /// Greedy proposals for rows at different draft-cache positions (each
