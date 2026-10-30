@@ -235,6 +235,108 @@ fn qwen36_moe_dflash2_greedy_generation_matches_ordinary() {
     assert!(totals.3 > 0, "no rollback was exercised");
 }
 
+/// Under the MoE profile the scheduler's single-request stream (the server
+/// path) prefills a prompt that fits one chunk in one graph, like the
+/// generation stream (the CLI path, whose greedy output the lossless tests
+/// qualify), so the two emit the same token IDs: short prompts and a prompt
+/// of a few hundred tokens, with a multi-window run, a run shorter than one
+/// block, and a stop token reached inside a window.
+#[test]
+#[ignore = "loads a full local Qwen3.6 MoE target and the incoai DFlash2 draft"]
+#[serial(mlx_metal)]
+fn qwen36_moe_dflash2_scheduler_b1_greedy_generation_matches_generation_stream() {
+    // The server's MoE profile (M5 affine4 projections, single-graph prefill):
+    // without it the scheduler stream splits the prompt's last token off.
+    ironmlx_core::m5_profile::install_for_target(
+        ironmlx_core::m5_profile::M5ProfileMode::Auto,
+        true,
+        ironmlx_core::m5_profile::M5ProfileTarget::Qwen36Moe,
+    );
+    let Some(fixture) = fixture() else {
+        eprintln!("skip: set QWEN36_MOE_DFLASH2_TARGET and DFLASH2_MODEL");
+        return;
+    };
+    let mut mid_prompt = String::new();
+    while fixture
+        .tokenizer
+        .encode(&mid_prompt, false)
+        .expect("encode")
+        .len()
+        < 300
+    {
+        mid_prompt.push_str(PROMPTS[1]);
+        mid_prompt.push(' ');
+    }
+    let mut prompts = PROMPTS.map(str::to_owned).to_vec();
+    prompts.push(mid_prompt);
+    let scheduler_b1 = |ids: &[u32], max_new_tokens: usize, stops: Vec<u32>| {
+        let mut stream = DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
+            &fixture.target,
+            &fixture.draft,
+            &fixture.tokenizer,
+            request(ids.to_vec(), max_new_tokens, stops, Sampler::greedy()),
+            DFlash2ExecutionOptions {
+                block_size: 8,
+                p2: DFlash2P2Options::default(),
+            },
+            None,
+            &|| false,
+        )
+        .expect("scheduler-B1 DFlash2 stream");
+        let events = drain(|| stream.next_token());
+        (events, stream.metrics())
+    };
+    let generation_stream = |ids: &[u32], max_new_tokens: usize, stops: Vec<u32>| {
+        let mut stream = DFlash2TextGenerationStream::new_text_only_with_options(
+            &fixture.target,
+            &fixture.draft,
+            &fixture.tokenizer,
+            request(ids.to_vec(), max_new_tokens, stops, Sampler::greedy()),
+            8,
+            DFlash2P2Options::default(),
+        )
+        .expect("DFlash2 stream");
+        drain(|| stream.next_token())
+    };
+    for (index, prompt) in prompts.iter().enumerate() {
+        let prompt_ids = fixture.tokenizer.encode(prompt, false).expect("encode");
+        for max_new_tokens in [61, 3] {
+            let expected = generation_stream(&prompt_ids, max_new_tokens, Vec::new());
+            let (actual, metrics) = scheduler_b1(&prompt_ids, max_new_tokens, Vec::new());
+            assert_eq!(
+                actual,
+                expected,
+                "scheduler-B1 prompt {index} ({} tokens) max_new_tokens={max_new_tokens} diverged",
+                prompt_ids.len()
+            );
+            assert_eq!(metrics.generated_tokens, max_new_tokens);
+            assert!(
+                metrics.windows > 0 && metrics.drafted_tokens > 0,
+                "no DFlash2 drafts"
+            );
+            eprintln!(
+                "[qwen36-moe-dflash2 scheduler-b1] prompt={index} tokens={} max_new={max_new_tokens} \
+                 windows={} drafted={} accepted={} prefill_us={} exact",
+                prompt_ids.len(),
+                metrics.windows,
+                metrics.drafted_tokens,
+                metrics.accepted_draft_tokens,
+                metrics.prefill_us,
+            );
+            if max_new_tokens == 61 {
+                let stop = expected[30].0;
+                let expected_stop = generation_stream(&prompt_ids, 61, vec![stop]);
+                let (actual_stop, stop_metrics) = scheduler_b1(&prompt_ids, 61, vec![stop]);
+                assert_eq!(
+                    actual_stop, expected_stop,
+                    "scheduler-B1 prompt {index} stop token {stop} diverged"
+                );
+                assert!(stop_metrics.generated_tokens < 61);
+            }
+        }
+    }
+}
+
 /// Over long contexts, greedy DFlash2 windows must emit the token IDs of the
 /// same stream decoding one token per window (budget 0, same prefill) where
 /// the attention regime changes mid-generation: prompts end just below 8193

@@ -1253,15 +1253,15 @@ where
     ) -> Result<Self> {
         let options = execution.p2.validate()?;
         // Single-graph prefill is qualified only with the M5 affine4 target
-        // route, and it needs the whole prompt in one pass: without a prefix
-        // cache it always applies; with one it applies only to a cold miss
-        // (nothing restored). A restored prefix keeps the chunked scheduler
-        // prefill for the remainder.
+        // routes (dense, and the MoE projections), and it needs the whole
+        // prompt in one pass: without a prefix cache it always applies; with
+        // one it applies only to a cold miss (nothing restored). A restored
+        // prefix keeps the chunked scheduler prefill for the remainder.
+        let fingerprint = model.dflash2_execution_fingerprint();
         let single_prefill = ironmlx_core::m5_profile::flag(
             ironmlx_core::m5_profile::settings::DFLASH2_SINGLE_PREFILL,
-        ) && model
-            .dflash2_execution_fingerprint()
-            .contains("experimental-m5-affine4");
+        ) && (fingerprint.contains("experimental-m5-affine4")
+            || fingerprint.contains("projections=m5-affine4"));
         let cold_single_prefill = single_prefill && prefix_cache.is_some();
         let single_prefill = single_prefill && prefix_cache.is_none();
         let mut request = request;

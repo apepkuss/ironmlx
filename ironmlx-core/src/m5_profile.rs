@@ -316,6 +316,11 @@ const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
     // short prompts +4.7% generation (knowledge tasks +6-9%), six 30K
     // prompts +6.2%; thresholds 0.7 / 0.85 gave +4.3% / +2.4%.
     (settings::DFLASH2_CONFIDENCE_VERIFY, "500"),
+    // A single-request prompt that fits one chunk prefills in one graph: the
+    // scheduler morphology otherwise splits its last token into a second
+    // forward, which reads the active experts again (~7 ms of a ~42 ms
+    // short-prompt prefill).
+    (settings::DFLASH2_SINGLE_PREFILL, "1"),
 ];
 
 /// Default flat-tree size of the Qwen3.6 MoE profile when the option is not
@@ -1203,6 +1208,7 @@ mod tests {
                 || *name == settings::DFLASH2_RAGGED_TAIL
                 || *name == settings::DENSE_PREFILL_TILED_GEMM
                 || *name == settings::DFLASH2_CONFIDENCE_VERIFY
+                || *name == settings::DFLASH2_SINGLE_PREFILL
             {
                 continue;
             }
