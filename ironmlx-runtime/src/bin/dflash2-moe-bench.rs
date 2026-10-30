@@ -558,7 +558,12 @@ fn batch_curve(
             ().into(),
         )?;
         mlx::transforms::eval(&[&prefill.hidden, &prefill.context_hidden])?;
-        let base: Vec<_> = cache.iter().map(LayerCache::snapshot).collect();
+        // Append-only snapshots, as the model's verify windows take (see
+        // the verify curve): the writes of each rep donate their buffers.
+        let base: Vec<_> = cache
+            .iter()
+            .map(LayerCache::dflash2_transaction_snapshot)
+            .collect::<Result<Vec<_>>>()?;
         let dims = prefill.hidden.shape();
         let mut last = target.dflash2_project_hidden_on(
             &mlx::ops::indexing::slice_strided(
@@ -636,7 +641,10 @@ fn batch_curve(
                     for (dst, &row) in group.iter().enumerate() {
                         adopt_layer_cache_rows(&mut cache, &caches[row], dst, 0)?;
                     }
-                    let base: Vec<_> = cache.iter().map(LayerCache::snapshot).collect();
+                    let base: Vec<_> = cache
+                        .iter()
+                        .map(LayerCache::dflash2_transaction_snapshot)
+                        .collect::<Result<Vec<_>>>()?;
                     let tokens: Vec<u32> = group
                         .iter()
                         .flat_map(|&row| continuations[row][..width].iter().copied())
