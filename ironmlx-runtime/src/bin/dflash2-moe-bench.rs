@@ -161,7 +161,13 @@ fn verify_curve(
         ().into(),
     )?;
     mlx::transforms::eval(&[&prefill.hidden, &prefill.context_hidden])?;
-    let base: Vec<_> = cache.iter().map(LayerCache::snapshot).collect();
+    // Append-only snapshots, as the model's verify windows take: the cache
+    // writes of each rep donate their buffers instead of copying the whole
+    // cache (a full snapshot shares the buffers and forces that copy).
+    let base: Vec<_> = cache
+        .iter()
+        .map(LayerCache::dflash2_transaction_snapshot)
+        .collect::<Result<Vec<_>>>()?;
     // Realistic verify tokens: the greedy continuation of the prompt.
     let mut continuation = Vec::new();
     let mut last = {
