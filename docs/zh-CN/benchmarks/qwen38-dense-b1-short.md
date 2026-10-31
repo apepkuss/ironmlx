@@ -33,7 +33,7 @@ B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平�
 
 下表列出各参测应用在各项指标上的结果。表中数值为两轮测试的中位数，括号内为两轮中的最小值和最大值；每轮的数值取该轮六个任务的中位数。解码速度越高越好，其余时间和内存指标越低越好；每行最优的数值加粗显示。
 
-| 指标 | IronMLX dev (c6ef14ec2) | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
+| 指标 | IronMLX 0.2.0-rc.3 | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
 |---|---|---|---|---|
 | 首字时间（ms） | 105 (95–⁠116) | 193 (191–⁠195) | 146 (140–⁠152) | **81** (76–⁠85) |
 | 解码速度（tok/s，越高越好） | **89.6** (89.3–⁠89.9) | 68.3 (67.8–⁠68.8) | 78.2 (78.1–⁠78.3) | 74.1 (74.0–⁠74.1) |
@@ -51,7 +51,7 @@ B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平�
 
 完成时间（s，越低越好）：
 
-| 任务（输入 token） | IronMLX dev (c6ef14ec2) | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
+| 任务（输入 token） | IronMLX 0.2.0-rc.3 | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
 |---|---|---|---|---|
 | 编程 1（62） | **1.73** | 2.61 | 2.12 | 2.34 |
 | 编程 2（54） | 2.67 | 3.19 | 2.62 | **1.93** |
@@ -62,7 +62,7 @@ B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平�
 
 解码速度（tok/s，越高越好）：
 
-| 任务（输入 token） | IronMLX dev (c6ef14ec2) | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
+| 任务（输入 token） | IronMLX 0.2.0-rc.3 | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
 |---|---|---|---|---|
 | 编程 1（62） | **158.3** | 105.9 | 129.4 | 112.9 |
 | 编程 2（54） | 99.9 | 85.1 | 103.2 | **137.9** |
@@ -75,7 +75,7 @@ IronMLX 在五个任务上完成最快、解码最快；TensorFold 在编程 2 �
 
 各应用处理单个请求时都使用外部 DFlash2 草稿模型做推测解码。从各服务自己的日志和状态接口看：
 
-- **IronMLX dev (c6ef14ec2)：** 每个验证窗口用 15 节点的草稿树，一次验证 16 行，草稿预算固定为 7；全部窗口都是树验证。
+- **IronMLX 0.2.0-rc.3：** 每个验证窗口用 15 节点的草稿树，一次验证 16 行，草稿预算固定为 7；全部窗口都是树验证。
 - **oMLX 0.7.2：** 每个请求的日志都记录了推测解码的接受情况。
 - **Splash 1.4.1：** 状态接口中的草稿与接受计数随每个请求增加。
 - **TensorFold 1.1.6：** 原生引擎（`qwen27`）；每轮至少验证 16 行（服务端对每个请求报告的每轮最少行数都是 16）。
@@ -96,7 +96,7 @@ IronMLX 在五个任务上完成最快、解码最快；TensorFold 在编程 2 �
 
 | 应用 | 来源 | 配置 |
 |---|---|---|
-| IronMLX dev (c6ef14ec2) | `dev` 分支提交 `c6ef14ec2` 的 release 构建（`cargo build --locked --release`），服务程序与 MLX Metal 运行时一起冻结 | 按 App 的方式启动；`--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none`（block size 8 与不设置时相同：默认取草稿模型自身的 block size 8）；M5 默认配置（含 ANE `auto`；短 prompt 不触发 ANE），不加任何调优开关 |
+| IronMLX 0.2.0-rc.3 | 提交 `c6ef14ec2` 的 release 构建（`cargo build --locked --release`），服务程序与 MLX Metal 运行时一起冻结。该提交到 `v0.2.0-rc.3` 标签（`2d5186bb0`）之间只删除了从未启用的实验开关并更新了文档，测量的代码路径与 0.2.0-rc.3 相同 | 按 App 的方式启动；`--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none`（block size 8 与不设置时相同：默认取草稿模型自身的 block size 8）；M5 默认配置（含 ANE `auto`；短 prompt 不触发 ANE），不加任何调优开关 |
 | oMLX 0.7.2 | 官方 App（`oMLX-0.7.2-macos26-27.dmg`） | `--no-cache --max-concurrent-requests 4`；设置中上下文 8,192，DFlash2 草稿按 4-bit（group 64）量化 |
 | Splash 1.4.1 | 官方 bottle | `--max-context 8192`；KV 缓存保持默认的 int8；默认 32 GiB 非持久磁盘 KV 缓存保持开启（每个会话都是新进程，每个请求都核对缓存命中计数不变）；草稿模型在加载时固定量化为 4-bit（Splash 内置行为，无需设置） |
 | TensorFold 1.1.6 | 官方原生发布包（sha256 `0cd208ba…`），tag `v1.1.6` → `eea9dc9` | `--drafter-bits 4 --parallel 4 --context 8192`，prompt 缓存与快照关闭，keep-warm 保持默认 |
@@ -127,7 +127,7 @@ IronMLX 在五个任务上完成最快、解码最快；TensorFold 在编程 2 �
 本页结论只适用于[方法](#方法)中描述的条件。以下是这次对比没有覆盖或需要注意的地方：
 
 - **不代表各应用的整体水平。** 本页结果只反映上述版本在这个模型、这种负载和这台机器上的表现，不能据此判断任何应用整体性能的高低。除方法中列出的共同设置外，各应用都使用默认策略，没有针对本测试调优；换用其他模型、其他负载或各应用推荐的配置，结果和先后都可能不同。如果你认为某个应用的配置不公平，欢迎通过 [GitHub Issues](https://github.com/apepkuss/ironmlx/issues) 反馈。
-- **IronMLX 为开发版本。** 本页的 IronMLX 是 `dev` 分支的构建，不是正式发布版本；正式发布版本的表现可能不同。
+- **IronMLX 为候选发布版本。** 0.2.0-rc.3 是预发布版本，不是 0.2.0 正式版本；正式版本的表现可能不同。
 - 长输入、其他模型、并发请求或真实多用户负载下的表现。并发结果见[Qwen3.8 27B B4 短 prompt 并发性能对比](qwen38-dense-b4-short.md)；约 30K token 长输入的单请求结果见[Qwen3.8 27B B1 30K prompt 性能对比](qwen38-dense-b1-30k.md)。
 - 尾延迟或统计显著性：单台机器上的两轮数据不足以支持这两类结论。
 - 回答质量。本测试只比较速度和内存，没有评估回答质量。各应用的输出不完全相同，每个计分请求都生成 256 个 token。

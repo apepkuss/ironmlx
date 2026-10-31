@@ -24,10 +24,10 @@ Based on all data collected in the short-prompt B1 single-request comparison, Ir
 
 <!-- benchmark:kpis qwen36-moe-b1-short -->
 
-- **Lowest memory.** Peak memory while serving is 20.0 GiB, the lowest in all four rounds; both Splash settings use 21.1 GiB and oMLX 21.6 GiB.
-- **Tied with Splash auto for first in decode speed.** The median decode speed is 249.7 tok/s against 253.6 tok/s for Splash auto, and each led in two of the four rounds; Splash auto ranged from 225.1 to 263.1 over the four rounds, IronMLX from 248.8 to 251.5. IronMLX decodes 3.0% faster than Splash all (242.4), faster in all four rounds; oMLX reaches 236.1.
-- **Second in completion time.** The median time from sending a request to its completion is 1.090 s, 0.7% longer than Splash auto (1.082 s), which led in three of the four rounds, and 6.2% shorter than Splash all (1.162 s), shorter in all four rounds; oMLX takes 1.260 s.
-- **Third in time to first token, by a few milliseconds.** The median time to first token is 50 ms, against 47 ms for Splash auto and 48 ms for Splash all; the four-round ranges of the three overlap. oMLX takes 102 ms.
+- **Fastest time to first token.** The median time to first token is 44 ms, against 47 ms for Splash auto and 48 ms for Splash all, first in all four rounds; the four-round ranges of IronMLX (43–45 ms) and Splash auto (46–47 ms) do not overlap, but the margin is 3 ms. oMLX takes 105 ms.
+- **Fastest decode.** The median decode speed is 268.1 tok/s, 9.7% faster than Splash auto (244.4) and 10.8% faster than Splash all (241.9), first in all four rounds; IronMLX's four rounds lie within 267.7–268.5, Splash auto's within 230.8–252.2. oMLX reaches 235.9.
+- **Shortest completion time.** The median time from sending a request to its completion is 1.025 s, 8.1% shorter than Splash auto (1.115 s) and 10.9% shorter than Splash all (1.150 s), first in all four rounds; oMLX takes 1.268 s.
+- **Lowest memory.** Peak memory while serving is 20.0 GiB, the lowest in all four rounds; both Splash settings use about 21.0–21.1 GiB and oMLX 21.6 GiB.
 - **Reproducible output.** For IronMLX and for Splash all, each task's output was byte-identical in all four rounds; Splash auto differed between rounds on five tasks and oMLX on four.
 
 ### Decode speed vs. time to first token
@@ -40,14 +40,14 @@ Decode speed is the number of tokens a request generates per second once its out
 
 The table below lists the results of each configuration for each metric. Values are medians of four rounds, with the minimum and maximum of the four rounds in parentheses; each round's value is the median of that round's six tasks. Higher decode speed is better, and lower is better for the time and memory metrics; the best value in each row is in bold.
 
-| Metric | IronMLX dev (c6ef14ec2) | oMLX 0.7.2 | Splash 1.4.1 auto | Splash 1.4.1 all |
+| Metric | IronMLX 0.2.0-rc.4 | oMLX 0.7.2 | Splash 1.4.1 auto | Splash 1.4.1 all |
 |---|---|---|---|---|
-| Time to first token (ms) | 50 (44–⁠52) | 102 (100–⁠103) | **47** (46–⁠51) | 48 (46–⁠49) |
-| Decode speed (tok/s, higher is better) | 249.7 (248.8–⁠251.5) | 236.1 (232.5–⁠237.8) | **253.6** (225.1–⁠263.1) | 242.4 (234.9–⁠248.0) |
-| Completion time (s) | 1.090 (1.080–⁠1.098) | 1.260 (1.238–⁠1.292) | **1.082** (1.059–⁠1.188) | 1.162 (1.117–⁠1.173) |
-| Peak memory while serving (GiB) | **20.0** (20.0–⁠20.0) | 21.6 (21.5–⁠21.6) | 21.1 (21.0–⁠21.2) | 21.1 (21.0–⁠21.2) |
+| Time to first token (ms) | **44** (43–⁠45) | 105 (104–⁠106) | 47 (46–⁠47) | 48 (47–⁠53) |
+| Decode speed (tok/s, higher is better) | **268.1** (267.7–⁠268.5) | 235.9 (231.1–⁠240.1) | 244.4 (230.8–⁠252.2) | 241.9 (236.1–⁠242.6) |
+| Completion time (s) | **1.025** (1.023–⁠1.026) | 1.268 (1.211–⁠1.307) | 1.115 (1.089–⁠1.163) | 1.150 (1.135–⁠1.173) |
+| Peak memory while serving (GiB) | **20.0** (20.0–⁠20.0) | 21.6 (21.5–⁠21.6) | 21.1 (21.0–⁠21.2) | 21.0 (21.0–⁠21.0) |
 
-IronMLX used the least memory and oMLX the most in all four rounds. oMLX had the slowest time to first token in all four rounds; the order of the other three changed from round to round. For completion time, the first three rounds ran Splash auto, IronMLX, Splash all, and oMLX; in the fourth round Splash auto slowed down markedly (decode speed 225.1 tok/s) and IronMLX was first. In decode speed, IronMLX was first in rounds 1 and 4 and Splash auto in rounds 2 and 3.
+IronMLX was first in every metric in all four rounds, and oMLX was last in every metric in all four rounds except decode speed in the fourth round. In the fourth round Splash auto slowed down (decode speed 230.8 tok/s, completion time 1.163 s) and fell behind Splash all and, in decode speed, behind oMLX; in the first three rounds the order was IronMLX, Splash auto, Splash all, oMLX in time to first token, decode speed, and completion time. In memory, the two Splash settings were within 0.2 GiB of each other and swapped order between rounds.
 
 > [!NOTE]
 > Peak memory while serving is measured during the six scored requests. While loading the model and warming up, IronMLX peaks higher (about 22.1 GiB) than while serving; this page does not compare memory during loading.
@@ -56,7 +56,7 @@ IronMLX used the least memory and oMLX the most in all four rounds. oMLX had the
 
 On mixture-of-experts models, Splash 1.4.1 by default (`--verify-rows auto`) lets a verify budget learned from earlier cycles choose which rows of each draft block a decode cycle verifies; its documentation states that this is faster but lets greedy outputs differ from run to run. `--verify-rows all` verifies the whole draft block in every cycle and makes the output reproducible (on dense models the two settings are the same). This page lists both: the default shows out-of-the-box speed, and `--verify-rows all` shows the speed when output must be reproducible.
 
-In this run, Splash auto decoded 4.6% faster than Splash all (253.6 against 242.4 tok/s) and completed 6.9% sooner (1.082 against 1.162 s), but varied more between rounds. oMLX 0.7.2 has a similar mechanism: its DFlash verify mode defaults to `adaptive`, which picks the number of drafts verified per cycle from measured cost and acceptance; oMLX runs with its default setting on this page. IronMLX has no such setting, and its output is always reproducible.
+In this run, Splash auto decoded 1.0% faster than Splash all (244.4 against 241.9 tok/s) and completed 3.0% sooner (1.115 against 1.150 s), but varied more between rounds. oMLX 0.7.2 has a similar mechanism: its DFlash verify mode defaults to `adaptive`, which picks the number of drafts verified per cycle from measured cost and acceptance; oMLX runs with its default setting on this page. IronMLX has no such setting, and its output is always reproducible.
 
 ### Results by task
 
@@ -64,31 +64,31 @@ The six tasks have the same output length (256 tokens), but each application's d
 
 Completion time (s, lower is better):
 
-| Task (input tokens) | IronMLX dev (c6ef14ec2) | oMLX 0.7.2 | Splash 1.4.1 auto | Splash 1.4.1 all |
+| Task (input tokens) | IronMLX 0.2.0-rc.4 | oMLX 0.7.2 | Splash 1.4.1 auto | Splash 1.4.1 all |
 |---|---|---|---|---|
-| Coding 1 (62) | **0.819** | 0.939 | 0.846 | 0.894 |
-| Coding 2 (54) | 0.761 | 0.861 | 0.718 | **0.699** |
-| Coding 3 (83) | 0.969 | 1.092 | **0.907** | 0.936 |
-| Knowledge 1 (46) | 1.518 | 1.923 | **1.348** | 1.430 |
-| Knowledge 2 (40) | **1.215** | 1.444 | 1.275 | 1.381 |
-| Knowledge 3 (49) | 1.470 | 1.601 | **1.420** | 1.691 |
+| Coding 1 (62) | **0.775** | 0.965 | 0.840 | 0.907 |
+| Coding 2 (54) | 0.746 | 0.861 | 0.701 | **0.675** |
+| Coding 3 (83) | **0.868** | 1.092 | 0.973 | 0.944 |
+| Knowledge 1 (46) | 1.311 | 1.832 | **1.288** | 1.377 |
+| Knowledge 2 (40) | **1.181** | 1.442 | 1.259 | 1.355 |
+| Knowledge 3 (49) | **1.421** | 1.635 | 1.454 | 1.649 |
 
 Decode speed (tok/s, higher is better):
 
-| Task (input tokens) | IronMLX dev (c6ef14ec2) | oMLX 0.7.2 | Splash 1.4.1 auto | Splash 1.4.1 all |
+| Task (input tokens) | IronMLX 0.2.0-rc.4 | oMLX 0.7.2 | Splash 1.4.1 auto | Splash 1.4.1 all |
 |---|---|---|---|---|
-| Coding 1 (62) | **332.3** | 308.0 | 319.4 | 302.3 |
-| Coding 2 (54) | 362.5 | 337.2 | 381.3 | **391.2** |
-| Coding 3 (83) | 280.5 | 282.2 | **299.6** | 294.7 |
-| Knowledge 1 (46) | 173.3 | 139.7 | **195.4** | 187.2 |
-| Knowledge 2 (40) | **218.1** | 189.5 | 207.2 | 190.6 |
-| Knowledge 3 (49) | 179.3 | 169.9 | **185.7** | 154.9 |
+| Coding 1 (62) | **349.6** | 299.8 | 322.3 | 298.1 |
+| Coding 2 (54) | 363.8 | 337.7 | 390.8 | **406.7** |
+| Coding 3 (83) | **312.6** | 282.8 | 276.9 | 287.1 |
+| Knowledge 1 (46) | 201.1 | 147.0 | **205.3** | 191.5 |
+| Knowledge 2 (40) | **223.6** | 189.6 | 210.1 | 194.8 |
+| Knowledge 3 (49) | **185.1** | 166.5 | 181.3 | 159.2 |
 
-IronMLX completes and decodes fastest on Coding 1 and Knowledge 2; Splash auto is fastest on Coding 3, Knowledge 1, and Knowledge 3; Splash all is fastest on Coding 2.
+IronMLX completes and decodes fastest on Coding 1, Coding 3, Knowledge 2, and Knowledge 3; Splash auto is fastest on Knowledge 1; Splash all is fastest on Coding 2.
 
 Every configuration uses the external DFlash2 draft model for speculative decoding when serving a single request, and every scored request had drafts accepted. According to each server's own logs and status pages:
 
-- **IronMLX dev (c6ef14ec2):** linear draft verification (no draft tree for this model), with the number of drafts per window set automatically by its default window-cost policy; every window carried drafts.
+- **IronMLX 0.2.0-rc.4:** linear draft verification (no draft tree for this model), with the number of drafts per window set automatically by its default window-cost policy; every window carried drafts.
 - **oMLX 0.7.2:** the log records the speculative decoding acceptance for every request.
 - **Splash 1.4.1 auto:** the drafted and accepted counters on its status page grow with every request; its startup log states that decode cycles verify the rows the verify budget chooses (`--verify-rows auto`).
 - **Splash 1.4.1 all:** as above; its startup log states that decode cycles verify every row of the draft block (`--verify-rows all`).
@@ -101,15 +101,15 @@ Every configuration uses the external DFlash2 draft model for speculative decodi
 |---|---|
 | Computer | MacBook Pro (Mac17,6), Apple M5 Max with a 40-core GPU, 128 GB unified memory |
 | Operating system | macOS 26.4 (25E246) |
-| Test date | October 28, 2026 (05:55–06:32 UTC) |
+| Test date | October 30, 2026 (15:41–16:17 UTC) |
 | Isolation | One inference server at a time; no other inference server or GPU compute job ran during the test. The benchmark client ran on the same Mac and connected over `127.0.0.1` |
-| Thermal control | Before every session the Mac stayed idle for at least two minutes after the previous server stopped, and macOS thermal pressure had read nominal for the last 60 seconds in a row; the first session of each of the two formal runs was the exception, waiting for the thermal condition only and starting about 100 s and 82 s after the previous run's server stopped. Thermal pressure was sampled every second during each session and stayed nominal throughout |
+| Thermal control | Before every session the Mac stayed idle for at least two minutes after the previous server stopped, and macOS thermal pressure had read nominal for the last 60 seconds in a row; the first session of each of the two formal runs was the exception, waiting for the thermal condition only and starting about 60 s after the previous server stopped. Thermal pressure was sampled every second during each session and stayed nominal throughout |
 
 ### Applications and configuration
 
 | Application | Source | Configuration |
 |---|---|---|
-| IronMLX dev (c6ef14ec2) | Release build (`cargo build --locked --release`) of commit `c6ef14ec2` on the `dev` branch; server and MLX Metal runtime frozen together | Started as the app starts it; `--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none` (block size 8 is the same as leaving it unset, which uses the draft model's own block size of 8); default M5 profile (the ANE does not apply to this model), no tuning switches |
+| IronMLX 0.2.0-rc.4 | Release build (`cargo build --locked --release`) of commit `93e9b3a69`; server and MLX Metal runtime frozen together. The `v0.2.0-rc.4` tag adds only release metadata and documentation on top of this commit, so the measured code path is that of 0.2.0-rc.4 | Started as the app starts it; `--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none` (block size 8 is the same as leaving it unset, which uses the draft model's own block size of 8); default M5 profile (the ANE does not apply to this model), no tuning switches |
 | oMLX 0.7.2 | Official app (`oMLX-0.7.2-macos26-27.dmg`) | `--no-cache --max-concurrent-requests 4`; context 8,192 and DFlash2 draft quantized to 4 bits (group 64) in its settings, DFlash verify mode left at its default `adaptive` |
 | Splash 1.4.1 auto | Official bottle | `--max-context 8192`; KV cache kept at its default int8; `--verify-rows` left at its default `auto`; the default 32 GiB non-persistent disk KV cache stays on (every session is a fresh process, and the cache hit counters were verified unchanged for every request); the draft model is always quantized to 4 bits at load (built-in Splash behavior, no setting) |
 | Splash 1.4.1 all | As above | Splash 1.4.1 auto plus `--verify-rows all`; after startup, the Splash engine process was verified to carry the option (and Splash 1.4.1 auto's engine process not to) |
@@ -131,21 +131,21 @@ Common settings for all applications: 4-bit draft model, 8,192-token context, ca
 
 - **Requests:** streaming `/v1/chat/completions`, one user message, temperature 0, thinking off, `max_tokens` 256, no `ignore_eos` (oMLX does not support it). A scored request may end by length (exactly 256 tokens counted by the server) or naturally (200–256 tokens counted by the server); in this run every scored request ended by length with exactly 256 tokens counted by the server.
 - **Prompts:** six short prompts (three coding, three knowledge; 40–83 input tokens), all different from each other and from the warm-up prompts.
-- **Sessions:** each session starts a fresh server, sends two warm-up requests, then the six scored requests one at a time (each sent 1 second after the previous one finished), then stops the server. A rule fixed before the test ran two rounds first (orders ABCS and SCBA, where A is IronMLX, B oMLX, C Splash auto, and S Splash all) and added two more rounds (BASC and CSAB) right after if, in any metric, two adjacent configurations swapped order between the rounds or their two-round ranges overlapped. Time to first token (the two Splash settings) and decode speed (Splash auto and IronMLX) swapped order over the first two rounds, and the two-round ranges of completion time (Splash auto and IronMLX) and memory (the two Splash settings) overlapped, so the rounds were added: four rounds × four configurations = 16 sessions, with the same average position for each configuration.
+- **Sessions:** each session starts a fresh server, sends two warm-up requests, then the six scored requests one at a time (each sent 1 second after the previous one finished), then stops the server. A rule fixed before the test ran two rounds first (orders ABCS and SCBA, where A is IronMLX, B oMLX, C Splash auto, and S Splash all) and added two more rounds (BASC and CSAB) right after if, in any metric, two adjacent configurations swapped order between the rounds or their two-round ranges overlapped. In memory, the two Splash settings swapped order over the first two rounds and their two-round ranges overlapped, so the rounds were added: four rounds × four configurations = 16 sessions, with the same average position for each configuration.
 - **Caching:** prefix and disk caches were off or verified unused for every request; speculative decoding was verified active from each server's counters or logs.
 - **Metrics:** time to first token runs from the send to the first non-empty content; decode speed is (output tokens − tokens in the first content) ÷ (time between the first and last content), counted on the client with the target tokenizer; completion runs from the send to `[DONE]`. Each round takes the median of the six tasks, and the table takes the median of the four rounds. Memory is the peak process-tree physical footprint, sampled every 50 ms while the six scored requests ran (including the gaps between them).
 - **Validity:** 16 of 16 sessions and 96 of 96 scored requests passed every check; no session was retried or dropped.
-- **Output reproducibility:** for IronMLX and for Splash all, each task's output was byte-identical in all four rounds. Splash auto on Coding 1, Coding 3, and the three knowledge tasks, and oMLX on Coding 1 and the three knowledge tasks, produced outputs that were not identical across the four rounds.
+- **Output reproducibility:** for IronMLX and for Splash all, each task's output was byte-identical in all four rounds. Splash auto on Coding 1, Coding 3, and the three knowledge tasks, and oMLX on Coding 3 and the three knowledge tasks, produced outputs that were not identical across the four rounds.
 
 ## Scope and limitations
 
 The conclusions on this page apply only under the conditions described in [Method](#method). The following are not covered by this comparison or need to be kept in mind:
 
 - **Not an overall verdict on any application.** These results reflect the listed versions on this model, this workload, and this Mac only; they do not show that any application is better or worse overall. Apart from the common settings listed in Method, each application ran its default strategy without tuning for this test (Splash all is an additional configuration for reproducible output); with other models, other workloads, or each application's recommended settings, the results and their order may differ. TensorFold is not included because its current release does not support this model, which says nothing about its performance on other models. If you think an application's configuration is unfair, please let us know through [GitHub Issues](https://github.com/apepkuss/ironmlx/issues).
-- **IronMLX is a development build.** The IronMLX on this page is a build of the `dev` branch, not a release; a release may perform differently.
-- **Close results.** IronMLX and Splash auto each led in two of the four rounds in decode speed and differ by only 0.7% in completion time; time to first token differs by a few milliseconds among three configurations whose four-round ranges overlap. None of these should be read as a clear advantage or disadvantage.
+- **IronMLX is a release candidate.** 0.2.0-rc.4 is a pre-release, not the final 0.2.0 release; the final release may perform differently.
+- **Close results.** IronMLX's lead in time to first token over Splash auto is 3 ms; the two Splash settings differ by 1.0% in decode speed, 3.0% in completion time, 1–2 ms in time to first token, and 0.1 GiB in memory, and swapped order between rounds in memory. None of these small differences should be read as a clear advantage or disadvantage.
 - Long prompts, other models, concurrent requests, or real multi-user traffic. For concurrent requests, see [Qwen3.6 35B A3B B4 concurrency performance comparison (short prompts)](qwen36-moe-b4-short.md); for single requests with prompts of about 30K tokens, see [Qwen3.6 35B A3B B1 30K-prompt performance comparison](qwen36-moe-b1-30k.md).
 - Tail latency or statistical significance: four rounds on one machine are not enough for either.
 - Answer quality. This test compares speed and memory only and does not evaluate answer quality, including whether the run-to-run output changes of Splash's and oMLX's default settings affect it.
 - A warm machine. Every session on this page started from nominal thermal pressure; sustained operation on a hot machine is not covered.
-- Run-to-run variation. Across the four rounds of the same task, time to first token varied by up to 80 ms for oMLX (Coding 3: 116 to 196 ms), 39 ms for Splash all, 26 ms for IronMLX, and 16 ms for Splash auto; decode speed varied by up to 32.4% for Splash auto (Coding 3: 241.4 to 319.6 tok/s), 23.2% for oMLX, 19.8% for Splash all, and 3.9% for IronMLX.
+- Run-to-run variation. Across the four rounds of the same task, time to first token varied by up to 65 ms for oMLX (Coding 3: 129 to 194 ms), 44 ms for Splash all (Coding 3: 52 to 96 ms), 16 ms for IronMLX, and 8 ms for Splash auto; decode speed varied by up to 32.0% for oMLX (Knowledge 1: 134.8 to 177.9 tok/s), 18.4% for Splash auto (Coding 3: 251.4 to 297.7 tok/s), 8.4% for Splash all, and 0.8% for IronMLX.

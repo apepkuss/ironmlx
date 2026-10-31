@@ -33,7 +33,7 @@ Batch throughput is the total output tokens of the four requests divided by the 
 
 The table below lists the results of each application for each metric. Values are medians of two rounds, with the minimum and maximum of the two rounds in parentheses; each round's value is the median of that round's three batches (three different prompt sets). Higher batch throughput is better, and lower is better for the time and memory metrics; the best value in each of the first six rows is in bold. On the first six metrics, the ranking of the applications stayed the same in both rounds.
 
-| Metric | IronMLX dev (c6ef14ec2) | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
+| Metric | IronMLX 0.2.0-rc.3 | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
 |---|---|---|---|---|
 | Batch throughput (tok/s, higher is better)¹ | **195.5** (194.2–⁠196.8) | 103.4 (102.4–⁠104.4) | 191.7 (189.8–⁠193.6) | 162.7 (159.4–⁠166.0) |
 | Median time to first token (ms) | 224 (215–⁠234) | 667 (660–⁠673) | 500 (499–⁠501) | **190** (189–⁠191) |
@@ -61,7 +61,7 @@ The chart below shows, for four requests sent at the same moment, when each requ
 
 Concurrent requests from the client do not guarantee batching inside the engine. According to each server's own logs and status pages, the four requests were handled as follows:
 
-- **IronMLX dev (c6ef14ec2):** uses the external DFlash2 draft model; whenever two or more requests can be batched, it verifies them together in ragged linear batches, and when only one request is left, that request is verified alone with a 15-node draft tree. Outputs were byte-identical to the same prompts served one at a time.
+- **IronMLX 0.2.0-rc.3:** uses the external DFlash2 draft model; whenever two or more requests can be batched, it verifies them together in ragged linear batches, and when only one request is left, that request is verified alone with a 15-node draft tree. Outputs were byte-identical to the same prompts served one at a time.
 - **oMLX 0.7.2:** runs batched speculative decoding for the four requests with the external DFlash2 draft model (its log names this batched path "Lightning MTP"); during batching it calibrates batched against standard decoding, and individual requests switch to standard decoding for a stretch.
 - **Splash 1.4.1:** uses the external DFlash2 draft model and decodes the four requests in shared batches of up to four rows; in each batch one request receives its first token first (about 0.14 s), and the other three receive theirs at the same moment (about 0.50 s). Outputs were byte-identical to the same prompts served one at a time.
 - **TensorFold 1.1.6:** native engine (`qwen27`) with four streams from `--parallel 4`; the four requests share each verification round, and every request uses DFlash2 drafts. Outputs were byte-identical to the same prompts served one at a time.
@@ -82,7 +82,7 @@ Concurrent requests from the client do not guarantee batching inside the engine.
 
 | Application | Source | Configuration |
 |---|---|---|
-| IronMLX dev (c6ef14ec2) | Release build (`cargo build --locked --release`) of commit `c6ef14ec2` on the `dev` branch; server and MLX Metal runtime frozen together | Started as the app starts it; `--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none` (block size 8 is the same as leaving it unset, which uses the draft model's own block size of 8); default M5 profile (ANE `auto`; short prompts do not use the ANE), no tuning switches |
+| IronMLX 0.2.0-rc.3 | Release build (`cargo build --locked --release`) of commit `c6ef14ec2`; server and MLX Metal runtime frozen together. The commits between it and the `v0.2.0-rc.3` tag (`2d5186bb0`) only remove experimental switches that were never enabled and update documentation, so the measured code path is that of 0.2.0-rc.3 | Started as the app starts it; `--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 8192 --kv-quant none` (block size 8 is the same as leaving it unset, which uses the draft model's own block size of 8); default M5 profile (ANE `auto`; short prompts do not use the ANE), no tuning switches |
 | oMLX 0.7.2 | Official app (`oMLX-0.7.2-macos26-27.dmg`) | `--no-cache --max-concurrent-requests 4`; context 8,192 and DFlash2 draft quantized to 4 bits (group 64) in its settings |
 | Splash 1.4.1 | Official bottle | `--max-context 8192`; KV cache kept at its default int8; the default 32 GiB non-persistent disk KV cache stays on (every session is a fresh process, and the cache hit counters were verified unchanged for every batch); the draft model is always quantized to 4 bits at load (built-in Splash behavior, no setting) |
 | TensorFold 1.1.6 | Official native release (sha256 `0cd208ba…`), tag `v1.1.6` → `eea9dc9` | `--drafter-bits 4 --parallel 4 --context 8192`, prompt cache and snapshots off, default keep-warm |
@@ -113,7 +113,7 @@ Common settings for all applications: 4-bit draft model, 8,192-token context, ca
 The conclusions on this page apply only under the conditions described in [Method](#method). The following are not covered by this comparison or need to be kept in mind:
 
 - **Not an overall verdict on any application.** These results reflect the listed versions on this model, this workload, and this Mac only; they do not show that any application is better or worse overall. Apart from the common settings listed in Method, each application ran its default strategy without tuning for this test; with other models, other workloads, or each application's recommended settings, the results and their order may differ. If you think an application's configuration is unfair, please let us know through [GitHub Issues](https://github.com/apepkuss/ironmlx/issues).
-- **IronMLX is a development build.** The IronMLX on this page is a build of the `dev` branch, not a release; a release may perform differently.
+- **IronMLX is a release candidate.** 0.2.0-rc.3 is a pre-release, not the final 0.2.0 release; the final release may perform differently.
 - Long prompts, other models, other concurrency levels, or real multi-user traffic. For concurrent requests with prompts of about 30K tokens, see [Qwen3.8 27B B4 30K-prompt concurrency performance comparison](qwen38-dense-b4-30k.md).
 - Tail latency or statistical significance: two rounds on one machine are not enough for either.
 - Answer quality. This test compares speed and memory only and does not evaluate answer quality. Outputs are not identical across applications, and every scored request generated 256 tokens.

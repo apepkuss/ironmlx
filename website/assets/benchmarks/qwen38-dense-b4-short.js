@@ -37,7 +37,7 @@ window.IRONMLX_BENCHMARKS["qwen38-dense-b4-short"] = {
  "apps": [
   {
    "key": "A",
-   "name": "IronMLX dev (c6ef14ec2)",
+   "name": "IronMLX 0.2.0-rc.3",
    "throughput_tps": {
     "median": 195.51416069477787,
     "range": [

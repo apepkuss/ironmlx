@@ -33,7 +33,7 @@ B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平�
 
 下表列出各参测应用在各项指标上的结果。表中数值为四轮测试的中位数，括号内为四轮中的最小值和最大值；每轮的数值取该轮六个任务的中位数。解码速度越高越好，其余时间和内存指标越低越好；每行最优的数值加粗显示。
 
-| 指标 | IronMLX dev (c6ef14ec2) | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
+| 指标 | IronMLX 0.2.0-rc.3 | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
 |---|---|---|---|---|
 | 首字时间（s） | **34.19** (33.99–⁠34.35) | 39.70 (39.67–⁠39.77) | 34.40 (34.28–⁠34.66) | 49.90 (49.73–⁠50.37) |
 | 解码速度（tok/s，越高越好） | 68.6 (68.5–⁠68.7) | 62.4 (60.9–⁠62.9) | **71.6** (71.4–⁠72.0) | 59.9 (59.4–⁠60.0) |
@@ -51,7 +51,7 @@ B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平�
 
 首字时间（s，越低越好）：
 
-| 任务 | IronMLX dev (c6ef14ec2) | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
+| 任务 | IronMLX 0.2.0-rc.3 | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
 |---|---|---|---|---|
 | 编程 1 | **30.54** | 35.11 | 31.01 | 40.83 |
 | 编程 2 | **32.51** | 37.32 | 33.23 | 46.24 |
@@ -62,7 +62,7 @@ B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平�
 
 完成时间（s，越低越好）：
 
-| 任务 | IronMLX dev (c6ef14ec2) | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
+| 任务 | IronMLX 0.2.0-rc.3 | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
 |---|---|---|---|---|
 | 编程 1 | **32.89** | 38.37 | 33.44 | 43.71 |
 | 编程 2 | **34.63** | 40.27 | 35.49 | 48.98 |
@@ -73,7 +73,7 @@ B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平�
 
 解码速度（tok/s，越高越好）：
 
-| 任务 | IronMLX dev (c6ef14ec2) | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
+| 任务 | IronMLX 0.2.0-rc.3 | oMLX 0.7.2 | Splash 1.4.1 | TensorFold 1.1.6 |
 |---|---|---|---|---|
 | 编程 1 | **108.6** | 78.1 | 104.6 | 88.7 |
 | 编程 2 | **120.5** | 87.1 | 112.8 | 93.1 |
@@ -89,7 +89,7 @@ B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平�
 
 各应用处理单个请求时都使用外部 DFlash2 草稿模型做推测解码，每个计分请求都有草稿被接受。从各服务自己的日志和状态接口看：
 
-- **IronMLX dev (c6ef14ec2)：** 每个验证窗口用 15 节点的草稿树，一次验证 16 行，草稿预算固定为 7；全部窗口都是树验证。30K 输入的 prefill 按默认的 ANE `auto` 把部分 MLP 计算交给 ANE（状态接口显示 ANE 处于启用状态）。
+- **IronMLX 0.2.0-rc.3：** 每个验证窗口用 15 节点的草稿树，一次验证 16 行，草稿预算固定为 7；全部窗口都是树验证。30K 输入的 prefill 按默认的 ANE `auto` 把部分 MLP 计算交给 ANE（状态接口显示 ANE 处于启用状态）。
 - **oMLX 0.7.2：** 每个请求的日志都记录了推测解码的接受情况。
 - **Splash 1.4.1：** 状态接口中的草稿与接受计数随每个请求增加；长输入的 prefill 按其默认设置把部分 FFN 计算交给 Neural Engine（日志记录）。
 - **TensorFold 1.1.6：** 原生引擎（`qwen27`）；每轮至少验证 16 行（服务端对每个请求报告的每轮最少行数都是 16）。
@@ -110,7 +110,7 @@ B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平�
 
 | 应用 | 来源 | 配置 |
 |---|---|---|
-| IronMLX dev (c6ef14ec2) | `dev` 分支提交 `c6ef14ec2` 的 release 构建（`cargo build --locked --release`），服务程序与 MLX Metal 运行时一起冻结 | 按 App 的方式启动；`--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 32768 --kv-quant none`（block size 8 与不设置时相同：默认取草稿模型自身的 block size 8）；M5 默认配置（含 ANE `auto`，30K 输入会启用），不加任何调优开关 |
+| IronMLX 0.2.0-rc.3 | 提交 `c6ef14ec2` 的 release 构建（`cargo build --locked --release`），服务程序与 MLX Metal 运行时一起冻结。该提交到 `v0.2.0-rc.3` 标签（`2d5186bb0`）之间只删除了从未启用的实验开关并更新了文档，测量的代码路径与 0.2.0-rc.3 相同 | 按 App 的方式启动；`--dflash2-block-size 8 --dflash2-draft-bits 4 --max-sequences 4 --max-cache-cap 32768 --kv-quant none`（block size 8 与不设置时相同：默认取草稿模型自身的 block size 8）；M5 默认配置（含 ANE `auto`，30K 输入会启用），不加任何调优开关 |
 | oMLX 0.7.2 | 官方 App（`oMLX-0.7.2-macos26-27.dmg`） | `--no-cache --max-concurrent-requests 4`；设置中上下文 32,768，DFlash2 草稿按 4-bit（group 64）量化 |
 | Splash 1.4.1 | 官方 bottle | `--max-context 32768`；KV 缓存保持默认的 int8；Neural Engine 保持默认开启；默认 32 GiB 非持久磁盘 KV 缓存保持开启（每个会话都是新进程，每个请求都核对缓存命中计数不变）；草稿模型在加载时固定量化为 4-bit（Splash 内置行为，无需设置） |
 | TensorFold 1.1.6 | 官方原生发布包（sha256 `0cd208ba…`），tag `v1.1.6` → `eea9dc9` | `--drafter-bits 4 --parallel 4 --context 32768`，prompt 缓存与快照关闭，keep-warm 保持默认 |
@@ -143,7 +143,7 @@ B1 单请求性能对比验证的目的是，通过与当前 Apple Silicon 平�
 本页结论只适用于[方法](#方法)中描述的条件。以下是这次对比没有覆盖或需要注意的地方：
 
 - **不代表各应用的整体水平。** 本页结果只反映上述版本在这个模型、这种负载和这台机器上的表现，不能据此判断任何应用整体性能的高低。除方法中列出的共同设置外，各应用都使用默认策略，没有针对本测试调优；换用其他模型、其他负载或各应用推荐的配置，结果和先后都可能不同。如果你认为某个应用的配置不公平，欢迎通过 [GitHub Issues](https://github.com/apepkuss/ironmlx/issues) 反馈。
-- **IronMLX 为开发版本。** 本页的 IronMLX 是 `dev` 分支的构建，不是正式发布版本；正式发布版本的表现可能不同。
+- **IronMLX 为候选发布版本。** 0.2.0-rc.3 是预发布版本，不是 0.2.0 正式版本；正式版本的表现可能不同。
 - **首字时间与完成时间的差距很小。** IronMLX 与 Splash 的首字时间只差 0.6%，完成时间只差 0.1% 且四轮各领先两轮；这两项不应视为明确的优势或劣势。
 - **ANE 会改变输出。** IronMLX 默认在 30K 输入的 prefill 中启用 ANE，数值与只用 GPU 时略有不同，贪心解码的输出也随之不同。离线核对（不计分）：同一构建关闭 ANE（`--ane off`）时，知识 3 生成满 256 个 token，文本与默认设置下不同。
 - 其他输入长度、其他模型、并发请求或真实多用户负载下的表现。本页只测了约 30K token 一种长输入；并发结果见[Qwen3.8 27B B4 30K prompt 并发性能对比](qwen38-dense-b4-30k.md)。
