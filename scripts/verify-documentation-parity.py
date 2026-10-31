@@ -10,6 +10,7 @@ CHINESE = ENGLISH / "zh-CN"
 PAIRED_DOCS = (
     "automatic-updates.md", "building-from-source.md", "known-issues.md",
     "privacy.md", "release-notes/0.1.0.md", "release-notes/0.2.0.md",
+    "release-notes/0.2.0-rc.4-validation.md",
     "storage-and-uninstall.md",
     "supported-models.md", "troubleshooting.md", "user-guide.md",
     "versioning-and-releases.md",

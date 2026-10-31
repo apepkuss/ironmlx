@@ -18,7 +18,7 @@ scripts/bump-version.sh 0.2.0
 与 App plist；版本变化时默认把 App build number 加一。需要指定构建号时：
 
 ```bash
-scripts/bump-version.sh 0.2.0 7
+scripts/bump-version.sh 0.2.0 8
 ```
 
 完成后必须提交脚本生成的全部改动，并运行：
@@ -36,6 +36,27 @@ Stable tag 使用 `vX.Y.Z`，并必须与 `VERSION` 一致。DMG、App About、C
 `--version`、`healthz.version`、release tag 和 release notes 应引用同一产品版本。
 
 RC 使用 `vX.Y.Z-rc.N` tag。
+
+GitHub Release 正文展示该版本的变化。RC1 对比上一正式版，后续 RC 对比同一
+产品版本的上一 RC；正式版汇总自上一正式版以来整条发布线的主要变化。通用产品
+能力通过用户指南及支持模型矩阵的链接提供。
+
+在 `docs/release-notes/X.Y.Z.md` 和
+`docs/zh-CN/release-notes/X.Y.Z.md` 中维护中英文摘要。
+候选版要点以 `<!-- release-summary:rc.N -->` 和
+`<!-- /release-summary -->` 包围，正式版概览使用
+`<!-- release-summary:stable -->`。生成器只提取所选版本的摘要，并将其中的
+相对链接转换为对应 tag 的文档链接。摘要缺失、为空或重复时生成失败，不会回退到
+通用能力文案。模板负责下载入口、系统要求和发布状态。
+
+创建 tag 前，可预览候选版正文：
+
+```bash
+python3 scripts/render-release-notes.py v0.2.0-rc.4 --candidate --repository apepkuss/ironmlx
+```
+
+上一 RC tag 必须已存在于发布历史中。此命令只生成文本，不修改已有 GitHub
+Releases，也不创建 tag。
 
 ## 当前发布硬门禁
 

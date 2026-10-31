@@ -107,16 +107,17 @@ draft 精度选项或批处理设置。
 | Target 量化配方 | Affine、group size 64、4/5/6/8 bit，且只带 mlx-community checkpoint 自带的 `mlp.gate` 与 `shared_expert_gate` 8-bit 覆盖。其他配方（包括 OptiQ）在加载时拒绝。 |
 | Draft 精度 | 默认在加载时把 BF16 checkpoint 量化为 affine 4-bit（group size 64，`--dflash2-draft-bits 4`）；`0` 保持 BF16；`8` 会被拒绝。App 提供 4-bit（默认）和 BF16。启动日志的 `draft_loaded_precision` 是从已加载投影层读回的实际精度。 |
 | Verify 宽度 | 所有位宽最多 8。省略 `--dflash2-block-size` 时 checkpoint 宽度被限制到 8；显式传入大于 8 的值直接报错。 |
-| 执行方式 | 未启用 M5 profile 时仅 B1：`--max-sequences` 仍限制同时活跃的请求数，但每次 target forward 只处理一个请求，活跃请求按窗口轮流推进。M5 profile 生效时，在同一窗口边界就绪的 greedy、无约束请求作为 ragged 线性行一起 verify，每次 forward 最多 `--max-sequences` 与 4 中较小者个请求；采样请求和带约束的请求仍单独推进。两种情况都不组成 Qwen3.8 的 tensor group：`--dflash2-tensor-batch-max-width` 被接受但不起作用，health 报告的 tensor 宽度上限为 1。 |
-| 草稿预算 | 单独推进的请求使用自适应的窗口成本策略：以普通的单 token 窗口为基准校准，按实测成本决定每个窗口的草稿数。M5 profile 下的 ragged 行固定起草 3 个 token（verify 宽度 4），参与过 ragged 窗口后单独剩下的请求沿用这一预算。草稿预算没有 CLI 选项。 |
-| Tree | `--dflash2-tree-max-nodes` 取 1–15 时，对 greedy 且无约束的请求启用 flat tree。采样请求和带约束的请求（包括开启 thinking 时附带的 reasoning budget）改走线性窗口，`tree_fallback_linear_windows` 统计这些窗口，服务端日志对每个请求记录一次原因。M5 profile 生效时，配置 tree 不会停止 ragged 合批：并发的 greedy 请求走 ragged 线性窗口，单独推进的请求走 tree 窗口。 |
+| 执行方式 | 未启用 M5 profile 时仅 B1：`--max-sequences` 仍限制同时活跃的请求数，但每次 target forward 只处理一个请求，活跃请求按窗口轮流推进。M5 profile 生效时，就绪的 greedy 请求（包括受约束请求）作为 ragged 线性行一起 verify，每次 forward 最多 `--max-sequences` 与 4 中较小者个请求。受约束行独立应用自己的推测 mask，并推进各自的约束状态，包括原生 reasoning budget。采样请求仍单独推进。两种情况都不组成 Qwen3.8 的 tensor group：`--dflash2-tensor-batch-max-width` 被接受但不起作用，health 报告的 tensor 宽度上限为 1。 |
+| 草稿预算 | M5 profile 下，符合条件、单独推进的 greedy、无约束线性窗口先按配置 block 的最大草稿数起草，再验证 drafter 置信度达到 0.5 的连续前缀，至少验证一个草稿位置；target 继续执行接受检查。单独推进的采样或受约束窗口保留自适应窗口成本策略，以普通单 token 窗口为基准校准。ragged 行固定起草 3 个 token（verify 宽度 4），参与过 ragged 窗口后单独剩下的请求优先沿用这一预算，不使用置信度验证。未启用 profile 时，默认仍为自适应策略。这些预算策略没有 CLI 选项。 |
+| 预填充 | M5 affine4 target 路径生效时，可放入一个预填充分块的单请求提示词使用一个图完成，不再拆出最后一个 token。此行为适用于无前缀缓存或缓存冷未命中；恢复了前缀时，剩余部分保留 scheduler 预填充。更长的提示词仍分块处理。 |
+| Tree | `--dflash2-tree-max-nodes` 取 1–15 时，对 greedy 且无约束的请求启用 flat tree。采样请求和带约束的请求（包括开启 thinking 时附带的 reasoning budget）改走线性窗口，`tree_fallback_linear_windows` 统计这些窗口，服务端日志对每个请求记录一次原因。M5 profile 生效时，配置 tree 不会停止 ragged 合批：并发的 greedy 请求走 ragged 线性窗口，单独推进且符合条件的无约束请求走 tree 窗口。 |
 | 采样 | 支持精确推测采样。该 target 拒绝 `--dflash2-position-keyed-sampling`。 |
 
-未启用 M5 profile 时，所有 greedy 结果（线性或 tree）都与同一 target 的普通解码逐 token 一致。M5 profile 生效时，greedy 输出可能在三方面与普通解码不同：ragged 行使用普通的批量 kernel，数值与该行单独 B1 解码不逐位一致，因此请求的输出可能取决于与哪些请求合批；affine4 target 使用 M5 affine4 投影；超过 2,048 token 的提示使用 D256 NAX 注意力和长分块 GatedDeltaNet 扫描，求和顺序不同。单独处理的请求每次运行输出相同。默认使用线性窗口，
+未启用 M5 profile 时，所有 greedy 结果（线性或 tree）都与同一 target 的普通解码逐 token 一致。M5 profile 生效时，greedy 输出可能与普通解码不同：ragged 行使用普通的批量 kernel，数值与该行单独 B1 解码不逐位一致，因此请求的输出可能取决于与哪些请求合批；affine4 target 使用 M5 投影与专家 kernel，少于 256 token 的调用与更宽调用的归约顺序不同；符合条件、超过 128 行的预填充投影使用 tiled GEMM；长提示词使用的 D256 NAX 注意力和长分块 GatedDeltaNet 扫描也会改变求和顺序。因此预填充分块形状可能影响输出。单独处理的请求在相同执行配置下可复现。默认使用线性窗口，
 因为在 M5 Max 上每个位宽的 tree 都比线性窗口慢。
 
 M5 profile（`--m5-dflash2-profile`）使用独立的 MoE 设置表，不继承 Qwen3.8 的设置。生效时开启的内容包括：
-M5 tensor-unit affine4 投影与专家 kernel、批量草稿、并发请求的 ragged 线性合批、长提示的 D256 NAX
+M5 tensor-unit affine4 投影与专家 kernel、tiled 预填充 GEMM、符合条件的单图预填充、基于置信度的单请求验证、批量草稿、并发请求的 ragged 线性合批、长提示的 D256 NAX
 注意力（预填充从 2,048 个 key 起，解码与 verify 从 8,193 个 key 起）、affine4 投影按形状选择的 split-K、启动预热和 wired
 权重。实际开启了什么，以启动日志的 `effective_settings` 和 `healthz.dflash2.m5_profile.settings` 中的
 非 null 值为准。affine4 投影只用于 affine4 target，结果确定，但与普通 MLX 解码输出不同；执行指纹显示

@@ -7,6 +7,7 @@ import argparse
 from pathlib import Path
 import re
 import subprocess
+from urllib.parse import urljoin
 
 
 def version_tuple(tag: str) -> tuple[int, int, int]:
@@ -16,7 +17,7 @@ def version_tuple(tag: str) -> tuple[int, int, int]:
     return tuple(int(value) for value in match.groups())
 
 
-def previous_stable_tag(root: Path, tag: str) -> str | None:
+def previous_release_tag(root: Path, tag: str) -> str | None:
     current = version_tuple(tag)
     try:
         tags = subprocess.check_output(
@@ -30,6 +31,12 @@ def previous_stable_tag(root: Path, tag: str) -> str | None:
             ["git", "-C", str(root), "tag", "--merged", "HEAD", "--list", "v*"],
             text=True,
         ).splitlines()
+    candidate = re.fullmatch(r"v\d+\.\d+\.\d+-rc\.([1-9]\d*)", tag)
+    if candidate and int(candidate.group(1)) > 1:
+        previous = tag.rsplit(".", 1)[0] + f".{int(candidate.group(1)) - 1}"
+        if previous not in tags:
+            raise ValueError(f"missing preceding candidate tag in release history: {previous}")
+        return previous
     candidates = []
     for candidate in tags:
         match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", candidate)
@@ -41,16 +48,40 @@ def previous_stable_tag(root: Path, tag: str) -> str | None:
     return max(candidates)[1] if candidates else None
 
 
+def release_summary(root: Path, relative: str, key: str, base: str, tag: str) -> str:
+    path = root / relative
+    notes = path.read_text(encoding="utf-8")
+    start = f"<!-- release-summary:{key} -->"
+    end = "<!-- /release-summary -->"
+    if notes.count(start) != 1:
+        raise ValueError(f"expected one {key} release summary in {relative}")
+    summary, separator, _ = notes.split(start, 1)[1].partition(end)
+    if not separator or "<!-- release-summary:" in summary or not summary.strip():
+        raise ValueError(f"empty or unclosed {key} release summary in {relative}")
+    # Summaries live next to the full notes; their relative links must still
+    # resolve to that release's immutable documentation on the Releases page.
+    source_url = f"{base}/blob/{tag}/{relative}"
+    return re.sub(
+        r"(?<=\]\()([^\s)]+)(?=\))",
+        lambda match: urljoin(source_url, match.group(1)),
+        summary.strip(),
+    )
+
+
 def render(root: Path, repository: str, tag: str, candidate: bool) -> str:
-    template = (root / ".github/release-notes-template.md").read_text()
+    version_tuple(tag)
+    if candidate != ("-rc." in tag):
+        raise ValueError("RC tags require --candidate; stable tags must not use it")
+    template = (root / ".github/release-notes-template.md").read_text(encoding="utf-8")
     version = tag.removeprefix("v").split("-", 1)[0]
     for relative in (f"docs/release-notes/{version}.md",
                      f"docs/zh-CN/release-notes/{version}.md"):
         if not (root / relative).is_file():
             raise FileNotFoundError(f"missing release notes: {relative}")
-    previous = previous_stable_tag(root, tag)
+    previous = previous_release_tag(root, tag)
     base = f"https://github.com/{repository}"
     release_url = f"{base}/releases/download/{tag}"
+    key = tag.split("-", 1)[1] if candidate else "stable"
     values = {
         "RELEASE_STATUS_EN": f"{tag} is a prerelease." if candidate else f"{tag} is a stable release.",
         "PURPOSE_EN": "testing and feedback." if candidate else "general use.",
@@ -59,6 +90,10 @@ def render(root: Path, repository: str, tag: str, candidate: bool) -> str:
         "MIN_MACOS": "26.4",
         "DMG_URL": f"{release_url}/IronMLX.dmg",
         "ZIP_URL": f"{release_url}/IronMLX-{version}.zip",
+        "CHANGES_HEADING_EN": f"Changes since {previous}" if previous else "Changes in this release",
+        "CHANGES_HEADING_ZH": f"相对 {previous} 的变化" if previous else "本次更新",
+        "CHANGES_EN": release_summary(root, f"docs/release-notes/{version}.md", key, base, tag),
+        "CHANGES_ZH": release_summary(root, f"docs/zh-CN/release-notes/{version}.md", key, base, tag),
         "SUPPORTED_MODELS_URL": f"{base}/blob/{tag}/docs/supported-models.md",
         "KNOWN_ISSUES_URL": f"{base}/blob/{tag}/docs/known-issues.md",
         "SUPPORTED_MODELS_ZH_URL": f"{base}/blob/{tag}/docs/zh-CN/supported-models.md",

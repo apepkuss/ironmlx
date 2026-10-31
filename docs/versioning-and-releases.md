@@ -19,7 +19,7 @@ dependencies, `Cargo.lock`, and the App plist. It increments the App build
 number by default; pass an explicit number when needed:
 
 ```bash
-scripts/bump-version.sh 0.2.0 7
+scripts/bump-version.sh 0.2.0 8
 ```
 
 Commit all generated changes and run:
@@ -36,6 +36,30 @@ IronMLX cannot accidentally publish to crates.io.
 Stable tags use `vX.Y.Z` and must match `VERSION`. DMG, App About, CLI
 `--version`, `healthz.version`, the release tag, and release notes must use the
 same product version. Release candidates use `vX.Y.Z-rc.N` tags.
+
+The GitHub Release body describes changes in that release. RC1 compares with
+the previous stable release; each later RC compares with the preceding RC of
+the same product version. A stable release summarizes the full release line
+since the previous stable release. General product capabilities belong in the
+linked user guide and supported-model matrix.
+
+Maintain the English and Simplified Chinese summaries in
+`docs/release-notes/X.Y.Z.md` and `docs/zh-CN/release-notes/X.Y.Z.md`.
+Wrap the bullets for each candidate with `<!-- release-summary:rc.N -->` and
+`<!-- /release-summary -->`; use `<!-- release-summary:stable -->` for the
+stable overview. The renderer selects only the requested summary and converts
+its relative links to documentation at the selected tag. Missing, empty or
+duplicate summaries fail rendering rather than falling back to generic text.
+The template owns download links, system requirements and release status.
+
+Preview a candidate body before creating its tag:
+
+```bash
+python3 scripts/render-release-notes.py v0.2.0-rc.4 --candidate --repository apepkuss/ironmlx
+```
+
+The preceding RC tag must already be in the release history. This command
+only renders text; it does not edit existing GitHub Releases or create tags.
 
 ## Current hard gate
 
