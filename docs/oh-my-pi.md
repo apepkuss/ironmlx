@@ -79,3 +79,16 @@ One-click setup configures `models.yml`; it does not change terminal proxy varia
 
 The text check should return `IRONMLX_OK`. The tool check should execute `pwd` once and return the working directory; a model merely describing the command is not a successful tool call.
 If it fails, check the endpoint, model ID and template support, then see [Troubleshooting](troubleshooting.md).
+
+## Recorded client verification
+
+The OMP 18.12.6 run on 2026-10-22 explicitly enabled the real-client test and passed both text and tool checks: `IRONMLX_OK`, one `bash` execution, and no tool error. This evidence was reused in the 2026-11-01 acceptance review; see the [client acceptance evidence](validation/agent-client-acceptance.json).
+
+The live test is opt-in. From the repository root, with OMP installed and `mlx-community/Qwen3.5-4B-MLX-4bit` loaded on port 9068, run:
+
+```bash
+IRONMLX_TEST_OMP_LIVE=1 swift test --package-path ironmlx-app --no-parallel \
+  --filter ompInstalledCLIAcceptsGeneratedConfigurationAndResponds
+```
+
+A default Swift test pass does not establish real-client execution. Reuse recorded evidence while the relevant implementation remains unchanged; rerun the affected checks after a relevant change or a new failure.

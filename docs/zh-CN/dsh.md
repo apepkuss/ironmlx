@@ -2,12 +2,12 @@
 
 [English](../dsh.md)
 
-DeepSeek Harness 可通过 Responses API 将 IronMLX 用作推理服务。本指南已使用 dsh `master` 的 `ddefc45fbc` 与本地 Qwen3.8-27B-4bit + DFlash2 组合验证；其他 dsh 版本和模型的行为可能不同。请先启动 IronMLX 并加载目标模型；dsh 需按其项目说明单独安装。
+DeepSeek Harness 可通过 Responses API 将 IronMLX 用作推理服务。Dashboard 分别提供官方 DeepSeek Harness 和社区 DSH Desktop 的一键配置。配置前请先启动 IronMLX 并加载目标对话模型；支持版本及已验证的客户端结果见下文。
 
 根据你使用的 DSH 客户端，选择对应的配置方式：
 
 - [官方 DeepSeek Harness 一键配置](#官方-deepseek-harness-一键配置)：分别配置官方 CLI 和 Desktop。
-- [DSH Desktop App](#dsh-desktop-app-配置)：通过图形界面创建提供方并选择模型。
+- [DSH Desktop App](#dsh-desktop-app-配置)：一键配置社区版，或通过图形界面创建提供方。
 - [DSH CLI](#dsh-cli-配置)：生成或编写 overlay，通过 `--patch` 启动。
 
 ## 官方 DeepSeek Harness 一键配置
@@ -32,6 +32,21 @@ CLI 需提供可直接执行的 `dsh` 命令，例如按官方 npm 包安装：`
 
 手动配置默认折叠。下文 CLI 的独立 `ironmlx.patch.yml` 是按次使用的高级替代方式；一键配置不需要 `--patch`。官方 Desktop 的手动方式是 **设置 → 模型 → 自定义模型 API**，填写 `ironmlx-local`、`OpenAI Responses`、IronMLX `/v1` 地址和 `local`，获取并添加模型后在新会话选择它。
 
+### 官方 CLI 一键配置后的验证
+
+选择 **DSH CLI** 并完成一键配置后，在临时项目目录执行以下命令。它们直接使用已配置的 Headless profile，无需 overlay，也无需导出占位 API Key。
+
+```bash
+dsh --profile headless --json "Reply with exactly IRONMLX_OK"
+probe_file="$(mktemp)"
+printf 'IRONMLX_DSH_TOOL_OK\n' > "$probe_file"
+dsh --profile headless --json \
+  "Use the read tool exactly once to read $probe_file, then reply with its complete contents."
+rm -f "$probe_file"
+```
+
+文本轮应以 `completed` 结束并返回 `IRONMLX_OK`；工具轮应有匹配的 `tool_call` 和成功的 `tool_result`，返回文件标记并以 `completed` 结束。仅收到描述读取动作的文本不算通过。官方 Desktop 请重新打开应用并新建 IronMLX 会话，在聊天中使用相同的文件读取检查。
+
 已验证仅安装社区版时的官方未安装提示与配置隔离；安装官方 Desktop `0.2.1-rc.2` 后，已核对签名发布包标识 `com.deepseek.dsh` 并通过真实安装检测。成功写入、旧版本、合并、备份、重复执行和阻止条件通过临时目录验证。官方 Desktop `0.2.1-rc.2` 已通过同一原生配置服务的真实写入验证，确认备份权限、默认模型、原有设置和社区版配置均符合预期。重新打开官方 Desktop 后，已确认默认使用 IronMLX 的 Qwen3.5-4B-MLX-4bit，并发送“Hi”收到正常回复。2026-11-01 已使用官方 Desktop 携带的 CLI、隔离 home 与原生一键配置服务，完成官方 CLI 文本回复和真实工具执行验收，详见[客户端验收证据](../validation/agent-client-acceptance.json)。配置成功提示本身不代表已完成聊天验证。
 
 ## DSH Desktop App 配置
@@ -45,6 +60,8 @@ CLI 需提供可直接执行的 `dsh` 命令，例如按官方 npm 包安装：`
 在 IronMLX App 内打开 **Dashboard → Agent → DSH Desktop**，选择模型后点击 **一键配置**。安装检查先于模型检查：未安装社区版、版本低于 `0.12.1` 或无法识别版本时，向导提示安装／升级并停止，不创建或修改任何 DSH 配置。安装后可再次点击，重新检测。
 
 `0.12.1` 是此适配器采用的首个配置格式基线。检测通过后，请先退出 DSH Desktop，并在 IronMLX 本机模式中加载对话 LLM。适配器将 IronMLX provider 合并到 `~/Library/Application Support/dsh-desktop/harness/profiles/web/cordis.patch.yml`，并在同一 Harness home 的 `.credentials.yaml` 中保存本机占位凭据引用。旧版 `settings.yaml` 尚待迁移时，会提示先启动一次社区版完成迁移。
+
+若现有 `llm-pi-ai` 条目包含 `disabled: true`，一键配置会在修改 profile 或凭据前报告冲突，不生成备份。请先确认是否确实需要启用插件，手动处理该禁用条目后重试；向导不会自动改变禁用状态。
 
 已有文件在修改前保存为同目录下的 `*.ironmlx-backup-<UUID>`；保留其他 provider 和设置，YAML 格式及注释可能被规范化，原始文本可从备份恢复。重复应用相同配置不重复生成备份。单轮输出预算最多采用 `4096` tokens，并受模型公布容量限制。
 
@@ -84,13 +101,15 @@ DSH Desktop 通过 GUI 保存提供方配置，不会自动加载 CLI overlay，
 
 验证 Desktop 路径时，新建会话并选择 IronMLX 模型，要求模型只回复 `IRONMLX_OK`。正常返回即可确认提供方发现和 Responses 请求可用。工具仍由 DSH Desktop 在本机执行；IronMLX 只负责推理和返回结构化工具调用。
 
+验证工具调用时，创建一个包含随机标记的临时文本文件，在 Desktop 聊天中要求使用 `read` 读取该文件。应确认实际读取动作、成功的工具结果，以及包含标记的最终回复。已安装的社区 Desktop host 已通过此项，详见[客户端验收证据](../validation/agent-client-acceptance.json)。
+
 ### 常见配置问题
 
 `local` 仅是本机回环免鉴权接口的占位值。使用需要鉴权的 LAN 接口时，应改填实际的 IronMLX LAN 地址和 API Key。若无法获取模型，请确认 IronMLX 正在运行、API 地址包含 `/v1`，并且 API 协议为 `openai-responses`。
 
 ## DSH CLI 配置
 
-CLI 优先使用上述一键配置。需要独立 overlay 时，可展开 Dashboard 手动配置或使用下面的示例，通过 `--patch` 启动并验证请求。
+CLI 优先使用上述一键配置。以下独立 overlay 是按次使用的高级替代方式，其早期验证使用 dsh `master` 的 `ddefc45fbc` 与 Qwen3.8-27B-4bit + DFlash2；当前一键配置的真实客户端证据单独记录。
 
 ### 使用 Dashboard 生成配置
 
@@ -131,7 +150,7 @@ CLI 向导根据当前已加载模型生成 dsh overlay，并在可用时从 `/v
 ### 保存配置
 
 将 overlay 保存为 `$DSH_HOME/ironmlx.patch.yml`（通常为 `~/.dsh/ironmlx.patch.yml`）。仅在需要使用 IronMLX 的运行中传入 `--patch`；不要覆盖现有的 home 级 `cordis.patch.yml`。
-如果 `$DSH_HOME/settings.yaml` 已指定默认模型或包含 `llm-pi-ai` 覆盖项，请在该文件中更新或移除冲突的配置：dsh 会在 overlay 的基础配置之后应用用户设置。
+当前官方版本在启动时迁移旧 `settings.yaml`。手动配置前请先启动一次 dsh 完成迁移，再检查 home／profile patch 中是否有冲突的模型或 Provider 覆盖。
 
 `IRONMLX_API_KEY=local` 只是满足 dsh 对本地免鉴权 endpoint 的凭据查询的占位值，不是 IronMLX 的 LAN API Key。本指南仅针对本机回环接口，不覆盖需要鉴权的 LAN 访问。
 

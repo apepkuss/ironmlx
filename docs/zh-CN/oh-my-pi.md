@@ -79,3 +79,16 @@ export no_proxy="$NO_PROXY"
 
 文本检查应返回 `IRONMLX_OK`；工具检查应实际执行一次 `pwd` 并返回工作目录。仅收到模型描述命令的文本不算工具调用成功。
 失败时先核对 endpoint、模型 ID 和模板支持，再查看[故障排查](troubleshooting.md)。
+
+## 已记录的客户端验证
+
+2026-10-22 的 OMP 18.12.6 验证显式开启了真实客户端测试，文本返回 `IRONMLX_OK`，工具检查确认 `bash` 执行一次且无错误。2026-11-01 的验收核对直接复用此记录，详见[客户端验收证据](../validation/agent-client-acceptance.json)。
+
+真实测试需显式开启。在仓库根目录执行前，需安装 OMP，并在 9068 端口加载 `mlx-community/Qwen3.5-4B-MLX-4bit`：
+
+```bash
+IRONMLX_TEST_OMP_LIVE=1 swift test --package-path ironmlx-app --no-parallel \
+  --filter ompInstalledCLIAcceptsGeneratedConfigurationAndResponds
+```
+
+默认 Swift 测试通过不代表真实客户端已执行。相关实现未变化时复用已有证据；只有相关实现变化或出现新问题时才重测对应部分。

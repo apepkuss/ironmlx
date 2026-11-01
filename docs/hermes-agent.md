@@ -78,3 +78,9 @@ If it fails, check the endpoint, model ID and template support, then see [Troubl
 ## Advanced: use the default profile
 
 To configure the default profile explicitly, merge the same fields into `~/.hermes/config.yaml` and replace `--profile ironmlx` with `--profile default` in the commands above. This changes the provider used by the default profile. In Desktop, select the house button at the bottom of the sidebar and start a new chat. Dashboard setup always uses the dedicated `ironmlx` profile.
+
+## Recorded client verification
+
+The 2026-10-22 real CLI session used the dedicated `ironmlx` profile and recorded one `terminal` call running `pwd`, a matching tool result with `exit_code: 0`, and the working directory in the final reply. This evidence was reused on 2026-11-01; see the [client acceptance evidence](validation/agent-client-acceptance.json).
+
+`hermesRepositoryAcceptsGeneratedProfileAndProvider` runs its optional repository check only when `IRONMLX_TEST_HERMES_REPO` and `IRONMLX_TEST_HERMES_PYTHON` are set. That check validates profile/provider parsing; it does not execute a text or tool turn. Default tests and configuration-parser checks therefore do not replace the real commands in **Verify** above. Reuse recorded client evidence unless the relevant implementation changes or a new failure appears.

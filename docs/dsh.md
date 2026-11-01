@@ -2,12 +2,12 @@
 
 [简体中文](zh-CN/dsh.md)
 
-DeepSeek Harness can use IronMLX as an inference provider through the Responses API. This guide was verified with dsh `master` at `ddefc45fbc` and a local Qwen3.8-27B-4bit + DFlash2 service. Other dsh revisions and models may behave differently. Start IronMLX and load the intended model first; install dsh separately following its own project instructions.
+DeepSeek Harness can use IronMLX through the Responses API. The Dashboard provides separate one-click setup for official DeepSeek Harness and community DSH Desktop. Start IronMLX and load the intended conversation model before configuration. Supported versions and verified client results are listed below.
 
 Choose the configuration path for the DSH client you use:
 
 - [Official DeepSeek Harness one-click setup](#official-deepseek-harness-one-click-setup): configure official CLI and Desktop separately.
-- [DSH Desktop App](#dsh-desktop-app-configuration): create a provider and select models through the GUI.
+- [DSH Desktop App](#dsh-desktop-app-configuration): configure the community app with one click or through its GUI.
 - [DSH CLI](#dsh-cli-configuration): generate or write an overlay, then launch with `--patch`.
 
 ## Official DeepSeek Harness one-click setup
@@ -32,6 +32,21 @@ Only the default `~/.dsh` is supported. A custom process or CLI login-shell `DSH
 
 Manual instructions are collapsed by default. The independent CLI `ironmlx.patch.yml` below remains an advanced per-invocation alternative; one-click setup does not require `--patch`. For official Desktop manual setup, open **Settings → Models → Custom model API**, enter `ironmlx-local`, `OpenAI Responses`, the IronMLX `/v1` endpoint, and `local`, then fetch/add the model and select it in a new chat.
 
+### Verify after official CLI one-click setup
+
+Run these commands from a disposable project directory after selecting **DSH CLI** and completing setup. They use the configured Headless profile directly; no overlay or exported placeholder key is required.
+
+```bash
+dsh --profile headless --json "Reply with exactly IRONMLX_OK"
+probe_file="$(mktemp)"
+printf 'IRONMLX_DSH_TOOL_OK\n' > "$probe_file"
+dsh --profile headless --json \
+  "Use the read tool exactly once to read $probe_file, then reply with its complete contents."
+rm -f "$probe_file"
+```
+
+The text turn must finish with `completed` and return `IRONMLX_OK`. The tool turn must contain matching `tool_call` and successful `tool_result` events, return the file marker, and finish with `completed`. A text description of a read is insufficient. For official Desktop, reopen the app and start a new IronMLX chat; use the same file-reading check in chat.
+
 Official missing-installation prompts and isolation were verified with only community Desktop installed. After installing official Desktop `0.2.1-rc.2`, its signed distribution identity `com.deepseek.dsh` and real installation detection were verified. Successful writes, version gates, merges, backups, repeated setup, and stop conditions are tested in temporary directories. Official Desktop `0.2.1-rc.2` has also passed real configuration writes through the same native service, including backup permissions, default model, preserved settings, and community isolation. After reopening official Desktop, its default selection used IronMLX with Qwen3.5-4B-MLX-4bit, and a Hi message received a normal reply. Official CLI text and tool execution were subsequently verified on 2026-11-01 using the installed official Desktop CLI, an isolated home, and production one-click configuration. See the [client acceptance evidence](validation/agent-client-acceptance.json). A saved-configuration result alone does not certify a chat turn.
 
 ## DSH Desktop App configuration
@@ -45,6 +60,8 @@ Community **DSH Desktop** and official **DeepSeek Harness** have separate Dashbo
 In the IronMLX App, open **Dashboard → Agent → DSH Desktop**, select a model, and click **One-click setup**. Installation checks run before model checks. Missing community installations, versions below `0.12.1`, and unverifiable versions stop setup without creating or changing DSH configuration, and show the community installation link. Click again after installation or upgrading to repeat detection.
 
 `0.12.1` is the adapter's initial configuration-format baseline. Quit DSH Desktop and load a conversation LLM in IronMLX local mode before applying configuration. The adapter merges the provider into `~/Library/Application Support/dsh-desktop/harness/profiles/web/cordis.patch.yml` and a local placeholder credential reference into `.credentials.yaml` in the same Harness home. If legacy `settings.yaml` needs migration, launch the community app once to finish migration first.
+
+If the existing `llm-pi-ai` entry has `disabled: true`, setup reports a conflict before changing either the profile or credentials, and creates no backup. Confirm that the plugin should be enabled, resolve the disabled entry manually, and retry. Setup does not silently enable it.
 
 Existing files are backed up beside the originals as `*.ironmlx-backup-<UUID>` before modification. Other providers and settings are retained; YAML formatting and comments may be normalized, with original text retained in backups. Reapplying unchanged configuration does not create more backups. The output budget is capped at 4096 tokens and bounded by advertised model capacity.
 
@@ -84,13 +101,15 @@ On the IronMLX Dashboard **Agent** page, select **DSH Desktop**. The guide provi
 
 To verify the Desktop path, start a new chat with the IronMLX model and ask it to reply with exactly `IRONMLX_OK`. A normal response confirms provider discovery and a Responses request. Tool execution still happens inside DSH Desktop; IronMLX only performs inference and returns structured tool calls.
 
+For tool verification, create a disposable text file containing a random marker and ask the Desktop chat to use `read` to read that file. Confirm an actual read action, a successful tool result, and a final reply containing the marker. The installed community host passed this check; see the [client acceptance evidence](validation/agent-client-acceptance.json).
+
 ### Common configuration problems
 
 `local` is only a placeholder for the keyless loopback endpoint. For authenticated LAN access, use the actual IronMLX LAN address and API key instead. If model discovery fails, confirm that IronMLX is running, the address includes `/v1`, and the selected protocol is `openai-responses`.
 
 ## DSH CLI configuration
 
-Use an overlay generated by the Dashboard, or write one using the example below. After saving it, launch with `--patch` and verify your requests.
+Prefer official CLI one-click setup above. The following overlay is an advanced per-invocation alternative. Its earlier verification used dsh `master` at `ddefc45fbc` with Qwen3.8-27B-4bit + DFlash2; current one-click client evidence is recorded separately.
 
 ### Generate configuration with the Dashboard
 
@@ -131,7 +150,7 @@ The following is an example; replace `MODEL_ID` and both capacities with values 
 ### Save the configuration
 
 Save the overlay as `$DSH_HOME/ironmlx.patch.yml` (normally `~/.dsh/ironmlx.patch.yml`). Pass it with `--patch` only on runs that should use IronMLX; do not replace an existing home-level `cordis.patch.yml`.
-If `$DSH_HOME/settings.yaml` already selects a default model or contains `llm-pi-ai` overrides, update or remove conflicting entries there: dsh applies user settings after the overlay's base configuration.
+Current official releases migrate legacy `settings.yaml` on startup. Launch dsh once to finish migration before manual configuration, then check the home/profile patches for conflicting model or provider overrides.
 
 `IRONMLX_API_KEY=local` is a placeholder that satisfies dsh's credential lookup for the local keyless endpoint. It is not an IronMLX LAN API key. This guide targets the local loopback listener, not authenticated LAN access.
 

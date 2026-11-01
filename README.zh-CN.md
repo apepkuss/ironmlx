@@ -36,7 +36,7 @@
 
 - **图形界面** — 通过 Dashboard 可视化管理模型、查看服务状态与调整配置。
 
-- **Agent 集成** — 支持 [Hermes Agent](docs/zh-CN/hermes-agent.md)、[oh-my-pi](docs/zh-CN/oh-my-pi.md) 和 [DSH CLI / Desktop](docs/zh-CN/dsh.md)。
+- **Agent 集成** — 为 [Hermes Agent](docs/zh-CN/hermes-agent.md)、[oh-my-pi](docs/zh-CN/oh-my-pi.md)、[社区 DSH Desktop](docs/zh-CN/dsh.md#dsh-desktop-app-配置) 和[官方 DeepSeek Harness CLI / Desktop](docs/zh-CN/dsh.md#官方-deepseek-harness-一键配置) 提供一键配置。
 
 - **多类模型** — 支持[文本与视觉](docs/zh-CN/text-vision-api.md)、[文本、图片与音频向量](docs/zh-CN/text-embeddings.md)、[语音合成](docs/zh-CN/audio-speech-api.md)、[图片生成](docs/zh-CN/image-generation-api.md)和决策推理（[System One](docs/zh-CN/laya-systemone-api.md) 或 [OpenAI Decisions API](docs/zh-CN/openai-decisions-api.md)）。
 
