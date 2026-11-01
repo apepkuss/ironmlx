@@ -6,16 +6,59 @@ DeepSeek Harness 可通过 Responses API 将 IronMLX 用作推理服务。本指
 
 根据你使用的 DSH 客户端，选择对应的配置方式：
 
+- [官方 DeepSeek Harness 一键配置](#官方-deepseek-harness-一键配置)：分别配置官方 CLI 和 Desktop。
 - [DSH Desktop App](#dsh-desktop-app-配置)：通过图形界面创建提供方并选择模型。
 - [DSH CLI](#dsh-cli-配置)：生成或编写 overlay，通过 `--patch` 启动。
 
+## 官方 DeepSeek Harness 一键配置
+
+在 **Dashboard → Agent → DeepSeek Harness** 中选择应用（默认 **官方桌面版**，也可切换为 **DSH CLI**），选择已加载的对话模型，然后点击 **一键配置**。适配器依据官方仓库 `687f282e86` 的 `0.2.1-rc.2` 配置格式实现；这是最低支持版本，稳定版及后续 RC 可用，开发／测试／alpha 构建不能通过检测。官方 CLI 安装说明见 [DeepSeek 官方仓库](https://github.com/deepseek-ai/deepseek-harness)，桌面版从 [DeepSeek 官方下载页](https://www.deepseek.com/zh/download/) 安装。
+
+CLI 需提供可直接执行的 `dsh` 命令，例如按官方 npm 包安装：`npm install -g @deepseek-ai/dsh`。仅存在 `npx` 缓存不视为已安装 CLI。
+
+安装和版本检查先于模型、后端及配置写入。仅安装社区 DSH Desktop 时，官方 CLI 和 Desktop 都提示未安装并停止，不创建 `~/.dsh`。官方 Desktop 通过 bundle ID `com.deepseek.dsh` 识别；社区版的 `io.dsh.desktop` 不能通过。CLI 要求可找到官方 `@deepseek-ai/dsh` 包的 `dsh` 入口，或官方 Desktop 提供的命令链接；社区应用内携带的同名 runtime 不算官方 CLI。
+
+| 应用 | 一键配置位置 | 使用方式 |
+| --- | --- | --- |
+| 官方 CLI | `~/.dsh/profiles/web/cordis.patch.yml`、`~/.dsh/profiles/headless/cordis.patch.yml` | `dsh web` 或 `dsh --profile headless "Hi"` |
+| 官方 Desktop | `~/.dsh/profiles/desktop/cordis.patch.yml` | 重新打开官方应用，以 IronMLX 开始新会话 |
+| 社区 DSH Desktop | `~/Library/Application Support/dsh-desktop/harness/profiles/web/cordis.patch.yml` | 使用独立 DSH Desktop 卡片 |
+
+上游 Headless 默认禁用凭据存储。一键配置会显式启用其默认托管存储，并设置 `watch: false`，使已保存的本机占位凭据无需通过环境变量导出即可使用；已有自定义凭据存储覆盖时停止配置。Web 和 Desktop 保持原有凭据行为。
+
+官方两个入口共享 `~/.dsh/.credentials.yaml`，使用独立引用 `IRONMLX_HARNESS_API_KEY` 保存本机占位值 `local`。一键配置只适用于本机模式，采用当前模型公布的 context window，输出预算不超过 `4096` tokens，使用 SSE，默认不声明 reasoning 档位。它合并已有 Provider 和模型，选择 IronMLX 作为对应 profile 的新会话默认模型；其他 profile、已有会话和社区配置不变。修改前备份现有文件，文件权限设为 `0600`；不更改的文件不重写、不重复备份，写入失败时尝试恢复已修改文件。YAML 注释和格式可能规范化，原始内容保留在备份中。
+
+仅支持默认 `~/.dsh`。检测到进程或 CLI 登录 Shell 的自定义 `DSH_HOME` 时停止；不会跟随符号链接写入社区目录。请先关闭官方 Desktop 与运行中的 `dsh`。检测到 profile 锁、旧 `settings.yaml`、home 级 `cordis.patch.yml` 对模型／Provider／凭据存储的覆盖，或不能安全合并的 YAML 时停止，改用手动配置或先处理冲突。首次启动官方应用负责初始化 profile 的 package manifest，一键配置不会代为安装插件。
+
+手动配置默认折叠。下文 CLI 的独立 `ironmlx.patch.yml` 是按次使用的高级替代方式；一键配置不需要 `--patch`。官方 Desktop 的手动方式是 **设置 → 模型 → 自定义模型 API**，填写 `ironmlx-local`、`OpenAI Responses`、IronMLX `/v1` 地址和 `local`，获取并添加模型后在新会话选择它。
+
+已验证仅安装社区版时的官方未安装提示与配置隔离；安装官方 Desktop `0.2.1-rc.2` 后，已核对签名发布包标识 `com.deepseek.dsh` 并通过真实安装检测。成功写入、旧版本、合并、备份、重复执行和阻止条件通过临时目录验证。官方 Desktop `0.2.1-rc.2` 已通过同一原生配置服务的真实写入验证，确认备份权限、默认模型、原有设置和社区版配置均符合预期。重新打开官方 Desktop 后，已确认默认使用 IronMLX 的 Qwen3.5-4B-MLX-4bit，并发送“Hi”收到正常回复。2026-11-01 已使用官方 Desktop 携带的 CLI、隔离 home 与原生一键配置服务，完成官方 CLI 文本回复和真实工具执行验收，详见[客户端验收证据](../validation/agent-client-acceptance.json)。配置成功提示本身不代表已完成聊天验证。
+
 ## DSH Desktop App 配置
+
+这里的 DSH Desktop 是从 [dshdesktop.com](https://dshdesktop.com/en/) 下载的社区版（macOS bundle ID：`io.dsh.desktop`），不是 DeepSeek 官方桌面应用。
+
+社区版 **DSH Desktop** 与官方 **DeepSeek Harness** 使用独立 Dashboard 卡片和安装检测。官方卡片可分别配置 CLI 与官方 Desktop。
+
+### 一键配置
+
+在 IronMLX App 内打开 **Dashboard → Agent → DSH Desktop**，选择模型后点击 **一键配置**。安装检查先于模型检查：未安装社区版、版本低于 `0.12.1` 或无法识别版本时，向导提示安装／升级并停止，不创建或修改任何 DSH 配置。安装后可再次点击，重新检测。
+
+`0.12.1` 是此适配器采用的首个配置格式基线。检测通过后，请先退出 DSH Desktop，并在 IronMLX 本机模式中加载对话 LLM。适配器将 IronMLX provider 合并到 `~/Library/Application Support/dsh-desktop/harness/profiles/web/cordis.patch.yml`，并在同一 Harness home 的 `.credentials.yaml` 中保存本机占位凭据引用。旧版 `settings.yaml` 尚待迁移时，会提示先启动一次社区版完成迁移。
+
+已有文件在修改前保存为同目录下的 `*.ironmlx-backup-<UUID>`；保留其他 provider 和设置，YAML 格式及注释可能被规范化，原始文本可从备份恢复。重复应用相同配置不重复生成备份。单轮输出预算最多采用 `4096` tokens，并受模型公布容量限制。
+
+“配置已保存”只表示写入完成。打开社区版 DSH Desktop，新建会话并选择 **IronMLX / 你的模型**，按下文验证连接。本机未安装时的提示已通过原生 Dashboard 测试；已安装路径使用临时配置验证；2026-11-01 已通过真实社区 Desktop host 执行一次 read，返回随机文件标记、isError=false，且会话正常完成，详见[客户端验收证据](../validation/agent-client-acceptance.json)。已成功的文本聊天直接复用。
+
+### 手动配置
+
+Dashboard 中的手动说明默认折叠，需要自定义地址、LAN 接入或排障时可展开；“验证连接”作为一键配置和手动配置的共用步骤单独展示。
 
 DSH Desktop 通过 GUI 保存提供方配置，不会自动加载 CLI overlay，也不需要修改 `DSH_HOME`。
 
 ### 获取连接信息
 
-在 IronMLX Dashboard 的 **Agent** 页选择 **DeepSeek Harness → DSH Desktop**。向导会提供当前本机 endpoint 对应的连接字段和 GUI 操作步骤。
+在 IronMLX Dashboard 的 **Agent** 页选择 **DSH Desktop**。向导会提供当前本机 endpoint 对应的连接字段和 GUI 操作步骤。
 
 ### 创建自定义提供方
 
@@ -47,7 +90,7 @@ DSH Desktop 通过 GUI 保存提供方配置，不会自动加载 CLI overlay，
 
 ## DSH CLI 配置
 
-CLI 可以使用 Dashboard 生成的 overlay，也可以按下面的示例手动编写。保存配置后，通过 `--patch` 启动并验证请求。
+CLI 优先使用上述一键配置。需要独立 overlay 时，可展开 Dashboard 手动配置或使用下面的示例，通过 `--patch` 启动并验证请求。
 
 ### 使用 Dashboard 生成配置
 

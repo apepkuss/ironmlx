@@ -52,6 +52,23 @@
         "usage": "Identifies the supported DeepSeek Harness integration in light appearance."
       },
       {
+        "bundled_modifications": "None; copied byte-for-byte from the community Desktop application icon.",
+        "bundled_path": "ironmlx-app/Sources/IronMLXAppCore/Resources/dsh-desktop-logo.png",
+        "bundled_sha256": "4fa81f05eef51cf6b4388539de436085939f26b88f4f2a0095896bc48a172424",
+        "component": "DSH Desktop community logo",
+        "copyright": "Copyright (c) 2026 DataElement",
+        "license": "MIT",
+        "license_file": "asset-dsh-desktop-mit.txt",
+        "license_sha256": "434c81c99d0154715e5bdfca16fe5fcc4473346d34a329e19d2aea4ef73cb29e",
+        "license_url": "https://github.com/dataelement/dsh-desktop/blob/a170609b2c6426222cd9275d047f9409dcc753b0/LICENSE",
+        "repository": "https://github.com/dataelement/dsh-desktop",
+        "revision": "a170609b2c6426222cd9275d047f9409dcc753b0",
+        "source_path": "build/app-icon.png",
+        "source_url": "https://github.com/dataelement/dsh-desktop/blob/a170609b2c6426222cd9275d047f9409dcc753b0/build/app-icon.png",
+        "upstream_sha256": "4fa81f05eef51cf6b4388539de436085939f26b88f4f2a0095896bc48a172424",
+        "usage": "Identifies the community DSH Desktop integration, distinct from DeepSeek official applications."
+      },
+      {
         "bundled_hash_scope": "License notice text; not a hash of adapted implementations",
         "bundled_modifications": "Retains upstream attribution for the Rust EmbeddingGemma 2 text, vision and audio adapters. Model weights and Python are not bundled.",
         "bundled_path": "ironmlx-lm/licenses/mlx-vlm-MIT.txt",
@@ -210,7 +227,7 @@
       }
     ],
     "manifest": "compliance/bundled-assets.json",
-    "manifest_sha256": "acf9af792598ae4d83426d3e91a290acadd723402dc773532ac14a48521956fb"
+    "manifest_sha256": "6b20182fae3fdb1731f53006433efdd69983cbc03baa34656ab69aafce99656d"
   },
   "generation": {
     "cargo_about_config": "about.toml",
@@ -4228,6 +4245,16 @@
         "version": "2.9.6"
       },
       {
+        "component": "Yams",
+        "identity": "yams",
+        "license": "MIT",
+        "license_file": "swift-yams-license.txt",
+        "license_sha256": "0354b0ea403d2e78059c5ae0510a2cfae9f8eb306fcef094ac9fff5b47e20bed",
+        "repository": "https://github.com/jpsim/Yams.git",
+        "revision": "a27b21e0c81c5bf42049b897a62aaf387e80f279",
+        "version": "6.2.2"
+      },
+      {
         "component": "ZIPFoundation",
         "identity": "zipfoundation",
         "license": "MIT",
@@ -4239,6 +4266,6 @@
       }
     ],
     "manifest": "ironmlx-app/Package.swift",
-    "manifest_sha256": "9e6cc4ad64e1e9abda6a20c29aa994d95dfd7d712f07b0d72f7ead2a98119c50"
+    "manifest_sha256": "247397917a77f9b2d0853ed3cb19cce27b4c45161939516e1d78ece3a940e3d8"
   }
 }

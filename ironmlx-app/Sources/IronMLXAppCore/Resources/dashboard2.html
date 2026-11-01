@@ -1479,6 +1479,76 @@
     gap: 16px;
     margin-bottom: 14px;
   }
+  .agent-setup-feedback {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-top: 16px;
+    padding: 14px 16px;
+    border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+    border-left-width: 3px;
+    border-radius: 9px;
+    background: color-mix(in srgb, var(--accent) 7%, var(--card-bg));
+    color: var(--text);
+  }
+  .agent-setup-feedback[hidden], .agent-setup-feedback-action[hidden] { display: none; }
+  .agent-setup-feedback[data-tone="warning"] {
+    background: var(--settings-notice-bg);
+    border-color: var(--settings-notice-border);
+    color: var(--settings-notice-text);
+  }
+  .agent-setup-feedback[data-tone="error"] {
+    background: var(--settings-error-bg);
+    border-color: var(--settings-error-border);
+    color: var(--settings-error-text);
+  }
+  .agent-setup-feedback[data-tone="success"] {
+    background: color-mix(in srgb, var(--green) 9%, var(--card-bg));
+    border-color: color-mix(in srgb, var(--green) 45%, var(--border));
+  }
+  .agent-setup-feedback-icon {
+    display: inline-grid;
+    place-items: center;
+    flex: 0 0 19px;
+    width: 19px;
+    height: 19px;
+    margin-top: 1px;
+    border: 1.5px solid currentColor;
+    border-radius: 50%;
+    font-size: 12px;
+    line-height: 1;
+    font-weight: 700;
+  }
+  .agent-setup-feedback[data-tone="info"] .agent-setup-feedback-icon { color: var(--accent); }
+  .agent-setup-feedback[data-tone="success"] .agent-setup-feedback-icon { color: var(--green); }
+  .agent-setup-feedback-content { min-width: 0; }
+  .agent-setup-feedback-message { margin: 0; font-size: 13px; line-height: 1.65; }
+  .agent-setup-feedback-action {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    padding: 6px 10px;
+    border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+    border-radius: 6px;
+    color: inherit;
+    background: color-mix(in srgb, var(--card-bg) 55%, transparent);
+    font-size: 12px;
+    font-weight: 600;
+    text-decoration: none;
+  }
+  .agent-setup-feedback-action:hover { background: var(--card-bg); }
+  .agent-setup-feedback-action:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+  .agent-manual-summary {
+    cursor: pointer;
+    display: list-item;
+    list-style-position: inside;
+  }
+  .agent-manual-summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 4px;
+  }
+  .agent-manual-body { margin-top: 18px; }
   .agent-guide-section-title {
     margin: 0;
     font-size: 14px;
@@ -1767,9 +1837,6 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     .agent-guide-nav-label {
-      grid-column: 1 / -1;
-    }
-    .agent-guide-nav-item[data-agent-guide="dsh"] {
       grid-column: 1 / -1;
     }
     .agent-runtime-grid,
@@ -4344,7 +4411,7 @@
             </span>
             <span class="agent-guide-nav-copy">
               <span class="agent-guide-nav-name">oh-my-pi</span>
-              <span class="agent-guide-nav-meta">Responses API</span>
+              <span class="agent-guide-nav-meta" data-i18n="agent_client_terminal">Terminal app</span>
             </span>
             <span class="agent-guide-nav-arrow" aria-hidden="true">›</span>
           </button>
@@ -4354,7 +4421,17 @@
             </span>
             <span class="agent-guide-nav-copy">
               <span class="agent-guide-nav-name">Hermes Agent</span>
-              <span class="agent-guide-nav-meta">Responses API</span>
+              <span class="agent-guide-nav-meta" data-i18n="agent_client_terminal_desktop">Terminal · Desktop</span>
+            </span>
+            <span class="agent-guide-nav-arrow" aria-hidden="true">›</span>
+          </button>
+          <button class="agent-guide-nav-item" type="button" data-agent-guide="dsh-desktop" aria-selected="false" aria-controls="agent-guide-dsh-desktop" onclick="selectAgentGuide('dsh-desktop')">
+            <span class="agent-guide-mark" aria-hidden="true">
+              <img class="agent-guide-logo" data-agent-logo="dsh-desktop" src="dsh-desktop-logo.png" alt="">
+            </span>
+            <span class="agent-guide-nav-copy">
+              <span class="agent-guide-nav-name">DSH Desktop</span>
+              <span class="agent-guide-nav-meta" data-i18n="agent_client_community_desktop">Community desktop</span>
             </span>
             <span class="agent-guide-nav-arrow" aria-hidden="true">›</span>
           </button>
@@ -4367,7 +4444,7 @@
             </span>
             <span class="agent-guide-nav-copy">
               <span class="agent-guide-nav-name">DeepSeek Harness</span>
-              <span class="agent-guide-nav-meta">Responses API</span>
+              <span class="agent-guide-nav-meta" data-i18n="agent_client_official_desktop_cli">Official desktop · CLI</span>
             </span>
             <span class="agent-guide-nav-arrow" aria-hidden="true">›</span>
           </button>
@@ -4406,38 +4483,44 @@
               </div>
             </section>
 
-            <section class="agent-guide-section">
+            <section class="agent-guide-section" id="hermes-one-click">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="hermes_auto_title">One-click setup</h3>
+                  <p class="agent-guide-section-desc" data-i18n="hermes_auto_description">Requires Hermes CLI or local Desktop 0.20.0 or later and at least 64K context. Configure a dedicated ironmlx profile.</p>
+                </div>
+                <button id="hermes-configure" class="btn-accent" type="button" onclick="configureHermes()" data-i18n="hermes_auto_button">One-click setup</button>
+              </div>
+              <div class="agent-guide-fields" style="grid-template-columns:minmax(0,1fr);">
+                <div class="agent-guide-field">
+                  <label for="hermes-model-select" data-i18n="agent_model">Model</label>
+                  <select id="hermes-model-select" onchange="renderAgentGuideConfiguration()"></select>
+                </div>
+              </div>
+              <div id="hermes-feedback" class="agent-setup-feedback" role="status" aria-live="polite" aria-atomic="true" hidden>
+                <span id="hermes-feedback-icon" class="agent-setup-feedback-icon" aria-hidden="true">!</span>
+                <div class="agent-setup-feedback-content">
+                  <p id="hermes-setup-status" class="agent-setup-feedback-message"></p>
+                  <a id="hermes-install" class="agent-setup-feedback-action" href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank" rel="noopener noreferrer" hidden onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="hermes_auto_install">Install Hermes Agent</span> <span aria-hidden="true">&#8599;</span></a>
+                </div>
+              </div>
+            </section>
+
+            <details class="agent-guide-section" id="hermes-manual">
+              <summary class="agent-guide-section-title agent-manual-summary" data-i18n="dsh_manual_configuration">Manual configuration</summary>
+              <div class="agent-manual-body">
               <div class="agent-guide-section-header">
                 <div>
                   <h3 class="agent-guide-section-title" data-i18n="agent_configure_provider">Configure provider</h3>
                   <p class="agent-guide-section-desc"><span data-i18n="agent_configuration_file">Configuration file</span>: <code id="hermes-config-path">~/.hermes/profiles/ironmlx/config.yaml</code></p>
                 </div>
               </div>
-              <fieldset class="agent-profile-options">
-                <legend class="visually-hidden" data-i18n="hermes_profile_scope_label">Hermes profile scope</legend>
-                <label class="agent-profile-option active">
-                  <input class="visually-hidden" type="radio" name="hermes-profile-mode" value="dedicated" data-hermes-profile-mode="dedicated" checked onchange="selectHermesProfileMode('dedicated')">
-                  <span class="agent-profile-option-title">
-                    <span data-i18n="hermes_profile_dedicated">Dedicated ironmlx profile</span>
-                    <span class="agent-profile-option-badge" data-i18n="agent_recommended">Recommended</span>
-                  </span>
-                  <span class="agent-profile-option-desc" data-i18n="hermes_profile_dedicated_desc">Keeps IronMLX configuration and sessions isolated from the default profile.</span>
-                </label>
-                <label class="agent-profile-option">
-                  <input class="visually-hidden" type="radio" name="hermes-profile-mode" value="default" data-hermes-profile-mode="default" onchange="selectHermesProfileMode('default')">
-                  <span class="agent-profile-option-title" data-i18n="hermes_profile_default">Default profile</span>
-                  <span class="agent-profile-option-desc" data-i18n="hermes_profile_default_desc">Simpler, but changes the provider used by the default profile.</span>
-                </label>
-              </fieldset>
+              <p class="agent-guide-section-desc" data-i18n="hermes_profile_note">One-click setup and manual configuration both use the dedicated ironmlx profile.</p>
               <div class="agent-guide-note" id="hermes-profile-create-note">
                 <span aria-hidden="true">i</span>
-                <span><span data-i18n="hermes_profile_create_once">Create the profile once before editing its configuration:</span> <code>hermes profile create ironmlx</code></span>
+                <span><span data-i18n="hermes_profile_create_once">With CLI installed, create the profile only if it does not already exist:</span> <code>hermes profile create ironmlx</code></span>
               </div>
               <div class="agent-guide-fields">
-                <div class="agent-guide-field">
-                  <label for="hermes-model-select" data-i18n="agent_model">Model</label>
-                  <select id="hermes-model-select" onchange="renderAgentGuideConfiguration()"></select>
-                </div>
                 <div class="agent-guide-field">
                   <label for="hermes-context-length" data-i18n="agent_context_length">Context length</label>
                   <input id="hermes-context-length" type="number" min="64000" step="1024" value="64000" onchange="renderAgentGuideConfiguration()">
@@ -4452,6 +4535,10 @@
                 </div>
                 <pre class="agent-code"><code id="hermes-config-code"></code></pre>
               </div>
+              <div class="agent-guide-note">
+                <span aria-hidden="true">i</span>
+                <span data-i18n="hermes_workspace_note">Merge these fields into the existing profile and retain other settings. To choose a terminal workspace, optionally set terminal.cwd to an existing project directory.</span>
+              </div>
               <div class="agent-guide-note warning">
                 <span aria-hidden="true">!</span>
                 <span data-i18n="hermes_context_requirement">Hermes Agent v0.20.0 and later require at least 64K context tokens. Use the model's actual context limit.</span>
@@ -4460,11 +4547,11 @@
                 <span aria-hidden="true">i</span>
                 <span>
                   <span data-i18n="hermes_profile_tui">TUI</span>: <code id="hermes-tui-command">hermes --profile ironmlx --tui</code><br>
-                  <span id="hermes-desktop-dedicated-note" data-i18n="hermes_profile_desktop_dedicated">Desktop: select the ironmlx profile, then start a new chat.</span>
-                  <span id="hermes-desktop-default-note" data-i18n="hermes_profile_desktop_default" hidden>Desktop: use the default profile, then start a new chat.</span>
+                  <span data-i18n="hermes_profile_desktop">Desktop: click the I profile button at the bottom of the sidebar (hover to confirm ironmlx), then start a new chat. Selecting ironmlx in Settings only chooses which profile to edit.</span>
                 </span>
               </div>
-            </section>
+              </div>
+            </details>
 
             <section class="agent-guide-section">
               <div class="agent-guide-section-header">
@@ -4495,7 +4582,7 @@
                 <div class="agent-guide-eyebrow" data-i18n="agent_provider_setup">Provider setup</div>
                 <div class="agent-guide-title-row">
                   <h2 class="agent-guide-title">oh-my-pi</h2>
-                  <span class="agent-guide-version-badge"><span data-i18n="agent_applicable_version">Applicable version</span>: <strong>17.2.12+</strong></span>
+                  <span class="agent-guide-version-badge"><span data-i18n="agent_applicable_version">Applicable version</span>: <strong>18.1.16+</strong></span>
                 </div>
                 <p class="agent-guide-description" data-i18n="omp_description">Register IronMLX as a keyless Responses provider, discover the models served by the App, and launch OMP in the intended project directory.</p>
               </div>
@@ -4521,7 +4608,32 @@
               </div>
             </section>
 
-            <section class="agent-guide-section">
+            <section class="agent-guide-section" id="omp-one-click">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="omp_auto_title">One-click setup</h3>
+                  <p class="agent-guide-section-desc" data-i18n="omp_auto_description">Requires oh-my-pi 18.1.16 or later. Configure the default profile and keep other providers.</p>
+                </div>
+                <button id="omp-configure" class="btn-accent" type="button" onclick="configureOMP()" data-i18n="omp_auto_button">One-click setup</button>
+              </div>
+              <div class="agent-guide-fields" style="grid-template-columns:minmax(0,1fr);">
+                <div class="agent-guide-field">
+                  <label for="omp-model-select" data-i18n="agent_model">Model</label>
+                  <select id="omp-model-select" onchange="renderAgentGuideConfiguration()"></select>
+                </div>
+              </div>
+              <div id="omp-feedback" class="agent-setup-feedback" role="status" aria-live="polite" aria-atomic="true" hidden>
+                <span id="omp-feedback-icon" class="agent-setup-feedback-icon" aria-hidden="true">!</span>
+                <div class="agent-setup-feedback-content">
+                  <p id="omp-setup-status" class="agent-setup-feedback-message"></p>
+                  <a id="omp-install" class="agent-setup-feedback-action" href="https://omp.sh/docs/quickstart" target="_blank" rel="noopener noreferrer" hidden onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="omp_auto_install">Install oh-my-pi</span> <span aria-hidden="true">&#8599;</span></a>
+                </div>
+              </div>
+            </section>
+
+            <details class="agent-guide-section" id="omp-manual">
+              <summary class="agent-guide-section-title agent-manual-summary" data-i18n="dsh_manual_configuration">Manual configuration</summary>
+              <div class="agent-manual-body">
               <div class="agent-guide-section-header">
                 <div>
                   <h3 class="agent-guide-section-title" data-i18n="agent_configure_provider">Configure provider</h3>
@@ -4537,19 +4649,14 @@
                 </div>
                 <pre class="agent-code"><code id="omp-config-code"></code></pre>
               </div>
-            </section>
+            </div>
+            </details>
 
             <section class="agent-guide-section">
               <div class="agent-guide-section-header">
                 <div>
                   <h3 class="agent-guide-section-title" data-i18n="agent_refresh_models">Refresh and select a model</h3>
                   <p class="agent-guide-section-desc" data-i18n="omp_refresh_desc">Refresh provider discovery, inspect available models, then start OMP from your project.</p>
-                </div>
-              </div>
-              <div class="agent-guide-fields" style="grid-template-columns:minmax(0,1fr);">
-                <div class="agent-guide-field">
-                  <label for="omp-model-select" data-i18n="agent_model">Model</label>
-                  <select id="omp-model-select" onchange="renderAgentGuideConfiguration()"></select>
                 </div>
               </div>
               <div class="agent-code-wrap">
@@ -4577,11 +4684,11 @@
                 <div class="agent-guide-eyebrow" data-i18n="agent_provider_setup">Provider setup</div>
                 <div class="agent-guide-title-row">
                   <h2 class="agent-guide-title">DeepSeek Harness</h2>
-                  <span class="agent-guide-version-badge"><span data-i18n="dsh_verified_revision">Validated master</span>: <strong>ddefc45fbc</strong></span>
+                  <span class="agent-guide-version-badge">0.2.1-rc.2+</span>
                 </div>
-                <p class="agent-guide-description" data-i18n="dsh_description">Connect DeepSeek Harness to IronMLX through the Responses API, using either a DSH CLI overlay or the DSH Desktop GUI.</p>
+                <p class="agent-guide-description" data-i18n="dsh_description">Connect official DeepSeek Harness CLI or Desktop to IronMLX through the Responses API.</p>
               </div>
-              <a id="dsh-official-guide" class="agent-guide-docs-link" href="https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-provider" target="_blank" rel="noopener noreferrer" onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="agent_official_guide">Official configuration guide</span> <span aria-hidden="true">↗</span></a>
+              <a id="dsh-official-guide" class="agent-guide-docs-link" href="https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-model-api" target="_blank" rel="noopener noreferrer" onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="agent_official_guide">Official configuration guide</span> <span aria-hidden="true">↗</span></a>
             </header>
 
             <section class="agent-guide-section">
@@ -4606,30 +4713,55 @@
             <section class="agent-guide-section">
               <div class="agent-guide-section-header">
                 <div>
-                  <h3 class="agent-guide-section-title" data-i18n="dsh_setup_method">Choose a setup method</h3>
-                  <p class="agent-guide-section-desc" data-i18n="dsh_setup_method_desc">Configure the provider in DSH Desktop, or use the generated overlay with DSH CLI.</p>
+                  <h3 class="agent-guide-section-title" data-i18n="dsh_setup_method">Choose an application</h3>
+                  <p class="agent-guide-section-desc" data-i18n="dsh_setup_method_desc">Choose the official application to check and configure.</p>
                 </div>
               </div>
               <fieldset class="agent-profile-options">
-                <legend class="visually-hidden" data-i18n="dsh_setup_method">Choose a setup method</legend>
+                <legend class="visually-hidden" data-i18n="dsh_setup_method">Choose an application</legend>
                 <label class="agent-profile-option active">
                   <input class="visually-hidden" type="radio" name="dsh-setup-mode" value="desktop" data-dsh-setup-mode="desktop" checked onchange="selectDshSetupMode('desktop')">
                   <span class="agent-profile-option-title">
-                    <span data-i18n="dsh_desktop">DSH Desktop</span>
-                    <span class="agent-profile-option-badge" data-i18n="dsh_gui">GUI</span>
+                    <span data-i18n="dsh_official_desktop">Official desktop app</span>
                   </span>
-                  <span class="agent-profile-option-desc" data-i18n="dsh_desktop_desc">Add IronMLX as a custom provider from DSH Desktop settings.</span>
+                  <span class="agent-profile-option-desc" data-i18n="dsh_harness_desktop_option">Configure the official DeepSeek Harness Desktop profile; community DSH Desktop has its own card.</span>
                 </label>
                 <label class="agent-profile-option">
                   <input class="visually-hidden" type="radio" name="dsh-setup-mode" value="cli" data-dsh-setup-mode="cli" onchange="selectDshSetupMode('cli')">
                   <span class="agent-profile-option-title" data-i18n="dsh_cli">DSH CLI</span>
-                  <span class="agent-profile-option-desc" data-i18n="dsh_cli_desc">Generate a scoped overlay and pass it only to dsh runs that should use IronMLX.</span>
+                  <span class="agent-profile-option-desc" data-i18n="dsh_cli_desc">Configure the official CLI Web and Headless profiles.</span>
                 </label>
               </fieldset>
             </section>
 
-            <div class="agent-guide-mode-panel" data-dsh-setup-panel="cli" hidden>
             <section class="agent-guide-section">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="dsh_harness_title">One-click setup</h3>
+                  <p id="dsh-harness-setup-desc" class="agent-guide-section-desc"></p>
+                </div>
+                <button id="dsh-harness-configure" class="btn-accent" type="button" onclick="configureDeepSeekHarness()" data-i18n="dsh_harness_button">Configure</button>
+              </div>
+              <div class="agent-guide-fields">
+                <div class="agent-guide-field">
+                  <label for="dsh-harness-model-select" data-i18n="agent_model">Model</label>
+                  <select id="dsh-harness-model-select"></select>
+                </div>
+              </div>
+              <div id="dsh-harness-feedback" class="agent-setup-feedback" role="status" aria-live="polite" aria-atomic="true" hidden>
+                <span id="dsh-harness-feedback-icon" class="agent-setup-feedback-icon" aria-hidden="true">!</span>
+                <div class="agent-setup-feedback-content">
+                  <p id="dsh-harness-setup-status" class="agent-setup-feedback-message"></p>
+                  <a id="dsh-harness-install" class="agent-setup-feedback-action" href="https://www.deepseek.com/en/download/" target="_blank" rel="noopener noreferrer" hidden onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span id="dsh-harness-install-label"></span> <span aria-hidden="true">↗</span></a>
+                </div>
+              </div>
+            </section>
+
+            <div class="agent-guide-mode-panel" data-dsh-setup-panel="cli" hidden>
+            <details class="agent-guide-section" id="dsh-harness-cli-manual">
+              <summary class="agent-guide-section-title agent-manual-summary" data-i18n="dsh_manual_configuration">Manual configuration</summary>
+              <div class="agent-manual-body">
+            <section>
               <div class="agent-guide-section-header">
                 <div>
                   <h3 class="agent-guide-section-title" data-i18n="agent_configure_provider">Configure provider</h3>
@@ -4710,46 +4842,112 @@
                 <span data-i18n="agent_tool_boundary">The agent executes terminal, bash, and MCP tools locally. IronMLX only provides inference and structured tool calls.</span>
               </div>
             </section>
+              </div>
+            </details>
             </div>
 
             <div class="agent-guide-mode-panel" data-dsh-setup-panel="desktop">
-              <section class="agent-guide-section">
-                <div class="agent-guide-section-header">
-                  <div>
-                    <h3 class="agent-guide-section-title" data-i18n="dsh_desktop_configure">Configure DSH Desktop</h3>
-                    <p class="agent-guide-section-desc" data-i18n="dsh_desktop_configure_desc">Create a custom provider in the Desktop app; no overlay file or DSH_HOME change is required.</p>
-                  </div>
-                  <a id="dsh-desktop-full-guide" class="agent-guide-docs-link" href="https://github.com/apepkuss/ironmlx/blob/dev/docs/dsh.md#dsh-desktop-gui-setup" target="_blank" rel="noopener noreferrer" onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="dsh_desktop_full_guide">Full DSH Desktop guide</span> <span aria-hidden="true">↗</span></a>
+              <details class="agent-guide-section" id="dsh-harness-desktop-manual">
+                <summary class="agent-guide-section-title agent-manual-summary" data-i18n="dsh_manual_configuration">Manual configuration</summary>
+                <div class="agent-manual-body">
+                  <p class="agent-guide-section-desc" data-i18n="dsh_harness_desktop_manual">Open Settings → Models, add a custom model API with provider ID ironmlx-local, protocol OpenAI Responses, the endpoint below, and placeholder key local. Fetch models, add the loaded model, and create the provider. Select IronMLX in a new chat.</p>
+                  <p class="agent-guide-description"><code data-agent-endpoint>http://127.0.0.1:9068/v1</code></p>
                 </div>
-                <ol class="agent-step-list">
-                  <li data-i18n="dsh_desktop_step_1">Start IronMLX and load the conversation LLM you intend to use with the agent.</li>
-                  <li data-i18n="dsh_desktop_step_2">In DSH Desktop, open Settings → Models → Add custom provider.</li>
-                  <li>
-                    <span data-i18n="dsh_desktop_step_3">Fill in the custom provider form with these values:</span>
-                    <dl class="agent-field-values">
-                      <dt data-i18n="dsh_desktop_provider_id">Provider ID</dt><dd>ironmlx-local</dd>
-                      <dt data-i18n="dsh_desktop_display_name">Display name</dt><dd>IronMLX</dd>
-                      <dt data-i18n="dsh_desktop_api_address">API address</dt><dd><code id="dsh-desktop-endpoint">http://127.0.0.1:9068/v1</code></dd>
-                      <dt data-i18n="dsh_desktop_api_protocol">API protocol</dt><dd>openai-responses</dd>
-                      <dt data-i18n="dsh_desktop_api_key">API key</dt><dd>local</dd>
-                    </dl>
-                  </li>
-                  <li data-i18n="dsh_desktop_step_4">Select Fetch available models.</li>
-                  <li data-i18n="dsh_desktop_step_5">Deselect all, then select only an Agent-capable conversation LLM. Do not add TTS, image, vision, or decision models.</li>
-                  <li data-i18n="dsh_desktop_step_6">Select Add selected, expand the model settings, keep the discovered context window, and review Max output tokens. IronMLX advertises 4096 when the model has no independent limit; adjust it for your workload. Reasoning and visible output share this budget.</li>
-                  <li data-i18n="dsh_desktop_step_7">Create the provider, then start a new chat with IronMLX / your model.</li>
-                </ol>
-                <div class="agent-guide-note">
-                  <span aria-hidden="true">i</span>
-                  <span data-i18n="dsh_desktop_key_note">The local value is only a placeholder for the keyless loopback endpoint. For LAN access, use the actual IronMLX address and API key.</span>
+              </details>
+            </div>
+          </article>
+          <article id="agent-guide-dsh-desktop" role="tabpanel" aria-label="DSH Desktop" hidden>
+            <header class="agent-guide-hero">
+              <div>
+                <div class="agent-guide-eyebrow" data-i18n="agent_provider_setup">Provider setup</div>
+                <div class="agent-guide-title-row">
+                  <h2 class="agent-guide-title">DSH Desktop</h2>
+                  <span class="agent-guide-version-badge" data-i18n="dsh_community">Community edition</span>
                 </div>
-              </section>
+                <p class="agent-guide-description" data-i18n="dsh_community_description">Connect the community DSH Desktop from dshdesktop.com to IronMLX.</p>
+              </div>
+              <a class="agent-guide-docs-link" data-dsh-desktop-website href="https://dshdesktop.com/en/" target="_blank" rel="noopener noreferrer" onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="dsh_community_website">Community website</span> <span aria-hidden="true">↗</span></a>
+            </header>
+            <section class="agent-guide-section">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="agent_current_connection">Current IronMLX connection</h3>
+                  <p class="agent-guide-section-desc" data-i18n="agent_current_connection_desc">Start IronMLX and load a model before validating the generated configuration.</p>
+                </div>
+              </div>
+              <div class="agent-runtime-grid">
+                <div class="agent-runtime-item">
+                  <span class="agent-runtime-label" data-i18n="agent_api_endpoint">API endpoint</span>
+                  <span class="agent-runtime-value" data-agent-endpoint>http://127.0.0.1:9068/v1</span>
+                </div>
+                <div class="agent-runtime-item">
+                  <span class="agent-runtime-label" data-i18n="agent_loaded_model">Loaded model</span>
+                  <span class="agent-runtime-value" data-agent-model-status data-i18n="agent_no_model">No model loaded</span>
+                </div>
+              </div>
+            </section>
 
               <section class="agent-guide-section">
                 <div class="agent-guide-section-header">
                   <div>
-                    <h3 class="agent-guide-section-title" data-i18n="agent_verify">Verify</h3>
-                    <p class="agent-guide-section-desc" data-i18n="dsh_desktop_verify_desc">Confirm that the provider appears in a new chat and complete one short Responses request.</p>
+                    <h3 class="agent-guide-section-title" data-i18n="dsh_auto_title">One-click setup</h3>
+                    <p class="agent-guide-section-desc" data-i18n="dsh_auto_description">For the community DSH Desktop from dshdesktop.com, version 0.12.1 or later.</p>
+                  </div>
+                  <button id="dsh-desktop-configure" class="btn-accent" type="button" onclick="configureDSHDesktop()" data-i18n="dsh_auto_button">One-click setup</button>
+                </div>
+                <div class="agent-guide-fields">
+                  <div class="agent-guide-field">
+                    <label for="dsh-desktop-model-select" data-i18n="agent_model">Model</label>
+                    <select id="dsh-desktop-model-select"></select>
+                  </div>
+                </div>
+                <div id="dsh-desktop-feedback" class="agent-setup-feedback" role="status" aria-live="polite" aria-atomic="true" hidden>
+                  <span id="dsh-desktop-feedback-icon" class="agent-setup-feedback-icon" aria-hidden="true">!</span>
+                  <div class="agent-setup-feedback-content">
+                    <p id="dsh-desktop-setup-status" class="agent-setup-feedback-message"></p>
+                    <a id="dsh-desktop-download" class="agent-setup-feedback-action" data-dsh-desktop-website href="https://dshdesktop.com/en/" target="_blank" rel="noopener noreferrer" hidden onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="dsh_auto_download">Install DSH Desktop</span> <span aria-hidden="true">↗</span></a>
+                  </div>
+                </div>
+              </section>
+              <details class="agent-guide-section" id="dsh-desktop-manual">
+                <summary class="agent-guide-section-title agent-manual-summary" data-i18n="dsh_manual_configuration">Manual configuration</summary>
+                <div class="agent-manual-body">
+                  <div class="agent-guide-section-header">
+                    <div>
+                      <p class="agent-guide-section-desc" data-i18n="dsh_desktop_configure_desc">Create a custom provider in the Desktop app; no overlay file or DSH_HOME change is required.</p>
+                    </div>
+                    <a id="dsh-desktop-full-guide" class="agent-guide-docs-link" href="https://github.com/apepkuss/ironmlx/blob/dev/docs/dsh.md#dsh-desktop-app-configuration" target="_blank" rel="noopener noreferrer" onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="dsh_desktop_full_guide">Full DSH Desktop guide</span> <span aria-hidden="true">↗</span></a>
+                  </div>
+                  <ol class="agent-step-list">
+                    <li data-i18n="dsh_desktop_step_1">Start IronMLX and load the conversation LLM you intend to use with the agent.</li>
+                    <li data-i18n="dsh_desktop_step_2">In DSH Desktop, open Settings → Models → Add custom provider.</li>
+                    <li>
+                      <span data-i18n="dsh_desktop_step_3">Fill in the custom provider form with these values:</span>
+                      <dl class="agent-field-values">
+                        <dt data-i18n="dsh_desktop_provider_id">Provider ID</dt><dd>ironmlx-local</dd>
+                        <dt data-i18n="dsh_desktop_display_name">Display name</dt><dd>IronMLX</dd>
+                        <dt data-i18n="dsh_desktop_api_address">API address</dt><dd><code id="dsh-desktop-endpoint">http://127.0.0.1:9068/v1</code></dd>
+                        <dt data-i18n="dsh_desktop_api_protocol">API protocol</dt><dd>openai-responses</dd>
+                        <dt data-i18n="dsh_desktop_api_key">API key</dt><dd>local</dd>
+                      </dl>
+                    </li>
+                    <li data-i18n="dsh_desktop_step_4">Select Fetch available models.</li>
+                    <li data-i18n="dsh_desktop_step_5">Deselect all, then select only an Agent-capable conversation LLM. Do not add TTS, image, vision, or decision models.</li>
+                    <li data-i18n="dsh_desktop_step_6">Select Add selected, expand the model settings, keep the discovered context window, and review Max output tokens. IronMLX advertises 4096 when the model has no independent limit; adjust it for your workload. Reasoning and visible output share this budget.</li>
+                    <li data-i18n="dsh_desktop_step_7">Create the provider, then start a new chat with IronMLX / your model.</li>
+                  </ol>
+                  <div class="agent-guide-note">
+                    <span aria-hidden="true">i</span>
+                    <span data-i18n="dsh_desktop_key_note">The local value is only a placeholder for the keyless loopback endpoint. For LAN access, use the actual IronMLX address and API key.</span>
+                  </div>
+                </div>
+              </details>
+
+              <section class="agent-guide-section" id="dsh-desktop-verify">
+                <div class="agent-guide-section-header">
+                  <div>
+                    <h3 class="agent-guide-section-title" data-i18n="dsh_verify_connection">Verify connection</h3>
+                    <p class="agent-guide-section-desc" data-i18n="dsh_verify_shared_desc">Use these steps after either one-click or manual configuration.</p>
                   </div>
                 </div>
                 <div class="agent-guide-note">
@@ -4761,7 +4959,6 @@
                   <span data-i18n="agent_tool_boundary">The agent executes terminal, bash, and MCP tools locally. IronMLX only provides inference and structured tool calls.</span>
                 </div>
               </section>
-            </div>
           </article>
         </div>
       </div>
@@ -5583,6 +5780,33 @@
   // ── i18n translations ──
   const I18N = {
     en: {
+      dsh_manual_configuration: "Manual configuration",
+      dsh_verify_connection: "Verify connection",
+      dsh_verify_shared_desc: "Use these steps after either one-click or manual configuration.",
+
+      dsh_official_desktop: "Official desktop app",
+      dsh_community_website: "Community website",
+      dsh_community_description: "Connect the community DSH Desktop from dshdesktop.com to IronMLX.",
+      dsh_community: "Community edition",
+      dsh_auto_title: "One-click setup",
+      dsh_auto_button: "One-click setup",
+      dsh_auto_description: "For the community DSH Desktop from dshdesktop.com, version 0.12.1 or later.",
+      dsh_auto_download: "Install DSH Desktop",
+      dsh_auto_pending: "Checking DSH Desktop and configuring…",
+      dsh_auto_not_installed: "Community DSH Desktop is not installed. Install version {minimum} or later from dshdesktop.com, then retry. Setup stopped; no configuration was written.",
+      dsh_auto_version_too_old: "Installed version {version} is below the required {minimum}. Upgrade community DSH Desktop, then retry. Setup stopped; no configuration was written.",
+      dsh_auto_version_unknown: "The installed community DSH Desktop version could not be verified. Install version {minimum} or later, then retry. Setup stopped; no configuration was written.",
+      dsh_auto_close_app: "Quit DSH Desktop before configuring, then retry.",
+      dsh_auto_initialize_app: "Launch DSH Desktop once to finish its configuration migration, quit it, then retry.",
+      dsh_auto_model_unavailable: "Load a conversation LLM in IronMLX and select it before retrying. Its context and output limits must be available.",
+      dsh_auto_local_only: "One-click setup currently supports IronMLX local mode. Switch to local mode, then retry.",
+      dsh_auto_backend_unavailable: "Unable to read model information from IronMLX. Check that the service is running, then retry.",
+      dsh_auto_provider_disabled: "The existing llm-pi-ai plugin is disabled (disabled: true). Resolve this conflict manually and retry. No configuration was written.",
+      dsh_auto_configuration_failed: "Configuration could not be saved. Check file permissions and configuration format. Existing-file backups, if created, are kept beside the files.",
+      dsh_auto_configured: "Configuration saved. Open community DSH Desktop, start a new chat, select IronMLX / your model, and ask it to reply with IRONMLX_OK to verify the connection.",
+      dsh_auto_native_required: "Open this Dashboard in the IronMLX App to configure local applications.",
+      dsh_auto_busy: "A setup operation is in progress. Please wait and retry.",
+
       download_pause: "Pause",
       download_resume: "Resume",
       download_retry: "Retry",
@@ -5715,6 +5939,10 @@
       nav_status: "Status", nav_models: "Models", nav_voices: "Voices", nav_benchmark: "Benchmark", nav_logs: "Logs", nav_chat: "Agent", nav_settings: "Settings",
       sidebar_expand: "Expand sidebar", sidebar_collapse: "Collapse sidebar",
       chat_subtitle: "Configure external agents to use IronMLX as their inference provider.",
+      agent_client_terminal: "Terminal app",
+      agent_client_terminal_desktop: "Terminal · Desktop",
+      agent_client_community_desktop: "Community desktop",
+      agent_client_official_desktop_cli: "Official desktop · CLI",
       agent_supported: "Supported agents", agent_supported_label: "Supported agents",
       agent_provider_setup: "Provider setup", agent_applicable_version: "Applicable version",
       agent_current_connection: "Current IronMLX connection",
@@ -5728,21 +5956,77 @@
       agent_tool_boundary: "The agent executes terminal, bash, and MCP tools locally. IronMLX only provides inference and structured tool calls.",
       agent_official_guide: "Official configuration guide",
       hermes_description: "Use IronMLX through Hermes Agent's stateless Responses transport. The configuration below is generated from the current App state.",
-      hermes_profile_scope_label: "Hermes profile scope",
-      hermes_profile_dedicated: "Dedicated ironmlx profile",
-      hermes_profile_dedicated_desc: "Keeps IronMLX configuration and sessions isolated from the default profile.",
-      hermes_profile_default: "Default profile",
-      hermes_profile_default_desc: "Simpler, but changes the provider used by the default profile.",
-      hermes_profile_create_once: "Create the profile once before editing its configuration:",
+      hermes_profile_note: "One-click setup and manual configuration both use the dedicated ironmlx profile.",
+      hermes_profile_create_once: "With CLI installed, create the profile only if it does not already exist:",
       hermes_profile_tui: "TUI",
-      hermes_profile_desktop_dedicated: "Desktop: select the ironmlx profile, then start a new chat.",
-      hermes_profile_desktop_default: "Desktop: use the default profile, then start a new chat.",
+      hermes_profile_desktop: "Desktop: click the I profile button at the bottom of the sidebar (hover to confirm ironmlx), then start a new chat. Selecting ironmlx in Settings only chooses which profile to edit.",
       hermes_context_requirement: "Hermes Agent v0.20.0 and later require at least 64K context tokens. Use the model's actual context limit.",
+      hermes_workspace_note: "Merge these fields into the existing profile and retain other settings. To choose a terminal workspace, optionally set terminal.cwd to an existing project directory.",
       hermes_verify_desc: "Check the service, complete one inference request, then verify a terminal tool call.",
       omp_description: "Register IronMLX as a keyless Responses provider, discover the models served by the App, and launch OMP in the intended project directory.",
       omp_refresh_desc: "Refresh provider discovery, inspect available models, then start OMP from your project.",
       omp_cwd_note: "Replace the project path before running the command. OMP executes bash tools in the directory supplied by --cwd.",
-      dsh_verified_revision: "Validated master", dsh_description: "Connect DeepSeek Harness to IronMLX through the Responses API, using either a DSH CLI overlay or the DSH Desktop GUI.",
+      hermes_auto_title: "One-click setup",
+      hermes_auto_description: "Requires Hermes CLI or local Desktop 0.20.0 or later and at least 64K context. Configure a dedicated ironmlx profile.",
+      hermes_auto_button: "One-click setup",
+      hermes_auto_pending: "Checking and configuring Hermes Agent…",
+      hermes_auto_install: "Install Hermes Agent",
+      hermes_auto_not_installed: "Hermes CLI and local Desktop were not found. Install {minimum} or later and retry. No configuration was written.",
+      hermes_auto_version_too_old: "Upgrade Hermes Agent {version} to {minimum} or later. No configuration was written.",
+      hermes_auto_version_unknown: "Could not verify the Hermes Agent version. Check the installation and retry. No configuration was written.",
+      hermes_auto_configured: "Configured the ironmlx profile. Restart open Hermes sessions; select ironmlx at the bottom of the Desktop sidebar or use the CLI commands below.",
+      hermes_auto_configuration_failed: "Could not update Hermes configuration. Check YAML syntax and file permissions. Existing configuration is backed up before modification.",
+      hermes_auto_model_unavailable: "Start IronMLX, load and select a conversation model, then retry.",
+      hermes_auto_backend_unavailable: "Could not connect to IronMLX. Start the service and retry.",
+      hermes_auto_local_only: "One-click setup requires IronMLX local mode.",
+      hermes_auto_busy: "Hermes setup is already in progress.",
+      hermes_auto_native_required: "Open the IronMLX App to use one-click setup.",
+      hermes_auto_context_too_small: "Hermes requires at least 64,000 context tokens. Load a model with sufficient actual capacity and retry. No configuration was written.",
+      hermes_auto_custom_home: "A custom Hermes data directory is selected. Use manual configuration for that directory. No configuration was written.",
+      hermes_auto_profile_conflict: "The ironmlx profile is deleted or uses symbolic links. Restore it in Hermes or use manual configuration. No configuration was written.",
+      omp_auto_title: "One-click setup",
+      omp_auto_description: "Requires oh-my-pi 18.1.16 or later. Configure the default profile and keep other providers.",
+      omp_auto_button: "One-click setup",
+      omp_auto_pending: "Checking and configuring oh-my-pi…",
+      omp_auto_install: "Install oh-my-pi",
+      omp_auto_not_installed: "oh-my-pi was not found. Install {minimum} or later and retry. No configuration was written.",
+      omp_auto_version_too_old: "Upgrade oh-my-pi {version} to {minimum} or later. No configuration was written.",
+      omp_auto_version_unknown: "Could not verify the oh-my-pi version. Check the installation and retry. No configuration was written.",
+      omp_auto_configured: "Configured the IronMLX provider. Restart open OMP sessions and use the commands below with your project directory.",
+      omp_auto_configuration_failed: "Could not update OMP configuration. Check YAML syntax and file permissions. Existing files are backed up before modification.",
+      omp_auto_initialize_cli: "Legacy models.json needs migration. Launch OMP once, then retry. No configuration was written.",
+      omp_auto_model_unavailable: "Start IronMLX, load and select a conversation model, then retry.",
+      omp_auto_backend_unavailable: "Could not connect to IronMLX. Start the service and retry.",
+      omp_auto_local_only: "One-click setup requires IronMLX local mode.",
+      omp_auto_busy: "OMP setup is already in progress.",
+      omp_auto_native_required: "Open the IronMLX App to use one-click setup.",
+      dsh_harness_desktop_option: "Configure the official DeepSeek Harness desktop app.",
+      dsh_harness_title: "One-click setup",
+      dsh_harness_button: "Configure",
+      dsh_harness_pending: "Checking and configuring…",
+      dsh_harness_cli_desc: "Requires official DSH CLI 0.2.1-rc.2 or later. Adds IronMLX to Web and Headless modes.",
+      dsh_harness_desktop_desc: "Requires official DeepSeek Harness Desktop 0.2.1-rc.2 or later. Use the separate DSH Desktop card for the community app.",
+      dsh_harness_desktop_manual: "Open Settings → Models, add a custom model API with provider ID ironmlx-local, protocol OpenAI Responses, the endpoint below, and placeholder key local. Fetch models, add the loaded model, and create the provider. Select IronMLX in a new chat.",
+      dsh_harness_not_installed: "{app} was not found. Install the official app and try again. Setup stopped; no configuration was written.",
+      dsh_harness_version_too_old: "Installed version {version} requires an upgrade to {minimum} or later. Setup stopped; no configuration was written.",
+      dsh_harness_version_unknown: "The official app version could not be verified. Install a supported official release and try again. No configuration was written.",
+      dsh_harness_cli_unrecognized: "The dsh command is not a recognized official installation. Community DSH Desktop does not qualify. Install the official CLI and try again. No configuration was written.",
+      dsh_harness_custom_home: "DSH_HOME uses a custom directory. Automatic setup supports ~/.dsh only; use manual configuration. No configuration was written.",
+      dsh_harness_home_unknown: "The CLI configuration directory could not be verified. Check the login shell or use manual configuration. No configuration was written.",
+      dsh_harness_home_conflict: "~/.dsh/cordis.patch.yml overrides the model, provider, or credential store. Resolve that override or configure manually. No configuration was written.",
+      dsh_harness_close_app: "Close official DeepSeek Harness Desktop and running dsh sessions, then try again. An active profile lock prevents configuration.",
+      dsh_harness_initialize_app: "Legacy settings.yaml needs migration. Start the selected official app once, close it, and try again. No configuration was written.",
+      dsh_harness_model_unavailable: "Start IronMLX and load a conversation model, then try again.",
+      dsh_harness_local_only: "One-click setup requires local mode.",
+      dsh_harness_busy: "Setup is already running.",
+      dsh_harness_native_required: "One-click setup is available in the IronMLX macOS app.",
+      dsh_harness_configuration_failed: "Configuration failed. Check the profile YAML, file permissions, and symbolic links. Existing backups can be used for recovery.",
+      dsh_harness_invalid_mode: "Choose CLI or the official desktop app.",
+      dsh_harness_configured_cli: "Configured the Web and Headless profiles. Run dsh web, or dsh --profile headless \"Hi\". New sessions use IronMLX; existing providers were preserved.",
+      dsh_harness_configured_desktop: "Configured the official Desktop profile. Reopen DeepSeek Harness and start a new chat with IronMLX. Community DSH Desktop was unchanged.",
+      dsh_harness_install_cli: "Install DSH CLI",
+      dsh_harness_install_desktop: "Install DeepSeek Harness",
+      dsh_verified_revision: "Validated master", dsh_description: "Connect official DeepSeek Harness CLI or Desktop to IronMLX through the Responses API.",
       dsh_save_file: "Save as", dsh_home_default: "(normally ~/.dsh)", dsh_reasoning: "Reasoning", dsh_reasoning_off: "Off",
       dsh_reasoning_minimal: "Minimal", dsh_reasoning_low: "Low", dsh_reasoning_medium: "Medium", dsh_reasoning_high: "High", dsh_reasoning_xhigh: "Extra high", dsh_reasoning_max: "Maximum",
       dsh_context_window: "Context window", dsh_output_budget: "Output budget (tokens)",
@@ -5752,11 +6036,11 @@
       dsh_capacity_ready: "Limits were prefilled from /v1/models. Review the output budget before copying.",
       dsh_invalid_capacity: "Enter positive whole-number limits. Output must fit within context and the capacities reported by /v1/models.",
       dsh_budget_note: "The output budget defaults to at most 4096 tokens, not automatically to the service's maximum. Reasoning and visible text share it; adjust it for your workload.",
-      dsh_settings_note: "If dsh settings.yaml already selects a default model or overrides llm-pi-ai, update those conflicting settings; user settings take precedence over this overlay.",
+      dsh_settings_note: "Legacy settings.yaml is migrated on startup. Start dsh once before manual setup; home and command-line patches can override profile settings.",
       dsh_verify_desc: "Set a local placeholder key, run a text turn, then check a real file-reading tool call.",
       dsh_key_note: "The placeholder key only satisfies dsh's credential lookup on the local keyless endpoint. It is not a LAN API key.",
-      dsh_setup_method: "Choose a setup method", dsh_setup_method_desc: "Configure the provider in DSH Desktop, or use the generated overlay with DSH CLI.",
-      dsh_cli: "DSH CLI", dsh_cli_desc: "Generate a scoped overlay and pass it only to dsh runs that should use IronMLX.",
+      dsh_setup_method: "Choose an application", dsh_setup_method_desc: "Choose the official application to check and configure.",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "Configure the official CLI Web and Headless profiles.",
       dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "Add IronMLX as a custom provider from DSH Desktop settings.",
       dsh_desktop_configure: "Configure DSH Desktop", dsh_desktop_configure_desc: "Create a custom provider in the Desktop app; no overlay file or DSH_HOME change is required.",
       dsh_desktop_full_guide: "Full DSH Desktop guide",
@@ -6184,6 +6468,33 @@
       cluster_pm_auto: "Auto (default)", cluster_pm_tp: "Tensor Parallel", cluster_pm_pp: "Pipeline Parallel"
     },
     "zh-Hans": {
+      dsh_manual_configuration: "手动配置",
+      dsh_verify_connection: "验证连接",
+      dsh_verify_shared_desc: "一键配置或手动配置完成后，使用以下步骤验证连接。",
+
+      dsh_official_desktop: "官方桌面版",
+      dsh_community_website: "社区版网站",
+      dsh_community_description: "将从 dshdesktop.com 下载的社区版 DSH Desktop 接入 IronMLX。",
+      dsh_community: "社区版",
+      dsh_auto_title: "一键配置",
+      dsh_auto_button: "一键配置",
+      dsh_auto_description: "适用于从 dshdesktop.com 下载的社区版 DSH Desktop，要求 0.12.1 或更高版本。",
+      dsh_auto_download: "安装 DSH Desktop",
+      dsh_auto_pending: "正在检查 DSH Desktop 并配置…",
+      dsh_auto_not_installed: "未检测到社区版 DSH Desktop。请从 dshdesktop.com 安装 {minimum} 或更高版本后重试。一键配置已停止，未写入任何配置。",
+      dsh_auto_version_too_old: "已安装版本 {version}，低于要求的 {minimum}。请升级社区版 DSH Desktop 后重试。一键配置已停止，未写入任何配置。",
+      dsh_auto_version_unknown: "无法确认已安装的社区版 DSH Desktop 版本。请安装 {minimum} 或更高版本后重试。一键配置已停止，未写入任何配置。",
+      dsh_auto_close_app: "请先退出 DSH Desktop，再点击一键配置。",
+      dsh_auto_initialize_app: "请先启动一次 DSH Desktop 完成配置迁移，退出后再点击一键配置。",
+      dsh_auto_model_unavailable: "请在 IronMLX 中加载并选择对话 LLM 后重试，需要能够读取该模型的上下文和输出上限。",
+      dsh_auto_local_only: "一键配置目前支持 IronMLX 本机模式，请切换到本机模式后重试。",
+      dsh_auto_backend_unavailable: "无法读取 IronMLX 模型信息，请确认服务正在运行后重试。",
+      dsh_auto_provider_disabled: "现有 llm-pi-ai 插件已禁用（disabled: true）。请手动处理此冲突后重试，未写入任何配置。",
+      dsh_auto_configuration_failed: "未能保存配置，请检查文件权限和配置格式。如已生成现有文件备份，备份保留在原文件旁。",
+      dsh_auto_configured: "配置已保存。请打开社区版 DSH Desktop，新建会话并选择 IronMLX／你的模型，要求回复 IRONMLX_OK 以验证连接。",
+      dsh_auto_native_required: "请在 IronMLX App 内打开 Dashboard，以配置本机应用。",
+      dsh_auto_busy: "已有配置操作正在进行，请稍后重试。",
+
       download_pause: "暂停",
       download_resume: "继续下载",
       download_retry: "重试",
@@ -6316,6 +6627,10 @@
       nav_status: "状态", nav_models: "模型", nav_voices: "声音", nav_benchmark: "基准测试", nav_logs: "日志", nav_chat: "Agent", nav_settings: "设置",
       sidebar_expand: "展开侧栏", sidebar_collapse: "收起侧栏",
       chat_subtitle: "配置外部 Agent 使用 IronMLX 作为推理 Provider。",
+      agent_client_terminal: "终端应用",
+      agent_client_terminal_desktop: "终端 · 桌面",
+      agent_client_community_desktop: "社区桌面版",
+      agent_client_official_desktop_cli: "官方桌面版 · CLI",
       agent_supported: "支持的 Agent", agent_supported_label: "支持的 Agent",
       agent_provider_setup: "Provider 配置", agent_applicable_version: "适用版本",
       agent_current_connection: "当前 IronMLX 连接",
@@ -6329,21 +6644,77 @@
       agent_tool_boundary: "Agent 在本机执行 terminal、bash 和 MCP 工具；IronMLX 仅提供推理和结构化工具调用。",
       agent_official_guide: "前往官方配置指南",
       hermes_description: "通过 Hermes Agent 的无状态 Responses transport 使用 IronMLX。下方配置根据当前 App 状态生成。",
-      hermes_profile_scope_label: "Hermes profile 范围",
-      hermes_profile_dedicated: "专用 ironmlx profile",
-      hermes_profile_dedicated_desc: "将 IronMLX 配置和会话与默认 profile 隔离。",
-      hermes_profile_default: "默认 profile",
-      hermes_profile_default_desc: "配置更简单，但会修改默认 profile 使用的 Provider。",
-      hermes_profile_create_once: "编辑配置前，仅需创建一次 profile：",
+      hermes_profile_note: "一键配置和手动配置均使用专用 ironmlx Profile。",
+      hermes_profile_create_once: "已安装 CLI 时，仅在 profile 尚不存在时创建；已有配置可跳过：",
       hermes_profile_tui: "TUI",
-      hermes_profile_desktop_dedicated: "Desktop：选择 ironmlx profile，然后新建会话。",
-      hermes_profile_desktop_default: "Desktop：使用默认 profile，然后新建会话。",
+      hermes_profile_desktop: "Desktop：在侧边栏底部点击 I 按钮（悬停确认名称为 ironmlx），然后新建会话。设置页选择 ironmlx 仅决定编辑哪个 profile。",
       hermes_context_requirement: "Hermes Agent v0.20.0 及以上版本需要至少 64K context tokens。请填写模型实际的 context 上限。",
+      hermes_workspace_note: "请将这些字段合并到已有 profile，保留其他设置。如需指定 terminal 工作目录，可将 terminal.cwd 设置为已存在的项目目录。",
       hermes_verify_desc: "检查服务、完成一次推理请求，然后验证一次 terminal 工具调用。",
       omp_description: "将 IronMLX 注册为免密钥 Responses Provider，发现 App 提供的模型，并在目标项目目录启动 OMP。",
       omp_refresh_desc: "刷新 Provider 发现、查看可用模型，然后从项目目录启动 OMP。",
       omp_cwd_note: "执行前请替换项目路径。OMP 会在 --cwd 指定的目录中执行 bash 工具。",
-      dsh_verified_revision: "已验证 master", dsh_description: "通过 Responses API 将 DeepSeek Harness 连接到 IronMLX，可选择 DSH CLI overlay 或 DSH Desktop GUI。",
+      hermes_auto_title: "一键配置",
+      hermes_auto_description: "需要 Hermes CLI 或本地 Desktop 0.20.0 及以上版本，模型上下文至少 64K。配置专用 ironmlx Profile。",
+      hermes_auto_button: "一键配置",
+      hermes_auto_pending: "正在检查并配置 Hermes Agent…",
+      hermes_auto_install: "安装 Hermes Agent",
+      hermes_auto_not_installed: "未检测到 Hermes CLI 或本地 Desktop。请安装 {minimum} 或更高版本后重试。未写入任何配置。",
+      hermes_auto_version_too_old: "已安装 Hermes Agent {version}，请升级至 {minimum} 或更高版本。未写入任何配置。",
+      hermes_auto_version_unknown: "无法确认 Hermes Agent 版本，请检查安装后重试。未写入任何配置。",
+      hermes_auto_configured: "已配置 ironmlx Profile。请重启已打开的 Hermes 会话，在 Desktop 侧边栏底部切换到 ironmlx，或使用下方 CLI 命令。",
+      hermes_auto_configuration_failed: "无法更新 Hermes 配置，请检查 YAML 格式和文件权限。修改前会备份已有配置。",
+      hermes_auto_model_unavailable: "请启动 IronMLX，加载并选择对话模型后重试。",
+      hermes_auto_backend_unavailable: "无法连接 IronMLX，请启动服务后重试。",
+      hermes_auto_local_only: "一键配置需要 IronMLX 处于本地模式。",
+      hermes_auto_busy: "Hermes 配置正在进行，请稍候。",
+      hermes_auto_native_required: "请在 IronMLX App 中使用一键配置。",
+      hermes_auto_context_too_small: "Hermes 要求至少 64,000 个上下文 token。请加载实际容量满足要求的模型后重试。未写入任何配置。",
+      hermes_auto_custom_home: "当前指定了自定义 Hermes 数据目录，请针对该目录使用手动配置。未写入任何配置。",
+      hermes_auto_profile_conflict: "ironmlx Profile 已删除或使用了符号链接。请在 Hermes 中恢复，或使用手动配置。未写入任何配置。",
+      omp_auto_title: "一键配置",
+      omp_auto_description: "需要 oh-my-pi 18.1.16 或更高版本。为默认配置目录接入 IronMLX，保留其他 Provider。",
+      omp_auto_button: "一键配置",
+      omp_auto_pending: "正在检查并配置 oh-my-pi…",
+      omp_auto_install: "安装 oh-my-pi",
+      omp_auto_not_installed: "未检测到 oh-my-pi。请安装 {minimum} 或更高版本后重试。未写入任何配置。",
+      omp_auto_version_too_old: "已安装 oh-my-pi {version}，请升级至 {minimum} 或更高版本。未写入任何配置。",
+      omp_auto_version_unknown: "无法确认 oh-my-pi 版本，请检查安装后重试。未写入任何配置。",
+      omp_auto_configured: "已配置 IronMLX Provider。请重启已打开的 OMP 会话，并将下方命令中的路径替换为目标项目目录后使用。",
+      omp_auto_configuration_failed: "无法更新 OMP 配置，请检查 YAML 格式和文件权限。修改前会备份已有文件。",
+      omp_auto_initialize_cli: "旧版 models.json 需要迁移。请先启动一次 OMP 后重试。未写入任何配置。",
+      omp_auto_model_unavailable: "请启动 IronMLX，加载并选择对话模型后重试。",
+      omp_auto_backend_unavailable: "无法连接 IronMLX，请启动服务后重试。",
+      omp_auto_local_only: "一键配置需要 IronMLX 处于本地模式。",
+      omp_auto_busy: "OMP 配置正在进行，请稍候。",
+      omp_auto_native_required: "请在 IronMLX App 中使用一键配置。",
+      dsh_harness_desktop_option: "配置 DeepSeek 官方桌面应用。",
+      dsh_harness_title: "一键配置",
+      dsh_harness_button: "一键配置",
+      dsh_harness_pending: "正在检查并配置…",
+      dsh_harness_cli_desc: "需要官方 DSH CLI 0.2.1-rc.2 或更高版本。将 IronMLX 添加到 Web 和 Headless 模式。",
+      dsh_harness_desktop_desc: "需要官方 DeepSeek Harness Desktop 0.2.1-rc.2 或更高版本。社区版请使用独立的 DSH Desktop 卡片。",
+      dsh_harness_desktop_manual: "打开设置 → 模型，添加自定义模型 API：Provider ID 为 ironmlx-local，协议为 OpenAI Responses，地址使用下方 Endpoint，API Key 填 local。获取并添加已加载模型，创建 Provider，然后在新会话中选择 IronMLX。",
+      dsh_harness_not_installed: "未检测到{app}。请安装官方应用后重试。一键配置已停止，未写入任何配置。",
+      dsh_harness_version_too_old: "当前版本为 {version}，需要 {minimum} 或更高版本。请升级后重试，未写入任何配置。",
+      dsh_harness_version_unknown: "无法确认官方应用版本。请安装受支持的官方版本后重试，未写入任何配置。",
+      dsh_harness_cli_unrecognized: "当前 dsh 命令无法确认为官方安装。社区版 DSH Desktop 不满足此要求。请安装官方 CLI 后重试，未写入任何配置。",
+      dsh_harness_custom_home: "检测到自定义 DSH_HOME。一键配置仅支持 ~/.dsh，请使用手动配置，未写入任何配置。",
+      dsh_harness_home_unknown: "无法确认 CLI 配置目录。请检查登录 Shell 或使用手动配置，未写入任何配置。",
+      dsh_harness_home_conflict: "~/.dsh/cordis.patch.yml 中存在模型、Provider 或凭据存储覆盖项。请先处理覆盖项或手动配置，未写入任何配置。",
+      dsh_harness_close_app: "请先关闭官方 DeepSeek Harness Desktop 和运行中的 dsh 会话，再重试。检测到 profile 锁时不会写入配置。",
+      dsh_harness_initialize_app: "检测到旧版 settings.yaml。请先启动所选官方应用完成迁移，关闭后重试，未写入任何配置。",
+      dsh_harness_model_unavailable: "请启动 IronMLX 并加载对话模型后重试。",
+      dsh_harness_local_only: "一键配置需要 IronMLX 处于本地模式。",
+      dsh_harness_busy: "配置正在进行，请稍候。",
+      dsh_harness_native_required: "请在 IronMLX macOS App 中使用一键配置。",
+      dsh_harness_configuration_failed: "配置失败。请检查 profile YAML、文件权限和符号链接；已有备份可用于恢复。",
+      dsh_harness_invalid_mode: "请选择 CLI 或官方桌面版。",
+      dsh_harness_configured_cli: "已配置 Web 和 Headless profile。运行 dsh web，或 dsh --profile headless \"Hi\" 即可使用。新会话默认使用 IronMLX，已有 Provider 已保留。",
+      dsh_harness_configured_desktop: "已配置官方 Desktop profile。请重新打开 DeepSeek Harness，并使用 IronMLX 开始新会话。社区版 DSH Desktop 未改动。",
+      dsh_harness_install_cli: "安装 DSH CLI",
+      dsh_harness_install_desktop: "安装 DeepSeek Harness",
+      dsh_verified_revision: "已验证 master", dsh_description: "通过 Responses API 将官方 DeepSeek Harness CLI 或 Desktop 接入 IronMLX。",
       dsh_save_file: "保存为", dsh_home_default: "（通常为 ~/.dsh）", dsh_reasoning: "推理模式", dsh_reasoning_off: "关闭",
       dsh_reasoning_minimal: "极低", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "极高", dsh_reasoning_max: "最大",
       dsh_context_window: "上下文容量", dsh_output_budget: "单轮输出预算（tokens）",
@@ -6353,11 +6724,11 @@
       dsh_capacity_ready: "已根据 /v1/models 预填容量；复制前请检查输出预算。",
       dsh_invalid_capacity: "请输入正整数；输出预算不得超过上下文容量或 /v1/models 公布的上限。",
       dsh_budget_note: "输出预算默认不超过 4096 tokens，不会一律取服务端硬上限。reasoning 与正文共同消耗它，请按任务需要调整。",
-      dsh_settings_note: "若 dsh 的 settings.yaml 已指定默认模型或覆盖 llm-pi-ai，请更新这些冲突的设置；用户设置的优先级高于此 overlay。",
+      dsh_settings_note: "旧版 settings.yaml 会在启动时迁移。手动配置前请先启动一次 dsh；home 级和命令行补丁可能覆盖 profile 设置。",
       dsh_verify_desc: "设置本地占位密钥，完成一轮文本请求，再验证真实的文件读取工具调用。",
       dsh_key_note: "占位密钥仅满足 dsh 对本地免鉴权 endpoint 的凭据查询；它不是 LAN API Key。",
-      dsh_setup_method: "选择配置方式", dsh_setup_method_desc: "在 DSH Desktop 中配置提供方，或使用 DSH CLI 加载生成的 overlay。",
-      dsh_cli: "DSH CLI", dsh_cli_desc: "生成独立 overlay，仅在需要使用 IronMLX 的 dsh 运行中加载。",
+      dsh_setup_method: "选择应用", dsh_setup_method_desc: "选择需要检查并配置的官方应用。",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "配置官方 CLI 的 Web 和 Headless profile。",
       dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "从 DSH Desktop 设置中将 IronMLX 添加为自定义提供方。",
       dsh_desktop_configure: "配置 DSH Desktop", dsh_desktop_configure_desc: "在桌面应用中创建自定义提供方；无需 overlay 文件，也无需修改 DSH_HOME。",
       dsh_desktop_full_guide: "完整 DSH Desktop 指南",
@@ -6785,6 +7156,33 @@
       cluster_pm_auto: "自动（默认）", cluster_pm_tp: "张量并行 (TP)", cluster_pm_pp: "流水线并行 (PP)"
     },
     "zh-Hant": {
+      dsh_manual_configuration: "手動設定",
+      dsh_verify_connection: "驗證連線",
+      dsh_verify_shared_desc: "完成一鍵設定或手動設定後，使用以下步驟驗證連線。",
+
+      dsh_official_desktop: "官方桌面版",
+      dsh_community_website: "社群版網站",
+      dsh_community_description: "將從 dshdesktop.com 下載的社群版 DSH Desktop 接入 IronMLX。",
+      dsh_community: "社群版",
+      dsh_auto_title: "One-click setup",
+      dsh_auto_button: "One-click setup",
+      dsh_auto_description: "For the community DSH Desktop from dshdesktop.com, version 0.12.1 or later.",
+      dsh_auto_download: "安裝 DSH Desktop",
+      dsh_auto_pending: "Checking DSH Desktop and configuring…",
+      dsh_auto_not_installed: "Community DSH Desktop is not installed. Install version {minimum} or later from dshdesktop.com, then retry. Setup stopped; no configuration was written.",
+      dsh_auto_version_too_old: "Installed version {version} is below the required {minimum}. Upgrade community DSH Desktop, then retry. Setup stopped; no configuration was written.",
+      dsh_auto_version_unknown: "The installed community DSH Desktop version could not be verified. Install version {minimum} or later, then retry. Setup stopped; no configuration was written.",
+      dsh_auto_close_app: "Quit DSH Desktop before configuring, then retry.",
+      dsh_auto_initialize_app: "Launch DSH Desktop once to finish its configuration migration, quit it, then retry.",
+      dsh_auto_model_unavailable: "Load a conversation LLM in IronMLX and select it before retrying. Its context and output limits must be available.",
+      dsh_auto_local_only: "One-click setup currently supports IronMLX local mode. Switch to local mode, then retry.",
+      dsh_auto_backend_unavailable: "Unable to read model information from IronMLX. Check that the service is running, then retry.",
+      dsh_auto_provider_disabled: "現有 llm-pi-ai 外掛已停用（disabled: true）。請手動處理此衝突後重試，未寫入任何設定。",
+      dsh_auto_configuration_failed: "Configuration could not be saved. Check file permissions and configuration format. Existing-file backups, if created, are kept beside the files.",
+      dsh_auto_configured: "Configuration saved. Open community DSH Desktop, start a new chat, select IronMLX / your model, and ask it to reply with IRONMLX_OK to verify the connection.",
+      dsh_auto_native_required: "Open this Dashboard in the IronMLX App to configure local applications.",
+      dsh_auto_busy: "A setup operation is in progress. Please wait and retry.",
+
       download_pause: "暫停",
       download_resume: "繼續下載",
       download_retry: "重試",
@@ -6917,6 +7315,10 @@
       nav_status: "狀態", nav_models: "模型", nav_voices: "聲音", nav_benchmark: "基準測試", nav_logs: "日誌", nav_chat: "Agent", nav_settings: "設定",
       sidebar_expand: "展開側欄", sidebar_collapse: "收起側欄",
       chat_subtitle: "設定外部 Agent 使用 IronMLX 作為推理 Provider。",
+      agent_client_terminal: "終端應用程式",
+      agent_client_terminal_desktop: "終端 · 桌面",
+      agent_client_community_desktop: "社群桌面版",
+      agent_client_official_desktop_cli: "官方桌面版 · CLI",
       agent_supported: "支援的 Agent", agent_supported_label: "支援的 Agent",
       agent_provider_setup: "Provider 設定", agent_applicable_version: "適用版本",
       agent_current_connection: "目前 IronMLX 連線",
@@ -6930,21 +7332,77 @@
       agent_tool_boundary: "Agent 在本機執行 terminal、bash 和 MCP 工具；IronMLX 僅提供推理與結構化工具呼叫。",
       agent_official_guide: "前往官方設定指南",
       hermes_description: "透過 Hermes Agent 的無狀態 Responses transport 使用 IronMLX。下方設定會根據目前 App 狀態產生。",
-      hermes_profile_scope_label: "Hermes profile 範圍",
-      hermes_profile_dedicated: "專用 ironmlx profile",
-      hermes_profile_dedicated_desc: "將 IronMLX 設定與工作階段和預設 profile 隔離。",
-      hermes_profile_default: "預設 profile",
-      hermes_profile_default_desc: "設定較簡單，但會修改預設 profile 使用的 Provider。",
-      hermes_profile_create_once: "編輯設定前，只需建立一次 profile：",
+      hermes_profile_note: "一鍵設定和手動設定均使用專用 ironmlx Profile。",
+      hermes_profile_create_once: "已安裝 CLI 時，僅在 profile 尚不存在時建立；已有設定可略過：",
       hermes_profile_tui: "TUI",
-      hermes_profile_desktop_dedicated: "Desktop：選擇 ironmlx profile，然後建立新工作階段。",
-      hermes_profile_desktop_default: "Desktop：使用預設 profile，然後建立新工作階段。",
+      hermes_profile_desktop: "Desktop：在側邊欄底部點擊 I 按鈕（懸停確認名稱為 ironmlx），然後建立新工作階段。設定頁選擇 ironmlx 只決定編輯哪個 profile。",
       hermes_context_requirement: "Hermes Agent v0.20.0 及以上版本需要至少 64K context tokens。請填寫模型實際的 context 上限。",
+      hermes_workspace_note: "請將這些欄位合併到既有 profile，保留其他設定。如需指定 terminal 工作目錄，可將 terminal.cwd 設為已存在的專案目錄。",
       hermes_verify_desc: "檢查服務、完成一次推理請求，然後驗證一次 terminal 工具呼叫。",
       omp_description: "將 IronMLX 註冊為免金鑰 Responses Provider，探索 App 提供的模型，並在目標專案目錄啟動 OMP。",
       omp_refresh_desc: "重新整理 Provider 探索、檢視可用模型，然後從專案目錄啟動 OMP。",
       omp_cwd_note: "執行前請替換專案路徑。OMP 會在 --cwd 指定的目錄中執行 bash 工具。",
-      dsh_verified_revision: "已驗證 master", dsh_description: "透過 Responses API 將 DeepSeek Harness 連接到 IronMLX，可選擇 DSH CLI overlay 或 DSH Desktop GUI。",
+      hermes_auto_title: "一鍵設定",
+      hermes_auto_description: "需要 Hermes CLI 或本機 Desktop 0.20.0 以上版本，模型上下文至少 64K。設定專用 ironmlx Profile。",
+      hermes_auto_button: "一鍵設定",
+      hermes_auto_pending: "正在檢查並設定 Hermes Agent…",
+      hermes_auto_install: "安裝 Hermes Agent",
+      hermes_auto_not_installed: "未偵測到 Hermes CLI 或本機 Desktop。請安裝 {minimum} 以上版本後重試。未寫入任何設定。",
+      hermes_auto_version_too_old: "已安裝 Hermes Agent {version}，請升級至 {minimum} 以上版本。未寫入任何設定。",
+      hermes_auto_version_unknown: "無法確認 Hermes Agent 版本，請檢查安裝後重試。未寫入任何設定。",
+      hermes_auto_configured: "已設定 ironmlx Profile。請重新啟動已開啟的 Hermes 工作階段，在 Desktop 側邊欄底部切換至 ironmlx，或使用下方 CLI 命令。",
+      hermes_auto_configuration_failed: "無法更新 Hermes 設定，請檢查 YAML 格式和檔案權限。變更前會備份現有設定。",
+      hermes_auto_model_unavailable: "請啟動 IronMLX，載入並選擇對話模型後重試。",
+      hermes_auto_backend_unavailable: "無法連線 IronMLX，請啟動服務後重試。",
+      hermes_auto_local_only: "一鍵設定需要 IronMLX 處於本機模式。",
+      hermes_auto_busy: "Hermes 設定正在進行，請稍候。",
+      hermes_auto_native_required: "請在 IronMLX App 中使用一鍵設定。",
+      hermes_auto_context_too_small: "Hermes 要求至少 64,000 個上下文 token。請載入實際容量符合要求的模型後重試。未寫入任何設定。",
+      hermes_auto_custom_home: "目前指定了自訂 Hermes 資料目錄，請對該目錄使用手動設定。未寫入任何設定。",
+      hermes_auto_profile_conflict: "ironmlx Profile 已刪除或使用符號連結。請在 Hermes 還原，或使用手動設定。未寫入任何設定。",
+      omp_auto_title: "一鍵設定",
+      omp_auto_description: "需要 oh-my-pi 18.1.16 或更新版本。為預設設定目錄接入 IronMLX，保留其他 Provider。",
+      omp_auto_button: "一鍵設定",
+      omp_auto_pending: "正在檢查並設定 oh-my-pi…",
+      omp_auto_install: "安裝 oh-my-pi",
+      omp_auto_not_installed: "未偵測到 oh-my-pi。請安裝 {minimum} 或更新版本後重試。未寫入任何設定。",
+      omp_auto_version_too_old: "已安裝 oh-my-pi {version}，請升級至 {minimum} 或更新版本。未寫入任何設定。",
+      omp_auto_version_unknown: "無法確認 oh-my-pi 版本，請檢查安裝後重試。未寫入任何設定。",
+      omp_auto_configured: "已設定 IronMLX Provider。請重新啟動已開啟的 OMP 工作階段，並將下方指令的路徑替換為目標專案目錄後使用。",
+      omp_auto_configuration_failed: "無法更新 OMP 設定，請檢查 YAML 格式和檔案權限。修改前會備份現有檔案。",
+      omp_auto_initialize_cli: "舊版 models.json 需要遷移。請先啟動一次 OMP 後重試。未寫入任何設定。",
+      omp_auto_model_unavailable: "請啟動 IronMLX，載入並選擇對話模型後重試。",
+      omp_auto_backend_unavailable: "無法連線 IronMLX，請啟動服務後重試。",
+      omp_auto_local_only: "一鍵設定需要 IronMLX 處於本機模式。",
+      omp_auto_busy: "OMP 設定正在進行，請稍候。",
+      omp_auto_native_required: "請在 IronMLX App 中使用一鍵設定。",
+      dsh_harness_desktop_option: "設定 DeepSeek 官方桌面應用程式。",
+      dsh_harness_title: "一鍵設定",
+      dsh_harness_button: "一鍵設定",
+      dsh_harness_pending: "正在檢查並設定…",
+      dsh_harness_cli_desc: "需要官方 DSH CLI 0.2.1-rc.2 或更新版本。將 IronMLX 新增至 Web 與 Headless 模式。",
+      dsh_harness_desktop_desc: "需要官方 DeepSeek Harness Desktop 0.2.1-rc.2 或更新版本。社群版請使用獨立的 DSH Desktop 卡片。",
+      dsh_harness_desktop_manual: "開啟設定 → 模型，新增自訂模型 API：Provider ID 為 ironmlx-local，協定為 OpenAI Responses，位址使用下方 Endpoint，API Key 填 local。取得並新增已載入模型，建立 Provider，然後在新對話選擇 IronMLX。",
+      dsh_harness_not_installed: "未偵測到{app}。請安裝官方應用程式後重試。設定已停止，未寫入任何設定。",
+      dsh_harness_version_too_old: "目前版本為 {version}，需要 {minimum} 或更新版本。請升級後重試，未寫入任何設定。",
+      dsh_harness_version_unknown: "無法確認官方應用程式版本。請安裝支援的官方版本後重試，未寫入任何設定。",
+      dsh_harness_cli_unrecognized: "目前 dsh 命令無法確認為官方安裝。社群版 DSH Desktop 不符合此要求。請安裝官方 CLI 後重試，未寫入任何設定。",
+      dsh_harness_custom_home: "偵測到自訂 DSH_HOME。一鍵設定僅支援 ~/.dsh，請使用手動設定，未寫入任何設定。",
+      dsh_harness_home_unknown: "無法確認 CLI 設定目錄。請檢查登入 Shell 或使用手動設定，未寫入任何設定。",
+      dsh_harness_home_conflict: "~/.dsh/cordis.patch.yml 中存在模型、Provider 或憑證儲存覆寫項。請先處理或手動設定，未寫入任何設定。",
+      dsh_harness_close_app: "請先關閉官方 DeepSeek Harness Desktop 與執行中的 dsh 工作階段，再重試。偵測到 profile 鎖時不會寫入設定。",
+      dsh_harness_initialize_app: "偵測到舊版 settings.yaml。請先啟動所選官方應用程式完成移轉，關閉後重試，未寫入任何設定。",
+      dsh_harness_model_unavailable: "請啟動 IronMLX 並載入對話模型後重試。",
+      dsh_harness_local_only: "一鍵設定需要 IronMLX 處於本機模式。",
+      dsh_harness_busy: "正在設定，請稍候。",
+      dsh_harness_native_required: "請在 IronMLX macOS App 中使用一鍵設定。",
+      dsh_harness_configuration_failed: "設定失敗。請檢查 profile YAML、檔案權限與符號連結；現有備份可用於還原。",
+      dsh_harness_invalid_mode: "請選擇 CLI 或官方桌面版。",
+      dsh_harness_configured_cli: "已設定 Web 與 Headless profile。執行 dsh web，或 dsh --profile headless \"Hi\" 即可使用。新對話預設使用 IronMLX，現有 Provider 已保留。",
+      dsh_harness_configured_desktop: "已設定官方 Desktop profile。請重新開啟 DeepSeek Harness，並使用 IronMLX 開始新對話。社群版 DSH Desktop 未變動。",
+      dsh_harness_install_cli: "安裝 DSH CLI",
+      dsh_harness_install_desktop: "安裝 DeepSeek Harness",
+      dsh_verified_revision: "已驗證 master", dsh_description: "透過 Responses API 將官方 DeepSeek Harness CLI 或 Desktop 接入 IronMLX。",
       dsh_save_file: "儲存為", dsh_home_default: "（通常為 ~/.dsh）", dsh_reasoning: "推理模式", dsh_reasoning_off: "關閉",
       dsh_reasoning_minimal: "極低", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "極高", dsh_reasoning_max: "最大",
       dsh_context_window: "上下文容量", dsh_output_budget: "單輪輸出預算（tokens）",
@@ -6954,11 +7412,11 @@
       dsh_capacity_ready: "已根據 /v1/models 預填容量；複製前請檢查輸出預算。",
       dsh_invalid_capacity: "請輸入正整數；輸出預算不得超過上下文容量或 /v1/models 公布的上限。",
       dsh_budget_note: "輸出預算預設不超過 4096 tokens，不會一律採用伺服器硬上限。reasoning 與正文共用預算，請依工作需要調整。",
-      dsh_settings_note: "若 dsh 的 settings.yaml 已指定預設模型或覆蓋 llm-pi-ai，請更新這些衝突的設定；使用者設定的優先順序高於此 overlay。",
+      dsh_settings_note: "舊版 settings.yaml 會在啟動時移轉。手動設定前請先啟動一次 dsh；home 層與命令列補丁可能覆寫 profile 設定。",
       dsh_verify_desc: "設定本機佔位金鑰，完成一輪文字請求，再驗證實際的檔案讀取工具呼叫。",
       dsh_key_note: "佔位金鑰僅滿足 dsh 對本機免驗證 endpoint 的憑證查詢；它不是 LAN API Key。",
-      dsh_setup_method: "選擇設定方式", dsh_setup_method_desc: "在 DSH Desktop 中設定提供者，或使用 DSH CLI 載入產生的 overlay。",
-      dsh_cli: "DSH CLI", dsh_cli_desc: "產生獨立 overlay，只在需要使用 IronMLX 的 dsh 執行中載入。",
+      dsh_setup_method: "選擇應用程式", dsh_setup_method_desc: "選擇要檢查並設定的官方應用程式。",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "設定官方 CLI 的 Web 與 Headless profile。",
       dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "從 DSH Desktop 設定中將 IronMLX 加入為自訂提供者。",
       dsh_desktop_configure: "設定 DSH Desktop", dsh_desktop_configure_desc: "在桌面應用程式中建立自訂提供者；不需要 overlay 檔案，也不需要修改 DSH_HOME。",
       dsh_desktop_full_guide: "完整 DSH Desktop 指南",
@@ -7389,6 +7847,33 @@
       cluster_pm_auto: "自動（預設）", cluster_pm_tp: "張量平行 (TP)", cluster_pm_pp: "管線平行 (PP)"
     },
     ja: {
+      dsh_manual_configuration: "手動設定",
+      dsh_verify_connection: "接続を確認",
+      dsh_verify_shared_desc: "ワンクリック設定または手動設定の完了後、次の手順で接続を確認してください。",
+
+      dsh_official_desktop: "公式デスクトップ版",
+      dsh_community_website: "コミュニティサイト",
+      dsh_community_description: "dshdesktop.com のコミュニティ版 DSH Desktop を IronMLX に接続します。",
+      dsh_community: "コミュニティ版",
+      dsh_auto_title: "One-click setup",
+      dsh_auto_button: "One-click setup",
+      dsh_auto_description: "For the community DSH Desktop from dshdesktop.com, version 0.12.1 or later.",
+      dsh_auto_download: "DSH Desktop をインストール",
+      dsh_auto_pending: "Checking DSH Desktop and configuring…",
+      dsh_auto_not_installed: "Community DSH Desktop is not installed. Install version {minimum} or later from dshdesktop.com, then retry. Setup stopped; no configuration was written.",
+      dsh_auto_version_too_old: "Installed version {version} is below the required {minimum}. Upgrade community DSH Desktop, then retry. Setup stopped; no configuration was written.",
+      dsh_auto_version_unknown: "The installed community DSH Desktop version could not be verified. Install version {minimum} or later, then retry. Setup stopped; no configuration was written.",
+      dsh_auto_close_app: "Quit DSH Desktop before configuring, then retry.",
+      dsh_auto_initialize_app: "Launch DSH Desktop once to finish its configuration migration, quit it, then retry.",
+      dsh_auto_model_unavailable: "Load a conversation LLM in IronMLX and select it before retrying. Its context and output limits must be available.",
+      dsh_auto_local_only: "One-click setup currently supports IronMLX local mode. Switch to local mode, then retry.",
+      dsh_auto_backend_unavailable: "Unable to read model information from IronMLX. Check that the service is running, then retry.",
+      dsh_auto_provider_disabled: "既存の llm-pi-ai プラグインは無効です（disabled: true）。競合を手動で解消してから再試行してください。設定は書き込んでいません。",
+      dsh_auto_configuration_failed: "Configuration could not be saved. Check file permissions and configuration format. Existing-file backups, if created, are kept beside the files.",
+      dsh_auto_configured: "Configuration saved. Open community DSH Desktop, start a new chat, select IronMLX / your model, and ask it to reply with IRONMLX_OK to verify the connection.",
+      dsh_auto_native_required: "Open this Dashboard in the IronMLX App to configure local applications.",
+      dsh_auto_busy: "A setup operation is in progress. Please wait and retry.",
+
       download_pause: "一時停止",
       download_resume: "再開",
       download_retry: "再試行",
@@ -7521,6 +8006,10 @@
       nav_status: "ステータス", nav_models: "モデル", nav_voices: "音声", nav_benchmark: "ベンチマーク", nav_logs: "ログ", nav_chat: "AI エージェント", nav_settings: "設定",
       sidebar_expand: "サイドバーを展開", sidebar_collapse: "サイドバーを折りたたむ",
       chat_subtitle: "外部エージェントが IronMLX を推論プロバイダーとして使用できるように設定します。",
+      agent_client_terminal: "ターミナルアプリ",
+      agent_client_terminal_desktop: "ターミナル · デスクトップ",
+      agent_client_community_desktop: "コミュニティ版デスクトップ",
+      agent_client_official_desktop_cli: "公式デスクトップ · CLI",
       agent_supported: "対応エージェント", agent_supported_label: "対応しているエージェント",
       agent_provider_setup: "プロバイダー設定", agent_applicable_version: "対応バージョン",
       agent_current_connection: "現在の IronMLX 接続",
@@ -7534,21 +8023,77 @@
       agent_tool_boundary: "エージェントが terminal、bash、MCP ツールをローカルで実行します。IronMLX は推論と構造化ツール呼び出しのみを提供します。",
       agent_official_guide: "公式設定ガイドへ",
       hermes_description: "Hermes Agent のステートレス Responses トランスポートから IronMLX を使用します。以下の設定は現在の App の状態から生成されます。",
-      hermes_profile_scope_label: "Hermes profile の範囲",
-      hermes_profile_dedicated: "専用 ironmlx profile",
-      hermes_profile_dedicated_desc: "IronMLX の設定とセッションをデフォルト profile から分離します。",
-      hermes_profile_default: "デフォルト profile",
-      hermes_profile_default_desc: "簡単ですが、デフォルト profile のプロバイダーが変更されます。",
-      hermes_profile_create_once: "設定を編集する前に profile を一度だけ作成します：",
+      hermes_profile_note: "ワンクリック設定と手動設定は、どちらも専用の ironmlx profile を使用します。",
+      hermes_profile_create_once: "CLI がある場合、profile がまだ存在しないときだけ作成します：",
       hermes_profile_tui: "TUI",
-      hermes_profile_desktop_dedicated: "Desktop：ironmlx profile を選択して、新しいチャットを開始します。",
-      hermes_profile_desktop_default: "Desktop：デフォルト profile を使用して、新しいチャットを開始します。",
+      hermes_profile_desktop: "Desktop：サイドバー下部の I ボタンにポインタを合わせて ironmlx と確認し、クリックして新しいチャットを開始します。設定画面の選択は編集対象のみを切り替えます。",
       hermes_context_requirement: "Hermes Agent v0.20.0 以降では 64K 以上のコンテキストトークンが必要です。モデルの実際のコンテキスト上限を指定してください。",
+      hermes_workspace_note: "既存の profile にこれらの項目をマージし、他の設定を保持してください。terminal の作業場所を指定する場合は、terminal.cwd に実在するプロジェクトディレクトリを設定します。",
       hermes_verify_desc: "サービスを確認し、推論リクエストを 1 回実行してから terminal ツール呼び出しを検証します。",
       omp_description: "IronMLX をキー不要の Responses プロバイダーとして登録し、App が提供するモデルを検出して、目的のプロジェクトディレクトリで OMP を起動します。",
       omp_refresh_desc: "プロバイダー検出を更新し、利用可能なモデルを確認してからプロジェクトで OMP を起動します。",
       omp_cwd_note: "実行前にプロジェクトパスを置き換えてください。OMP は --cwd で指定したディレクトリで bash ツールを実行します。",
-      dsh_verified_revision: "検証済み master", dsh_description: "Responses API 経由で DeepSeek Harness を IronMLX に接続し、DSH CLI overlay または DSH Desktop GUI を使用します。",
+      hermes_auto_title: "ワンクリック設定",
+      hermes_auto_description: "Hermes CLI またはローカル Desktop 0.20.0 以降と 64K 以上のコンテキストが必要です。専用 ironmlx プロファイルを設定します。",
+      hermes_auto_button: "ワンクリック設定",
+      hermes_auto_pending: "Hermes Agent を確認・設定中…",
+      hermes_auto_install: "Hermes Agent をインストール",
+      hermes_auto_not_installed: "Hermes CLI またはローカル Desktop が見つかりません。{minimum} 以降をインストールしてください。設定は未変更です。",
+      hermes_auto_version_too_old: "Hermes Agent {version} を {minimum} 以降に更新してください。設定は未変更です。",
+      hermes_auto_version_unknown: "Hermes Agent のバージョンを確認できません。インストールを確認してください。設定は未変更です。",
+      hermes_auto_configured: "ironmlx profile を設定しました。開いている Hermes セッションを再起動し、Desktop のサイドバー下部で ironmlx に切り替えるか、以下の CLI コマンドを使ってください。",
+      hermes_auto_configuration_failed: "Hermes 設定を更新できません。YAML の形式と権限を確認してください。変更前に既存設定をバックアップします。",
+      hermes_auto_model_unavailable: "IronMLX を起動して対話モデルを読み込み、選択してください。",
+      hermes_auto_backend_unavailable: "IronMLX に接続できません。サービスを起動してください。",
+      hermes_auto_local_only: "IronMLX のローカルモードが必要です。",
+      hermes_auto_busy: "Hermes 設定を実行中です。",
+      hermes_auto_native_required: "IronMLX App でワンクリック設定を使用してください。",
+      hermes_auto_context_too_small: "Hermes は 64,000 以上のコンテキストトークンが必要です。十分な実容量のモデルを読み込んでください。設定は未変更です。",
+      hermes_auto_custom_home: "カスタム Hermes データディレクトリは手動で設定してください。設定は未変更です。",
+      hermes_auto_profile_conflict: "ironmlx プロファイルは削除済みかシンボリックリンクを使用しています。Hermes で復元するか手動で設定してください。設定は未変更です。",
+      omp_auto_title: "ワンクリック設定",
+      omp_auto_description: "oh-my-pi 18.1.16 以降が必要です。既定のプロファイルを設定し、他のプロバイダーを保持します。",
+      omp_auto_button: "ワンクリック設定",
+      omp_auto_pending: "oh-my-pi を確認・設定中…",
+      omp_auto_install: "oh-my-pi をインストール",
+      omp_auto_not_installed: "oh-my-pi が見つかりません。{minimum} 以降をインストールしてください。設定は未変更です。",
+      omp_auto_version_too_old: "oh-my-pi {version} を {minimum} 以降に更新してください。設定は未変更です。",
+      omp_auto_version_unknown: "oh-my-pi のバージョンを確認できません。インストールを確認してください。設定は未変更です。",
+      omp_auto_configured: "IronMLX プロバイダーを設定しました。OMP セッションを再起動し、下のコマンドのパスを対象プロジェクトに置き換えて実行してください。",
+      omp_auto_configuration_failed: "OMP 設定を更新できません。YAML の形式と権限を確認してください。変更前に既存ファイルをバックアップします。",
+      omp_auto_initialize_cli: "旧 models.json の移行が必要です。OMP を一度起動して再試行してください。設定は未変更です。",
+      omp_auto_model_unavailable: "IronMLX を起動して対話モデルを読み込み、選択してください。",
+      omp_auto_backend_unavailable: "IronMLX に接続できません。サービスを起動してください。",
+      omp_auto_local_only: "IronMLX のローカルモードが必要です。",
+      omp_auto_busy: "OMP 設定を実行中です。",
+      omp_auto_native_required: "IronMLX App でワンクリック設定を使用してください。",
+      dsh_harness_desktop_option: "公式 DeepSeek Harness デスクトップアプリを設定します。",
+      dsh_harness_title: "ワンクリック設定",
+      dsh_harness_button: "設定する",
+      dsh_harness_pending: "確認・設定中…",
+      dsh_harness_cli_desc: "公式 DSH CLI 0.2.1-rc.2 以降が必要です。Web と Headless モードに IronMLX を追加します。",
+      dsh_harness_desktop_desc: "公式 DeepSeek Harness Desktop 0.2.1-rc.2 以降が必要です。コミュニティ版は専用の DSH Desktop カードを使用してください。",
+      dsh_harness_desktop_manual: "設定 → モデルでカスタムモデル API を追加します。Provider ID は ironmlx-local、プロトコルは OpenAI Responses、URL は下記 Endpoint、API Key は local とします。読み込み済みモデルを取得・追加して Provider を作成し、新しいチャットで IronMLX を選択してください。",
+      dsh_harness_not_installed: "{app} が見つかりません。公式アプリをインストールして再試行してください。設定は停止し、ファイルは書き込んでいません。",
+      dsh_harness_version_too_old: "現在のバージョン {version} は {minimum} 以降への更新が必要です。設定は書き込んでいません。",
+      dsh_harness_version_unknown: "公式アプリのバージョンを確認できません。対応する公式リリースをインストールしてください。設定は書き込んでいません。",
+      dsh_harness_cli_unrecognized: "dsh コマンドを公式インストールと確認できません。コミュニティ版 DSH Desktop は対象外です。公式 CLI をインストールしてください。設定は書き込んでいません。",
+      dsh_harness_custom_home: "カスタム DSH_HOME を検出しました。自動設定は ~/.dsh のみに対応します。手動で設定してください。書き込みは行っていません。",
+      dsh_harness_home_unknown: "CLI の設定ディレクトリを確認できません。ログインシェルを確認するか手動で設定してください。書き込みは行っていません。",
+      dsh_harness_home_conflict: "~/.dsh/cordis.patch.yml にモデル、Provider、認証ストアの上書きがあります。上書きを解消するか手動で設定してください。書き込みは行っていません。",
+      dsh_harness_close_app: "公式 DeepSeek Harness Desktop と実行中の dsh を終了して再試行してください。profile ロックがある場合は書き込みません。",
+      dsh_harness_initialize_app: "旧 settings.yaml の移行が必要です。選択した公式アプリを起動し、終了してから再試行してください。書き込みは行っていません。",
+      dsh_harness_model_unavailable: "IronMLX を起動して会話モデルを読み込んでください。",
+      dsh_harness_local_only: "自動設定にはローカルモードが必要です。",
+      dsh_harness_busy: "設定が既に進行中です。",
+      dsh_harness_native_required: "IronMLX macOS アプリで利用できます。",
+      dsh_harness_configuration_failed: "設定に失敗しました。profile YAML、権限、シンボリックリンクを確認してください。既存のバックアップから復元できます。",
+      dsh_harness_invalid_mode: "CLI または公式デスクトップを選択してください。",
+      dsh_harness_configured_cli: "Web と Headless profile を設定しました。dsh web または dsh --profile headless \"Hi\" を実行してください。新規セッションは IronMLX を使用し、既存 Provider は保持されます。",
+      dsh_harness_configured_desktop: "公式 Desktop profile を設定しました。DeepSeek Harness を再起動し、IronMLX で新しいチャットを開始してください。コミュニティ版は変更していません。",
+      dsh_harness_install_cli: "DSH CLI をインストール",
+      dsh_harness_install_desktop: "DeepSeek Harness をインストール",
+      dsh_verified_revision: "検証済み master", dsh_description: "公式 DeepSeek Harness CLI または Desktop を Responses API で IronMLX に接続します。",
       dsh_save_file: "保存先", dsh_home_default: "（通常は ~/.dsh）", dsh_reasoning: "推論モード", dsh_reasoning_off: "オフ",
       dsh_reasoning_minimal: "最小", dsh_reasoning_low: "低", dsh_reasoning_medium: "中", dsh_reasoning_high: "高", dsh_reasoning_xhigh: "非常に高い", dsh_reasoning_max: "最大",
       dsh_context_window: "コンテキスト容量", dsh_output_budget: "回答ごとの出力予算（tokens）",
@@ -7558,11 +8103,11 @@
       dsh_capacity_ready: "/v1/models の容量を入力しました。コピーする前に出力予算を確認してください。",
       dsh_invalid_capacity: "正の整数を入力してください。出力予算はコンテキスト容量と /v1/models の上限以下にしてください。",
       dsh_budget_note: "出力予算は最大 4096 tokens で初期入力され、サーバー上限を常に使うわけではありません。推論と本文は同じ予算を消費するため、用途に合わせて調整してください。",
-      dsh_settings_note: "dsh の settings.yaml が既定のモデルを指定するか llm-pi-ai を上書きしている場合は、競合する設定を更新してください。ユーザー設定がこの overlay より優先されます。",
+      dsh_settings_note: "旧 settings.yaml は起動時に移行されます。手動設定前に dsh を一度起動してください。home とコマンドラインのパッチは profile 設定を上書きします。",
       dsh_verify_desc: "ローカルの仮キーを設定し、テキストの応答と実際のファイル読み取りツール呼び出しを確認します。",
       dsh_key_note: "仮キーは認証不要のローカル endpoint で dsh の認証情報照会を満たすためだけのものです。LAN API Key ではありません。",
-      dsh_setup_method: "設定方法を選択", dsh_setup_method_desc: "DSH Desktop でプロバイダーを設定するか、DSH CLI で生成した overlay を使います。",
-      dsh_cli: "DSH CLI", dsh_cli_desc: "専用 overlay を生成し、IronMLX を使う dsh 実行にだけ渡します。",
+      dsh_setup_method: "アプリを選択", dsh_setup_method_desc: "確認・設定する公式アプリを選択します。",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "公式 CLI の Web と Headless profile を設定します。",
       dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "DSH Desktop の設定から IronMLX をカスタムプロバイダーとして追加します。",
       dsh_desktop_configure: "DSH Desktop を設定", dsh_desktop_configure_desc: "デスクトップアプリでカスタムプロバイダーを作成します。overlay ファイルや DSH_HOME の変更は不要です。",
       dsh_desktop_full_guide: "DSH Desktop の完全ガイド",
@@ -7993,6 +8538,33 @@
       cluster_pm_auto: "自動（既定）", cluster_pm_tp: "テンソル並列 (TP)", cluster_pm_pp: "パイプライン並列 (PP)"
     },
     ko: {
+      dsh_manual_configuration: "수동 설정",
+      dsh_verify_connection: "연결 확인",
+      dsh_verify_shared_desc: "원클릭 또는 수동 설정을 완료한 후 아래 단계로 연결을 확인하세요.",
+
+      dsh_official_desktop: "공식 데스크톱 버전",
+      dsh_community_website: "커뮤니티 웹사이트",
+      dsh_community_description: "dshdesktop.com의 커뮤니티 DSH Desktop을 IronMLX에 연결합니다.",
+      dsh_community: "커뮤니티 버전",
+      dsh_auto_title: "One-click setup",
+      dsh_auto_button: "One-click setup",
+      dsh_auto_description: "For the community DSH Desktop from dshdesktop.com, version 0.12.1 or later.",
+      dsh_auto_download: "DSH Desktop 설치",
+      dsh_auto_pending: "Checking DSH Desktop and configuring…",
+      dsh_auto_not_installed: "Community DSH Desktop is not installed. Install version {minimum} or later from dshdesktop.com, then retry. Setup stopped; no configuration was written.",
+      dsh_auto_version_too_old: "Installed version {version} is below the required {minimum}. Upgrade community DSH Desktop, then retry. Setup stopped; no configuration was written.",
+      dsh_auto_version_unknown: "The installed community DSH Desktop version could not be verified. Install version {minimum} or later, then retry. Setup stopped; no configuration was written.",
+      dsh_auto_close_app: "Quit DSH Desktop before configuring, then retry.",
+      dsh_auto_initialize_app: "Launch DSH Desktop once to finish its configuration migration, quit it, then retry.",
+      dsh_auto_model_unavailable: "Load a conversation LLM in IronMLX and select it before retrying. Its context and output limits must be available.",
+      dsh_auto_local_only: "One-click setup currently supports IronMLX local mode. Switch to local mode, then retry.",
+      dsh_auto_backend_unavailable: "Unable to read model information from IronMLX. Check that the service is running, then retry.",
+      dsh_auto_provider_disabled: "기존 llm-pi-ai 플러그인이 비활성화되어 있습니다(disabled: true). 충돌을 수동으로 해결한 후 다시 시도하세요. 설정을 쓰지 않았습니다.",
+      dsh_auto_configuration_failed: "Configuration could not be saved. Check file permissions and configuration format. Existing-file backups, if created, are kept beside the files.",
+      dsh_auto_configured: "Configuration saved. Open community DSH Desktop, start a new chat, select IronMLX / your model, and ask it to reply with IRONMLX_OK to verify the connection.",
+      dsh_auto_native_required: "Open this Dashboard in the IronMLX App to configure local applications.",
+      dsh_auto_busy: "A setup operation is in progress. Please wait and retry.",
+
       download_pause: "일시 중지",
       download_resume: "재개",
       download_retry: "다시 시도",
@@ -8125,6 +8697,10 @@
       nav_status: "상태", nav_models: "모델", nav_voices: "음성", nav_benchmark: "벤치마크", nav_logs: "로그", nav_chat: "AI 에이전트", nav_settings: "설정",
       sidebar_expand: "사이드바 펼치기", sidebar_collapse: "사이드바 접기",
       chat_subtitle: "외부 에이전트가 IronMLX를 추론 프로바이더로 사용하도록 구성하세요.",
+      agent_client_terminal: "터미널 앱",
+      agent_client_terminal_desktop: "터미널 · 데스크톱",
+      agent_client_community_desktop: "커뮤니티 데스크톱",
+      agent_client_official_desktop_cli: "공식 데스크톱 · CLI",
       agent_supported: "지원 에이전트", agent_supported_label: "지원되는 에이전트",
       agent_provider_setup: "프로바이더 설정", agent_applicable_version: "지원 버전",
       agent_current_connection: "현재 IronMLX 연결",
@@ -8138,21 +8714,77 @@
       agent_tool_boundary: "에이전트는 terminal, bash 및 MCP 도구를 로컬에서 실행합니다. IronMLX는 추론과 구조화된 도구 호출만 제공합니다.",
       agent_official_guide: "공식 설정 가이드 열기",
       hermes_description: "Hermes Agent의 상태 비저장 Responses 전송을 통해 IronMLX를 사용합니다. 아래 설정은 현재 App 상태에서 생성됩니다.",
-      hermes_profile_scope_label: "Hermes profile 범위",
-      hermes_profile_dedicated: "전용 ironmlx profile",
-      hermes_profile_dedicated_desc: "IronMLX 설정과 세션을 기본 profile에서 분리합니다.",
-      hermes_profile_default: "기본 profile",
-      hermes_profile_default_desc: "간단하지만 기본 profile에서 사용하는 프로바이더가 변경됩니다.",
-      hermes_profile_create_once: "설정을 편집하기 전에 profile을 한 번만 생성하세요:",
+      hermes_profile_note: "원클릭 설정과 수동 설정 모두 전용 ironmlx profile을 사용합니다.",
+      hermes_profile_create_once: "CLI가 설치되어 있고 profile이 아직 없을 때만 생성하세요:",
       hermes_profile_tui: "TUI",
-      hermes_profile_desktop_dedicated: "Desktop: ironmlx profile을 선택한 다음 새 채팅을 시작하세요.",
-      hermes_profile_desktop_default: "Desktop: 기본 profile을 사용한 다음 새 채팅을 시작하세요.",
+      hermes_profile_desktop: "Desktop: 사이드바 하단의 I 버튼 위에 마우스를 올려 ironmlx인지 확인한 후 클릭하고 새 채팅을 시작하세요. 설정 화면의 선택은 편집할 profile만 바꿉니다.",
       hermes_context_requirement: "Hermes Agent v0.20.0 이상은 최소 64K 컨텍스트 토큰이 필요합니다. 모델의 실제 컨텍스트 한도를 입력하세요.",
+      hermes_workspace_note: "기존 profile에 이 필드를 병합하고 다른 설정은 유지하세요. terminal 작업 폴더를 지정하려면 terminal.cwd를 실제 프로젝트 디렉터리로 설정하세요.",
       hermes_verify_desc: "서비스를 확인하고 추론 요청 한 번을 완료한 다음 terminal 도구 호출을 검증하세요.",
       omp_description: "IronMLX를 키가 필요 없는 Responses 프로바이더로 등록하고 App이 제공하는 모델을 검색한 뒤 원하는 프로젝트 디렉터리에서 OMP를 시작하세요.",
       omp_refresh_desc: "프로바이더 검색을 새로고침하고 사용 가능한 모델을 확인한 다음 프로젝트에서 OMP를 시작하세요.",
       omp_cwd_note: "명령을 실행하기 전에 프로젝트 경로를 바꾸세요. OMP는 --cwd로 지정한 디렉터리에서 bash 도구를 실행합니다.",
-      dsh_verified_revision: "검증된 master", dsh_description: "Responses API를 통해 DeepSeek Harness를 IronMLX에 연결하고 DSH CLI overlay 또는 DSH Desktop GUI를 사용하세요.",
+      hermes_auto_title: "원클릭 설정",
+      hermes_auto_description: "Hermes CLI 또는 로컬 Desktop 0.20.0 이상과 64K 이상의 컨텍스트가 필요합니다. 전용 ironmlx 프로필을 설정합니다.",
+      hermes_auto_button: "원클릭 설정",
+      hermes_auto_pending: "Hermes Agent 확인 및 설정 중…",
+      hermes_auto_install: "Hermes Agent 설치",
+      hermes_auto_not_installed: "Hermes CLI 또는 로컬 Desktop을 찾지 못했습니다. {minimum} 이상을 설치하세요. 설정은 변경되지 않았습니다.",
+      hermes_auto_version_too_old: "Hermes Agent {version}을 {minimum} 이상으로 업데이트하세요. 설정은 변경되지 않았습니다.",
+      hermes_auto_version_unknown: "Hermes Agent 버전을 확인할 수 없습니다. 설치를 확인하세요. 설정은 변경되지 않았습니다.",
+      hermes_auto_configured: "ironmlx profile을 설정했습니다. 열린 Hermes 세션을 다시 시작하고 Desktop 사이드바 하단에서 ironmlx로 전환하거나 아래 CLI 명령을 사용하세요.",
+      hermes_auto_configuration_failed: "Hermes 설정을 업데이트할 수 없습니다. YAML 형식과 권한을 확인하세요. 변경 전에 기존 설정을 백업합니다.",
+      hermes_auto_model_unavailable: "IronMLX를 시작하고 대화 모델을 로드한 후 선택하세요.",
+      hermes_auto_backend_unavailable: "IronMLX에 연결할 수 없습니다. 서비스를 시작하세요.",
+      hermes_auto_local_only: "IronMLX 로컬 모드가 필요합니다.",
+      hermes_auto_busy: "Hermes 설정이 진행 중입니다.",
+      hermes_auto_native_required: "IronMLX App에서 원클릭 설정을 사용하세요.",
+      hermes_auto_context_too_small: "Hermes에는 최소 64,000 컨텍스트 토큰이 필요합니다. 실제 용량이 충분한 모델을 로드하세요. 설정은 변경되지 않았습니다.",
+      hermes_auto_custom_home: "사용자 지정 Hermes 데이터 디렉터리는 수동으로 설정하세요. 설정은 변경되지 않았습니다.",
+      hermes_auto_profile_conflict: "ironmlx 프로필이 삭제되었거나 심볼릭 링크를 사용합니다. Hermes에서 복원하거나 수동으로 설정하세요. 설정은 변경되지 않았습니다.",
+      omp_auto_title: "원클릭 설정",
+      omp_auto_description: "oh-my-pi 18.1.16 이상이 필요합니다. 기본 프로필을 설정하고 다른 제공자는 유지합니다.",
+      omp_auto_button: "원클릭 설정",
+      omp_auto_pending: "oh-my-pi 확인 및 설정 중…",
+      omp_auto_install: "oh-my-pi 설치",
+      omp_auto_not_installed: "oh-my-pi를 찾지 못했습니다. {minimum} 이상을 설치하세요. 설정은 변경되지 않았습니다.",
+      omp_auto_version_too_old: "oh-my-pi {version}을 {minimum} 이상으로 업데이트하세요. 설정은 변경되지 않았습니다.",
+      omp_auto_version_unknown: "oh-my-pi 버전을 확인할 수 없습니다. 설치를 확인하세요. 설정은 변경되지 않았습니다.",
+      omp_auto_configured: "IronMLX 제공자를 설정했습니다. OMP 세션을 다시 시작하고 아래 명령의 경로를 대상 프로젝트로 바꿔 실행하세요.",
+      omp_auto_configuration_failed: "OMP 설정을 업데이트할 수 없습니다. YAML 형식과 권한을 확인하세요. 변경 전에 기존 파일을 백업합니다.",
+      omp_auto_initialize_cli: "이전 models.json을 마이그레이션해야 합니다. OMP를 한 번 실행한 후 다시 시도하세요. 설정은 변경되지 않았습니다.",
+      omp_auto_model_unavailable: "IronMLX를 시작하고 대화 모델을 로드한 후 선택하세요.",
+      omp_auto_backend_unavailable: "IronMLX에 연결할 수 없습니다. 서비스를 시작하세요.",
+      omp_auto_local_only: "IronMLX 로컬 모드가 필요합니다.",
+      omp_auto_busy: "OMP 설정이 진행 중입니다.",
+      omp_auto_native_required: "IronMLX App에서 원클릭 설정을 사용하세요.",
+      dsh_harness_desktop_option: "공식 DeepSeek Harness 데스크톱 앱을 설정합니다.",
+      dsh_harness_title: "원클릭 설정",
+      dsh_harness_button: "설정",
+      dsh_harness_pending: "확인 및 설정 중…",
+      dsh_harness_cli_desc: "공식 DSH CLI 0.2.1-rc.2 이상이 필요합니다. Web 및 Headless 모드에 IronMLX를 추가합니다.",
+      dsh_harness_desktop_desc: "공식 DeepSeek Harness Desktop 0.2.1-rc.2 이상이 필요합니다. 커뮤니티 앱은 별도의 DSH Desktop 카드를 사용하세요.",
+      dsh_harness_desktop_manual: "설정 → 모델에서 사용자 지정 모델 API를 추가하세요. Provider ID는 ironmlx-local, 프로토콜은 OpenAI Responses, 주소는 아래 Endpoint, API Key는 local입니다. 로드된 모델을 가져와 추가하고 Provider를 만든 후 새 채팅에서 IronMLX를 선택하세요.",
+      dsh_harness_not_installed: "{app}을 찾을 수 없습니다. 공식 앱을 설치한 후 다시 시도하세요. 설정이 중단되었으며 파일을 쓰지 않았습니다.",
+      dsh_harness_version_too_old: "설치 버전 {version}을 {minimum} 이상으로 업그레이드하세요. 설정을 쓰지 않았습니다.",
+      dsh_harness_version_unknown: "공식 앱 버전을 확인할 수 없습니다. 지원되는 공식 버전을 설치하세요. 설정을 쓰지 않았습니다.",
+      dsh_harness_cli_unrecognized: "dsh 명령을 공식 설치로 확인할 수 없습니다. 커뮤니티 DSH Desktop은 해당하지 않습니다. 공식 CLI를 설치하세요. 설정을 쓰지 않았습니다.",
+      dsh_harness_custom_home: "사용자 지정 DSH_HOME을 감지했습니다. 자동 설정은 ~/.dsh만 지원합니다. 수동으로 설정하세요. 파일을 쓰지 않았습니다.",
+      dsh_harness_home_unknown: "CLI 설정 디렉터리를 확인할 수 없습니다. 로그인 셸을 확인하거나 수동으로 설정하세요. 파일을 쓰지 않았습니다.",
+      dsh_harness_home_conflict: "~/.dsh/cordis.patch.yml에 모델, Provider 또는 자격 증명 저장소 재정의가 있습니다. 이를 해결하거나 수동으로 설정하세요. 파일을 쓰지 않았습니다.",
+      dsh_harness_close_app: "공식 DeepSeek Harness Desktop과 실행 중인 dsh 세션을 종료한 후 다시 시도하세요. profile 잠금이 있으면 파일을 쓰지 않습니다.",
+      dsh_harness_initialize_app: "이전 settings.yaml을 마이그레이션해야 합니다. 선택한 공식 앱을 시작한 후 종료하고 다시 시도하세요. 파일을 쓰지 않았습니다.",
+      dsh_harness_model_unavailable: "IronMLX를 시작하고 대화 모델을 로드하세요.",
+      dsh_harness_local_only: "원클릭 설정은 로컬 모드가 필요합니다.",
+      dsh_harness_busy: "설정이 이미 진행 중입니다.",
+      dsh_harness_native_required: "IronMLX macOS 앱에서 사용할 수 있습니다.",
+      dsh_harness_configuration_failed: "설정에 실패했습니다. profile YAML, 파일 권한 및 심볼릭 링크를 확인하세요. 기존 백업으로 복구할 수 있습니다.",
+      dsh_harness_invalid_mode: "CLI 또는 공식 데스크톱 앱을 선택하세요.",
+      dsh_harness_configured_cli: "Web 및 Headless profile을 설정했습니다. dsh web 또는 dsh --profile headless \"Hi\"를 실행하세요. 새 세션은 IronMLX를 사용하며 기존 Provider는 유지됩니다.",
+      dsh_harness_configured_desktop: "공식 Desktop profile을 설정했습니다. DeepSeek Harness를 다시 열고 IronMLX로 새 채팅을 시작하세요. 커뮤니티 버전은 변경하지 않았습니다.",
+      dsh_harness_install_cli: "DSH CLI 설치",
+      dsh_harness_install_desktop: "DeepSeek Harness 설치",
+      dsh_verified_revision: "검증된 master", dsh_description: "공식 DeepSeek Harness CLI 또는 Desktop을 Responses API로 IronMLX에 연결합니다.",
       dsh_save_file: "다음 이름으로 저장", dsh_home_default: "(일반적으로 ~/.dsh)", dsh_reasoning: "추론 모드", dsh_reasoning_off: "끄기",
       dsh_reasoning_minimal: "최소", dsh_reasoning_low: "낮음", dsh_reasoning_medium: "중간", dsh_reasoning_high: "높음", dsh_reasoning_xhigh: "매우 높음", dsh_reasoning_max: "최대",
       dsh_context_window: "컨텍스트 용량", dsh_output_budget: "응답당 출력 예산(tokens)",
@@ -8162,11 +8794,11 @@
       dsh_capacity_ready: "/v1/models의 용량을 채웠습니다. 복사하기 전에 출력 예산을 확인하세요.",
       dsh_invalid_capacity: "양의 정수를 입력하세요. 출력 예산은 컨텍스트 용량과 /v1/models의 상한을 넘을 수 없습니다.",
       dsh_budget_note: "출력 예산은 최대 4096 tokens로 초기 설정되며 항상 서버 최대값을 사용하지는 않습니다. 추론과 본문이 같은 예산을 사용하므로 작업에 맞게 조정하세요.",
-      dsh_settings_note: "dsh settings.yaml이 기본 모델을 지정하거나 llm-pi-ai를 덮어쓰는 경우 충돌하는 설정을 수정하세요. 사용자 설정이 이 overlay보다 우선합니다.",
+      dsh_settings_note: "이전 settings.yaml은 시작 시 마이그레이션됩니다. 수동 설정 전에 dsh를 한 번 시작하세요. home 및 명령줄 패치가 profile 설정을 재정의할 수 있습니다.",
       dsh_verify_desc: "로컬 임시 키를 설정하고 텍스트 응답과 실제 파일 읽기 도구 호출을 확인하세요.",
       dsh_key_note: "임시 키는 인증이 필요 없는 로컬 endpoint에서 dsh의 자격 증명 조회만 충족합니다. LAN API Key가 아닙니다.",
-      dsh_setup_method: "설정 방법 선택", dsh_setup_method_desc: "DSH Desktop에서 제공자를 설정하거나 DSH CLI에서 생성된 overlay를 사용하세요.",
-      dsh_cli: "DSH CLI", dsh_cli_desc: "전용 overlay를 생성하여 IronMLX를 사용할 dsh 실행에만 전달합니다.",
+      dsh_setup_method: "앱 선택", dsh_setup_method_desc: "확인하고 설정할 공식 앱을 선택하세요.",
+      dsh_cli: "DSH CLI", dsh_cli_desc: "공식 CLI의 Web 및 Headless profile을 설정합니다.",
       dsh_desktop: "DSH Desktop", dsh_gui: "GUI", dsh_desktop_desc: "DSH Desktop 설정에서 IronMLX를 사용자 지정 제공자로 추가합니다.",
       dsh_desktop_configure: "DSH Desktop 설정", dsh_desktop_configure_desc: "데스크톱 앱에서 사용자 지정 제공자를 만드세요. overlay 파일이나 DSH_HOME 변경은 필요하지 않습니다.",
       dsh_desktop_full_guide: "전체 DSH Desktop 가이드",
@@ -8613,12 +9245,15 @@
       : 'https://hermes-agent.nousresearch.com/docs/integrations/providers#custom--self-hosted-llm-providers';
     const dshGuide = document.getElementById('dsh-official-guide');
     if (dshGuide) dshGuide.href = lang === 'zh-Hans'
-      ? 'https://deepseek-harness.github.io/deepseek-harness/guide/providers#%E6%B7%BB%E5%8A%A0%E8%87%AA%E5%AE%9A%E4%B9%89%E6%8F%90%E4%BE%9B%E6%96%B9'
-      : 'https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-provider';
+      ? 'https://deepseek-harness.github.io/deepseek-harness/guide/providers#%E6%B7%BB%E5%8A%A0%E8%87%AA%E5%AE%9A%E4%B9%89%E6%A8%A1%E5%9E%8B-api'
+      : 'https://deepseek-harness.github.io/deepseek-harness/en/guide/providers#add-a-custom-model-api';
+    document.querySelectorAll('[data-dsh-desktop-website]').forEach(function(link) {
+      link.href = dshDesktopWebsiteURL(lang);
+    });
     const dshDesktopGuide = document.getElementById('dsh-desktop-full-guide');
     if (dshDesktopGuide) dshDesktopGuide.href = lang === 'zh-Hans' || lang === 'zh-Hant'
-      ? 'https://github.com/apepkuss/ironmlx/blob/dev/docs/zh-CN/dsh.md#dsh-desktop-gui-%E9%85%8D%E7%BD%AE'
-      : 'https://github.com/apepkuss/ironmlx/blob/dev/docs/dsh.md#dsh-desktop-gui-setup';
+      ? 'https://github.com/apepkuss/ironmlx/blob/dev/docs/zh-CN/dsh.md#dsh-desktop-app-%E9%85%8D%E7%BD%AE'
+      : 'https://github.com/apepkuss/ironmlx/blob/dev/docs/dsh.md#dsh-desktop-app-configuration';
     document.documentElement.lang = HTML_LANG_MAP[lang] || 'en';
     document.querySelectorAll('[data-i18n]').forEach(el => {
       const key = el.dataset.i18n;
@@ -8658,6 +9293,10 @@
       const select = document.getElementById(id);
       if (select) select.value = i18nLang;
     });
+    renderDSHDesktopSetupResult();
+    renderDeepSeekHarnessSetupResult();
+    renderOMPSetupResult();
+    renderHermesSetupResult();
     updateSettingsSaveBar();
     updateLogLevelControls();
     // Re-render model list to update action buttons text
@@ -13247,7 +13886,6 @@
 
   // ── Agent provider guides ──
   let currentAgentGuide = null;
-  let hermesProfileMode = 'dedicated';
   let dshSetupMode = 'desktop';
   let dshModelCapacities = new Map();
   let dshConfiguredModel = null;
@@ -13256,7 +13894,7 @@
     const scroll = document.querySelector('.agent-guide-scroll');
     if (!scroll) return;
     const pageVisible = document.getElementById('page-chat').classList.contains('active');
-    ['hermes', 'omp', 'dsh'].forEach(function(name) {
+    ['hermes', 'omp', 'dsh', 'dsh-desktop'].forEach(function(name) {
       const panel = document.getElementById('agent-guide-' + name);
       const hero = panel.querySelector('.agent-guide-hero');
       let bar = panel.querySelector('.agent-guide-compact-bar');
@@ -13299,34 +13937,23 @@
   });
 
   function selectAgentGuide(agent) {
-    if (agent !== 'hermes' && agent !== 'omp' && agent !== 'dsh') return;
+    if (!['hermes', 'omp', 'dsh', 'dsh-desktop'].includes(agent)) return;
     currentAgentGuide = agent;
     document.querySelectorAll('[data-agent-guide]').forEach(function(button) {
       const selected = button.dataset.agentGuide === agent;
       button.classList.toggle('active', selected);
       button.setAttribute('aria-selected', selected ? 'true' : 'false');
     });
-    ['hermes', 'omp', 'dsh'].forEach(function(name) {
+    ['hermes', 'omp', 'dsh', 'dsh-desktop'].forEach(function(name) {
       const panel = document.getElementById('agent-guide-' + name);
       if (panel) panel.hidden = name !== agent;
     });
     renderAgentGuideConfiguration();
   }
 
-  function selectHermesProfileMode(mode) {
-    if (mode !== 'dedicated' && mode !== 'default') return;
-    hermesProfileMode = mode;
-    document.querySelectorAll('[data-hermes-profile-mode]').forEach(function(input) {
-      const selected = input.dataset.hermesProfileMode === mode;
-      input.checked = selected;
-      const option = input.closest('.agent-profile-option');
-      if (option) option.classList.toggle('active', selected);
-    });
-    renderAgentGuideConfiguration();
-  }
-
   function selectDshSetupMode(mode) {
     if (mode !== 'cli' && mode !== 'desktop') return;
+    if (deepSeekHarnessSetupPending) return;
     dshSetupMode = mode;
     document.querySelectorAll('[data-dsh-setup-mode]').forEach(function(input) {
       const selected = input.dataset.dshSetupMode === mode;
@@ -13337,7 +13964,183 @@
     document.querySelectorAll('[data-dsh-setup-panel]').forEach(function(panel) {
       panel.hidden = panel.dataset.dshSetupPanel !== mode;
     });
+    renderDeepSeekHarnessSetupResult();
     renderAgentGuideConfiguration();
+  }
+
+  let hermesSetupPending = false;
+  let hermesSetupResult = null;
+
+  function configureHermes() {
+    if (hermesSetupPending) return;
+    if (!window.webkit?.messageHandlers?.fetchAPIPost) {
+      hermesSetupResult = { code: 'native_required' };
+      renderHermesSetupResult();
+      return;
+    }
+    hermesSetupPending = true;
+    hermesSetupResult = null;
+    renderHermesSetupResult();
+    apiPost('/admin/api/agents/hermes/configure', {
+      model: document.getElementById('hermes-model-select').value
+    });
+  }
+
+  function renderHermesSetupResult() {
+    const button = document.getElementById('hermes-configure');
+    button.disabled = hermesSetupPending;
+    button.textContent = t(hermesSetupPending ? 'hermes_auto_pending' : 'hermes_auto_button');
+    const result = hermesSetupResult;
+    const feedback = document.getElementById('hermes-feedback');
+    feedback.hidden = !hermesSetupPending && !result;
+    const warnings = ['not_installed', 'version_too_old', 'version_unknown',
+      'model_unavailable', 'local_only', 'busy', 'context_too_small', 'custom_home', 'profile_conflict'];
+    const tone = hermesSetupPending ? 'info' : result?.success === true ? 'success'
+      : warnings.includes(result?.code) ? 'warning' : 'error';
+    feedback.dataset.tone = tone;
+    document.getElementById('hermes-feedback-icon').textContent = tone === 'success' ? '\u2713' : tone === 'info' ? 'i' : '!';
+    document.getElementById('hermes-setup-status').textContent = hermesSetupPending ? t('hermes_auto_pending') : result
+      ? t('hermes_auto_' + result.code, t('hermes_auto_configuration_failed'))
+        .replace('{version}', result.installedVersion || '?').replace('{minimum}', result.minimumVersion || '0.20.0') : '';
+    document.getElementById('hermes-install').hidden = !result
+      || !['not_installed', 'version_too_old', 'version_unknown'].includes(result.code);
+  }
+
+  let ompSetupPending = false;
+  let ompSetupResult = null;
+
+  function configureOMP() {
+    if (ompSetupPending) return;
+    if (!window.webkit?.messageHandlers?.fetchAPIPost) {
+      ompSetupResult = { code: 'native_required' };
+      renderOMPSetupResult();
+      return;
+    }
+    ompSetupPending = true;
+    ompSetupResult = null;
+    renderOMPSetupResult();
+    apiPost('/admin/api/agents/omp/configure', {
+      model: document.getElementById('omp-model-select').value
+    });
+  }
+
+  function renderOMPSetupResult() {
+    const button = document.getElementById('omp-configure');
+    button.disabled = ompSetupPending;
+    button.textContent = t(ompSetupPending ? 'omp_auto_pending' : 'omp_auto_button');
+    const result = ompSetupResult;
+    const feedback = document.getElementById('omp-feedback');
+    feedback.hidden = !ompSetupPending && !result;
+    const warnings = ['not_installed', 'version_too_old', 'version_unknown', 'initialize_cli',
+      'model_unavailable', 'local_only', 'busy'];
+    const tone = ompSetupPending ? 'info' : result?.success === true ? 'success'
+      : warnings.includes(result?.code) ? 'warning' : 'error';
+    feedback.dataset.tone = tone;
+    document.getElementById('omp-feedback-icon').textContent = tone === 'success' ? '\u2713' : tone === 'info' ? 'i' : '!';
+    document.getElementById('omp-setup-status').textContent = ompSetupPending ? t('omp_auto_pending') : result
+      ? t('omp_auto_' + result.code, t('omp_auto_configuration_failed'))
+        .replace('{version}', result.installedVersion || '?').replace('{minimum}', result.minimumVersion || '18.1.16') : '';
+    document.getElementById('omp-install').hidden = !result
+      || !['not_installed', 'version_too_old', 'version_unknown'].includes(result.code);
+  }
+
+  let deepSeekHarnessSetupPending = false;
+  let deepSeekHarnessSetupMode = null;
+  const deepSeekHarnessSetupResults = {};
+
+  function configureDeepSeekHarness() {
+    if (deepSeekHarnessSetupPending) return;
+    if (!window.webkit?.messageHandlers?.fetchAPIPost) {
+      deepSeekHarnessSetupResults[dshSetupMode] = { code: 'native_required' };
+      renderDeepSeekHarnessSetupResult();
+      return;
+    }
+    deepSeekHarnessSetupPending = true;
+    deepSeekHarnessSetupMode = dshSetupMode;
+    delete deepSeekHarnessSetupResults[dshSetupMode];
+    renderDeepSeekHarnessSetupResult();
+    apiPost('/admin/api/agents/dsh/configure', {
+      mode: dshSetupMode,
+      model: document.getElementById('dsh-harness-model-select').value
+    });
+  }
+
+  function officialHarnessInstallationURL(mode, language) {
+    if (mode === 'cli') return 'https://github.com/deepseek-ai/deepseek-harness';
+    return 'https://www.deepseek.com/' + (String(language).toLowerCase().startsWith('zh') ? 'zh/' : 'en/') + 'download/';
+  }
+
+  function renderDeepSeekHarnessSetupResult() {
+    const button = document.getElementById('dsh-harness-configure');
+    button.disabled = deepSeekHarnessSetupPending;
+    button.textContent = t(deepSeekHarnessSetupPending ? 'dsh_harness_pending' : 'dsh_harness_button');
+    document.querySelectorAll('[data-dsh-setup-mode]').forEach(function(input) { input.disabled = deepSeekHarnessSetupPending; });
+    document.getElementById('dsh-harness-setup-desc').textContent = t('dsh_harness_' + dshSetupMode + '_desc');
+    const result = deepSeekHarnessSetupResults[dshSetupMode];
+    const feedback = document.getElementById('dsh-harness-feedback');
+    feedback.hidden = !deepSeekHarnessSetupPending && !result;
+    const warnings = ['not_installed', 'version_too_old', 'version_unknown', 'cli_unrecognized',
+      'custom_home', 'home_unknown', 'home_conflict', 'close_app', 'initialize_app', 'model_unavailable', 'local_only', 'busy'];
+    const tone = deepSeekHarnessSetupPending ? 'info' : result?.success === true ? 'success'
+      : warnings.includes(result?.code) ? 'warning' : 'error';
+    feedback.dataset.tone = tone;
+    document.getElementById('dsh-harness-feedback-icon').textContent = tone === 'success' ? '✓' : tone === 'info' ? 'i' : '!';
+    const code = result?.code === 'configured' ? 'configured_' + dshSetupMode : result?.code;
+    document.getElementById('dsh-harness-setup-status').textContent = deepSeekHarnessSetupPending ? t('dsh_harness_pending') : result
+      ? t('dsh_harness_' + code, t('dsh_harness_configuration_failed'))
+        .replace('{app}', t(dshSetupMode === 'cli' ? 'dsh_cli' : 'dsh_official_desktop'))
+        .replace('{version}', result.installedVersion || '?').replace('{minimum}', result.minimumVersion || '0.2.1-rc.2') : '';
+    const install = document.getElementById('dsh-harness-install');
+    install.hidden = !result || !['not_installed', 'version_too_old', 'version_unknown', 'cli_unrecognized'].includes(result.code);
+    install.href = officialHarnessInstallationURL(dshSetupMode, currentLang);
+    document.getElementById('dsh-harness-install-label').textContent = t('dsh_harness_install_' + dshSetupMode);
+  }
+
+  let dshDesktopSetupPending = false;
+  let dshDesktopSetupResult = null;
+
+  function configureDSHDesktop() {
+    if (dshDesktopSetupPending) return;
+    if (!window.webkit?.messageHandlers?.fetchAPIPost) {
+      dshDesktopSetupResult = { code: 'native_required' };
+      renderDSHDesktopSetupResult();
+      return;
+    }
+    dshDesktopSetupPending = true;
+    dshDesktopSetupResult = null;
+    renderDSHDesktopSetupResult();
+    // Native installation/version checks run before model or backend checks.
+    apiPost('/admin/api/agents/dsh-desktop/configure', {
+      model: document.getElementById('dsh-desktop-model-select').value
+    });
+  }
+
+  function dshDesktopWebsiteURL(language) {
+    return 'https://dshdesktop.com/' + (String(language).toLowerCase().startsWith('zh') ? 'zh/' : 'en/');
+  }
+
+  function renderDSHDesktopSetupResult() {
+    const button = document.getElementById('dsh-desktop-configure');
+    button.disabled = dshDesktopSetupPending;
+    button.textContent = t(dshDesktopSetupPending ? 'dsh_auto_pending' : 'dsh_auto_button');
+    const result = dshDesktopSetupResult;
+    const feedback = document.getElementById('dsh-desktop-feedback');
+    feedback.hidden = !dshDesktopSetupPending && !result;
+    const warningCodes = ['not_installed', 'version_too_old', 'version_unknown',
+      'close_app', 'initialize_app', 'provider_disabled', 'model_unavailable', 'local_only', 'busy'];
+    const tone = dshDesktopSetupPending ? 'info' : result?.success === true ? 'success'
+      : warningCodes.includes(result?.code) ? 'warning' : 'error';
+    feedback.dataset.tone = tone;
+    document.getElementById('dsh-desktop-feedback-icon').textContent = tone === 'success' ? '✓'
+      : tone === 'info' ? 'i' : '!';
+    document.getElementById('dsh-desktop-download').href = dshDesktopWebsiteURL(currentLang);
+    const status = document.getElementById('dsh-desktop-setup-status');
+    status.textContent = dshDesktopSetupPending ? t('dsh_auto_pending') : result
+      ? t('dsh_auto_' + result.code, t('dsh_auto_configuration_failed'))
+        .replace('{version}', result.installedVersion || '?')
+        .replace('{minimum}', result.minimumVersion || '0.12.1') : '';
+    document.getElementById('dsh-desktop-download').hidden = !result
+      || !['not_installed', 'version_too_old', 'version_unknown'].includes(result.code);
   }
 
   function agentEndpoint() {
@@ -13414,6 +14217,8 @@
     const hermesModel = updateAgentModelSelect(document.getElementById('hermes-model-select'), models);
     const ompModel = updateAgentModelSelect(document.getElementById('omp-model-select'), models);
     const dshModel = updateAgentModelSelect(document.getElementById('dsh-model-select'), models);
+    updateAgentModelSelect(document.getElementById('dsh-desktop-model-select'), models);
+    updateAgentModelSelect(document.getElementById('dsh-harness-model-select'), models);
     const modelStatus = models.length
       ? models.join(', ')
       : t('agent_no_model', 'No model loaded');
@@ -13438,40 +14243,24 @@
       contextInput.value = String(contextLength);
     }
 
-    const dedicatedHermesProfile = hermesProfileMode === 'dedicated';
-    const hermesCommand = dedicatedHermesProfile
-      ? 'hermes --profile ironmlx'
-      : 'hermes --profile default';
-    const hermesConfigPath = document.getElementById('hermes-config-path');
-    const hermesCreateNote = document.getElementById('hermes-profile-create-note');
-    const hermesTuiCommand = document.getElementById('hermes-tui-command');
-    const hermesDesktopDedicatedNote = document.getElementById('hermes-desktop-dedicated-note');
-    const hermesDesktopDefaultNote = document.getElementById('hermes-desktop-default-note');
-    if (hermesConfigPath) {
-      hermesConfigPath.textContent = dedicatedHermesProfile
-        ? '~/.hermes/profiles/ironmlx/config.yaml'
-        : '~/.hermes/config.yaml';
-    }
-    if (hermesCreateNote) hermesCreateNote.hidden = !dedicatedHermesProfile;
-    if (hermesTuiCommand) hermesTuiCommand.textContent = hermesCommand + ' --tui';
-    if (hermesDesktopDedicatedNote) hermesDesktopDedicatedNote.hidden = !dedicatedHermesProfile;
-    if (hermesDesktopDefaultNote) hermesDesktopDefaultNote.hidden = dedicatedHermesProfile;
+    const hermesCommand = 'hermes --profile ironmlx';
 
     setAgentCode('hermes-config-code', [
       'model:',
       '  default: ' + yamlDoubleQuoted(hermesModel),
       '  provider: "custom:ironmlx-responses"',
       '  context_length: ' + contextLength,
+      '  base_url: ' + yamlDoubleQuoted(endpoint),
+      '  api_mode: "codex_responses"',
       '',
       'providers:',
       '  ironmlx-responses:',
       '    api: ' + yamlDoubleQuoted(endpoint),
+      '    base_url: ' + yamlDoubleQuoted(endpoint),
       '    transport: "codex_responses"',
+      '    api_mode: "codex_responses"',
       '    discover_models: false',
-      '',
-      'terminal:',
-      '  env_type: "local"',
-      '  cwd: "/absolute/path/to/agent-workspace"'
+      '    enabled: true'
     ].join('\n'));
 
     setAgentCode('hermes-verify-code', [
@@ -13492,7 +14281,7 @@
 
     const ompSelector = 'ironmlx/' + ompModel;
     setAgentCode('omp-verify-code', [
-      'omp models refresh',
+      'omp models refresh ironmlx',
       'omp models ironmlx',
       '',
       'omp --cwd /absolute/path/to/project \\',
@@ -15156,7 +15945,23 @@
   function onApiFetchResult(path, jsonStr) {
     const dict = I18N[currentLang] || I18N.en;
     try {
-      if (path === '/v1/models') {
+      if (path === '/admin/api/agents/hermes/configure') {
+        hermesSetupPending = false;
+        hermesSetupResult = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };
+        renderHermesSetupResult();
+      } else if (path === '/admin/api/agents/omp/configure') {
+        ompSetupPending = false;
+        ompSetupResult = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };
+        renderOMPSetupResult();
+      } else if (path === '/admin/api/agents/dsh/configure') {
+        deepSeekHarnessSetupResults[deepSeekHarnessSetupMode] = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };
+        deepSeekHarnessSetupPending = false;
+        renderDeepSeekHarnessSetupResult();
+      } else if (path === '/admin/api/agents/dsh-desktop/configure') {
+        dshDesktopSetupPending = false;
+        dshDesktopSetupResult = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };
+        renderDSHDesktopSetupResult();
+      } else if (path === '/v1/models') {
         const result = JSON.parse(jsonStr || 'null');
         dshModelCapacities = new Map();
         if (Array.isArray(result?.data)) {

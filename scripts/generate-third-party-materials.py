@@ -338,6 +338,12 @@ def swift_materials(
 
         checkout = (checkout_root / identity).resolve()
         if not checkout.is_dir():
+            # SwiftPM preserves repository capitalization on case-sensitive volumes.
+            candidates = [path for path in checkout_root.iterdir()
+                          if path.name.casefold() == identity.casefold() and path.is_dir()]
+            if len(candidates) == 1:
+                checkout = candidates[0].resolve()
+        if not checkout.is_dir():
             raise ValueError(f"Swift package checkout is missing: {checkout}")
         actual_revision = subprocess.run(
             ["git", "-C", str(checkout), "rev-parse", "HEAD"],

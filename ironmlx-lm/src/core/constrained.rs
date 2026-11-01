@@ -399,7 +399,7 @@ impl ConstraintTokenizer {
     /// request-time and post-generation validation use the same subset.
     pub fn compile_json_output(&self, schema: &Value) -> Result<ConstraintPlan> {
         validate_constraint_output_schema(schema)?;
-        let grammar = TopLevelGrammar::from_json_schema(schema.clone());
+        let grammar = TopLevelGrammar::from_json_schema(grammar_schema(schema));
         let matcher = Matcher::new(self.factory.create_parser(grammar.clone()));
         if matcher.is_error() {
             bail!(
@@ -412,7 +412,7 @@ impl ConstraintTokenizer {
         Ok(ConstraintPlan {
             factory: Arc::clone(&self.factory),
             grammar,
-            grammar_source: Arc::from(serde_json::to_string(schema)?),
+            grammar_source: Arc::from(serde_json::to_string(&grammar_schema(schema))?),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: false,
@@ -1067,9 +1067,14 @@ fn validate_strict_schema_node(schema: &Value, path: &str) -> Result<()> {
     if let Some(items) = object.get("items") {
         validate_strict_schema_node(items, &format!("{path}[]"))?;
     }
-    if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+    if let Some(branches) = schema_union_branches(object) {
         for (index, branch) in branches.iter().enumerate() {
-            validate_strict_schema_node(branch, &format!("{path}.anyOf[{index}]"))?;
+            let keyword = if object.contains_key("oneOf") {
+                "oneOf"
+            } else {
+                "anyOf"
+            };
+            validate_strict_schema_node(branch, &format!("{path}.{keyword}[{index}]"))?;
         }
     }
     Ok(())
@@ -1105,6 +1110,7 @@ fn validate_schema_node_with_limits(
         "maxItems",
         "minLength",
         "maxLength",
+        "pattern",
         "minimum",
         "maximum",
         "exclusiveMinimum",
@@ -1112,6 +1118,7 @@ fn validate_schema_node_with_limits(
         "enum",
         "const",
         "anyOf",
+        "oneOf",
         "description",
         "title",
         "default",
@@ -1125,13 +1132,18 @@ fn validate_schema_node_with_limits(
     if let Some(kind) = object.get("type") {
         validate_type_keyword(kind)?;
     }
-    if let Some(any_of) = object.get("anyOf") {
-        let branches = any_of
-            .as_array()
-            .ok_or_else(|| anyhow!("anyOf must be an array"))?;
-        anyhow::ensure!(!branches.is_empty(), "anyOf must not be empty");
-        for branch in branches {
-            validate_schema_node_with_limits(branch, depth + 1, nodes, max_depth, max_nodes)?;
+    for keyword in ["anyOf", "oneOf"] {
+        if let Some(union) = object.get(keyword) {
+            let branches = union
+                .as_array()
+                .ok_or_else(|| anyhow!("{keyword} must be an array"))?;
+            anyhow::ensure!(!branches.is_empty(), "{keyword} must not be empty");
+            for branch in branches {
+                validate_schema_node_with_limits(branch, depth + 1, nodes, max_depth, max_nodes)?;
+            }
+            if keyword == "oneOf" {
+                validate_disjoint_one_of(object, branches)?;
+            }
         }
     }
     if let Some(properties) = object.get("properties") {
@@ -1188,15 +1200,139 @@ fn validate_schema_node_with_limits(
     }
     if !object.contains_key("type")
         && !object.contains_key("anyOf")
+        && !object.contains_key("oneOf")
         && !object.contains_key("enum")
         && !object.contains_key("const")
     {
-        bail!("schema node requires type, anyOf, enum, or const");
+        bail!("schema node requires type, anyOf, oneOf, enum, or const");
     }
     validate_length_bounds(object, "minLength", "maxLength", "string")?;
+    if let Some(pattern) = object.get("pattern") {
+        anyhow::ensure!(
+            type_contains(object.get("type"), "string") && schema_union_branches(object).is_none(),
+            "pattern requires an explicit string type without union branches"
+        );
+        compile_string_pattern(pattern)?;
+    }
     validate_length_bounds(object, "minItems", "maxItems", "array")?;
     validate_numeric_bounds(object)?;
     Ok(())
+}
+
+/// Keep native raw-string grammars and JSON grammars on the same bounded
+/// regular-expression subset. Anchors are required because native terminals
+/// match whole values, while JSON Schema patterns normally search substrings.
+fn string_pattern_body(pattern: &Value) -> Result<String> {
+    let pattern = pattern
+        .as_str()
+        .ok_or_else(|| anyhow!("pattern must be a string"))?;
+    anyhow::ensure!(pattern.len() <= 4096, "pattern exceeds 4096 bytes");
+    anyhow::ensure!(
+        pattern.starts_with('^')
+            && pattern.ends_with('$')
+            && pattern[..pattern.len() - 1]
+                .chars()
+                .rev()
+                .take_while(|c| *c == '\\')
+                .count()
+                % 2
+                == 0,
+        "pattern requires ^ and $ anchors"
+    );
+    // Match the JSON compiler's ASCII semantics for JavaScript digit/word classes
+    // and escape Lark delimiters before inserting the expression into a terminal.
+    let body = llguidance::regex_to_lark(&pattern[1..pattern.len() - 1], "dw");
+    let full = regex_syntax::Parser::new()
+        .parse(&format!("^{body}$"))
+        .context("unsupported string pattern")?;
+    let inner = regex_syntax::Parser::new()
+        .parse(&body)
+        .context("unsupported string pattern")?;
+    anyhow::ensure!(
+        full.properties()
+            .look_set_prefix()
+            .contains(regex_syntax::hir::Look::Start)
+            && full
+                .properties()
+                .look_set_suffix()
+                .contains(regex_syntax::hir::Look::End)
+            && inner.properties().look_set().is_empty(),
+        "pattern requires whole-value anchors and no internal assertions"
+    );
+    Ok(body)
+}
+
+fn compile_string_pattern(pattern: &Value) -> Result<regex::Regex> {
+    let body = string_pattern_body(pattern)?;
+    regex::RegexBuilder::new(&format!(r"\A(?:{body})\z"))
+        .size_limit(1_048_576)
+        .build()
+        .context("unsupported string pattern")
+}
+
+/// Union branches in an already validated schema. oneOf is limited to disjoint
+/// explicit JSON types, so its branches also form an exact grammar union.
+pub(crate) fn schema_union_branches(object: &Map<String, Value>) -> Option<&Vec<Value>> {
+    object
+        .get("anyOf")
+        .or_else(|| object.get("oneOf"))
+        .and_then(Value::as_array)
+}
+
+fn validate_disjoint_one_of(object: &Map<String, Value>, branches: &[Value]) -> Result<()> {
+    anyhow::ensure!(
+        object.keys().all(|key| matches!(
+            key.as_str(),
+            "oneOf" | "description" | "title" | "default" | "examples"
+        )),
+        "oneOf supports only annotation siblings"
+    );
+    let mut seen = HashSet::new();
+    for branch in branches {
+        let kinds = match branch.get("type") {
+            Some(Value::String(kind)) => vec![kind.as_str()],
+            Some(Value::Array(kinds)) => kinds.iter().filter_map(Value::as_str).collect(),
+            _ => bail!("oneOf branches require explicit, disjoint types"),
+        };
+        // JSON Schema integers overlap numbers; both occupy the numeric domain.
+        let domains = kinds
+            .into_iter()
+            .map(|kind| match kind {
+                "integer" => "number",
+                other => other,
+            })
+            .collect::<HashSet<_>>();
+        for domain in domains {
+            anyhow::ensure!(seen.insert(domain), "oneOf branch types must be disjoint");
+        }
+    }
+    Ok(())
+}
+
+/// llguidance does not implement exclusive oneOf. Our validated, type-disjoint
+/// subset is equivalent to anyOf. Visit schema positions only: literal object
+/// values in const/enum/default/examples may themselves contain a `oneOf` key.
+fn grammar_schema(schema: &Value) -> Value {
+    let mut object = schema.as_object().expect("schema validated").clone();
+    if let Some(branches) = object.remove("oneOf") {
+        object.insert("anyOf".to_owned(), branches);
+    }
+    if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+        for child in properties.values_mut() {
+            *child = grammar_schema(child);
+        }
+    }
+    for keyword in ["items", "additionalProperties"] {
+        if let Some(child) = object.get_mut(keyword).filter(|child| child.is_object()) {
+            *child = grammar_schema(child);
+        }
+    }
+    if let Some(branches) = object.get_mut("anyOf").and_then(Value::as_array_mut) {
+        for branch in branches {
+            *branch = grammar_schema(branch);
+        }
+    }
+    Value::Object(object)
 }
 
 fn validate_length_bounds(
@@ -1343,7 +1479,7 @@ fn type_contains(kind: Option<&Value>, expected: &str) -> bool {
 fn build_json_output_grammar(schema: &Value) -> Result<String> {
     Ok(format!(
         "start: structured_output\nstructured_output: %json {}\nws: WS?\nWS: /[ \\t\\r\\n]+/\n",
-        serde_json::to_string(schema)?
+        serde_json::to_string(&grammar_schema(schema))?
     ))
 }
 
@@ -1726,7 +1862,7 @@ fn build_llama_tool_grammar(
         });
         grammar.push_str(&format!(
             "function_{index}: %json {}\n",
-            serde_json::to_string(&schema)?
+            serde_json::to_string(&grammar_schema(&schema))?
         ));
     }
     grammar.push_str(
@@ -1875,7 +2011,7 @@ fn append_structured_output_rule(
     if let Some(schema) = output_schema {
         grammar.push_str(&format!(
             "structured_output: %json {}\n",
-            serde_json::to_string(schema)?
+            serde_json::to_string(&grammar_schema(schema))?
         ));
     }
     Ok(())
@@ -1888,7 +2024,7 @@ fn append_gemma_schema_rule(
     next_rule: &mut usize,
 ) -> Result<()> {
     let object = schema.as_object().expect("schema validated");
-    if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+    if let Some(branches) = schema_union_branches(object) {
         let mut child_rules = Vec::with_capacity(branches.len());
         for branch in branches {
             let child = fresh_gemma_rule(next_rule);
@@ -1896,6 +2032,14 @@ fn append_gemma_schema_rule(
             child_rules.push(child);
         }
         grammar.push_str(&format!("{rule}: {}\n", child_rules.join(" | ")));
+        return Ok(());
+    }
+    if object.contains_key("pattern") && schema_is_string_only(schema) {
+        let terminal = append_pattern_terminal(grammar, rule, schema)?;
+        let delimiter = lark_literal(GEMMA_STRING_DELIMITER)?;
+        grammar.push_str(&format!(
+            "{rule}[lazy]: {delimiter} {terminal} {delimiter}\n"
+        ));
         return Ok(());
     }
     if let Some(values) = object.get("enum").and_then(Value::as_array) {
@@ -1931,7 +2075,7 @@ fn append_gemma_schema_rule(
     if schema_requires_json_value_grammar(object) {
         grammar.push_str(&format!(
             "{rule}: %json {}\n",
-            serde_json::to_string(schema)?
+            serde_json::to_string(&grammar_schema(schema))?
         ));
         return Ok(());
     }
@@ -2089,7 +2233,7 @@ fn append_tagged_value_rule(
     next_rule: &mut usize,
 ) -> Result<()> {
     let object = schema.as_object().expect("schema validated");
-    if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+    if let Some(branches) = schema_union_branches(object) {
         let mut child_rules = Vec::with_capacity(branches.len());
         for branch in branches {
             let child = fresh_tagged_rule(next_rule);
@@ -2129,6 +2273,11 @@ fn append_tagged_value_rule(
     }
     let close = lark_literal(close_marker)?;
     if schema_is_string_only(schema) {
+        if object.contains_key("pattern") {
+            let terminal = append_pattern_terminal(grammar, rule, schema)?;
+            grammar.push_str(&format!("{rule}[lazy]: {terminal} {close}\n"));
+            return Ok(());
+        }
         if let Some(values) = raw_string_constants(schema)? {
             grammar.push_str(&format!("{rule}: "));
             for (index, value) in values.iter().enumerate() {
@@ -2153,12 +2302,12 @@ fn append_tagged_value_rule(
         if allow_native_line_padding {
             grammar.push_str(&format!(
                 "{rule}: native_line? %json {} native_line? {close}\n",
-                serde_json::to_string(schema)?
+                serde_json::to_string(&grammar_schema(schema))?
             ));
         } else {
             grammar.push_str(&format!(
                 "{rule}: %json {} {close}\n",
-                serde_json::to_string(schema)?
+                serde_json::to_string(&grammar_schema(schema))?
             ));
         }
     }
@@ -2172,7 +2321,7 @@ fn append_minicpm5_value_rule(
     next_rule: &mut usize,
 ) -> Result<()> {
     let object = schema.as_object().expect("schema validated");
-    if let Some(branches) = object.get("anyOf").and_then(Value::as_array) {
+    if let Some(branches) = schema_union_branches(object) {
         let mut child_rules = Vec::with_capacity(branches.len());
         for branch in branches {
             let child = fresh_tagged_rule(next_rule);
@@ -2199,6 +2348,15 @@ fn append_minicpm5_value_rule(
 
     let close = lark_literal("</param>")?;
     if schema_is_string_only(schema) {
+        if object.contains_key("pattern") {
+            let terminal = append_pattern_terminal(grammar, rule, schema)?;
+            let raw_terminal = format!("{terminal}_RAW");
+            grammar.push_str(&format!(
+                "{raw_terminal}: {terminal} & /[^<\\r\\n&]*/\n\
+                 {rule}: {raw_terminal} {close} | \"<![CDATA[\" {terminal} \"]]>\" {close}\n"
+            ));
+            return Ok(());
+        }
         if let Some(values) = raw_string_constants(schema)? {
             grammar.push_str(&format!("{rule}: "));
             for (index, value) in values.iter().enumerate() {
@@ -2231,7 +2389,7 @@ fn append_minicpm5_value_rule(
     } else {
         grammar.push_str(&format!(
             "{rule}: %json {} {close}\n",
-            serde_json::to_string(schema)?
+            serde_json::to_string(&grammar_schema(schema))?
         ));
     }
     Ok(())
@@ -2243,6 +2401,24 @@ fn fresh_tagged_rule(next_rule: &mut usize) -> String {
     rule
 }
 
+fn append_pattern_terminal(grammar: &mut String, rule: &str, schema: &Value) -> Result<String> {
+    let object = schema.as_object().expect("schema validated");
+    let pattern = string_pattern_body(&object["pattern"])?;
+    let repetition = schema_length_repetition(object, "minLength", "maxLength")?;
+    let terminal = format!("{}_PATTERN", rule.to_uppercase());
+    grammar.push_str(&format!("{terminal}: /{pattern}/ & /(.|\\n){repetition}/"));
+    if let Some(values) = raw_string_constants(schema)? {
+        anyhow::ensure!(!values.is_empty(), "string enum must not be empty");
+        let literals = values
+            .iter()
+            .map(|value| lark_literal(value))
+            .collect::<Result<Vec<_>>>()?;
+        grammar.push_str(&format!(" & ({})", literals.join(" | ")));
+    }
+    grammar.push('\n');
+    Ok(terminal)
+}
+
 fn schema_requires_json_value_grammar(schema: &Map<String, Value>) -> bool {
     matches!(
         schema.get("additionalProperties"),
@@ -2252,6 +2428,7 @@ fn schema_requires_json_value_grammar(schema: &Map<String, Value>) -> bool {
         "maxItems",
         "minLength",
         "maxLength",
+        "pattern",
         "minimum",
         "maximum",
         "exclusiveMinimum",
@@ -2295,7 +2472,7 @@ pub fn schema_is_string_only(schema: &Value) -> bool {
     let Some(object) = schema.as_object() else {
         return false;
     };
-    if let Some(any_of) = object.get("anyOf").and_then(Value::as_array) {
+    if let Some(any_of) = schema_union_branches(object) {
         return !any_of.is_empty() && any_of.iter().all(schema_is_string_only);
     }
     if let Some(values) = object.get("enum").and_then(Value::as_array) {
@@ -2312,7 +2489,7 @@ pub fn schema_accepts_string(schema: &Value) -> bool {
     let Some(object) = schema.as_object() else {
         return false;
     };
-    if let Some(any_of) = object.get("anyOf").and_then(Value::as_array) {
+    if let Some(any_of) = schema_union_branches(object) {
         return any_of.iter().any(schema_accepts_string);
     }
     if let Some(values) = object.get("enum").and_then(Value::as_array) {
@@ -2327,7 +2504,7 @@ pub fn schema_accepts_string(schema: &Value) -> bool {
 
 fn raw_string_constants(schema: &Value) -> Result<Option<Vec<String>>> {
     let object = schema.as_object().expect("schema validated");
-    if let Some(any_of) = object.get("anyOf").and_then(Value::as_array) {
+    if let Some(any_of) = schema_union_branches(object) {
         let mut result = Vec::new();
         for branch in any_of {
             let Some(values) = raw_string_constants(branch)? else {
@@ -2370,12 +2547,15 @@ pub fn validate_schema_value(schema: &Value, value: &Value) -> Result<()> {
     let object = schema
         .as_object()
         .expect("schema validated before generation");
-    if let Some(any_of) = object.get("anyOf").and_then(Value::as_array) {
-        if !any_of
+    if let Some(branches) = schema_union_branches(object) {
+        let matches = branches
             .iter()
-            .any(|branch| validate_schema_value(branch, value).is_ok())
-        {
-            bail!("value does not match any anyOf branch");
+            .filter(|branch| validate_schema_value(branch, value).is_ok())
+            .count();
+        if object.contains_key("oneOf") {
+            anyhow::ensure!(matches == 1, "value must match exactly one oneOf branch");
+        } else {
+            anyhow::ensure!(matches > 0, "value does not match any anyOf branch");
         }
     }
     if let Some(expected) = object.get("const") {
@@ -2437,6 +2617,12 @@ pub fn validate_schema_value(schema: &Value, value: &Value) -> Result<()> {
     }
     if let Some(text) = value.as_str() {
         validate_collection_length(object, text.chars().count(), "minLength", "maxLength")?;
+        if let Some(pattern) = object.get("pattern") {
+            anyhow::ensure!(
+                compile_string_pattern(pattern)?.is_match(text),
+                "string does not match pattern"
+            );
+        }
     }
     if value.is_number() {
         validate_numeric_value(object, value)?;
@@ -3125,9 +3311,149 @@ mod tests {
         validate_schema_value(&schema, &serde_json::json!({"items": [1, 2]})).unwrap();
         assert!(validate_schema_value(&schema, &serde_json::json!({"items": [3]})).is_err());
 
-        let bad = serde_json::json!({"type": "string", "pattern": "x"});
+        let bad = serde_json::json!({"type": "string", "format": "email"});
         let mut nodes = 0;
         assert!(validate_schema_node(&bad, 0, &mut nodes).is_err());
+    }
+
+    #[test]
+    fn anchored_string_patterns_validate_and_constrain_native_tool_values() {
+        let schema = serde_json::json!({
+            "type":"string", "pattern":"^[a-z0-9][a-z0-9-]{0,31}$",
+            "minLength":2, "maxLength":8
+        });
+        let mut nodes = 0;
+        validate_schema_node(&schema, 0, &mut nodes).unwrap();
+        validate_schema_value(&schema, &serde_json::json!("my-agent")).unwrap();
+        for invalid in ["a", "A-agent", "-agent", "my-agent-long", "agent\n"] {
+            assert!(validate_schema_value(&schema, &serde_json::json!(invalid)).is_err());
+        }
+        for pattern in [
+            serde_json::json!(5),
+            serde_json::json!("x"),
+            serde_json::json!("^[a-$"),
+            serde_json::json!("^(?=x)x$"),
+            serde_json::json!("^a|b$"),
+            serde_json::json!("^(?m:a$)$"),
+            serde_json::json!("^a\\$"),
+            serde_json::json!(format!("^{}$", "a".repeat(4096))),
+        ] {
+            assert!(compile_string_pattern(&pattern).is_err());
+        }
+        assert!(!compile_string_pattern(&serde_json::json!(r"^\d+$"))
+            .unwrap()
+            .is_match("１２"));
+        assert!(compile_string_pattern(&serde_json::json!("^a/b$"))
+            .unwrap()
+            .is_match("a/b"));
+        let tool = ToolDefinition {
+            name: "rename".to_owned(),
+            description: None,
+            parameters: serde_json::json!({"type":"object", "properties":{"to":schema},
+                                         "required":["to"], "additionalProperties":false}),
+            strict: None,
+        };
+        validate_tool_schemas(std::slice::from_ref(&tool)).unwrap();
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let options = ToolConstraintOptions {
+            choice: ToolChoiceConstraint::Required,
+            allow_parallel_calls: false,
+        };
+        let plans = [
+            (
+                tokenizer
+                    .compile_qwen_tools(std::slice::from_ref(&tool), &options)
+                    .unwrap(),
+                "<tool_call><function=rename><parameter=to>",
+                "</parameter></function></tool_call>",
+            ),
+            (
+                tokenizer
+                    .compile_glm_tools(std::slice::from_ref(&tool), &options)
+                    .unwrap(),
+                "<tool_call>rename<arg_key>to</arg_key><arg_value>",
+                "</arg_value></tool_call>",
+            ),
+            (
+                tokenizer
+                    .compile_minicpm5_tools(std::slice::from_ref(&tool), &options)
+                    .unwrap(),
+                "<function name=\"rename\"><param name=\"to\">",
+                "</param></function>",
+            ),
+            (
+                tokenizer
+                    .compile_llama_tools(std::slice::from_ref(&tool), &options)
+                    .unwrap(),
+                "{\"name\":\"rename\",\"parameters\":{\"to\":\"",
+                "\"}}",
+            ),
+        ];
+        for (plan, prefix, suffix) in plans {
+            let mut valid = plan.start_session().unwrap();
+            consume_bytes(&mut valid, format!("{prefix}my-agent{suffix}").as_bytes()).unwrap();
+            assert!(valid.is_accepting().unwrap());
+            for value in ["-agent", "a", "my-agent-long"] {
+                let mut invalid = plan.start_session().unwrap();
+                assert!(
+                    consume_bytes(&mut invalid, format!("{prefix}{value}{suffix}").as_bytes())
+                        .is_err()
+                        || !invalid.is_accepting().unwrap()
+                );
+            }
+        }
+        let gemma = ConstraintTokenizer::byte_level_gemma()
+            .unwrap()
+            .compile_gemma_tools(&[tool], &options)
+            .unwrap();
+        let mut valid = gemma.start_session().unwrap();
+        valid
+            .commit_tokens(&gemma_tokens(
+                "<|tool_call>call:rename{to:<|\"|>my-agent<|\"|>}<tool_call|>",
+            ))
+            .unwrap();
+        assert!(valid.is_accepting().unwrap());
+        let mut invalid = gemma.start_session().unwrap();
+        assert!(
+            invalid
+                .commit_tokens(&gemma_tokens(
+                    "<|tool_call>call:rename{to:<|\"|>-agent<|\"|>}<tool_call|>"
+                ))
+                .is_err()
+                || !invalid.is_accepting().unwrap()
+        );
+    }
+
+    #[test]
+    fn hermes_connection_targets_keep_nested_pattern_constraints() {
+        let schema = serde_json::json!({"type":"object","properties":{
+            "targets":{"type":"array","items":{"anyOf":[
+                {"type":"string"}, {"type":"object","properties":{
+                    "name":{"type":"string"},
+                    "to":{"type":"string","pattern":"^[a-z0-9][a-z0-9-]{0,31}$"}
+                },"required":["name"],"additionalProperties":false}
+            ]}}},"required":["targets"],"additionalProperties":false});
+        let tool: ToolDefinition = serde_json::from_value(
+            serde_json::json!({"name":"manage_connections","parameters":schema}),
+        )
+        .unwrap();
+        validate_tool_schemas(&[tool]).unwrap();
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let plan = tokenizer.compile_json_output(&schema).unwrap();
+        let mut valid = plan.start_session().unwrap();
+        consume_bytes(
+            &mut valid,
+            br#"{"targets":["gmail",{"name":"linear","to":"my-work"}]}"#,
+        )
+        .unwrap();
+        assert!(valid.is_accepting().unwrap());
+        let bad = serde_json::json!({"targets":[{"name":"linear","to":"-invalid"}]});
+        assert!(validate_schema_value(&schema, &bad).is_err());
+        let mut invalid = plan.start_session().unwrap();
+        assert!(
+            consume_bytes(&mut invalid, bad.to_string().as_bytes()).is_err()
+                || !invalid.is_accepting().unwrap()
+        );
     }
 
     #[test]
@@ -3182,6 +3508,170 @@ mod tests {
         ] {
             assert!(validate_schema_value(&hub.parameters, &invalid).is_err());
         }
+    }
+
+    // The `at` selector shipped by @deepseek-ai/dsh-tool-schedule in DSH
+    // Desktop 0.12.1, after defineTool converts required flags to JSON Schema.
+    fn dsh_schedule_tool() -> ToolDefinition {
+        serde_json::from_value(serde_json::json!({
+            "name": "schedule_create",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "at": {
+                        "description": "An RFC 3339 timestamp or local date/time/time zone",
+                        "oneOf": [
+                            {"type": "string"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "date": {"type": "string"},
+                                    "time": {"type": "string"},
+                                    "time_zone": {"type": "string"}
+                                },
+                                "required": ["date", "time", "time_zone"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    }
+                },
+                "required": ["at"],
+                "additionalProperties": false
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn dsh_schedule_one_of_preserves_value_and_strict_validation() {
+        let tool = dsh_schedule_tool();
+        validate_tool_schemas(std::slice::from_ref(&tool)).unwrap();
+        validate_strict_tool_schema(&tool).unwrap();
+        for at in [
+            serde_json::json!("2026-10-23T09:00:00+08:00"),
+            serde_json::json!({"date":"2026-10-23","time":"09:00","time_zone":"Asia/Shanghai"}),
+        ] {
+            let args = serde_json::json!({"at": at});
+            validate_schema_value(&tool.parameters, &args).unwrap();
+            let lowered = crate::core::tool_calling::lower_gemma_tool_arguments(
+                std::slice::from_ref(&tool),
+                "schedule_create",
+                &args,
+            )
+            .unwrap();
+            assert_eq!(lowered, args);
+        }
+        for at in [
+            serde_json::json!(42),
+            serde_json::json!(null),
+            serde_json::json!({"date":"2026-10-23","time":"09:00"}),
+            serde_json::json!({"date":"2026-10-23","time":"09:00","time_zone":"Asia/Shanghai","extra":true}),
+        ] {
+            assert!(
+                validate_schema_value(&tool.parameters, &serde_json::json!({"at":at})).is_err()
+            );
+        }
+        let mut non_strict = tool.clone();
+        non_strict.parameters["properties"]["at"]["oneOf"][1]["required"] =
+            serde_json::json!(["date"]);
+        validate_tool_schemas(std::slice::from_ref(&non_strict)).unwrap();
+        assert!(validate_strict_tool_schema(&non_strict).is_err());
+    }
+
+    #[test]
+    fn one_of_rejects_overlapping_or_ambiguous_branches() {
+        for union in [
+            serde_json::json!({"oneOf": []}),
+            serde_json::json!({"oneOf": [{"type":"string"},{"type":"string"}]}),
+            serde_json::json!({"oneOf": [{"type":"number"},{"type":"integer"}]}),
+            serde_json::json!({"oneOf": [{"type":["string","null"]},{"type":"null"}]}),
+            serde_json::json!({"oneOf": [{"const":"x"},{"type":"number"}]}),
+            serde_json::json!({"oneOf": [{"type":"string"},{"type":"number"}],"type":"string"}),
+        ] {
+            let mut tool = dsh_schedule_tool();
+            tool.parameters["properties"]["at"] = union;
+            assert!(validate_tool_schemas(&[tool]).is_err());
+        }
+        // Runtime validation remains exclusive even if called defensively with
+        // an overlapping schema that request validation would reject.
+        assert!(validate_schema_value(
+            &serde_json::json!({"oneOf":[{"type":"number"},{"type":"integer"}]}),
+            &serde_json::json!(3)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn all_tool_dialects_decode_dsh_schedule_one_of_branches() {
+        let options = ToolConstraintOptions {
+            choice: ToolChoiceConstraint::Required,
+            allow_parallel_calls: false,
+        };
+        let tool = dsh_schedule_tool();
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        for (raw, json_value, gemma_value) in [
+            ("2026-10-23T09:00:00+08:00", "\"2026-10-23T09:00:00+08:00\"", "<|\"|>2026-10-23T09:00:00+08:00<|\"|>"),
+            (r#"{"date":"2026-10-23","time":"09:00","time_zone":"Asia/Shanghai"}"#,
+             r#"{"date":"2026-10-23","time":"09:00","time_zone":"Asia/Shanghai"}"#,
+             "{date:<|\"|>2026-10-23<|\"|>,time:<|\"|>09:00<|\"|>,time_zone:<|\"|>Asia/Shanghai<|\"|>}"),
+        ] {
+            let tools = std::slice::from_ref(&tool);
+            let cases = [
+                (tokenizer.compile_qwen_tools(tools, &options).unwrap(),
+                 format!("<tool_call><function=schedule_create><parameter=at>{raw}</parameter></function></tool_call>")),
+                (tokenizer.compile_glm_tools(tools, &options).unwrap(),
+                 format!("<tool_call>schedule_create<arg_key>at</arg_key><arg_value>{raw}</arg_value></tool_call>")),
+                (tokenizer.compile_llama_tools(tools, &options).unwrap(),
+                 format!("{{\"name\":\"schedule_create\",\"parameters\":{{\"at\":{json_value}}}}}")),
+                (tokenizer.compile_minicpm5_tools(tools, &options).unwrap(),
+                 format!("<function name=\"schedule_create\"><param name=\"at\">{raw}</param></function>")),
+            ];
+            for (plan, output) in cases {
+                let mut session = plan.start_session().unwrap();
+                consume_bytes(&mut session, output.as_bytes()).unwrap();
+                assert!(session.is_accepting().unwrap());
+            }
+            let lowered = crate::core::tool_calling::lower_gemma_tool_definitions(tools).unwrap();
+            let plan = ConstraintTokenizer::byte_level_gemma().unwrap()
+                .compile_gemma_tools(&lowered, &options).unwrap();
+            let mut session = plan.start_session().unwrap();
+            session.commit_tokens(&gemma_tokens(&format!(
+                "<|tool_call>call:schedule_create{{at:{gemma_value}}}<tool_call|>"
+            ))).unwrap();
+            assert!(session.is_accepting().unwrap());
+            let mut parser = crate::core::tool_calling::GemmaToolCallParser::new("dsh", tools).unwrap();
+            let events = parser.push(&format!(
+                "<|tool_call>call:schedule_create{{at:{gemma_value}}}<tool_call|>"
+            )).unwrap();
+            assert!(parser.finish().unwrap().1);
+            let crate::core::generated_output::GeneratedOutputEvent::ToolCall(call) = &events[0] else {
+                panic!("expected schedule tool call");
+            };
+            assert_eq!(call.arguments, serde_json::json!({"at": serde_json::from_str::<Value>(json_value).unwrap()}));
+        }
+    }
+
+    #[test]
+    fn nested_one_of_grammar_keeps_literal_object_data() {
+        let schema = serde_json::json!({
+            "type":"object", "additionalProperties":false, "required":["values","literal"],
+            "properties": {
+                "values":{"type":"array","items":{"oneOf":[{"type":"string"},{"type":"null"}]}},
+                "literal":{"const":{"oneOf":"literal data"}}
+            }
+        });
+        validate_json_output_schema(&schema, false).unwrap();
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let plan = tokenizer.compile_json_output(&schema).unwrap();
+        let mut session = plan.start_session().unwrap();
+        consume_bytes(
+            &mut session,
+            br#"{"values":["x",null],"literal":{"oneOf":"literal data"}}"#,
+        )
+        .unwrap();
+        assert!(session.is_accepting().unwrap());
+        let mut invalid = plan.start_session().unwrap();
+        assert!(consume_bytes(&mut invalid, br#"{"values":[42"#).is_err());
     }
 
     #[test]

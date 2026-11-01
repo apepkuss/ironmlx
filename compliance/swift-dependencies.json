@@ -12,6 +12,17 @@
       "version": "2.9.6"
     },
     {
+      "component": "Yams",
+      "identity": "yams",
+      "license": "MIT",
+      "license_file": "swift-yams-license.txt",
+      "license_sha256": "0354b0ea403d2e78059c5ae0510a2cfae9f8eb306fcef094ac9fff5b47e20bed",
+      "license_source": "LICENSE",
+      "repository": "https://github.com/jpsim/Yams.git",
+      "revision": "a27b21e0c81c5bf42049b897a62aaf387e80f279",
+      "version": "6.2.2"
+    },
+    {
       "component": "ZIPFoundation",
       "identity": "zipfoundation",
       "license": "MIT",
