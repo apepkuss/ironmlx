@@ -16,10 +16,10 @@
 
 <p align="center">
   <a href="#安装与首次运行">安装</a> ·
-  <a href="https://apepkuss.github.io/ironmlx/zh-Hans/docs/supported-models.html">支持的模型</a> ·
-  <a href="https://apepkuss.github.io/ironmlx/zh-Hans/docs/api-reference.html">API 参考</a> ·
-  <a href="https://apepkuss.github.io/ironmlx/zh-Hans/docs/">文档</a> ·
-  <a href="https://apepkuss.github.io/ironmlx/zh-Hans/">官网</a>
+  <a href="https://apepkuss.github.io/ironmlx/zh/docs/supported-models.html">支持的模型</a> ·
+  <a href="https://apepkuss.github.io/ironmlx/zh/docs/api-reference.html">API 参考</a> ·
+  <a href="https://apepkuss.github.io/ironmlx/zh/docs/">文档</a> ·
+  <a href="https://apepkuss.github.io/ironmlx/zh/">官网</a>
 </p>
 
 <p align="center">

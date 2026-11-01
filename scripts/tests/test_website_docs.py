@@ -3,9 +3,12 @@ import importlib.util
 from html.parser import HTMLParser
 from pathlib import Path
 import json
+import re
 import subprocess
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -63,9 +66,81 @@ class WebsiteDocumentationTests(unittest.TestCase):
         subprocess.run([sys.executable, str(ROOT / "scripts/build-website-docs.py")], check=True, capture_output=True)
         cls.website = ROOT / "website"
         cls.pages = {}
-        for directory in (cls.website / "docs", cls.website / "zh-Hans/docs"):
+        for directory in (cls.website / "docs", cls.website / "zh/docs"):
             for path in directory.rglob("*.html"):
                 cls.pages[path.resolve()] = PageParser(path.read_text(encoding="utf-8"))
+
+    def test_legacy_chinese_urls_redirect_to_matching_pages_with_query_and_fragment(self):
+        current = self.website / "zh"
+        scripts, expected = [], []
+        for target in [current / "index.html", *sorted((current / "docs").rglob("*.html"))]:
+            relative = target.relative_to(current)
+            legacy = self.website / "zh-Hans" / relative
+            html = legacy.read_text(encoding="utf-8")
+            self.assertIn('http-equiv="refresh"', html)
+            for reference in PageParser(html).references:
+                destination = (legacy.parent / reference).resolve()
+                if destination.is_dir():
+                    destination /= "index.html"
+                self.assertEqual(destination, target.resolve())
+            script = re.search(r"<script>(.*?)</script>", html, re.S).group(1)
+            old_url = f"https://example.test/ironmlx/zh-Hans/{relative.as_posix()}"
+            new_url = f"https://example.test/ironmlx/zh/{relative.as_posix()}"
+            if relative == Path("index.html"):
+                old_url = old_url.removesuffix("index.html")
+                new_url = new_url.removesuffix("index.html")
+            suffix = "?source=legacy&theme=dark#section-2"
+            scripts.append({"script": script, "href": old_url + suffix})
+            expected.append(new_url + suffix)
+        result = subprocess.run(["node", "-e", """
+            const fs = require('fs'), vm = require('vm');
+            const inputs = JSON.parse(fs.readFileSync(0, 'utf8'));
+            const results = inputs.map(({script, href}) => {
+                const url = new URL(href);
+                let destination;
+                const location = {href, search: url.search, hash: url.hash,
+                    replace(value) { destination = value; }};
+                vm.runInNewContext(script, {URL, window: {location}});
+                return destination;
+            });
+            process.stdout.write(JSON.stringify(results));
+        """], input=json.dumps(scripts), text=True, capture_output=True, check=True)
+        self.assertEqual(json.loads(result.stdout), expected)
+
+    def test_chinese_entry_points_use_short_path_and_keep_language_tag(self):
+        english = (self.website / "index.html").read_text(encoding="utf-8")
+        chinese = (self.website / "zh/index.html").read_text(encoding="utf-8")
+        self.assertIn('href="zh/" lang="zh-Hans"', english)
+        self.assertIn('<html lang="zh-Hans"', chinese)
+        self.assertIn('href="docs/"', chinese)
+        self.assertIn('/ironmlx/zh/docs/', (ROOT / "README.zh-CN.md").read_text(encoding="utf-8"))
+        for page in self.pages.values():
+            for reference in page.references:
+                url = urlsplit(reference)
+                if not url.netloc or url.netloc == "apepkuss.github.io":
+                    self.assertNotIn("zh-Hans/", url.path)
+
+    def test_release_metadata_updates_the_new_chinese_homepage(self):
+        spec = importlib.util.spec_from_file_location("website_metadata", ROOT / "scripts/build-website-release-metadata.py")
+        metadata = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(metadata)
+        release = {"tag_name": "v0.1.0", "draft": False, "prerelease": False,
+                   "assets": [{"name": "IronMLX.dmg", "browser_download_url": "https://example.test/IronMLX.dmg"}]}
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            for relative in ("website/index.html", "website/zh/index.html", "website/zh-Hans/index.html"):
+                destination = temporary / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text((ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
+            legacy = (temporary / "website/zh-Hans/index.html").read_bytes()
+            with patch.object(metadata, "ROOT", temporary), patch.object(metadata, "releases", return_value=[release]):
+                metadata.main()
+            for relative in ("website/index.html", "website/zh/index.html"):
+                html = (temporary / relative).read_text(encoding="utf-8")
+                self.assertNotIn("__RELEASE_BADGE_", html)
+                self.assertNotIn("__STABLE_BUTTON_", html)
+                self.assertIn("https://example.test/IronMLX.dmg", html)
+            self.assertEqual((temporary / "website/zh-Hans/index.html").read_bytes(), legacy)
 
     def test_published_pages_have_unique_ids_and_resolving_references(self):
         self.assertEqual(len(self.pages), 2 * (len(DOCS.PAGES) + 1))
@@ -84,7 +159,7 @@ class WebsiteDocumentationTests(unittest.TestCase):
                         self.assertIn(unquote(url.fragment), self.pages[target].ids, reference)
 
     def test_bilingual_search_links_include_real_section_anchors(self):
-        for directory in (self.website / "docs", self.website / "zh-Hans/docs"):
+        for directory in (self.website / "docs", self.website / "zh/docs"):
             data = json.loads((directory / "search-index.json").read_text(encoding="utf-8"))
             self.assertEqual(len(data), len(DOCS.PAGES))
             self.assertEqual(len({doc["href"] for doc in data}), len(DOCS.PAGES))
@@ -95,7 +170,7 @@ class WebsiteDocumentationTests(unittest.TestCase):
                     self.assertIn(section["anchor"], self.pages[target].ids)
 
     def test_dsh_is_published_with_cli_desktop_and_local_integration_links(self):
-        for directory in (self.website / "docs", self.website / "zh-Hans/docs"):
+        for directory in (self.website / "docs", self.website / "zh/docs"):
             with self.subTest(language=directory):
                 target = directory / "dsh.html"
                 html = target.read_text(encoding="utf-8")
@@ -126,8 +201,8 @@ class WebsiteDocumentationTests(unittest.TestCase):
         for entry in catalog["entries"]:
             groups.setdefault(entry["modelId"], []).append(entry)
         expected_repositories = {"https://huggingface.co/" + entry["hfRepo"] for entry in catalog["entries"]}
-        for directory in (self.website / "docs", self.website / "zh-Hans/docs"):
-            chinese = directory.name == "docs" and directory.parent.name == "zh-Hans"
+        for directory in (self.website / "docs", self.website / "zh/docs"):
+            chinese = directory.name == "docs" and directory.parent.name == "zh"
             html = (directory / "supported-models.html").read_text(encoding="utf-8")
             rows = ModelTableParser(html).rows
             for row in rows:
@@ -172,7 +247,7 @@ class WebsiteDocumentationTests(unittest.TestCase):
     def test_embeddings_are_published_under_the_api_hub_with_catalogue_variants(self):
         self.assertEqual(DOCS.GROUP_MAP["text-embeddings.md"][0], "api")
         self.assertEqual(DOCS.PAGE_PARENT["text-embeddings.md"], "api-reference.md")
-        for directory in (self.website / "docs", self.website / "zh-Hans/docs"):
+        for directory in (self.website / "docs", self.website / "zh/docs"):
             with self.subTest(language=directory):
                 topic = (directory / "text-embeddings.html").read_text(encoding="utf-8")
                 self.assertIn('href="api-reference.html"', topic)
@@ -200,8 +275,8 @@ class WebsiteDocumentationTests(unittest.TestCase):
             "contributing": "security",
         }
         for language, directory, counterpart in (
-            ("en", self.website / "docs", "../zh-Hans/docs/"),
-            ("zh", self.website / "zh-Hans/docs", "../../docs/"),
+            ("en", self.website / "docs", "../zh/docs/"),
+            ("zh", self.website / "zh/docs", "../../docs/"),
         ):
             for source, destination in links.items():
                 html = (directory / f"{source}.html").read_text(encoding="utf-8")
@@ -219,7 +294,7 @@ class WebsiteDocumentationTests(unittest.TestCase):
 
     def test_renderer_preserves_code_and_multiline_instructions(self):
         source = ROOT / "docs/zh-CN/developer-guide.md"
-        target = self.website / "zh-Hans/docs/developer-guide.html"
+        target = self.website / "zh/docs/developer-guide.html"
         markdown = '# Demo\n\n1. Install the app\n   and open it.\n2. Load a model.\n\n```json\n{"input":"<script>& test"}\n```\n\n## Repeated heading\n\n## Repeated heading\n'
         content, toc, _ = DOCS.render(markdown, source, target)
         self.assertIn("<li>Install the app and open it.</li>", content)
@@ -229,7 +304,7 @@ class WebsiteDocumentationTests(unittest.TestCase):
         self.assertIn('id="section-2"', content)
 
     def test_nested_release_pages_keep_overview_and_language_destinations(self):
-        target = self.website / "zh-Hans/docs/release-notes/0.2.0.html"
+        target = self.website / "zh/docs/release-notes/0.2.0.html"
         html = target.read_text(encoding="utf-8")
         self.assertIn('href="../index.html"', html)
         self.assertIn('href="../../../docs/release-notes/0.2.0.html"', html)
@@ -237,7 +312,7 @@ class WebsiteDocumentationTests(unittest.TestCase):
 
     def test_inline_code_and_external_resource_links_are_safe(self):
         source = ROOT / "docs/zh-CN/supported-models.md"
-        target = self.website / "zh-Hans/docs/supported-models.html"
+        target = self.website / "zh/docs/supported-models.html"
         content = DOCS.inline('`[x](developer-guide.md)` [API](text-vision-api.md#openai-responses-api) [JSON](../../ironmlx-app/Sources/IronMLXAppCore/Resources/supported-models.json)', source, target)
         self.assertIn('<code>[x](developer-guide.md)</code>', content)
         self.assertIn('href="text-vision-api.html#openai-responses-api"', content)

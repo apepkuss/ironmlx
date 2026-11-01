@@ -94,7 +94,7 @@ def main() -> None:
         "__RC_DOWNLOAD_EN__": rc_en,
         "__RC_DOWNLOAD_ZH__": rc_zh,
     }
-    for relative in (Path("website/index.html"), Path("website/zh-Hans/index.html")):
+    for relative in (Path("website/index.html"), Path("website/zh/index.html")):
         path = ROOT / relative
         content = path.read_text()
         for marker, value in replacements.items():

@@ -11,5 +11,6 @@ ironmlx/tests/fixtures/qwen35/*.npy
 /ironmlx/reports/
 /dist/
 /website/docs/
+/website/zh/docs/
 /website/zh-Hans/docs/
 AGENTS.md

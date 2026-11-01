@@ -161,8 +161,8 @@ def inline(text, source, target):
                 filename, source_language = published
                 # Root documents are shared canonical references; use the reader's language.
                 if filename in SOURCE_OVERRIDES and not source_target.is_relative_to(ROOT / "docs"):
-                    source_language = "zh" if target.is_relative_to(WEBSITE / "zh-Hans") else "en"
-                generated_root = WEBSITE / "zh-Hans" / "docs" if source_language == "zh" else WEBSITE / "docs"
+                    source_language = "zh" if target.is_relative_to(WEBSITE / "zh") else "en"
+                generated_root = WEBSITE / "zh" / "docs" if source_language == "zh" else WEBSITE / "docs"
                 href = relative((generated_root / filename).with_suffix(".html"), target.parent)
             elif source_target.is_relative_to(ROOT):
                 href = f"https://github.com/apepkuss/ironmlx/blob/dev/{source_target.relative_to(ROOT).as_posix()}"
@@ -232,11 +232,11 @@ def render(markdown, source, target):
             asset = WEBSITE / "assets" / f"mermaid-{digest}.svg"
             if not asset.is_file():
                 raise ValueError(f"Render the Mermaid source to {asset.relative_to(ROOT)} before building")
-            description = "音频库依赖关系" if target.is_relative_to(WEBSITE / "zh-Hans") else "Audio library dependencies"
+            description = "音频库依赖关系" if target.is_relative_to(WEBSITE / "zh") else "Audio library dependencies"
             html.append(f'<figure class="doc-diagram"><img src="{relative(asset, target.parent)}" alt="{description}" loading="lazy"></figure>')
             code.clear()
             return
-        copy = "复制" if target.is_relative_to(WEBSITE / "zh-Hans") else "Copy"
+        copy = "复制" if target.is_relative_to(WEBSITE / "zh") else "Copy"
         safe_language = escape(language, quote=True)
         html.append(f'<div class="code-block"><div class="code-toolbar"><span>{safe_language}</span><button type="button" data-copy-code>{copy}</button></div><pre><code class="language-{safe_language}">{escape(chr(10).join(code))}</code></pre></div>')
         code.clear()
@@ -328,7 +328,7 @@ def render(markdown, source, target):
             if all(re.fullmatch(r"[-: ]+", cell) for cell in cells):
                 continue
             if not table:
-                html.append('<div class="doc-table" role="region" aria-label="' + ("表格" if target.is_relative_to(WEBSITE / "zh-Hans") else "Table") + '" tabindex="0"><table><thead><tr>' + "".join(f"<th>{inline(cell, source, target)}</th>" for cell in cells) + "</tr></thead><tbody>")
+                html.append('<div class="doc-table" role="region" aria-label="' + ("表格" if target.is_relative_to(WEBSITE / "zh") else "Table") + '" tabindex="0"><table><thead><tr>' + "".join(f"<th>{inline(cell, source, target)}</th>" for cell in cells) + "</tr></thead><tbody>")
                 table = True
             else:
                 html.append("<tr>" + "".join(f"<td>{inline(cell, source, target)}</td>" for cell in cells) + "</tr>")
@@ -431,9 +431,9 @@ def theme_picker(language):
 def page(title, content, language, output, target, toc=(), current=None):
     lang_name = "zh-Hans" if language == "zh" else "en"
     home = relative(WEBSITE, target.parent) + "/"
-    local_home = relative(WEBSITE / "zh-Hans" if language == "zh" else WEBSITE, target.parent) + "/"
+    local_home = relative(WEBSITE / "zh" if language == "zh" else WEBSITE, target.parent) + "/"
     index = relative(output / "index.html", target.parent)
-    counterpart_root = WEBSITE / "docs" if language == "zh" else WEBSITE / "zh-Hans" / "docs"
+    counterpart_root = WEBSITE / "docs" if language == "zh" else WEBSITE / "zh" / "docs"
     switch = relative(counterpart_root / target.relative_to(output), target.parent)
     search = localized("Search documentation", "搜索文档", language)
     docs_title = localized("Documentation", "文档", language)
@@ -543,7 +543,7 @@ def article_footer(language, entry, source, output, target):
 
 
 def build(language):
-    output = WEBSITE / "zh-Hans" / "docs" if language == "zh" else WEBSITE / "docs"
+    output = WEBSITE / "zh" / "docs" if language == "zh" else WEBSITE / "docs"
     if output.exists():
         shutil.rmtree(output)
     output.mkdir(parents=True)
@@ -570,6 +570,39 @@ def build(language):
     target.write_text(page(localized("Documentation", "文档", language), overview(language), language, output, target), encoding="utf-8")
 
 
+def build_legacy_chinese_redirects():
+    """Keep published Chinese URLs working after the move to /zh/."""
+    current = WEBSITE / "zh"
+    legacy = WEBSITE / "zh-Hans"
+    old_docs = legacy / "docs"
+    if old_docs.exists():
+        shutil.rmtree(old_docs)
+    for target in [current / "index.html", *sorted((current / "docs").rglob("*.html"))]:
+        destination = legacy / target.relative_to(current)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        href = relative(target, destination.parent)
+        if target == current / "index.html":
+            href = "../zh/"
+        destination.write_text(f'''<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IronMLX — 页面已迁移</title>
+  <link rel="canonical" href="{escape(href, quote=True)}">
+  <script>
+    const target = new URL({json.dumps(href)}, window.location.href);
+    target.search = window.location.search;
+    target.hash = window.location.hash;
+    window.location.replace(target.href);
+  </script>
+  <meta http-equiv="refresh" content="0; url={escape(href, quote=True)}">
+</head>
+<body><p>页面已迁移，请访问<a href="{escape(href, quote=True)}">新地址</a>。</p></body>
+</html>
+''', encoding="utf-8")
+
+
 def main():
     subprocess.run([sys.executable, str(ROOT / "scripts/build-supported-models-docs.py")], check=True)
     assets = WEBSITE / "assets"
@@ -579,6 +612,7 @@ def main():
             shutil.copy2(image, assets / image.name)
     for language in ("en", "zh"):
         build(language)
+    build_legacy_chinese_redirects()
     print(f"Built {len(PAGES) * 2} articles, two overviews, and bilingual search indexes.")
 
 

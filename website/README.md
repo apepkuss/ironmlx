@@ -99,7 +99,12 @@ build dependency. The shared `theme.js` controls appearance across the website.
 Preview the documentation directly at:
 
 - English: <http://localhost:8000/website/docs/>
-- 简体中文: <http://localhost:8000/website/zh-Hans/docs/>
+- 简体中文: <http://localhost:8000/website/zh/docs/>
+
+Chinese pages use `/zh/`; their HTML language remains `zh-Hans`.
+The build also generates redirects for the former `/zh-Hans/` homepage and
+documentation URLs, preserving query strings and section anchors with JavaScript.
+Without JavaScript, a meta refresh and visible link still lead to the new page.
 
 Article links use stable heading anchors and preserve the previous `section-N`
 anchors. Links to Markdown pages outside the published subset open their source
