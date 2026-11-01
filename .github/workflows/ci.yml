@@ -37,6 +37,7 @@ jobs:
     runs-on: macos-26
     outputs:
       docs_changed: ${{ steps.range.outputs.docs_changed }}
+      website_changed: ${{ steps.range.outputs.website_changed }}
       code_changed: ${{ steps.range.outputs.code_changed }}
       base_sha: ${{ steps.range.outputs.base_sha }}
       head_sha: ${{ steps.range.outputs.head_sha }}
@@ -46,6 +47,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Test CI range resolution
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_ci_change_range.py -v
 
       - name: Resolve change range
         id: range
@@ -109,6 +113,52 @@ jobs:
       - name: Verify English and Simplified Chinese documentation structure
         run: python3 scripts/verify-documentation-parity.py
 
+  website-quality:
+    name: Website quality
+    needs: changes
+    if: needs.changes.outputs.website_changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout immutable IronMLX commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify checkout identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+
+      - name: Verify Conventional Commits
+        run: scripts/verify-conventional-commits.sh "${{ needs.changes.outputs.base_sha }}" "${{ needs.changes.outputs.head_sha }}"
+
+      - name: Verify supported-model documentation inputs
+        run: python3 scripts/build-supported-models-docs.py --check
+
+      - name: Build and test bilingual website
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_website_docs.py -v
+
+      - name: Test release note rendering
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_render_release_notes.py -v
+
+      - name: Preview current stable release summary
+        shell: bash
+        run: |
+          python3 scripts/render-release-notes.py "v$(cat VERSION)" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output "$RUNNER_TEMP/ironmlx-release-body.md"
+
+      - name: Protect tracked website inputs
+        shell: bash
+        run: |
+          git diff --check
+          git diff --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+
   release-quality:
     name: Rust, Swift, MLX, and App Bundle
     needs: changes
@@ -133,9 +183,6 @@ jobs:
       - name: Verify Conventional Commits
         shell: bash
         run: scripts/verify-conventional-commits.sh "${{ needs.changes.outputs.base_sha }}" "${{ needs.changes.outputs.head_sha }}"
-
-      - name: Test CI range resolution
-        run: python3 -m unittest discover -s scripts/tests -p test_ci_change_range.py -v
 
       - name: Install pinned Rust toolchains
         shell: bash

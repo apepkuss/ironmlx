@@ -19,6 +19,22 @@ and `GROUPS` define the bilingual directory, descriptions, and reading order.
 Update those entries when adding a published page. Markdown remains the source
 of truth; generated HTML and search indexes are ignored by Git.
 
+## CI quality checks
+
+The independent **Website quality** job runs on Ubuntu with Python and Node.
+It checks the model-list inputs before generation, builds and tests the bilingual
+site, tests and previews release notes, and rejects unexpected source changes.
+It does not compile the native App or deploy the website.
+
+Website files, website-only build scripts/tests, and the website deployment
+workflow run this job without the native build. Markdown and documentation
+assets also run the documentation and website checks. Shared App catalogue,
+model-list generator, version and release-rendering inputs run both website and
+native checks. CI rules, global Git policy changes and unavailable comparison
+bases retain all quality jobs; unknown non-website changes retain native checks.
+
+## Site structure
+
 Getting started links the user guide, developer guide, and supported models.
 The developer guide includes the API quick start and directs readers to API,
 CLI, source development, and maintenance references. The overview cards link
