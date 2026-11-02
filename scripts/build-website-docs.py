@@ -24,6 +24,7 @@ PAGES = (
     ("benchmarks/qwen36-moe-b4-short.md", "Qwen3.6 35B A3B B4 concurrency performance comparison (short prompts)", "Qwen3.6 35B A3B B4 短 prompt 并发性能对比", "Compare IronMLX with oMLX and Splash on a mixture-of-experts model when four short-prompt requests arrive together.", "四个短 prompt 请求同时到达时，在混合专家模型上对比 IronMLX 与 oMLX、Splash。"),
     ("benchmarks/qwen36-moe-b1-30k.md", "Qwen3.6 35B A3B B1 30K-prompt performance comparison", "Qwen3.6 35B A3B B1 30K prompt 性能对比", "Compare IronMLX with oMLX and Splash on a mixture-of-experts model when one request with a 30K-token prompt is served at a time.", "每次处理一个 30K token 长 prompt 请求时，在混合专家模型上对比 IronMLX 与 oMLX、Splash。"),
     ("benchmarks/qwen36-moe-b4-30k.md", "Qwen3.6 35B A3B B4 30K-prompt concurrency performance comparison", "Qwen3.6 35B A3B B4 30K prompt 并发性能对比", "Compare IronMLX with oMLX and Splash on a mixture-of-experts model when four requests with 30K-token prompts arrive together.", "四个 30K token 长 prompt 请求同时到达时，在混合专家模型上对比 IronMLX 与 oMLX、Splash。"),
+    ("benchmarks/ironmlx-long-context.md", "IronMLX long-context performance (128K and 256K prompts)", "IronMLX 长上下文性能（128K 与 256K prompt）", "See how IronMLX's time to first token, decode speed, and memory change with 128K and 256K prompts on the dense and MoE models.", "在 Dense 与 MoE 模型上，查看 128K 与 256K prompt 下 IronMLX 的首字时间、解码速度与内存如何变化。"),
     ("api-reference.md", "API reference", "API 参考", "Find every documented endpoint and choose an API topic.", "查找全部已公开文档的端点，按能力进入 API 专题。"),
     ("service-api.md", "Service and management API", "服务与管理 API", "Look up shared access conventions, health, model discovery, and management endpoints.", "查阅公共访问约定、健康检查、模型发现与管理接口。"),
     ("text-vision-api.md", "Text and vision API", "文本与视觉 API", "Use Responses, Chat Completions, and Messages for text and image understanding.", "查阅文本与图片理解、思考、工具、结构化输出和流式协议。"),
@@ -58,13 +59,13 @@ PAGES = (
 )
 GROUPS = (
     ("start", "Getting started", "开始使用", "Everything you need for your first local inference.", "从安装到首次请求，开始本地推理。", PAGES[:3]),
-    ("benchmarks", "Benchmarks", "性能对比", "Measured comparisons with other local inference applications on the same Mac.", "在同一台 Mac 上与其他本地推理应用的实测对比。", PAGES[3:11]),
-    ("api", "Development & API", "开发与 API", "Integrate APIs, build from source, and contribute to IronMLX.", "接入 API、从源码构建与参与 IronMLX 开发。", PAGES[11:22]),
-    ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[22:25]),
-    ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[25:29]),
-    ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[29:35]),
-    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[35:38]),
-    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[38:]),
+    ("benchmarks", "Benchmarks", "性能对比", "Measured comparisons with other local inference applications on the same Mac, and IronMLX long-context measurements.", "在同一台 Mac 上与其他本地推理应用的实测对比，以及 IronMLX 长上下文实测。", PAGES[3:12]),
+    ("api", "Development & API", "开发与 API", "Integrate APIs, build from source, and contribute to IronMLX.", "接入 API、从源码构建与参与 IronMLX 开发。", PAGES[12:23]),
+    ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[23:26]),
+    ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[26:30]),
+    ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[30:36]),
+    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[36:39]),
+    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[39:]),
 )
 PAGE_MAP = {entry[0]: entry for entry in PAGES}
 GROUP_MAP = {entry[0]: group for group in GROUPS for entry in group[5]}
@@ -73,6 +74,7 @@ GROUP_MAP = {entry[0]: group for group in GROUPS for entry in group[5]}
 SUBGROUPS = {"benchmarks": (
     ("Dense models", "Dense 模型", "benchmarks/qwen38-dense-"),
     ("MoE models", "MoE 模型", "benchmarks/qwen36-moe-"),
+    ("Long context", "长上下文", "benchmarks/ironmlx-long-context"),
 )}
 
 
@@ -102,7 +104,7 @@ SOURCE_OVERRIDES = {
 
 # <!-- benchmark:<figure> <id> --> on its own line places a chart rendered by assets/benchmarks/benchmarks.js
 # from the data registered in assets/benchmarks/<id>.js.
-BENCHMARK_FIGURE = re.compile(r"<!--\s*benchmark:(kpis|scatter|timeline)\s+([a-z0-9-]+)\s*-->")
+BENCHMARK_FIGURE = re.compile(r"<!--\s*benchmark:(kpis|scatter|timeline|scaling)\s+([a-z0-9-]+)\s*-->")
 BENCHMARK_ID = re.compile(r'data-benchmark-id="([a-z0-9-]+)"')
 
 
@@ -466,9 +468,16 @@ def page(title, content, language, output, target, toc=(), current=None):
             if not (WEBSITE / "assets" / "benchmarks" / f"{benchmark}.js").is_file():
                 raise ValueError(f"missing benchmark data: website/assets/benchmarks/{benchmark}.js")
         body_class += " docs-benchmark-page"
-        benchmark_assets = f'<link rel="stylesheet" href="{home}assets/benchmarks/benchmarks.css">' + "".join(
-            f'<script src="{home}assets/benchmarks/{benchmark}.js" defer></script>' for benchmark in benchmark_ids
-        ) + f'<script src="{home}assets/benchmarks/benchmarks.js" defer></script>'
+
+        # Each benchmark asset URL carries a hash of its content, so a browser never pairs a cached data file with
+        # a newer renderer (or the other way round) after an update.
+        def benchmark_asset(name):
+            digest = sha256((WEBSITE / "assets" / "benchmarks" / name).read_bytes()).hexdigest()[:12]
+            return f"{home}assets/benchmarks/{name}?v={digest}"
+
+        benchmark_assets = f'<link rel="stylesheet" href="{benchmark_asset("benchmarks.css")}">' + "".join(
+            f'<script src="{benchmark_asset(f"{benchmark}.js")}" defer></script>' for benchmark in benchmark_ids
+        ) + f'<script src="{benchmark_asset("benchmarks.js")}" defer></script>'
     return f'''<!doctype html>
 <html lang="{lang_name}" data-theme="system">
 <head>

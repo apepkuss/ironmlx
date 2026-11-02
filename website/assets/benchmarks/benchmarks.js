@@ -5,6 +5,7 @@
 // A data set with ttft_unit "s" keeps its first-token values in ms but shows them in seconds.
 // The timeline grid is every 2 s for short timelines and coarser for long ones.
 // A B4 data set with x_metric "prefill_tps" shows batch prefill speed in place of batch throughput.
+// A data set with mode "scaling" (one application across input lengths) uses the scaling figure only.
 (() => {
   const registry = window.IRONMLX_BENCHMARKS || {};
   const zh = document.documentElement.lang.startsWith("zh");
@@ -311,7 +312,141 @@
     chart.appendChild(svg);
   };
 
-  const figures = { kpis, scatter, timeline };
+  // Input-length scaling (mode "scaling"): one panel per metric in a two-by-two grid (speeds on top, time to
+  // first token and memory below), one line per model over the prompt lengths.
+  // Points marked `reference` come from another page's runs and are drawn hollow, joined by a dashed segment.
+  // Every point carries its value in its line's color, placed at the first nearby position that clears the
+  // lines, the markers, the other labels, and the axes; the tooltip adds the range over the rounds.
+  const S = zh ? {
+    panels: [["prefill_tps", "prefill 速度（tok/s）", "tok/s", 0], ["decode_tps", "解码速度（tok/s）", "tok/s", 1],
+      ["ttft_s", "首字时间（s）", "s", 2], ["memory_gib", "服务时内存峰值（GiB）", "GiB", 1]],
+    axis: "输入长度（token）",
+    reference: "空心点：30K 对比页中的 IronMLX 结果",
+    input: "输入",
+    tokens: "token",
+    median: (n) => `${n} 轮中位数`,
+    range: "轮间范围",
+    source: "来自 30K 对比页",
+  } : {
+    panels: [["prefill_tps", "Prefill speed (tok/s)", "tok/s", 0], ["decode_tps", "Decode speed (tok/s)", "tok/s", 1],
+      ["ttft_s", "Time to first token (s)", "s", 2], ["memory_gib", "Peak memory while serving (GiB)", "GiB", 1]],
+    axis: "Input length (tokens)",
+    reference: "Hollow points: IronMLX results from the 30K comparison pages",
+    input: "Input",
+    tokens: "tokens",
+    median: (n) => `Median of ${n} rounds`,
+    range: "Range over rounds",
+    source: "From the 30K comparison page",
+  };
+  const scaling = (host, data) => {
+    host.classList.add("bench-panel");
+    host.appendChild(legend(data.models.map((model, i) => `<i class="key-dot series-${i}"></i>${model.name}`).concat(S.reference)));
+    const chart = html("div", "bench-chart");
+    host.appendChild(chart);
+    // Panels two per row; the x axis runs over the measured lengths with room on both sides for labels.
+    const cols = 2, panelW = 380, panelH = 250, W = panelW * cols, m = { l: 48, r: 14, t: 34, b: 50 }, pad = { l: 52, r: 36 };
+    const H = panelH * Math.ceil(S.panels.length / cols) + 28;
+    const lengths = [...new Map(data.models.flatMap((model) => model.points.map((pt) => [pt.prompt_tokens, pt.length]))).entries()]
+      .sort((a, b) => a[0] - b[0]);
+    const xMin = lengths[0][0], xMax = lengths[lengths.length - 1][0];
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": S.panels.map((p) => p[1]).join(" / ") });
+    // In the document from the start, so that label sizes can be measured while placing them.
+    chart.appendChild(svg);
+    const tip = tooltip(host);
+    const niceMax = (v) => {
+      const unit = 10 ** Math.floor(Math.log10(v));
+      const step = [1, 2, 2.5, 5, 10].find((s) => v / (s * unit) <= 5) * unit;
+      return [Math.ceil(v / step) * step, step];
+    };
+    // Label positions around a point (dx, dy of the baseline, anchor), in order of preference.
+    const SPOTS = [[0, -10, "middle"], [0, 19, "middle"], [9, 4, "start"], [-9, 4, "end"], [7, -8, "start"], [-7, -8, "end"],
+      [7, 16, "start"], [-7, 16, "end"], [-9, -5, "end"], [-9, 13, "end"], [9, -5, "start"], [9, 13, "start"],
+      [0, -23, "middle"], [0, 32, "middle"], [-9, -14, "end"], [9, -14, "start"]];
+    const crosses = (b, [x1, y1, x2, y2]) => {
+      // Segment against box: sample the segment densely (the boxes are a few pixels tall).
+      const steps = Math.ceil(Math.hypot(x2 - x1, y2 - y1) / 2);
+      for (let s = 0; s <= steps; s += 1) {
+        const x = x1 + (x2 - x1) * s / steps, y = y1 + (y2 - y1) * s / steps;
+        if (x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height) return true;
+      }
+      return false;
+    };
+    const overlaps = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
+    S.panels.forEach(([key, title, unit, digits], p) => {
+      const ox = (p % cols) * panelW, oy = Math.floor(p / cols) * panelH;
+      const left = ox + m.l, top = oy + m.t, bottom = oy + panelH - m.b;
+      const width = panelW - m.l - m.r;
+      const [yMax, yStep] = niceMax(Math.max(...data.models.flatMap((model) => model.points.map((pt) => pt[key].median))) * 1.12);
+      const sx = (v) => left + pad.l + (v - xMin) / (xMax - xMin) * (width - pad.l - pad.r);
+      const sy = (v) => bottom - v / yMax * (bottom - top);
+      text(svg, ox + 10, top - 16, title, { class: "axis-title" });
+      // Tick labels are obstacles for the value labels, which may use the free space between them.
+      const markers = [];
+      const tick = (node) => {
+        const b = node.getBBox();
+        markers.push({ x: b.x - 2, y: b.y - 1, width: b.width + 4, height: b.height + 2 });
+      };
+      for (let v = 0; v <= yMax + 1e-9; v += yStep) {
+        el("line", { x1: left, x2: left + width, y1: sy(v), y2: sy(v), class: "grid" }, svg);
+        tick(text(svg, left - 6, sy(v) + 4, fmt(v, 0), { "text-anchor": "end" }));
+      }
+      lengths.forEach(([tokens, label]) => tick(text(svg, sx(tokens), bottom + 30, label, { "text-anchor": "middle" })));
+      const segments = [];
+      const labels = [];
+      data.models.forEach((model, i) => {
+        const g = el("g", {}, svg);
+        model.points.slice(1).forEach((pt, j) => {
+          const prev = model.points[j];
+          segments.push([sx(prev.prompt_tokens), sy(prev[key].median), sx(pt.prompt_tokens), sy(pt[key].median)]);
+          el("line", {
+            x1: sx(prev.prompt_tokens), y1: sy(prev[key].median), x2: sx(pt.prompt_tokens), y2: sy(pt[key].median),
+            class: `series-line series-${i}${prev.reference ? " dashed" : ""}`,
+          }, g);
+        });
+        model.points.forEach((pt) => {
+          const cx = sx(pt.prompt_tokens), cy = sy(pt[key].median);
+          el("circle", { cx, cy, r: 5, class: `series-mark series-${i}${pt.reference ? " hollow" : ""}` }, g);
+          markers.push({ x: cx - 7, y: cy - 7, width: 14, height: 14 });
+          labels.push({ cx, cy, i, value: fmt(pt[key].median, digits) });
+          const hit = el("circle", { cx, cy, r: 14, class: "hit" }, g);
+          const content = `<strong>${model.name}</strong>`
+            + tipRow(S.input, `${fmt(pt.prompt_tokens, 0)} ${S.tokens}`)
+            + tipRow(S.median(pt.rounds), `${fmt(pt[key].median, digits)} ${unit}`)
+            + tipRow(S.range, `${fmt(pt[key].range[0], digits)}–${fmt(pt[key].range[1], digits)}`)
+            + (pt.reference ? `<div class="tip-row"><span>${S.source}</span></div>` : "");
+          hit.addEventListener("mousemove", (e) => tip.show(content, e));
+          hit.addEventListener("mouseleave", () => tip.hide());
+        });
+      });
+      // Value labels on top of the lines, rightmost points first; each takes the first spot with no collision,
+      // or else the spot with the fewest.
+      const bounds = { x0: ox + 2, x1: ox + panelW - 2, y0: top - 8, y1: bottom + 18 };
+      const placed = [];
+      labels.sort((a, b) => b.cx - a.cx).forEach(({ cx, cy, i, value }) => {
+        const node = text(svg, cx, cy, value, { class: `series-label series-${i}` });
+        let best = null;
+        SPOTS.forEach(([dx, dy, anchor]) => {
+          if (best && best.cost === 0) return;
+          node.setAttribute("x", cx + dx);
+          node.setAttribute("y", cy + dy);
+          node.setAttribute("text-anchor", anchor);
+          const b = node.getBBox();
+          const box = { x: b.x - 2, y: b.y - 1, width: b.width + 4, height: b.height + 2 };
+          const outside = box.x < bounds.x0 || box.x + box.width > bounds.x1 || box.y < bounds.y0 || box.y + box.height > bounds.y1;
+          const cost = (outside ? 100 : 0) + segments.filter((s) => crosses(box, s)).length
+            + markers.filter((r) => overlaps(box, r)).length + placed.filter((r) => overlaps(box, r)).length;
+          if (!best || cost < best.cost) best = { cost, dx, dy, anchor, box };
+        });
+        node.setAttribute("x", cx + best.dx);
+        node.setAttribute("y", cy + best.dy);
+        node.setAttribute("text-anchor", best.anchor);
+        placed.push(best.box);
+      });
+    });
+    text(svg, W / 2, H - 8, S.axis, { "text-anchor": "middle", class: "axis-title" });
+  };
+
+  const figures = { kpis, scatter, timeline, scaling };
   document.querySelectorAll("[data-benchmark]").forEach((host) => {
     const data = registry[host.dataset.benchmarkId];
     const render = figures[host.dataset.benchmark];
@@ -320,9 +455,17 @@
 
   // Results tables: in a table whose header has an IronMLX column, tint that column and shade each body cell
   // whose value is bold (the best value of its row); tables without an IronMLX column are left as they are.
+  // A column whose body cells are all input lengths ("30K", "128K") shrinks to its content, leaving the width
+  // to the result columns.
   document.querySelectorAll(".doc-content table").forEach((table) => {
     const head = table.tHead ? table.tHead.rows[0] : table.rows[0];
     if (!head) return;
+    const body = [...table.rows].filter((row) => row.parentElement.tagName === "TBODY");
+    [...head.cells].forEach((_, i) => {
+      if (body.length && body.every((row) => /^\d+K$/.test((row.cells[i]?.textContent || "").trim()))) {
+        [...table.rows].forEach((row) => row.cells[i]?.classList.add("bench-compact-col"));
+      }
+    });
     const focus = [...head.cells].findIndex((cell) => cell.textContent.trim().startsWith("IronMLX"));
     if (focus < 0) return;
     [...table.rows].forEach((row) => {

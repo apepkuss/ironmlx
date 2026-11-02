@@ -203,6 +203,91 @@ html[data-theme="dark"] .docs-benchmark-page {
   stroke-linecap: round;
 }
 
+/* Scaling figure: one color per model (the second series is not "another application", so it is not grey). */
+/* Value labels use a darker orange than the line in light mode so the text keeps enough contrast. */
+.docs-benchmark-page {
+  --viz-series-0: var(--viz-focus);
+  --viz-series-1: #d9822b;
+  --viz-series-1-text: #a85a0d;
+}
+
+html[data-theme="dark"] .docs-benchmark-page {
+  --viz-series-1: #f0a35e;
+  --viz-series-1-text: #f0a35e;
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme="system"] .docs-benchmark-page {
+    --viz-series-1: #f0a35e;
+    --viz-series-1-text: #f0a35e;
+  }
+}
+
+.bench-chart text.series-label {
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.bench-chart text.series-label.series-0 {
+  fill: var(--viz-series-0);
+}
+
+.bench-chart text.series-label.series-1 {
+  fill: var(--viz-series-1-text);
+}
+
+.key-dot.series-0 {
+  background: var(--viz-series-0);
+}
+
+.key-dot.series-1 {
+  background: var(--viz-series-1);
+}
+
+.bench-chart .series-line {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.bench-chart .series-line.dashed {
+  stroke-dasharray: 5 5;
+}
+
+.bench-chart .series-line.series-0 {
+  stroke: var(--viz-series-0);
+}
+
+.bench-chart .series-line.series-1 {
+  stroke: var(--viz-series-1);
+}
+
+.bench-chart .series-mark {
+  stroke: var(--surface);
+  stroke-width: 2;
+}
+
+.bench-chart .series-mark.series-0 {
+  fill: var(--viz-series-0);
+}
+
+.bench-chart .series-mark.series-1 {
+  fill: var(--viz-series-1);
+}
+
+.bench-chart .series-mark.hollow {
+  fill: var(--surface);
+  stroke-width: 2.5;
+}
+
+.bench-chart .series-mark.hollow.series-0 {
+  stroke: var(--viz-series-0);
+}
+
+.bench-chart .series-mark.hollow.series-1 {
+  stroke: var(--viz-series-1);
+}
+
 .bench-tooltip {
   position: absolute;
   z-index: 5;
@@ -288,6 +373,13 @@ html[data-theme="dark"] .docs-benchmark-page {
 
 .doc-content td.bench-focus-col.bench-best {
   background-image: linear-gradient(var(--bench-best-focus), var(--bench-best-focus));
+}
+
+/* Overrides the 100 px minimum of documentation table cells. */
+.doc-content .bench-compact-col {
+  width: 1%;
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .doc-content td.bench-focus-col strong {
