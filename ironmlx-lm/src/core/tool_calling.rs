@@ -77,7 +77,7 @@ impl ToolDialect {
     /// Recognize exact native template contracts. Similar-looking templates
     /// are deliberately not guessed into support.
     pub fn detect(model_type: &str, template: &str) -> Option<Self> {
-        if matches!(model_type, "qwen3_5" | "qwen3_5_moe") {
+        if matches!(model_type, "qwen3_5" | "qwen3_5_moe" | "qwen4_exp") {
             let required = [
                 "<tool_call>",
                 "<function=",
@@ -2318,6 +2318,11 @@ mod tests {
             Some(ToolDialect::Qwen35)
         );
         assert_eq!(ToolDialect::detect("minicpmv4_6", template), None);
+        assert_eq!(
+            ToolDialect::detect("qwen4_exp", template),
+            Some(ToolDialect::Qwen35)
+        );
+        assert_eq!(ToolDialect::detect("qwen4_exp", "<tool_call>"), None);
         assert_eq!(ToolDialect::detect("qwen3_5", "<tool_call>"), None);
 
         let gemma = concat!(

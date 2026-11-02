@@ -1549,9 +1549,16 @@ impl EnginePoolInner {
             .memory_limits
             .check_total_memory_limit(target_id, estimated_weight_bytes)?;
         let governor = global_process_memory_governor();
+        let reserve_load = || {
+            if flash_plan.is_some() {
+                governor.try_reserve_model_load(estimated_weight_bytes, "model_load")
+            } else {
+                governor.try_reserve(estimated_weight_bytes, "model_load")
+            }
+        };
         let first_snapshot = governor.sample_process();
         let first_reservation = if first_snapshot.pressure_level == PressureLevel::Normal {
-            governor.try_reserve(estimated_weight_bytes, "model_load")
+            reserve_load()
         } else {
             Err(
                 crate::core::process_memory::MemoryReservationError::Pressure {
@@ -1582,7 +1589,7 @@ impl EnginePoolInner {
                         retry_snapshot.pressure_level
                     );
                 }
-                match governor.try_reserve(estimated_weight_bytes, "model_load") {
+                match reserve_load() {
                     Ok(reservation) => Some(reservation),
                     Err(retry_error) => {
                         bail!(

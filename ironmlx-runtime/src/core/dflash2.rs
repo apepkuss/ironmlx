@@ -1664,14 +1664,15 @@ where
             };
             // A chunk never splits an image's pad run.
             let chunk_len = match vl.as_ref() {
-                Some(vl) => {
-                    extend_vl_chunk_end_for_image_pad(
-                        &request.prompt_ids,
-                        vl.image_token_id,
-                        position,
-                        position + chunk_len,
-                    ) - position
-                }
+                Some(vl) => dflash2_image_prefill_chunk_len(
+                    &request.prompt_ids,
+                    vl.image_token_id,
+                    position,
+                    chunk_len,
+                    request.prefill_chunk_size,
+                    prefill_execution,
+                    model.requires_row_isolated_multimodal_prefill(),
+                ),
                 None => chunk_len,
             };
             let start = position as usize;
@@ -5636,6 +5637,32 @@ fn dflash2_prefill_chunk_len(
     }
 }
 
+/// Flash must keep the ordinary scheduler's `[N-1] + [1]` image prefill.
+/// The shared pad-run helper also absorbs a short final text tail, which
+/// otherwise silently turns this single-chunk scheduler split into `[N]`.
+#[allow(clippy::too_many_arguments)]
+fn dflash2_image_prefill_chunk_len(
+    prompt: &[u32],
+    image_id: i32,
+    position: i32,
+    base_len: i32,
+    requested: usize,
+    execution: DFlash2PrefillExecution,
+    preserve_scheduler_split: bool,
+) -> i32 {
+    let remaining = prompt.len() as i32 - position;
+    if preserve_scheduler_split
+        && execution == DFlash2PrefillExecution::SchedulerB1
+        && position == 0
+        && remaining > 1
+        && base_len == remaining - 1
+        && (requested == 0 || remaining as usize <= requested)
+    {
+        return base_len;
+    }
+    extend_vl_chunk_end_for_image_pad(prompt, image_id, position, position + base_len) - position
+}
+
 fn should_cache_dflash2_prefill_boundary(
     prompt_len: i32,
     position: i32,
@@ -5673,6 +5700,29 @@ mod moe_tests;
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn flash_image_prefill_keeps_scheduler_tail_but_retains_chunked_absorption() {
+        let mut prompt = vec![1; 91];
+        prompt[4..68].fill(42);
+        let plan = |base, requested, execution, preserve| {
+            dflash2_image_prefill_chunk_len(&prompt, 42, 0, base, requested, execution, preserve)
+        };
+        assert_eq!(
+            plan(90, 2048, DFlash2PrefillExecution::SchedulerB1, true),
+            90
+        );
+        assert_eq!(plan(90, 0, DFlash2PrefillExecution::SchedulerB1, true), 90);
+        assert_eq!(plan(16, 16, DFlash2PrefillExecution::SchedulerB1, true), 91);
+        assert_eq!(
+            plan(90, 2048, DFlash2PrefillExecution::SchedulerB1, false),
+            91
+        );
+        assert_eq!(
+            plan(90, 90, DFlash2PrefillExecution::GenerationStream, true),
+            91
+        );
+    }
 
     #[test]
     fn automatic_block_size_uses_checkpoint_width_up_to_q8() {

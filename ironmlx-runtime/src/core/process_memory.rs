@@ -541,6 +541,7 @@ impl Default for MemoryGovernorSnapshot {
 
 #[derive(Debug)]
 struct GovernorState {
+    model_load_reserved_bytes: usize,
     snapshot: MemoryGovernorSnapshot,
     candidate_level: PressureLevel,
     candidate_samples: u32,
@@ -621,6 +622,7 @@ impl ProcessMemoryGovernor {
             config,
             sample_gate: Mutex::new(()),
             state: Mutex::new(GovernorState {
+                model_load_reserved_bytes: 0,
                 snapshot: MemoryGovernorSnapshot::default(),
                 candidate_level: PressureLevel::Normal,
                 candidate_samples: 0,
@@ -702,8 +704,17 @@ impl ProcessMemoryGovernor {
             || telemetry.metal_limit_bytes.is_none();
         let soft = ratio_bytes(effective_ceiling, self.config.soft_ratio);
         let hard = ratio_bytes(effective_ceiling, self.config.hard_ratio);
+        // A serialized eager model load turns its reserved envelope into the
+        // sampled footprint. Keep its full reservation for competing admission,
+        // but do not count both copies as observed physical pressure.
+        let pressure_usage = current.saturating_add(
+            state
+                .snapshot
+                .reserved_bytes
+                .saturating_sub(state.model_load_reserved_bytes),
+        );
         let observed = classify_observed_pressure(
-            current.saturating_add(state.snapshot.reserved_bytes),
+            pressure_usage,
             effective_ceiling,
             soft,
             hard,
@@ -722,14 +733,7 @@ impl ProcessMemoryGovernor {
             state.candidate_samples = 0;
             state.recovery_samples = 0;
         } else {
-            let current_with_reservations = current.saturating_add(state.snapshot.reserved_bytes);
-            advance_pressure_state(
-                &mut state,
-                observed,
-                current_with_reservations,
-                recovery,
-                self.config,
-            );
+            advance_pressure_state(&mut state, observed, pressure_usage, recovery, self.config);
         }
 
         state.snapshot.current_usage_bytes = current;
@@ -773,6 +777,17 @@ impl ProcessMemoryGovernor {
         purpose: &'static str,
     ) -> Result<MemoryReservation, MemoryReservationError> {
         self.try_reserve_inner(bytes, purpose, ReservationKind::General)
+    }
+
+    /// Hold a serialized eager-load envelope against competing admission.
+    /// Actual footprint growth remains authoritative for pressure/eviction;
+    /// this reservation must not create a second physical copy of the weights.
+    pub(crate) fn try_reserve_model_load(
+        self: &Arc<Self>,
+        bytes: usize,
+        purpose: &'static str,
+    ) -> Result<MemoryReservation, MemoryReservationError> {
+        self.try_reserve_inner(bytes, purpose, ReservationKind::ModelLoad)
     }
 
     fn try_reserve_cold_materialization(
@@ -849,6 +864,11 @@ impl ProcessMemoryGovernor {
         }
         state.snapshot.reserved_bytes =
             state.snapshot.reserved_bytes.saturating_add(reserved_bytes);
+        if kind == ReservationKind::ModelLoad {
+            state.model_load_reserved_bytes = state
+                .model_load_reserved_bytes
+                .saturating_add(reserved_bytes);
+        }
         if kind == ReservationKind::ColdMaterialization {
             state.snapshot.cold_materialization_reservations = state
                 .snapshot
@@ -896,6 +916,9 @@ impl ProcessMemoryGovernor {
             }
         } else {
             state.snapshot.reserved_bytes = state.snapshot.reserved_bytes.saturating_sub(bytes);
+        }
+        if kind == ReservationKind::ModelLoad {
+            state.model_load_reserved_bytes = state.model_load_reserved_bytes.saturating_sub(bytes);
         }
         if kind == ReservationKind::ColdMaterialization {
             state.snapshot.cold_materialization_reservations = state
@@ -1177,6 +1200,7 @@ pub struct MemoryReservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReservationKind {
     General,
+    ModelLoad,
     ColdMaterialization,
     Prefill,
 }
@@ -1678,6 +1702,63 @@ mod tests {
         governor.update(telemetry(gib(8)));
         governor.update(telemetry(gib(8)));
         assert_eq!(governor.snapshot().pressure_level, PressureLevel::Hard);
+    }
+
+    #[test]
+    fn eager_model_load_reservation_does_not_double_observed_footprint() {
+        let governor = Arc::new(ProcessMemoryGovernor::new(config()).unwrap());
+        let sample = |usage| {
+            let mut sample = telemetry(gib(usage));
+            sample.vm.as_mut().unwrap().free_bytes = gib(24);
+            sample
+        };
+        governor.update(sample(4));
+        let load = governor
+            .try_reserve_model_load(gib(17), "model_load")
+            .unwrap();
+        for _ in 0..3 {
+            let during = governor.update(sample(20));
+            assert_eq!(during.pressure_level, PressureLevel::Normal);
+            assert_eq!(during.reserved_bytes, gib(17));
+        }
+        assert!(matches!(
+            governor.try_reserve(1, "competing_request"),
+            Err(MemoryReservationError::InsufficientHeadroom { .. })
+        ));
+        load.commit();
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+        assert_eq!(governor.state.lock().unwrap().model_load_reserved_bytes, 0);
+        assert_eq!(
+            governor.update(sample(20)).pressure_level,
+            PressureLevel::Normal
+        );
+        let ordinary = governor.try_reserve(gib(1), "request").unwrap();
+        assert_eq!(
+            governor.update(sample(24)).pressure_level,
+            PressureLevel::Emergency
+        );
+        drop(ordinary);
+    }
+
+    #[test]
+    fn eager_model_load_still_detects_real_pressure_and_releases_on_failure() {
+        let governor = Arc::new(ProcessMemoryGovernor::new(config()).unwrap());
+        let sample = |usage| {
+            let mut sample = telemetry(gib(usage));
+            sample.vm.as_mut().unwrap().free_bytes = gib(24);
+            sample
+        };
+        governor.update(sample(4));
+        let load = governor
+            .try_reserve_model_load(gib(17), "model_load")
+            .unwrap();
+        assert_eq!(
+            governor.update(sample(26)).pressure_level,
+            PressureLevel::Emergency
+        );
+        drop(load);
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+        assert_eq!(governor.state.lock().unwrap().model_load_reserved_bytes, 0);
     }
 
     #[test]
