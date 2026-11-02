@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:9c23044c-51c9-5180-bc2f-be52e5e26c32",
+  "serialNumber": "urn:uuid:21fdf6f4-4d69-57de-a613-d07f2e64df82",
   "version": 1,
   "metadata": {
     "component": {
@@ -11750,6 +11750,38 @@
         }
       ],
       "purl": "pkg:github/ml-explore/mlx@64ea011cb65f14d9ce2737e60db9a4ae91ed7441"
+    },
+    {
+      "type": "library",
+      "bom-ref": "native:MLX-VLM QSA reference kernel (vendored)@ff788e98d82f6a931992a6a8ee0e74c7a7e6925e",
+      "name": "MLX-VLM QSA reference kernel (vendored)",
+      "version": "ff788e98d82f6a931992a6a8ee0e74c7a7e6925e",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:license-file",
+          "value": "native-mlx-vlm-mit.txt"
+        },
+        {
+          "name": "ironmlx:license-sha256",
+          "value": "f74c448746be3376e27dee43e2be9ec9d55f4820cd7466c603a6c7d1fd2d25b8"
+        },
+        {
+          "name": "ironmlx:source-sha256",
+          "value": "f53095f69702b3ad99b64edcb11f9385a7f258f868711a8a3d6640a784d2d008"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/Blaizzy/mlx-vlm.git"
+        }
+      ],
+      "purl": "pkg:github/Blaizzy/mlx-vlm@ff788e98d82f6a931992a6a8ee0e74c7a7e6925e"
     },
     {
       "type": "library",

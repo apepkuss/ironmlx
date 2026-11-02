@@ -156,6 +156,22 @@ class BundledAssetMaterialsTests(unittest.TestCase):
 
 
 class VendoredNativeSourceTests(unittest.TestCase):
+    def test_pinned_source_file_verifies_without_an_external_git_checkout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "kernel.py"
+            source.write_bytes(b"pinned kernel\n")
+            verification = {"type": "file", "source": "repo:kernel.py",
+                            "sha256": sha256(source.read_bytes())}
+            expected = {"type": "file", "sha256": verification["sha256"]}
+            self.assertEqual(GENERATOR.verify_native_source(verification, root, root, root), expected)
+            source.write_bytes(b"changed\n")
+            with self.assertRaisesRegex(ValueError, "native source file mismatch"):
+                GENERATOR.verify_native_source(verification, root, root, root)
+            source.unlink()
+            with self.assertRaisesRegex(ValueError, "native source file is missing"):
+                GENERATOR.verify_native_source(verification, root, root, root)
+
     def git_fixture(self, root: Path) -> tuple[Path, str]:
         import subprocess
 

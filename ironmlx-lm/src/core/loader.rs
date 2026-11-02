@@ -311,6 +311,10 @@ enum SanitizeMode {
     Mtp,
     Gemma4Drafter,
     DFlash2Draft,
+    #[cfg(unix)]
+    FlashText {
+        resident_budget_bytes: u64,
+    },
     /// Only the vision encoder's tensors (read and evaluated on their own).
     VisionOnly,
     Embedding {
@@ -338,6 +342,18 @@ impl WeightSource for Loader {
 }
 
 impl Loader {
+    /// Internal qualification path. PLE remains in bounded positional-I/O
+    /// storage and vision/MTP are excluded before any eager evaluation.
+    /// This does not register Flash as a supported runtime architecture.
+    #[cfg(unix)]
+    pub fn open_flash_text(model_dir: &Path, resident_budget_bytes: u64) -> Result<Self> {
+        Self::open_impl(
+            model_dir,
+            SanitizeMode::FlashText {
+                resident_budget_bytes,
+            },
+        )
+    }
     /// Open a directory containing `config.json`, `tokenizer_config.json`,
     /// and `model.safetensors` (single-file) or `model.safetensors.index.json`
     /// (sharded). All weights are mmap-loaded eagerly.
@@ -442,6 +458,22 @@ impl Loader {
         )
         .with_context(|| format!("parsing {}", config_path.display()))?;
 
+        #[cfg(unix)]
+        if let SanitizeMode::FlashText {
+            resident_budget_bytes,
+        } = sanitize_mode
+        {
+            crate::models::qwen4_exp::config::FlashTextConfig::from_root(&config_raw)?;
+            let files = crate::core::tensor_file::ModelTensorFiles::open(model_dir)?;
+            let bytes = files
+                .tensors()
+                .filter(|(key, _)| flash_resident_tensor(key))
+                .try_fold(0u64, |n, (_, info)| n.checked_add(info.bytes()))
+                .context("Flash resident weight bytes overflow")?;
+            anyhow::ensure!(bytes <= resident_budget_bytes,
+                "Flash resident weights require {bytes} bytes, reservation is {resident_budget_bytes}");
+        }
+
         let tokenizer_config = TokenizerConfig::from_model_dir(model_dir)?;
 
         let optiq_metadata = load_optiq_metadata(model_dir)?;
@@ -464,6 +496,11 @@ impl Loader {
         }
 
         match sanitize_mode {
+            #[cfg(unix)]
+            SanitizeMode::FlashText { .. } => {
+                tensors.retain(|key, _| flash_resident_tensor(key));
+                Self::sanitize(&mut tensors, &config_raw, false)?;
+            }
             SanitizeMode::Embedding {
                 keep_vision_tower,
                 keep_audio_tower,
@@ -815,6 +852,13 @@ impl Loader {
     pub fn model_dir(&self) -> &Path {
         &self.model_dir
     }
+}
+
+#[cfg(unix)]
+fn flash_resident_tensor(key: &str) -> bool {
+    key.starts_with("language_model.")
+        && !key.contains(".ngram_embedding.")
+        && !key.contains("mtp.")
 }
 
 fn tensor_storage_bytes(tensors: &HashMap<String, Array>) -> usize {

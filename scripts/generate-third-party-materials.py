@@ -135,14 +135,14 @@ def verify_native_source(
                 f"expected {expected}, found {actual}"
             )
         return {"commit": expected, "type": verification_type}
-    if verification_type == "archive":
+    if verification_type in {"archive", "file"}:
         if not source_path.is_file():
-            raise ValueError(f"native source archive is missing: {source_path}")
+            raise ValueError(f"native source {verification_type} is missing: {source_path}")
         actual = sha256_bytes(source_path.read_bytes())
         expected = verification["sha256"]
         if actual != expected:
             raise ValueError(
-                f"native source archive mismatch at {source_path}: "
+                f"native source {verification_type} mismatch at {source_path}: "
                 f"expected {expected}, found {actual}"
             )
         return {"sha256": expected, "type": verification_type}

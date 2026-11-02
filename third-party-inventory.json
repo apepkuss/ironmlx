@@ -332,6 +332,18 @@
         }
       },
       {
+        "component": "MLX-VLM QSA reference kernel (vendored)",
+        "license": "MIT",
+        "license_file": "native-mlx-vlm-mit.txt",
+        "license_sha256": "f74c448746be3376e27dee43e2be9ec9d55f4820cd7466c603a6c7d1fd2d25b8",
+        "repository": "https://github.com/Blaizzy/mlx-vlm.git",
+        "revision": "ff788e98d82f6a931992a6a8ee0e74c7a7e6925e",
+        "source_integrity": {
+          "sha256": "f53095f69702b3ad99b64edcb11f9385a7f258f868711a8a3d6640a784d2d008",
+          "type": "file"
+        }
+      },
+      {
         "component": "nlohmann/json",
         "license": "MIT",
         "license_file": "native-nlohmann-json-mit.txt",
