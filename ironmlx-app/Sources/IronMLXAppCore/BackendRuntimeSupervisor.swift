@@ -5,17 +5,27 @@ public struct BackendRecoveryPolicy: Equatable, Sendable {
     public var automaticRecoveryDelay: TimeInterval
     public var stableWindow: TimeInterval
     public var readinessTimeout: TimeInterval
+    public var fixedModelReadinessTimeout: TimeInterval
 
     public init(
         maximumAutomaticRecoveryAttempts: Int = 1,
         automaticRecoveryDelay: TimeInterval = 1.0,
         stableWindow: TimeInterval = 60.0,
-        readinessTimeout: TimeInterval = 5.0
+        readinessTimeout: TimeInterval = 5.0,
+        fixedModelReadinessTimeout: TimeInterval = 300.0
     ) {
         self.maximumAutomaticRecoveryAttempts = maximumAutomaticRecoveryAttempts
         self.automaticRecoveryDelay = automaticRecoveryDelay
         self.stableWindow = stableWindow
         self.readinessTimeout = readinessTimeout
+        self.fixedModelReadinessTimeout = fixedModelReadinessTimeout
+    }
+
+    func readinessTimeout(for snapshot: BackendRecoverySnapshot) -> TimeInterval {
+        // A fixed DFlash actor loads target/draft weights before opening HTTP.
+        // The ordinary daemon opens HTTP before its lazy model loads.
+        snapshot.models.contains { $0.isDefault && $0.dflash2ModelDir != nil }
+            ? max(readinessTimeout, fixedModelReadinessTimeout) : readinessTimeout
     }
 }
 
@@ -178,10 +188,7 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
             }
             try? await Task.sleep(for: .seconds(interval))
         },
-        readinessWaiter: @escaping ReadinessWaiter = { config, timeout in
-            try await BackendAPIClient(host: config.host, port: config.port)
-                .waitUntilReady(timeout: timeout)
-        }
+        readinessWaiter: ReadinessWaiter? = nil
     ) {
         self.processManager = processManager
         self.configStore = configStore
@@ -195,7 +202,25 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
         self.notificationCenter = notificationCenter
         self.policy = policy
         self.sleep = sleep
-        self.readinessWaiter = readinessWaiter
+        self.readinessWaiter =
+            readinessWaiter ?? { config, timeout in
+                let launchID = await processManager.currentLaunchID
+                try await BackendAPIClient(host: config.host, port: config.port)
+                    .waitUntilReady(
+                        timeout: timeout,
+                        shouldContinue: {
+                            try await MainActor.run {
+                                guard processManager.currentLaunchID == launchID else { throw CancellationError() }
+                                if processManager.isRunning { return true }
+                                if let termination = processManager.lastTermination,
+                                    termination.launchID == launchID, termination.stopIntent.isPlanned
+                                {
+                                    throw CancellationError()
+                                }
+                                return false
+                            }
+                        })
+            }
         self.confirmedSnapshot = BackendRecoverySnapshot.capture(
             config: configStore.load(),
             scanner: scanner,
@@ -371,8 +396,9 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
             resumeLaunchCompletionWaiters(for: launchID)
         }
         do {
-            try await readinessWaiter(snapshot.config, policy.readinessTimeout)
+            try await readinessWaiter(snapshot.config, policy.readinessTimeout(for: snapshot))
         } catch {
+            let cancelled = Task.isCancelled || error is CancellationError
             if processManager.currentLaunchID == launchID, processManager.isRunning {
                 await processManager.stop(
                     intent: isAutomaticRecovery
@@ -383,7 +409,7 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
             if launchFailure(for: launchID) == .instanceAlreadyRunning {
                 throw BackendRuntimeSupervisorError.instanceAlreadyRunning
             }
-            guard !Task.isCancelled else {
+            guard !cancelled else {
                 throw CancellationError()
             }
             processManager.transition(to: .failed, error: error.localizedDescription)

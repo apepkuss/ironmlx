@@ -129,9 +129,20 @@ public struct BackendAPIClient: Sendable {
     }
 
     public func waitUntilReady(timeout: TimeInterval = 5.0) async throws {
+        try await waitUntilReady(timeout: timeout, shouldContinue: nil)
+    }
+
+    public func waitUntilReady(
+        timeout: TimeInterval,
+        shouldContinue: (@Sendable () async throws -> Bool)?
+    ) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         var lastError: Error?
         repeat {
+            try Task.checkCancellation()
+            if let shouldContinue, try await shouldContinue() == false {
+                throw URLError(.cannotConnectToHost)
+            }
             do {
                 _ = try await fetchHealthz()
                 return

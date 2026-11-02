@@ -212,9 +212,15 @@ merely to upgrade an older download-only import into a newly supported model.
 ## Repository checks
 
 The final source passed 1,755 Rust unit tests across CLI, core, LM and runtime,
-565 Swift App tests, the workspace/all-targets Release check, supported-catalog
+569 Swift App tests, the workspace/all-targets Release check, supported-catalog
 regeneration, reproducible third-party materials (17 verification tests), and
 the deterministic CycloneDX SBOM including the pinned GDN reference kernel.
 Model-backed GPU/HTTP gates above are separate opt-in checks; ignored tests
 are not counted as passes. Release App packaging and live App acceptance use
 the same pinned MLX source.
+
+The App's fixed DFlash startup has a separate 300-second readiness ceiling:
+weights load before HTTP opens, whereas the ordinary lazy daemon retains its
+5-second budget. Process exit, generation replacement and planned stop interrupt
+the readiness wait; waiting longer must not hide a dead helper or override Stop.
+Live App startup is part of acceptance, beyond direct CLI serving.

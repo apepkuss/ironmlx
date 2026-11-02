@@ -785,3 +785,50 @@ private func runtimeTemporaryDirectory() throws -> URL {
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     return root
 }
+
+@Test func fixedModelReadinessBudgetDoesNotExtendLazyDaemonStartup() {
+    let policy = BackendRecoveryPolicy()
+    let plain = BackendRecoverySnapshot(config: AppConfig(), models: [])
+    #expect(policy.readinessTimeout(for: plain) == 5)
+    let target = BackendRecoveryModel(
+        id: "flash", modelDir: "/models/flash", isDefault: true,
+        pinned: false, maxCacheCap: 32768, mtpModelDir: nil, mtpDraftTokens: nil,
+        dflash2ModelDir: "/models/draft", promptLookup: nil, samplingDefaults: .empty)
+    var fixed = BackendRecoverySnapshot(config: AppConfig(), models: [target])
+    #expect(policy.readinessTimeout(for: fixed) == 300)
+    fixed.models[0].isDefault = false
+    #expect(policy.readinessTimeout(for: fixed) == 5)
+}
+
+@Test @MainActor
+func plannedStopInterruptsDefaultReadinessWithoutMarkingFailure() async throws {
+    let root = try runtimeTemporaryDirectory()
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    #expect(configStore.save(AppConfig(port: 65535)))
+    let processManager = BackendProcessManager(
+        configStore: configStore,
+        terminator: BackendProcessTerminator(sleep: { _ in }),
+        logStore: IronMLXLogStore(rootURL: root.appendingPathComponent("logs")),
+        launchPlanProvider: {
+            BackendProcessLaunchPlan(processURL: URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"])
+        })
+    let supervisor = BackendRuntimeSupervisor(
+        processManager: processManager, configStore: configStore,
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        restartCoordinator: FixedModelRestorer(result: .successful(port: 65535)),
+        incidentStore: BackendIncidentStore(url: root.appendingPathComponent("incidents.json")))
+    let startup = Task { try await supervisor.ensureRunning() }
+    for _ in 0..<200 {
+        if processManager.isRunning { break }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(processManager.isRunning)
+    await supervisor.stop(intent: .userStop)
+    do {
+        try await startup.value
+        Issue.record("stopped startup unexpectedly became ready")
+    } catch is CancellationError {}
+    #expect(supervisor.state == .stopped)
+    #expect(supervisor.lastIncident == nil)
+}

@@ -106,3 +106,23 @@ import Testing
     let nestedLegacy = try decoder.decode(BackendModelCapabilities.self, from: JSONSerialization.data(withJSONObject: nested))
     #expect(nestedLegacy.supportsAudio == false)
 }
+
+@Test func readinessDoesNotWaitForLongBudgetAfterProcessExit() async throws {
+    let start = ContinuousClock.now
+    do {
+        try await BackendAPIClient(host: "127.0.0.1", port: 65535)
+            .waitUntilReady(timeout: 300, shouldContinue: { false })
+        Issue.record("readiness accepted a stopped process")
+    } catch let error as URLError {
+        #expect(error.code == .cannotConnectToHost)
+    }
+    #expect(start.duration(to: .now) < .seconds(1))
+}
+
+@Test func readinessPropagatesPlannedStopCancellation() async throws {
+    do {
+        try await BackendAPIClient(host: "127.0.0.1", port: 65535)
+            .waitUntilReady(timeout: 300, shouldContinue: { throw CancellationError() })
+        Issue.record("readiness ignored cancellation")
+    } catch is CancellationError {}
+}
