@@ -73,9 +73,9 @@ impl DFlash2Target for FlashTextModel {
     fn dflash2_verify_capabilities(&self) -> DFlash2VerifyCapabilities {
         DFlash2VerifyCapabilities {
             profile: if self.layer_major_verify {
-                "qwen38-flash-next-vl-layer-major-q1-v4"
+                "qwen38-flash-next-vl-layer-major-q1-v5"
             } else {
-                "qwen38-flash-next-vl-q1-chain-v4"
+                "qwen38-flash-next-vl-q1-chain-v5"
             }
             .into(),
             row_bit_exact_qmm: true,
@@ -100,7 +100,7 @@ impl DFlash2Target for FlashTextModel {
             || "full".into(),
             |q| format!("{}{}g{}", q.mode.mlx_backend_mode(), q.bits, q.group_size),
         );
-        format!("qwen38-flash-next-vl-v4;mlx=a8f66b590;rope=reference-power;quant={quant};capture=completed-hc-mean;ple=bounded-ssd;experts={};dispatch=source-e512;verify={}",
+        format!("qwen38-flash-next-vl-v5;mlx=a8f66b590;rope=reference-power;quant={quant};capture=completed-hc-mean;ple=bounded-ssd;experts={};dispatch=source-e512;prefill=scheduler-image-tail-v1;verify={}",
             if self.expert_paging_enabled(){"bounded-ssd"}else{"resident"},if self.layer_major_verify{"layer-major-q1"}else{"token-major-q1"})
     }
     fn dflash2_instance(&self) -> Option<&DFlash2Instance> {

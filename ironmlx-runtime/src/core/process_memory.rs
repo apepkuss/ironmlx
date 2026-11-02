@@ -794,6 +794,9 @@ impl ProcessMemoryGovernor {
             || telemetry.metal_limit_bytes.is_none();
         let soft = ratio_bytes(effective_ceiling, self.config.soft_ratio);
         let hard = ratio_bytes(effective_ceiling, self.config.hard_ratio);
+        // A serialized eager model load turns its reserved envelope into the
+        // sampled footprint. Keep its full reservation for competing admission,
+        // but do not count both copies as observed physical pressure.
         let pressure_usage = current.saturating_add(
             state
                 .snapshot
@@ -1956,6 +1959,63 @@ mod tests {
         governor.update(telemetry(gib(8)));
         governor.update(telemetry(gib(8)));
         assert_eq!(governor.snapshot().pressure_level, PressureLevel::Hard);
+    }
+
+    #[test]
+    fn eager_model_load_reservation_does_not_double_observed_footprint() {
+        let governor = Arc::new(ProcessMemoryGovernor::new(config()).unwrap());
+        let sample = |usage| {
+            let mut sample = telemetry(gib(usage));
+            sample.vm.as_mut().unwrap().free_bytes = gib(24);
+            sample
+        };
+        governor.update(sample(4));
+        let load = governor
+            .try_reserve_model_load(gib(17))
+            .unwrap();
+        for _ in 0..3 {
+            let during = governor.update(sample(20));
+            assert_eq!(during.pressure_level, PressureLevel::Normal);
+            assert_eq!(during.reserved_bytes, gib(17));
+        }
+        assert!(matches!(
+            governor.try_reserve(1, "competing_request"),
+            Err(MemoryReservationError::InsufficientHeadroom { .. })
+        ));
+        load.commit();
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+        assert_eq!(governor.snapshot().model_load_reserved_bytes, 0);
+        assert_eq!(
+            governor.update(sample(20)).pressure_level,
+            PressureLevel::Normal
+        );
+        let ordinary = governor.try_reserve(gib(1), "request").unwrap();
+        assert_eq!(
+            governor.update(sample(24)).pressure_level,
+            PressureLevel::Emergency
+        );
+        drop(ordinary);
+    }
+
+    #[test]
+    fn eager_model_load_still_detects_real_pressure_and_releases_on_failure() {
+        let governor = Arc::new(ProcessMemoryGovernor::new(config()).unwrap());
+        let sample = |usage| {
+            let mut sample = telemetry(gib(usage));
+            sample.vm.as_mut().unwrap().free_bytes = gib(24);
+            sample
+        };
+        governor.update(sample(4));
+        let load = governor
+            .try_reserve_model_load(gib(17))
+            .unwrap();
+        assert_eq!(
+            governor.update(sample(26)).pressure_level,
+            PressureLevel::Emergency
+        );
+        drop(load);
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+        assert_eq!(governor.snapshot().model_load_reserved_bytes, 0);
     }
 
     #[test]

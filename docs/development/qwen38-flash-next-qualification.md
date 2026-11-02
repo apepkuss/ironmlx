@@ -153,9 +153,25 @@ memory gates. `off` explicitly disables ANE.
   bytes and its residency plan; only the deferred vision tower is an additional
   cold liability. Reserving the roughly 80 GB target a second time is rejected
   and is no longer done for Flash.
+- Live App EnginePool testing additionally caught the large eager-load
+  reservation being counted alongside the already materialized weight footprint.
+  Flash now uses a model-load reservation class: the full envelope still blocks
+  competing admission, while pressure/eviction classification uses actual
+  footprint plus other reservation classes. Genuine physical pressure is still
+  detected. Synthetic regression covers growth, commit, failure and admission
+  conservation; fixed-model CLI serving alone did not exercise this pool path.
 - Compact expert dispatch preserves the source expert count (512) when choosing
   the upstream `B/E >= 4` sorted-RHS QMM route. Merely reducing the resident RHS
   table must not change the QMV/QMM arithmetic during image-prefill chunks.
+- The default App-sized image prefill exposed a second partition mismatch:
+  ordinary scheduling uses `[N-1] + [1]`, while the shared image helper absorbed
+  the final text token into `[N]` for DFlash. Flash now retains that scheduler
+  suffix; truly chunked image-pad/tail absorption and GenerationStream behavior
+  are unchanged. Explicitly different prefill partitions may change BF16
+  trajectories, so parity claims compare the same partition contract.
+- Flash's exact Qwen XML tool template now enables the existing byte-level
+  constraint tokenizer and native tool parser. Live ordinary and DFlash tests
+  cover sampled requests, strict JSON, forced tool calls and a tool-result turn.
 - Actual ordinary HTTP with mixed text/image and multi-image requests passes
   B1/B4 token/message/finish-reason equality, image SSE cancellation and immediate
   row reuse. Flash image rows retain the B1 prefill chunk boundaries before
@@ -195,7 +211,7 @@ merely to upgrade an older download-only import into a newly supported model.
 
 ## Repository checks
 
-The final source passed 1,752 Rust unit tests across CLI, core, LM and runtime,
+The final source passed 1,755 Rust unit tests across CLI, core, LM and runtime,
 565 Swift App tests, the workspace/all-targets Release check, supported-catalog
 regeneration, reproducible third-party materials (17 verification tests), and
 the deterministic CycloneDX SBOM including the pinned GDN reference kernel.
