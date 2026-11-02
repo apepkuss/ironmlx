@@ -14,6 +14,7 @@ use mlx::{Array, Dtype, MetalKernel, Shape, StreamOrDevice};
 
 use crate::core::cache::gated_delta::GatedDeltaReplayCapture;
 use crate::core::cache::GatedDeltaCache;
+use crate::core::weights::WeightSource;
 use crate::core::Loader;
 use crate::nn::{Conv1d, Conv1dConfig, Linear, RmsNormGated};
 use crate::Result;
@@ -73,6 +74,7 @@ pub struct GatedDeltaNet {
     a_log: Array,   // [num_v_heads]
     dt_bias: Array, // [num_v_heads]
     cfg: GatedDeltaNetConfig,
+    flash_math: bool,
     kernel_no_mask: OnceLock<MetalKernel>,
     kernel_masked: OnceLock<MetalKernel>,
     kernel_no_state_no_mask: OnceLock<MetalKernel>,
@@ -101,6 +103,31 @@ enum GatedDeltaInputProjections {
 }
 
 impl GatedDeltaNet {
+    /// Flash reuses the recurrence and replay machinery, with distinct q/k
+    /// normalization and a sigmoid output gate. Legacy fused preparation
+    /// kernels encode Qwen3.5 math and must never be selected for this flavor.
+    pub fn from_flash_weights(
+        source: &(impl WeightSource + ?Sized),
+        prefix: &str,
+        cfg: &crate::models::qwen4_exp::config::FlashTextConfig,
+    ) -> Result<Self> {
+        let mut layer = Self::from_loader_impl(
+            source,
+            prefix,
+            GatedDeltaNetConfig {
+                hidden_size: cfg.hidden_size,
+                num_v_heads: cfg.linear_num_value_heads,
+                num_k_heads: cfg.linear_num_key_heads,
+                head_k_dim: cfg.linear_key_head_dim,
+                head_v_dim: cfg.linear_value_head_dim,
+                conv_kernel_size: cfg.linear_conv_kernel_dim,
+                rms_norm_eps: cfg.rms_norm_eps,
+            },
+            false,
+        )?;
+        layer.flash_math = true;
+        Ok(layer)
+    }
     /// Projections applied to activations (fused storage when fused).
     pub(crate) fn activation_projections(&self) -> Vec<&Linear> {
         let mut out = match &self.input_projections {
@@ -155,7 +182,7 @@ impl GatedDeltaNet {
     }
 
     fn from_loader_impl(
-        loader: &Loader,
+        loader: &(impl WeightSource + ?Sized),
         prefix: &str,
         cfg: GatedDeltaNetConfig,
         fuse_dflash2: bool,
@@ -218,6 +245,7 @@ impl GatedDeltaNet {
             a_log,
             dt_bias,
             cfg,
+            flash_math: false,
             kernel_no_mask: OnceLock::new(),
             kernel_masked: OnceLock::new(),
             kernel_no_state_no_mask: OnceLock::new(),
@@ -258,6 +286,7 @@ impl GatedDeltaNet {
             a_log,
             dt_bias,
             cfg,
+            flash_math: false,
             kernel_no_mask: OnceLock::new(),
             kernel_masked: OnceLock::new(),
             kernel_no_state_no_mask: OnceLock::new(),
@@ -389,7 +418,8 @@ impl GatedDeltaNet {
         // take the decode route's fused input projection, preparation and
         // gated norm kernels instead of the op-by-op chain (another rounding
         // and summation order, so only from a fixed position on).
-        let long_prefill = seq > 64
+        let long_prefill = !self.flash_math
+            && seq > 64
             && batch == 1
             && mask.is_none()
             && tree.is_none()
@@ -436,12 +466,17 @@ impl GatedDeltaNet {
             // emits zero at pad positions), so pad-position `z` values are
             // discarded anyway. We zero `qkv` only.
             let (qkv, z, b, a) = match &self.input_projections {
-                GatedDeltaInputProjections::Separate { qkv, z, b, a } => (
-                    qkv.forward_on(x, target)?,
-                    z.forward_on(x, target)?,
-                    b.forward_on(x, target)?,
-                    a.forward_on(x, target)?,
-                ),
+                GatedDeltaInputProjections::Separate { qkv, z, b, a } => {
+                    let projected_qkv = qkv.forward_on(x, target)?;
+                    let projected_z = z.forward_on(x, target)?;
+                    let _flash_gates = self.flash_math.then(super::position_stable_qmm::scope);
+                    (
+                        projected_qkv,
+                        projected_z,
+                        b.forward_on(x, target)?,
+                        a.forward_on(x, target)?,
+                    )
+                }
                 GatedDeltaInputProjections::Fused {
                     projection,
                     qkv,
@@ -520,7 +555,8 @@ impl GatedDeltaNet {
         let fused_prep = match (fused_output.as_ref(), cache.as_deref()) {
             // Bit-identical to the fast-path chain (IronQkNorm, IronGdnGates).
             (Some(output), Some(c))
-                if super::dense_fast_path::gdn_fused_prep_armed()
+                if !self.flash_math
+                    && super::dense_fast_path::gdn_fused_prep_armed()
                     && mask.is_none()
                     && tree.is_none()
                     && !defer_captured_state_commit
@@ -555,7 +591,7 @@ impl GatedDeltaNet {
             // the three inputs before it on its path, so each node's values
             // are those of decoding it after its path.
             (Some(output), Some(c))
-                if tree.is_some()
+                if !self.flash_math && tree.is_some()
                     && batch == 1
                     && super::dense_fast_path::gdn_fused_prep_armed()
                     && mask.is_none()
@@ -733,7 +769,13 @@ impl GatedDeltaNet {
             };
 
             // Step 4: q/k rms_norm (no weight)
-            let (q_scaled, k_scaled) = if super::dense_fast_path::gdn_kernels_armed()
+            let (q_scaled, k_scaled) = if self.flash_math {
+                crate::models::qwen4_exp::math::normalize_delta_qk_on(
+                    &q_per_head,
+                    &k_per_head,
+                    target,
+                )?
+            } else if super::dense_fast_path::gdn_kernels_armed()
                 && conv_out.dtype() == Dtype::Bfloat16
                 && self.cfg.head_k_dim == 128
             {
@@ -761,7 +803,8 @@ impl GatedDeltaNet {
             };
 
             // Steps 5-6: g = exp(-exp(A_log) * softplus(a + dt_bias)), beta = sigmoid(b).
-            let (g, beta) = if super::dense_fast_path::gdn_kernels_armed()
+            let (g, beta) = if !self.flash_math
+                && super::dense_fast_path::gdn_kernels_armed()
                 && a.dtype() == Dtype::Bfloat16
                 && b.dtype() == Dtype::Bfloat16
                 && self.a_log.dtype() == Dtype::Bfloat16
@@ -1052,7 +1095,8 @@ impl GatedDeltaNet {
         // Step 8: RmsNormGated(y, z) + reshape + out_proj
         let gated_in_place = match (fused_output.as_ref(), self.norm.weight()) {
             (Some(output), weight)
-                if (super::fused_norm::requested() || super::dense_fast_path::is_armed())
+                if !self.flash_math
+                    && (super::fused_norm::requested() || super::dense_fast_path::is_armed())
                     && mask.is_none()
                     && (tree.is_none() || super::dense_fast_path::is_armed())
                     && self.cfg.head_v_dim == 128
@@ -1077,7 +1121,17 @@ impl GatedDeltaNet {
                 (batch, seq, self.cfg.num_v_heads, self.cfg.head_v_dim),
                 target,
             )?;
-            let normed = self.norm.forward_on(&y, Some(&z_per_head), target)?;
+            let normed = if self.flash_math {
+                crate::models::qwen4_exp::math::sigmoid_gated_rms_on(
+                    &y,
+                    &z_per_head,
+                    self.norm.weight(),
+                    self.norm.eps(),
+                    target,
+                )?
+            } else {
+                self.norm.forward_on(&y, Some(&z_per_head), target)?
+            };
             let normed_flat = normed.reshape_on((batch, seq, self.cfg.value_dim()), target)?;
             self.out_proj.forward_on(&normed_flat, target)?
         };

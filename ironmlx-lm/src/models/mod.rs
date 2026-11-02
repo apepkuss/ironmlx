@@ -35,6 +35,7 @@ pub mod minicpmv4_6;
 pub mod qwen3_5;
 pub mod qwen3_5_moe;
 pub mod qwen3_6_moe;
+pub mod qwen4_exp;
 pub mod vision;
 
 pub use architecture::ModelArchitecture;

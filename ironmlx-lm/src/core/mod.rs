@@ -13,9 +13,12 @@ pub mod model;
 pub mod model_input;
 pub mod native_output;
 pub mod reasoning_budget;
+pub mod residency;
 pub mod sampler;
 mod semantic_constraint;
 pub mod speculative_model;
+#[cfg(unix)]
+pub mod tensor_file;
 pub mod tokenizer;
 pub mod tool_calling;
 mod tool_prompt_cache;
