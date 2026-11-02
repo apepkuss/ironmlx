@@ -5,12 +5,14 @@ use super::{
     config::FlashTextConfig,
     hyper::HyperConnection,
     math::capture_hc_mean_on,
+    paged_moe::PagedMoe,
     ple::{PleLayer, PleState},
     ple_rows::PleRows,
 };
 use crate::{
     core::{
         cache::{gated_delta::GatedDeltaCacheSnapshot, GatedDeltaCache},
+        paged_experts::{ExpertCacheStats, ExpertTableSpec, PagedExperts},
         tensor_file::ModelTensorFiles,
         Loader,
     },
@@ -19,18 +21,28 @@ use crate::{
 };
 use anyhow::{ensure, Context, Result};
 use mlx::{Array, Dtype, StreamOrDevice};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 enum Attention {
     Linear(Box<GatedDeltaNet>),
     Sparse(Box<QsaAttention>),
+}
+enum Moe {
+    Resident(Box<SparseMoeBlock>),
+    Paged(Box<PagedMoe>),
+}
+#[derive(Debug, Clone, Copy)]
+pub struct ExpertPagingOptions {
+    pub cache_bytes: usize,
+    pub staging_bytes: usize,
+    pub pack_bytes: usize,
 }
 struct Layer {
     attention: Attention,
     ple: Option<PleLayer>,
     attn_hc: HyperConnection,
     mlp_hc: HyperConnection,
-    mlp: SparseMoeBlock,
+    mlp: Moe,
 }
 enum LayerState {
     Linear {
@@ -105,6 +117,7 @@ pub struct FlashTextModel {
     head: Linear,
     pub config: FlashTextConfig,
     instance: Arc<()>,
+    experts: Option<Arc<Mutex<PagedExperts>>>,
 }
 
 impl FlashTextModel {
@@ -115,7 +128,59 @@ impl FlashTextModel {
         ple_staging_bytes: usize,
         qsa_scratch_bytes: usize,
     ) -> Result<Self> {
+        Self::from_loader_with_paging(
+            loader,
+            files,
+            ple_cache_bytes,
+            ple_staging_bytes,
+            qsa_scratch_bytes,
+            None,
+        )
+    }
+
+    pub fn from_loader_with_paging(
+        loader: &Loader,
+        files: Arc<ModelTensorFiles>,
+        ple_cache_bytes: usize,
+        ple_staging_bytes: usize,
+        qsa_scratch_bytes: usize,
+        paging: Option<ExpertPagingOptions>,
+    ) -> Result<Self> {
         let cfg = FlashTextConfig::from_root(loader.config_raw_value())?;
+        let experts = paging
+            .map(|options| -> Result<_> {
+                let mut tables = Vec::new();
+                for layer in 0..cfg.num_hidden_layers {
+                    let prefix = format!("model.layers.{layer}.mlp.switch_mlp");
+                    ensure!(!loader.contains(&format!("{prefix}.gate_proj.weight")),
+                    "paged graph requires a loader that excluded routed experts before evaluation");
+                    let quant = loader
+                        .quant_meta_for(&format!("{prefix}.gate_proj"))
+                        .context("missing expert quantization")?;
+                    ensure!(
+                        ["up_proj", "down_proj"]
+                            .iter()
+                            .all(|name| loader.quant_meta_for(&format!("{prefix}.{name}"))
+                                == Some(quant)),
+                        "paged Flash experts require matching gate/up/down quantization"
+                    );
+                    tables.push(ExpertTableSpec {
+                        prefix: format!("language_model.{prefix}"),
+                        experts: cfg.num_experts as u32,
+                        hidden: cfg.hidden_size,
+                        intermediate: cfg.moe_intermediate_size,
+                        quant,
+                    });
+                }
+                Ok(Arc::new(Mutex::new(PagedExperts::new(
+                    Arc::clone(&files),
+                    tables,
+                    options.cache_bytes,
+                    options.staging_bytes,
+                    options.pack_bytes,
+                )?)))
+            })
+            .transpose()?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for (index, kind) in cfg.layer_types.iter().enumerate() {
             let prefix = format!("model.layers.{index}");
@@ -166,12 +231,22 @@ impl FlashTextModel {
                     &cfg,
                     true,
                 )?,
-                mlp: SparseMoeBlock::from_loader(
-                    loader,
-                    &format!("{prefix}.mlp"),
-                    cfg.num_experts_per_tok,
-                    cfg.norm_topk_prob,
-                )?,
+                mlp: if let Some(store) = &experts {
+                    Moe::Paged(Box::new(PagedMoe::from_weights(
+                        loader,
+                        &format!("{prefix}.mlp"),
+                        &cfg,
+                        Arc::clone(store),
+                        index,
+                    )?))
+                } else {
+                    Moe::Resident(Box::new(SparseMoeBlock::from_loader(
+                        loader,
+                        &format!("{prefix}.mlp"),
+                        cfg.num_experts_per_tok,
+                        cfg.norm_topk_prob,
+                    )?))
+                },
             });
         }
         Ok(Self {
@@ -186,7 +261,20 @@ impl FlashTextModel {
             head: Linear::from_loader(loader, "lm_head")?,
             config: cfg,
             instance: Arc::new(()),
+            experts,
         })
+    }
+
+    pub fn expert_cache_stats(&self) -> Result<Option<ExpertCacheStats>> {
+        self.experts
+            .as_ref()
+            .map(|store| {
+                Ok(store
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("expert cache lock poisoned"))?
+                    .stats())
+            })
+            .transpose()
     }
 
     pub fn new_cache(&self, cap: i32) -> Result<FlashCache> {
@@ -308,7 +396,10 @@ impl FlashTextModel {
             };
             hyper = branch.combine_on(&output, target)?;
             let branch = layer.mlp_hc.branch_on(&hyper, target)?;
-            let output = layer.mlp.forward_on(&branch.input, target, index as i32)?;
+            let output = match &layer.mlp {
+                Moe::Resident(moe) => moe.forward_on(&branch.input, target, index as i32)?,
+                Moe::Paged(moe) => moe.forward_on(&branch.input, target, index as i32)?,
+            };
             hyper = branch.combine_on(&output, target)?;
             if capture_layers.binary_search(&index).is_ok() {
                 captures.push(capture_hc_mean_on(

@@ -2,7 +2,7 @@
 //! passing does not expose the model through the production scheduler.
 use ironmlx_lm::{
     core::{tensor_file::ModelTensorFiles, Loader},
-    models::qwen4_exp::text_model::FlashTextModel,
+    models::qwen4_exp::text_model::{ExpertPagingOptions, FlashTextModel},
 };
 use mlx::Dtype;
 use sha2::{Digest, Sha256};
@@ -12,22 +12,46 @@ use std::{path::Path, sync::Arc};
 #[ignore = "requires IRONMLX_FLASH_SNAPSHOT, M5 Max and at least 128 GiB RAM"]
 fn real_flash_text_prefill_and_decode() {
     let snapshot = std::env::var("IRONMLX_FLASH_SNAPSHOT").expect("snapshot required");
+    let paging = std::env::var("IRONMLX_FLASH_EXPERT_CACHE_MIB")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .unwrap()
+                .checked_mul(1024 * 1024)
+                .unwrap()
+        });
     mlx::memory::set_cache_limit(512 * 1024 * 1024);
-    mlx::memory::set_wired_limit(96usize << 30).unwrap();
+    mlx::memory::set_wired_limit(if paging.is_some() {
+        24usize << 30
+    } else {
+        96usize << 30
+    })
+    .unwrap();
     let start = std::time::Instant::now();
-    let loader = Loader::open_flash_text(Path::new(&snapshot), 82u64 << 30).unwrap();
+    let loader = if paging.is_some() {
+        Loader::open_flash_text_paged(Path::new(&snapshot), 8u64 << 30)
+    } else {
+        Loader::open_flash_text(Path::new(&snapshot), 82u64 << 30)
+    }
+    .unwrap();
     eprintln!(
         "loaded_bytes={} elapsed={:?}",
         loader.loaded_tensor_bytes(),
         start.elapsed()
     );
     let files = Arc::new(ModelTensorFiles::open(Path::new(&snapshot)).unwrap());
-    let model = FlashTextModel::from_loader(
+    let model = FlashTextModel::from_loader_with_paging(
         &loader,
         files,
         32 * 1024 * 1024,
         16 * 1024 * 1024,
         64 * 1024 * 1024,
+        paging.map(|cache_bytes| ExpertPagingOptions {
+            cache_bytes,
+            staging_bytes: 16 * 1024 * 1024,
+            pack_bytes: 64 * 1024 * 1024,
+        }),
     )
     .unwrap();
     drop(loader);
@@ -173,4 +197,11 @@ fn real_flash_text_prefill_and_decode() {
         );
     }
     eprintln!("memory={:?}", mlx::memory::snapshot());
+    if let Some(limit) = paging {
+        let stats = model.expert_cache_stats().unwrap().unwrap();
+        eprintln!("expert_cache={stats:?}");
+        assert!(stats.charged_bytes <= limit && stats.peak_charged_bytes <= limit);
+        assert!(stats.misses > 0 && stats.evictions > 0);
+        assert!(mlx::memory::snapshot().peak_bytes < 12usize << 30);
+    }
 }

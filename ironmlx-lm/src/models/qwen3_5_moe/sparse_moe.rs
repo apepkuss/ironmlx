@@ -33,6 +33,7 @@ use mlx::ops::indexing::{slice_on, take_along_axis_on, take_on};
 use mlx::ops::shape::concatenate_on;
 use mlx::ops::sort::{argpartition_on, argsort_on};
 use mlx::{Array, StreamOrDevice};
+use std::sync::OnceLock;
 
 use crate::core::{logical_width_from_packed, Loader, QuantMeta};
 use crate::nn::activations::{build_geglu_tanh, build_swiglu, invoke_geglu_tanh, invoke_swiglu};
@@ -426,7 +427,70 @@ pub struct RoutedExperts {
     geglu: std::sync::OnceLock<CompiledFn>,
 }
 
+/// Bounded, already fused affine expert batch supplied by a paging adapter.
+/// Each triplet contains packed weights, scales and quantization biases.
+pub(crate) struct CompactExpertWeights {
+    pub gate_up: [Array; 3],
+    pub down: [Array; 3],
+    pub quant: QuantMeta,
+}
+
 impl RoutedExperts {
+    pub(crate) fn from_compact_affine(weights: CompactExpertWeights) -> Result<Self> {
+        let [weight, scales, biases] = weights.gate_up;
+        let [down_weight, down_scales, down_biases] = weights.down;
+        let meta = weights.quant;
+        anyhow::ensure!(
+            meta.mode.uses_affine_storage(),
+            "compact experts require affine storage"
+        );
+        meta.validate_storage("compact.gate_up", &weight, &scales, Some(&biases))?;
+        meta.validate_storage(
+            "compact.down",
+            &down_weight,
+            &down_scales,
+            Some(&down_biases),
+        )?;
+        let shape = weight.shape();
+        let dims = shape.as_slice();
+        let down = down_weight.shape();
+        let down = down.as_slice();
+        anyhow::ensure!(
+            dims.len() == 3
+                && down.len() == 3
+                && dims[0] > 0
+                && dims[1] > 0
+                && dims[1] % 2 == 0
+                && down[0] == dims[0]
+                && down[1] == logical_width_from_packed(dims[2], meta.bits)?
+                && logical_width_from_packed(down[2], meta.bits)? == dims[1] / 2,
+            "compact expert projection shape mismatch"
+        );
+        let num_experts = dims[0];
+        let moe_intermediate = dims[1] / 2;
+        Ok(Self {
+            gate_up: GateUpPath::Fused {
+                legacy_source: std::sync::Mutex::new(None),
+                fused_gate_up: OnceLock::from(FusedGateUp {
+                    weight,
+                    scales,
+                    biases: Some(biases),
+                    meta,
+                }),
+                meta,
+            },
+            moe_intermediate,
+            down_weight,
+            down_scales,
+            down_biases: Some(down_biases),
+            down_meta: meta,
+            group_size: meta.group_size,
+            bits: meta.bits,
+            num_experts,
+            swiglu: OnceLock::new(),
+            geglu: OnceLock::new(),
+        })
+    }
     /// Load from `{prefix}.gate_proj.*` + `up_proj.*` + `down_proj.*`.
     /// Prefix is typically `"model.layers.{i}.mlp.switch_mlp"`.
     pub fn from_loader(loader: &Loader, prefix: &str) -> Result<Self> {
