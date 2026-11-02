@@ -197,7 +197,8 @@ merely to upgrade an older download-only import into a newly supported model.
 
 The final source passed 1,752 Rust unit tests across CLI, core, LM and runtime,
 565 Swift App tests, the workspace/all-targets Release check, supported-catalog
-regeneration, and reproducible third-party materials (17 verification tests).
+regeneration, reproducible third-party materials (17 verification tests), and
+the deterministic CycloneDX SBOM including the pinned GDN reference kernel.
 Model-backed GPU/HTTP gates above are separate opt-in checks; ignored tests
 are not counted as passes. Release App packaging and live App acceptance use
 the same pinned MLX source.
