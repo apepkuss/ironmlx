@@ -3,9 +3,9 @@
 # shellcheck disable=SC2034 # This file is sourced; consumers use these values.
 
 readonly IRONMLX_MLX_REPOSITORY="https://github.com/apepkuss/mlx.git"
-readonly IRONMLX_MLX_COMMIT="73ad5df20cb30be4192e5c4d0ae8130674773427"
+readonly IRONMLX_MLX_COMMIT="a8f66b5901791a38ff527f249e1f1a84f46c03b6"
 readonly IRONMLX_MLX_UPSTREAM_REPOSITORY="https://github.com/ml-explore/mlx.git"
-readonly IRONMLX_MLX_UPSTREAM_REVISION="8a81722b1d71cac9b7dde47e56a438c4b529129b"
+readonly IRONMLX_MLX_UPSTREAM_REVISION="a8f66b5901791a38ff527f249e1f1a84f46c03b6"
 
 # Distribution materials and scoped acceptance reviewed for the first RC.
 # This enables packaging gates; public release still requires explicit dispatch.

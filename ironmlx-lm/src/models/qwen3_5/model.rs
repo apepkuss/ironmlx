@@ -1415,7 +1415,7 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
             );
         }
         format!(
-            "qwen35-dflash2-v2;prepared-qmm=lane-product-stable-v2;attention=bulk-position-stable-v1;recurrent=logical-prefix-v2;{}",
+            "qwen35-dflash2-v3-mlx0325;prepared-qmm=lane-product-stable-rows-v1;attention=bulk-position-stable-v1;recurrent=logical-prefix-v2;{}",
             self.dflash2_verify_capabilities().stable_fingerprint()
         )
     }

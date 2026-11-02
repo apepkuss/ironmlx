@@ -97,6 +97,7 @@ std::unique_ptr<MlxArray> fast_scaled_dot_product_attention(
   return std::make_unique<MlxArray>(
       mlx::core::fast::scaled_dot_product_attention(
           queries, keys, values, scale,
+          -1,
           std::string(mask_mode),
           opt_arr(mask_arr),
           opt_arr(sinks),

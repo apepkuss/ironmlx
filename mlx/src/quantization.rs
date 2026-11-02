@@ -236,10 +236,10 @@ pub fn qk_norm_fused_on(
     Ok((Array::from_inner(qo), Array::from_inner(ko)))
 }
 
-/// MLX's product-stable affine4 `qmv_fast_wide` kernel (the `qmv_fast`
-/// arithmetic of every row, independent of the row count) for BF16 `x`
-/// `[..., K]` against affine4/group-64 `w` `[N, K/8]`, with the rows split
-/// into the fewest threadgroups of at most `max_nv` (2..=5) equal rows.
+/// Compatibility entry point for the fork's product-stable affine4 wide QMV.
+/// With upstream MLX, dispatches separate single-row products for BF16 `x`
+/// `[..., K]` and affine4/group-64 `w` `[N, K/8]`. `max_nv` (2..=5) is
+/// retained for API compatibility; it does not select an upstream kernel.
 pub fn qmv_fast_wide_on(
     x: &Array,
     w: &Array,

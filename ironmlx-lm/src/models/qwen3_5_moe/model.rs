@@ -583,6 +583,9 @@ impl Qwen35MoeModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        let batch = input_ids.shape().as_slice().first().is_some_and(|&b| b > 1);
+        let _linear = batch.then(crate::nn::batch_stable_qmm::linear_scope);
+        let _state = batch.then(crate::nn::batch_stable_qmm::context_scope);
         let hidden = self.text.forward_on(
             input_ids,
             position_ids,
@@ -607,6 +610,9 @@ impl Qwen35MoeModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        let batch = input_ids.shape().as_slice().first().is_some_and(|&b| b > 1);
+        let _linear = batch.then(crate::nn::batch_stable_qmm::linear_scope);
+        let _state = batch.then(crate::nn::batch_stable_qmm::context_scope);
         let hidden = self.text.embed_on(input_ids, target)?;
         let hidden = self.text.forward_post_embedding_on(
             &hidden,
@@ -785,6 +791,9 @@ impl Qwen35MoeModel {
         cache: Option<&mut [LayerCache]>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
+        let batch = input_ids.shape().as_slice().first().is_some_and(|&b| b > 1);
+        let _linear = batch.then(crate::nn::batch_stable_qmm::linear_scope);
+        let _state = batch.then(crate::nn::batch_stable_qmm::context_scope);
         let input_shape = input_ids.shape();
         let input_shape = input_shape.as_slice();
         let exact_batched_verify = crate::nn::verify_qmm::is_armed()
