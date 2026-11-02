@@ -31,7 +31,7 @@ class ExperimentalPrefillQMMMtile final : public mx::UnaryPrimitive {
       if (!a.flags().row_contiguous || a.strides(-1) != 1 ||
           a.strides(-2) != a.shape(-1)) {
         mx::QuantizedMatmul native(stream(), 64, 4, mx::QuantizationMode::Affine,
-                                   true, false, false);
+                                   true);
         native.eval_gpu(in, out);
         static std::once_flag fallback_witness[2];
         std::call_once(fallback_witness[down ? 1 : 0], [down] {

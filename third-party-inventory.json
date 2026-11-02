@@ -833,13 +833,13 @@
         "license_file": "native-mlx-mit.txt",
         "license_sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
         "repository": "https://github.com/apepkuss/mlx.git",
-        "revision": "1a888a4ffb4442fe34e403016eb0bb751f10ccb5",
+        "revision": "a8f66b5901791a38ff527f249e1f1a84f46c03b6",
         "source_integrity": {
-          "commit": "1a888a4ffb4442fe34e403016eb0bb751f10ccb5",
+          "commit": "a8f66b5901791a38ff527f249e1f1a84f46c03b6",
           "type": "git"
         },
         "upstream_repository": "https://github.com/ml-explore/mlx.git",
-        "upstream_revision": "8a81722b1d71cac9b7dde47e56a438c4b529129b"
+        "upstream_revision": "a8f66b5901791a38ff527f249e1f1a84f46c03b6"
       },
       {
         "component": "MLX Metal kernel headers (vendored, IronMLX fork)",
@@ -891,6 +891,7 @@
           "CoreFoundation.framework",
           "CryptoKit.framework",
           "Foundation.framework",
+          "IOKit.framework",
           "Metal.framework",
           "MetalPerformanceShaders.framework",
           "MetalPerformanceShadersGraph.framework",

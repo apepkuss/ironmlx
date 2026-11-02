@@ -853,6 +853,34 @@ impl RoutedExperts {
             ));
         }
         let k = ivec[1];
+        if crate::nn::batch_stable_qmm::context_is_armed() {
+            if let Some((batch, sequence)) = options.request_layout.filter(|(b, _)| *b > 1) {
+                anyhow::ensure!(
+                    batch * sequence == bs,
+                    "expert request layout does not match token rows"
+                );
+                // Preserve each request's gather shape and routing threshold.
+                // Pooling unrelated requests changes upstream QMV/QMM dispatch
+                // and can amplify small router differences through MoE layers.
+                let mut rows = Vec::with_capacity(batch as usize);
+                for request in 0..batch {
+                    let start = request * sequence;
+                    let stop = start + sequence;
+                    rows.push(self.apply_experts_inner(
+                        &slice_on(x, vec![start, 0], vec![stop, h], target)?,
+                        &slice_on(inds, vec![start, 0], vec![stop, k], target)?,
+                        &slice_on(weights, vec![start, 0], vec![stop, k], target)?,
+                        target,
+                        RoutedApplyOptions {
+                            request_layout: None,
+                            ..options
+                        },
+                    )?);
+                }
+                let refs: Vec<&Array> = rows.iter().collect();
+                return Ok(concatenate_on(&refs, 0, target)?);
+            }
+        }
         let bs_k = bs * k;
         let use_sorted = bs_k >= SORTED_ROUTING_MIN_BS_K;
         let child_spans_enabled = false;
@@ -1461,7 +1489,8 @@ impl SparseMoeBlock {
                     .tile_router
                     .as_ref()
                     .expect("checked tile router")
-                    .forward_on(&flat_x, target)?; // [BS, E + 1]
+                    .forward_on(x, target)?
+                    .reshape([bs, num_experts + 1])?; // [BS, E + 1]
                 let logits = slice_on(&all, vec![0, 0], vec![bs, num_experts], target)?;
                 let gate = slice_on(
                     &all,
@@ -1476,7 +1505,8 @@ impl SparseMoeBlock {
                     self.router_gate
                         .as_ref()
                         .ok_or_else(|| anyhow!("SparseMoeBlock: M5 experts need bf16 activations"))?
-                        .forward_on(&flat_x, target)?,
+                        .forward_on(x, target)?
+                        .reshape([bs, num_experts])?,
                     None,
                 )
             };
@@ -1562,7 +1592,7 @@ impl SparseMoeBlock {
             };
 
             // (7) Shared expert with independent sigmoid gate.
-            let shared_gated = self.forward_shared_on(&flat_x, target)?; // [BS, H]
+            let shared_gated = self.forward_shared_on(x, target)?.reshape([bs, h])?;
 
             // (8) Combine routed + shared, then reshape back to [B, S, H].
             let out_flat = &routed_y + &shared_gated; // [BS, H]

@@ -48,6 +48,7 @@ fn main() {
     for fw in [
         "Metal",
         "Foundation",
+        "IOKit",
         "Accelerate",
         "MetalPerformanceShaders",
         "MetalPerformanceShadersGraph",

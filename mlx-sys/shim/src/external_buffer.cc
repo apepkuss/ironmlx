@@ -95,8 +95,9 @@ std::unique_ptr<MlxArray> array_from_external_buffer(
   MTL::Buffer* buffer = d.mtl_device()->newBuffer(
       reinterpret_cast<const void*>(address), nbytes, MTL::ResourceStorageModeShared, nullptr);
   if (!buffer) throw std::runtime_error("cannot wrap the external buffer as a Metal buffer");
-  mx::array a(mx::allocator::Buffer(static_cast<void*>(buffer)), std::move(s), dtype,
+  mx::allocator::Data data(mx::allocator::Buffer(static_cast<void*>(buffer)),
               [](mx::allocator::Buffer b) { static_cast<MTL::Buffer*>(b.ptr())->release(); });
+  mx::array a(std::move(data), std::move(s), dtype);
   return std::make_unique<MlxArray>(std::move(a));
 }
 

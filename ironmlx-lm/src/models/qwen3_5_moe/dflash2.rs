@@ -354,10 +354,10 @@ impl DFlash2Target for Qwen35MoeModel {
         let projections = if self.m5_affine4_projections() {
             "m5-affine4-v1"
         } else {
-            "product-stable-v2"
+            "product-stable-mlx0325-rows-v1"
         };
         format!(
-            "qwen36-moe-dflash2-v1;experts={experts};projections={projections};attention=bulk-position-stable-v1;recurrent=logical-prefix-v2;{}",
+            "qwen36-moe-dflash2-v2-mlx0325;experts={experts};projections={projections};attention=bulk-position-stable-v1;recurrent=logical-prefix-v2;{}",
             self.dflash2_verify_capabilities().stable_fingerprint()
         )
     }

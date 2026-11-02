@@ -1,8 +1,9 @@
 //! Scoped routing for product-stable affine quantized projections.
 //!
 //! Qwen MTP uses this for its complete draft head and draft-logit projection.
-//! The underlying MLX primitive preserves the single-row accumulation tree
-//! while evaluating multiple rows in one dispatch.
+//! The upstream-MLX compatibility bridge preserves the single-row product
+//! shape by dispatching rows separately; qualified native kernels may fuse
+//! them after proving equivalent arithmetic.
 
 use std::cell::Cell;
 

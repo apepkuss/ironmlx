@@ -31,7 +31,7 @@ struct CachedKernelState {
   MTL::ComputePipelineState* pipeline = nullptr;
 };
 
-// MLX's CustomKernel::eval_gpu (73ad5df2) with the pipeline resolved once.
+// MLX's CustomKernel::eval_gpu (a8f66b590) with the pipeline resolved once.
 class CachedCustomKernel final : public mx::Primitive {
  public:
   CachedCustomKernel(mx::Stream stream, std::shared_ptr<CachedKernelState> state,
@@ -70,7 +70,7 @@ class CachedCustomKernel final : public mx::Primitive {
     }
     auto& d = mx::metal::device(s.device);
     std::call_once(st.resolved, [&] {
-      auto lib = d.get_library(st.lib_name, mx::CompileOptions(st.compile_options),
+      auto lib = d.get_library(st.lib_name, mx::fast::CompileOptions(st.compile_options),
                                [&st] { return mx::metal::utils() + st.source; });
       st.pipeline = d.get_kernel(st.name, lib);
     });
@@ -152,7 +152,7 @@ void cached_kernel_remember(CachedKernelTable& table, const std::vector<int64_t>
   if (outputs.empty() || !outputs[0].has_primitive()) return;
   auto* kernel = dynamic_cast<mx::fast::CustomKernel*>(&outputs[0].primitive());
   if (kernel == nullptr) return;
-  auto [name, source, grid, threadgroup, shape_infos, ensure, init, scalars, precompiled,
+  auto [name, source, source_hash, grid, threadgroup, shape_infos, ensure, init, scalars, precompiled,
         shared_memory, compile_options] = kernel->state();
   (void)grid;
   (void)threadgroup;
@@ -161,7 +161,7 @@ void cached_kernel_remember(CachedKernelTable& table, const std::vector<int64_t>
   auto state = std::make_shared<CachedKernelState>();
   // MLX's library name for this kernel, so its compiled library is reused.
   char hash[32];
-  std::snprintf(hash, sizeof(hash), "%zx", std::hash<std::string>{}(source));
+  std::snprintf(hash, sizeof(hash), "%zx", source_hash);
   state->lib_name = name + "_" + hash + "_" + std::to_string(compile_options);
   state->name = std::move(name);
   state->source = std::move(source);

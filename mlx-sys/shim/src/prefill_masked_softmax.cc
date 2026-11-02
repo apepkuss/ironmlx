@@ -240,7 +240,8 @@ std::optional<mlx::core::array> experimental_masked_causal_sdpa(
   // Only where MLX itself would execute the op-level fallback.
   if (!mx::fast::ScaledDotProductAttention::use_fallback(
           queries, keys, values, /*has_mask=*/true, /*has_arr_mask=*/false,
-          /*do_causal=*/true, /*is_training=*/false, /*output_logsumexp=*/false,
+          /*do_causal=*/true, /*has_sinks=*/false, /*window_size=*/-1,
+          /*is_training=*/false, /*output_logsumexp=*/false,
           /*force_fused=*/false, stream))
     return {};
   static std::once_flag message;

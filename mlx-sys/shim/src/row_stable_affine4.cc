@@ -645,68 +645,11 @@ std::unique_ptr<MlxArrayVec> router_topk_fused(
 namespace {
 namespace mx = mlx::core;
 
-// MLX's own product-stable affine4 kernel (qmv_fast arithmetic per input
-// row: each simdgroup computes one input row against four output rows), with
-// up to five input rows per threadgroup instead of MLX's two. MLX's dispatch
-// pads an odd row count to an even one (the padded simdgroups repeat the last
-// row), so 3 and 5 rows cost as much as 4 and 6; here the rows are split into
-// the fewest equal threadgroups. Every output bit is the kernel's own,
-// whatever the row grouping.
-class QmvFastWide final : public mx::UnaryPrimitive {
- public:
-  QmvFastWide(mx::Stream stream, int max_nv) : UnaryPrimitive(stream), max_nv_(max_nv) {}
-  const char* name() const override { return "IronQmvFastWide"; }
-  void eval_cpu(const std::vector<mx::array>&, mx::array&) override {
-    throw std::runtime_error("IronQmvFastWide requires the GPU");
-  }
-  bool is_equivalent(const mx::Primitive& other) const override {
-    return max_nv_ == static_cast<const QmvFastWide&>(other).max_nv_;
-  }
-  void eval_gpu(const std::vector<mx::array>& inputs, mx::array& out) override {
-    auto& s = stream();
-    std::vector<mx::array> copies;
-    auto contiguous = [&](const mx::array& a) -> mx::array {
-      if (a.flags().row_contiguous) return a;
-      copies.push_back(mx::array(a.shape(), a.dtype(), nullptr, {}));
-      mx::copy_gpu(a, copies.back(), mx::CopyType::General, s);
-      return copies.back();
-    };
-    const mx::array x = contiguous(inputs[0]);
-    const mx::array w = contiguous(inputs[1]);
-    const mx::array sc = contiguous(inputs[2]);
-    const mx::array bi = contiguous(inputs[3]);
-    out.set_data(mx::allocator::malloc(out.nbytes()));
-    const int K = x.shape(-1), N = w.shape(0), M = int(x.size() / K);
-    const int tiles = (M + max_nv_ - 1) / max_nv_;
-    const int nv = (M + tiles - 1) / tiles;
-    auto& d = mx::metal::device(s.device);
-    auto kernel = d.get_kernel(
-        "affine_qmv_fast_wide_bfloat16_t_gs_64_b_4_nv_" + std::to_string(nv) + "_kl_32_batch_0");
-    auto& enc = mx::metal::get_command_encoder(s);
-    enc.set_compute_pipeline_state(kernel);
-    enc.set_input_array(w, 0);
-    enc.set_input_array(sc, 1);
-    enc.set_input_array(bi, 2);
-    enc.set_input_array(x, 3);
-    enc.set_output_array(out, 4);
-    enc.set_bytes(K, 5);
-    enc.set_bytes(N, 6);
-    enc.set_bytes(M, 7);
-    enc.dispatch_threadgroups(MTL::Size(tiles, (N + 3) / 4, 1), MTL::Size(32, nv, 1));
-    enc.add_temporaries(std::move(copies));
-  }
-
- private:
-  int max_nv_;
-};
-
 }  // namespace
 
 std::unique_ptr<MlxArray> qmv_fast_wide(
     const MlxArray& x, const MlxArray& w, const MlxArray& scales, const MlxArray& biases,
     int32_t max_nv, bool has_target, bool is_device_only, uint8_t device_type, int32_t stream_index) {
-  auto target = helpers::decode_stream_or_device(has_target, is_device_only, device_type, stream_index);
-  const auto stream = mx::to_stream(target);
   require(x.ndim() >= 1 && w.ndim() == 2 && scales.ndim() == 2 && biases.ndim() == 2 &&
               x.dtype() == mx::bfloat16 && w.dtype() == mx::uint32 &&
               scales.dtype() == mx::bfloat16 && biases.dtype() == mx::bfloat16,
@@ -721,10 +664,11 @@ std::unique_ptr<MlxArray> qmv_fast_wide(
   require(max_nv >= 2 && max_nv <= 5 && M >= 2 && fits_i32(int64_t(x.size())) &&
               fits_i32(M * N),
           "qmv_fast_wide: unsupported operands");
-  auto shape = x.shape();
-  shape.back() = N;
-  return std::make_unique<MlxArray>(mx::array(shape, mx::bfloat16,
-      std::make_shared<QmvFastWide>(stream, max_nv), {x, w, scales, biases}));
+  // The old fork-only wide kernels are absent from upstream 0.32.5.
+  // Preserve B1 product arithmetic through the public upstream QMM bridge.
+  return quantized_matmul_product_stable(
+      x, w, scales, &biases, true, true, 64, true, 4, "affine",
+      has_target, is_device_only, device_type, stream_index);
 }
 
 namespace {
