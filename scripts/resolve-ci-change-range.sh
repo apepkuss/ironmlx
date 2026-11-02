@@ -13,9 +13,8 @@ git cat-file -e "$head_sha^{commit}" 2>/dev/null || fail "head commit is unavail
 
 force_full=false
 if [[ "$base_sha" = "$ZERO_SHA" ]] || ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
-  # A force push can make the old tip unreachable from a fresh checkout. Use a
-  # reachable mainline ancestor for commit validation, but require full quality
-  # checks: its tree diff cannot establish what changed from the missing tip.
+  # A new branch has no old tip, and a force push can make the old tip unreachable
+  # from a fresh checkout. Both use the closest reachable mainline ancestor.
   best_base=""
   best_distance=""
   for candidate in refs/remotes/origin/main refs/remotes/origin/dev; do
@@ -30,9 +29,16 @@ if [[ "$base_sha" = "$ZERO_SHA" ]] || ! git cat-file -e "$base_sha^{commit}" 2>/
     fi
   done
   [[ -n "$best_base" ]] || fail "cannot resolve a nonempty range from main/dev; refusing to skip checks"
-  echo "Base $base_sha is unavailable or new; using $best_base and requiring full quality checks" >&2
+  if [[ "$base_sha" = "$ZERO_SHA" ]]; then
+    # The diff from the ancestor covers everything the branch adds to mainline,
+    # including commits inherited from any unmerged branch it started from.
+    echo "New branch; classifying its changes from $best_base" >&2
+  else
+    # The tree diff cannot establish what changed from the missing tip.
+    echo "Base $base_sha is unavailable; using $best_base and requiring full quality checks" >&2
+    force_full=true
+  fi
   base_sha="$best_base"
-  force_full=true
 fi
 
 # Evaluate the diff before iteration: errors inside process substitution would

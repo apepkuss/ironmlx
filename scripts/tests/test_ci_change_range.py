@@ -164,21 +164,55 @@ class ChangeRangeTests(unittest.TestCase):
         self.assertEqual(result["website_changed"], "true")
         self.assertEqual(result["code_changed"], "true")
 
-    def test_new_branch_uses_reachable_ancestor(self):
+    def test_new_docs_branch_is_classified_from_its_ancestor(self):
         head = self.commit("docs/api.md", "API", "docs: add API")
         result = self.resolve(ZERO, head)
         self.assertEqual(result["base_sha"], self.base)
         self.assertEqual(result["docs_changed"], "true")
         self.assertEqual(result["website_changed"], "true")
+        self.assertEqual(result["code_changed"], "false")
+
+    def test_new_website_branch_does_not_run_native_quality(self):
+        head = self.commit("website/index.html", "page", "feat(website): add page")
+        result = self.resolve(ZERO, head)
+        self.assertEqual(result["docs_changed"], "false")
+        self.assertEqual(result["website_changed"], "true")
+        self.assertEqual(result["code_changed"], "false")
+
+    def test_new_native_branch_runs_native_quality(self):
+        head = self.commit("src/lib.rs", "fn main() {}", "feat: add source")
+        result = self.resolve(ZERO, head)
+        self.assertEqual(result["docs_changed"], "false")
+        self.assertEqual(result["website_changed"], "false")
         self.assertEqual(result["code_changed"], "true")
 
-    def test_unavailable_bases_force_all_jobs_for_website_changes(self):
+    def test_new_branch_with_ci_policy_change_runs_every_quality_job(self):
+        head = self.commit(".github/workflows/ci.yml", "policy", "ci: update quality policy")
+        result = self.resolve(ZERO, head)
+        for flag in ["docs_changed", "website_changed", "code_changed"]:
+            self.assertEqual(result[flag], "true")
+
+    def test_new_branch_checks_every_commit_since_the_ancestor(self):
+        self.commit("src/lib.rs", "fn main() {}", "feat: add source")
+        head = self.commit("docs/api.md", "API", "docs: add API")
+        result = self.resolve(ZERO, head)
+        self.assertEqual(result["base_sha"], self.base)
+        self.assertEqual(result["docs_changed"], "true")
+        self.assertEqual(result["code_changed"], "true")
+
+    def test_new_branch_uses_the_closest_mainline_ancestor(self):
+        dev = self.commit("src/lib.rs", "code", "feat: add source")
+        self.git("update-ref", "refs/remotes/origin/dev", dev)
+        head = self.commit("docs/api.md", "API", "docs: add API")
+        result = self.resolve(ZERO, head)
+        self.assertEqual(result["base_sha"], dev)
+        self.assertEqual(result["code_changed"], "false")
+
+    def test_unavailable_base_forces_all_jobs_for_website_changes(self):
         head = self.commit("website/index.html", "page", "feat(website): add page")
-        for base in [ZERO, MISSING]:
-            with self.subTest(base=base):
-                result = self.resolve(base, head)
-                for flag in ["docs_changed", "website_changed", "code_changed"]:
-                    self.assertEqual(result[flag], "true")
+        result = self.resolve(MISSING, head)
+        for flag in ["docs_changed", "website_changed", "code_changed"]:
+            self.assertEqual(result[flag], "true")
 
     def test_closest_mainline_ancestor_is_used(self):
         dev = self.commit("src/lib.rs", "code", "feat: add source")
@@ -189,14 +223,18 @@ class ChangeRangeTests(unittest.TestCase):
     def test_missing_mainline_fails_without_classification(self):
         head = self.commit("docs/api.md", "API", "docs: add API")
         self.git("update-ref", "-d", "refs/remotes/origin/main")
-        result = self.run_script(MISSING, head)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
+        for base in [ZERO, MISSING]:
+            with self.subTest(base=base):
+                result = self.run_script(base, head)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
 
     def test_fallback_cannot_validate_an_empty_range(self):
-        result = self.run_script(MISSING, self.base)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
+        for base in [ZERO, MISSING]:
+            with self.subTest(base=base):
+                result = self.run_script(base, self.base)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
 
     def test_bad_identifiers_and_missing_head_fail_closed(self):
         for base, head in [("HEAD", self.base), (self.base, "HEAD"), (self.base, MISSING)]:
