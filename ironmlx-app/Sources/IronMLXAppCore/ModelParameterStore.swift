@@ -1,6 +1,7 @@
 import Foundation
 
 public struct ModelParameters: Codable, Equatable, Sendable {
+    public var asr: BackendASRSettings?
     public var decision: BackendDecisionSettings?
     public var audioExecution: BackendAudioExecutionSettings?
     public var modelID: String
@@ -28,6 +29,7 @@ public struct ModelParameters: Codable, Equatable, Sendable {
 
     public init(
         modelID: String,
+        asr: BackendASRSettings? = nil,
         decision: BackendDecisionSettings? = nil,
         audioExecution: BackendAudioExecutionSettings? = nil,
         alias: String? = nil,
@@ -51,6 +53,7 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         promptLookupCrossRequest: Bool? = nil
     ) {
         self.modelID = modelID
+        self.asr = asr
         self.decision = decision
         self.audioExecution = audioExecution
         self.alias = alias
@@ -143,6 +146,7 @@ public struct ModelParameters: Codable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
+        case asr
         case decision
         case audioExecution = "audio_execution"
         case modelID = "model_id"
@@ -502,6 +506,9 @@ public final class ModelParameterStore: @unchecked Sendable {
                 throw ConfigurationPersistenceError.invalidValue("models.\(key)")
             }
             try ConfigurationJSON.requireKeys(Set(model.keys), allowed: Self.modelKeys)
+            if let asr = model["asr"] as? [String: Any] {
+                try ConfigurationJSON.requireKeys(Set(asr.keys), allowed: ["max_audio_duration_seconds", "max_output_tokens"])
+            }
         }
     }
 
@@ -512,6 +519,7 @@ public final class ModelParameterStore: @unchecked Sendable {
     }
 
     private func validate(_ parameters: ModelParameters, key: String) throws {
+        try parameters.asr?.validate()
         if let decision = parameters.decision { try decision.validate() }
         if let audioExecution = parameters.audioExecution {
             try validateAudioExecution(audioExecution)
@@ -664,7 +672,7 @@ public final class ModelParameterStore: @unchecked Sendable {
     }
 
     private static let modelKeys: Set<String> = [
-        "decision", "audio_execution", "model_id", "alias", "model_type", "context_size", "max_tokens",
+        "asr", "decision", "audio_execution", "model_id", "alias", "model_type", "context_size", "max_tokens",
         "max_output_tokens", "temperature",
         "top_p", "top_k", "repeat_penalty", "mtp_enabled", "mtp_model_id",
         "mtp_draft_tokens", "dflash2_enabled", "dflash2_model_id", "dflash2_block_size",

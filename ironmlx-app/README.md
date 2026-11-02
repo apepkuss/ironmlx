@@ -3,6 +3,13 @@
 The release build produces one self-contained `IronMLX.app` for Apple Silicon `arm64` on
 macOS 26.4 or newer. It does not support Intel or earlier macOS releases.
 
+## App responsibility
+
+The App manages local models and configures and monitors the inference service.
+Upstream applications submit task inputs through the service APIs and consume the
+results. Dashboard controls are for model and service management; task-specific
+upload, inference and result workflows belong in upstream applications.
+
 ## Release build
 
 The release builder requires a clean MLX checkout pinned to commit
@@ -67,6 +74,44 @@ Completed snapshots are marked **Downloaded · Cannot run in this version** and
 cannot be loaded or selected as the default model. Model Management still allows
 file access, integrity verification, and deletion. Missing files, malformed
 metadata, and integrity failures cannot be overridden.
+
+Nemotron 3 Diarization BF16 runs through the native Rust/MLX audio runtime.
+The App identifies it as Diarization, manages its lifecycle, and promotes verified
+file-only snapshots after native metadata preflight without re-downloading weights.
+Upstream clients use `POST /v1/audio/diarizations` for independent JSON/RTTM or
+uploaded-file SSE results. `response_format=diarized_json` on transcription combines
+Qwen3-ASR, ForcedAligner and Nemotron, with explicit ambiguous-overlap annotations.
+WebRTC clients establish calls with `POST /v1/realtime/calls`, send microphone
+audio on an Opus media track and use the `oai-events` DataChannel for the same
+transcription events. HTTP hangup cancels the call. Realtime WebSocket and WebRTC sessions can opt into `audio.input.diarization` for continuous
+speaker activity and aligned labels on confirmed text, retaining speaker context
+across turns. No recording or transcription UI is added. See the
+[recognition and diarization API](../docs/audio-transcriptions-api.md).
+
+Qwen3-ASR 0.6B/1.7B 8-bit checkpoints run through the native Rust/MLX ASR
+engine. The App manages their download, loading and service status. Upstream
+applications submit audio through `POST /v1/audio/transcriptions`; the Dashboard
+does not include a transcription client. The supported offline profile accepts
+WAV, FLAC or MP3 recordings with automatic long-audio segmentation.
+Realtime PCM transcription is available over `/v1/realtime`, with optional CPU
+server VAD configured per API session. The backend detects speech boundaries and
+automatically commits turns; the App adds no recording or transcription controls.
+Each ASR model's parameter page exposes maximum audio duration and maximum
+output tokens per segment. Both Qwen3-ASR sizes default to 1,200 seconds and
+1,024 tokens, using the official chunk/evaluation policy as a reference.
+Values persist independently by model ID and apply to new requests and realtime
+sessions, without reloading weights. The App restores them on backend startup.
+Qwen3-ForcedAligner checkpoints whose top-level `model_type` is `qwen3_asr`
+are identified by the nested `thinker_config.model_type` and serve the independent
+`POST /v1/audio/alignments` task. Timestamped transcription uses this checkpoint
+as a fixed auxiliary model. It has no autoregressive output-token setting and
+cannot become the default chat model.
+
+Previously downloaded file-only snapshots are promoted after native preflight,
+without downloading their weights again. ASR tokenizers may use `tokenizer.json`
+or split `vocab.json`/`merges.txt`, with `tokenizer_config.json` and
+`preprocessor_config.json`. See the [transcription API](../docs/audio-transcriptions-api.md)
+for CLI usage, OpenAI-compatible requests and limits.
 
 Hugging Face transfers automatically switch to macOS URLSession after a Rust
 transport connection failure. The switch retains the identity-bound committed

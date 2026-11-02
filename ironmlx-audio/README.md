@@ -21,6 +21,18 @@ process memory reservations and transport cancellation belong to the runtime.
 For server registration, WAV responses and PCM streaming, see the
 [speech API contract](../docs/audio-speech-api.md).
 
+## Qwen3-ASR recognition
+
+Native `qwen3_asr::Qwen3Asr` supports the published 0.6B and 1.7B affine 8-bit
+checkpoints: 128-bin Whisper features, convolutional audio encoder and cached
+Qwen3 text decoder. Tokenization, feature extraction and inference use Rust/MLX;
+Python is only used for reference comparisons during development.
+
+Use `ironmlx transcribe` or OpenAI-compatible `POST /v1/audio/transcriptions`.
+The offline profile accepts mono/stereo WAV, FLAC and MP3 with automatic long-audio segmentation,
+converts to 16 kHz, and returns text with automatic or explicit language selection.
+See [Speech recognition API](../docs/audio-transcriptions-api.md) for usage and bounds.
+
 ## Public interfaces
 
 | Interface | Responsibility |
@@ -350,3 +362,36 @@ IRONMLX_AUDIO_APP_BUNDLE=/absolute/path/to/IronMLX.app \
 IRONMLX_AUDIO_APP_REFERENCE=/absolute/path/to/reference.wav \
 swift test -c release --package-path ironmlx-app --filter audioAppLoadsAndRestoresFromSavedConfigurationWithBundle
 ```
+
+Native Qwen3-ForcedAligner affine 8-bit inference uses the shared audio/text backbone and a separate timestamp classification head. `Qwen3Asr::align` accepts audio plus supplied text. The server exposes independent alignment and fixed ASR-plus-alignment workflows; see the same API contract for language units, limits and timestamp precision.
+
+## Nemotron 3 speaker diarization
+
+`diarization::NemotronDiarization` loads the published Nemotron 3 BF16 MLX
+checkpoint, with strict configuration/tensor validation and no Python runtime.
+The native implementation uses a feature-stacking RoPE encoder and bounded
+arrival-order speaker cache/FIFO state. It supports eight speaker activity
+channels at 10 ms resolution, including simultaneous activity.
+
+`diarize` accepts owned PCM and resamples it to mono 16 kHz; `Options` controls
+threshold, minimum turn duration, gap merging and latency preset. The progress
+callback receives the absolute starting frame and native activity probabilities.
+The returned `Diarization` has recording duration, active-label count, speaker
+turns and an RTTM formatter.
+
+For incremental PCM, call `init_stream(options)` and repeatedly call
+`feed(&mut state, samples, false, control)` with finite mono 16 kHz samples.
+Flush once with `feed(&mut state, &[], true, control)`. PCM partitions do not
+reset speaker identity or time, and a finished state rejects further input.
+`offline`, `low`, `very_low`, and `ultra_low` match the documented cache/window
+presets; all retain bounded PCM history and encoder context. Models/states belong
+to one native worker, not the HTTP task.
+
+The managed runtime adds queue/memory admission, cancellation, deadlines and
+model leases. The [recognition and diarization API](../docs/audio-transcriptions-api.md)
+exposes independent JSON/RTTM/file-SSE, the Qwen3 three-model workflow and optional
+Realtime WebSocket speaker labels. `DiarizationRuntime::start_stream` retains
+worker-local caches across turns; `DiarizationStream::snapshot` flushes a copy
+without consuming the live right context. Dropping a stream cancels its work and
+releases its cache reservation and model lease.
+The APIs label speakers; they do not identify people or extract separate voices.

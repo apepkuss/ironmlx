@@ -432,6 +432,29 @@ pub struct EngineModelCapabilities {
 }
 
 impl EngineModelCapabilities {
+    pub fn diarization() -> Self {
+        Self {
+            runtime_kind: "diarization",
+            ..Self::asr()
+        }
+    }
+
+    pub fn alignment() -> Self {
+        Self {
+            runtime_kind: "alignment",
+            supports_streaming: false,
+            ..Self::asr()
+        }
+    }
+
+    pub fn asr() -> Self {
+        Self {
+            runtime_kind: "asr",
+            supports_audio: true,
+            supports_streaming: true,
+            ..Self::audio()
+        }
+    }
     pub fn image_generation() -> Self {
         Self {
             runtime_kind: "image_generation",
@@ -556,10 +579,15 @@ impl EnginePoolConfig {
     pub(crate) fn validate_enabled_model_architectures(&self) -> Result<()> {
         for model in &self.models {
             validate_engine_model_config(model)?;
-            if model.capabilities.runtime_kind == "embedding"
-                && self.default_model.as_deref() == Some(model.id.as_str())
+            if matches!(
+                model.capabilities.runtime_kind,
+                "embedding" | "asr" | "alignment" | "diarization"
+            ) && self.default_model.as_deref() == Some(model.id.as_str())
             {
-                bail!("embedding models cannot be the default generation model");
+                bail!(
+                    "{} models cannot be the default generation model",
+                    model.capabilities.runtime_kind
+                );
             }
         }
         Ok(())
@@ -567,6 +595,39 @@ impl EnginePoolConfig {
 }
 
 pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<()> {
+    if matches!(
+        model.capabilities.runtime_kind,
+        "asr" | "alignment" | "diarization"
+    ) {
+        if model.load_policy == EngineLoadPolicy::Disabled {
+            return Ok(());
+        }
+        let role = if model.capabilities.runtime_kind == "diarization" {
+            ironmlx_audio::diarization::preflight_model_metadata(&model.path)?.artifact_role
+        } else {
+            ironmlx_audio::qwen3_asr::preflight_model_metadata(&model.path)?.artifact_role
+        };
+        let expected = if role == "diarization" {
+            EngineModelCapabilities::diarization()
+        } else if role == "alignment" {
+            EngineModelCapabilities::alignment()
+        } else {
+            EngineModelCapabilities::asr()
+        };
+        if model.capabilities != expected
+            || model.default
+            || model.audio.is_some()
+            || model.decision.is_some()
+            || model.scheduler_runtime_profile.is_some()
+            || model.mtp.is_some()
+            || model.prompt_lookup.is_some()
+            || model.default_max_output_tokens.is_some()
+            || model.sampling_defaults != SamplingDefaults::default()
+        {
+            bail!("ASR models do not accept TTS, decision or generation settings");
+        }
+        return Ok(());
+    }
     if let Some(settings) = model.decision {
         settings.validate()?;
         if model.capabilities.runtime_kind != "decision" {

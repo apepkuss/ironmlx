@@ -38,7 +38,7 @@
 
 - **Agent integrations** — One-click setup for [Hermes Agent](docs/hermes-agent.md), [oh-my-pi](docs/oh-my-pi.md), [community DSH Desktop](docs/dsh.md#dsh-desktop-app-configuration), and [official DeepSeek Harness CLI / Desktop](docs/dsh.md#official-deepseek-harness-one-click-setup).
 
-- **Model capabilities** — [Text and vision](docs/text-vision-api.md), [text, image and audio embeddings](docs/text-embeddings.md), [speech synthesis](docs/audio-speech-api.md), [image generation](docs/image-generation-api.md), and decision inference through [System One](docs/laya-systemone-api.md) or the [OpenAI Decisions API](docs/openai-decisions-api.md).
+- **Model capabilities** — [Text and vision](docs/text-vision-api.md), [text, image and audio embeddings](docs/text-embeddings.md), [speech synthesis](docs/audio-speech-api.md), [speech recognition](docs/audio-transcriptions-api.md), [image generation](docs/image-generation-api.md), and decision inference through [System One](docs/laya-systemone-api.md) or the [OpenAI Decisions API](docs/openai-decisions-api.md).
 
 - **Model management** — Download models from Hugging Face or ModelScope, [import local models](docs/user-guide.md#import-a-model-already-on-this-mac), and manage multiple models.
 

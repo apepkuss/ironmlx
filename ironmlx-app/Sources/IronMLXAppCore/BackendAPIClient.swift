@@ -262,6 +262,15 @@ public struct BackendAPIClient: Sendable {
         return try JSONDecoder().decode(BackendModelAdminResponse.self, from: data)
     }
 
+    public func updateASRSettings(model: String, settings: BackendASRSettings) async throws {
+        try settings.validate()
+        struct Update: Encodable {
+            var model: String
+            var settings: BackendASRSettings
+        }
+        _ = try await postJSON(path: "/admin/api/models/asr", body: Update(model: model, settings: settings))
+    }
+
     public func unloadModel(model: String, modelDir: String? = nil) async throws -> BackendModelAdminResponse {
         let request = BackendUnloadModelRequest(model: model, modelDir: modelDir)
         let data = try await postJSON(path: "/admin/api/models/unload", body: request)

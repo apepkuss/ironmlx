@@ -696,6 +696,139 @@ func downloadOnlyCompletesVerifiedSnapshotWithoutMakingItLoadable(message: Strin
     #expect(await service.downloadHuggingFace(repoID: repoID, token: nil).downloadOnly == true)
 }
 
+@Test(arguments: ["split", "consolidated", "vocab.json", "merges.txt", "tokenizer_config.json", "preprocessor_config.json"], [false, true])
+func qwen3ASRDownloadOnlyUsesASRMetadata(layout: String, forcedAligner: Bool) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = forcedAligner ? "mlx-community/Qwen3-ForcedAligner-0.6B-8bit" : "mlx-community/Qwen3-ASR-0.6B-8bit"
+    let client = FakeModelDownloadHTTPClient()
+    let message = forcedAligner ? "Error: unsupported model_type: qwen3_forced_aligner" : "Error: unsupported model_type: qwen3_asr (expected 'llama')"
+    let weights = Data("asr-weights".utf8)
+    var files: [(path: String, data: Data, sha256: String?)] = [
+        ("config.json", Data(#"{"model_type":"qwen3_asr","architectures":["Qwen3ASRForConditionalGeneration"]}"#.utf8), nil),
+        ("tokenizer_config.json", Data("{}".utf8), nil),
+        ("preprocessor_config.json", Data("{}".utf8), nil),
+        ("model.safetensors", weights, sha256(weights)),
+    ]
+    if layout == "consolidated" {
+        files.append(("tokenizer.json", Data("{}".utf8), nil))
+    } else {
+        files.append(("vocab.json", Data(#"{"hello":0}"#.utf8), nil))
+        files.append(("merges.txt", Data("#version: 0.2\nh e\n".utf8), nil))
+    }
+    files.removeAll { $0.path == layout }
+    configureHuggingFace(client, repoID: repoID, files: files)
+    client.dataResponses["https://huggingface.co/api/models/\(repoID)/revision/\(testCommit)?blobs=true"] =
+        client.dataResponses["https://huggingface.co/api/models/\(repoID)?blobs=true"]
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: DownloadOnlyRejectingPreflight(message: message),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(!(await service.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    #expect(await service.downloadStatuses().first?.canContinueDownload == true)
+    #expect(client.streamRequests.isEmpty)
+    #expect(await service.resumeDownload(provider: .huggingFace, repoID: repoID, downloadOnly: true).success)
+    try await waitForDownloadCondition {
+        let queue = await service.downloadQueueSnapshot()
+        return queue.activeCount == 0 && queue.queuedCount == 0
+    }
+    let status = try #require(await service.downloadStatuses().first)
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    if layout != "split", layout != "consolidated" {
+        #expect(status.status == "rejected")
+        #expect(status.errorCode == "repo_missing_metadata")
+        #expect(status.error?.contains(layout) == true)
+        #expect(client.streamRequests.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: snapshot.path))
+        return
+    }
+    #expect(status.status == "completed")
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(manifest.compatibility.modelType == "qwen3_asr")
+    #expect(manifest.compatibility.downloadOnly == true)
+    #expect(manifest.compatibility.runtimeSupportError == message)
+    #expect(try Data(contentsOf: snapshot.appendingPathComponent("model.safetensors")) == weights)
+    #expect(manifest.files.contains { $0.path == "tokenizer_config.json" })
+    #expect(manifest.files.contains { $0.path == "preprocessor_config.json" })
+    let scanner = LocalModelScanner(rootURL: root)
+    #expect(scanner.model(for: repoID)?.type == "asr")
+    #expect(scanner.readiness(for: repoID)?.isLoadable == false)
+    #expect(scanner.resolveModelPath(for: repoID) == nil)
+    #expect(scanner.downloadedSnapshotDirectory(for: repoID) == snapshot)
+}
+
+@Test(arguments: [false, true])
+func nemotronDiarizationDownloadOnlyDoesNotRequireTextTokenizer(corruptWeights: Bool) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "mlx-community/Nemotron-3-Diarization"
+    let message = "Error: unsupported model_type: nemotron_diarization"
+    let client = FakeModelDownloadHTTPClient()
+    configureDownloadOnlyFixture(client, repoID: repoID, tokenizer: false,
+        config: Data(#"{"model_type":"nemotron_diarization","num_speakers":8,"processor_config":{"sampling_rate":16000}}"#.utf8))
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: DownloadOnlyRejectingPreflight(message: message),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(!(await service.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    #expect(await service.downloadStatuses().first?.canContinueDownload == true)
+    #expect(client.streamRequests.isEmpty)
+    if corruptWeights {
+        client.streamResponses["https://huggingface.co/\(repoID)/resolve/\(testCommit)/model.safetensors"] =
+            StreamFixture(data: Data("damaged".utf8))
+    }
+    #expect(await service.resumeDownload(provider: .huggingFace, repoID: repoID, downloadOnly: true).success)
+    try await waitForDownloadCondition {
+        let queue = await service.downloadQueueSnapshot()
+        return queue.activeCount == 0 && queue.queuedCount == 0
+    }
+    let status = try #require(await service.downloadStatuses().first)
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    if corruptWeights {
+        #expect(status.status == "corrupt")
+        #expect(!FileManager.default.fileExists(atPath: snapshot.path))
+        return
+    }
+    #expect(status.status == "completed")
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(manifest.compatibility.modelType == "nemotron_diarization")
+    #expect(manifest.compatibility.downloadOnly == true)
+    #expect(manifest.compatibility.runtimeSupportError == message)
+    #expect(!FileManager.default.fileExists(atPath: snapshot.appendingPathComponent("tokenizer.json").path))
+    #expect(try Data(contentsOf: snapshot.appendingPathComponent("model.safetensors")) == Data("weights".utf8))
+    let scanner = LocalModelScanner(rootURL: root)
+    #expect(scanner.readiness(for: repoID)?.reasonCode == "download_only_model")
+    #expect(scanner.readiness(for: repoID)?.isLoadable == false)
+    #expect(scanner.resolveModelPath(for: repoID) == nil)
+    #expect(scanner.downloadedSnapshotDirectory(for: repoID) == snapshot)
+    #expect(await service.downloadHuggingFace(repoID: repoID, token: nil).downloadOnly == true)
+}
+
+@Test func nemotronDiarizationRunnableDownloadDoesNotRequireTextTokenizer() async throws {
+    struct NativeDiarizationPreflight: ModelMetadataPreflighting {
+        func validate(metadataDirectory _: URL) async throws -> ModelMetadataPreflightResult {
+            ModelMetadataPreflightResult(modelType: "nemotron_diarization", artifactRole: "diarization")
+        }
+    }
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "mlx-community/Nemotron-3-Diarization"
+    let client = FakeModelDownloadHTTPClient()
+    let config = Data(#"{"model_type":"nemotron_diarization","dtype":"bfloat16","num_speakers":8,"output_subsampling_factor":1,"encoder_config":{"d_model":512,"n_layers":31,"n_heads":8,"feat_in":128},"processor_config":{"sampling_rate":16000,"n_fft":512,"hop_length":160},"modules_config":{"num_speakers":8,"fc_d_model":512,"tf_d_model":192}}"#.utf8)
+    configureDownloadOnlyFixture(client, repoID: repoID, tokenizer: false, config: config)
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: NativeDiarizationPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    let result = await service.downloadHuggingFace(repoID: repoID, token: nil)
+    #expect(result.success)
+    #expect(result.downloadOnly != true)
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(manifest.compatibility.artifactRole == "diarization")
+    #expect(manifest.compatibility.downloadOnly == nil)
+    let model = try #require(LocalModelScanner(rootURL: root).model(for: repoID))
+    #expect(model.type == "diarization")
+    #expect(model.readiness?.isLoadable == true)
+}
+
 @Test func downloadOnlyDFlash2DraftCompletesWithoutItsOwnTokenizer() async throws {
     let root = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: root) }

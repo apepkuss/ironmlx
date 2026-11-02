@@ -18,6 +18,16 @@ flowchart TD
 
 服务端资源注册、WAV 响应和 PCM 流式传输，见[语音 API 契约](../docs/zh-CN/audio-speech-api.md)。
 
+## Qwen3-ASR 语音识别
+
+原生 `qwen3_asr::Qwen3Asr` 支持已发布的 0.6B、1.7B affine 8-bit 模型，
+包含 128 维 Whisper 特征、卷积音频编码器和带缓存的 Qwen3 文本解码器。
+分词、特征提取和推理均使用 Rust/MLX；Python 只用于开发时的参考比较。
+
+通过 `ironmlx transcribe` 或兼容 OpenAI 的 `POST /v1/audio/transcriptions` 使用。
+当前离线配置接受单声道或双声道 WAV、FLAC、MP3，自动分段长录音，转换到 16 kHz，
+支持自动或指定语言并返回文本。用法和边界见[语音识别 API](../docs/zh-CN/audio-transcriptions-api.md)。
+
 ## 公共接口
 
 | 接口 | 职责 |
@@ -298,3 +308,29 @@ IRONMLX_AUDIO_APP_BUNDLE=/absolute/path/to/IronMLX.app \
 IRONMLX_AUDIO_APP_REFERENCE=/absolute/path/to/reference.wav \
 swift test -c release --package-path ironmlx-app --filter audioAppLoadsAndRestoresFromSavedConfigurationWithBundle
 ```
+
+原生 Qwen3-ForcedAligner affine 8-bit 推理复用音频／文字骨干，使用独立时间戳分类头。`Qwen3Asr::align` 接收音频和已有文字。服务端同时提供独立对齐和固定 ASR 加对齐流程；语言单元、限制与时间戳精度见[转写接口契约](../docs/zh-CN/audio-transcriptions-api.md)。
+
+## Nemotron 3 说话人分离
+
+`diarization::NemotronDiarization` 加载已发布的 Nemotron 3 BF16 MLX 快照，
+严格验证配置和张量，不依赖 Python 运行时。原生实现包含特征堆叠 RoPE 编码器、
+有界的说话人缓存和 FIFO，输出 8 路说话人活动概率，帧步长 10 ms，保留同时讲话。
+
+`diarize` 接收 PCM，转换为 16 kHz 单声道；`Options` 控制阈值、最短讲话段、
+间隔合并和延迟预设。进度回调提供绝对起始帧号及原生活动概率。
+返回的 `Diarization` 包含录音时长、活动编号数量、说话人时间段及 RTTM 格式化方法。
+
+增量 PCM 使用 `init_stream(options)` 初始化，再以有限值、16 kHz 单声道 PCM
+反复调用 `feed(&mut state, samples, false, control)`；结束时调用一次
+`feed(&mut state, &[], true, control)`。输入分块不会重置说话人编号或时间；
+已结束的状态拒绝继续输入。支持 `offline`、`low`、`very_low`、`ultra_low`，
+均使用有界的 PCM 历史与编码器上下文。模型和状态由原生工作线程拥有，不放在 HTTP 任务中。
+
+托管运行时提供队列、内存准入、取消、超时及模型租约。
+[识别与说话人分离 API](../docs/zh-CN/audio-transcriptions-api.md)提供独立 JSON、
+RTTM、文件 SSE、Qwen3 三模型组合流程和可选的实时 WebSocket 说话人标注。
+`DiarizationRuntime::start_stream` 跨轮次保留工作线程内的缓存；
+`DiarizationStream::snapshot` 在副本中补齐末尾，不消费实时流的右侧上下文。
+丢弃流会取消工作并释放缓存预留和模型租约。服务只标注说话人，不识别真实身份，
+也不提取每个人的独立音轨。

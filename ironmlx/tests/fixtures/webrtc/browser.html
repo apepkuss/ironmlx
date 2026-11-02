@@ -1,0 +1,54 @@
+<!doctype html><meta charset="utf-8"><title>IronMLX WebRTC integration test</title>
+<script type="module">
+import { connectTranscription } from '/__client.js';
+const events = [];
+const phases = [];
+const api = `http://127.0.0.1:${location.port}`; // Deliberately cross-origin from localhost.
+try {
+  const microphone = await navigator.mediaDevices.getUserMedia({ audio: true });
+  if (microphone.getAudioTracks().length !== 1) throw new Error('Microphone capture did not supply one audio track');
+  microphone.getTracks().forEach(track => track.stop());
+  const ice = await (await fetch('/__ice')).json();
+  for (const [size, diarization, vad] of [['0.6B', false, false], ['0.6B', true, true], ['1.7B', true, true]]) {
+    let resolveFinal, rejectFinal;
+    const final = new Promise((resolve, reject) => { resolveFinal = resolve; rejectFinal = reject; });
+    final.catch(() => {});
+    const timeout = setTimeout(() => rejectFinal(new Error('No final transcription event')), 45000);
+    const phaseEvents = [];
+    const context = new AudioContext();
+    const buffer = await context.decodeAudioData(await (await fetch('/__audio.wav')).arrayBuffer());
+    const source = context.createBufferSource(); source.buffer = buffer;
+    const destination = context.createMediaStreamDestination(); source.connect(destination);
+    await context.resume();
+    const client = await connectTranscription({
+      stream: destination.stream, ...ice,
+      baseUrl: api, apiKey: 'imx_webrtc_test', model: `mlx-community/Qwen3-ASR-${size}-8bit`, language: 'zh',
+      diarization, turnDetection: vad ? { type: 'server_vad' } : null,
+      onEvent(event) {
+        events.push(event); phaseEvents.push(event);
+        if (event.type === 'error' || event.type === 'conversation.item.input_audio_transcription.failed') rejectFinal(new Error(JSON.stringify(event)));
+        if (event.type === (diarization ? 'conversation.item.input_audio_transcription.diarized' : 'conversation.item.input_audio_transcription.completed') && event.is_final) resolveFinal(event);
+      },
+    });
+    try {
+      source.start();
+      if (!vad) {
+        // Browser-generated track: two seconds of silence, speech, then two seconds of silence.
+        await new Promise(resolve => setTimeout(resolve, buffer.duration * 1000 + 300));
+        client.commit();
+      }
+      const result = await final;
+      if (!result.transcript.includes('交易')) throw new Error(`Unexpected transcript: ${result.transcript}`);
+      if (diarization && !result.segments.some(s => s.speaker.startsWith('speaker_'))) throw new Error('Missing speaker labels');
+      const stats = await client.peer.getStats();
+      const outbound = [...stats.values()].filter(s => s.type === 'outbound-rtp' && s.kind === 'audio');
+      const selected = [...stats.values()].filter(s => s.type === 'candidate-pair' && s.state === 'succeeded' && s.nominated).map(s => ({ local: stats.get(s.localCandidateId)?.candidateType, remote: stats.get(s.remoteCandidateId)?.candidateType }));
+      if (ice.iceTransportPolicy === 'relay' && !selected.some(s => s.local === 'relay' && s.remote === 'relay')) throw new Error(`Expected relayed candidate pair: ${JSON.stringify(selected)}`);
+      phases.push({ size, diarization, vad, result, outbound, selected, callId: client.callId, eventTypes: phaseEvents.map(e => e.type) });
+    } finally { clearTimeout(timeout); await client.hangup(); destination.stream.getTracks().forEach(track => track.stop()); await context.close(); }
+  }
+  await fetch('/__report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ok: true, phases, events }) });
+} catch (error) {
+  await fetch('/__report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ok: false, error: String(error), stack: error.stack, phases, events }) });
+}
+</script>
