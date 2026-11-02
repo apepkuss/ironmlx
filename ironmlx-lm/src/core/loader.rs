@@ -314,6 +314,7 @@ enum SanitizeMode {
     #[cfg(unix)]
     FlashText {
         resident_budget_bytes: u64,
+        paged_experts: bool,
     },
     /// Only the vision encoder's tensors (read and evaluated on their own).
     VisionOnly,
@@ -351,6 +352,18 @@ impl Loader {
             model_dir,
             SanitizeMode::FlashText {
                 resident_budget_bytes,
+                paged_experts: false,
+            },
+        )
+    }
+
+    #[cfg(unix)]
+    pub fn open_flash_text_paged(model_dir: &Path, resident_budget_bytes: u64) -> Result<Self> {
+        Self::open_impl(
+            model_dir,
+            SanitizeMode::FlashText {
+                resident_budget_bytes,
+                paged_experts: true,
             },
         )
     }
@@ -461,13 +474,14 @@ impl Loader {
         #[cfg(unix)]
         if let SanitizeMode::FlashText {
             resident_budget_bytes,
+            paged_experts,
         } = sanitize_mode
         {
             crate::models::qwen4_exp::config::FlashTextConfig::from_root(&config_raw)?;
             let files = crate::core::tensor_file::ModelTensorFiles::open(model_dir)?;
             let bytes = files
                 .tensors()
-                .filter(|(key, _)| flash_resident_tensor(key))
+                .filter(|(key, _)| flash_resident_tensor(key, paged_experts))
                 .try_fold(0u64, |n, (_, info)| n.checked_add(info.bytes()))
                 .context("Flash resident weight bytes overflow")?;
             anyhow::ensure!(bytes <= resident_budget_bytes,
@@ -497,8 +511,8 @@ impl Loader {
 
         match sanitize_mode {
             #[cfg(unix)]
-            SanitizeMode::FlashText { .. } => {
-                tensors.retain(|key, _| flash_resident_tensor(key));
+            SanitizeMode::FlashText { paged_experts, .. } => {
+                tensors.retain(|key, _| flash_resident_tensor(key, paged_experts));
                 Self::sanitize(&mut tensors, &config_raw, false)?;
             }
             SanitizeMode::Embedding {
@@ -855,10 +869,11 @@ impl Loader {
 }
 
 #[cfg(unix)]
-fn flash_resident_tensor(key: &str) -> bool {
+fn flash_resident_tensor(key: &str, paged_experts: bool) -> bool {
     key.starts_with("language_model.")
         && !key.contains(".ngram_embedding.")
         && !key.contains("mtp.")
+        && (!paged_experts || !key.contains(".mlp.switch_mlp."))
 }
 
 fn tensor_storage_bytes(tensors: &HashMap<String, Array>) -> usize {

@@ -8,6 +8,8 @@ pub mod config;
 pub mod hyper;
 pub mod math;
 #[cfg(unix)]
+mod paged_moe;
+#[cfg(unix)]
 pub mod ple;
 pub mod ple_index;
 #[cfg(unix)]

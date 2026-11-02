@@ -10,6 +10,8 @@ pub mod loader;
 pub mod model;
 pub mod model_input;
 pub mod native_output;
+#[cfg(unix)]
+pub mod paged_experts;
 pub mod reasoning_budget;
 pub mod residency;
 pub mod sampler;
