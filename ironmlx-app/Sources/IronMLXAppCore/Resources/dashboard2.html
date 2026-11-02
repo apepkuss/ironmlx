@@ -3885,7 +3885,8 @@
         <div class="model-import-status" id="model-import-status" role="status" aria-live="polite">
           <span id="model-import-status-text"></span>
           <progress id="model-import-progress" max="100" value="0"></progress>
-          <button class="btn-secondary" type="button" onclick="cancelModelImport()" data-i18n="cancel">Cancel</button>
+          <button class="btn-secondary" id="model-import-cancel" type="button" onclick="cancelModelImport()" data-i18n="cancel">Cancel</button>
+          <button class="btn-secondary" id="model-import-retry" type="button" onclick="retryModelImportRecovery()" data-i18n="model_import_retry_recovery" hidden>Retry recovery</button>
         </div>
         <div class="data-table-wrapper">
         <div class="model-import-empty" id="model-import-empty" style="display:none;">
@@ -5766,6 +5767,7 @@
         <strong class="model-import-name" id="model-import-name"></strong>
         <span class="model-import-type" id="model-import-type"></span>
       </div>
+      <p class="model-import-note" id="model-import-file-only-note" data-i18n="model_import_file_only_note" hidden></p>
       <div class="model-import-paths">
         <div class="model-import-path">
           <span class="model-import-path-label" data-i18n="model_import_source">Source</span>
@@ -5784,7 +5786,7 @@
     </div>
     <div class="modal-footer">
       <button class="btn-cancel" type="button" onclick="closeModelImport()" data-i18n="cancel">Cancel</button>
-      <button class="btn-primary" type="button" onclick="confirmModelImport()" data-i18n="model_import_copy">Copy to IronMLX</button>
+      <button class="btn-primary" id="model-import-confirm" type="button" onclick="confirmModelImport()" data-i18n="model_import_copy">Copy to IronMLX</button>
     </div>
   </div>
 </div>
@@ -6220,6 +6222,13 @@
       download_status_queued: "Queued", download_status_queued_position: "Queued · #{position}", download_status_resolving: "Resolving repository", download_status_preflighting: "Checking files and disk", download_status_downloading: "Downloading", download_status_verifying: "Verifying", download_status_publishing: "Publishing", download_status_completed: "Completed", download_status_cancelled: "Cancelled", download_status_rejected: "Rejected", download_status_interrupted: "Interrupted", download_status_corrupt: "Corrupt", download_status_failed: "Failed",
       download_recovery_title: "Previous download queue was not restored", download_recovery_copy: "Queued tasks are not resumed after restarting IronMLX. Re-add the tasks you still need.", download_readd_public: "Re-add tasks without credentials", download_readd: "Re-add", download_ignore: "Ignore", download_token_required: "Token required", download_enter_token: "Enter token", download_token_prompt: "Enter the Hugging Face token, then add the task again.", dismiss: "Dismiss",
       download_anyway: "Download anyway",
+      model_import_anyway: "Import anyway",
+      model_import_recovering: "Recovering interrupted model import…",
+      model_import_recovered: "Recovered {count} model import(s).",
+      model_import_recovery_failed: "Import recovery did not complete. The files have been preserved.",
+      model_import_retry_recovery: "Retry recovery",
+      model_import_file_only_note: "This version cannot run this model's architecture or quantization format. You can still import and verify its files for storage; loading and default-model selection will stay disabled.",
+      model_file_only_status: "Saved · Cannot run in this version",
       download_status_download_only: "Downloaded · Cannot run in this version",
       download_only_note: "You can download the files, but this version cannot load or run this model.",
       download_only_completed_note: "The files are downloaded, but this version cannot load or run this model.",
@@ -6918,6 +6927,13 @@
       download_status_queued: "排队中", download_status_queued_position: "排队中 · 第 {position} 位", download_status_resolving: "解析仓库", download_status_preflighting: "检查文件与磁盘", download_status_downloading: "下载中", download_status_verifying: "校验中", download_status_publishing: "发布中", download_status_completed: "已完成", download_status_cancelled: "已取消", download_status_rejected: "已拒绝", download_status_interrupted: "已中断", download_status_corrupt: "文件损坏", download_status_failed: "失败",
       download_recovery_title: "上次下载队列未恢复", download_recovery_copy: "IronMLX 重启后不会自动恢复排队任务。请重新添加仍需下载的任务。", download_readd_public: "重新添加无需凭证的任务", download_readd: "重新添加", download_ignore: "忽略此项", download_token_required: "需要 Token", download_enter_token: "输入 Token", download_token_prompt: "请输入 Hugging Face Token，然后重新添加该任务。", dismiss: "全部忽略",
       download_anyway: "仍然下载",
+      model_import_anyway: "仍然导入",
+      model_import_recovering: "正在恢复中断的模型导入…",
+      model_import_recovered: "已恢复 {count} 个模型的导入。",
+      model_import_recovery_failed: "导入恢复未完成，文件已保留。",
+      model_import_retry_recovery: "重试恢复",
+      model_import_file_only_note: "当前版本不支持该模型的架构或量化格式。仍可导入文件并完成校验，但无法加载运行或设为默认模型。",
+      model_file_only_status: "已保存 · 当前不支持运行",
       download_status_download_only: "已下载 · 当前不支持运行",
       download_only_note: "可以继续下载文件，但当前版本无法加载运行该模型。",
       download_only_completed_note: "文件已下载，但当前版本无法加载运行该模型。",
@@ -7616,6 +7632,13 @@
       download_status_queued: "排隊中", download_status_queued_position: "排隊中 · 第 {position} 位", download_status_resolving: "解析儲存庫", download_status_preflighting: "檢查檔案與磁碟", download_status_downloading: "下載中", download_status_verifying: "驗證中", download_status_publishing: "發佈中", download_status_completed: "已完成", download_status_cancelled: "已取消", download_status_rejected: "已拒絕", download_status_interrupted: "已中斷", download_status_corrupt: "檔案損壞", download_status_failed: "失敗",
       download_recovery_title: "上次下載佇列未恢復", download_recovery_copy: "IronMLX 重新啟動後不會自動恢復排隊任務。請重新加入仍需下載的任務。", download_readd_public: "重新加入無需憑證的任務", download_readd: "重新加入", download_ignore: "略過此項", download_token_required: "需要 Token", download_enter_token: "輸入 Token", download_token_prompt: "請輸入 Hugging Face Token，然後重新加入該任務。", dismiss: "全部略過",
       download_anyway: "仍然下載",
+      model_import_anyway: "仍然匯入",
+      model_import_recovering: "正在恢復中斷的模型匯入…",
+      model_import_recovered: "已恢復 {count} 個模型的匯入。",
+      model_import_recovery_failed: "匯入恢復未完成，檔案已保留。",
+      model_import_retry_recovery: "重試恢復",
+      model_import_file_only_note: "目前版本不支援此模型的架構或量化格式。仍可匯入檔案並完成驗證，但無法載入執行或設為預設模型。",
+      model_file_only_status: "已儲存 · 目前不支援執行",
       download_status_download_only: "已下載 · 目前不支援執行",
       download_only_note: "可以繼續下載檔案，但目前版本無法載入或執行此模型。",
       download_only_completed_note: "檔案已下載，但目前版本無法載入或執行此模型。",
@@ -8317,6 +8340,13 @@
       download_status_queued: "待機中", download_status_queued_position: "待機中 · {position} 番目", download_status_resolving: "リポジトリを解析中", download_status_preflighting: "ファイルとディスクを確認中", download_status_downloading: "ダウンロード中", download_status_verifying: "検証中", download_status_publishing: "公開処理中", download_status_completed: "完了", download_status_cancelled: "キャンセル済み", download_status_rejected: "拒否", download_status_interrupted: "中断", download_status_corrupt: "破損", download_status_failed: "失敗",
       download_recovery_title: "前回のダウンロードキューは復元されませんでした", download_recovery_copy: "IronMLX の再起動後、待機中タスクは自動再開されません。必要なタスクを再追加してください。", download_readd_public: "認証不要のタスクを再追加", download_readd: "再追加", download_ignore: "無視", download_token_required: "Token が必要", download_enter_token: "Token を入力", download_token_prompt: "Hugging Face Token を入力してからタスクを再追加してください。", dismiss: "すべて閉じる",
       download_anyway: "ダウンロードを続行",
+      model_import_anyway: "インポートを続行",
+      model_import_recovering: "中断されたモデルのインポートを復元中…",
+      model_import_recovered: "{count} 件のモデルインポートを復元しました。",
+      model_import_recovery_failed: "インポートの復元が完了していません。ファイルは保持されています。",
+      model_import_retry_recovery: "復元を再試行",
+      model_import_file_only_note: "このバージョンは、このモデルのアーキテクチャまたは量子化形式に対応していません。ファイルの保存と検証はできますが、読み込み・実行やデフォルトモデルへの設定はできません。",
+      model_file_only_status: "保存済み · このバージョンでは実行不可",
       download_status_download_only: "ダウンロード済み · このバージョンでは実行不可",
       download_only_note: "ファイルはダウンロードできますが、このバージョンではモデルをロード・実行できません。",
       download_only_completed_note: "ファイルはダウンロード済みですが、このバージョンではモデルをロード・実行できません。",
@@ -9018,6 +9048,13 @@
       download_status_queued: "대기 중", download_status_queued_position: "대기 중 · {position}번째", download_status_resolving: "저장소 확인 중", download_status_preflighting: "파일 및 디스크 확인 중", download_status_downloading: "다운로드 중", download_status_verifying: "검증 중", download_status_publishing: "게시 중", download_status_completed: "완료", download_status_cancelled: "취소됨", download_status_rejected: "거부됨", download_status_interrupted: "중단됨", download_status_corrupt: "손상됨", download_status_failed: "실패",
       download_recovery_title: "이전 다운로드 대기열이 복원되지 않았습니다", download_recovery_copy: "IronMLX 재시작 후 대기 중인 작업은 자동으로 복원되지 않습니다. 필요한 작업을 다시 추가하세요.", download_readd_public: "자격 증명 없는 작업 다시 추가", download_readd: "다시 추가", download_ignore: "이 항목 무시", download_token_required: "Token 필요", download_enter_token: "Token 입력", download_token_prompt: "Hugging Face Token을 입력한 다음 작업을 다시 추가하세요.", dismiss: "모두 무시",
       download_anyway: "계속 다운로드",
+      model_import_anyway: "계속 가져오기",
+      model_import_recovering: "중단된 모델 가져오기를 복구하는 중…",
+      model_import_recovered: "모델 가져오기 {count}개를 복구했습니다.",
+      model_import_recovery_failed: "가져오기 복구가 완료되지 않았습니다. 파일은 보존되었습니다.",
+      model_import_retry_recovery: "복구 다시 시도",
+      model_import_file_only_note: "현재 버전은 이 모델의 아키텍처 또는 양자화 형식을 지원하지 않습니다. 파일을 가져와 저장하고 검증할 수 있지만, 로드하거나 실행하거나 기본 모델로 설정할 수 없습니다.",
+      model_file_only_status: "저장됨 · 현재 버전에서 실행 불가",
       download_status_download_only: "다운로드됨 · 현재 버전에서 실행 불가",
       download_only_note: "파일은 다운로드할 수 있지만 현재 버전에서는 모델을 로드하거나 실행할 수 없습니다.",
       download_only_completed_note: "파일은 다운로드되었지만 현재 버전에서는 모델을 로드하거나 실행할 수 없습니다.",
@@ -9827,6 +9864,14 @@
 
   // ── Model Selection & Deletion ──
   let modelImportBusy = false;
+  let modelImportDownloadOnly = false;
+
+  function showModelImportStatus() {
+    document.getElementById('model-import-status').classList.add('visible');
+    document.getElementById('model-import-progress').hidden = false;
+    document.getElementById('model-import-cancel').hidden = false;
+    document.getElementById('model-import-retry').hidden = true;
+  }
 
   function chooseModelImport() {
     if (modelImportBusy) return;
@@ -9836,8 +9881,7 @@
   function onModelImportInspecting() {
     modelImportBusy = true;
     document.getElementById('model-import-button').disabled = true;
-    const status = document.getElementById('model-import-status');
-    status.classList.add('visible');
+    showModelImportStatus();
     document.getElementById('model-import-status-text').textContent = t('model_import_inspecting');
     document.getElementById('model-import-progress').removeAttribute('value');
   }
@@ -9855,22 +9899,30 @@
     document.getElementById('model-import-available').textContent = preview.availableBytes == null
       ? '' : t('model_import_available').replace('{size}', formatVersionBytes(preview.availableBytes));
     document.getElementById('model-import-type').textContent = preview.modelType;
+    modelImportDownloadOnly = preview.downloadOnly === true;
+    document.getElementById('model-import-file-only-note').hidden = !modelImportDownloadOnly;
+    const confirm = document.getElementById('model-import-confirm');
+    const label = modelImportDownloadOnly ? 'model_import_anyway' : 'model_import_copy';
+    confirm.setAttribute('data-i18n', label);
+    confirm.textContent = t(label);
     document.getElementById('model-import-modal').classList.add('open');
   }
 
   function closeModelImport() {
+    modelImportDownloadOnly = false;
     document.getElementById('model-import-modal').classList.remove('open');
     window.webkit?.messageHandlers?.cancelModelImport?.postMessage('');
   }
 
   function confirmModelImport() {
+    if (modelImportBusy) return;
     document.getElementById('model-import-modal').classList.remove('open');
     modelImportBusy = true;
     document.getElementById('model-import-button').disabled = true;
-    document.getElementById('model-import-status').classList.add('visible');
+    showModelImportStatus();
     document.getElementById('model-import-status-text').textContent = t('model_import_progress').replace('{pct}', '0');
     document.getElementById('model-import-progress').value = 0;
-    window.webkit?.messageHandlers?.confirmModelImport?.postMessage('');
+    window.webkit?.messageHandlers?.confirmModelImport?.postMessage(modelImportDownloadOnly);
   }
 
   function onModelImportProgress(jsonStr) {
@@ -9891,6 +9943,7 @@
 
   function finishModelImport() {
     modelImportBusy = false;
+    modelImportDownloadOnly = false;
     document.getElementById('model-import-button').disabled = false;
     document.getElementById('model-import-status').classList.remove('visible');
   }
@@ -9915,6 +9968,34 @@
   function onModelImportError(message) {
     finishModelImport();
     showToast(message, 'warn', 8000);
+  }
+
+  function onModelImportRecoveryStarted() {
+    onModelImportInspecting();
+    document.getElementById('model-import-status-text').textContent = t('model_import_recovering');
+  }
+
+  function onModelImportRecoveryFinished(jsonStr) {
+    const result = JSON.parse(jsonStr);
+    finishModelImport();
+    if (result.errors.length) {
+      document.getElementById('model-import-status').classList.add('visible');
+      document.getElementById('model-import-status-text').textContent =
+        t('model_import_recovery_failed') + ' ' + result.errors.join(' · ');
+      document.getElementById('model-import-progress').hidden = true;
+      document.getElementById('model-import-cancel').hidden = true;
+      document.getElementById('model-import-retry').hidden = false;
+      showToast(t('model_import_recovery_failed'), 'warn', 8000);
+    }
+    if (result.completed.length) {
+      showToast(t('model_import_recovered').replace('{count}', result.completed.length), 'success');
+    }
+  }
+
+  function retryModelImportRecovery() {
+    if (modelImportBusy) return;
+    onModelImportRecoveryStarted();
+    window.webkit?.messageHandlers?.recoverModelImports?.postMessage('');
   }
 
   function deleteSingleModel(modelId) {
@@ -12833,7 +12914,7 @@
     const readiness = modelReadiness(model);
     if (readiness.status === 'unsupported' || readiness.status === 'incomplete') {
       const text = readiness.status === 'incomplete' ? dict.status_incomplete
-        : readiness.reason_code === 'download_only_model' ? dict.download_status_download_only : dict.status_unsupported;
+        : readiness.reason_code === 'download_only_model' ? dict.model_file_only_status : dict.status_unsupported;
       return { dot: readiness.status === 'incomplete' ? 'model-incomplete' : 'model-unsupported', text: text, title: readiness.status === 'incomplete' ? '' : modelReadinessTitle(model) };
     }
     let verifiedTitle = '';

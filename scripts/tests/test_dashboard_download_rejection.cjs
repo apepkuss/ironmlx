@@ -155,7 +155,7 @@ for (const lang of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
     assert.equal(p.context.isModelLoadable(model), false);
     assert.match(p.context.renderModelLoadActions(model, '', '', '', '', false), /disabled/);
     const status = p.context.modelStatusPresentation(model, false);
-    assert.ok(output.includes(status.text));
+    assert.equal(status.text, p.context.t('model_file_only_status'));
   });
 }
 

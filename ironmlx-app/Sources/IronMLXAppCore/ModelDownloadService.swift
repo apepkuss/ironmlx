@@ -1591,27 +1591,7 @@ public actor ModelDownloadService {
                 )
                 runtimeSupportError = error.localizedDescription
             }
-            let requiredMetadataPaths: [String]
-            switch compatibility.artifactRole {
-            case "decision":
-                requiredMetadataPaths = ["tokenizer/tokenizer.json"]
-            case ModelArtifactRole.imageGeneration:
-                requiredMetadataPaths = ["processor/tokenizer.json"]
-            default:
-                if compatibility.modelType == "nemotron_diarization" {
-                    // Audio-frame classification has no text tokenizer. Allow
-                    // Native preflight independently gates inference compatibility.
-                    requiredMetadataPaths = ["config.json"]
-                } else if compatibility.modelType == "qwen3_asr" {
-                    // Qwen3-ASR checkpoints can ship the split BPE vocabulary
-                    // instead of a consolidated tokenizer.json.
-                    let tokenizerPaths = metadata.contains { $0.path == "tokenizer.json" }
-                        ? ["tokenizer.json"] : ["vocab.json", "merges.txt"]
-                    requiredMetadataPaths = ["tokenizer_config.json", "preprocessor_config.json"] + tokenizerPaths
-                } else {
-                    requiredMetadataPaths = ["tokenizer.json"]
-                }
-            }
+            let requiredMetadataPaths = compatibility.requiredMetadataPaths(availablePaths: Set(metadata.map(\.path)))
             if ttsProfile == nil, compatibility.artifactRole != ModelArtifactRole.dflash2Drafter {
                 for path in requiredMetadataPaths where !metadata.contains(where: { $0.path == path }) {
                     throw DownloadFailure(

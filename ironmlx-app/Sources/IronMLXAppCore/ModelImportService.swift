@@ -31,6 +31,8 @@ public struct ModelImportPreview: Sendable {
     public let totalBytes: Int64
     public let availableBytes: Int64?
     public let compatibility: ModelMetadataPreflightResult
+    public let runtimeSupportError: String?
+    public var downloadOnly: Bool { runtimeSupportError != nil }
     public let externalResources: [String]?
     fileprivate let files: [InputFile]
     fileprivate let existingManifest: ModelSnapshotManifest?
@@ -47,6 +49,12 @@ public struct ModelImportProgress: Codable, Sendable {
     public let completedBytes: Int64
     public let totalBytes: Int64
     public let currentFile: String
+}
+
+public struct InterruptedModelImport: Sendable {
+    public let staging: URL
+    fileprivate let provider: ModelRepositoryProvider
+    fileprivate let publication: URL
 }
 
 fileprivate struct InputFile: Sendable {
@@ -91,26 +99,45 @@ public struct ModelImportService: Sendable {
             item.provider == .standalone ? nil : item
         }
         let files = try collectFiles(in: source, manifest: manifest)
+        try validateWeightIndexes(in: source, files: files)
         try Task.checkCancellation()
         let remoteFiles = files.map { file in
             RemoteModelFile(path: file.path, size: file.identity.size, sha256: nil, blobID: nil, etag: nil)
         }
         let ttsProfile = try TTSModelDownloadProfile.inspect(directory: source, files: remoteFiles)
         let compatibility: ModelMetadataPreflightResult
+        var runtimeSupportError: String?
         if let ttsProfile {
             compatibility = ttsProfile.compatibility
         } else {
-            compatibility = try await preflight.validate(metadataDirectory: source)
+            do {
+                compatibility = try await preflight.validate(metadataDirectory: source)
+            } catch {
+                guard ModelMetadataPreflightError.allowsDownloadOnly(error.localizedDescription) else { throw error }
+                let data = try Data(contentsOf: source.appendingPathComponent("config.json"))
+                guard let config = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let modelType = config["model_type"] as? String,
+                      !modelType.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw ModelImportError.invalidSource("Missing model_type in config.json.")
+                }
+                let isDFlash2Draft = (config["architectures"] as? [String])?.contains("DFlash2DraftModel") == true
+                compatibility = ModelMetadataPreflightResult(
+                    modelType: modelType,
+                    artifactRole: isDFlash2Draft ? ModelArtifactRole.dflash2Drafter : "download_only",
+                    quantization: nil
+                )
+                runtimeSupportError = error.localizedDescription
+            }
         }
         try Task.checkCancellation()
         guard !files.isEmpty, files.contains(where: { $0.path.hasSuffix(".safetensors") }) else {
             throw ModelImportError.invalidSource("No safetensors model weights were found.")
         }
-        let tokenizerPath = compatibility.artifactRole == "decision"
-            ? "tokenizer/tokenizer.json" : "tokenizer.json"
-        if ttsProfile == nil, compatibility.artifactRole != ModelArtifactRole.dflash2Drafter,
-           !files.contains(where: { $0.path == tokenizerPath }) {
-            throw ModelImportError.invalidSource("\(tokenizerPath) is missing.")
+        let paths = Set(files.map(\.path))
+        if ttsProfile == nil {
+            for path in compatibility.requiredMetadataPaths(availablePaths: paths) where !paths.contains(path) {
+                throw ModelImportError.invalidSource("\(path) is missing.")
+            }
         }
         let displayName = native?.displayName ?? native?.repoID ?? Self.cacheModelName(source) ?? source.lastPathComponent
         let totalBytes = try files.reduce(Int64(0)) { total, file in
@@ -156,6 +183,7 @@ public struct ModelImportService: Sendable {
             totalBytes: totalBytes,
             availableBytes: available,
             compatibility: compatibility,
+            runtimeSupportError: runtimeSupportError,
             externalResources: ttsProfile?.externalResources ?? native?.compatibility.externalResources,
             files: files,
             existingManifest: native
@@ -164,8 +192,12 @@ public struct ModelImportService: Sendable {
 
     public func importModel(
         _ preview: ModelImportPreview,
+        allowUnsupported: Bool = false,
         progress: @escaping @Sendable (ModelImportProgress) -> Void = { _ in }
     ) async throws -> ModelImportResult {
+        if let error = preview.runtimeSupportError, !allowUnsupported {
+            throw ModelImportError.unsupported(error)
+        }
         let store = ModelDownloadStore(rootURL: rootURL)
         try ensureManagedPathIsNotRedirected(preview)
         let currentFiles = try collectFiles(in: preview.source, manifest: preview.existingManifest)
@@ -179,9 +211,13 @@ public struct ModelImportService: Sendable {
         let staging = repository.appendingPathComponent(".imports", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: staging) }
+        var copyComplete = false
+        defer {
+            if !copyComplete { try? FileManager.default.removeItem(at: staging) }
+        }
 
         var copiedBytes: Int64 = 0
+        var nextProgressBytes: Int64 = 0
         var copied: [ModelSnapshotFile] = []
         var contentDigest = SHA256()
         for file in preview.files {
@@ -199,13 +235,21 @@ public struct ModelImportService: Sendable {
             do {
                 while true {
                     try Task.checkCancellation()
-                    let chunk = try input.read(upToCount: 4 * 1_024 * 1_024) ?? Data()
-                    if chunk.isEmpty { break }
-                    try output.write(contentsOf: chunk)
-                    digest.update(data: chunk)
-                    copiedBytes += Int64(chunk.count)
-                    progress(ModelImportProgress(phase: "copying", completedBytes: copiedBytes,
-                        totalBytes: preview.totalBytes, currentFile: file.path))
+                    let bytesRead = try autoreleasepool {
+                        let chunk = try input.read(upToCount: 4 * 1_024 * 1_024) ?? Data()
+                        if !chunk.isEmpty {
+                            try output.write(contentsOf: chunk)
+                            digest.update(data: chunk)
+                        }
+                        return chunk.count
+                    }
+                    if bytesRead == 0 { break }
+                    copiedBytes += Int64(bytesRead)
+                    if copiedBytes >= nextProgressBytes || copiedBytes == preview.totalBytes {
+                        progress(ModelImportProgress(phase: "copying", completedBytes: copiedBytes,
+                            totalBytes: preview.totalBytes, currentFile: file.path))
+                        nextProgressBytes = copiedBytes + 64 * 1_024 * 1_024
+                    }
                 }
                 try output.synchronize()
                 try input.close()
@@ -255,6 +299,8 @@ public struct ModelImportService: Sendable {
                 quantizationMode: preview.compatibility.quantization?.mode,
                 quantizationBits: preview.compatibility.quantization?.bits,
                 quantizationGroupSize: preview.compatibility.quantization?.groupSize,
+                downloadOnly: preview.downloadOnly ? true : nil,
+                runtimeSupportError: preview.runtimeSupportError,
                 externalResources: preview.externalResources
             ),
             resources: ModelSnapshotResources(
@@ -264,14 +310,109 @@ public struct ModelImportService: Sendable {
             displayName: preview.provider == .standalone ? preview.displayName : preview.existingManifest?.displayName
         )
         try store.writeManifest(manifest, to: staging)
+        copyComplete = true
+        return try await finishImport(staging: staging, manifest: manifest, progress: progress)
+    }
+
+    /// Complete copies and publication records survive App termination. Do not
+    /// treat an incomplete copy as a published model or discard its files here.
+    public func interruptedImports() throws -> [InterruptedModelImport] {
+        var result: [InterruptedModelImport] = []
+        for provider in ModelRepositoryProvider.allCases {
+            let providerRoot = ModelRepositoryLayout.providerRoot(rootURL: rootURL, provider: provider)
+            guard FileManager.default.fileExists(atPath: providerRoot.path) else { continue }
+            try ensureManagedPathsAreNotRedirected(provider: provider, repository: providerRoot)
+            let repositories = try FileManager.default.contentsOfDirectory(
+                at: providerRoot, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+            )
+            for repository in repositories {
+                let imports = repository.appendingPathComponent(".imports", isDirectory: true)
+                guard FileManager.default.fileExists(atPath: imports.path) else { continue }
+                try ensureManagedPathsAreNotRedirected(provider: provider, repository: repository)
+                let entries = try FileManager.default.contentsOfDirectory(
+                    at: imports, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]
+                )
+                let names = Set(entries.compactMap { entry -> String? in
+                    let name = entry.pathExtension == "json"
+                        ? entry.deletingPathExtension().lastPathComponent : entry.lastPathComponent
+                    return UUID(uuidString: name) == nil ? nil : name
+                })
+                for name in names.sorted() {
+                    let staging = imports.appendingPathComponent(name, isDirectory: true)
+                    result.append(InterruptedModelImport(staging: staging, provider: provider,
+                        publication: staging.appendingPathExtension("json")))
+                }
+            }
+        }
+        return result.sorted { $0.staging.path < $1.staging.path }
+    }
+
+    public func recoverImport(
+        _ interrupted: InterruptedModelImport,
+        progress: @escaping @Sendable (ModelImportProgress) -> Void = { _ in }
+    ) async throws -> ModelImportResult {
+        try Task.checkCancellation()
+        let staging = interrupted.staging
+        let repository = staging.deletingLastPathComponent().deletingLastPathComponent()
+        try ensureManagedPathsAreNotRedirected(provider: interrupted.provider, repository: repository)
+        try rejectSymbolicLink(staging)
+        try rejectSymbolicLink(interrupted.publication)
+        let verifier = ModelSnapshotVerifier()
+        let manifest: ModelSnapshotManifest
+        if FileManager.default.fileExists(atPath: interrupted.publication.path) {
+            manifest = try JSONDecoder().decode(ModelSnapshotManifest.self,
+                from: Data(contentsOf: interrupted.publication))
+        } else {
+            guard FileManager.default.fileExists(atPath: staging.appendingPathComponent(ModelSnapshotManifest.filename).path) else {
+                throw ModelImportError.invalidSource("The previous import stopped before copying finished. Select the original model folder to import again. The interrupted copy has been preserved at \(staging.path).")
+            }
+            manifest = try verifier.loadManifest(at: staging)
+        }
+        let store = ModelDownloadStore(rootURL: rootURL)
+        let expected = try store.repositoryRoot(provider: interrupted.provider, repoID: manifest.repoID)
+        guard manifest.provider == interrupted.provider, expected.standardizedFileURL == repository.standardizedFileURL else {
+            throw ModelSnapshotVerificationError.identityMismatch("interrupted import does not match its repository")
+        }
+        let lock = try store.acquireRepositoryLock(provider: manifest.provider, repoID: manifest.repoID)
+        defer { withExtendedLifetime(lock) {} }
+        let final = try store.snapshotURL(provider: manifest.provider, repoID: manifest.repoID, commitSHA: manifest.commitSHA)
+        try rejectSymbolicLink(final)
+        let source = FileManager.default.fileExists(atPath: staging.path) ? staging : final
+        guard try verifier.loadManifest(at: source) == manifest else {
+            throw ModelSnapshotVerificationError.identityMismatch("interrupted import publication record differs from its snapshot")
+        }
+        return try await finishImport(staging: source, manifest: manifest,
+            publication: interrupted.publication, progress: progress)
+    }
+
+    private func finishImport(
+        staging: URL,
+        manifest: ModelSnapshotManifest,
+        publication: URL? = nil,
+        progress: @escaping @Sendable (ModelImportProgress) -> Void
+    ) async throws -> ModelImportResult {
+        let store = ModelDownloadStore(rootURL: rootURL)
+        let files = try collectFiles(in: staging, manifest: manifest)
+        guard files.contains(where: { $0.path.hasSuffix(".safetensors") }) else {
+            throw ModelImportError.invalidSource("No safetensors model weights were found.")
+        }
+        try validateWeightIndexes(in: staging, files: files)
+        let metadata = ModelMetadataPreflightResult(modelType: manifest.compatibility.modelType,
+            artifactRole: manifest.compatibility.artifactRole, quantization: nil)
+        let paths = Set(files.map(\.path))
+        if metadata.artifactRole != "tts" {
+            for path in metadata.requiredMetadataPaths(availablePaths: paths) where !paths.contains(path) {
+                throw ModelImportError.invalidSource("\(path) is missing.")
+            }
+        }
         _ = try ModelSnapshotVerifier().verify(snapshot: staging,
-            expectedProvider: preview.provider, expectedRepoID: preview.repoID,
+            expectedProvider: manifest.provider, expectedRepoID: manifest.repoID,
             requireCommitDirectory: false
         ) { path, completed, total in
             progress(ModelImportProgress(phase: "verifying", completedBytes: completed,
                 totalBytes: total, currentFile: path))
         }
-        if preview.compatibility.artifactRole == "tts" {
+        if manifest.compatibility.artifactRole == "tts" {
             _ = try await AudioResourcePreparationService(rootURL: rootURL).prepare(
                 snapshot: staging, token: nil
             ) { name, _, _ in
@@ -280,42 +421,62 @@ public struct ModelImportService: Sendable {
             }
         }
         let readiness = LocalModelScanner(rootURL: rootURL).readiness(for: staging.path)
-        guard readiness?.isLoadable == true else {
+        let storedOnly = manifest.compatibility.downloadOnly == true && readiness?.reasonCode == "download_only_model"
+        guard readiness?.isLoadable == true || storedOnly else {
             throw ModelImportError.unsupported(readiness?.message ?? "The copied snapshot is not ready to load.")
         }
         try ModelDownloadStore.atomicWrite(
             ModelSnapshotIntegrityRecord(
-                provider: preview.provider,
-                repoID: preview.repoID,
-                commitSHA: snapshotID,
+                provider: manifest.provider,
+                repoID: manifest.repoID,
+                commitSHA: manifest.commitSHA,
                 state: .verified,
                 verifiedAt: Date()
             ),
             to: staging.appendingPathComponent(ModelSnapshotIntegrityRecord.filename)
         )
-        let final = try store.snapshotURL(provider: preview.provider, repoID: preview.repoID, commitSHA: snapshotID)
+        let final = try store.snapshotURL(provider: manifest.provider, repoID: manifest.repoID, commitSHA: manifest.commitSHA)
+        let record = publication ?? staging.appendingPathExtension("json")
+        try ModelDownloadStore.atomicWrite(manifest, to: record)
         try FileManager.default.createDirectory(at: final.deletingLastPathComponent(), withIntermediateDirectories: true)
         if FileManager.default.fileExists(atPath: final.path) {
             let existing = try ModelSnapshotVerifier().verify(snapshot: final,
-                expectedProvider: preview.provider, expectedRepoID: preview.repoID)
+                expectedProvider: manifest.provider, expectedRepoID: manifest.repoID)
             guard existing.files == manifest.files else {
                 throw ModelImportError.destinationConflict(final.path)
             }
             try store.updateRef(for: existing)
-            return ModelImportResult(repoID: preview.repoID, snapshot: final, alreadyPresent: true)
+            if staging != final { try? FileManager.default.removeItem(at: staging) }
+            try? FileManager.default.removeItem(at: record)
+            return ModelImportResult(repoID: manifest.repoID, snapshot: final, alreadyPresent: true)
         }
         try Task.checkCancellation()
         guard rename(staging.path, final.path) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
-        do {
-            try ModelDownloadStore.syncDirectory(final.deletingLastPathComponent())
-            try store.updateRef(for: manifest)
-        } catch {
-            try? FileManager.default.removeItem(at: final)
-            throw error
+        try ModelDownloadStore.syncDirectory(final.deletingLastPathComponent())
+        try store.updateRef(for: manifest)
+        try? FileManager.default.removeItem(at: record)
+        return ModelImportResult(repoID: manifest.repoID, snapshot: final, alreadyPresent: false)
+    }
+
+    private func validateWeightIndexes(in source: URL, files: [InputFile]) throws {
+        let paths = Set(files.map(\.path))
+        for file in files where file.path.hasSuffix(".safetensors.index.json") {
+            let data = try Data(contentsOf: file.url)
+            guard let index = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let weights = index["weight_map"] as? [String: String], !weights.isEmpty else {
+                throw ModelImportError.invalidSource("Invalid weight_map in \(file.path).")
+            }
+            let parent = file.url.deletingLastPathComponent()
+            for shard in Set(weights.values).sorted() {
+                let url = try ModelSnapshotVerifier.safeFileURL(path: shard, beneath: parent)
+                let path = url.pathComponents.dropFirst(source.pathComponents.count).joined(separator: "/")
+                guard paths.contains(path) else {
+                    throw ModelImportError.invalidSource("Missing weight shard: \(path).")
+                }
+            }
         }
-        return ModelImportResult(repoID: preview.repoID, snapshot: final, alreadyPresent: false)
     }
 
     private func collectFiles(in source: URL, manifest: ModelSnapshotManifest?) throws -> [InputFile] {
@@ -391,19 +552,27 @@ public struct ModelImportService: Sendable {
     }
 
     private func ensureManagedPathIsNotRedirected(_ preview: ModelImportPreview) throws {
+        try ensureManagedPathsAreNotRedirected(provider: preview.provider, repository: preview.destination)
+    }
+
+    private func ensureManagedPathsAreNotRedirected(provider: ModelRepositoryProvider, repository: URL) throws {
         let modelRoot = rootURL.appendingPathComponent("models", isDirectory: true)
-        let providerRoot = ModelRepositoryLayout.providerRoot(rootURL: rootURL, provider: preview.provider)
-        for path in [modelRoot, providerRoot, preview.destination,
-                     preview.destination.appendingPathComponent(".imports"),
-                     preview.destination.appendingPathComponent("snapshots")] {
-            var info = stat()
-            if lstat(path.path, &info) == 0 {
-                guard info.st_mode & S_IFMT != S_IFLNK else {
-                    throw ModelImportError.invalidSource("The model library contains a redirected directory: \(path.path)")
-                }
-            } else if errno != ENOENT {
-                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        let providerRoot = ModelRepositoryLayout.providerRoot(rootURL: rootURL, provider: provider)
+        for path in [modelRoot, providerRoot, repository,
+                     repository.appendingPathComponent(".imports"),
+                     repository.appendingPathComponent("snapshots")] {
+            try rejectSymbolicLink(path)
+        }
+    }
+
+    private func rejectSymbolicLink(_ path: URL) throws {
+        var info = stat()
+        if lstat(path.path, &info) == 0 {
+            guard info.st_mode & S_IFMT != S_IFLNK else {
+                throw ModelImportError.invalidSource("The model library contains a redirected path: \(path.path)")
             }
+        } else if errno != ENOENT {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
 }

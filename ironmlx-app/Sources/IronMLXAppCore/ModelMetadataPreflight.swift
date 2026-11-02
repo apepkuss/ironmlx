@@ -19,6 +19,22 @@ public struct ModelMetadataPreflightResult: Decodable, Equatable, Sendable {
         case artifactRole = "artifact_role"
         case quantization
     }
+
+    func requiredMetadataPaths(availablePaths: Set<String>) -> [String] {
+        switch artifactRole {
+        case ModelArtifactRole.dflash2Drafter: return []
+        case "decision": return ["tokenizer/tokenizer.json"]
+        case ModelArtifactRole.imageGeneration: return ["processor/tokenizer.json"]
+        default:
+            if modelType == "nemotron_diarization" { return ["config.json"] }
+            if modelType == "qwen3_asr" {
+                let tokenizerPaths = availablePaths.contains("tokenizer.json")
+                    ? ["tokenizer.json"] : ["vocab.json", "merges.txt"]
+                return ["tokenizer_config.json", "preprocessor_config.json"] + tokenizerPaths
+            }
+            return ["tokenizer.json"]
+        }
+    }
 }
 
 public struct ModelQuantizationPreflight: Decodable, Equatable, Sendable {
