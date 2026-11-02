@@ -448,12 +448,15 @@ public struct ModelSnapshotVerifier: Sendable {
         var nextProgressBytes: Int64 = 64 * 1_024 * 1_024
         while true {
             try Task.checkCancellation()
-            let data = try handle.read(upToCount: 4 * 1_024 * 1_024) ?? Data()
-            if data.isEmpty {
-                break
+            // Detached tasks may hash hundreds of GB before yielding. Drain
+            // Foundation read temporaries for every chunk, not just on return.
+            let bytesRead = try autoreleasepool {
+                let data = try handle.read(upToCount: 4 * 1_024 * 1_024) ?? Data()
+                digest.update(data: data)
+                return data.count
             }
-            digest.update(data: data)
-            completedBytes += Int64(data.count)
+            if bytesRead == 0 { break }
+            completedBytes += Int64(bytesRead)
             if completedBytes >= nextProgressBytes {
                 progress?(completedBytes)
                 nextProgressBytes = completedBytes + 64 * 1_024 * 1_024

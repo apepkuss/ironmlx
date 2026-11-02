@@ -9,6 +9,145 @@ private struct ImportPreflight: ModelMetadataPreflighting {
     }
 }
 
+private struct RejectingImportPreflight: ModelMetadataPreflighting {
+    var message = "Error: unsupported model_type: qwen4_exp (expected 'llama')"
+
+    func validate(metadataDirectory: URL) async throws -> ModelMetadataPreflightResult {
+        throw ModelMetadataPreflightError.rejected(message)
+    }
+}
+
+private func writeImportSource(in root: URL, config: String = #"{"model_type":"qwen4_exp"}"#) throws -> URL {
+    let source = root.appendingPathComponent("external/model", isDirectory: true)
+    try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+    try Data(config.utf8).write(to: source.appendingPathComponent("config.json"))
+    try Data("{}".utf8).write(to: source.appendingPathComponent("tokenizer.json"))
+    try Data("weights".utf8).write(to: source.appendingPathComponent("model.safetensors"))
+    return source
+}
+
+@Test(arguments: ["Error: unsupported model_type: qwen4_exp (expected 'llama')",
+                  "Error: unsupported quantization.mode: future_mode",
+                  "Error: unsupported quantization.bits: 3",
+                  "Error: unsupported quantization.group_size: 16"])
+func unsupportedLocalModelsImportOnlyAfterExplicitConfirmation(message: String) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = try writeImportSource(in: root)
+    let managed = root.appendingPathComponent("managed")
+    let service = ModelImportService(rootURL: managed, preflight: RejectingImportPreflight(message: message))
+    let preview = try await service.inspect(source)
+    #expect(preview.downloadOnly)
+    #expect(preview.runtimeSupportError == message)
+    await #expect(throws: ModelImportError.self) { try await service.importModel(preview) }
+    #expect(!FileManager.default.fileExists(atPath: preview.destination.path))
+
+    let result = try await service.importModel(preview, allowUnsupported: true)
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: result.snapshot)
+    #expect(manifest.provider == .standalone)
+    #expect(manifest.compatibility.downloadOnly == true)
+    #expect(manifest.compatibility.runtimeSupportError == message)
+    let scanner = LocalModelScanner(rootURL: managed)
+    let imported = try #require(scanner.scan().first)
+    #expect(imported.readiness?.status == "unsupported")
+    #expect(imported.readiness?.reasonCode == "download_only_model")
+    #expect(imported.readiness?.isLoadable == false)
+    #expect(scanner.resolveModelPath(for: result.repoID) == nil)
+    #expect(scanner.resolveModelPath(for: result.snapshot.path) == nil)
+    #expect(try await ModelIntegrityVerificationService(rootURL: managed).verify(repoID: result.repoID).state == "verified")
+    #expect(try Data(contentsOf: source.appendingPathComponent("model.safetensors")) == Data("weights".utf8))
+}
+
+@Test(arguments: ["Invalid config.json", "Missing tokenizer", "unsupported architecture",
+                  "Error: DFlash2 config missing integer num_target_layers",
+                  "Error: DFlash2 target_layer_ids must be unique and strictly increasing"])
+func localImportDoesNotOverrideMalformedOrUnclassifiedMetadata(message: String) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = try writeImportSource(in: root)
+    let service = ModelImportService(rootURL: root.appendingPathComponent("managed"),
+                                     preflight: RejectingImportPreflight(message: message))
+    await #expect(throws: ModelMetadataPreflightError.self) { try await service.inspect(source) }
+}
+
+@Test(arguments: ["tokenizer", "weights", "shard", "index", "config"])
+func fileOnlyImportStillRequiresCompleteModelFiles(gate: String) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = try writeImportSource(in: root)
+    switch gate {
+    case "tokenizer": try FileManager.default.removeItem(at: source.appendingPathComponent("tokenizer.json"))
+    case "weights": try FileManager.default.removeItem(at: source.appendingPathComponent("model.safetensors"))
+    case "shard":
+        try Data(#"{"weight_map":{"tensor":"missing.safetensors"}}"#.utf8)
+            .write(to: source.appendingPathComponent("model.safetensors.index.json"))
+    case "index":
+        try Data(#"{"weight_map":{}}"#.utf8)
+            .write(to: source.appendingPathComponent("model.safetensors.index.json"))
+    default: try Data("invalid JSON".utf8).write(to: source.appendingPathComponent("config.json"))
+    }
+    let managed = root.appendingPathComponent("managed")
+    let service = ModelImportService(rootURL: managed, preflight: RejectingImportPreflight())
+    await #expect(throws: (any Error).self) { try await service.inspect(source) }
+    #expect(LocalModelScanner(rootURL: managed).scan().isEmpty)
+}
+
+@Test func fileOnlyImportPreservesDFlash2DraftRoleWithoutTokenizer() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = try writeImportSource(in: root,
+        config: #"{"model_type":"qwen3","architectures":["DFlash2DraftModel"]}"#)
+    try FileManager.default.removeItem(at: source.appendingPathComponent("tokenizer.json"))
+    let managed = root.appendingPathComponent("managed")
+    let service = ModelImportService(rootURL: managed, preflight: RejectingImportPreflight(
+        message: "Error: unsupported DFlash2 configuration: target_layer_ids count 8 differs from draft layer count 6"))
+    let preview = try await service.inspect(source)
+    #expect(preview.compatibility.artifactRole == ModelArtifactRole.dflash2Drafter)
+    let result = try await service.importModel(preview, allowUnsupported: true)
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: result.snapshot)
+    #expect(manifest.compatibility.artifactRole == ModelArtifactRole.dflash2Drafter)
+    #expect(manifest.compatibility.downloadOnly == true)
+    #expect(LocalModelScanner(rootURL: managed).resolveModelPath(for: result.repoID) == nil)
+}
+
+@Test func fileOnlyImportChecksExistingSnapshotHashesBeforePublishing() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let snapshot = try writeVerifiedTestSnapshot(root: root.appendingPathComponent("original"), repoID: "org/model",
+        files: ["config.json": Data(#"{"model_type":"qwen4_exp"}"#.utf8),
+                "tokenizer.json": Data("{}".utf8), "model.safetensors": Data("weights".utf8)])
+    // Keep the size unchanged so structural verification alone cannot detect damage.
+    try Data("damaged".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+    let managed = root.appendingPathComponent("managed")
+    let service = ModelImportService(rootURL: managed, preflight: RejectingImportPreflight())
+    let preview = try await service.inspect(snapshot)
+    await #expect(throws: ModelImportError.self) { try await service.importModel(preview, allowUnsupported: true) }
+    #expect(LocalModelScanner(rootURL: managed).scan().isEmpty)
+}
+
+@Test(arguments: ["nemotron_diarization", "qwen3_asr"])
+func fileOnlyAudioImportsUseTheSameRequiredMetadataAsDownloads(modelType: String) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let source = try writeImportSource(in: root, config: "{\"model_type\":\"\(modelType)\"}")
+    try FileManager.default.removeItem(at: source.appendingPathComponent("tokenizer.json"))
+    if modelType == "qwen3_asr" {
+        for path in ["tokenizer_config.json", "preprocessor_config.json", "vocab.json", "merges.txt"] {
+            try Data("{}".utf8).write(to: source.appendingPathComponent(path))
+        }
+    }
+    let managed = root.appendingPathComponent("managed")
+    let service = ModelImportService(rootURL: managed, preflight: RejectingImportPreflight(
+        message: "Error: unsupported quantization.mode: future_mode"))
+    let preview = try await service.inspect(source)
+    let result = try await service.importModel(preview, allowUnsupported: true)
+    #expect(try ModelSnapshotVerifier().verify(snapshot: result.snapshot).compatibility.downloadOnly == true)
+    if modelType == "qwen3_asr" {
+        try FileManager.default.removeItem(at: source.appendingPathComponent("preprocessor_config.json"))
+        await #expect(throws: ModelImportError.self) { try await service.inspect(source) }
+    }
+}
+
 @MainActor
 @Test func dashboardRegistersModelImportHandlers() {
     #expect(DashboardBridge.handlerNames.contains("chooseModelImport"))

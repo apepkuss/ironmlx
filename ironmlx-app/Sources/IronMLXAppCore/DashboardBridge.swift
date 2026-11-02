@@ -17,6 +17,7 @@ private struct ModelImportDashboardPreview: Encodable {
     let totalBytes: Int64
     let availableBytes: Int64?
     let modelType: String
+    let downloadOnly: Bool
 }
 
 @MainActor
@@ -67,6 +68,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private var runtimeRelayToken: RuntimeRelayToken?
     private var isDashboardWindowVisible = false
     private var isDashboardPageLoaded = false
+    private var modelImportRecoveryTask: Task<Void, Never>?
+    private var attemptedImportRecovery = false
     private lazy var diagnosticExportCoordinator = DiagnosticExportCoordinator(
         window: webView?.window,
         service: DiagnosticBundleService(
@@ -146,6 +149,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         huggingFaceSearchTask?.cancel()
         modelImportInspectionTask?.cancel()
         modelImportTask?.cancel()
+        modelImportRecoveryTask?.cancel()
         notificationCenter.removeObserver(self)
         // The download service is shared with the starter download flow and
         // owned by the App, which cancels its downloads at quit.
@@ -155,6 +159,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         diagnosticExportCoordinator.cancel()
         modelImportInspectionTask?.cancel()
         modelImportTask?.cancel()
+        modelImportRecoveryTask?.cancel()
         Task {
             await downloadService.cancelAllDownloads()
         }
@@ -192,6 +197,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "chooseModelImport",
         "confirmModelImport",
         "cancelModelImport",
+        "recoverModelImports",
         "cancelModelDownload",
         "searchHF",
         "cancelHFSearch",
@@ -298,12 +304,18 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             cancelHuggingFaceSearch()
         case "scanLocalModels":
             sendScannedModels()
+            if !attemptedImportRecovery {
+                attemptedImportRecovery = true
+                recoverModelImports()
+            }
         case "chooseModelImport":
             chooseModelImport()
         case "confirmModelImport":
-            confirmModelImport()
+            confirmModelImport(allowUnsupported: message.body as? Bool == true)
         case "cancelModelImport":
             cancelModelImport()
+        case "recoverModelImports":
+            recoverModelImports()
         case "syncLoadedModels":
             syncLoadedModels()
         case "exportRuntimeLog":
@@ -3344,7 +3356,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func chooseModelImport() {
-        guard modelImportTask == nil, modelImportInspectionTask == nil else { return }
+        guard modelImportTask == nil, modelImportInspectionTask == nil, modelImportRecoveryTask == nil else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
@@ -3370,7 +3382,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         fileCount: preview.fileCount,
                         totalBytes: preview.totalBytes,
                         availableBytes: preview.availableBytes,
-                        modelType: preview.compatibility.modelType
+                        modelType: preview.compatibility.modelType,
+                        downloadOnly: preview.downloadOnly
                     )
                     let json = try Self.jsonString(payload)
                     self.sendJavaScript("onModelImportPreview(\(Self.jsStringLiteral(json)))")
@@ -3391,12 +3404,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private func confirmModelImport() {
-        guard modelImportTask == nil, let preview = pendingModelImport else { return }
+    private func confirmModelImport(allowUnsupported: Bool) {
+        guard modelImportTask == nil, modelImportRecoveryTask == nil, let preview = pendingModelImport else { return }
         pendingModelImport = nil
         let service = importService
         let task = Task.detached(priority: .userInitiated) {
-            try await service.importModel(preview) { status in
+            try await service.importModel(preview, allowUnsupported: allowUnsupported) { status in
                 Task { @MainActor in
                     guard let json = try? Self.jsonString(status) else { return }
                     self.sendJavaScript("onModelImportProgress(\(Self.jsStringLiteral(json)))")
@@ -3425,7 +3438,62 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private func cancelModelImport() {
         modelImportInspectionTask?.cancel()
         modelImportTask?.cancel()
+        modelImportRecoveryTask?.cancel()
         pendingModelImport = nil
+    }
+
+    private func recoverModelImports() {
+        guard modelImportRecoveryTask == nil, modelImportTask == nil,
+              modelImportInspectionTask == nil, pendingModelImport == nil else { return }
+        let service = importService
+        modelImportRecoveryTask = Task { [weak self] in
+            guard let self else { return }
+            var completed: [String] = []
+            var errors: [String] = []
+            do {
+                let pending = try await Task.detached { try service.interruptedImports() }.value
+                try Task.checkCancellation()
+                if !pending.isEmpty { sendJavaScript("onModelImportRecoveryStarted()") }
+                for interrupted in pending {
+                    try Task.checkCancellation()
+                    IronMLXAppLogger.info("Recovering interrupted model import: \(interrupted.staging.path)")
+                    let task = Task.detached(priority: .utility) {
+                        try await service.recoverImport(interrupted) { status in
+                            Task { @MainActor [weak self] in
+                                guard let json = try? Self.jsonString(status) else { return }
+                                self?.sendJavaScript("onModelImportProgress(\(Self.jsStringLiteral(json)))")
+                            }
+                        }
+                    }
+                    modelImportTask = task
+                    do {
+                        let result = try await task.value
+                        modelImportTask = nil
+                        completed.append(result.repoID)
+                        IronMLXAppLogger.info("Recovered model import: \(result.repoID)")
+                    } catch {
+                        modelImportTask = nil
+                        if error is CancellationError { throw error }
+                        errors.append(error.localizedDescription)
+                        IronMLXAppLogger.error("Model import recovery failed: \(error.localizedDescription)")
+                    }
+                }
+                try Task.checkCancellation()
+            } catch {
+                modelImportTask = nil
+                if error is CancellationError {
+                    modelImportRecoveryTask = nil
+                    sendJavaScript("onModelImportCancelled()")
+                    return
+                }
+                errors.append(error.localizedDescription)
+                IronMLXAppLogger.error("Model import recovery failed: \(error.localizedDescription)")
+            }
+            modelImportRecoveryTask = nil
+            let payload = ["completed": completed, "errors": errors]
+            guard let json = try? Self.jsonString(payload) else { return }
+            sendScannedModels(afterScanJavaScript: "onModelImportRecoveryFinished(\(Self.jsStringLiteral(json)))")
+        }
     }
 
     private func modelsWithEffectiveMaxTokens(

@@ -62,6 +62,23 @@ The App always starts the model-manager helper first, even when no local model
 is configured; after the helper is healthy, the UI is shown and confirmed models
 continue restoring asynchronously.
 
+## Importing local models
+
+**Import local model** copies a model directory into the managed library and verifies
+its files. Explicit architecture or quantization incompatibility offers **Import
+anyway** in the preview. This saves a verified file-only snapshot, marked **Saved ·
+Cannot run in this version**; loading and default-model selection remain disabled.
+The same incompatibility rules apply to downloads and imports. Missing required
+files, malformed metadata, source changes, and integrity failures still block
+import. Ordinary folders are stored under `~/.ironmlx/models/standalone`; verified
+IronMLX provider snapshots retain their provider identity.
+
+On startup, the App discovers interrupted imports, verifies completed copies and
+finishes publication without recopying the model. Publication records also recover
+a snapshot renamed before its active ref was written. Recovery progress appears
+in Model Management. Failures preserve the files and show a persistent reason and
+**Retry recovery** action; incomplete copies are never silently marked as imported.
+
 ## Downloading incompatible models
 
 Downloads stop before weights are transferred when metadata preflight rejects the
