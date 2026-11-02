@@ -1,4 +1,4 @@
-//! Bridge for MLX convolution ops (1D, 2D, and transposed 1D).
+//! Bridge for MLX convolution ops (1D, 2D, 3D, and transposed 1D).
 //!
 //! Each fn carries 4 trailing `StreamOrDevice` args (P5.7) — same encoding
 //! as the array bridge: `(has_target, is_device_only, device_type, stream_index)`.
@@ -31,6 +31,25 @@ pub mod ffi {
             stride_w: i32,
             padding_h: i32,
             padding_w: i32,
+            dilation_h: i32,
+            dilation_w: i32,
+            groups: i32,
+            has_target: bool,
+            is_device_only: bool,
+            device_type: u8,
+            stream_index: i32,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        unsafe fn ops_conv3d(
+            input: &MlxArray,
+            weight: &MlxArray,
+            stride_t: i32,
+            stride_h: i32,
+            stride_w: i32,
+            padding_t: i32,
+            padding_h: i32,
+            padding_w: i32,
+            dilation_t: i32,
             dilation_h: i32,
             dilation_w: i32,
             groups: i32,

@@ -19,11 +19,28 @@ pub struct QsaState {
     pub values: Option<Array>,
     pub raw_index_keys: Option<Array>,
     pub block_keys: Option<Array>,
+    pub positions: Option<Array>,
     pub offset: i32,
     cap: i32,
 }
 
 impl QsaState {
+    pub fn reset(&mut self) {
+        self.keys = None;
+        self.values = None;
+        self.raw_index_keys = None;
+        self.block_keys = None;
+        self.positions = None;
+        self.offset = 0;
+    }
+    pub(crate) fn set_cap(&mut self, cap: i32) -> Result<()> {
+        ensure!(
+            cap > 0 && (0..=cap).contains(&self.offset),
+            "QSA snapshot exceeds destination capacity"
+        );
+        self.cap = cap;
+        Ok(())
+    }
     pub fn new(cap: i32) -> Result<Self> {
         ensure!(cap > 0, "QSA cache capacity must be positive");
         Ok(Self {
@@ -31,6 +48,7 @@ impl QsaState {
             values: None,
             raw_index_keys: None,
             block_keys: None,
+            positions: None,
             offset: 0,
             cap,
         })
@@ -61,9 +79,11 @@ impl QsaState {
         let keys = trim(&self.keys, 2)?;
         let values = trim(&self.values, 2)?;
         let index = trim(&self.raw_index_keys, 1)?;
+        let positions = trim(&self.positions, 2)?;
         self.keys = keys;
         self.values = values;
         self.raw_index_keys = index;
+        self.positions = positions;
         self.block_keys = None;
         self.offset = offset;
         Ok(())
@@ -124,14 +144,14 @@ impl QsaAttention {
             k_norm: norm("k_norm")?,
             index_q_norm: norm("indexer.q_layernorm")?,
             index_k_norm: norm("indexer.k_layernorm")?,
-            rope: Mrope::new(
+            rope: Mrope::new_reference_power(
                 cfg.head_dim,
                 rope.rope_theta,
                 rope.partial_rotary_factor,
                 &rope.mrope_section,
                 true,
             )?,
-            index_rope: Mrope::new(
+            index_rope: Mrope::new_reference_power(
                 cfg.indexer_head_dim,
                 rope.rope_theta,
                 rotary / cfg.indexer_head_dim as f32,
@@ -148,6 +168,7 @@ impl QsaAttention {
         projected: &Array,
         state: &mut QsaState,
         seq: i32,
+        chunk_positions: &Array,
         target: StreamOrDevice,
     ) -> Result<(Option<Array>, Option<Array>)> {
         let cfg = &self.cfg;
@@ -190,7 +211,7 @@ impl QsaAttention {
         let query =
             grouped_residual_rms_on(&query, &self.index_q_norm, hd, cfg.rms_norm_eps, target)?;
         let query = transpose_axes_on(&query, &[0, 2, 1, 3], target)?;
-        let (cos, sin) = self.index_rope.cos_sin(&positions(state.offset, seq, 1)?)?;
+        let (cos, sin) = self.index_rope.cos_sin(chunk_positions)?;
         let (query, _) = self.index_rope.apply(&query, &query, &cos, &sin)?;
         let previous = state
             .block_keys
@@ -207,9 +228,14 @@ impl QsaAttention {
             let pooled =
                 grouped_residual_rms_on(&pooled, &self.index_k_norm, hd, cfg.rms_norm_eps, target)?
                     .reshape_on([1, 1, blocks - previous, hd], target)?;
-            let (cos, sin) =
-                self.index_rope
-                    .cos_sin(&positions(previous * ratio, blocks - previous, ratio)?)?;
+            let block_positions = mlx::ops::indexing::slice_strided_on(
+                state.positions.as_ref().expect("QSA position history"),
+                &[0, 0, previous * ratio][..],
+                &[3, 1, blocks * ratio][..],
+                &[1, 1, ratio][..],
+                target,
+            )?;
+            let (cos, sin) = self.index_rope.cos_sin(&block_positions)?;
             let (pooled, _) = self.index_rope.apply(&pooled, &pooled, &cos, &sin)?;
             append(&state.block_keys, &pooled, 2, target)?
         } else {
@@ -281,6 +307,16 @@ impl QsaAttention {
         cache: &mut QsaState,
         target: StreamOrDevice,
     ) -> Result<Array> {
+        self.forward_positions_on(input, cache, None, target)
+    }
+
+    pub fn forward_positions_on(
+        &self,
+        input: &Array,
+        cache: &mut QsaState,
+        position_ids: Option<&Array>,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
         let shape = input.shape();
         let dims = shape.as_slice();
         ensure!(
@@ -295,11 +331,23 @@ impl QsaAttention {
                 .is_some_and(|n| n <= cache.cap),
             "QSA context capacity exceeded"
         );
+        let chunk_positions = match position_ids {
+            Some(ids) => {
+                ensure!(
+                    ids.shape().as_slice() == [3, 1, seq],
+                    "QSA positions must be [3,1,S]"
+                );
+                ids.clone()
+            }
+            None => positions(cache.offset, seq, 1)?,
+        };
         let mut state = cache.clone();
+        state.positions = Some(append(&state.positions, &chunk_positions, 2, target)?);
         let (mask, selected) = self.sparse_mask_on(
             &self.index.forward_on(input, target)?,
             &mut state,
             seq,
+            &chunk_positions,
             target,
         )?;
         let cfg = &self.cfg;
@@ -327,7 +375,7 @@ impl QsaAttention {
             .forward_on(input, target)?
             .reshape_on([1, seq, kv, hd], target)?;
         let v = transpose_axes_on(&v, &[0, 2, 1, 3], target)?;
-        let (cos, sin) = self.rope.cos_sin(&positions(state.offset, seq, 1)?)?;
+        let (cos, sin) = self.rope.cos_sin(&chunk_positions)?;
         let (q, k) = self.rope.apply(&q, &k, &cos, &sin)?;
         let k = append(&state.keys, &k, 2, target)?;
         let v = append(&state.values, &v, 2, target)?;

@@ -131,6 +131,9 @@ impl EngineVariantHttpAdapter for EngineVariant {
             Self::Qwen35(state) => openai::chat_completions_with_state(state.clone(), req).await,
             Self::Qwen35Moe(state) => openai::chat_completions_with_state(state.clone(), req).await,
             Self::Qwen36Moe(state) => openai::chat_completions_with_state(state.clone(), req).await,
+            Self::Qwen38FlashNext(state) => {
+                openai::chat_completions_with_state(state.clone(), req).await
+            }
             Self::Gemma4(state) => openai::chat_completions_with_state(state.clone(), req).await,
             Self::Gemma4Drafter(state) => {
                 openai::chat_completions_with_gemma4_drafter_state(state.as_ref().clone(), req)
@@ -163,6 +166,9 @@ impl EngineVariantHttpAdapter for EngineVariant {
             Self::Qwen35(state) => responses::responses_with_state(state.clone(), req).await,
             Self::Qwen35Moe(state) => responses::responses_with_state(state.clone(), req).await,
             Self::Qwen36Moe(state) => responses::responses_with_state(state.clone(), req).await,
+            Self::Qwen38FlashNext(state) => {
+                responses::responses_with_state(state.clone(), req).await
+            }
             Self::Gemma4(state) => responses::responses_with_state(state.clone(), req).await,
             Self::Gemma4Drafter(state) => {
                 responses::responses_with_state(state.base.clone(), req).await
@@ -204,6 +210,9 @@ impl EngineVariantHttpAdapter for EngineVariant {
             Self::Qwen35(state) => anthropic::messages_with_state(state.clone(), req).await,
             Self::Qwen35Moe(state) => anthropic::messages_with_state(state.clone(), req).await,
             Self::Qwen36Moe(state) => anthropic::messages_with_state(state.clone(), req).await,
+            Self::Qwen38FlashNext(state) => {
+                anthropic::messages_with_state(state.clone(), req).await
+            }
             Self::Gemma4(state) => anthropic::messages_with_state(state.clone(), req).await,
             Self::Gemma4Drafter(state) => {
                 anthropic::messages_with_gemma4_drafter_state(state.as_ref().clone(), req).await

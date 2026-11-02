@@ -92,6 +92,22 @@ impl GatedDeltaCacheSnapshot {
 }
 
 impl GatedDeltaCache {
+    /// Recreate a request row from already evaluated snapshot handles,
+    /// without allocating and immediately discarding a second zero state.
+    pub(crate) fn from_snapshot(snapshot: &GatedDeltaCacheSnapshot, cap: i32) -> Result<Self> {
+        anyhow::ensure!(
+            cap > 0 && snapshot.offsets.iter().all(|&n| (0..=cap).contains(&n)),
+            "GatedDelta snapshot exceeds destination capacity"
+        );
+        Ok(Self {
+            conv_state: snapshot.conv_state.clone(),
+            recurrent_state: snapshot.recurrent_state.clone(),
+            offsets: snapshot.offsets.clone(),
+            cap,
+            speculative_base: None,
+            speculative_replay: None,
+        })
+    }
     /// Allocate a fresh cache.
     ///
     /// `cap` and `kernel_size` must each be ≥ 1. Both states start zero-initialized.

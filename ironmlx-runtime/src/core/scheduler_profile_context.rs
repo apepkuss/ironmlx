@@ -30,7 +30,7 @@ pub struct SchedulerProfileContextOptions<'a> {
 
 pub fn build_scheduler_runtime_context(
     model_dir: &Path,
-    options: SchedulerProfileContextOptions<'_>,
+    mut options: SchedulerProfileContextOptions<'_>,
 ) -> Result<SchedulerAutotuneRuntimeContext> {
     let config_path = model_dir.join("config.json");
     let config_bytes = std::fs::read(&config_path)
@@ -38,6 +38,13 @@ pub fn build_scheduler_runtime_context(
     let config: serde_json::Value = serde_json::from_slice(&config_bytes)
         .with_context(|| format!("parsing {}", config_path.display()))?;
     let architecture = ModelArchitecture::from_config_value(&config)?;
+    if architecture == ModelArchitecture::Qwen38FlashNext {
+        options.kv_quantization = SchedulerKvQuantization::None;
+        options.active_kv_offload = false;
+        options.paged_prefix_cache_enabled = false;
+        options.prefix_lru_cache_max_bytes = None;
+        options.ssd_prefix_cache_max_bytes = None;
+    }
     let model_revision_fingerprint = model_fingerprint(model_dir, &config_bytes)?;
     let weight_quantization = weight_quantization_context(model_dir, &config)?;
 

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-18",
+  "updatedAt": "2026-11-03",
   "entries": [
     {
       "id": "qwen35-2b-4bit",
@@ -539,6 +539,32 @@
       "msMetadataRevision": "d2d96122f142c185af55e41b3c109808bfa39e0c",
       "modelId": "qwen38-27b",
       "variantLabel": "Affine · 8 bit"
+    },
+    {
+      "id": "qwen38-flash-next-4bit",
+      "name": "Qwen 3.8 Flash-Next",
+      "parameters": null,
+      "weightFormat": "Affine 4-bit",
+      "weightBytes": 111519423247,
+      "downloadBytes": 111546653418,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "verified",
+      "noteKey": "catalog_note_flash_next",
+      "hfRepo": "mlx-community/Qwen3.8-Flash-Next-4bit",
+      "msRepo": null,
+      "metadataRevision": "07b5dc6c54600a359b87f1e53e7adf6351c72a2c",
+      "evidence": [
+        "docs/development/qwen38-flash-next-qualification.md"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "qwen38-flash-next",
+      "variantLabel": "Affine · 4 bit"
     },
     {
       "id": "gemma4-e2b-4bit",
@@ -1169,6 +1195,29 @@
       "msMetadataRevision": "4a6b35cb971153e6b3c42e3136324c5302b1015c",
       "modelId": "qwen-image21",
       "variantLabel": "Mixed 4-bit / BF16"
+    },
+    {
+      "id": "dflash2-qwen38-flash-next-bf16",
+      "name": "Qwen 3.8 Flash-Next DFlash2",
+      "parameters": null,
+      "weightFormat": "BF16",
+      "weightBytes": 1206140008,
+      "downloadBytes": 1206437758,
+      "category": "assistant",
+      "capabilities": [
+        "assistant"
+      ],
+      "status": "verified",
+      "noteKey": "catalog_note_dflash",
+      "hfRepo": "incoai/Qwen3.8-Flash-Next-DFlash2",
+      "msRepo": null,
+      "metadataRevision": "a22a1744e85c17364dcc54a6a420af7135d4c7f6",
+      "evidence": [
+        "docs/development/qwen38-flash-next-qualification.md"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "dflash2-qwen38-flash-next",
+      "variantLabel": "BF16"
     },
     {
       "id": "dflash2-qwen38",

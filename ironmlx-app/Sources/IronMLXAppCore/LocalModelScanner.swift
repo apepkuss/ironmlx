@@ -361,6 +361,7 @@ private extension LocalModel {
 
 private struct DFlash2CompatibilitySignature: Equatable {
     var role: String
+    var flashDraftRecipe: Bool = false
     /// Target family (`qwen35_dense` or `qwen36_moe`); nil for drafts.
     var targetFamily: String? = nil
     var hiddenSize: Int?
@@ -380,12 +381,17 @@ private struct DFlash2CompatibilitySignature: Equatable {
         // Draft and target FFN widths are unrelated (a dense draft MLP and an
         // expert FFN), so only the shared hidden space and target geometry
         // the draft consumes are compared.
+        let ropeCompatible =
+            target.targetFamily == "qwen38_flash_next"
+            ? flashDraftRecipe && floatValuesMatch(ropeTheta, 10000)
+                && floatValuesMatch(target.ropeTheta, 10000000)
+            : floatValuesMatch(ropeTheta, target.ropeTheta)
         return hiddenSize == target.hiddenSize
             && vocabSize == target.vocabSize
             && maxPositionEmbeddings == target.maxPositionEmbeddings
             && targetLayerCount == target.targetLayerCount
             && floatValuesMatch(rmsNormEps, target.rmsNormEps)
-            && floatValuesMatch(ropeTheta, target.ropeTheta)
+            && ropeCompatible
             && blockSize.map { $0 >= 2 } == true
             && !targetLayerIDs.isEmpty
             && targetLayerIDs.allSatisfy { layer in
@@ -753,8 +759,11 @@ public struct LocalModelScanner: Sendable {
                         }
                         .sorted { $0.id.localizedStandardCompare($1.id) == .orderedAscending }
                     let family = targetSignature.targetFamily
-                    let draftBitsOptions = family == "qwen36_moe"
-                        ? LocalModelDFlash2Info.moeDraftBitsOptions
+                    let draftBitsOptions =
+                        family == "qwen38_flash_next"
+                        ? [0]
+                        : family == "qwen36_moe"
+                            ? LocalModelDFlash2Info.moeDraftBitsOptions
                         : LocalModelDFlash2Info.denseDraftBitsOptions
                     if !compatible.isEmpty {
                         let enabled = dflash2EnabledModels.contains(model.id)
@@ -952,6 +961,16 @@ public struct LocalModelScanner: Sendable {
             }
         }
         return nil
+    }
+
+    /// Flash's QSA/PLE/recurrent state has its own bounded storage plan;
+    /// the legacy full-KV swap format cannot extend its logical context yet.
+    public func supportsActiveKvOffload(for reference: String) -> Bool {
+        guard let path = resolveModelPath(for: reference),
+            let data = try? Data(contentsOf: URL(fileURLWithPath: path).appendingPathComponent("config.json")),
+            let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return true }
+        return normalizedString(config["model_type"]) != "qwen4-exp"
     }
 
     public func maxPositionEmbeddings(for reference: String) -> Int? {
@@ -1179,8 +1198,8 @@ public struct LocalModelScanner: Sendable {
         snapshot: URL
     ) -> LocalModelReasoningMetadata? {
         guard let modelType = config["model_type"] as? String,
-              modelType == "qwen3_5" || modelType == "qwen3_5_moe",
-              let template = chatTemplate(in: snapshot) else {
+            modelType == "qwen3_5" || modelType == "qwen3_5_moe" || modelType == "qwen4_exp",
+            let template = chatTemplate(in: snapshot) else {
             return nil
         }
         let qwen38Markers = [
@@ -1311,9 +1330,9 @@ public struct LocalModelScanner: Sendable {
                 signals: modelCapabilitySignals(config: config)
             ),
             supportsMtp: !isDiffusion && mtpCompatibilitySignature(config)?.supportsMtp == true,
-            supportsPromptLookup: !isDiffusion,
+            supportsPromptLookup: !isDiffusion && modelType != "qwen4-exp",
             supportsSpeculativeDecoding: !isDiffusion
-                && mtpCompatibilitySignature(config)?.supportsMtp == true,
+                && (modelType == "qwen4-exp" || mtpCompatibilitySignature(config)?.supportsMtp == true),
             supportsKvCache: !isDiffusion,
             supportedSamplingParameters: isDiffusion
                 ? ["max_tokens", "temperature", "seed"]
@@ -1367,6 +1386,12 @@ public struct LocalModelScanner: Sendable {
     }
 
     private func hasVisionCapability(config: [String: Any], signals: [String]) -> Bool {
+        if normalizedString(config["model_type"]) == "qwen4-exp" {
+            guard let vision = config["vision_config"] as? [String: Any] else { return false }
+            return intValue(vision["depth"]) == 27 && intValue(vision["hidden_size"]) == 1152
+                && intValue(vision["num_heads"]) == 16 && intValue(vision["out_hidden_size"]) == 2560
+                && intValue(vision["patch_size"]) == 16 && intValue(vision["spatial_merge_size"]) == 2
+        }
         if let visionConfig = config["vision_config"] as? [String: Any], !visionConfig.isEmpty {
             return true
         }
@@ -1451,6 +1476,27 @@ public struct LocalModelScanner: Sendable {
         }
         switch kind {
         case .base:
+            if normalizedString(config["model_type"]) == "qwen4-exp" {
+                guard let text = config["text_config"] as? [String: Any],
+                    let quant = config["quantization"] as? [String: Any],
+                    intValue(quant["bits"]) == 4, intValue(quant["group_size"]) == 32,
+                    normalizedString(quant["mode"]) == "affine",
+                    intValue(text["hidden_size"]) == 2560, intValue(text["num_hidden_layers"]) == 48,
+                    intValue(text["hc_count"]) == 4, intValue(text["num_experts"]) == 512,
+                    intValue(text["num_experts_per_tok"]) == 10,
+                    intValue(text["num_attention_heads"]) == 24, intValue(text["num_key_value_heads"]) == 2,
+                    intValue(text["head_dim"]) == 256,
+                    let vocab = positiveIntValue(text["vocab_size"]),
+                    let cap = positiveIntValue(text["max_position_embeddings"]),
+                    let eps = finitePositiveDouble(text["rms_norm_eps"]),
+                    let rope = text["rope_parameters"] as? [String: Any],
+                    let theta = finitePositiveDouble(rope["rope_theta"]), theta == 10000000
+                else { return nil }
+                return DFlash2CompatibilitySignature(
+                    role: "target", targetFamily: "qwen38_flash_next", hiddenSize: 2560, vocabSize: vocab,
+                    maxPositionEmbeddings: cap, targetLayerCount: 48, rmsNormEps: eps, ropeTheta: theta,
+                    targetLayerIDs: [])
+            }
             if normalizedString(config["model_type"]) == "qwen3-5-moe" {
                 return qwen36MoeDFlash2TargetSignature(config)
             }
@@ -1537,6 +1583,11 @@ public struct LocalModelScanner: Sendable {
             }
             return DFlash2CompatibilitySignature(
                 role: "draft",
+                flashDraftRecipe: hiddenSize == 2560 && intermediateSize == 7680
+                    && vocabSize == 248320 && targetLayerCount == 48 && numHiddenLayers == 5
+                    && numAttentionHeads == 32 && numKeyValueHeads == 8 && headDim == 128
+                    && slidingWindow == 2048 && blockSize == 8 && maskTokenID == 248077
+                    && targetLayerIDs == [5, 15, 25, 35, 45],
                 hiddenSize: hiddenSize,
                 intermediateSize: intermediateSize,
                 vocabSize: vocabSize,
@@ -2073,7 +2124,17 @@ public struct LocalModelScanner: Sendable {
         let supportedEmbedding = isSupportedEmbeddingConfig(configJSON)
         let supportedASR = Qwen3ASRModelSupport.isSupported(configJSON)
         let supportedDiarization = NemotronDiarizationModelSupport.isSupported(configJSON)
-        if manifest.compatibility.downloadOnly == true && !supportedEmbedding && !supportedASR && !supportedDiarization {
+        let supportedFlashNext =
+            normalizedString(configJSON["model_type"]) == "qwen4-exp"
+            && dflash2CompatibilitySignature(configJSON, kind: .base)?.targetFamily == "qwen38_flash_next"
+        if supportedFlashNext
+            && !FileManager.default.isReadableFile(atPath: url.appendingPathComponent("tokenizer.json").path)
+        {
+            missingFiles.append("tokenizer.json")
+        }
+        if manifest.compatibility.downloadOnly == true && !supportedEmbedding && !supportedASR && !supportedDiarization
+            && !supportedFlashNext
+        {
             readiness = LocalModelReadiness(
                 status: "unsupported", reasonCode: "download_only_model",
                 message: manifest.compatibility.runtimeSupportError ?? "Downloaded for file use only; this model cannot run in IronMLX."

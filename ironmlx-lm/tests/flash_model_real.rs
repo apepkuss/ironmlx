@@ -41,6 +41,10 @@ fn real_flash_text_prefill_and_decode() {
         start.elapsed()
     );
     let files = Arc::new(ModelTensorFiles::open(Path::new(&snapshot)).unwrap());
+    let pack_bytes = std::env::var("IRONMLX_FLASH_EXPERT_PACK_MIB")
+        .ok()
+        .map(|n| n.parse::<usize>().unwrap() * 1024 * 1024)
+        .unwrap_or(64 * 1024 * 1024);
     let model = FlashTextModel::from_loader_with_paging(
         &loader,
         files,
@@ -50,15 +54,23 @@ fn real_flash_text_prefill_and_decode() {
         paging.map(|cache_bytes| ExpertPagingOptions {
             cache_bytes,
             staging_bytes: 16 * 1024 * 1024,
-            pack_bytes: 64 * 1024 * 1024,
+            pack_bytes,
         }),
     )
     .unwrap();
     drop(loader);
     let tokenizer =
         tokenizers::Tokenizer::from_file(Path::new(&snapshot).join("tokenizer.json")).unwrap();
-    let prompt = "<|im_start|>user\nHello!<|im_end|>\n<|im_start|>assistant\n";
-    let tokens = tokenizer.encode(prompt, false).unwrap().get_ids().to_vec();
+    let prompt = std::env::var("IRONMLX_FLASH_PROMPT_FILE")
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .unwrap_or_else(|_| {
+            "<|im_start|>user\nHello!<|im_end|>\n<|im_start|>assistant\n".to_owned()
+        });
+    let tokens = tokenizer
+        .encode(prompt.as_str(), false)
+        .unwrap()
+        .get_ids()
+        .to_vec();
     let oracle = std::env::var("IRONMLX_FLASH_MODEL_ORACLE")
         .ok()
         .map(|path| {
@@ -91,7 +103,10 @@ fn real_flash_text_prefill_and_decode() {
             let (arrays, _) = mlx::io::load_safetensors(&path).unwrap();
             (metadata, arrays)
         });
-    let mut cache = model.new_cache(512).unwrap();
+    let steps = oracle.as_ref().map_or(24, |(metadata, _)| {
+        metadata["generated_tokens"].as_array().unwrap().len()
+    });
+    let mut cache = model.new_cache((tokens.len() + steps + 32) as i32).unwrap();
     let captures: Vec<usize> = if oracle.is_some() {
         (0..model.config.num_hidden_layers).collect()
     } else {
@@ -134,7 +149,7 @@ fn real_flash_text_prefill_and_decode() {
     let mut generated = Vec::new();
     let mut top1_matches = 0;
     let mut reference_ok = true;
-    for step in 0..24 {
+    for step in 0..steps {
         let logits = output
             .logits
             .astype(Dtype::Float32)

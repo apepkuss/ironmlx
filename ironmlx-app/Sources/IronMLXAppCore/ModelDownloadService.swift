@@ -1624,7 +1624,9 @@ public actor ModelDownloadService {
                 availableDiskBytes: nil,
                 physicalMemoryBytes: Int64(clamping: ProcessInfo.processInfo.physicalMemory)
             )
-            if runtimeSupportError == nil { try resources.validate() }
+            if runtimeSupportError == nil {
+                try resources.validate(requireResidentWeights: compatibility.requiresFullWeightResidency)
+            }
 
             let metadataBytes = try checkedTotalBytes(
                 metadata,

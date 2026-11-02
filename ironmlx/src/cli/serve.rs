@@ -182,8 +182,8 @@ pub struct ServeArgs {
     #[arg(long = "mtp-draft-tokens")]
     pub mtp_draft_tokens: Option<usize>,
 
-    /// Official DFlash2 draft checkpoint directory. Selects the isolated,
-    /// text-only DFlash2 request actor for this server.
+    /// Official DFlash2 draft checkpoint directory. Selects the isolated
+    /// DFlash2 actor for text and qualified image requests.
     #[arg(long = "dflash2-model-dir")]
     pub dflash2_model_dir: Option<PathBuf>,
 
@@ -194,8 +194,8 @@ pub struct ServeArgs {
     pub dflash2_block_size: Option<usize>,
 
     /// Runtime affine quantization for the official BF16 DFlash2 draft.
-    /// Pass 0 to keep the draft in BF16. Default: 4. Qwen3.6 MoE targets
-    /// support 4 and 0 (BF16) only.
+    /// Pass 0 to keep the draft in BF16. Default: 4; Flash-Next defaults to BF16 (0) and requires it. Qwen3.6 MoE
+    /// targets support 4 and 0 (BF16) only.
     #[arg(long = "dflash2-draft-bits")]
     pub dflash2_draft_bits: Option<i32>,
 
@@ -215,7 +215,7 @@ pub struct ServeArgs {
     /// their own table (tensor-unit affine4 expert and projection kernels,
     /// batched drafting and verify, NAX attention and split-K verify for
     /// long prompts; the startup log's `effective_settings` shows what is
-    /// on). `off` keeps the generic defaults.
+    /// on). Flash-Next uses its own group-32 profile with batched drafting and request-private verification; it does not inherit the Dense/MoE weight layouts. `off` keeps the generic defaults.
     #[arg(
         long = "m5-dflash2-profile",
         default_value = "auto",
@@ -1035,9 +1035,9 @@ where
         .with_context(|| format!("Loader::open_dflash2 {}", draft_dir.display()))?;
     let draft_bits_value = family.resolve_draft_bits(args.dflash2_draft_bits)?;
     let draft_bits = (draft_bits_value != 0).then_some(draft_bits_value);
-    let mut draft = ironmlx_lm::models::DFlash2DraftModel::from_loader(
+    let mut draft = ironmlx_lm::models::DFlash2DraftModel::from_loader_for_target(
         &draft_loader,
-        model.dflash2_target_spec(),
+        &model,
         draft_bits,
     )
     .context("DFlash2DraftModel::from_loader")?;
@@ -1051,7 +1051,12 @@ where
     family.ensure_tree_supported(&model, dflash2_tree_max_nodes(args))?;
     let block_size_resolution =
         family.resolve_block_size(&model, args.dflash2_block_size, checkpoint_block_size)?;
-    static_memory_estimate.speculative_cold_bytes = draft_loader.loaded_tensor_bytes();
+    static_memory_estimate.speculative_cold_bytes =
+        if family == super::dflash2_target::DFlash2TargetFamily::Qwen38FlashNext {
+            0 // Eagerly loaded/prewarmed MLX buffers are already in active_bytes.
+        } else {
+            draft_loader.loaded_tensor_bytes()
+        };
     drop(draft_loader);
     model.dflash2_prewarm().context("DFlash2 kernel prewarm")?;
     if model.dflash2_window_cost_budget_policy() {
@@ -1084,7 +1089,11 @@ where
     }
 
     let model_id = single_model_id(args)?;
-    let prefix_cache = resolve_dflash2_prefix_lru_cache_config(args)?;
+    let prefix_cache = if family == super::dflash2_target::DFlash2TargetFamily::Qwen38FlashNext {
+        None
+    } else {
+        resolve_dflash2_prefix_lru_cache_config(args)?
+    };
     let (tensor_batch_requested_max_width, tensor_batch_max_width) =
         resolve_dflash2_tensor_batch_width(
             args,
@@ -1482,7 +1491,32 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
         );
     }
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
-    let mut loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
+    let flash_plan = if architecture == ironmlx_lm::models::ModelArchitecture::Qwen38FlashNext {
+        anyhow::ensure!(
+            args.kv_quant.turboquant_bits().is_none(),
+            "Flash currently requires BF16 KV caches"
+        );
+        let cfg = resolved_scheduler.scheduler_config;
+        Some(ironmlx_runtime::core::flash_load::plan(
+            &model_dir,
+            cfg.b_max,
+            cfg.max_cache_cap,
+            cfg.prefill_chunk_size,
+            if dflash2_family.is_some() {
+                1536 << 20
+            } else {
+                0
+            },
+            None,
+        )?)
+    } else {
+        None
+    };
+    let mut loader = if let Some(plan) = &flash_plan {
+        plan.open_loader(&model_dir)?
+    } else {
+        Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?
+    };
     let component_bytes = loader.loaded_tensor_component_bytes();
     if dflash2_family.is_some() {
         // DFlash2 serving loads the vision encoder on its first image
@@ -1663,6 +1697,47 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                     scheduler_config,
                     scheduler_runtime_profile,
                     vision_input,
+                )
+            } else {
+                serve_with_model(
+                    model,
+                    tokenizer,
+                    &args,
+                    scheduler_config,
+                    scheduler_runtime_profile,
+                    vision_input,
+                    static_memory_estimate,
+                )
+            }
+        }
+        ironmlx_lm::models::ModelArchitecture::Qwen38FlashNext => {
+            let model = flash_plan
+                .as_ref()
+                .context("Flash load plan missing")?
+                .build_model(&loader)?;
+            let static_memory_estimate = StaticMemoryEstimate {
+                // Flash's retained weights were eagerly read/evaluated on
+                // the load thread and are already charged to MLX active RAM.
+                // Reserving the whole checkpoint again rejects valid full
+                // residency. Only the deferred tower remains a cold liability.
+                text_cold_bytes: 0,
+                vision_cold_bytes: flash_plan
+                    .as_ref()
+                    .context("Flash load plan missing")?
+                    .vision_weight_bytes as usize,
+                speculative_cold_bytes: 0,
+            };
+            drop(loader);
+            if let Some(family) = dflash2_family {
+                serve_with_dflash2_model(
+                    model,
+                    family,
+                    tokenizer,
+                    &args,
+                    scheduler_config,
+                    scheduler_runtime_profile,
+                    static_memory_estimate,
+                    vision_input.context("Flash vision input configuration missing")?,
                 )
             } else {
                 serve_with_model(

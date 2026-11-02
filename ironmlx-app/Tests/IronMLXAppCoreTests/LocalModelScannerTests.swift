@@ -1216,3 +1216,62 @@ func localModelScannerReevaluatesDownloadedEmbeddingGemma2(quantized: Bool, visi
     try Data("changed weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
     #expect(scanner.scan().first?.readiness?.isLoadable == false)
 }
+
+
+@Test(arguments: [false, true]) func flashNextUsesIndependentDraftRopeAndBF16Only(vision: Bool) throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let targetID = "mlx-community/Qwen3.8-Flash-Next-4bit"
+    let draftID = "incoai/Qwen3.8-Flash-Next-DFlash2"
+    let target = """
+        {"model_type":"qwen4_exp","vision_config":{"hidden_size":1152},
+         "quantization":{"mode":"affine","bits":4,"group_size":32},
+         "text_config":{"hidden_size":2560,"num_hidden_layers":48,"hc_count":4,
+           "num_experts":512,"num_experts_per_tok":10,"num_attention_heads":24,
+           "num_key_value_heads":2,"head_dim":256,"vocab_size":248320,
+           "max_position_embeddings":262144,"rms_norm_eps":0.000001,
+           "rope_parameters":{"rope_theta":10000000}}}
+        """
+    let draft = dflash2DraftConfig(hiddenSize: 2560)
+        .replacingOccurrences(of: "17408", with: "7680")
+        .replacingOccurrences(of: "\"num_target_layers\": 64", with: "\"num_target_layers\": 48")
+        .replacingOccurrences(of: "10000000", with: "10000")
+        .replacingOccurrences(of: "248070", with: "248077")
+        .replacingOccurrences(of: "[5, 19, 33, 47, 61]", with: "[5, 15, 25, 35, 45]")
+    let targetSnapshot = try writeVerifiedTestSnapshot(
+        root: root, repoID: targetID,
+        files: [
+            "config.json": Data(
+                (vision
+                    ? target.replacingOccurrences(
+                        of: "\"vision_config\":{\"hidden_size\":1152}",
+                        with:
+                            "\"vision_config\":{\"hidden_size\":1152,\"depth\":27,\"num_heads\":16,\"out_hidden_size\":2560,\"patch_size\":16,\"spatial_merge_size\":2}"
+                    ) : target).utf8), "model.safetensors": Data("weights".utf8),
+            "tokenizer.json": Data(#"{"version":"1.0"}"#.utf8),
+            "tokenizer_config.json": Data("{}".utf8),
+        ])
+    var manifest = try ModelSnapshotVerifier().loadManifest(at: targetSnapshot)
+    manifest.compatibility.downloadOnly = true
+    manifest.compatibility.artifactRole = "download_only"
+    manifest.compatibility.runtimeSupportError = "unsupported model_type: qwen4_exp"
+    try ModelDownloadStore(rootURL: root).writeManifest(manifest, to: targetSnapshot)
+    _ = try writeSnapshot(root: root, repoID: draftID, configJSON: draft)
+    _ = try writeSnapshot(
+        root: root, repoID: "wrong/Flash-DFlash2",
+        configJSON: draft.replacingOccurrences(of: "[5, 15, 25, 35, 45]", with: "[5, 16, 25, 35, 45]"))
+    let scanner = LocalModelScanner(rootURL: root)
+    let model = try #require(scanner.scan(loadedModels: []).first(where: { $0.id == targetID }))
+    #expect(model.readiness?.isLoadable == true)
+    #expect(try ModelSnapshotVerifier().loadManifest(at: targetSnapshot).compatibility.downloadOnly == true)
+    #expect(model.dflash2?.targetFamily == "qwen38_flash_next")
+    #expect(model.dflash2?.draftBitsOptions == [0])
+    #expect(model.dflash2?.candidates.map(\.id) == [draftID])
+    #expect(model.capabilities?.supportsVision == vision)
+    #expect(model.capabilities?.supportsMtp == false)
+    #expect(scanner.supportsActiveKvOffload(for: targetID) == false)
+    let parameters = ModelParameterStore(url: root.appendingPathComponent("parameters.json"))
+    #expect(
+        ModelLoadParameters.maxCacheCap(
+            for: targetID, scanner: scanner, parameterStore: parameters, activeKvOffloadEnabled: true) == 32768)
+}

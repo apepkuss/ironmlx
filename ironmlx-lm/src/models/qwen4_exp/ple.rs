@@ -20,6 +20,20 @@ use std::sync::Mutex;
 pub struct PleState {
     pub history: PleHistory,
     pub convolution: Option<Array>,
+    initial_history: PleHistory,
+}
+impl PleState {
+    pub(crate) fn from_history(history: PleHistory) -> Self {
+        Self {
+            initial_history: history.clone(),
+            history,
+            convolution: None,
+        }
+    }
+    pub fn reset(&mut self) {
+        self.history = self.initial_history.clone();
+        self.convolution = None;
+    }
 }
 
 pub struct PleLayer {
@@ -79,15 +93,13 @@ impl PleLayer {
     }
 
     pub fn new_state(&self) -> Result<PleState> {
-        Ok(PleState {
-            history: self
-                .rows
-                .lock()
-                .map_err(|_| anyhow::anyhow!("PLE cache lock poisoned"))?
-                .index()
-                .history(),
-            convolution: None,
-        })
+        let history = self
+            .rows
+            .lock()
+            .map_err(|_| anyhow::anyhow!("PLE cache lock poisoned"))?
+            .index()
+            .history();
+        Ok(PleState::from_history(history))
     }
 
     pub fn forward_on(
@@ -116,8 +128,16 @@ impl PleLayer {
                 .into_iter()
                 .flatten()
                 .collect();
-            rows.gather_on(&indices, target)?
-                .reshape_on([1, seq, cfg.ple_embed_dim], target)?
+            let per_chunk = rows.max_gather_rows() / rows.index().heads() * rows.index().heads();
+            let mut chunks = Vec::new();
+            for chunk in indices.chunks(per_chunk) {
+                chunks.push(rows.gather_on(chunk, target)?);
+            }
+            let refs: Vec<&Array> = chunks.iter().collect();
+            let embeddings = mlx::ops::shape::concatenate_on(&refs, 0, target)?
+                .reshape_on([1, seq, cfg.ple_embed_dim], target)?;
+            embeddings.eval()?;
+            embeddings
         };
         let norm = |x: &Array, gamma: &Array| {
             grouped_residual_rms_on(x, gamma, cfg.hidden_size, cfg.rms_norm_eps, target)

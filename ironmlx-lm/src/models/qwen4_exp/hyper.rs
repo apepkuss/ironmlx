@@ -96,9 +96,11 @@ impl HyperConnection {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("final HC mixer has no branch"))?;
         let (input, normed) = self.project_on(hyper, target)?;
-        let _stable = crate::nn::position_stable_qmm::scope();
-        let injection =
-            math::hc_injection_gate_on(&inject.forward_on(&normed, target)?, self.streams, target)?;
+        let injection = math::hc_injection_gate_on(
+            &inject.forward_singleton_gather_on(&normed, target)?,
+            self.streams,
+            target,
+        )?;
         Ok(HyperBranch {
             input,
             residual: hyper.clone(),

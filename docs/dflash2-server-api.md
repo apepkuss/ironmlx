@@ -20,8 +20,10 @@ Recorded validation covers:
 | Draft | `z-lab/Qwen3.8-27B-DFlash2` |
 | Target (MoE) | `mlx-community/Qwen3.6-35B-A3B-4bit`, `-5bit`, `-6bit` or `-8bit` |
 | Draft (MoE) | `incoai/Qwen3.6-35B-A3B-DFlash2` (BF16) |
+| Target (Flash) | `mlx-community/Qwen3.8-Flash-Next-4bit` |
+| Draft (Flash) | `incoai/Qwen3.8-Flash-Next-DFlash2` (BF16) |
 
-Text and image requests are served; video is not. The target loads its vision encoder on the first image request, and the draft cannot be loaded as a normal base model. Qwen3.8 targets must use affine 4-bit or 8-bit; Qwen3.6 35B A3B targets have their own limits, described in [Qwen3.6 35B A3B (MoE)](#qwen36-35b-a3b-moe). Other quantized or unquantized targets are not marked compatible by the App.
+Text and image requests are served; video is not. The target loads its vision encoder on the first image request, and the draft cannot be loaded as a normal base model. Qwen3.8 27B Dense targets must use affine 4-bit or 8-bit; Qwen3.6 35B A3B targets have their own limits, described in [Qwen3.6 35B A3B (MoE)](#qwen36-35b-a3b-moe). Flash has its own [qualified recipe](#qwen38-flash-next). Other quantized or unquantized targets are not marked compatible by the App.
 
 ## Startup example
 
@@ -45,9 +47,9 @@ ironmlx serve \
 | `--dflash2-position-keyed-sampling` | Explicitly opts sampled requests into the versioned device-side position-keyed sampler; changes same-seed output |
 | `--max-sequences` | Positive active-request limit |
 | `--model-id` | Stable public ID; defaults to the model path if omitted |
-| `--dflash2-tensor-batch-max-width` | Positive tensor-group width limit; default 4; 1 disables cross-request tensor batching, not request concurrency. Qwen3.8 only: the Qwen3.6 MoE target accepts the option but never forms tensor groups ([Qwen3.6 35B A3B (MoE)](#qwen36-35b-a3b-moe)) |
+| `--dflash2-tensor-batch-max-width` | Positive tensor-group width limit; default 4; 1 disables cross-request tensor batching, not request concurrency. Qwen3.8 27B Dense only: the Qwen3.6 MoE target accepts the option but never forms tensor groups ([Qwen3.6 35B A3B (MoE)](#qwen36-35b-a3b-moe)) |
 | `--m5-dflash2-profile` | `auto` (default) or `off`; `auto` turns on the qualified M5 settings of the target's family on Apple GPU generation 17 or newer (`healthz.dflash2.m5_profile`) |
-| `--ane` | `auto` (default) or `off`. With the M5 profile active, Qwen3.8 prefill MLPs of full 2048-token chunks starting below position 65,536 give 12 of their 34 channel units to the Neural Engine (W8A8); shorter prompts, decoding and MoE targets never use it. `off` keeps all computation on the GPU. `healthz.dflash2.m5_profile.ane_status` reports `active`, `disabled`, `not_applicable` or `inactive`. |
+| `--ane` | `auto` (default) or `off`. With the M5 profile active, Qwen3.8 27B Dense prefill MLPs of full 2048-token chunks starting below position 65,536 give 12 of their 34 channel units to the Neural Engine (W8A8); shorter prompts, decoding and MoE targets never use it. `off` keeps all computation on the GPU. `healthz.dflash2.m5_profile.ane_status` reports `active`, `disabled`, `not_applicable` or `inactive`. |
 
 Actual group width is the minimum of max sequences, tensor width limit and the number of ready requests with compatible execution shapes. The width limit does not increase active slots or replace max sequences.
 
@@ -55,7 +57,7 @@ The recorded `z-lab/Qwen3.8-27B-DFlash2` checkpoint declares block size 8, so au
 
 ## App configuration
 
-The scanner identifies `DFlash2DraftModel` as an auxiliary artifact. A draft appears in the selector only if it satisfies backend constraints and matches the target's hidden size, vocabulary, context length, layer count, RMS epsilon and RoPE theta. FFN widths are not compared because the draft has its own FFN, and the number of target taps is independent of the draft's depth. Incomplete or incompatible artifacts are rejected.
+The scanner identifies `DFlash2DraftModel` as an auxiliary artifact. A draft appears in the selector only if it satisfies backend constraints and matches the target's hidden size, vocabulary, context length, layer count, RMS epsilon and RoPE theta. FFN widths are not compared because the draft has its own FFN, and the number of target taps is independent of the draft's depth. Flash's intentional RoPE-theta difference is checked against its author pair contract below. Incomplete or incompatible artifacts are rejected.
 
 Dashboard exposes the DFlash2 switch, compatible draft, block size, draft precision and Tensor Batch limit. An empty block size uses the selected checkpoint width capped at Q8. An empty tensor batch limit uses the backend default of 4. The effective tensor batch width is also bounded by Max Sequences.
 Enabling DFlash2 retains one default target and restarts the backend into the fixed target/draft actor. Disabling or changing its settings also requires a controlled restart. Validation, startup or recovery failure restores the prior configuration and model parameters, then restarts the previous path.
@@ -83,12 +85,53 @@ Without the M5 profile, every greedy result, linear or tree, is token-identical 
 
 The M5 profile (`--m5-dflash2-profile`) uses its own MoE table and never inherits the Qwen3.8 settings. When active it turns on, among others, the M5 tensor-unit affine4 projections and expert kernels, tiled prefill GEMM, eligible single-graph prefill, confidence-based single-request verification, batched drafting, ragged linear batching of concurrent requests, D256 NAX attention for long prompts (prefill from 2,048 keys, decode and verify from 8,193), per-shape split-K for the affine4 projections, startup warmup and wired weights. The startup log's `effective_settings` and the non-null values in `healthz.dflash2.m5_profile.settings` list exactly what is on. The affine4 projections run for affine4 targets only; they are deterministic, but their output differs from ordinary MLX decoding, and the execution fingerprint reports `projections=m5-affine4-v1` (other widths report `product-stable-v2`). MoE targets have no dense MLP, so they never use the Neural Engine (`ane_status` is `not_applicable`, or `disabled` with `--ane off`). `healthz.dflash2.m5_profile.target` reports `qwen36-moe`; a target outside the qualified recipes is rejected at startup.
 
+## Qwen3.8 Flash-Next
+
+The qualified pair is `mlx-community/Qwen3.8-Flash-Next-4bit` (affine 4-bit,
+group 32) with `incoai/Qwen3.8-Flash-Next-DFlash2` (BF16). It supports text
+and image requests, including concurrent requests. Flash requires draft bits
+`0` (the automatic default for this family), block widths 2–8, linear
+verification and the stateful sampler. Flat trees, position-keyed sampling,
+MTP, Prompt Lookup, TurboQuant KV and persistent prefix payloads are not
+qualified. The author draft's RoPE theta differs from the target by design;
+the pair is checked against its exact capture-layer and geometry contract.
+
+The complete checkpoint is about 112 GB. Its PLE rows always stay on SSD.
+Before loading, IronMLX reserves the configured concurrency/context envelope,
+vision tower, draft and temporary memory; routed experts remain resident if
+that entire plan fits, otherwise a bounded read-only SSD expert cache is used.
+`IRONMLX_FLASH_EXPERT_RESIDENCY=auto|full|ssd` selects the policy, and
+`IRONMLX_FLASH_EXPERT_CACHE_MIB` sets the SSD-mode cache ceiling (16384 MiB
+by default). Smaller machines may need lower Max Sequences or context capacity;
+SSD paging does not make request state free. Existing standalone imports are
+recognized without reimporting. The App keeps Flash's default context at 32K
+and uses BF16 KV even when global settings select another KV format.
+
+The M5 profile reports target `qwen38-flash-next` and has an independent
+settings table. It retains native group-32 weight layouts, batches draft
+requests and verifies each request's QSA/PLE/GDN state transactionally. Older
+GPUs and `--m5-dflash2-profile off` use the generic path. ANE `auto` reports
+`not_applicable` for this recipe; `off` reports `disabled`. No Flash ANE
+acceleration is claimed. DFlash is adaptive: it measures ordinary and narrow
+windows before wider probes, and can choose ordinary decode when speculation
+costs more. Acceptance and hardware determine any throughput benefit.
+
+```bash
+ironmlx serve --model /path/to/Qwen3.8-Flash-Next-4bit \
+  --dflash2-model-dir /path/to/Qwen3.8-Flash-Next-DFlash2 \
+  --dflash2-draft-bits 0 --max-sequences 1 --max-cache-cap 32768
+```
+
+See the [qualification record](development/qwen38-flash-next-qualification.md)
+for fixed source identities, numerical gates and measured limits. Video input
+is not exposed by the current HTTP image contract.
+
 ## Execution and concurrency
 
 The separate actor does not use ordinary Scheduler, MTP or Prompt Lookup execution. Each request owns target/draft caches, a sampler and PRNG state.
-With one max sequence, one request advances; larger limits permit that many active requests. For Qwen3.8 targets, ready requests with identical execution keys form bounded MLX tensor groups (the Qwen3.6 MoE target batches as ragged rows instead; see [Qwen3.6 35B A3B (MoE)](#qwen36-35b-a3b-moe)). Excess requests form subsequent groups and advance in rotation. Different constraints, sampling shapes or cache states remain separate; differing accepted lengths split caches back into requests, which can regroup later. Benefits depend on hardware, workload and acceptance rate.
+With one max sequence, one request advances; larger limits permit that many active requests. For Qwen3.8 27B Dense targets, ready requests with identical execution keys form bounded MLX tensor groups (the Qwen3.6 MoE and Flash targets batch as ragged rows instead; see [Qwen3.6 35B A3B (MoE)](#qwen36-35b-a3b-moe)). Excess requests form subsequent groups and advance in rotation. Different constraints, sampling shapes or cache states remain separate; differing accepted lengths split caches back into requests, which can regroup later. Benefits depend on hardware, workload and acceptance rate.
 
-The optional tree builds a best-first candidate lattice capped at 15 nodes, batches at most eight root-to-leaf paths into one target verify forward, and commits only the accepted row's transactional cache state. For Qwen3.8 it is limited to affine-4, unconstrained B1 execution, and enabling it sets the effective cross-request tensor width to one because its batch lanes are reserved for tree paths. The Qwen3.6 MoE flat tree verifies its nodes in one forward at every qualified bit width. `tree_windows` and `tree_drafted_nodes` expose actual use rather than merely configured eligibility.
+The optional tree builds a best-first candidate lattice capped at 15 nodes, batches at most eight root-to-leaf paths into one target verify forward, and commits only the accepted row's transactional cache state. For Qwen3.8 27B Dense it is limited to affine-4, unconstrained B1 execution, and enabling it sets the effective cross-request tensor width to one because its batch lanes are reserved for tree paths. The Qwen3.6 MoE flat tree verifies its nodes in one forward at every qualified bit width. `tree_windows` and `tree_drafted_nodes` expose actual use rather than merely configured eligibility.
 
 When slots fill, requests wait in the admission queue. A full queue returns HTTP 503, `scheduler_queue_full`, and `Retry-After: 5`. Streaming disconnect releases caches and slots at the next safe boundary after the current forward.
 

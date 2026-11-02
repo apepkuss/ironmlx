@@ -121,6 +121,14 @@ pub(crate) enum DFlash2DraftBudgetPolicy {
 }
 
 impl DFlash2DraftBudgetPolicy {
+    pub(crate) fn with_sequential_calibration(mut self, enabled: bool) -> Self {
+        if let Self::WindowCost(policy) = &mut self {
+            policy.sequential_calibration = enabled;
+            policy.plan_next(false);
+        }
+        self
+    }
+
     #[cfg(test)]
     pub(crate) fn new(kind: DFlash2BudgetPolicyKind, max_draft_tokens: usize) -> Self {
         Self::with_memory(kind, max_draft_tokens, None)
@@ -538,6 +546,7 @@ pub(crate) struct DFlash2WindowCostPolicy {
     recovery_budget: usize,
     recovery_windows_left: usize,
     domain: Option<DFlash2PolicyDomain>,
+    sequential_calibration: bool,
 }
 
 impl DFlash2WindowCostPolicy {
@@ -575,11 +584,6 @@ impl DFlash2WindowCostPolicy {
     const SHARED_DEPTH_DECAY: f64 = 0.99;
     /// Depth-1 windows the pooled prior is worth in a new stream.
     const SHARED_PRIOR_WINDOWS: f64 = 4.0;
-
-    #[cfg(test)]
-    pub(crate) fn new(max_draft_tokens: usize) -> Self {
-        Self::with_memory(max_draft_tokens, None)
-    }
 
     pub(crate) fn with_memory(
         max_draft_tokens: usize,
@@ -625,6 +629,7 @@ impl DFlash2WindowCostPolicy {
             recovery_budget: 1,
             recovery_windows_left: 0,
             domain,
+            sequential_calibration: false,
         };
         policy.plan_next(false);
         policy
@@ -641,7 +646,12 @@ impl DFlash2WindowCostPolicy {
     fn calibration_budgets(&self) -> Vec<usize> {
         let max = self.max_draft_tokens;
         let mut unique = Vec::new();
-        for budget in [max, 1, max.div_ceil(2), 0] {
+        let order = if self.sequential_calibration {
+            [0, 1, max.div_ceil(2), max]
+        } else {
+            [max, 1, max.div_ceil(2), 0]
+        };
+        for budget in order {
             if !unique.contains(&budget) {
                 unique.push(budget);
             }
@@ -718,6 +728,24 @@ impl DFlash2WindowCostPolicy {
     }
 
     fn pending_calibration(&self) -> Option<usize> {
+        // A conservative upper acceptance estimate avoids repeated Q8 probes
+        // when a Q1-chain verifier is already much dearer than ordinary decode.
+        // Narrow recovery probes remain active; new acceptance evidence can
+        // reopen wider calibration without inventing unmeasured costs.
+        if self.sequential_calibration
+            && self.cost[0].samples >= Self::CALIBRATION_SAMPLES
+            && self.cost[1].samples >= Self::CALIBRATION_SAMPLES
+        {
+            let first = &self.depth[0];
+            let upper = (first.accepted + 2.0) / (first.reached + 2.0);
+            let upper_commits = Self::expected_committed(
+                &vec![upper; self.max_draft_tokens],
+                self.max_draft_tokens,
+            );
+            if self.cost[1].window_us / upper_commits > self.cost[0].window_us * 1.10 {
+                return None;
+            }
+        }
         self.calibration_budgets()
             .into_iter()
             .find(|&budget| self.cost[budget].samples < Self::CALIBRATION_SAMPLES)
@@ -2397,6 +2425,40 @@ mod tests {
                     .collect::<String>()
             );
         }
+    }
+
+    #[test]
+    fn sequential_verifier_measures_baseline_before_wide_windows_and_recovers() {
+        let mut policy = DFlash2DraftBudgetPolicy::new(DFlash2BudgetPolicyKind::WindowCost, 7)
+            .with_sequential_calibration(true);
+        assert_eq!(policy.current_budget(), 0);
+        for _ in 0..2 {
+            policy.observe(fixed_window(0, 0, 100));
+        }
+        assert_eq!(policy.current_budget(), 1);
+        for _ in 0..3 {
+            policy.observe(fixed_window(1, 0, 500));
+        }
+        assert_eq!(
+            policy.current_budget(),
+            0,
+            "dear rejected Q1 windows must not force Q8 calibration"
+        );
+        let state = window_cost_state_mut(&mut policy);
+        state.depth[0] = DepthStat {
+            reached: 10.0,
+            accepted: 10.0,
+        };
+        state.cost[1] = CostStat {
+            window_us: 110.0,
+            samples: 2,
+        };
+        state.plan_next(false);
+        assert_eq!(
+            policy.current_budget(),
+            4,
+            "improved acceptance reopens wider calibration"
+        );
     }
 
     fn fixed_window(budget: usize, accepted: usize, window_us: u64) -> MtpDraftPolicyWindow {

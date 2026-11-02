@@ -498,6 +498,10 @@ impl DecoderLayer {
                     "DecoderLayer::forward_on: received Mla cache (kind mismatch)"
                 ));
             }
+            #[cfg(unix)]
+            (_, Some(LayerCache::Flash(_))) => {
+                return Err(anyhow!("legacy decoder received a Flash composite cache"))
+            }
         };
         profile_decode_layer_turbo_stage("decode_attention_path", &[&attn], profile_shape)?;
         let h = x + &attn;

@@ -1048,6 +1048,8 @@ fn first_full_layer_offsets(cache: &[LayerCache]) -> Result<&[i32]> {
         .find_map(|c| match c {
             LayerCache::Full(kv) => Some(kv.offsets()),
             LayerCache::Mla(mla) => Some(mla.offsets()),
+            #[cfg(unix)]
+            LayerCache::Flash(cache)=>Some(cache.offsets()),
             _ => None,
         })
         .ok_or_else(|| {
@@ -1068,6 +1070,8 @@ fn cache_row_cached_len(cache: &[LayerCache], row: usize) -> Result<Option<i32>>
             LayerCache::Full(kv) => kv.offsets(),
             LayerCache::Linear(gd) => gd.offsets(),
             LayerCache::Mla(mla) => mla.offsets(),
+            #[cfg(unix)]
+            LayerCache::Flash(cache) => cache.offsets(),
         };
         let layer_cached_len = *layer_offsets.get(row).ok_or_else(|| {
             anyhow!(
@@ -1119,6 +1123,8 @@ fn cache_cap_and_dtype(cache: &[LayerCache]) -> Result<(i32, Dtype)> {
         match layer {
             LayerCache::Full(kv) => return Ok((kv.cap(), kv.dtype())),
             LayerCache::Mla(mla) => return Ok((mla.cap(), mla.dtype())),
+            #[cfg(unix)]
+            LayerCache::Flash(cache) => return Ok((cache.cap(), cache.dtype())),
             LayerCache::Linear(gd) => {
                 linear_cap.get_or_insert(gd.cap());
             }
@@ -1886,6 +1892,10 @@ fn adopt_cache_row_layers(
             (LayerCache::Mla(dst_mla), LayerCache::Mla(src_mla)) => {
                 dst_mla.adopt_row_from(src_mla, dst_row, src_row)?;
             }
+            #[cfg(unix)]
+            (LayerCache::Flash(dst), LayerCache::Flash(src)) => {
+                dst.adopt_row_from(src, dst_row, src_row)?
+            }
             _ => return Err(anyhow!("{context}: cache layer kind mismatch")),
         }
     }
@@ -1919,6 +1929,10 @@ fn adopt_cache_row_layers_skipping_reused_paged(
             (LayerCache::Mla(dst_mla), LayerCache::Mla(src_mla)) => {
                 dst_mla.adopt_row_from(src_mla, dst_row, src_row)?;
             }
+            #[cfg(unix)]
+            (LayerCache::Flash(dst), LayerCache::Flash(src)) => {
+                dst.adopt_row_from(src, dst_row, src_row)?;
+            }
             _ => return Err(anyhow!("{context}: cache layer kind mismatch")),
         }
     }
@@ -1944,6 +1958,8 @@ fn reuse_full_paged_storage(
             }
             (LayerCache::Linear(_), LayerCache::Linear(_))
             | (LayerCache::Mla(_), LayerCache::Mla(_)) => {}
+            #[cfg(unix)]
+            (LayerCache::Flash(_), LayerCache::Flash(_)) => {}
             _ => return Err(anyhow!("{context}: cache layer kind mismatch")),
         }
     }
@@ -1955,6 +1971,8 @@ fn reuse_full_paged_storage(
             }
             (LayerCache::Linear(_), LayerCache::Linear(_))
             | (LayerCache::Mla(_), LayerCache::Mla(_)) => {}
+            #[cfg(unix)]
+            (LayerCache::Flash(_), LayerCache::Flash(_)) => {}
             _ => return Err(anyhow!("{context}: cache layer kind mismatch")),
         }
     }
@@ -2140,6 +2158,8 @@ fn full_paged_page_bytes(cache: &[LayerCache]) -> usize {
     cache.iter().fold(0_usize, |total, layer| match layer {
         LayerCache::Full(kv) => total.saturating_add(kv.paged_page_bytes().unwrap_or(0)),
         LayerCache::Linear(_) | LayerCache::Mla(_) => total,
+        #[cfg(unix)]
+        LayerCache::Flash(_) => total,
     })
 }
 
@@ -2148,6 +2168,8 @@ fn cache_is_fullpaged_only(cache: &[LayerCache]) -> bool {
         && cache.iter().all(|layer| match layer {
             LayerCache::Full(kv) => kv.paged().is_some(),
             LayerCache::Linear(_) | LayerCache::Mla(_) => false,
+            #[cfg(unix)]
+            LayerCache::Flash(_) => false,
         })
 }
 
@@ -2162,6 +2184,8 @@ fn full_paged_available_unique_pages(cache: &[LayerCache]) -> Option<usize> {
                 }));
             }
             LayerCache::Linear(_) | LayerCache::Mla(_) => return None,
+            #[cfg(unix)]
+            LayerCache::Flash(_) => return None,
         }
     }
     available
@@ -2237,6 +2261,8 @@ fn paged_adopt_page_copies(cache: &[LayerCache]) -> u64 {
         .filter_map(|layer| match layer {
             LayerCache::Full(kv) => kv.paged_physical_stats(),
             LayerCache::Linear(_) | LayerCache::Mla(_) => None,
+            #[cfg(unix)]
+            LayerCache::Flash(_) => None,
         })
         .fold(0_u64, |total, stats| {
             total.saturating_add(stats.adopt_page_copies)
@@ -5351,6 +5377,9 @@ pub struct Scheduler<M: Model> {
     process_memory_governor: Option<crate::core::process_memory::SharedProcessMemoryGovernor>,
     cold_materialization_tracker:
         Arc<OnceLock<Arc<crate::core::process_memory::ColdMaterializationTracker>>>,
+    /// The outer synchronous prefill owns these cold-component permits.
+    /// Chunked/mid-admission helpers must borrow that scope, not wait on it.
+    cold_materialization_scope: Option<crate::core::process_memory::MaterializationComponents>,
     runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
     governor_admission_reservations:
         HashMap<RequestId, crate::core::process_memory::MemoryReservation>,
@@ -5403,8 +5432,17 @@ impl<M: Model> Scheduler<M> {
         effective_cap_max: usize,
         meta: ironmlx_lm::core::model::ModelMeta,
     ) -> Result<Self, crate::core::memory_budget::MemoryBudgetError> {
-        let budget_state =
-            crate::core::memory_budget::validate_startup_budget(b_max, effective_cap_max, &meta)?;
+        let budget_state = if let Some((per_token, fixed)) = M::scheduler_cache_cost() {
+            crate::core::memory_budget::validate_startup_budget_with_cost(
+                b_max,
+                effective_cap_max,
+                &meta,
+                per_token,
+                fixed,
+            )?
+        } else {
+            crate::core::memory_budget::validate_startup_budget(b_max, effective_cap_max, &meta)?
+        };
         let memory_budget_exceeded_count =
             std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         Self::new_with_state(
@@ -5473,6 +5511,7 @@ impl<M: Model> Scheduler<M> {
             active_kv_stats: None,
             process_memory_governor: None,
             cold_materialization_tracker: Arc::new(OnceLock::new()),
+            cold_materialization_scope: None,
             runtime_usage: Arc::new(
                 crate::core::runtime_usage::ModelRuntimeUsageCounters::default(),
             ),
@@ -5556,6 +5595,15 @@ impl<M: Model> Scheduler<M> {
         &self,
         components: crate::core::process_memory::MaterializationComponents,
     ) -> Result<Option<crate::core::process_memory::ColdMaterializationGuard>> {
+        if let Some(owned) = self.cold_materialization_scope {
+            anyhow::ensure!(
+                (!components.text || owned.text)
+                    && (!components.vision || owned.vision)
+                    && (!components.speculative || owned.speculative),
+                "nested prefill exceeds its cold-materialization scope"
+            );
+            return Ok(None);
+        }
         let (Some(tracker), Some(governor)) = (
             self.cold_materialization_tracker.get(),
             self.process_memory_governor.as_ref(),
@@ -5803,7 +5851,8 @@ impl<M: Model> Scheduler<M> {
             self.budget_state.logical_cap(),
             self.budget_state.resident_cap(),
             self.budget_state.policy(),
-        );
+        )
+        .with_custom_cost(T::scheduler_cache_cost());
         let mut scheduler = Scheduler::<T>::new_with_state(
             1,
             self.effective_cap_max,
@@ -7057,8 +7106,7 @@ impl<M: Model> Scheduler<M> {
         // B1-p2.5: memory budget admission gate.
         let row_cap = req.prompt_ids.len().saturating_add(req.max_new_tokens);
         let charged_cap = self.budget_state.resident_charge_cap(row_cap);
-        let requested_bytes =
-            crate::core::memory_budget::kv_cache_bytes(1, charged_cap, &self.meta);
+        let requested_bytes = self.budget_state.request_bytes(charged_cap, &self.meta);
         let allowance = if req.priority.is_background() {
             0
         } else {
@@ -12430,9 +12478,12 @@ impl<M: Model> Scheduler<M> {
         M: MtpSpeculativeModel + DenseVlMethods,
     {
         self.ensure_not_poisoned()?;
-        let cold_materialization =
-            self.begin_cold_materialization(self.active_materialization_components(true))?;
-        match self.prefill_admitted_mtp_batch_inner(model, mtp, cfg, projection) {
+        let components = self.active_materialization_components(true);
+        let cold_materialization = self.begin_cold_materialization(components)?;
+        let previous_scope = self.cold_materialization_scope.replace(components);
+        let result = self.prefill_admitted_mtp_batch_inner(model, mtp, cfg, projection);
+        self.cold_materialization_scope = previous_scope;
+        match result {
             Ok(events) => {
                 self.commit_all_governor_admissions();
                 if let Some(guard) = cold_materialization {
@@ -14874,9 +14925,12 @@ impl<M: Model> Scheduler<M> {
         M: DenseVlMethods,
     {
         self.ensure_not_poisoned()?;
-        let cold_materialization =
-            self.begin_cold_materialization(self.active_materialization_components(false))?;
-        match self.prefill_admitted_inner(model) {
+        let components = self.active_materialization_components(false);
+        let cold_materialization = self.begin_cold_materialization(components)?;
+        let previous_scope = self.cold_materialization_scope.replace(components);
+        let result = self.prefill_admitted_inner(model);
+        self.cold_materialization_scope = previous_scope;
+        match result {
             Ok(events) => {
                 self.commit_all_governor_admissions();
                 if let Some(guard) = cold_materialization {
@@ -14989,11 +15043,12 @@ impl<M: Model> Scheduler<M> {
 
         if active_rows.len() > 1
             && model.requires_split_batched_prefill_for_token_parity()
-            && active_rows.iter().all(|&row| {
-                self.slots[row]
-                    .as_ref()
-                    .is_some_and(|state| state.pixel_values.is_none())
-            })
+            && (model.requires_row_isolated_multimodal_prefill()
+                || active_rows.iter().all(|&row| {
+                    self.slots[row]
+                        .as_ref()
+                        .is_some_and(|state| state.pixel_values.is_none())
+                }))
         {
             return self.prefill_admitted_row_isolated(model, &active_rows);
         }
@@ -18414,9 +18469,12 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
         cfg: MtpSpeculativeConfig,
     ) -> Result<Vec<StepEvent>> {
         self.ensure_not_poisoned()?;
-        let cold_materialization =
-            self.begin_cold_materialization(self.active_materialization_components(true))?;
-        match self.prefill_admitted_gemma4_drafter_batch_inner(model, drafter, cfg) {
+        let components = self.active_materialization_components(true);
+        let cold_materialization = self.begin_cold_materialization(components)?;
+        let previous_scope = self.cold_materialization_scope.replace(components);
+        let result = self.prefill_admitted_gemma4_drafter_batch_inner(model, drafter, cfg);
+        self.cold_materialization_scope = previous_scope;
+        match result {
             Ok(events) => {
                 self.commit_all_governor_admissions();
                 if let Some(guard) = cold_materialization {
@@ -21560,6 +21618,76 @@ mod tests {
     }
 
     #[test]
+    #[serial(mlx_metal)]
+    fn cold_vision_chunked_prefill_borrows_outer_permit_without_waiting_on_it() {
+        use crate::core::process_memory::{
+            ComponentMaterializationState, HostVmStatistics, MaterializationComponent,
+            MemoryGovernorConfig, MemoryTelemetry, ProcessMemoryGovernor, StaticMemoryEstimate,
+        };
+
+        let gib = 1024 * 1024 * 1024;
+        let governor = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                static_reserve_bytes: 4 * gib,
+                minimum_prefill_chunk_tokens: 1,
+                ..MemoryGovernorConfig::default()
+            })
+            .expect("governor"),
+        );
+        governor.update(MemoryTelemetry {
+            total_ram_bytes: 32 * gib,
+            phys_footprint_bytes: Some(4 * gib),
+            vm: Some(HostVmStatistics {
+                free_bytes: 8 * gib,
+                inactive_bytes: 2 * gib,
+                active_bytes: 8 * gib,
+                wired_bytes: 8 * gib,
+            }),
+            mlx_active_bytes: Some(4 * gib),
+            mlx_cache_bytes: Some(0),
+            metal_limit_bytes: Some(24 * gib),
+        });
+        let tracker =
+            crate::core::process_memory::ColdMaterializationTracker::new(StaticMemoryEstimate {
+                text_cold_bytes: 8_192,
+                vision_cold_bytes: 4_096,
+                ..StaticMemoryEstimate::default()
+            });
+        let tracker_slot = Arc::new(OnceLock::new());
+        tracker_slot
+            .set(Arc::clone(&tracker))
+            .expect("install tracker");
+        let mut scheduler = Scheduler::<ScriptedMtpSchedulerModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        scheduler.process_memory_governor = Some(Arc::clone(&governor));
+        scheduler.share_cold_materialization_tracker(tracker_slot);
+        let mut request = mk_req(vec![1, 248056, 2, 3]);
+        request.prefill_chunk_size = 2;
+        request.pixel_values = Some(vec![mlx::Array::zeros([1, 1], mlx::Dtype::Float32).unwrap()]);
+        request.image_grid_thw = Some(vec![(1, 2, 2)]);
+        scheduler.admit(request).expect("admit");
+        let model = ScriptedMtpSchedulerModel::new(3, Vec::new(), Vec::new());
+        scheduler
+            .prefill_admitted(&model)
+            .expect("chunked vision prefill");
+        assert_eq!(
+            tracker.state(MaterializationComponent::Vision),
+            ComponentMaterializationState::Warm
+        );
+        assert!(scheduler.cold_materialization_scope.is_none());
+
+        assert_eq!(
+            tracker.state(MaterializationComponent::Text),
+            ComponentMaterializationState::Warm
+        );
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+    }
+
+    #[test]
     fn process_governor_prefill_failure_rolls_back_admission_reservation() {
         use crate::core::process_memory::{
             HostVmStatistics, MemoryGovernorConfig, MemoryTelemetry, ProcessMemoryGovernor,
@@ -22114,6 +22242,10 @@ mod tests {
                     }
                     ironmlx_lm::core::cache::layer::LayerCache::Linear(gd) => gd.advance(lens)?,
                     ironmlx_lm::core::cache::layer::LayerCache::Mla(_) => {}
+                    #[cfg(unix)]
+                    ironmlx_lm::core::cache::layer::LayerCache::Flash(_) => {
+                        panic!("test model did not create Flash cache")
+                    }
                 }
             }
             Ok(())
@@ -22523,6 +22655,10 @@ mod tests {
                         gd.advance(lens)?;
                     }
                     ironmlx_lm::core::cache::layer::LayerCache::Mla(_) => {}
+                    #[cfg(unix)]
+                    ironmlx_lm::core::cache::layer::LayerCache::Flash(_) => {
+                        panic!("test model did not create Flash cache")
+                    }
                 }
             }
             Ok(())
@@ -25276,6 +25412,8 @@ mod tests {
                 LayerCache::Full(kv) => assert_eq!(kv.offsets(), &[expected_offset]),
                 LayerCache::Linear(gd) => assert_eq!(gd.offsets(), &[expected_offset]),
                 LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+                #[cfg(unix)]
+                LayerCache::Flash(_) => panic!("test model did not create Flash cache"),
             }
         }
     }
@@ -25339,6 +25477,8 @@ mod tests {
                 LayerCache::Full(kv) => assert_eq!(kv.offsets(), &[expected_offset]),
                 LayerCache::Linear(gd) => assert_eq!(gd.offsets(), &[expected_offset]),
                 LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+                #[cfg(unix)]
+                LayerCache::Flash(_) => panic!("test model did not create Flash cache"),
             }
         }
     }
@@ -25381,6 +25521,8 @@ mod tests {
                 LayerCache::Full(kv) => assert_eq!(kv.offsets(), &[expected_offset]),
                 LayerCache::Linear(gd) => assert_eq!(gd.offsets(), &[expected_offset]),
                 LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+                #[cfg(unix)]
+                LayerCache::Flash(_) => panic!("test model did not create Flash cache"),
             }
         }
         let stats = scheduler
@@ -25420,6 +25562,8 @@ mod tests {
                 LayerCache::Full(kv) => kv.offsets().to_vec(),
                 LayerCache::Linear(gd) => gd.offsets().to_vec(),
                 LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+                #[cfg(unix)]
+                LayerCache::Flash(_) => panic!("test model did not create Flash cache"),
             })
             .collect::<Vec<_>>();
         let prng_before = scheduler.prng_state.to_vec::<u32>().expect("PRNG before");
@@ -25440,6 +25584,8 @@ mod tests {
                 LayerCache::Full(kv) => kv.offsets().to_vec(),
                 LayerCache::Linear(gd) => gd.offsets().to_vec(),
                 LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+                #[cfg(unix)]
+                LayerCache::Flash(_) => panic!("test model did not create Flash cache"),
             })
             .collect::<Vec<_>>();
         assert_eq!(offsets_after, offsets_before);
@@ -25521,6 +25667,8 @@ mod tests {
                 LayerCache::Full(kv) => assert_eq!(kv.offsets(), &[11, 8]),
                 LayerCache::Linear(gd) => assert_eq!(gd.offsets(), &[11, 8]),
                 LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+                #[cfg(unix)]
+                LayerCache::Flash(_) => panic!("test model did not create Flash cache"),
             }
         }
 
@@ -25610,6 +25758,8 @@ mod tests {
                 LayerCache::Full(kv) => kv.offsets()[1],
                 LayerCache::Linear(gd) => gd.offsets()[1],
                 LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+                #[cfg(unix)]
+                LayerCache::Flash(_) => panic!("test model did not create Flash cache"),
             })
             .collect::<Vec<_>>();
         model.clear_text_hidden_trace();
@@ -25651,6 +25801,8 @@ mod tests {
                 LayerCache::Full(kv) => kv.offsets()[1],
                 LayerCache::Linear(gd) => gd.offsets()[1],
                 LayerCache::Mla(_) => panic!("unexpected MLA cache"),
+                #[cfg(unix)]
+                LayerCache::Flash(_) => panic!("test model did not create Flash cache"),
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -26362,6 +26514,8 @@ mod tests {
             match &scheduler.cache.as_ref().expect("main cache before rebase")[0] {
                 LayerCache::Full(cache) => cache.offsets()[0],
                 LayerCache::Linear(_) | LayerCache::Mla(_) => panic!("expected full cache"),
+                #[cfg(unix)]
+                LayerCache::Flash(_) => panic!("expected full cache"),
             };
 
         scheduler
@@ -26392,6 +26546,8 @@ mod tests {
             match &scheduler.cache.as_ref().expect("main cache after rebase")[0] {
                 LayerCache::Full(cache) => cache.offsets()[0],
                 LayerCache::Linear(_) | LayerCache::Mla(_) => panic!("expected full cache"),
+                #[cfg(unix)]
+                LayerCache::Flash(_) => panic!("expected full cache"),
             };
         assert_eq!(
             main_cache_offset_after, main_cache_offset_before,

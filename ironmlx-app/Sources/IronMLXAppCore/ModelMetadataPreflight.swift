@@ -20,6 +20,11 @@ public struct ModelMetadataPreflightResult: Decodable, Equatable, Sendable {
         case quantization
     }
 
+    /// Flash's bounded expert/PLE loader performs its complete memory plan
+    /// at load time; downloading the checkpoint does not require all weights
+    /// to fit RAM. Disk and snapshot-integrity checks remain mandatory.
+    var requiresFullWeightResidency: Bool { modelType != "qwen4_exp" }
+
     func requiredMetadataPaths(availablePaths: Set<String>) -> [String] {
         switch artifactRole {
         case ModelArtifactRole.dflash2Drafter: return []
@@ -138,7 +143,7 @@ public struct ModelResourcePreflight: Sendable {
         return result.overflow ? Int64.max : result.partialValue
     }
 
-    public func validate() throws {
+    public func validate(requireResidentWeights: Bool = true) throws {
         if let availableDiskBytes,
            requiredDiskBytes > availableDiskBytes {
             throw ModelResourcePreflightError.insufficientDisk(
@@ -146,6 +151,7 @@ public struct ModelResourcePreflight: Sendable {
                 available: availableDiskBytes
             )
         }
+        guard requireResidentWeights else { return }
         let usableMemory = max(0, physicalMemoryBytes - Self.memorySafetyBytes)
         if estimatedPeakMemoryBytes > usableMemory {
             throw ModelResourcePreflightError.insufficientMemory(

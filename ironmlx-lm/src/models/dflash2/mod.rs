@@ -482,6 +482,12 @@ impl DFlash2TargetForwardMode {
 pub trait DFlash2Target: crate::core::Model {
     /// Target fields the draft checkpoint must match.
     fn dflash2_target_spec(&self) -> DFlash2TargetSpec;
+    /// Target-owned pair contract. The default preserves legacy shared RoPE;
+    /// an architecture may override it only for a separately qualified pair.
+    fn dflash2_validate_draft_config(&self, draft: &DFlash2Config) -> Result<()> {
+        draft.validate()?;
+        draft.ensure_target_compatible(&self.dflash2_target_spec())
+    }
 
     fn dflash2_target_cache_cost(&self) -> DFlash2TargetCacheCost;
 
@@ -525,6 +531,12 @@ pub trait DFlash2Target: crate::core::Model {
 
     /// Whether the runtime may choose this target's linear draft budget with
     /// the DFlash2 window-cost policy instead of the shared Qwen MTP policy.
+    /// Q1-chain verifiers calibrate the ordinary baseline and a narrow
+    /// window before paying for a wide speculative probe.
+    fn dflash2_sequential_verify_cost(&self) -> bool {
+        false
+    }
+
     fn dflash2_window_cost_budget_policy(&self) -> bool {
         false
     }

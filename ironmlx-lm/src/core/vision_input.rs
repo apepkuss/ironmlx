@@ -11,6 +11,11 @@ pub enum VisionInputConfig {
         /// range with the serving cap applied.
         pixel_bounds: qwen3_5::image_processor::PixelBounds,
     },
+    /// Flash follows the pinned MLX-VLM NumPy rescaling arithmetic.
+    Qwen38Flash {
+        spatial_merge_size: i32,
+        pixel_bounds: qwen3_5::image_processor::PixelBounds,
+    },
     Gemma4 {
         vision_config: crate::models::gemma4::Gemma4VisionConfig,
     },
@@ -38,7 +43,9 @@ impl VisionInputConfig {
     ) -> anyhow::Result<Self> {
         use crate::models::ModelArchitecture;
         Ok(match architecture {
-            ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe => {
+            ModelArchitecture::Qwen35Dense
+            | ModelArchitecture::Qwen35Moe
+            | ModelArchitecture::Qwen38FlashNext => {
                 match loader
                     .config_raw_value()
                     .get("vision_config")
@@ -46,12 +53,20 @@ impl VisionInputConfig {
                 {
                     Some(value) => {
                         let config: qwen3_5::VisionConfig = serde_json::from_value(value.clone())?;
-                        Self::Qwen {
-                            spatial_merge_size: config.spatial_merge_size,
-                            pixel_bounds: qwen3_5::image_processor::PixelBounds::for_model(
-                                loader.model_dir(),
-                                max_image_pixels,
-                            )?,
+                        let pixel_bounds = qwen3_5::image_processor::PixelBounds::for_model(
+                            loader.model_dir(),
+                            max_image_pixels,
+                        )?;
+                        if architecture == ModelArchitecture::Qwen38FlashNext {
+                            Self::Qwen38Flash {
+                                spatial_merge_size: config.spatial_merge_size,
+                                pixel_bounds,
+                            }
+                        } else {
+                            Self::Qwen {
+                                spatial_merge_size: config.spatial_merge_size,
+                                pixel_bounds,
+                            }
                         }
                     }
                     None => Self::TextOnly,
@@ -126,6 +141,9 @@ pub fn derive_image_token_and_merge(
         VisionInputConfig::TextOnly => (-1, 1),
         VisionInputConfig::Qwen {
             spatial_merge_size, ..
+        }
+        | VisionInputConfig::Qwen38Flash {
+            spatial_merge_size, ..
         } => (
             tokenizer
                 .token_to_id("<|image_pad|>")
@@ -193,6 +211,9 @@ pub fn expand_decoded_messages(
         VisionInputConfig::TextOnly => 1,
         VisionInputConfig::Qwen {
             spatial_merge_size, ..
+        }
+        | VisionInputConfig::Qwen38Flash {
+            spatial_merge_size, ..
         } => *spatial_merge_size,
         VisionInputConfig::Gemma4 { vision_config } => vision_config.pooling_kernel_size,
         VisionInputConfig::DiffusionGemma { vision_config, .. } => {
@@ -217,9 +238,17 @@ pub fn expand_decoded_messages(
                 vision_input.validate_image_input()?;
                 match vision_input {
                     VisionInputConfig::TextOnly => unreachable!("image input validated above"),
-                    VisionInputConfig::Qwen { pixel_bounds, .. } => {
+                    VisionInputConfig::Qwen { pixel_bounds, .. }
+                    | VisionInputConfig::Qwen38Flash { pixel_bounds, .. } => {
                         let (pv, gh, gw) =
-                            qwen3_5::image_processor::preprocess(img_bytes, *pixel_bounds)?;
+                            if matches!(vision_input, VisionInputConfig::Qwen38Flash { .. }) {
+                                qwen3_5::image_processor::preprocess_numpy_rescale(
+                                    img_bytes,
+                                    *pixel_bounds,
+                                )?
+                            } else {
+                                qwen3_5::image_processor::preprocess(img_bytes, *pixel_bounds)?
+                            };
                         let n = ((gh / spatial_merge_size) * (gw / spatial_merge_size)) as usize;
                         placeholders.push(qwen_placeholder(n));
                         all_pixel_values.push(pv);

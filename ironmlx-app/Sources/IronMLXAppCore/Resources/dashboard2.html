@@ -5890,6 +5890,7 @@
       catalog_quantization: "Quantization variant",
       catalog_select_quantization: "Select quantization variant",
       catalog_note_optiq: "Mixed 4/8-bit precision: 4 bit is the predominant precision, not the precision of every layer.",
+      catalog_note_flash_next: "PLE rows stay on SSD. Expert residency and cache capacity are selected from available memory.",
       catalog_size: "Approx. download {size}",
       catalog_memory_unknown: "Memory requirements checked before download",
       catalog_memory_large: "Weight budget {size}: exceeds this device’s memory allowance",
@@ -5903,7 +5904,7 @@
       catalog_note_tts: "Requires additional audio resources, prepared automatically by the App. Their downloads are not included in the displayed repository size.",
       catalog_note_image: "Text-to-image and single-image editing. Qwen Research License applies; commercial use is not licensed.",
       catalog_note_decision: "For the System One decision API; not a chat model.",
-      catalog_note_dflash: "Requires a matching Qwen3.8-27B affine 4-bit or 8-bit main model. Text only; cannot load as a main model.",
+      catalog_note_dflash: "Requires the matching main model. Cannot load independently.",
       catalog_note_mtp: "Requires a main model from the matching Qwen family and size. This MTP head is an acceleration assistant, not a main model.",
       catalog_note_gemma_assistant: "Requires the matching Gemma 4 main model. This assistant cannot be loaded as a main model.",
 
@@ -6595,6 +6596,7 @@
       catalog_quantization: "量化版本",
       catalog_select_quantization: "选择量化版本",
       catalog_note_optiq: "采用 4/8-bit 混合精度；4 bit 表示主要精度，不代表每一层都是 4 bit。",
+      catalog_note_flash_next: "PLE 按需从 SSD 读取；专家驻留方式与缓存容量根据可用内存规划。",
       catalog_size: "预计下载 {size}",
       catalog_memory_unknown: "下载前检查内存需求",
       catalog_memory_large: "权重预算 {size}：超出本机内存预算",
@@ -6608,7 +6610,7 @@
       catalog_note_tts: "需要额外音频资源，由 App 自动准备；其下载量不包含在显示的仓库大小中。",
       catalog_note_image: "支持文生图与单图编辑。受 Qwen Research License 约束，不授权商业用途。",
       catalog_note_decision: "用于 System One 决策 API，不是聊天模型。",
-      catalog_note_dflash: "需要匹配的 Qwen3.8-27B affine 4-bit 或 8-bit 主模型。仅用于文本，不能作为主模型加载。",
+      catalog_note_dflash: "需要匹配的主模型，不能独立加载。",
       catalog_note_mtp: "需要同系列、同规格的 Qwen 主模型。MTP 是加速辅助模型，不能作为主模型加载。",
       catalog_note_gemma_assistant: "需要匹配的 Gemma 4 主模型。Assistant 是加速辅助模型，不能作为主模型加载。",
 
@@ -7300,6 +7302,7 @@
       catalog_quantization: "量化版本",
       catalog_select_quantization: "選擇量化版本",
       catalog_note_optiq: "採用 4/8-bit 混合精度；4 bit 表示主要精度，不代表每一層都是 4 bit。",
+      catalog_note_flash_next: "PLE 按需從 SSD 讀取；專家駐留方式與快取容量依可用記憶體規劃。",
       catalog_size: "預計下載 {size}",
       catalog_memory_unknown: "下載前檢查記憶體需求",
       catalog_memory_large: "權重預算 {size}：超出本機記憶體預算",
@@ -7313,7 +7316,7 @@
       catalog_note_tts: "需要額外音訊資源，由 App 自動準備；其下載量不包含在顯示的儲存庫大小中。",
       catalog_note_image: "支援文生圖與單圖編輯。受 Qwen Research License 約束，不授權商業用途。",
       catalog_note_decision: "用於 System One 決策 API，不是聊天模型。",
-      catalog_note_dflash: "需要相符的 Qwen3.8-27B affine 4-bit 或 8-bit 主模型。僅用於文字，不能作為主模型載入。",
+      catalog_note_dflash: "需要相符的主模型，不能獨立載入。",
       catalog_note_mtp: "需要同系列、同規格的 Qwen 主模型。MTP 是加速輔助模型，不能作為主模型載入。",
       catalog_note_gemma_assistant: "需要相符的 Gemma 4 主模型。Assistant 是加速輔助模型，不能作為主模型載入。",
 
@@ -8008,6 +8011,7 @@
       catalog_quantization: "量子化バリアント",
       catalog_select_quantization: "量子化バリアントを選択",
       catalog_note_optiq: "4/8-bit の混合精度です。4 bit は主な精度を示し、すべての層が 4 bit という意味ではありません。",
+      catalog_note_flash_next: "PLE は SSD から必要に応じて読み込みます。エキスパートの常駐方式とキャッシュ容量は空きメモリに合わせます。",
       catalog_size: "推定ダウンロード {size}",
       catalog_memory_unknown: "ダウンロード前に必要メモリを確認",
       catalog_memory_large: "重みの概算 {size}：この端末のメモリ予算を超過",
@@ -8021,7 +8025,7 @@
       catalog_note_tts: "追加の音声リソースを App が自動的に準備します。その容量は表示されるリポジトリの容量に含まれません。",
       catalog_note_image: "テキストからの画像生成と単一画像の編集に対応。Qwen Research License の対象で、商用利用は許諾されていません。",
       catalog_note_decision: "System One 意思決定 API 用です。チャットモデルではありません。",
-      catalog_note_dflash: "対応する Qwen3.8-27B affine 4-bit または 8-bit メインモデルが必要です。テキスト専用で、メインモデルとしては読み込めません。",
+      catalog_note_dflash: "対応するメインモデルが必要です。単独では読み込めません。",
       catalog_note_mtp: "同じ Qwen 系列・サイズのメインモデルが必要です。MTP は高速化の補助モデルで、メインモデルとしては読み込めません。",
       catalog_note_gemma_assistant: "対応する Gemma 4 メインモデルが必要です。この補助モデルはメインモデルとしては読み込めません。",
 
@@ -8716,6 +8720,7 @@
       catalog_quantization: "양자화 버전",
       catalog_select_quantization: "양자화 버전 선택",
       catalog_note_optiq: "4/8-bit 혼합 정밀도입니다. 4 bit는 주된 정밀도이며 모든 레이어의 정밀도를 뜻하지 않습니다.",
+      catalog_note_flash_next: "PLE는 SSD에서 필요할 때 읽습니다. 전문가 상주 방식과 캐시 용량은 사용 가능한 메모리에 맞춥니다.",
       catalog_size: "예상 다운로드 {size}",
       catalog_memory_unknown: "다운로드 전에 메모리 요구량 확인",
       catalog_memory_large: "가중치 예산 {size}: 기기 메모리 예산 초과",
@@ -8729,7 +8734,7 @@
       catalog_note_tts: "추가 오디오 리소스를 App이 자동으로 준비합니다. 해당 다운로드 용량은 표시된 저장소 크기에 포함되지 않습니다.",
       catalog_note_image: "텍스트 기반 이미지 생성과 단일 이미지 편집을 지원합니다. Qwen Research License가 적용되며 상업적 사용은 허가되지 않습니다.",
       catalog_note_decision: "System One 의사결정 API용이며 채팅 모델이 아닙니다.",
-      catalog_note_dflash: "일치하는 Qwen3.8-27B affine 4-bit 또는 8-bit 주 모델이 필요합니다. 텍스트 전용이며 주 모델로 로드할 수 없습니다.",
+      catalog_note_dflash: "일치하는 주 모델이 필요하며 단독으로 로드할 수 없습니다.",
       catalog_note_mtp: "동일한 Qwen 계열과 크기의 주 모델이 필요합니다. MTP는 가속 보조 모델이며 주 모델로 로드할 수 없습니다.",
       catalog_note_gemma_assistant: "일치하는 Gemma 4 주 모델이 필요합니다. 이 보조 모델은 주 모델로 로드할 수 없습니다.",
 
@@ -11435,6 +11440,7 @@
   }
 
   function catalogMemoryHint(entry) {
+    if (entry.noteKey === 'catalog_note_flash_next') return null;
     const hints = window.__IRONMLX_CATALOG_MEMORY_HINTS__;
     const estimate = Number(hints && hints.estimatedBytes && hints.estimatedBytes[entry.id]);
     const available = Number(hints && hints.availableBytes);
@@ -11564,7 +11570,8 @@
       }).join('');
       const isDrafter = ['assistant', 'drafter'].includes(entry.category);
       const noteKey = selected && selected.noteKey ? selected.noteKey : isDrafter ? entry.noteKey : null;
-      const mainModel = entry.noteKey === 'catalog_note_dflash' ? 'Qwen 3.8 27B'
+      const mainModel = entry.noteKey === 'catalog_note_dflash'
+        ? (entry.hfRepo.includes('Flash-Next') ? 'Qwen 3.8 Flash-Next' : entry.hfRepo.includes('Qwen3.6-35B-A3B') ? 'Qwen 3.6 35B A3B' : 'Qwen 3.8 27B')
         : entry.noteKey === 'catalog_note_mtp' || entry.noteKey === 'catalog_note_gemma_assistant'
           ? entry.name.replace(/\s+(MTP|Assistant)$/, '') : null;
       const providers = [{ name: 'huggingface', repo: selected ? selected.hfRepo : '' }];

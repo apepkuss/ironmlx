@@ -20,10 +20,12 @@ DFlash2 当前通过独立执行路径提供三类入口：
 | Draft | `z-lab/Qwen3.8-27B-DFlash2` |
 | Target（MoE） | `mlx-community/Qwen3.6-35B-A3B-4bit`、`-5bit`、`-6bit` 或 `-8bit` |
 | Draft（MoE） | `incoai/Qwen3.6-35B-A3B-DFlash2`（BF16） |
+| Target（Flash） | `mlx-community/Qwen3.8-Flash-Next-4bit` |
+| Draft（Flash） | `incoai/Qwen3.8-Flash-Next-DFlash2`（BF16） |
 
 支持文本与图片请求，不支持视频。Target 在首个图片请求时加载视觉编码器；DFlash2 draft
-不能作为普通 base model 加载。Qwen3.8 target 必须使用 affine 4-bit 或 affine 8-bit；Qwen3.6 35B A3B
-target 的限制见 [Qwen3.6 35B A3B（MoE）](#qwen36-35b-a3bmoe)。其他量化格式和
+不能作为普通 base model 加载。Qwen3.8 27B Dense target 必须使用 affine 4-bit 或 affine 8-bit；Qwen3.6 35B A3B
+target 的限制见 [Qwen3.6 35B A3B（MoE）](#qwen36-35b-a3bmoe)。Flash 使用[独立配方](#qwen38-flash-next)。其他量化格式和
 非量化 target 不会被 App 标记为 DFlash2 兼容。
 
 ## 启动示例
@@ -49,7 +51,7 @@ draft checkpoint 声明的宽度，并以已资格化的 Q8 作为默认上限�
 
 `--m5-dflash2-profile` 接受 `auto`（默认）或 `off`；`auto` 在 Apple GPU 第 17 代及更新机型上启用
 target 所属模型族已认定的 M5 设置（见 `healthz.dflash2.m5_profile`）。
-`--ane` 接受 `auto`（默认）或 `off`：M5 profile 生效时，Qwen3.8 在预填充起点低于 65,536 的完整 2048
+`--ane` 接受 `auto`（默认）或 `off`：M5 profile 生效时，Qwen3.8 27B Dense 在预填充起点低于 65,536 的完整 2048
 token 分块中，把 MLP 34 个通道单元中的 12 个交给神经引擎计算（W8A8）；更短的提示、解码阶段和 MoE target
 都不使用神经引擎。`off` 让全部计算留在 GPU 上。`healthz.dflash2.m5_profile.ane_status` 报告 `active`、
 `disabled`、`not_applicable` 或 `inactive`。
@@ -64,7 +66,7 @@ affine-4、无约束、B1 请求显式启用有界 best-first 草稿树。
 但不关闭 actor 的请求级并发。实际宽度为
 `min(max_sequences, tensor_batch_max_width, 当前就绪且执行形态兼容的请求数)`。
 因此该参数只限制一次 tensor 操作合并的行数，不增加活动请求数，也不替代
-`--max-sequences`。该参数只作用于 Qwen3.8：Qwen3.6 MoE target 接受该参数，但从不组成 tensor group
+`--max-sequences`。该参数只作用于 Qwen3.8 27B Dense：Qwen3.6 MoE target 接受该参数，但从不组成 tensor group
 （见 [Qwen3.6 35B A3B（MoE）](#qwen36-35b-a3bmoe)）。
 
 当前已验收的 `z-lab/Qwen3.8-27B-DFlash2` checkpoint 声明的 block size 为 `8`，
@@ -76,7 +78,7 @@ draft checkpoint 必须同时支持所请求宽度，运行时不会隐式扩宽
 App 的模型扫描器把 `DFlash2DraftModel` 识别为辅助 artifact，不把它列为可独立加载的
 base model。只有同时满足后端 DFlash2 draft 配置约束，并与 target 的 hidden size、
 vocab、上下文长度、target 层数、RMS epsilon 和 RoPE theta 一致的
-draft（FFN 宽度不比较，因为 draft 有自己的 FFN；target tap 数量也与 draft 层数无关），才会出现在 target 的 DFlash2 选择器中；不完整或不兼容的 artifact fail closed。
+draft（FFN 宽度不比较，因为 draft 有自己的 FFN；target tap 数量也与 draft 层数无关），才会出现在 target 的 DFlash2 选择器中。Flash 的 RoPE theta 例外按下文作者组合合同验证；不完整或不兼容的 artifact fail closed。
 
 Dashboard 提供 DFlash2 开关、兼容 draft 选择、block size、运行时 draft 精度和
 Tensor Batch 上限。Tensor Batch 上限留空时不下发显式参数，由后端使用默认值
@@ -124,6 +126,39 @@ M5 tensor-unit affine4 投影与专家 kernel、tiled 预填充 GEMM、符合条
 `projections=m5-affine4-v1`（其他位宽显示 `product-stable-v2`）。MoE target 没有稠密 MLP，因此从不使用神经引擎（`ane_status` 为
 `not_applicable`，使用 `--ane off` 时为 `disabled`）。`healthz.dflash2.m5_profile.target` 显示 `qwen36-moe`；不在已认定配方内的 target
 在启动时即被拒绝。
+
+## Qwen3.8 Flash-Next
+
+已验证的组合为 `mlx-community/Qwen3.8-Flash-Next-4bit`（affine 4-bit、group 32）
+与 `incoai/Qwen3.8-Flash-Next-DFlash2`（BF16）。支持文本、图片和并发请求。
+Flash 的草稿精度必须为 `0`（本系列默认值），block size 为 2–8，使用线性验证
+与有状态采样。暂不启用平面树、位置键控采样、MTP、Prompt Lookup、TurboQuant KV
+及持久化前缀缓存。草稿与主模型的 RoPE theta 按作者设计不同；兼容性按该组合的
+捕获层和尺寸合同检查。
+
+完整权重约 112 GB，PLE 始终按需从 SSD 读取。加载前规划并发、上下文、视觉塔、
+草稿与临时内存；只有完整预算可容纳时专家才全部驻留，否则使用有界、只读的
+SSD 专家缓存。`IRONMLX_FLASH_EXPERT_RESIDENCY=auto|full|ssd` 选择策略，
+`IRONMLX_FLASH_EXPERT_CACHE_MIB` 设置 SSD 模式缓存上限，默认 16384 MiB。
+小内存机器可能需要降低 Max Sequences 或上下文容量；SSD 专家缓存不会免除
+请求状态的内存需求。已有 standalone 导入无需重新导入。App 默认上下文保持
+32K，即使全局选择其他 KV 格式，Flash 仍使用 BF16 KV。
+
+M5 profile 的 target 为 `qwen38-flash-next`，有独立设置表，保留原生 group-32
+权重布局，批量生成草稿，并对各请求的 QSA/PLE/GDN 状态执行事务验证。
+旧 GPU 和 `--m5-dflash2-profile off` 使用通用路径。ANE `auto` 在此组合报告
+`not_applicable`，`off` 报告 `disabled`，目前没有启用 Flash 的 ANE 加速。
+DFlash 先测普通解码和窄窗口，再决定是否探测宽窗口；投机成本较高时回退普通
+解码。性能收益取决于接受率和硬件。
+
+```bash
+ironmlx serve --model /path/to/Qwen3.8-Flash-Next-4bit \
+  --dflash2-model-dir /path/to/Qwen3.8-Flash-Next-DFlash2 \
+  --dflash2-draft-bits 0 --max-sequences 1 --max-cache-cap 32768
+```
+
+固定源码身份、数值验证与测量边界见[验证记录](../development/qwen38-flash-next-qualification.md)。
+当前 HTTP 图片协议没有开放视频输入。
 
 ## 执行与并发语义
 

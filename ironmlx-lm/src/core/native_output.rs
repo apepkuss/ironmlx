@@ -31,7 +31,7 @@ impl NativeOutputDialect {
     /// Detect a native output contract from the model type and exact template
     /// markers. Similar-looking templates are deliberately not enabled.
     pub fn detect(model_type: &str, template: &str) -> Option<Self> {
-        if matches!(model_type, "qwen3_5" | "qwen3_5_moe") {
+        if matches!(model_type, "qwen3_5" | "qwen3_5_moe" | "qwen4_exp") {
             let qwen38 = [
                 "message.reasoning_content is string",
                 "reasoning_effort|default('xhigh')",

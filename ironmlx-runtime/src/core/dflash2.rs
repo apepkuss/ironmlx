@@ -1496,7 +1496,8 @@ where
                     )?,
                     max_draft_tokens,
                     policy_domain(model, draft),
-                ),
+                )
+                .with_sequential_calibration(model.dflash2_sequential_verify_cost()),
                 experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
                 confidence_verify: confidence_verify(max_draft_tokens)?,
                 ragged_budget: ragged_group_budget(max_draft_tokens)?,
@@ -1861,7 +1862,8 @@ where
                 )?,
                 max_draft_tokens,
                 policy_domain(model, draft),
-            ),
+            )
+            .with_sequential_calibration(model.dflash2_sequential_verify_cost()),
             experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
             confidence_verify: confidence_verify(max_draft_tokens)?,
             ragged_budget: ragged_group_budget(max_draft_tokens)?,
@@ -2310,6 +2312,18 @@ where
                     feed_array(&mut hash, gdn.recurrent_state())?;
                 }
                 LayerCache::Mla(_) => anyhow::bail!("MLA cache digest is not supported"),
+                #[cfg(unix)]
+                LayerCache::Flash(cache) => {
+                    for offset in cache.offsets() {
+                        feed(&mut hash, &offset.to_le_bytes());
+                    }
+                    for token in cache.diagnostic_tokens() {
+                        feed(&mut hash, &token.to_le_bytes());
+                    }
+                    for array in cache.state_arrays() {
+                        feed_array(&mut hash, array)?;
+                    }
+                }
             }
             out.push(format!("{hash:016x}"));
         }
@@ -2347,6 +2361,12 @@ where
                     total += count(gdn.conv_state())? + count(gdn.recurrent_state())?;
                 }
                 LayerCache::Mla(_) => anyhow::bail!("MLA cache check is not supported"),
+                #[cfg(unix)]
+                LayerCache::Flash(cache) => {
+                    for array in cache.state_arrays() {
+                        total += count(array)?;
+                    }
+                }
             }
         }
         Ok(total)

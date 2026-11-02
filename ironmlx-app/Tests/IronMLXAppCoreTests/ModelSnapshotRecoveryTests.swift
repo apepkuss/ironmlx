@@ -319,3 +319,18 @@ private struct FixedBodyHTTPClient: ModelDownloadHTTPClient {
         try await onData(body)
     }
 }
+
+@Test func boundedFlashDownloadChecksDiskWithoutRequiringWholeCheckpointInRAM() throws {
+    let gib: Int64 = 1_024 * 1_024 * 1_024
+    var resources = ModelResourcePreflight(
+        weightBytes: 112 * gib, remainingDownloadBytes: 112 * gib, availableDiskBytes: 200 * gib,
+        physicalMemoryBytes: 32 * gib)
+    let flash = ModelMetadataPreflightResult(modelType: "qwen4_exp", artifactRole: "model", quantization: nil)
+    let dense = ModelMetadataPreflightResult(modelType: "llama", artifactRole: "model", quantization: nil)
+    #expect(flash.requiresFullWeightResidency == false)
+    #expect(dense.requiresFullWeightResidency == true)
+    #expect(throws: ModelResourcePreflightError.self) { try resources.validate() }
+    try resources.validate(requireResidentWeights: flash.requiresFullWeightResidency)
+    resources.availableDiskBytes = 100 * gib
+    #expect(throws: ModelResourcePreflightError.self) { try resources.validate(requireResidentWeights: false) }
+}

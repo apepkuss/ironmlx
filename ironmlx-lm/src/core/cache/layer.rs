@@ -17,6 +17,8 @@ pub enum LayerCache {
     Full(KVCache),
     Linear(GatedDeltaCache),
     Mla(crate::models::glm4_moe_lite::mla_cache::MlaLatentCache),
+    #[cfg(unix)]
+    Flash(crate::models::qwen4_exp::cache::FlashLayerCache),
 }
 
 /// Per-layer cache checkpoint used by speculative decoding rollback.
@@ -25,6 +27,8 @@ pub enum LayerCacheSnapshot {
     Full(KVCacheSnapshot),
     Linear(GatedDeltaCacheSnapshot),
     Mla(MlaLatentCacheSnapshot),
+    #[cfg(unix)]
+    Flash(crate::models::qwen4_exp::cache::FlashLayerSnapshot),
 }
 
 impl LayerCache {
@@ -35,6 +39,8 @@ impl LayerCache {
             LayerCache::Full(kv) => kv.diagnostic_buffers(),
             LayerCache::Linear(gd) => vec![gd.conv_state(), gd.recurrent_state()],
             LayerCache::Mla(_) => Vec::new(),
+            #[cfg(unix)]
+            LayerCache::Flash(cache) => cache.state_arrays(),
         }
     }
 
@@ -49,6 +55,8 @@ impl LayerCache {
         match self {
             LayerCache::Full(_) => Ok(()),
             LayerCache::Linear(cache) => cache.begin_speculative_prefix_capture(),
+            #[cfg(unix)]
+            LayerCache::Flash(cache) => cache.begin_speculative_prefix_capture(),
             LayerCache::Mla(_) => {
                 anyhow::bail!("speculative prefix capture does not support MLA cache")
             }
@@ -56,12 +64,21 @@ impl LayerCache {
     }
 
     pub fn discard_speculative_prefix_capture(&mut self) {
+        #[cfg(unix)]
+        if let LayerCache::Flash(cache) = self {
+            cache.discard_speculative_prefix_capture();
+        }
         if let LayerCache::Linear(cache) = self {
             cache.discard_speculative_prefix_capture();
         }
     }
 
     pub fn enable_turboquant(&mut self, bits: TurboQuantKVBits) -> anyhow::Result<()> {
+        #[cfg(unix)]
+        anyhow::ensure!(
+            !matches!(self, LayerCache::Flash(_)),
+            "Flash text requires BF16 KV; TurboQuant is not qualified"
+        );
         if let LayerCache::Full(kv) = self {
             kv.enable_turboquant(bits)?;
         }
@@ -89,6 +106,8 @@ impl LayerCache {
         match self {
             LayerCache::Full(kv) => kv.shrink_paged_hot_window(hot_window_pages),
             LayerCache::Linear(_) | LayerCache::Mla(_) => Ok(0),
+            #[cfg(unix)]
+            LayerCache::Flash(_) => Ok(0),
         }
     }
 
@@ -96,6 +115,8 @@ impl LayerCache {
         match self {
             LayerCache::Full(kv) => kv.restore_configured_paged_hot_window(),
             LayerCache::Linear(_) | LayerCache::Mla(_) => false,
+            #[cfg(unix)]
+            LayerCache::Flash(_) => false,
         }
     }
 
@@ -109,6 +130,8 @@ impl LayerCache {
             }
             LayerCache::Linear(gd) => gd.reset(),
             LayerCache::Mla(c) => c.reset(),
+            #[cfg(unix)]
+            LayerCache::Flash(c) => c.reset(),
         }
     }
 
@@ -118,6 +141,8 @@ impl LayerCache {
             LayerCache::Full(kv) => LayerCacheSnapshot::Full(kv.snapshot()),
             LayerCache::Linear(gd) => LayerCacheSnapshot::Linear(gd.snapshot()),
             LayerCache::Mla(c) => LayerCacheSnapshot::Mla(c.snapshot()),
+            #[cfg(unix)]
+            LayerCache::Flash(c) => LayerCacheSnapshot::Flash(c.snapshot()),
         }
     }
 
@@ -125,6 +150,8 @@ impl LayerCache {
     pub fn append_snapshot(&self) -> anyhow::Result<LayerCacheSnapshot> {
         match self {
             LayerCache::Full(kv) => Ok(LayerCacheSnapshot::Full(kv.append_snapshot())),
+            #[cfg(unix)]
+            LayerCache::Flash(c) => Ok(LayerCacheSnapshot::Flash(c.snapshot())),
             LayerCache::Linear(_) => {
                 anyhow::bail!("LayerCache::append_snapshot does not support Linear cache")
             }
@@ -145,6 +172,8 @@ impl LayerCache {
         match self {
             LayerCache::Full(kv) => Ok(LayerCacheSnapshot::Full(kv.append_snapshot())),
             LayerCache::Linear(gd) => Ok(LayerCacheSnapshot::Linear(gd.snapshot())),
+            #[cfg(unix)]
+            LayerCache::Flash(c) => Ok(LayerCacheSnapshot::Flash(c.snapshot())),
             LayerCache::Mla(_) => {
                 anyhow::bail!("DFlash2 transaction snapshots do not support MLA cache")
             }
@@ -157,6 +186,12 @@ impl LayerCache {
             (LayerCache::Full(kv), LayerCacheSnapshot::Full(s)) => kv.restore(s),
             (LayerCache::Linear(gd), LayerCacheSnapshot::Linear(s)) => gd.restore(s),
             (LayerCache::Mla(c), LayerCacheSnapshot::Mla(s)) => c.restore(s),
+            #[cfg(unix)]
+            (LayerCache::Flash(c), LayerCacheSnapshot::Flash(s)) => c.restore(s),
+            #[cfg(unix)]
+            (LayerCache::Flash(_), _) => {
+                anyhow::bail!("Flash cache received another architecture's snapshot")
+            }
             (LayerCache::Full(_), _) => {
                 anyhow::bail!("LayerCache::restore: Full cache received non-Full snapshot")
             }
@@ -192,6 +227,10 @@ pub fn adopt_layer_cache_rows(
             }
             (LayerCache::Mla(dst), LayerCache::Mla(src)) => {
                 dst.adopt_row_from(src, dst_row, src_row)?;
+            }
+            #[cfg(unix)]
+            (LayerCache::Flash(dst), LayerCache::Flash(src)) => {
+                dst.adopt_row_from(src, dst_row, src_row)?
             }
             _ => anyhow::bail!("cache layer kind mismatch"),
         }
@@ -259,6 +298,8 @@ pub fn prefix_key_spec_for_caches(
     let mut kv_cache_profile: Option<String> = None;
     for cache in caches {
         match cache {
+            #[cfg(unix)]
+            LayerCache::Flash(_) => return Ok(None),
             LayerCache::Full(kv) => {
                 if let Some(paged) = kv.paged() {
                     remember_kv_cache_profile(&mut kv_cache_profile, kv.prefix_cache_profile())?;
@@ -460,6 +501,8 @@ pub fn prefix_entry_for_row(
                 let (c_kv, k_pe, layer_cached_len) = mla.prefix_latent_for_row_on(row, ())?;
                 (PrefixLayerPayload::Mla { c_kv, k_pe }, layer_cached_len)
             }
+            #[cfg(unix)]
+            LayerCache::Flash(_) => return Ok(None),
         };
         if let Some(expected) = cached_len {
             if layer_cached_len != expected {
@@ -543,6 +586,10 @@ pub fn restore_prefix_entry_for_row(
             }
             (LayerCache::Mla(mla), PrefixLayerPayload::Mla { c_kv, k_pe }) => {
                 mla.restore_prefix_latent_for_row_on(c_kv, k_pe, row, cached_len, ())?;
+            }
+            #[cfg(unix)]
+            (LayerCache::Flash(_), _) => {
+                anyhow::bail!("Flash auxiliary state is not a legacy persistent prefix payload")
             }
             (LayerCache::Full(_), _) => {
                 anyhow::bail!(
@@ -638,6 +685,10 @@ pub fn restore_prefix_entry_for_rows(
                 for &row in rows {
                     mla.restore_prefix_latent_for_row_on(c_kv, k_pe, row, cached_len, ())?;
                 }
+            }
+            #[cfg(unix)]
+            (LayerCache::Flash(_), _) => {
+                anyhow::bail!("Flash auxiliary state is not a legacy persistent prefix payload")
             }
             (LayerCache::Full(_), _) => {
                 anyhow::bail!(

@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 
 /// Storage bytes retained by the runtime after loader sanitization, split by
-/// the component that first touches the corresponding mmap-backed tensors.
+/// the runtime component that consumes them. This is a storage inventory,
+/// not a promise of additional first-use memory liability.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LoadedTensorComponentBytes {
     pub text: usize,
@@ -168,6 +169,9 @@ pub fn preflight_model_metadata(model_dir: &Path) -> Result<ModelMetadataPreflig
             "gemma4_assistant" | "gemma4_unified_assistant" => "gemma4_drafter",
             _ => {
                 crate::models::ModelArchitecture::from_model_type(model_type)?;
+                if model_type == "qwen4_exp" {
+                    crate::models::qwen4_exp::config::FlashTextConfig::from_root(&config_raw)?;
+                }
                 "base"
             }
         }
@@ -295,7 +299,7 @@ impl TokenizerConfig {
     }
 }
 
-/// Mmap-eager safetensors model loader. Owns all tensor data + parsed config.
+/// Eagerly evaluated safetensors model loader. Owns tensor data and parsed config.
 pub struct Loader {
     weights: WeightMap,
     tokenizer_config: TokenizerConfig,
@@ -343,9 +347,9 @@ impl WeightSource for Loader {
 }
 
 impl Loader {
-    /// Internal qualification path. PLE remains in bounded positional-I/O
+    /// Flash text loading. PLE remains in bounded positional-I/O
     /// storage and vision/MTP are excluded before any eager evaluation.
-    /// This does not register Flash as a supported runtime architecture.
+    /// Callers must compute a FlashLoadPlan before opening this loader.
     #[cfg(unix)]
     pub fn open_flash_text(model_dir: &Path, resident_budget_bytes: u64) -> Result<Self> {
         Self::open_impl(
@@ -369,7 +373,7 @@ impl Loader {
     }
     /// Open a directory containing `config.json`, `tokenizer_config.json`,
     /// and `model.safetensors` (single-file) or `model.safetensors.index.json`
-    /// (sharded). All weights are mmap-loaded eagerly.
+    /// (sharded). Retained weights are eagerly read/evaluated on the load thread.
     ///
     /// `vision_tower.*` keys are **dropped** during sanitize — use
     /// [`Loader::open_multimodal`] when the vision encoder weights are needed.
@@ -621,7 +625,7 @@ impl Loader {
 
     /// Storage bytes grouped by the runtime component that consumes them.
     /// This is metadata-only accounting and never evaluates or touches tensor
-    /// contents, so model loading retains its mmap-on-demand behavior.
+    /// contents; `open_impl` has already eagerly evaluated retained tensors.
     pub fn loaded_tensor_component_bytes(&self) -> LoadedTensorComponentBytes {
         tensor_component_storage_bytes(self.weights.tensors())
     }

@@ -167,6 +167,10 @@ impl Gemma4DecoderLayer {
             profile,
         )?;
         let kv_cache = match cache {
+            #[cfg(unix)]
+            Some(LayerCache::Flash(_)) => {
+                return Err(anyhow!("Gemma received a Flash composite cache"))
+            }
             Some(LayerCache::Full(kv)) => Some(kv),
             Some(LayerCache::Linear(_)) => {
                 return Err(anyhow!(

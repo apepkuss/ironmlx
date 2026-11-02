@@ -28,7 +28,7 @@ import WebKit
         let geometry = try await view.evaluateJavaScript("""
         (() => {
           const check = (condition, message) => { if (!condition) throw new Error(message); };
-          setLanguage('zh');
+          setLanguage('zh'); navigateTo('models'); switchToTab('models-scheduler');
           document.documentElement.classList.remove('sidebar-collapsed'); updateSidebarControls();
           const toggle = document.getElementById('sidebar-toggle');
           const tooltip = document.getElementById('sidebar-tooltip');
@@ -45,7 +45,7 @@ import WebKit
           const helpStyle = getComputedStyle(helpTooltip);
           check(compactStyle.backgroundColor === (dark ? 'rgba(58, 58, 60, 0.98)' : 'rgba(44, 44, 46, 0.96)'), 'adaptive compact tooltip background');
           check(compactStyle.color === (dark ? 'rgb(245, 245, 247)' : 'rgb(255, 255, 255)'), 'adaptive compact tooltip text');
-          check(helpStyle.backgroundColor === (dark ? 'rgba(44, 44, 46, 0.96)' : 'rgba(255, 255, 255, 0.96)'), 'adaptive explanatory tooltip background');
+          check(helpStyle.backgroundColor === (dark ? 'rgba(44, 44, 46, 0.96)' : 'rgba(255, 255, 255, 0.96)'), 'adaptive explanatory tooltip background actual=' + helpStyle.backgroundColor + ' dark=' + dark);
           check(helpStyle.color === (dark ? 'rgb(209, 209, 214)' : 'rgb(81, 81, 84)'), 'adaptive explanatory tooltip text');
           check(toggle.textContent.trim() === '', 'toggle has no visible text label');
           enter(toggle);

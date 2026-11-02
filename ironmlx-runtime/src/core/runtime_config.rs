@@ -521,7 +521,8 @@ impl EngineModelCapabilities {
             supports_audio: false,
             supports_mtp,
             supports_prompt_lookup: architecture.supports_prompt_lookup(),
-            supports_speculative_decoding: supports_mtp,
+            supports_speculative_decoding: supports_mtp
+                || architecture == ModelArchitecture::Qwen38FlashNext,
             supports_kv_cache: !is_diffusion,
             supported_sampling_parameters: if is_diffusion {
                 &["max_tokens", "temperature", "seed"]
@@ -722,8 +723,9 @@ pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<
         prompt_lookup.validate()?;
         if !architecture.supports_prompt_lookup() {
             bail!(
-                "engine model `{}` configures PromptLookup for DiffusionGemma",
-                model.id
+                "engine model `{}` configures PromptLookup for unsupported architecture `{}`; disable PromptLookup",
+                model.id,
+                architecture.model_type()
             );
         }
     }
@@ -825,5 +827,20 @@ impl EngineRuntimeOptions {
             bail!("prefix LRU cache requires paged prefix cache");
         }
         PrefixLruCacheConfig::new(max_bytes).map(Some)
+    }
+}
+
+#[cfg(test)]
+mod flash_capability_tests {
+    use super::*;
+    #[test]
+    fn flash_model_management_exposes_qualified_images_and_dflash_without_legacy_modes() {
+        let vl =
+            EngineModelCapabilities::for_architecture(ModelArchitecture::Qwen38FlashNext, true);
+        assert!(vl.supports_vision && vl.supports_streaming && vl.supports_speculative_decoding);
+        assert!(!vl.supports_audio && !vl.supports_mtp && !vl.supports_prompt_lookup);
+        let text =
+            EngineModelCapabilities::for_architecture(ModelArchitecture::Qwen38FlashNext, false);
+        assert!(!text.supports_vision);
     }
 }

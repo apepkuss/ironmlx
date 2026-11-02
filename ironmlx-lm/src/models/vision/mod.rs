@@ -42,6 +42,7 @@ pub struct VisionTower {
     /// Square root of `num_position_embeddings`, e.g. 48 for 2304 embeddings.
     num_grid_per_side: i32,
     spatial_merge_size: i32,
+    reference_position_linspace: bool,
 }
 
 /// Main visual embedding plus the intermediate DeepStack features injected
@@ -120,7 +121,7 @@ impl VisionSlot {
         };
         let tower = std::sync::OnceLock::new();
         if loader.contains("vision_tower.patch_embed.proj.weight") {
-            let _ = tower.set(VisionTower::from_loader(loader, cfg)?);
+            let _ = tower.set(Self::load_tower(loader, cfg)?);
             return Ok(Self {
                 tower,
                 deferred: None,
@@ -130,6 +131,23 @@ impl VisionSlot {
             tower,
             deferred: Some((loader.model_dir().to_path_buf(), cfg.clone())),
         })
+    }
+
+    fn load_tower(loader: &crate::core::Loader, cfg: &VisionConfig) -> Result<VisionTower> {
+        let mut tower = VisionTower::from_loader(loader, cfg)?;
+        // Flash's HC graph amplifies even small BF16 image perturbations.
+        // Keep the pinned reference's D72 -> D80 fused attention geometry;
+        // D96 NAX padding and fused rotary change BF16 accumulation and must
+        // qualify independently before being enabled.
+        if loader.config_raw_value()["model_type"] == "qwen4_exp" {
+            for block in &mut tower.blocks {
+                block.preserve_attention_geometry();
+            }
+            tower.merger.preserve_reference_gelu();
+            tower.reference_position_linspace = true;
+            tower.patch_embed.preserve_reference_convolution();
+        }
+        Ok(tower)
     }
 
     /// The resident tower, if loaded.
@@ -154,7 +172,7 @@ impl VisionSlot {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("model has no vision encoder"))?;
         let loader = crate::core::Loader::open_vision(model_dir)?;
-        let tower = VisionTower::from_loader(&loader, cfg)?;
+        let tower = Self::load_tower(&loader, cfg)?;
         // A concurrent load that won keeps its tower; this one is dropped.
         Ok(self.tower.set(tower).is_ok())
     }
@@ -215,6 +233,7 @@ impl VisionTower {
             hidden_size: cfg.hidden_size,
             num_grid_per_side,
             spatial_merge_size: cfg.spatial_merge_size,
+            reference_position_linspace: false,
         })
     }
 
@@ -325,14 +344,22 @@ impl VisionTower {
 
         for &(_t, h, w) in grid_thw {
             // linspace(0, num_g-1, h) and linspace(0, num_g-1, w)
-            let h_idxs: Vec<f32> = if h == 1 {
+            // MLX linspace divides the index before multiplying by the endpoint.
+            // Multiplying first can round interpolation weights across a BF16 boundary.
+            let h_idxs: Vec<f32> = if self.reference_position_linspace {
+                ops::constructors::linspace(0.0, (num_g - 1) as f64, h, mlx::Dtype::Float32)?
+                    .to_vec()?
+            } else if h == 1 {
                 vec![0.0_f32]
             } else {
                 (0..h)
                     .map(|i| i as f32 * (num_g - 1) as f32 / (h - 1) as f32)
                     .collect()
             };
-            let w_idxs: Vec<f32> = if w == 1 {
+            let w_idxs: Vec<f32> = if self.reference_position_linspace {
+                ops::constructors::linspace(0.0, (num_g - 1) as f64, w, mlx::Dtype::Float32)?
+                    .to_vec()?
+            } else if w == 1 {
                 vec![0.0_f32]
             } else {
                 (0..w)

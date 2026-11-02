@@ -34,6 +34,15 @@ impl ModelMeta {
 }
 
 pub trait Model {
+    /// Architecture-specific reservation including recurrent/auxiliary state
+    /// and transactional overlap. None preserves the ordinary GQA estimate.
+    fn scheduler_cache_cost() -> Option<(usize, usize)>
+    where
+        Self: Sized,
+    {
+        None
+    }
+
     fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>>;
 
     /// Dtype expected by this model's KV cache tensors.
@@ -90,6 +99,13 @@ pub trait Model {
     /// Whether an equal-length text batch must preserve the single-row
     /// scheduler's `[N - 1] + [1]` prefill morphology for greedy-token parity.
     fn requires_split_batched_prefill_for_token_parity(&self) -> bool {
+        false
+    }
+
+    /// Extend split-batch prefill to image rows, preserving each row's B1
+    /// chunk boundaries before assembling the scheduler cache. Has an effect
+    /// only when `requires_split_batched_prefill_for_token_parity` is true.
+    fn requires_row_isolated_multimodal_prefill(&self) -> bool {
         false
     }
 

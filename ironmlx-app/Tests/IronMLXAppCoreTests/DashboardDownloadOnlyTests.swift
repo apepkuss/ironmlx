@@ -47,7 +47,7 @@ import WebKit
       const row = document.querySelector('#tab-models-manage tbody tr');
       check(row.querySelector('.action-load').disabled, 'loading stays disabled after integrity verification');
       check(row.querySelector('input[name="default-model"]').disabled, 'default-model selection stays disabled');
-      check(row.querySelector('.model-status-text').textContent === '已下载 · 当前不支持运行', 'local model status');
+      check(row.querySelector('.model-status-text').textContent === '已保存 · 当前不支持运行', 'local model status');
       row.querySelector('.model-more').click();
       const files = [...document.querySelectorAll('.model-more-menu button')].find(button => button.textContent === '查看模型文件');
       check(!!files, 'file access remains available');

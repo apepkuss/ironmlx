@@ -117,7 +117,7 @@ pub struct GenerateArgs {
 
     /// Runtime affine quantization for the official BF16 DFlash2 draft. Zero
     /// keeps BF16; 4 and 8 select the supported quantized variants. Default:
-    /// 4. Qwen3.6 MoE targets support 4 and 0 (BF16) only.
+    /// 4; Flash-Next requires BF16 (0) and selects it by default. Qwen3.6 MoE targets support 4 and 0 (BF16) only.
     #[arg(long)]
     pub dflash2_draft_bits: Option<i32>,
 
@@ -180,7 +180,7 @@ fn ensure_dflash2_generation_supported(
         ));
     }
     let family = DFlash2TargetFamily::detect(architecture, config_raw)?;
-    if !args.images.is_empty() {
+    if !args.images.is_empty() && family != DFlash2TargetFamily::Qwen38FlashNext {
         return Err(anyhow!(
             "--dflash2-model-dir is text-only and cannot be combined with --image"
         ));
@@ -326,9 +326,9 @@ where
     }
     let draft_loader = Loader::open_dflash2(draft_dir).context("Loader::open_dflash2")?;
     let draft_bits = family.resolve_draft_bits(args.dflash2_draft_bits)?;
-    let draft = ironmlx_lm::models::DFlash2DraftModel::from_loader(
+    let draft = ironmlx_lm::models::DFlash2DraftModel::from_loader_for_target(
         &draft_loader,
-        model.dflash2_target_spec(),
+        model,
         (draft_bits != 0).then_some(draft_bits),
     )
     .context("DFlash2DraftModel::from_loader")?;
@@ -571,7 +571,60 @@ pub fn run(mut args: GenerateArgs) -> Result<()> {
             args.model
         ));
     }
-    let mut loader = if args.images.is_empty() {
+    let flash_plan = if ironmlx_runtime::core::flash_load::is_flash(&model_dir)? {
+        let tokenizer = Tokenizer::from_model_dir(&model_dir)?;
+        let bounds =
+            ironmlx_lm::models::qwen3_5::image_processor::PixelBounds::for_model(&model_dir, None)?;
+        let mut placeholders = Vec::new();
+        for image in &args.images {
+            let bytes = std::fs::read(image)
+                .with_context(|| format!("reading --image {}", image.display()))?;
+            let (_pixels, h, w) =
+                ironmlx_lm::models::qwen3_5::image_processor::preprocess(&bytes, bounds)?;
+            let count = usize::try_from(h / 2)?
+                .checked_mul(usize::try_from(w / 2)?)
+                .context("Flash image token overflow")?;
+            placeholders.push(format!(
+                "<|vision_start|>{}<|vision_end|>",
+                "<|image_pad|>".repeat(count)
+            ));
+        }
+        let prompt_content = inject_image_placeholders(&args.prompt, &placeholders)?;
+        let prompt = if args.chat && tokenizer.has_chat_template() {
+            tokenizer.apply_chat_template(
+                &[Message {
+                    role: "user".into(),
+                    content: prompt_content.clone(),
+                }],
+                true,
+                Some(&serde_json::json!({"enable_thinking":args.enable_thinking})),
+            )?
+        } else {
+            prompt_content
+        };
+        let cap = tokenizer
+            .encode(&prompt, false)?
+            .len()
+            .checked_add(args.max_tokens)
+            .context("Flash context overflow")?;
+        Some(ironmlx_runtime::core::flash_load::plan(
+            &model_dir,
+            1,
+            cap.max(1),
+            args.prefill_chunk_size,
+            if args.dflash2_model_dir.is_some() {
+                1536 << 20
+            } else {
+                0
+            },
+            None,
+        )?)
+    } else {
+        None
+    };
+    let mut loader = if let Some(plan) = &flash_plan {
+        plan.open_loader(&model_dir)?
+    } else if args.images.is_empty() {
         Loader::open(&model_dir).context("Loader::open")?
     } else {
         Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?
@@ -634,6 +687,19 @@ pub fn run(mut args: GenerateArgs) -> Result<()> {
             if args.mtp_model_dir.is_some() {
                 run_generation_with_gemma4_drafter_model(
                     &model, &tokenizer, &loader, model_type, &args,
+                )
+            } else {
+                run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
+            }
+        }
+        ironmlx_lm::models::ModelArchitecture::Qwen38FlashNext => {
+            let model = flash_plan
+                .as_ref()
+                .context("Flash load plan missing")?
+                .build_model(&loader)?;
+            if let Some(family) = dflash2_family {
+                run_generation_with_dflash2_model(
+                    &model, family, &tokenizer, &loader, model_type, &args,
                 )
             } else {
                 run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)

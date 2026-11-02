@@ -3267,12 +3267,25 @@ where
         paged_prefix_cache.as_ref(),
         &active_kv_offload,
     );
-    let budget_state = crate::core::memory_budget::validate_startup_budget_with_policy(
-        b_max,
-        effective_cap_max,
-        &meta,
-        budget_policy,
-    )?;
+    let budget_state = if let Some((per_token, fixed)) = M::scheduler_cache_cost() {
+        // Auxiliary recurrent state cannot be swapped by the full-KV-only
+        // offload implementation. Charge the full logical capacity.
+        crate::core::memory_budget::validate_startup_budget_with_cost(
+            b_max,
+            effective_cap_max,
+            &meta,
+            per_token,
+            fixed,
+        )?
+        .with_custom_cost(Some((per_token, fixed)))
+    } else {
+        crate::core::memory_budget::validate_startup_budget_with_policy(
+            b_max,
+            effective_cap_max,
+            &meta,
+            budget_policy,
+        )?
+    };
 
     spawn_scheduler_actor_with_mode_and_budget_state(
         model,

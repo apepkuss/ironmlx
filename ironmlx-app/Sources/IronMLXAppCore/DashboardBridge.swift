@@ -3335,7 +3335,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             model.effectiveMaxTokens = ModelLoadParameters.effectiveMaxCacheCap(
                 savedMaxCacheCap: parameterStore.parameters(for: model.id)?.maxCacheCap,
                 contextWindow: model.maxPositionEmbeddings,
-                activeKvOffloadEnabled: activeKvOffloadEnabled
+                activeKvOffloadEnabled: activeKvOffloadEnabled && scanner.supportsActiveKvOffload(for: model.id)
             )
             return model
         }

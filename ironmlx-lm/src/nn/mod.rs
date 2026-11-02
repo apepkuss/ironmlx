@@ -137,3 +137,6 @@ pub fn m5_prepared_totals() -> (usize, usize) {
 pub fn shared_weight_layout_totals() -> (usize, usize, usize) {
     shared_weight_layout::conversion_totals()
 }
+
+#[cfg(test)]
+mod flash_m5_qmm;

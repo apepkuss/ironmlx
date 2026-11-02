@@ -51,6 +51,13 @@ impl PleRows {
             .context("PLE row size overflow")?;
         let capacity = cache_bytes / (row_bytes + ENTRY_OVERHEAD);
         ensure!(capacity > 0, "PLE cache cannot fit one complete row");
+        ensure!(
+            width
+                .checked_mul(12)
+                .and_then(|n| n.checked_mul(index.heads()))
+                .is_some_and(|bytes| bytes <= staging_bytes),
+            "PLE staging cannot fit one complete token lookup"
+        );
         let mut shards = Vec::new();
         let mut first = 0u64;
         while first < index.row_count() {
@@ -102,6 +109,9 @@ impl PleRows {
 
     pub fn index(&self) -> &PleIndex {
         &self.index
+    }
+    pub fn max_gather_rows(&self) -> usize {
+        (self.staging_bytes / (self.width * 12)).min(i32::MAX as usize)
     }
     pub fn resident_rows(&self) -> usize {
         self.rows.len()

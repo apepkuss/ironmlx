@@ -24,6 +24,7 @@ use ironmlx_core::sampler::Sampler;
 use ironmlx_image::models::QwenImage21Pipeline;
 use ironmlx_lm::core::model::Model;
 use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
+use ironmlx_lm::models::qwen4_exp::text_model::FlashTextModel;
 use {ironmlx_lm::core::loader::Loader, ironmlx_lm::core::tokenizer::Tokenizer};
 use {
     ironmlx_lm::models::DiffusionGemmaConfig, ironmlx_lm::models::DiffusionGemmaGenerationConfig,
@@ -196,6 +197,9 @@ enum EngineSlotState {
         request_count: u64,
     },
     Draining {
+        /// Keep the bounded Flash plan alive while external request leases
+        /// still own the engine after the slot releases its Arc.
+        flash_peak_bytes: usize,
         started_unix_ms: u64,
         load_attempts: u64,
         request_count: u64,
@@ -387,6 +391,7 @@ impl EngineSlotState {
                 started_unix_ms,
                 load_attempts,
                 request_count,
+                ..
             } => EngineSlotRuntimeSnapshot {
                 state: EngineRuntimeState::Draining,
                 unload_reason: Some(EngineUnloadReason::Manual),
@@ -444,6 +449,7 @@ pub enum EngineVariant {
     Qwen35(AppState<Qwen35Model>),
     Qwen35Moe(AppState<Qwen35MoeModel>),
     Qwen36Moe(AppState<Qwen36MoeModel>),
+    Qwen38FlashNext(AppState<FlashTextModel>),
     Gemma4(AppState<Gemma4Model>),
     Gemma4Drafter(Box<Gemma4DrafterAppState>),
     Glm4MoeLite(AppState<Glm4MoeLiteModel>),
@@ -1496,9 +1502,44 @@ impl EnginePoolInner {
     async fn ensure_capacity_for(
         &self,
         model: &EngineModelConfig,
-    ) -> Result<Option<MemoryReservation>> {
+    ) -> Result<(
+        Option<MemoryReservation>,
+        Option<ironmlx_lm::models::qwen4_exp::load_plan::FlashLoadPlan>,
+    )> {
         let target_id = model.id.as_str();
-        let estimated_weight_bytes = estimated_engine_weight_bytes(model)?;
+        let (pool_has_flash, planned_occupied) =
+            self.planned_memory_envelope_excluding(target_id).await;
+        let flash_plan = if super::flash_load::is_flash(&model.path).unwrap_or(false) {
+            let cfg = model
+                .scheduler_runtime_profile
+                .as_ref()
+                .context("Flash scheduler profile missing")?
+                .config;
+            Some(super::flash_load::plan_with_occupied(
+                &model.path,
+                cfg.b_max,
+                cfg.max_cache_cap,
+                cfg.prefill_chunk_size,
+                0,
+                self.runtime.memory_limits.model_memory_limit_bytes,
+                planned_occupied,
+            )?)
+        } else {
+            None
+        };
+        let estimated_weight_bytes = if let Some(plan) = &flash_plan {
+            plan.residency.peak_bytes as usize
+        } else {
+            estimated_engine_weight_bytes(model)?
+        };
+        if pool_has_flash && flash_plan.is_none() {
+            let available = super::flash_load::available_bytes(
+                planned_occupied,
+                self.runtime.memory_limits.total_memory_limit_bytes,
+            )?;
+            anyhow::ensure!(estimated_weight_bytes <= available,
+                "model load `{target_id}` exceeds capacity reserved for loaded Flash engines: needed={estimated_weight_bytes}, available={available}; unload an idle model or reduce its configured capacity");
+        }
         // A target that cannot fit by itself must not evict existing models
         // while attempting to reclaim capacity for an impossible load.
         self.runtime
@@ -1602,7 +1643,7 @@ impl EnginePoolInner {
                 .memory_limits
                 .check_total_memory_limit(target_id, estimated_active_bytes)?;
         }
-        Ok(memory_reservation)
+        Ok((memory_reservation, flash_plan))
     }
 
     async fn loaded_count(&self) -> usize {
@@ -1637,6 +1678,36 @@ impl EnginePoolInner {
             .memory_limits
             .check_total_memory_limit(target_id, mlx_active_bytes)?;
         Ok(())
+    }
+
+    async fn planned_memory_envelope_excluding(&self, exclude_id: &str) -> (bool, usize) {
+        let slots = self.slots.lock().await.clone();
+        let mut has_flash = false;
+        let mut total = 0usize;
+        for (id, slot) in slots {
+            if id == exclude_id {
+                continue;
+            }
+            let state = slot.state.lock().await;
+            match &*state {
+                EngineSlotState::Loaded { engine, .. } => {
+                    if let Some(peak) = engine.flash_peak_bytes() {
+                        has_flash = true;
+                        total = total.saturating_add(peak);
+                    } else {
+                        total = total.saturating_add(engine.model_weight_bytes());
+                    }
+                }
+                EngineSlotState::Draining {
+                    flash_peak_bytes, ..
+                } if *flash_peak_bytes > 0 && slot.active_requests.load(Ordering::SeqCst) > 0 => {
+                    has_flash = true;
+                    total = total.saturating_add(*flash_peak_bytes);
+                }
+                _ => {}
+            }
+        }
+        (has_flash, total)
     }
 
     async fn loaded_model_weight_bytes_excluding(&self, exclude_id: &str) -> usize {
@@ -1864,7 +1935,7 @@ impl EngineSlot {
                 }
             }
 
-            let load_reservation = match pool.ensure_capacity_for(&self.model).await {
+            let (load_reservation, flash_plan) = match pool.ensure_capacity_for(&self.model).await {
                 Ok(reservation) => reservation,
                 Err(error) => {
                     let mut state = self.state.lock().await;
@@ -1905,7 +1976,7 @@ impl EngineSlot {
                     return Err(error);
                 }
             };
-            let result = load_engine_variant(&self.model, &self.runtime).await;
+            let result = load_engine_variant(&self.model, &self.runtime, flash_plan).await;
             match result {
                 Ok(engine) => {
                     if let Err(error) = pool
@@ -2027,9 +2098,14 @@ impl EngineSlot {
         let mut state = self.state.lock().await;
         let load_attempts = state.load_attempts();
         match &*state {
-            EngineSlotState::Loaded { request_count, .. } => {
+            EngineSlotState::Loaded {
+                engine,
+                request_count,
+                ..
+            } => {
                 if self.active_requests.load(Ordering::SeqCst) > 0 {
                     *state = EngineSlotState::Draining {
+                        flash_peak_bytes: engine.flash_peak_bytes().unwrap_or(0),
                         started_unix_ms: unix_time_ms(),
                         load_attempts,
                         request_count: *request_count,
@@ -2158,11 +2234,30 @@ impl EngineSlot {
 }
 
 impl EngineVariant {
+    fn flash_peak_bytes(&self) -> Option<usize> {
+        let Self::Qwen38FlashNext(state) = self else {
+            return None;
+        };
+        use ironmlx_lm::models::qwen4_exp::load_plan::{
+            FLASH_CACHE_BYTES_PER_TOKEN, FLASH_FIXED_BYTES_PER_SEQUENCE,
+        };
+        let per_sequence = state
+            .effective_cap_max
+            .saturating_mul(FLASH_CACHE_BYTES_PER_TOKEN as usize)
+            .saturating_add(FLASH_FIXED_BYTES_PER_SEQUENCE as usize);
+        Some(
+            state
+                .model_weight_bytes
+                .saturating_add(state.b_max.saturating_mul(per_sequence)),
+        )
+    }
+
     fn context_window(&self) -> Option<usize> {
         let cap = match self {
             Self::Qwen35(state) => state.effective_cap_max,
             Self::Qwen35Moe(state) => state.effective_cap_max,
             Self::Qwen36Moe(state) => state.effective_cap_max,
+            Self::Qwen38FlashNext(state) => state.effective_cap_max,
             Self::Gemma4(state) => state.effective_cap_max,
             Self::Gemma4Drafter(state) => state.base.effective_cap_max,
             Self::Glm4MoeLite(state) => state.effective_cap_max,
@@ -2185,6 +2280,9 @@ impl EngineVariant {
             Self::Qwen35(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::Qwen35Moe(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::Qwen36Moe(state) => state.request_execution.clear_shared_prompt_lookup().await,
+            Self::Qwen38FlashNext(state) => {
+                state.request_execution.clear_shared_prompt_lookup().await
+            }
             Self::Gemma4(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::Gemma4Drafter(state) => {
                 state
@@ -2274,6 +2372,9 @@ impl EngineVariant {
             Self::Qwen36Moe(state) => {
                 LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
             }
+            Self::Qwen38FlashNext(state) => {
+                LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
+            }
             Self::Gemma4(state) => {
                 LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
             }
@@ -2315,6 +2416,7 @@ impl EngineVariant {
             Self::Qwen35(_) => "qwen3_5",
             Self::Qwen35Moe(_) => "qwen3_5_moe",
             Self::Qwen36Moe(_) => "qwen3_6_moe",
+            Self::Qwen38FlashNext(_) => "qwen4_exp",
             Self::Gemma4(_) => "gemma4",
             Self::Gemma4Drafter(_) => "gemma4",
             Self::Glm4MoeLite(_) => "glm4_moe_lite",
@@ -2336,6 +2438,7 @@ impl EngineVariant {
             Self::Qwen35(state) => state.model_weight_bytes,
             Self::Qwen35Moe(state) => state.model_weight_bytes,
             Self::Qwen36Moe(state) => state.model_weight_bytes,
+            Self::Qwen38FlashNext(state) => state.model_weight_bytes,
             Self::Gemma4(state) => state.model_weight_bytes,
             Self::Gemma4Drafter(state) => state.base.model_weight_bytes,
             Self::Glm4MoeLite(state) => state.model_weight_bytes,
@@ -2381,6 +2484,7 @@ impl EngineVariant {
             Self::Qwen35(state) => causal_pending_requests(state),
             Self::Qwen35Moe(state) => causal_pending_requests(state),
             Self::Qwen36Moe(state) => causal_pending_requests(state),
+            Self::Qwen38FlashNext(state) => causal_pending_requests(state),
             Self::Gemma4(state) => causal_pending_requests(state),
             Self::Gemma4Drafter(state) => causal_pending_requests(&state.base),
             Self::Glm4MoeLite(state) => causal_pending_requests(state),
@@ -2402,6 +2506,7 @@ impl EngineVariant {
             Self::Qwen35(state) => state.runtime_usage.snapshot(true),
             Self::Qwen35Moe(state) => state.runtime_usage.snapshot(true),
             Self::Qwen36Moe(state) => state.runtime_usage.snapshot(true),
+            Self::Qwen38FlashNext(state) => state.runtime_usage.snapshot(true),
             Self::Gemma4(state) => state.runtime_usage.snapshot(true),
             Self::Gemma4Drafter(state) => state.base.runtime_usage.snapshot(true),
             Self::Glm4MoeLite(state) => state.runtime_usage.snapshot(true),
@@ -2492,6 +2597,7 @@ fn resolve_engine_mtp_config(
 async fn load_engine_variant(
     model: &EngineModelConfig,
     runtime: &EngineRuntimeOptions,
+    flash_plan: Option<ironmlx_lm::models::qwen4_exp::load_plan::FlashLoadPlan>,
 ) -> Result<EngineVariant> {
     if model.capabilities.runtime_kind == "diarization" {
         return Ok(EngineVariant::Diarization(
@@ -2539,8 +2645,15 @@ async fn load_engine_variant(
             ),
         ));
     }
-    let loader = Loader::open_multimodal(&model.path)
-        .with_context(|| format!("Loader::open_multimodal {}", model.path.display()))?;
+    if flash_plan.is_some() {
+        anyhow::ensure!(model.mtp.is_none(), "Flash uses its DFlash2 draft, not MTP");
+    }
+    let loader = if let Some(plan) = &flash_plan {
+        plan.open_loader(&model.path)?
+    } else {
+        Loader::open_multimodal(&model.path)
+            .with_context(|| format!("Loader::open_multimodal {}", model.path.display()))?
+    };
     let component_bytes = loader.loaded_tensor_component_bytes();
     let static_memory_estimate = StaticMemoryEstimate {
         text_cold_bytes: component_bytes.text,
@@ -2696,6 +2809,41 @@ async fn load_engine_variant(
                 .await?;
                 Ok(EngineVariant::Gemma4(state))
             }
+        }
+        ModelArchitecture::Qwen38FlashNext => {
+            let model_impl = flash_plan
+                .as_ref()
+                .context("Flash load plan missing")?
+                .build_model(&loader)?;
+            let estimate = StaticMemoryEstimate {
+                // Flash loader already materialized these MLX buffers; the
+                // retained weights are covered by active_bytes and the plan.
+                text_cold_bytes: 0,
+                vision_cold_bytes: flash_plan
+                    .as_ref()
+                    .context("Flash load plan missing")?
+                    .vision_weight_bytes as usize,
+                speculative_cold_bytes: 0,
+            };
+            drop(loader);
+            // Global App KV settings apply only to architectures whose
+            // complete auxiliary state has qualified those storage formats.
+            let mut flash_runtime = runtime.clone();
+            flash_runtime.kv_cache_turboquant_bits = None;
+            flash_runtime.active_kv_offload = crate::core::cache::ActiveKvOffloadConfig::disabled();
+            let state = build_plain_or_prompt_lookup_causal_state(
+                model_impl,
+                tokenizer,
+                model,
+                &flash_runtime,
+                estimate,
+                None,
+                None,
+                prompt_lookup,
+                vision_input,
+            )
+            .await?;
+            Ok(EngineVariant::Qwen38FlashNext(state))
         }
         ModelArchitecture::Glm4MoeLite => {
             let model_impl =
@@ -3957,6 +4105,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn flash_capacity_liability_survives_slot_draining_until_request_release() {
+        let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
+        let model_dir = write_minimal_model_config("qwen3_5");
+        pool.register_dynamic_model(
+            model_config("flash", &model_dir, EngineLoadPolicy::Lazy),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let slot = pool.inner.slots.lock().await["flash"].clone();
+        slot.active_requests
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        *slot.state.lock().await = EngineSlotState::Draining {
+            flash_peak_bytes: 24usize << 30,
+            started_unix_ms: 0,
+            load_attempts: 1,
+            request_count: 1,
+        };
+        assert_eq!(
+            pool.inner.planned_memory_envelope_excluding("other").await,
+            (true, 24usize << 30)
+        );
+        assert_eq!(
+            pool.inner.planned_memory_envelope_excluding("flash").await,
+            (false, 0)
+        );
+        slot.active_requests
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            pool.inner.planned_memory_envelope_excluding("other").await,
+            (false, 0)
+        );
+        std::fs::remove_dir_all(model_dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn draining_model_rejects_new_request_until_unload_finishes() {
         let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
         let model_dir = write_minimal_model_config("qwen3_5");
@@ -3967,6 +4152,7 @@ mod tests {
             active_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
             pinned: std::sync::atomic::AtomicBool::new(false),
             state: Mutex::new(EngineSlotState::Draining {
+                flash_peak_bytes: 0,
                 started_unix_ms: unix_time_ms(),
                 load_attempts: 1,
                 request_count: 1,

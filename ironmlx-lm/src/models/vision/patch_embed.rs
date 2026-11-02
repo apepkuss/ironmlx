@@ -8,6 +8,7 @@ use ironmlx_core::weights::WeightSource;
 pub struct PatchEmbed {
     weight_2d: Array,
     bias: Array,
+    reference_conv3d: bool,
 }
 
 impl PatchEmbed {
@@ -17,7 +18,11 @@ impl PatchEmbed {
     /// be reshaped to `[hidden_size, kT*kH*kW*Cin]` (size mismatch).
     pub fn new(weight_5d: Array, bias: Array, hidden_size: i32) -> Result<Self> {
         let weight_2d = weight_5d.reshape(&[hidden_size, 2 * 16 * 16 * 3][..])?;
-        Ok(Self { weight_2d, bias })
+        Ok(Self {
+            weight_2d,
+            bias,
+            reference_conv3d: false,
+        })
     }
 
     pub fn from_loader(
@@ -43,6 +48,10 @@ impl PatchEmbed {
         Ok(result)
     }
 
+    pub(crate) fn preserve_reference_convolution(&mut self) {
+        self.reference_conv3d = true;
+    }
+
     pub fn forward(&self, x: &Array) -> Result<Array> {
         self.forward_on(x, ())
     }
@@ -52,6 +61,21 @@ impl PatchEmbed {
         // x: [N, T=2, C=3, H=16, W=16]  →  [N, T, H, W, C]
         let x = ops::shape::transpose_axes(x, [0_i32, 1, 3, 4, 2])?;
         let n = x.shape().as_slice()[0];
+        if self.reference_conv3d {
+            let hidden = self.weight_2d.shape().as_slice()[0];
+            let weight = self.weight_2d.reshape([hidden, 2, 16, 16, 3])?;
+            let input = x.astype_on(weight.dtype(), target)?;
+            let out = ops::conv::conv3d_on(
+                &input,
+                &weight,
+                (2, 16, 16),
+                (0, 0, 0),
+                (1, 1, 1),
+                1,
+                target,
+            )?;
+            return Ok(&out.reshape([n, hidden])? + &self.bias);
+        }
         let x = x
             .reshape(&[n, 2 * 16 * 16 * 3][..])?
             .astype_on(self.weight_2d.dtype(), target)?;
