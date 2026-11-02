@@ -671,15 +671,7 @@ async fn per_row_offset_invalid_args_return_err() {
         }
         // Reset between sub-tests.
         for cell in &mut cache {
-            match cell {
-                LayerCache::Full(kv) => kv.reset(),
-                LayerCache::Linear(gdc) => {
-                    gdc.reset().expect("reset");
-                }
-                LayerCache::Mla(c) => {
-                    c.reset().expect("reset");
-                }
-            }
+            cell.reset().expect("reset");
         }
 
         // (b) per_row_lens[i] < 0
@@ -700,15 +692,7 @@ async fn per_row_offset_invalid_args_return_err() {
             assert!(r.is_err(), "negative len should Err");
         }
         for cell in &mut cache {
-            match cell {
-                LayerCache::Full(kv) => kv.reset(),
-                LayerCache::Linear(gdc) => {
-                    gdc.reset().expect("reset");
-                }
-                LayerCache::Mla(c) => {
-                    c.reset().expect("reset");
-                }
-            }
+            cell.reset().expect("reset");
         }
 
         // (c) per_row_lens[i] > k.shape()[2]
@@ -729,15 +713,7 @@ async fn per_row_offset_invalid_args_return_err() {
             assert!(r.is_err(), "len > k seq should Err");
         }
         for cell in &mut cache {
-            match cell {
-                LayerCache::Full(kv) => kv.reset(),
-                LayerCache::Linear(gdc) => {
-                    gdc.reset().expect("reset");
-                }
-                LayerCache::Mla(c) => {
-                    c.reset().expect("reset");
-                }
-            }
+            cell.reset().expect("reset");
         }
 
         // (d) offsets[i] + per_row_lens[i] > cap

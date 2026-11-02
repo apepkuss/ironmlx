@@ -16,6 +16,7 @@ product.
 | MLX C++ with bundled JACCL | `a8f66b5901791a38ff527f249e1f1a84f46c03b6` | MIT | `THIRD_PARTY_LICENSES/native-mlx-mit.txt` | https://github.com/apepkuss/mlx.git |
 | MLX Metal kernel headers (vendored, IronMLX fork) | `73ad5df20cb30be4192e5c4d0ae8130674773427` | MIT | `THIRD_PARTY_LICENSES/native-mlx-kernel-headers-fork-mit.txt` | https://github.com/apepkuss/mlx.git |
 | MLX Metal kernel headers (vendored, upstream v0.32.3) | `64ea011cb65f14d9ce2737e60db9a4ae91ed7441` | MIT | `THIRD_PARTY_LICENSES/native-mlx-kernel-headers-v0.32.3-mit.txt` | https://github.com/ml-explore/mlx.git |
+| MLX-VLM GDN prefill reference kernel (vendored) | `ff788e98d82f6a931992a6a8ee0e74c7a7e6925e` | MIT | `THIRD_PARTY_LICENSES/native-mlx-vlm-mit.txt` | https://github.com/Blaizzy/mlx-vlm.git |
 | MLX-VLM QSA reference kernel (vendored) | `ff788e98d82f6a931992a6a8ee0e74c7a7e6925e` | MIT | `THIRD_PARTY_LICENSES/native-mlx-vlm-mit.txt` | https://github.com/Blaizzy/mlx-vlm.git |
 | nlohmann/json | `3.11.3` | MIT | `THIRD_PARTY_LICENSES/native-nlohmann-json-mit.txt` | https://github.com/nlohmann/json.git |
 

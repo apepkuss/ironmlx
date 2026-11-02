@@ -215,13 +215,14 @@ fn real_hc_gdn_matches_pinned_reference() {
     assert_eq!(state.offset, base.offset + 1);
     let index = cfg.ple_index(0).unwrap();
     let width = cfg.ple_embed_dim as usize / index.heads();
+    let staging_bytes = width * 12 * index.heads() * 2;
     let rows = PleRows::new(
         Arc::clone(&files),
         "language_model.model.layers.1.ple.ple_embedding.ngram_embedding",
         index,
         width,
         4 * 1024 * 1024,
-        8 * 1024 * 1024,
+        staging_bytes,
     )
     .unwrap();
     let ple = PleLayer::from_weights(&weights, "model.layers.1.ple", &cfg, rows).unwrap();

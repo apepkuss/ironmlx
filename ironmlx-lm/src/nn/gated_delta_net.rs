@@ -469,13 +469,14 @@ impl GatedDeltaNet {
                 GatedDeltaInputProjections::Separate { qkv, z, b, a } => {
                     let projected_qkv = qkv.forward_on(x, target)?;
                     let projected_z = z.forward_on(x, target)?;
-                    let _flash_gates = self.flash_math.then(super::position_stable_qmm::scope);
-                    (
-                        projected_qkv,
-                        projected_z,
-                        b.forward_on(x, target)?,
-                        a.forward_on(x, target)?,
-                    )
+                    let gate = |projection: &Linear| {
+                        if self.flash_math {
+                            projection.forward_singleton_gather_on(x, target)
+                        } else {
+                            projection.forward_on(x, target)
+                        }
+                    };
+                    (projected_qkv, projected_z, gate(b)?, gate(a)?)
                 }
                 GatedDeltaInputProjections::Fused {
                     projection,
@@ -948,6 +949,33 @@ impl GatedDeltaNet {
                     part(&g)?,
                     part(&beta)?,
                 );
+                if self.flash_math
+                    && len > 1
+                    && mask.is_none()
+                    && self.cfg.head_k_dim == 128
+                    && self.cfg.head_v_dim % 8 == 0
+                    && g.dtype() == Dtype::Float32
+                {
+                    let zeros;
+                    let state = if let Some(state) = state_in {
+                        state
+                    } else {
+                        zeros = Array::zeros(
+                            [
+                                batch,
+                                self.cfg.num_v_heads,
+                                self.cfg.head_v_dim,
+                                self.cfg.head_k_dim,
+                            ],
+                            Dtype::Float32,
+                        )?;
+                        &zeros
+                    };
+                    let (y, state) = crate::models::qwen4_exp::gdn_kernel::prefill_on(
+                        &q, &k, &v, &g, &beta, state, target,
+                    )?;
+                    return Ok((y, Some(state)));
+                }
                 let t_arr: Array = (&[len][..], ()).try_into()?;
                 let y_shape =
                     Shape::from(vec![batch, len, self.cfg.num_v_heads, self.cfg.head_v_dim]);

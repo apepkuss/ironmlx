@@ -133,6 +133,27 @@ impl Mrope {
         })
     }
 
+    /// Reference power convention used by Flash-Next. Keep existing models'
+    /// historical exp/log frequency construction unchanged.
+    pub fn new_reference_power(
+        head_dim: i32,
+        theta: f32,
+        partial: f32,
+        sections: &[i32],
+        interleaved: bool,
+    ) -> Result<Self> {
+        let mut rope = Self::new(head_dim, theta, partial, sections, interleaved)?;
+        let exponents = constructors::arange(0.0, rope.rot_dim as f64, 2.0, Dtype::Float32)?;
+        let dim = Array::try_from((&[rope.rot_dim as f32][..], ()))?;
+        let exponent = mlx::ops::binary::divide(&exponents, &dim)?;
+        let base = Array::try_from((&[theta][..], ()))?;
+        let power = mlx::ops::binary::power(&base, &exponent)?;
+        let one = Array::try_from((&[1.0f32][..], ()))?;
+        rope.inv_freq = mlx::ops::binary::divide(&one, &power)?;
+        rope.inv_freq.eval()?;
+        Ok(rope)
+    }
+
     /// Number of channels actually rotated (`head_dim * partial_rotary_factor`,
     /// rounded down to even).
     pub fn rot_dim(&self) -> i32 {

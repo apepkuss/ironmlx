@@ -97,6 +97,54 @@ pub fn conv2d_on(
     Ok(Array::from_inner(inner))
 }
 
+/// 3D convolution in NDHWC layout; weights are [out, depth, height, width, in/groups].
+pub fn conv3d(
+    input: &Array,
+    weight: &Array,
+    stride: (i32, i32, i32),
+    padding: (i32, i32, i32),
+    dilation: (i32, i32, i32),
+    groups: i32,
+) -> Result<Array> {
+    conv3d_on(input, weight, stride, padding, dilation, groups, ())
+}
+
+/// Stream-targeted 3D convolution.
+pub fn conv3d_on(
+    input: &Array,
+    weight: &Array,
+    stride: (i32, i32, i32),
+    padding: (i32, i32, i32),
+    dilation: (i32, i32, i32),
+    groups: i32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
+    let (has, dev_only, dev_t, idx) = target.into().encode();
+    // SAFETY: input and weight are borrowed for the duration of the call.
+    let inner = unsafe {
+        mlx_sys::conv::ffi::ops_conv3d(
+            input.as_inner(),
+            weight.as_inner(),
+            stride.0,
+            stride.1,
+            stride.2,
+            padding.0,
+            padding.1,
+            padding.2,
+            dilation.0,
+            dilation.1,
+            dilation.2,
+            groups,
+            has,
+            dev_only,
+            dev_t,
+            idx,
+        )
+    }
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
 /// Transposed 1D convolution in NLC layout; weights are [out, kernel, in/groups].
 #[allow(clippy::too_many_arguments)]
 pub fn conv_transpose1d(

@@ -60,6 +60,55 @@ impl Linear {
             shared: None,
         }
     }
+    /// MLX-VLM singleton quantized projection morphology for Flash gates.
+    /// Dense qmv and gathered qmv can differ at a BF16 rounding boundary;
+    /// preserve the reference's gather call for S>1 and ordinary qmv at S=1.
+    pub(crate) fn forward_singleton_gather_on(
+        &self,
+        x: &Array,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        let shape = x.shape();
+        let d = shape.as_slice();
+        if d.len() != 3 || d[1] <= 1 {
+            return self.forward_on(x, target);
+        }
+        let Some(p) = self.quantized_parts() else {
+            return self.forward_on(x, target);
+        };
+        if p.mode != QuantMode::Affine {
+            return self.forward_on(x, target);
+        }
+        let projected = mlx::ops::shape::contiguous_on(x, false, target)?
+            .reshape_on([d[0], d[1], 1, 1, d[2]], target)?;
+        let weight = mlx::ops::shape::expand_dims_on(p.weight, 0, target)?;
+        let scales = mlx::ops::shape::expand_dims_on(p.scales, 0, target)?;
+        let biases = p
+            .biases
+            .map(|b| mlx::ops::shape::expand_dims_on(b, 0, target))
+            .transpose()?;
+        let indices = Array::zeros([d[0], d[1], 1], mlx::Dtype::Int32)?;
+        let output = mlx::quantization::gather_quantized_matmul_on(
+            &projected,
+            &weight,
+            &scales,
+            biases.as_ref(),
+            None,
+            Some(&indices),
+            true,
+            Some(p.group_size),
+            Some(p.bits),
+            p.mode.mlx_backend_mode(),
+            false,
+            target,
+        )?;
+        let mut output = output.reshape_on([d[0], d[1], self.out_features() as i32], target)?;
+        if let Some(bias) = p.bias {
+            output = mlx::ops::binary::add_on(&output, bias, target)?;
+        }
+        Ok(output)
+    }
+
     pub fn forward(&self, x: &Array) -> Result<Array> {
         self.forward_on(x, ())
     }

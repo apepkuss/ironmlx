@@ -208,6 +208,8 @@ pub enum M5ProfileTarget {
     Qwen35Dense,
     /// Qwen3.6-35B-A3B MoE targets.
     Qwen36Moe,
+    /// Flash-Next: native affine4/g32 kernels and independent HC/PLE rows.
+    Qwen38FlashNext,
     /// No qualified profile: every setting stays off.
     Unqualified,
 }
@@ -217,6 +219,7 @@ impl M5ProfileTarget {
         match self {
             Self::Qwen35Dense => "qwen35-dense",
             Self::Qwen36Moe => "qwen36-moe",
+            Self::Qwen38FlashNext => "qwen38-flash-next",
             Self::Unqualified => "unqualified",
         }
     }
@@ -225,6 +228,7 @@ impl M5ProfileTarget {
         match self {
             Self::Qwen35Dense => PROFILE_VALUES,
             Self::Qwen36Moe => MOE_PROFILE_VALUES,
+            Self::Qwen38FlashNext => FLASH_PROFILE_VALUES,
             Self::Unqualified => &[],
         }
     }
@@ -272,6 +276,19 @@ impl M5ProfileTarget {
 /// prompt-length-specialized kernels before serving: the first run of a new
 /// build no longer stalls 190-240 ms inside a request (prefill of a prompt
 /// over 64 tokens, the drafter's first 33-48-row context projection).
+// Flash has g32 expert/projection weights and two KV heads. The g64 tiled
+// kernels and Dense GDN/ANE preparation are deliberately not inherited.
+// MLX a8f66b590 dispatches its own generation-17 NAX kernels for supported
+// native g32 prefill shapes. Multi-request verification keeps independent
+// HC/PLE/recurrent states and uses the measured window-cost fallback.
+const FLASH_PROFILE_VALUES: &[(&str, &str)] = &[
+    (settings::DFLASH2_RAGGED_LINEAR, "1"),
+    (settings::DFLASH2_RAGGED_BUDGET, "3"),
+    (settings::DFLASH2_RAGGED_SOLO_BUDGET, "3"),
+    (settings::DFLASH2_DRAFT_BATCHED, "1"),
+    (settings::MLX_CACHE_MAX_MIB, "512"),
+];
+
 const MOE_PROFILE_VALUES: &[(&str, &str)] = &[
     (settings::DFLASH2_RAGGED_LINEAR, "1"),
     (settings::DFLASH2_RAGGED_BUDGET, "3"),
@@ -1183,6 +1200,34 @@ mod tests {
         );
         assert_eq!(resolve_ane(AneMode::Auto, true, 0), AneStatus::Inactive);
         assert_eq!(AneStatus::NotApplicable.as_str(), "not_applicable");
+    }
+
+    #[test]
+    fn flash_profile_keeps_group32_and_ane_separate_from_dense_and_moe() {
+        let flash = Some(M5ProfileTarget::Qwen38FlashNext.values());
+        for name in [
+            settings::M5_MOE_AFFINE4_PROJECTIONS,
+            settings::M5_SHARED_WEIGHT_LAYOUT,
+            settings::DFLASH2_DRAFT_M5_RESIDENT,
+            settings::DFLASH2_DRAFT_M5,
+            settings::PREFILL_D256_NAX_MIN_KEYS,
+            settings::GDN_COMMIT_KERNEL,
+        ] {
+            assert_eq!(setting_with(None, flash, name), None, "{name}");
+        }
+        assert_eq!(
+            setting_with(None, flash, settings::DFLASH2_RAGGED_LINEAR).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            resolve_ane(AneMode::Auto, false, 4),
+            AneStatus::NotApplicable
+        );
+        assert_eq!(resolve_ane(AneMode::Off, false, 4), AneStatus::Disabled);
+        assert_eq!(
+            resolve_for_target(M5ProfileMode::Auto, true, true, Some("applegpu_g16s")),
+            M5ProfileStatus::UnsupportedGpu
+        );
     }
 
     #[test]

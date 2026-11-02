@@ -21,12 +21,15 @@ const MOE_DEFAULT_DRAFT_BITS: i32 = 4;
 pub(crate) enum DFlash2TargetFamily {
     /// Dense Qwen3.5-family targets (the Qwen3.8 lane and its qualification).
     Qwen35Dense,
+    Qwen38FlashNext,
     /// Qwen3.6-35B-A3B MoE with an exactly qualified affine recipe. Requests
     /// verify one at a time, or as ragged rows of up to four requests when
     /// the M5 profile enables ragged linear batching (never as tensor groups);
     /// windows are linear unless the flat tree is opted into. The BF16 draft
     /// runs either quantized at load to affine 4-bit (default) or kept in BF16.
-    Qwen36Moe { bits: i32 },
+    Qwen36Moe {
+        bits: i32,
+    },
 }
 
 impl DFlash2TargetFamily {
@@ -36,6 +39,7 @@ impl DFlash2TargetFamily {
     ) -> Result<Self> {
         match architecture {
             ModelArchitecture::Qwen35Dense => Ok(Self::Qwen35Dense),
+            ModelArchitecture::Qwen38FlashNext => {ironmlx_lm::models::qwen4_exp::config::FlashTextConfig::from_root(config_raw)?; Ok(Self::Qwen38FlashNext)},
             ModelArchitecture::Qwen35Moe => {
                 ironmlx_lm::models::qwen36_moe_dflash2_target_bits(config_raw)
                     .map(|bits| Self::Qwen36Moe { bits })
@@ -56,6 +60,7 @@ impl DFlash2TargetFamily {
     pub(crate) fn m5_profile_target(self) -> M5ProfileTarget {
         match self {
             Self::Qwen35Dense => M5ProfileTarget::Qwen35Dense,
+            Self::Qwen38FlashNext => M5ProfileTarget::Qwen38FlashNext,
             Self::Qwen36Moe { .. } => M5ProfileTarget::Qwen36Moe,
         }
     }
@@ -65,7 +70,7 @@ impl DFlash2TargetFamily {
         match (self, profile_active) {
             (Self::Qwen35Dense, true) => ironmlx_core::m5_profile::DFLASH2_TREE_MAX_NODES,
             (Self::Qwen36Moe { .. }, true) => ironmlx_core::m5_profile::MOE_DFLASH2_TREE_MAX_NODES,
-            (_, false) => 0,
+            (Self::Qwen38FlashNext, _) | (_, false) => 0,
         }
     }
 
@@ -81,6 +86,7 @@ impl DFlash2TargetFamily {
         }
         match self {
             Self::Qwen35Dense => Ok(requested.unwrap_or(DENSE_DEFAULT_DRAFT_BITS)),
+            Self::Qwen38FlashNext => {anyhow::ensure!(requested.unwrap_or(0)==0,"Flash-Next currently requires its BF16 DFlash2 draft (--dflash2-draft-bits 0)");Ok(0)},
             Self::Qwen36Moe { .. } => match requested.unwrap_or(MOE_DEFAULT_DRAFT_BITS) {
                 bits @ (0 | 4) => Ok(bits),
                 bits => Err(anyhow!(
@@ -96,6 +102,12 @@ impl DFlash2TargetFamily {
         tree_max_nodes: Option<usize>,
         position_keyed_sampling: bool,
     ) -> Result<()> {
+        if self == Self::Qwen38FlashNext {
+            anyhow::ensure!(
+                tree_max_nodes.unwrap_or(0) == 0 && !position_keyed_sampling,
+                "Flash-Next DFlash2 requires linear verification without position-keyed sampling"
+            );
+        }
         if let Self::Qwen36Moe { .. } = self {
             anyhow::ensure!(
                 tree_max_nodes.unwrap_or(0)
@@ -118,11 +130,16 @@ impl DFlash2TargetFamily {
         model: &M,
         tree_max_nodes: usize,
     ) -> Result<()> {
-        if let Self::Qwen36Moe { bits } = self {
+        if !matches!(self, Self::Qwen35Dense) {
+            let target = match self {
+                Self::Qwen36Moe { bits } => format!("Qwen3.6 MoE affine{bits}"),
+                Self::Qwen38FlashNext => "Qwen3.8 Flash-Next affine4g32".to_owned(),
+                Self::Qwen35Dense => unreachable!(),
+            };
             let certified = model.dflash2_verify_capabilities().flat_tree_max_nodes;
             anyhow::ensure!(
                 tree_max_nodes <= certified,
-                "--dflash2-tree-max-nodes {tree_max_nodes} exceeds the {certified}-node flat tree certified for this Qwen3.6 MoE affine{bits} target"
+                "--dflash2-tree-max-nodes {tree_max_nodes} exceeds the {certified}-node flat tree certified for this {target} target"
             );
         }
         Ok(())
@@ -142,7 +159,12 @@ impl DFlash2TargetFamily {
             requested,
             checkpoint_block_size,
         )?;
-        if let Self::Qwen36Moe { bits } = self {
+        if !matches!(self, Self::Qwen35Dense) {
+            let target = match self {
+                Self::Qwen36Moe { bits } => format!("Qwen3.6 MoE affine{bits}"),
+                Self::Qwen38FlashNext => "Qwen3.8 Flash-Next affine4g32".to_owned(),
+                Self::Qwen35Dense => unreachable!(),
+            };
             let capabilities = model.dflash2_verify_capabilities();
             let max_verify_width = capabilities
                 .max_draft_tokens(1)
@@ -150,12 +172,12 @@ impl DFlash2TargetFamily {
                 .unwrap_or(0);
             anyhow::ensure!(
                 max_verify_width >= 2,
-                "Qwen3.6 MoE affine{bits} target certifies no DFlash2 verify width"
+                "{target} target certifies no DFlash2 verify width"
             );
             if resolution.explicit {
                 anyhow::ensure!(
                     resolution.block_size <= max_verify_width,
-                    "--dflash2-block-size {} exceeds the Q{max_verify_width} verify width certified for this Qwen3.6 MoE affine{bits} target ({})",
+                    "--dflash2-block-size {} exceeds the Q{max_verify_width} verify width certified for this {target} target ({})",
                     resolution.block_size,
                     capabilities.profile
                 );
@@ -210,6 +232,18 @@ pub(crate) fn model_dir_dflash2_family(model_dir: &Path) -> Option<DFlash2Target
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flash_scope_keeps_author_bf16_draft_and_linear_verification() {
+        let family = DFlash2TargetFamily::Qwen38FlashNext;
+        assert_eq!(family.resolve_draft_bits(None).unwrap(), 0);
+        assert!(family.resolve_draft_bits(Some(4)).is_err());
+        assert!(family.resolve_draft_bits(Some(8)).is_err());
+        assert!(family.ensure_execution_scope(None, false).is_ok());
+        assert!(family.ensure_execution_scope(Some(2), false).is_err());
+        assert!(family.ensure_execution_scope(None, true).is_err());
+        assert_eq!(family.default_tree_max_nodes(true), 0);
+    }
 
     #[test]
     fn moe_scope_defaults_to_q4_draft_and_keeps_linear_stateful_sampling() {

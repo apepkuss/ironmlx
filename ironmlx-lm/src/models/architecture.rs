@@ -11,6 +11,8 @@ pub enum ModelArchitecture {
     /// Qwen3.5 MoE execution graph. This also covers Qwen3.6 MoE checkpoints
     /// that declare `model_type = "qwen3_5_moe"`.
     Qwen35Moe,
+    /// Qwen3.8 Flash-Next HC/GDN/QSA/PLE execution graph.
+    Qwen38FlashNext,
     /// Gemma4 dense execution graph. This accepts both tower-based
     /// `model_type = "gemma4"` checkpoints and encoder-free
     /// `model_type = "gemma4_unified"` checkpoints.
@@ -36,7 +38,7 @@ pub enum ModelArchitecture {
 
 impl ModelArchitecture {
     pub const EXPECTED_MODEL_TYPES: &'static str =
-        "'qwen3_5', 'qwen3_5_moe', 'gemma4', 'gemma4_unified', 'glm4_moe_lite', 'llama', 'minicpmv4_6', or 'diffusion_gemma'";
+        "'qwen3_5', 'qwen3_5_moe', 'qwen4_exp', 'gemma4', 'gemma4_unified', 'glm4_moe_lite', 'llama', 'minicpmv4_6', or 'diffusion_gemma'";
 
     pub fn from_config_value(raw: &Value) -> Result<Self> {
         let model_type = raw
@@ -50,6 +52,7 @@ impl ModelArchitecture {
         match model_type {
             "qwen3_5" => Ok(Self::Qwen35Dense),
             "qwen3_5_moe" => Ok(Self::Qwen35Moe),
+            "qwen4_exp" => Ok(Self::Qwen38FlashNext),
             "gemma4" | "gemma4_unified" => Ok(Self::Gemma4),
             "glm4_moe_lite" => Ok(Self::Glm4MoeLite),
             "llama" => Ok(Self::Llama),
@@ -66,6 +69,7 @@ impl ModelArchitecture {
         match self {
             Self::Qwen35Dense => "qwen3_5",
             Self::Qwen35Moe => "qwen3_5_moe",
+            Self::Qwen38FlashNext => "qwen4_exp",
             Self::Gemma4 => "gemma4",
             Self::Glm4MoeLite => "glm4_moe_lite",
             Self::Llama => "llama",
@@ -75,7 +79,7 @@ impl ModelArchitecture {
     }
 
     pub fn supports_prompt_lookup(self) -> bool {
-        !matches!(self, Self::DiffusionGemma)
+        !matches!(self, Self::DiffusionGemma | Self::Qwen38FlashNext)
     }
 }
 

@@ -420,6 +420,9 @@ pub struct RoutedExperts {
     pub group_size: i32,
     pub bits: i32,
     pub num_experts: i32,
+    /// Paging compacts RHS storage; retain the source expert count for the
+    /// upstream B/E gather-QMV vs gather-RHS-QMM scheduling decision.
+    dispatch_experts: Option<i32>,
     /// Lazily-built compiled SwiGLU closure for the routed activation.
     /// Owned here so `apply_experts` is self-contained.
     swiglu: std::sync::OnceLock<CompiledFn>,
@@ -436,6 +439,63 @@ pub(crate) struct CompactExpertWeights {
 }
 
 impl RoutedExperts {
+    pub(crate) fn set_dispatch_expert_count(&mut self, original: i32) -> Result<()> {
+        anyhow::ensure!(
+            original >= self.num_experts,
+            "source expert count cannot be smaller than compact storage"
+        );
+        self.dispatch_experts = Some(original);
+        Ok(())
+    }
+
+    /// Reference-width gate/up projections. Views share a compact packed
+    /// allocation; the complete resident path retains its original tensors.
+    pub(crate) fn keep_gate_up_split(&mut self) -> Result<()> {
+        let source = match &self.gate_up {
+            GateUpPath::Split { .. } => return Ok(()),
+            GateUpPath::Fused {
+                legacy_source,
+                fused_gate_up,
+                meta,
+            } => {
+                if let Some(fused) = fused_gate_up.get() {
+                    let view = |x: &Array, start: i32, end: i32| -> Result<Array> {
+                        let d = x.shape();
+                        let d = d.as_slice();
+                        Ok(x.slice(&[0, start, 0][..], &[d[0], end, d[2]][..])?)
+                    };
+                    let projection = |start, end| -> Result<ExpertQuantProjection> {
+                        Ok(ExpertQuantProjection {
+                            weight: view(&fused.weight, start, end)?,
+                            scales: view(&fused.scales, start, end)?,
+                            biases: fused
+                                .biases
+                                .as_ref()
+                                .map(|x| view(x, start, end))
+                                .transpose()?,
+                            meta: *meta,
+                        })
+                    };
+                    LazyGateUpSource {
+                        gate: projection(0, self.moe_intermediate)?,
+                        up: projection(self.moe_intermediate, 2 * self.moe_intermediate)?,
+                    }
+                } else {
+                    legacy_source
+                        .lock()
+                        .map_err(|_| anyhow!("expert layout poisoned"))?
+                        .take()
+                        .context("expert split source missing")?
+                }
+            }
+        };
+        self.gate_up = GateUpPath::Split {
+            gate: source.gate,
+            up: source.up,
+        };
+        Ok(())
+    }
+
     pub(crate) fn from_compact_affine(weights: CompactExpertWeights) -> Result<Self> {
         let [weight, scales, biases] = weights.gate_up;
         let [down_weight, down_scales, down_biases] = weights.down;
@@ -487,6 +547,7 @@ impl RoutedExperts {
             group_size: meta.group_size,
             bits: meta.bits,
             num_experts,
+            dispatch_experts: None,
             swiglu: OnceLock::new(),
             geglu: OnceLock::new(),
         })
@@ -538,6 +599,7 @@ impl RoutedExperts {
             group_size: gate_meta.group_size,
             bits: gate_meta.bits,
             num_experts,
+            dispatch_experts: None,
             swiglu: std::sync::OnceLock::new(),
             geglu: std::sync::OnceLock::new(),
         })
@@ -991,16 +1053,24 @@ impl RoutedExperts {
                                 "RoutedExperts::apply_experts: expand_dims sorted_x → [BS*k,1,H]",
                             )?;
 
+                        // MLX main selects gather-RHS-QMM when B/E>=4.
+                        // Compact SSD weights must not change that decision:
+                        // mark this sorted list generic below the source-E
+                        // threshold, preserving the resident QMV arithmetic.
+                        let sorted_dispatch = self
+                            .dispatch_experts
+                            .is_none_or(|experts| bs_k / experts >= 4);
                         let (gate_out, up_out) = self
-                            .gate_up_outputs(
-                                &sorted_x_3d,
-                                &sorted_topk,
-                                /* sorted_indices */ true,
-                                target,
-                            )
+                            .gate_up_outputs(&sorted_x_3d, &sorted_topk, sorted_dispatch, target)
                             .context("RoutedExperts::apply_experts: gate/up gather_qmm (sorted)")?;
 
-                        (gate_out, up_out, sorted_topk, true, Some(sort_perm))
+                        (
+                            gate_out,
+                            up_out,
+                            sorted_topk,
+                            sorted_dispatch,
+                            Some(sort_perm),
+                        )
                     } else {
                         // --- Default broadcast path. ---
                         let x_in =
@@ -1132,6 +1202,7 @@ impl RoutedExperts {
 /// Routed path: `gather_quantized_matmul_on` (G1) fused stacked SwiGLU.
 /// Shared path: standard `Mlp` gated by `sigmoid(shared_expert_gate(x))`.
 pub struct SparseMoeBlock {
+    row_invariant_shared_gate: bool,
     /// Router: Linear(hidden → num_experts) quantized 4-bit, no additive bias.
     /// `None` on the M5 expert route, which uses `tile_router` only.
     router_gate: Option<Linear>,
@@ -1161,6 +1232,20 @@ pub struct SparseMoeBlock {
 }
 
 impl SparseMoeBlock {
+    pub(crate) fn from_loader_flash(
+        loader: &Loader,
+        prefix: &str,
+        topk: i32,
+        norm_topk: bool,
+    ) -> Result<Self> {
+        let mut block = Self::from_loader(loader, prefix, topk, norm_topk)?;
+        block.row_invariant_shared_gate = true;
+        if let Some(routed) = &mut block.routed {
+            routed.keep_gate_up_split()?;
+        }
+        Ok(block)
+    }
+
     /// Construct from `{prefix}` where prefix = `"model.layers.{i}.mlp"`.
     ///
     /// Sub-paths:
@@ -1256,6 +1341,7 @@ impl SparseMoeBlock {
             (Some(router_gate), Some(shared_expert_gate))
         };
         Ok(Self {
+            row_invariant_shared_gate: false,
             router_gate,
             routed,
             m5_experts,
@@ -1417,9 +1503,12 @@ impl SparseMoeBlock {
         let shared_y = shared_expert
             .forward_on(flat_x, target)
             .context("SparseMoeBlock: shared_expert forward")?;
-        let gate_logit = shared_expert_gate
-            .forward_on(flat_x, target)
-            .context("SparseMoeBlock: shared_expert_gate forward")?;
+        let gate_logit = if self.row_invariant_shared_gate {
+            shared_expert_gate.forward_singleton_gather_on(flat_x, target)
+        } else {
+            shared_expert_gate.forward_on(flat_x, target)
+        }
+        .context("SparseMoeBlock: shared_expert_gate forward")?;
         let gate = gate_logit
             .sigmoid_on(target)
             .context("SparseMoeBlock: shared gate sigmoid")?;
@@ -1671,6 +1760,65 @@ impl SparseMoeBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "M5 real-kernel qualification of compact expert dispatch"]
+    fn compact_experts_preserve_source_gather_dispatch_and_exact_values() -> Result<()> {
+        crate::models::vision::init_test_metallib();
+        let make = |rows: i32, cols: i32| -> Result<[Array; 3]> {
+            let values: Vec<f32> = (0..rows * cols)
+                .map(|i| ((i as f32) * 0.017).sin() * 0.1)
+                .collect();
+            let w = Array::try_from((values.as_slice(), [1, rows, cols]))?
+                .astype(mlx::Dtype::Bfloat16)?;
+            let q = mlx::quantization::quantize(&w, Some(32), Some(4), "affine", None)?;
+            Ok([q[0].clone(), q[1].clone(), q[2].clone()])
+        };
+        let gate = make(1280, 2560)?;
+        let down = make(2560, 640)?;
+        let build = |experts: i32, source: Option<i32>| -> Result<RoutedExperts> {
+            let expand = |arrays: &[Array; 3]| -> Result<[Array; 3]> {
+                let one = |a: &Array| -> Result<Array> {
+                    let shape = a.shape();
+                    let d = shape.as_slice();
+                    Ok(mlx::ops::shape::broadcast_to(a, [experts, d[1], d[2]])?)
+                };
+                Ok([one(&arrays[0])?, one(&arrays[1])?, one(&arrays[2])?])
+            };
+            let mut routed = RoutedExperts::from_compact_affine(CompactExpertWeights {
+                gate_up: expand(&gate)?,
+                down: expand(&down)?,
+                quant: QuantMeta {
+                    bits: 4,
+                    group_size: 32,
+                    mode: crate::core::weights::QuantMode::Affine,
+                },
+            })?;
+            routed.keep_gate_up_split()?;
+            if let Some(source) = source {
+                routed.set_dispatch_expert_count(source)?;
+            }
+            Ok(routed)
+        };
+        let values: Vec<f32> = (0..16 * 2560).map(|i| ((i as f32) * 0.031).cos()).collect();
+        let x = Array::try_from((values.as_slice(), [16, 2560]))?.astype(mlx::Dtype::Bfloat16)?;
+        let ids: Vec<u32> = (0..16).flat_map(|_| 0..10u32).collect();
+        let ids = Array::try_from((ids.as_slice(), [16, 10]))?;
+        let scores = Array::try_from((vec![0.1f32; 160].as_slice(), [16, 10]))?
+            .astype(mlx::Dtype::Bfloat16)?;
+        let expected = build(512, None)?.apply_experts(&x, &ids, &scores, ().into(), 0)?;
+        let compact = build(10, Some(512))?.apply_experts(&x, &ids, &scores, ().into(), 0)?;
+        assert_eq!(expected.dtype(), compact.dtype());
+        assert_eq!(
+            expected
+                .equal(&compact)?
+                .reshape([-1])?
+                .all(-1, false)?
+                .to_vec::<bool>()?,
+            [true]
+        );
+        Ok(())
+    }
 
     #[test]
     fn sorted_routing_threshold_matches_mlx_switch_glu_contract() {

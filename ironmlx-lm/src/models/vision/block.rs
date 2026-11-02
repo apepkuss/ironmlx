@@ -120,6 +120,21 @@ impl VisionRotary {
         })
     }
 
+    fn apply_reference(&self, tensor: &Array) -> Result<Array> {
+        let d = tensor.shape();
+        let (seq, heads, hd) = (d[0], d[1], d[2]);
+        let half = hd / 2;
+        let a = tensor.slice(&[0, 0, 0][..], &[seq, heads, half][..])?;
+        let b = tensor.slice(&[0, 0, half][..], &[seq, heads, hd][..])?;
+        let negative = -&b;
+        let rotated = ops::concatenate(&[&negative, &a], 2)?;
+        let sin = self
+            .sin_signed
+            .slice(&[0, 0, half][..], &[seq, 1, hd][..])?;
+        let sin = ops::concatenate(&[&sin, &sin], 2)?;
+        Ok((tensor * &self.cos + rotated * &sin).astype(tensor.dtype())?)
+    }
+
     /// Rotates `tensor` (`[seq, num_heads, head_dim]`), with `apply` the
     /// compiled elementwise tail ([`build_rotary_apply`]).
     fn apply(&self, apply: &CompiledFn, tensor: &Array) -> Result<Array> {
@@ -193,6 +208,7 @@ pub struct VitAttention {
     num_heads: i32,
     head_dim: i32,
     rotary_apply: OnceLock<CompiledFn>,
+    preserve_attention_geometry: bool,
 }
 
 impl VitAttention {
@@ -214,6 +230,7 @@ impl VitAttention {
             num_heads,
             head_dim,
             rotary_apply: OnceLock::new(),
+            preserve_attention_geometry: false,
         }
     }
 
@@ -234,6 +251,7 @@ impl VitAttention {
             num_heads,
             head_dim,
             rotary_apply: OnceLock::new(),
+            preserve_attention_geometry: false,
         })
     }
 
@@ -243,9 +261,16 @@ impl VitAttention {
     /// `cu_seqlens`: cumulative sequence lengths, e.g. `[0, seq]` for single
     ///   image or `[0, s1, s1+s2, ...]` for multi-image batch.
     pub fn forward(&self, x: &Array, rotary: &VisionRotary, cu_seqlens: &[i32]) -> Result<Array> {
-        let pad_to = nax_padded_head_dim(self.head_dim).filter(|_| {
-            x.dtype() != mlx::Dtype::Float32 && cu_seqlens.windows(2).all(|w| w[1] - w[0] > 8)
-        });
+        let pad_to = if self.preserve_attention_geometry {
+            [64, 80, 128]
+                .into_iter()
+                .find(|&d| d >= self.head_dim)
+                .filter(|&d| d != self.head_dim)
+        } else {
+            nax_padded_head_dim(self.head_dim).filter(|_| {
+                x.dtype() != mlx::Dtype::Float32 && cu_seqlens.windows(2).all(|w| w[1] - w[0] > 8)
+            })
+        };
         self.forward_padded(x, rotary, cu_seqlens, pad_to)
     }
 
@@ -261,7 +286,11 @@ impl VitAttention {
         let seq = x.shape()[0];
         let nh = self.num_heads;
         let hd = self.head_dim;
-        let scale = 1.0_f32 / (hd as f32).sqrt();
+        let scale = if self.preserve_attention_geometry {
+            (hd as f64).powf(-0.5) as f32
+        } else {
+            1.0_f32 / (hd as f32).sqrt()
+        };
 
         // Step 1: fused QKV projection → [seq, 3*dim]
         // Use addmm (fused bias-matmul) to match mlx-vlm's nn.Linear which calls
@@ -281,8 +310,14 @@ impl VitAttention {
 
         // Step 4: apply rotary to Q and K
         let rotary_apply = self.rotary_apply.get_or_init(build_rotary_apply);
-        let q = rotary.apply(rotary_apply, &q)?;
-        let k = rotary.apply(rotary_apply, &k)?;
+        let (q, k) = if self.preserve_attention_geometry {
+            (rotary.apply_reference(&q)?, rotary.apply_reference(&k)?)
+        } else {
+            (
+                rotary.apply(rotary_apply, &q)?,
+                rotary.apply(rotary_apply, &k)?,
+            )
+        };
 
         // Step 5: transpose to [nh, seq, hd] then unsqueeze batch → [1, nh, seq, hd] for SDPA
         // MLX fast SDPA requires rank-4 input: [batch, heads, seq, head_dim]
@@ -367,6 +402,10 @@ pub struct VitBlock {
 }
 
 impl VitBlock {
+    pub(crate) fn preserve_attention_geometry(&mut self) {
+        self.attn.preserve_attention_geometry = true;
+    }
+
     /// Construct from pre-built sub-modules.
     pub fn new(norm1: LayerNorm, attn: VitAttention, norm2: LayerNorm, mlp: VitMLP) -> Self {
         Self {

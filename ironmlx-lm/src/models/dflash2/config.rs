@@ -85,6 +85,19 @@ impl From<&Qwen35MoeConfig> for DFlash2TargetSpec {
     }
 }
 
+impl From<&crate::models::qwen4_exp::config::FlashTextConfig> for DFlash2TargetSpec {
+    fn from(cfg: &crate::models::qwen4_exp::config::FlashTextConfig) -> Self {
+        Self {
+            hidden_size: cfg.hidden_size,
+            vocab_size: cfg.vocab_size as i32,
+            max_position_embeddings: cfg.max_position_embeddings as i32,
+            num_hidden_layers: cfg.num_hidden_layers as i32,
+            rms_norm_eps: cfg.rms_norm_eps,
+            rope_theta: cfg.rope_parameters.rope_theta,
+        }
+    }
+}
+
 impl DFlash2Config {
     pub fn from_loader(loader: &Loader) -> Result<Self> {
         let config: Self = serde_json::from_value(loader.config_raw_value().clone())
@@ -247,6 +260,53 @@ impl DFlash2Config {
     /// widths are deliberately not compared: a dense draft MLP has no relation
     /// to a target's dense or expert FFN width.
     pub fn ensure_target_compatible(&self, target: &DFlash2TargetSpec) -> Result<()> {
+        self.ensure_target_shape_compatible(target)?;
+        if (self.rope_parameters.rope_theta - target.rope_theta).abs() > f32::EPSILON {
+            return Err(anyhow!(
+                "DFlash2 target rope_theta mismatch: draft={} target={}",
+                self.rope_parameters.rope_theta,
+                target.rope_theta
+            ));
+        }
+        Ok(())
+    }
+
+    /// Drafter-author contract for the Flash pair: independently trained
+    /// 10k draft RoPE, raw completed HC stream means at zero-based taps.
+    /// This exception is qualified for this recipe only; legacy target/draft
+    /// pairs keep their strict shared-RoPE compatibility rule above.
+    pub fn ensure_flash_next_compatible(
+        &self,
+        target: &crate::models::qwen4_exp::config::FlashTextConfig,
+    ) -> Result<()> {
+        self.validate()?;
+        target.validate()?;
+        self.ensure_target_shape_compatible(&target.into())?;
+        anyhow::ensure!(
+            target.hidden_size == 2560
+                && target.num_hidden_layers == 48
+                && target.hc_count == 4
+                && target.num_attention_heads == 24
+                && target.num_key_value_heads == 2
+                && target.head_dim == 256
+                && target.num_experts == 512
+                && target.num_experts_per_tok == 10
+                && target.moe_intermediate_size == 640
+                && target.rope_parameters.rope_theta == 10_000_000.0
+                && target.rope_parameters.partial_rotary_factor == 0.25
+                && self.rope_parameters.rope_theta == 10_000.0
+                && self.num_hidden_layers == 5
+                && self.num_attention_heads == 32
+                && self.num_key_value_heads == 8
+                && self.head_dim == 128
+                && self.dflash_config.block_size == 8
+                && self.dflash_config.target_layer_ids == [5, 15, 25, 35, 45],
+            "unsupported Flash-Next DFlash2 pair/capture contract"
+        );
+        Ok(())
+    }
+
+    fn ensure_target_shape_compatible(&self, target: &DFlash2TargetSpec) -> Result<()> {
         macro_rules! check_eq {
             ($field:ident) => {
                 if self.$field != target.$field {
@@ -276,13 +336,6 @@ impl DFlash2Config {
                 target.rms_norm_eps
             ));
         }
-        if (self.rope_parameters.rope_theta - target.rope_theta).abs() > f32::EPSILON {
-            return Err(anyhow!(
-                "DFlash2 target rope_theta mismatch: draft={} target={}",
-                self.rope_parameters.rope_theta,
-                target.rope_theta
-            ));
-        }
         Ok(())
     }
 }
@@ -290,6 +343,30 @@ impl DFlash2Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flash_pair_qualifies_independent_rope_and_exact_hc_capture_recipe_only() {
+        let target: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/qwen38_flash_next/config.json"
+        ))
+        .unwrap();
+        let target = crate::models::qwen4_exp::config::FlashTextConfig::from_root(&target).unwrap();
+        let draft: DFlash2Config = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/qwen38_flash_next/draft_config.json"
+        ))
+        .unwrap();
+        assert!(draft.ensure_target_compatible(&(&target).into()).is_err());
+        draft.ensure_flash_next_compatible(&target).unwrap();
+        let mut wrong = draft.clone();
+        wrong.dflash_config.target_layer_ids[0] = 6;
+        assert!(wrong.ensure_flash_next_compatible(&target).is_err());
+        let mut wrong = draft.clone();
+        wrong.rope_parameters.rope_theta = 10_000_000.;
+        assert!(wrong.ensure_flash_next_compatible(&target).is_err());
+        let mut wrong = target.clone();
+        wrong.hc_count = 2;
+        assert!(draft.ensure_flash_next_compatible(&wrong).is_err());
+    }
 
     fn official_config() -> DFlash2Config {
         serde_json::from_value(serde_json::json!({

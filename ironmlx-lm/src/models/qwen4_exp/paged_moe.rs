@@ -121,12 +121,14 @@ impl PagedMoe {
                 .map(|id| mapping[id])
                 .collect();
             let local = Array::try_from((local.as_slice(), [(end - start) as i32, topk]))?;
-            let compact = RoutedExperts::from_compact_affine(CompactExpertWeights {
+            let mut compact = RoutedExperts::from_compact_affine(CompactExpertWeights {
                 gate_up: batch.arrays.gate_up.clone(),
                 down: batch.arrays.down.clone(),
                 quant: self.quant,
             })?;
             let x = flat.slice(&[start as i32, 0][..], &[end as i32, hidden][..])?;
+            compact.keep_gate_up_split()?;
+            compact.set_dispatch_expert_count(self.cfg.num_experts)?;
             let score = scores.slice(&[start as i32, 0][..], &[end as i32, topk][..])?;
             let output = compact.apply_experts(&x, &local, &score, target, layer)?;
             // Finish every consumer before releasing the pins. Packed arrays
@@ -142,9 +144,8 @@ impl PagedMoe {
             .reshape_on([1, seq, hidden], target)?;
         let shared = self.shared.forward_on(input, target)?;
         let gate = {
-            let _stable = crate::nn::position_stable_qmm::scope();
             self.shared_gate
-                .forward_on(input, target)?
+                .forward_singleton_gather_on(input, target)?
                 .sigmoid_on(target)?
         };
         Ok(mlx::ops::binary::add_on(

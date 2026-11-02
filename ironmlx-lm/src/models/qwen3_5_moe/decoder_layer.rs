@@ -266,6 +266,10 @@ impl DecoderLayerMoe {
                             "DecoderLayerMoe::forward_on: received Mla cache (kind mismatch)"
                         ));
                     }
+                    #[cfg(unix)]
+                    (_, Some(LayerCache::Flash(_))) => {
+                        return Err(anyhow!("Qwen3.5 MoE received a Flash composite cache"))
+                    }
                 }
             };
             if crate::nn::fused_norm::requested()

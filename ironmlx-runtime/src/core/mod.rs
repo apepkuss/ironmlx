@@ -75,3 +75,5 @@ pub mod embedding_execution;
 
 pub mod alignment_execution;
 pub mod diarization_execution;
+
+pub mod flash_load;

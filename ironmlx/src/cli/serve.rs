@@ -187,8 +187,8 @@ pub struct ServeArgs {
     #[arg(long = "mtp-draft-tokens")]
     pub mtp_draft_tokens: Option<usize>,
 
-    /// Official DFlash2 draft checkpoint directory. Selects the isolated,
-    /// text-only DFlash2 request actor for this server.
+    /// Official DFlash2 draft checkpoint directory. Selects the isolated
+    /// DFlash2 actor for text and qualified image requests.
     #[arg(long = "dflash2-model-dir")]
     pub dflash2_model_dir: Option<PathBuf>,
 
@@ -199,8 +199,8 @@ pub struct ServeArgs {
     pub dflash2_block_size: Option<usize>,
 
     /// Runtime affine quantization for the official BF16 DFlash2 draft.
-    /// Pass 0 to keep the draft in BF16. Default: 4. Qwen3.6 MoE targets
-    /// support 4 and 0 (BF16) only.
+    /// Pass 0 to keep the draft in BF16. Default: 4; Flash-Next defaults to BF16 (0) and requires it. Qwen3.6 MoE
+    /// targets support 4 and 0 (BF16) only.
     #[arg(long = "dflash2-draft-bits")]
     pub dflash2_draft_bits: Option<i32>,
 
@@ -220,7 +220,7 @@ pub struct ServeArgs {
     /// their own table (tensor-unit affine4 expert and projection kernels,
     /// batched drafting and verify, NAX attention and split-K verify for
     /// long prompts; the startup log's `effective_settings` shows what is
-    /// on). `off` keeps the generic defaults.
+    /// on). Flash-Next uses its own group-32 profile with batched drafting and request-private verification; it does not inherit the Dense/MoE weight layouts. `off` keeps the generic defaults.
     #[arg(
         long = "m5-dflash2-profile",
         default_value = "auto",
@@ -1224,6 +1224,32 @@ impl DFlash2Startup {
 
 /// Serve `--model` with `--dflash2-model-dir`: bind and report progress
 /// first, then load the target and draft on this thread.
+/// Flash-Next load plan for `model_dir`, or `None` for other architectures.
+/// `extra_bytes` reserves room for a DFlash2 drafter beside the target.
+fn flash_load_plan(
+    args: &ServeArgs,
+    model_dir: &Path,
+    architecture: ironmlx_lm::models::ModelArchitecture,
+    scheduler_config: SchedulerServeConfig,
+    extra_bytes: u64,
+) -> Result<Option<ironmlx_lm::models::qwen4_exp::load_plan::FlashLoadPlan>> {
+    if architecture != ironmlx_lm::models::ModelArchitecture::Qwen38FlashNext {
+        return Ok(None);
+    }
+    anyhow::ensure!(
+        args.kv_quant.turboquant_bits().is_none(),
+        "Flash currently requires BF16 KV caches"
+    );
+    Ok(Some(ironmlx_runtime::core::flash_load::plan(
+        model_dir,
+        scheduler_config.b_max,
+        scheduler_config.max_cache_cap,
+        scheduler_config.prefill_chunk_size,
+        extra_bytes,
+        None,
+    )?))
+}
+
 fn run_dflash2(
     args: &ServeArgs,
     model_dir: &Path,
@@ -1267,9 +1293,13 @@ fn load_dflash2_router(
     } = resolved_scheduler;
     startup.enter_stage(LoadStage::ReadingWeights)?;
     let observer = startup.observer();
+    let flash_plan = flash_load_plan(args, model_dir, architecture, scheduler_config, 1536 << 20)?;
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
-    let mut loader =
-        Loader::open_multimodal_with(model_dir, &observer).context("Loader::open_multimodal")?;
+    let mut loader = if let Some(plan) = &flash_plan {
+        plan.open_loader(model_dir)?
+    } else {
+        Loader::open_multimodal_with(model_dir, &observer).context("Loader::open_multimodal")?
+    };
     load_timer.finish("main_weights");
     startup.enter_stage(LoadStage::BuildingModel)?;
     let component_bytes = loader.loaded_tensor_component_bytes();
@@ -1324,6 +1354,30 @@ fn load_dflash2_router(
                 startup,
             )
         }
+        ironmlx_lm::models::ModelArchitecture::Qwen38FlashNext => {
+            let plan = flash_plan.as_ref().context("Flash load plan missing")?;
+            let model = plan.build_model(&loader)?;
+            // Flash's retained weights were read and evaluated on the load
+            // thread; only the deferred vision tower remains cold.
+            let mut static_memory_estimate = StaticMemoryEstimate::from_allocated_weights(
+                component_bytes.text,
+                plan.vision_weight_bytes as usize,
+            );
+            static_memory_estimate.allocated.vision = false;
+            drop(loader);
+            load_dflash2_model_router(
+                model,
+                family,
+                tokenizer,
+                args,
+                scheduler_config,
+                scheduler_runtime_profile,
+                static_memory_estimate,
+                vision_input,
+                load_timer,
+                startup,
+            )
+        }
         other => bail!("DFlash2 does not support the {other:?} target architecture"),
     }
 }
@@ -1358,9 +1412,9 @@ where
         .with_context(|| format!("Loader::open_dflash2 {}", draft_dir.display()))?;
     let draft_bits_value = family.resolve_draft_bits(args.dflash2_draft_bits)?;
     let draft_bits = (draft_bits_value != 0).then_some(draft_bits_value);
-    let mut draft = ironmlx_lm::models::DFlash2DraftModel::from_loader(
+    let mut draft = ironmlx_lm::models::DFlash2DraftModel::from_loader_for_target(
         &draft_loader,
-        model.dflash2_target_spec(),
+        &model,
         draft_bits,
     )
     .context("DFlash2DraftModel::from_loader")?;
@@ -1408,8 +1462,15 @@ where
     }
 
     let model_id = single_model_id(args)?;
-    let prefix_cache = resolve_dflash2_prefix_lru_cache_config(args)?;
-    let prefix_cache_disk = resolve_dflash2_prefix_disk_config(args)?;
+    let (prefix_cache, prefix_cache_disk) =
+        if family == super::dflash2_target::DFlash2TargetFamily::Qwen38FlashNext {
+            (None, None)
+        } else {
+            (
+                resolve_dflash2_prefix_lru_cache_config(args)?,
+                resolve_dflash2_prefix_disk_config(args)?,
+            )
+        };
     let (tensor_batch_requested_max_width, tensor_batch_max_width) =
         resolve_dflash2_tensor_batch_width(
             args,
@@ -1832,15 +1893,29 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
             load_timer,
         );
     }
+    let flash_plan = flash_load_plan(
+        &args,
+        &model_dir,
+        architecture,
+        resolved_scheduler.scheduler_config,
+        0,
+    )?;
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
-    let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
+    let loader = if let Some(plan) = &flash_plan {
+        plan.open_loader(&model_dir)?
+    } else {
+        Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?
+    };
     load_timer.finish("main_weights");
-    ironmlx_runtime::core::resident_weights::pin_loaded_weights(
-        args.resident_weights,
-        &single_model_id(&args)?,
-        loader.loaded_tensors(),
-        loader.loaded_tensor_bytes(),
-    );
+    if flash_plan.is_none() {
+        // Flash keeps its own bounded residency for the weights it retains.
+        ironmlx_runtime::core::resident_weights::pin_loaded_weights(
+            args.resident_weights,
+            &single_model_id(&args)?,
+            loader.loaded_tensors(),
+            loader.loaded_tensor_bytes(),
+        );
+    }
     let component_bytes = loader.loaded_tensor_component_bytes();
     let static_memory_estimate =
         StaticMemoryEstimate::from_allocated_weights(component_bytes.text, component_bytes.vision);
@@ -2002,6 +2077,28 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                     load_timer,
                 )
             }
+        }
+        ironmlx_lm::models::ModelArchitecture::Qwen38FlashNext => {
+            let plan = flash_plan.as_ref().context("Flash load plan missing")?;
+            let model = plan.build_model(&loader)?;
+            // Flash's retained weights were read and evaluated on the load
+            // thread; only the deferred vision tower remains cold.
+            let mut static_memory_estimate = StaticMemoryEstimate::from_allocated_weights(
+                component_bytes.text,
+                plan.vision_weight_bytes as usize,
+            );
+            static_memory_estimate.allocated.vision = false;
+            drop(loader);
+            serve_with_model(
+                model,
+                tokenizer,
+                &args,
+                scheduler_config,
+                scheduler_runtime_profile,
+                vision_input,
+                static_memory_estimate,
+                load_timer,
+            )
         }
         ironmlx_lm::models::ModelArchitecture::Glm4MoeLite => {
             let model = ironmlx_lm::models::Glm4MoeLiteModel::from_loader(&loader)

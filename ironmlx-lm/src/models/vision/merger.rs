@@ -50,9 +50,15 @@ pub struct PatchMerger {
     hidden_size: i32,
     /// DeepStack mergers normalize the already shuffled 2x2 patch group.
     use_postshuffle_norm: bool,
+    reference_gelu: bool,
+    reference_gelu_fn: std::sync::OnceLock<mlx::compile::CompiledFn>,
 }
 
 impl PatchMerger {
+    pub(crate) fn preserve_reference_gelu(&mut self) {
+        self.reference_gelu = true;
+    }
+
     /// Construct from pre-loaded weight Arrays.
     ///
     /// - `norm_w` / `norm_b`: shape `[hidden_size]`, e.g. `[1024]`.
@@ -78,6 +84,8 @@ impl PatchMerger {
             spatial_merge_size,
             hidden_size,
             use_postshuffle_norm: false,
+            reference_gelu: false,
+            reference_gelu_fn: std::sync::OnceLock::new(),
         }
     }
 
@@ -126,6 +134,8 @@ impl PatchMerger {
             spatial_merge_size,
             hidden_size,
             use_postshuffle_norm,
+            reference_gelu: false,
+            reference_gelu_fn: std::sync::OnceLock::new(),
         })
     }
 
@@ -161,7 +171,27 @@ impl PatchMerger {
         let h = self.fc1.forward_on(&h, target)?;
 
         // Step 4: exact GELU (erf-based)
-        let h = gelu_exact(&h, target)?;
+        let h = if self.reference_gelu {
+            let f = self.reference_gelu_fn.get_or_init(|| {
+                mlx::compile::compile(
+                    |xs: &[&Array]| -> mlx::Result<Vec<Array>> {
+                        let x = xs[0];
+                        let scalar = |n: f32| -> mlx::Result<Array> {
+                            Array::try_from((&[n][..], ()))?.astype(x.dtype())
+                        };
+                        let one = scalar(1.0)?;
+                        let two = scalar(2.0)?;
+                        let sqrt2 = scalar(std::f32::consts::SQRT_2)?;
+                        Ok(vec![(x * (one + (x / sqrt2).erf()?)) / two])
+                    },
+                    mlx::compile::ShapeMode::Shapeless,
+                )
+                .expect("Flash vision GELU compile")
+            });
+            f.invoke(&[&h])?.remove(0)
+        } else {
+            gelu_exact(&h, target)?
+        };
 
         // Step 5: fc2  [N/4, 4096] @ [out_hidden, 4096]^T + bias → [N/4, out_hidden]
         self.fc2.forward_on(&h, target)

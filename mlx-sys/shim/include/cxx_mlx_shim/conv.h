@@ -44,6 +44,14 @@ std::unique_ptr<MlxArray> ops_conv2d(
     uint8_t device_type,
     int32_t stream_index);
 
+std::unique_ptr<MlxArray> ops_conv3d(
+    const MlxArray& input, const MlxArray& weight,
+    int32_t stride_t, int32_t stride_h, int32_t stride_w,
+    int32_t padding_t, int32_t padding_h, int32_t padding_w,
+    int32_t dilation_t, int32_t dilation_h, int32_t dilation_w,
+    int32_t groups, bool has_target, bool is_device_only,
+    uint8_t device_type, int32_t stream_index);
+
 std::unique_ptr<MlxArray> ops_conv_transpose1d(
     const MlxArray& input,
     const MlxArray& weight,

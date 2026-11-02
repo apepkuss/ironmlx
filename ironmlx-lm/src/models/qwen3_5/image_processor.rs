@@ -274,6 +274,23 @@ pub fn patchify(raw: &[f32], h: i32, w: i32) -> Result<(Array, i32, i32)> {
 /// resampling of `Qwen2VLImageProcessor` and of mlx-vlm, which resizes with
 /// PIL) → normalize → patchify. Returns `(pixel_values, grid_h, grid_w)`.
 pub fn preprocess(img_bytes: &[u8], bounds: PixelBounds) -> Result<(Array, i32, i32)> {
+    preprocess_impl(img_bytes, bounds, false)
+}
+
+/// MLX-VLM's NumPy processor rescales float32 pixels by a rounded reciprocal.
+/// Keep this explicit for Flash rather than changing existing families' pixels.
+pub fn preprocess_numpy_rescale(
+    img_bytes: &[u8],
+    bounds: PixelBounds,
+) -> Result<(Array, i32, i32)> {
+    preprocess_impl(img_bytes, bounds, true)
+}
+
+fn preprocess_impl(
+    img_bytes: &[u8],
+    bounds: PixelBounds,
+    numpy_rescale: bool,
+) -> Result<(Array, i32, i32)> {
     // 1. decode
     let img = crate::core::image_input::load_from_memory_bounded(img_bytes)
         .map_err(|e| anyhow!("decode image: {e}"))?
@@ -289,7 +306,13 @@ pub fn preprocess(img_bytes: &[u8], bounds: PixelBounds) -> Result<(Array, i32, 
     let plane = (h2 * w2) as usize;
     let mut chw = vec![0.0_f32; 3 * plane];
     for (i, p) in resized.chunks_exact(3).enumerate() {
-        let n = normalize_pixel([p[0], p[1], p[2]]);
+        let n = if numpy_rescale {
+            std::array::from_fn(|channel| {
+                (p[channel] as f32 * (1.0_f32 / 255.0) - IMAGE_MEAN[channel]) / IMAGE_STD[channel]
+            })
+        } else {
+            normalize_pixel([p[0], p[1], p[2]])
+        };
         chw[i] = n[0];
         chw[plane + i] = n[1];
         chw[2 * plane + i] = n[2];

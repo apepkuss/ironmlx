@@ -51,6 +51,7 @@ fn context_window_from_config(config: &Value, cache_cap: usize) -> Option<usize>
         ModelArchitecture::Llama | ModelArchitecture::Glm4MoeLite => config,
         ModelArchitecture::Qwen35Dense
         | ModelArchitecture::Qwen35Moe
+        | ModelArchitecture::Qwen38FlashNext
         | ModelArchitecture::Gemma4
         | ModelArchitecture::MiniCpmV46 => config.get("text_config")?,
         ModelArchitecture::DiffusionGemma => return None,

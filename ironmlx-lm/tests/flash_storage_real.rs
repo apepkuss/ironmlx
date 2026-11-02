@@ -161,3 +161,32 @@ fn local_flash_snapshot_metadata_and_bounded_reads() {
     assert!(provider.gather_on(&[u64::MAX], ().into()).is_err());
     assert_eq!((provider.hits, provider.misses), (1, 3));
 }
+
+#[test]
+#[ignore = "requires IRONMLX_FLASH_SNAPSHOT; metadata-only capacity qualification"]
+fn flash_preflight_selects_bounded_residency_before_any_weight_materialization() {
+    use ironmlx_lm::core::residency::ExpertResidency;
+    use ironmlx_lm::models::qwen4_exp::load_plan::{FlashLoadPlan, FlashLoadRequest};
+    let snapshot = std::env::var("IRONMLX_FLASH_SNAPSHOT").unwrap();
+    let path = std::path::Path::new(&snapshot);
+    let mut request = FlashLoadRequest::new(24u64 << 30, 4, 4096, 512, 1536 << 20);
+    let plan = FlashLoadPlan::inspect(path, &request).unwrap();
+    assert_eq!(plan.residency.mode, ExpertResidency::Ssd);
+    assert!(plan.residency.peak_bytes <= request.usable_bytes);
+    assert!(plan.fixed_weight_bytes < 4u64 << 30);
+    assert!(plan.residency.resident_expert_bytes < 16u64 << 30);
+    request.usable_bytes = 110u64 << 30;
+    assert_eq!(
+        FlashLoadPlan::inspect(path, &request)
+            .unwrap()
+            .residency
+            .mode,
+        ExpertResidency::Full
+    );
+    request.usable_bytes = 24u64 << 30;
+    request.expert_residency = ExpertResidency::Full;
+    assert!(FlashLoadPlan::inspect(path, &request).is_err());
+    request.expert_residency = ExpertResidency::Auto;
+    request.usable_bytes = 5u64 << 30;
+    assert!(FlashLoadPlan::inspect(path, &request).is_err());
+}

@@ -136,6 +136,18 @@ pub struct DFlash2TreeSpec {
 }
 
 impl DFlash2DraftModel {
+    pub fn from_loader_for_target<T: DFlash2Target>(
+        loader: &Loader,
+        target: &T,
+        draft_bits: Option<i32>,
+    ) -> Result<Self> {
+        if loader.quant_meta().is_some() {
+            anyhow::bail!("DFlash2 requires the original BF16 draft checkpoint");
+        }
+        let config = DFlash2Config::from_loader(loader)?;
+        target.dflash2_validate_draft_config(&config)?;
+        Self::from_validated_config(loader, config, draft_bits)
+    }
     pub fn from_loader(
         loader: &Loader,
         target: impl Into<DFlash2TargetSpec>,
@@ -148,6 +160,27 @@ impl DFlash2DraftModel {
         }
         let config = DFlash2Config::from_loader(loader)?;
         config.ensure_target_compatible(&target.into())?;
+        Self::from_validated_config(loader, config, draft_bits)
+    }
+
+    pub fn from_loader_for_flash(
+        loader: &Loader,
+        target: &crate::models::qwen4_exp::config::FlashTextConfig,
+        draft_bits: Option<i32>,
+    ) -> Result<Self> {
+        if loader.quant_meta().is_some() {
+            anyhow::bail!("Flash DFlash2 requires the original BF16 draft checkpoint");
+        }
+        let config = DFlash2Config::from_loader(loader)?;
+        config.ensure_flash_next_compatible(target)?;
+        Self::from_validated_config(loader, config, draft_bits)
+    }
+
+    fn from_validated_config(
+        loader: &Loader,
+        config: DFlash2Config,
+        draft_bits: Option<i32>,
+    ) -> Result<Self> {
         validate_tensor_manifest(loader, &config)?;
         let mut layers = Vec::with_capacity(config.num_hidden_layers as usize);
         for index in 0..config.num_hidden_layers {

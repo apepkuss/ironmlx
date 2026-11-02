@@ -174,6 +174,7 @@ pub struct BudgetState {
     logical_cap: usize,
     resident_cap: usize,
     policy: KvBudgetPolicy,
+    custom_cost: Option<(usize, usize)>,
 }
 
 impl BudgetState {
@@ -212,6 +213,20 @@ impl BudgetState {
             logical_cap,
             resident_cap,
             policy,
+            custom_cost: None,
+        }
+    }
+
+    pub fn with_custom_cost(mut self, cost: Option<(usize, usize)>) -> Self {
+        self.custom_cost = cost;
+        self
+    }
+
+    pub fn request_bytes(&self, cap: usize, meta: &ModelMeta) -> usize {
+        let cap = self.resident_charge_cap(cap);
+        match self.custom_cost {
+            Some((per_token, fixed)) => cap.saturating_mul(per_token).saturating_add(fixed),
+            None => kv_cache_bytes(1, cap, meta),
         }
     }
 
@@ -354,7 +369,7 @@ fn validate_startup_budget_with_policy_for_total_ram(
     )
 }
 
-fn validate_startup_budget_with_cost_for_total_ram(
+pub(crate) fn validate_startup_budget_with_cost_for_total_ram(
     b_max: usize,
     effective_cap_max: usize,
     meta: &ModelMeta,
@@ -390,12 +405,10 @@ fn validate_startup_budget_with_cost_for_total_ram(
         }
         KvBudgetPolicy::ActiveKvOffload { .. } => requested,
     };
-    Ok(BudgetState::with_soft_limit(
-        soft_limit,
-        effective_cap_max,
-        resident_cap,
-        policy,
-    ))
+    Ok(
+        BudgetState::with_soft_limit(soft_limit, effective_cap_max, resident_cap, policy)
+            .with_custom_cost(Some((bytes_per_token, fixed_bytes_per_sequence))),
+    )
 }
 
 /// Realistic Qwen3.5-4B-like ModelMeta for tests.

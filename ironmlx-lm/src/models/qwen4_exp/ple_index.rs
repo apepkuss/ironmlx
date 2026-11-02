@@ -57,6 +57,11 @@ pub struct PleHistory {
     context: Vec<u32>,
     pub position: u64,
 }
+impl PleHistory {
+    pub fn tokens(&self) -> &[u32] {
+        &self.context
+    }
+}
 
 impl PleIndex {
     pub fn new(spec: PleIndexSpec) -> Result<Self> {

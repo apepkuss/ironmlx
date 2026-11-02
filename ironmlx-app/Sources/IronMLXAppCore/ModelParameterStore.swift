@@ -756,7 +756,7 @@ public enum ModelLoadParameters {
         effectiveMaxCacheCap(
             savedMaxCacheCap: parameterStore.parameters(for: modelReference)?.maxCacheCap,
             contextWindow: scanner.maxPositionEmbeddings(for: modelReference),
-            activeKvOffloadEnabled: activeKvOffloadEnabled
+            activeKvOffloadEnabled: activeKvOffloadEnabled && scanner.supportsActiveKvOffload(for: modelReference)
         )
     }
 

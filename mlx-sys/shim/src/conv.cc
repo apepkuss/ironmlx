@@ -41,6 +41,21 @@ std::unique_ptr<MlxArray> ops_conv2d(
   return std::make_unique<MlxArray>(mlx::core::conv2d(input, weight, {stride_h, stride_w}, {padding_h, padding_w}, {dilation_h, dilation_w}, groups, target));
 }
 
+std::unique_ptr<MlxArray> ops_conv3d(
+    const MlxArray& input, const MlxArray& weight,
+    int32_t stride_t, int32_t stride_h, int32_t stride_w,
+    int32_t padding_t, int32_t padding_h, int32_t padding_w,
+    int32_t dilation_t, int32_t dilation_h, int32_t dilation_w,
+    int32_t groups, bool has_target, bool is_device_only,
+    uint8_t device_type, int32_t stream_index) {
+  auto target = cxx_mlx::helpers::decode_stream_or_device(
+      has_target, is_device_only, device_type, stream_index);
+  return std::make_unique<MlxArray>(mlx::core::conv3d(
+      input, weight, {stride_t, stride_h, stride_w},
+      {padding_t, padding_h, padding_w}, {dilation_t, dilation_h, dilation_w},
+      groups, target));
+}
+
 std::unique_ptr<MlxArray> ops_conv_transpose1d(
     const MlxArray& input,
     const MlxArray& weight,
