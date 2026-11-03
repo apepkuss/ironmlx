@@ -1300,9 +1300,6 @@ pub fn ane_model_from_snapshot(path: &std::path::Path) -> ironmlx_core::ane::Mod
 }
 fn ane_model_from_config(config: &serde_json::Value) -> ironmlx_core::ane::Model {
     use ironmlx_core::ane::Model;
-    if config["model_type"] == "qwen4_exp" {
-        return Model::FlashNext;
-    }
     let text = config.get("text_config").unwrap_or(config);
     let quant = config
         .get("quantization")
@@ -1348,7 +1345,7 @@ impl AneHealth {
             available: hw.available,
             runtime_error: hw.runtime_error.clone(),
             reason: hw.reason,
-            models: [Model::Dense27B, Model::FlashNext]
+            models: [Model::Dense27B]
                 .into_iter()
                 .map(AneModelHealth::for_model)
                 .collect(),
@@ -2489,7 +2486,14 @@ mod ane_contract_tests {
         }
         assert_eq!(
             ane_model_from_config(&serde_json::json!({"model_type":"qwen4_exp"})),
-            ironmlx_core::ane::Model::FlashNext
+            ironmlx_core::ane::Model::Other
         );
+        let health = AneHealth::current();
+        assert_eq!(health.models.len(), 1);
+        assert_eq!(health.models[0].model, "qwen38-27b");
+        let unsupported = AneModelHealth::for_model(ironmlx_core::ane::Model::Other);
+        assert_eq!(unsupported.model, "unadapted");
+        assert_eq!(unsupported.completed_jobs, 0);
+        assert_eq!(unsupported.live_surface_bytes, 0);
     }
 }

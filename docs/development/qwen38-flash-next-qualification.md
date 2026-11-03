@@ -109,10 +109,10 @@ measured slower than MLX QMV for all six tested projection geometries, including
 the vocabulary head. It remains an ignored qualification benchmark, absent from
 production routing. No acceleration claim follows from merely compiling on M5.
 
-ANE mode remains `auto`/`off`. The existing Dense g64 channel-sharing path is
-not qualified for Flash g32/640-wide shared experts; `auto` must report
-`not_applicable` until a measured end-to-end win passes the numerical and
-memory gates. `off` explicitly disables ANE.
+Flash's shared and routed experts execute on the GPU in ordinary and DFlash2
+paths, including SSD-paged experts. The experimental Flash ANE implementation
+and its diagnostic switches have been removed. The independent Dense g64 ANE
+backend and global `auto`/`off` policy remain available for qualified 27B models.
 
 ## Serving and image gates
 
@@ -204,8 +204,7 @@ ceilings when planning another model and retains Flash liability while an
 unloaded slot still has active request leases.
 
 Video input is not exposed by the existing HTTP image contract. Native image
-support must not be advertised as video support. Flash ANE remains explicitly
-not applicable, and lower-memory physical hardware/older Apple GPUs still
+support must not be advertised as video support. Lower-memory physical hardware/older Apple GPUs still
 need independent on-device qualification. No standalone manifest is rewritten
 merely to upgrade an older download-only import into a newly supported model.
 

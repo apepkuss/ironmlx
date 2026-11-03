@@ -374,12 +374,13 @@ import Testing
 
 @Test func independentAneHealthRoundTripsWithoutDflashMetadata() throws {
     let data=Data("""
-    {"mode":"auto","chip":"Apple M5 Max","qualified":true,"available":true,"reason":"eligible","runtime_error":null,"current_model":{"model":"qwen38-27b","reason":"eligible","completed_jobs":64,"live_surface_bytes":103186432},"models":[{"model":"qwen38-flash-next","reason":"model_not_adapted","completed_jobs":0,"live_surface_bytes":0}]}
+    {"mode":"auto","chip":"Apple M5 Max","qualified":true,"available":true,"reason":"eligible","runtime_error":null,"current_model":{"model":"qwen38-27b","reason":"eligible","completed_jobs":64,"live_surface_bytes":103186432},"models":[{"model":"qwen38-27b","reason":"eligible","completed_jobs":64,"live_surface_bytes":103186432}]}
     """.utf8)
     let value=try JSONDecoder().decode(HealthzSnapshot.AneInfo.self,from:data)
     #expect(value.currentModel?.completedJobs==64)
     #expect(value.currentModel?.liveSurfaceBytes==103186432)
-    #expect(value.models.first?.reason=="model_not_adapted")
+    #expect(value.models.first?.model=="qwen38-27b")
+    #expect(value.models.first?.reason=="eligible")
     #expect(try JSONDecoder().decode(HealthzSnapshot.AneInfo.self,from:JSONEncoder().encode(value))==value)
     let unavailable=Data("""
     {"mode":"off","chip":"Apple M5 Max","qualified":true,"available":false,"reason":"runtime_unavailable","runtime_error":"ABI probe rejected","models":[]}

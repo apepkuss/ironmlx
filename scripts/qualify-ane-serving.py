@@ -5,6 +5,7 @@ Start ironmlx serve with --model-id ane-qualification --max-sequences 2
 --prefill-chunk-size 2048 --max-cache-cap 12288, without a prefix cache.
 Choose the model/draft and --ane auto/off before running this script. This
 checks text/images, B1/B2, multiple chunks and cancellation before first token.
+Use --family unsupported to verify GPU-only models through the common status.
 The image fixture and health counters are required; GPU fallback is not ANE
 execution. --expect-fallback is reserved for an injected native-worker error.
 """
@@ -22,7 +23,7 @@ p = argparse.ArgumentParser()
 p.add_argument("--port", type=int, default=19086)
 p.add_argument("--output", type=pathlib.Path, required=True)
 p.add_argument("--model", default="ane-qualification")
-p.add_argument("--family", choices=["dense", "flash"], required=True)
+p.add_argument("--family", choices=["dense", "unsupported"], required=True)
 p.add_argument("--mode", choices=["auto", "off"], required=True)
 p.add_argument("--expect-fallback", action="store_true")
 a = p.parse_args()
@@ -35,14 +36,8 @@ def health():
 
 
 def jobs():
-    return next(
-        (
-            v["completed_jobs"]
-            for v in health()["ane"]["models"]
-            if v["model"]
-            == ("qwen38-27b" if a.family == "dense" else "qwen38-flash-next")
-        )
-    )
+    # Unsupported models must not execute any of the process's ANE backends.
+    return sum(v["completed_jobs"] for v in health()["ane"]["models"])
 
 
 text = "The quick brown fox jumps over the lazy dog. " * 255
@@ -178,14 +173,14 @@ if a.family == "dense" and a.mode == "auto" and (not a.expect_fallback):
     assert after_b2 > after_b1, "concurrent requests did not execute ANE"
     assert long_jobs >= 192, "multiple full chunks did not execute ANE"
 else:
-    assert jobs() == 0, "off or unadapted Flash executed ANE"
-family_state = next(
-    (
-        x
-        for x in h["ane"]["models"]
-        if x["model"] == ("qwen38-27b" if a.family == "dense" else "qwen38-flash-next")
-    )
+    assert jobs() == 0, "off or unadapted model executed ANE"
+family_state = (
+    next(x for x in h["ane"]["models"] if x["model"] == "qwen38-27b")
+    if a.family == "dense"
+    else h["ane"]["current_model"]
 )
+assert family_state is not None, "qualification requires a fixed-model server"
+
 expected = (
     "runtime_failed"
     if a.expect_fallback

@@ -223,10 +223,10 @@ pub struct ServeArgs {
     )]
     pub m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode,
 
-    /// Neural Engine use. `auto` follows the M5 DFlash2 profile: Dense
-    /// targets' prefill MLPs of full 2048-token chunks share part of their
-    /// channels with the Neural Engine (MoE targets have no dense MLP and
-    /// never use it). `off` keeps all computation on the GPU.
+    /// Neural Engine use, independent of the M5 DFlash2 profile. On qualified
+    /// Apple M5 Max machines, `auto` accelerates eligible full 2048-token
+    /// prefill chunks of Qwen3.8-27B affine4/group64 models in ordinary and
+    /// DFlash2 inference. `off` keeps all computation on the GPU.
     #[arg(long = "ane", default_value = "auto", value_parser = parse_ane_mode)]
     pub ane: ironmlx_core::m5_profile::AneMode,
 

@@ -3,7 +3,7 @@
 
 Usage: python3 scripts/analyze-ane-qualification.py DIRECTORY --output REPORT.json
 Inputs named FAMILY-FIXTURE-ROUTE-{auto,off}.json are produced by the explicitly
-ignored ane_{dense,flash}_real integration tests. Raw arrays remain local.
+ignored ane_dense_real integration test. Raw arrays remain local.
 """
 
 import argparse

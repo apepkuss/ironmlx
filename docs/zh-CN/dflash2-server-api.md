@@ -51,10 +51,10 @@ draft checkpoint 声明的宽度，并以已资格化的 Q8 作为默认上限�
 
 `--m5-dflash2-profile` 接受 `auto`（默认）或 `off`；`auto` 在 Apple GPU 第 17 代及更新机型上启用
 target 所属模型族已认定的 M5 设置（见 `healthz.dflash2.m5_profile`）。
-`--ane` 接受 `auto`（默认）或 `off`：M5 profile 生效时，Qwen3.8 27B Dense 在预填充起点低于 65,536 的完整 2048
-token 分块中，把 MLP 34 个通道单元中的 12 个交给神经引擎计算（W8A8）；更短的提示、解码阶段和 MoE target
-都不使用神经引擎。`off` 让全部计算留在 GPU 上。`healthz.dflash2.m5_profile.ane_status` 报告 `active`、
-`disabled`、`not_applicable` 或 `inactive`。
+`--ane` 接受 `auto`（默认）或 `off`，独立于 M5 GPU profile。在已适配的 Apple M5 Max 上，
+Qwen3.8-27B affine4/group64 的普通推理和 DFlash2 预填充，可将起点低于 65,536 的适用完整
+2048-token 分块中的部分 MLP 通道交给神经引擎计算（W8A8）。`off` 让全部计算留在 GPU 上。
+`healthz.ane` 和各已加载模型的 `ane` 字段独立报告策略、资格、已完成作业及共享缓冲区字节数。
 
 `--dflash2-tree-max-nodes` 接受 `0..=15`：默认 `0` 保持稳定的线性提议路径，正值仅为
 affine-4、无约束、B1 请求显式启用有界 best-first 草稿树。
@@ -146,8 +146,8 @@ SSD 专家缓存。`IRONMLX_FLASH_EXPERT_RESIDENCY=auto|full|ssd` 选择策略�
 
 M5 profile 的 target 为 `qwen38-flash-next`，有独立设置表，保留原生 group-32
 权重布局，批量生成草稿，并对各请求的 QSA/PLE/GDN 状态执行事务验证。
-旧 GPU 和 `--m5-dflash2-profile off` 使用通用路径。ANE `auto` 在此组合报告
-`not_applicable`，`off` 报告 `disabled`，目前没有启用 Flash 的 ANE 加速。
+旧 GPU 和 `--m5-dflash2-profile off` 使用通用路径。Flash-Next 的普通推理和
+DFlash2 计算均使用 GPU。
 DFlash 先测普通解码和窄窗口，再决定是否探测宽窗口；投机成本较高时回退普通
 解码。性能收益取决于接受率和硬件。
 

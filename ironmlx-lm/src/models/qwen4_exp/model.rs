@@ -125,7 +125,6 @@ impl FlashTextModel {
         );
         let batch = dims[0] as usize;
         let seq = dims[1];
-        let _ane = self.ane_scope(batch, seq, mode == DFlash2TargetForwardMode::Prefill);
         if let Some(p) = position_ids {
             ensure!(
                 p.shape().as_slice() == [3, dims[0], seq],

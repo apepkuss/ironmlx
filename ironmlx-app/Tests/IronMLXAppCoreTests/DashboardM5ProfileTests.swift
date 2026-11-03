@@ -519,8 +519,8 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     let webView = try await loadedDashboard(config: AppConfig(), messages: messages)
     defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
     let value = try await webView.evaluateJavaScript("""
-      renderRuntimeModels([{id:'flash',model:'flash',loaded:true,
-        ane:{model:'qwen38-flash-next',reason:'model_not_adapted',completed_jobs:0}}]);
+      renderRuntimeModels([{id:'unsupported',model:'unsupported',loaded:true,
+        ane:{model:'unadapted',reason:'model_not_adapted',completed_jobs:0}}]);
       JSON.stringify({enabled:!document.getElementById('cfg-ane').disabled,
         status:document.getElementById('runtime-model-health').textContent})
     """) as? String
