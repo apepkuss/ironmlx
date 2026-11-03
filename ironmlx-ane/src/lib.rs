@@ -180,6 +180,40 @@ fn fnv1a(data: &[u8], mut hash: u64) -> u64 {
     hash
 }
 
+/// A second model may load the same content-addressed program while the
+/// service is reading it. Never truncate its live MIL/weights files in place.
+fn replace_cache_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let (temporary, mut file) = loop {
+        let name = format!(
+            ".ane-write-{}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let temporary = path.with_file_name(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(file) => break (temporary, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    let result = (|| {
+        file.write_all(bytes)?;
+        drop(file);
+        std::fs::rename(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn cache_root() -> PathBuf {
     let mut buffer = vec![0 as c_char; 1024];
     // SAFETY: valid buffer; confstr writes a NUL-terminated path.
@@ -224,8 +258,8 @@ impl Program {
         );
         let dir = cache_root().join(&key);
         std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("model.mil"), mil)?;
-        std::fs::write(dir.join("weights.bin"), weights)?;
+        replace_cache_file(&dir.join("weights.bin"), weights)?;
+        replace_cache_file(&dir.join("model.mil"), mil.as_bytes())?;
         let dir_c = CString::new(dir.to_string_lossy().as_bytes())?;
         let key_c = CString::new(key)?;
         let mut err = [0 as c_char; 1024];
@@ -237,6 +271,22 @@ impl Program {
             return Err(anyhow!(call_error(&err)));
         }
         Ok(Self { ptr })
+    }
+
+    /// Bound the caller's wait for private-runtime compilation/loading. The
+    /// native call itself is not cancellable: on timeout its owned input and
+    /// eventual program stay on the detached preparation thread until return.
+    pub fn load_bounded(mil: &str, weights: &[u8], timeout: std::time::Duration) -> Result<Self> {
+        let (mil, weights) = (mil.to_owned(), weights.to_vec());
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("ironmlx-ane-prepare".into())
+            .spawn(move || {
+                let _ = send.send(Self::load(&mil, &weights));
+            })?;
+        receive
+            .recv_timeout(timeout)
+            .map_err(|error| anyhow!("ANE program preparation did not complete: {error}"))?
     }
 
     pub fn procedures(&self) -> usize {
@@ -393,5 +443,65 @@ mod tests {
             return sign * mant * 2f32.powi(-24);
         }
         sign * (1.0 + mant / 1024.0) * 2f32.powi(exp - 15)
+    }
+}
+
+#[cfg(test)]
+mod cache_write_tests {
+    use super::*;
+    #[test]
+    fn concurrent_program_loads_never_expose_a_partial_cache_file() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Barrier,
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "ironmlx-ane-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("weights.bin");
+        replace_cache_file(&path, &vec![1; 65536]).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let done = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                barrier.wait();
+                loop {
+                    let bytes = std::fs::read(&path).unwrap();
+                    assert_eq!(bytes.len(), 65536);
+                    assert!([1, 2].contains(&bytes[0]));
+                    assert!(bytes.iter().all(|v| *v == bytes[0]));
+                    if done.load(Ordering::Acquire) {
+                        break;
+                    }
+                }
+            });
+            barrier.wait();
+            let writers = (0..4)
+                .map(|index| {
+                    scope.spawn({
+                        let path = &path;
+                        move || {
+                            for _ in 0..24 {
+                                replace_cache_file(path, &vec![1 + (index % 2) as u8; 65536])
+                                    .unwrap();
+                            }
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
+            for writer in writers {
+                writer.join().unwrap();
+            }
+            done.store(true, Ordering::Release);
+            reader.join().unwrap();
+        });
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

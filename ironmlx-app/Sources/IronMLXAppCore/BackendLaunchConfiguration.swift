@@ -274,6 +274,9 @@ public struct BackendLaunchConfiguration: Equatable {
             "--active-kv-offload-dir",
             dataRootURL.appendingPathComponent("cache/active_kv_offload", isDirectory: true).path,
         ]
+        // Settings present ANE under the M5 DFlash2 optimization: either off
+        // keeps every path on the GPU.
+        if !options.ane || !options.m5DFlash2Profile { arguments += ["--ane", "off"] }
         if let dflash2Runtime {
             arguments += [
                 "--model", dflash2Runtime.targetModelDir,
@@ -306,9 +309,6 @@ public struct BackendLaunchConfiguration: Equatable {
             }
             if !options.m5DFlash2Profile {
                 arguments += ["--m5-dflash2-profile", "off"]
-            }
-            if !options.ane {
-                arguments += ["--ane", "off"]
             }
             return arguments
         }

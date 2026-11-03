@@ -9,12 +9,19 @@
 #include <memory>
 
 namespace cxx_mlx {
+struct ExternalBufferOwner;
 
 // An MLX array over caller-owned, page-aligned host memory (for example an
 // IOSurface shared with the Neural Engine), wrapped as a no-copy shared Metal
 // buffer: GPU kernels read it in place. The memory must outlive the array.
 std::unique_ptr<MlxArray> array_from_external_buffer(
     size_t address, size_t nbytes, rust::Slice<const int32_t> shape, uint8_t dtype_repr);
+
+// The Metal buffer itself retains the Rust owner, including asynchronous
+// command-buffer references after an MLX graph/model is dropped.
+std::unique_ptr<MlxArray> array_from_external_buffer_owned(
+    size_t address, size_t nbytes, rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    rust::Box<ExternalBufferOwner> owner);
 
 // Copy `src` (any strides, same shape and dtype) into the memory of the
 // external array `dst` on the GPU, after every array of `after`; the result

@@ -1,5 +1,6 @@
 #include "cxx_mlx_shim/external_buffer.h"
 #include "cxx_mlx_shim/shim_helpers.h"
+#include "mlx-sys/src/bridge/fast.rs.h"
 
 #include <stdexcept>
 
@@ -79,8 +80,9 @@ mx::Stream gpu_stream(bool has_target, bool is_device_only, uint8_t device_type,
 }
 }  // namespace
 
-std::unique_ptr<MlxArray> array_from_external_buffer(
-    size_t address, size_t nbytes, rust::Slice<const int32_t> shape, uint8_t dtype_repr) {
+static std::unique_ptr<MlxArray> make_external_array(
+    size_t address, size_t nbytes, rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    std::shared_ptr<rust::Box<ExternalBufferOwner>> owner) {
   if (address == 0 || address % 16384 != 0 || nbytes == 0 || nbytes % 16384 != 0)
     throw std::runtime_error("external buffer must be page aligned in address and length");
   const auto dtype = helpers::dtype_from_repr(dtype_repr);
@@ -92,13 +94,30 @@ std::unique_ptr<MlxArray> array_from_external_buffer(
   }
   if (elements * mx::size_of(dtype) > nbytes) throw std::runtime_error("external buffer too small for its shape");
   auto& d = mx::metal::device(mx::Device::gpu);
-  MTL::Buffer* buffer = d.mtl_device()->newBuffer(
-      reinterpret_cast<const void*>(address), nbytes, MTL::ResourceStorageModeShared, nullptr);
+  MTL::Buffer* buffer = nullptr;
+  if (owner) {
+    buffer = d.mtl_device()->newBuffer(reinterpret_cast<const void*>(address), nbytes,
+        MTL::ResourceStorageModeShared, ^(void*, NS::UInteger) { (void)owner; });
+  } else {
+    buffer = d.mtl_device()->newBuffer(reinterpret_cast<const void*>(address), nbytes,
+        MTL::ResourceStorageModeShared, nullptr);
+  }
   if (!buffer) throw std::runtime_error("cannot wrap the external buffer as a Metal buffer");
   mx::allocator::Data data(mx::allocator::Buffer(static_cast<void*>(buffer)),
               [](mx::allocator::Buffer b) { static_cast<MTL::Buffer*>(b.ptr())->release(); });
   mx::array a(std::move(data), std::move(s), dtype);
   return std::make_unique<MlxArray>(std::move(a));
+}
+
+std::unique_ptr<MlxArray> array_from_external_buffer(
+    size_t address, size_t nbytes, rust::Slice<const int32_t> shape, uint8_t dtype_repr) {
+  return make_external_array(address, nbytes, shape, dtype_repr, nullptr);
+}
+std::unique_ptr<MlxArray> array_from_external_buffer_owned(
+    size_t address, size_t nbytes, rust::Slice<const int32_t> shape, uint8_t dtype_repr,
+    rust::Box<ExternalBufferOwner> owner) {
+  return make_external_array(address, nbytes, shape, dtype_repr,
+      std::make_shared<rust::Box<ExternalBufferOwner>>(std::move(owner)));
 }
 
 std::unique_ptr<MlxArray> copy_into_external(
@@ -153,6 +172,10 @@ uint64_t handoff_signaled_value(const HandoffEvent& event) {
 }  // namespace cxx_mlx
 #else
 namespace cxx_mlx {
+std::unique_ptr<MlxArray> array_from_external_buffer_owned(size_t, size_t, rust::Slice<const int32_t>, uint8_t, rust::Box<ExternalBufferOwner>) {
+  throw std::runtime_error("external buffers require Metal");
+}
+
 std::unique_ptr<MlxArray> array_from_external_buffer(size_t, size_t, rust::Slice<const int32_t>, uint8_t) {
   throw std::runtime_error("external buffers require Metal");
 }

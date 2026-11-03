@@ -23,7 +23,7 @@ private func loadedDashboard(config: AppConfig, messages: CapturedSettingsMessag
     configuration.userContentController.add(messages, name: "setLogLevel")
     let bootstrap = try DashboardWindowController.bootstrapScript(config: config, route: .status)
     configuration.userContentController.addUserScript(
-        WKUserScript(source: bootstrap, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        WKUserScript(source: bootstrap + "\nwindow.__IRONMLX_ANE_HEALTH__ = {qualified:true, available:true, reason:'eligible'};", injectionTime: .atDocumentStart, forMainFrameOnly: true))
     let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1000, height: 650), configuration: configuration)
     let html = URL(fileURLWithPath: "Sources/IronMLXAppCore/Resources/dashboard2.html").standardizedFileURL
     webView.loadFileURL(html, allowingReadAccessTo: html.deletingLastPathComponent())
@@ -190,6 +190,14 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     #expect(zh["title"] as? String == "关于 M5 DFlash2 优化")
     #expect(zh["body"] as? String == "在 Apple M5（GPU 第 17 代）及更新机型上，DFlash2 服务启用针对 M5 调优的内核、树式草稿和负载下的合批；各项不适用时自动回退。关闭后使用通用设置。Qwen 3.6 35B A3B 使用其专属的调优设置。")
     try await snapshot(webView, named: "settings-m5-advanced-help-zh")
+    let aneBodiesJSON=try await webView.evaluateJavaScript("JSON.stringify(Object.values(I18N).map(d=>d.ane_help_body))") as? String
+    let aneBodies=try JSONDecoder().decode([String].self,from:Data(try #require(aneBodiesJSON).utf8))
+    #expect(aneBodies.count==5)
+    for body in aneBodies {
+        #expect(body.contains("4-bit") && body.contains("Affine") && body.contains("group size 64"))
+        #expect(!body.contains("Flash-Next") && !body.contains("Qwen 3.6"))
+    }
+
 
     // Hover opens the same tooltip; Escape closes it.
     let hover = try await webView.evaluateJavaScript("""
@@ -302,7 +310,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
 }
 
 @MainActor
-@Test func dashboardAneToggleDefaultsOnFollowsM5ProfileAndSavesOffWithRestart() async throws {
+@Test func dashboardAneToggleIsIndependentOfM5ProfileAndSavesOffWithRestart() async throws {
     let messages = CapturedSettingsMessages()
     let webView = try await loadedDashboard(config: AppConfig(), messages: messages)
     defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
@@ -317,7 +325,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
       const row = ane.closest('.settings-row');
       const card = row.closest('.card-settings');
       const rows = [...card.querySelectorAll(':scope > .settings-row')];
-      const note = document.getElementById('ane-requires-m5-profile');
+      const note = document.getElementById('ane-unavailable-reason');
       const trigger = row.querySelector('.profile-help-trigger');
       const tooltip = document.getElementById(trigger.getAttribute('aria-describedby'));
       const out = {
@@ -383,7 +391,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     let missing = try await webView.evaluateJavaScript("""
     JSON.stringify(Object.entries(I18N).flatMap(([lang, dict]) =>
       ['ane_acceleration', 'ane_acceleration_desc', 'ane_help_title', 'ane_help_body', 'ane_help_label',
-       'ane_requires_m5_profile', 'runtime_ane', 'ane_status_active', 'ane_status_disabled', 'ane_status_inactive']
+       'ane_machine_unqualified', 'ane_hardware_unknown', 'ane_runtime_unavailable', 'ane_model_not_adapted', 'runtime_ane', 'ane_status_active', 'ane_status_disabled', 'ane_status_inactive']
         .filter(key => !dict[key]).map(key => lang + ':' + key)))
     """) as? String
     #expect(missing == "[]")
@@ -400,7 +408,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
 }
 
 @MainActor
-@Test func dashboardRuntimeStatusShowsAneStatusExceptWhenNotApplicable() async throws {
+@Test func dashboardLegacyDflashMetadataDoesNotOwnAneStatus() async throws {
     let messages = CapturedSettingsMessages()
     let webView = try await loadedDashboard(config: AppConfig(), messages: messages)
     defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
@@ -421,10 +429,10 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
         })()
         """) as? String
     }
-    #expect(try await meta(ane: "active", language: "en")?.contains("M5 profile active · ANE on") == true)
-    #expect(try await meta(ane: "disabled", language: "en")?.contains("ANE off") == true)
+    #expect(try await meta(ane: "active", language: "en")?.contains("M5 profile active") == true)
+    #expect(try await meta(ane: "disabled", language: "en")?.contains("ANE") == false)
     #expect(try await meta(ane: "not_applicable", language: "en")?.contains("ANE") == false)
-    #expect(try await meta(ane: "disabled", language: "zh")?.contains("神经引擎：已关闭") == true)
+    #expect(try await meta(ane: "disabled", language: "zh")?.contains("神经引擎") == false)
 }
 
 @MainActor

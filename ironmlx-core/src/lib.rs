@@ -1,6 +1,7 @@
 //! Shared model-independent weights and neural-network computation.
 
 pub mod m1_profile;
+pub mod ane;
 pub mod m5_profile;
 pub mod nn;
 pub mod weights;

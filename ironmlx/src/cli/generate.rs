@@ -137,6 +137,10 @@ pub struct GenerateArgs {
     #[arg(long = "m1-profile", default_value = "off", value_parser = parse_m1_profile_mode)]
     pub m1_profile: ironmlx_core::m1_profile::M1ProfileMode,
 
+    /// Shared Neural Engine acceleration: auto or off, for ordinary and draft decoding.
+    #[arg(long, default_value = "auto")]
+    pub ane: ironmlx_core::m5_profile::AneMode,
+
     /// Use versioned position-keyed sampling for DFlash2. This changes output
     /// for the same seed and is therefore explicit rather than a new default.
     #[arg(long, default_value_t = false)]
@@ -543,17 +547,26 @@ fn parse_m5_profile_mode(value: &str) -> Result<ironmlx_core::m5_profile::M5Prof
 
 pub fn run(mut args: GenerateArgs) -> Result<()> {
     let model_dir = PathBuf::from(&args.model);
+    ironmlx_core::ane::set_fixed_model(
+        ironmlx_runtime::core::runtime_health::ane_model_from_snapshot(&model_dir),
+    );
     let dflash2 = args.dflash2_model_dir.is_some();
     let family = dflash2
         .then(|| super::dflash2_target::model_dir_dflash2_family(&model_dir))
         .flatten();
-    let profile = ironmlx_core::m5_profile::install_for_target(
+    let profile = ironmlx_core::m5_profile::install_for_target_with_ane(
         args.m5_dflash2_profile,
+        args.ane,
         dflash2,
         family
             .map(DFlash2TargetFamily::m5_profile_target)
             .unwrap_or(ironmlx_core::m5_profile::M5ProfileTarget::Unqualified),
     );
+    let ane_hw = ironmlx_core::ane::hardware();
+    tracing::info!(mode=args.ane.as_str(),chip=?ane_hw.chip,qualified=ane_hw.qualified,available=ane_hw.available,
+        model_family=?ironmlx_core::ane::fixed_model().map(|m|m.as_str()),
+        model_reason=?ironmlx_core::ane::fixed_model().map(ironmlx_core::ane::reason),
+        runtime_error=?ane_hw.runtime_error,"Independent ANE execution policy");
     args.dflash2_tree_max_nodes.get_or_insert(
         family
             .map(|family| family.default_tree_max_nodes(profile.is_active()))

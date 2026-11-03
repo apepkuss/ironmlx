@@ -1860,6 +1860,7 @@ version = "0.5.1"
 dependencies = [
  "anyhow",
  "approx",
+ "ironmlx-ane",
  "mlx",
  "serde",
  "serial_test",
@@ -1901,6 +1902,7 @@ dependencies = [
  "approx",
  "clap",
  "dirs",
+ "half",
  "image",
  "ironmlx-ane",
  "ironmlx-audio",

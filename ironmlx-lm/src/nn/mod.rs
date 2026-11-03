@@ -18,6 +18,7 @@ pub(crate) mod dflash2_drafter_fusion;
 pub(crate) mod dflash_tree;
 pub mod embedding;
 pub mod fast_argmax;
+pub(crate) mod flash_ane;
 pub mod fused_norm;
 pub mod gated_attention;
 pub mod gated_delta_net;

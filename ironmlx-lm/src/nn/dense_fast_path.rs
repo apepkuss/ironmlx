@@ -161,14 +161,13 @@ pub(crate) fn prefill_ane_ffn_pipelined() -> bool {
 /// 512-channel units of each full-chunk prefill MLP under the prefill scope
 /// (`ane_ffn`), 0 when off.
 pub(crate) fn prefill_ane_ffn_units() -> usize {
-    static UNITS: OnceLock<usize> = OnceLock::new();
-    *UNITS.get_or_init(|| {
-        ironmlx_core::m5_profile::setting(
-            ironmlx_core::m5_profile::settings::DENSE_PREFILL_ANE_FFN_UNITS,
-        )
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
-    })
+    // Policy can retire a backend after a failure. Do not freeze an earlier
+    // setting; diagnostics also need real auto/off paired execution.
+    ironmlx_core::m5_profile::setting(
+        ironmlx_core::m5_profile::settings::DENSE_PREFILL_ANE_FFN_UNITS,
+    )
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(0)
 }
 
 /// GatedDeltaNet fused q/k norm and gate kernels: under either fast path.

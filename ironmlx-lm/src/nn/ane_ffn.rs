@@ -14,6 +14,7 @@
 //! program and signals back, and the GPU waits on that only to add the ANE's
 //! output, after its own channels. The driving thread never blocks.
 use crate::Result;
+use anyhow::Context as _;
 use ironmlx_ane::{Elem, Program, Surface};
 use mlx::fast::HandoffEvent;
 use mlx::{Array, Dtype, MetalKernel, Shape, StreamOrDevice};
@@ -42,6 +43,7 @@ const READY_TIMEOUT_MS: u64 = 10_000;
 
 /// The whole surface (`rows x stride`, rows padded to 64 bytes) as an MLX
 /// array over the same memory. The surface must outlive the array.
+#[cfg(test)]
 pub(crate) fn surface_array(surface: &Surface) -> Result<Array> {
     let dtype = match surface.elem {
         Elem::I8 => Dtype::Int8,
@@ -55,6 +57,25 @@ pub(crate) fn surface_array(surface: &Surface) -> Result<Array> {
             surface.alloc_bytes,
             &[surface.rows as i32, surface.stride() as i32],
             dtype,
+        )?
+    })
+}
+
+pub(crate) fn surface_array_owned<T: std::any::Any + Send + Sync>(
+    surface: &Surface,
+    owner: Arc<T>,
+) -> Result<Array> {
+    let dtype = match surface.elem {
+        Elem::I8 => Dtype::Int8,
+        Elem::F16 => Dtype::Float16,
+    };
+    Ok(unsafe {
+        mlx::fast::array_from_external_buffer_owned(
+            surface.base() as usize,
+            surface.alloc_bytes,
+            &[surface.rows as i32, surface.stride() as i32],
+            dtype,
+            owner,
         )?
     })
 }
@@ -427,7 +448,7 @@ impl Default for Variant {
 /// equal segments of the contraction dimension `k` (statements appended to
 /// `line`, the result named `name`).
 #[allow(clippy::too_many_arguments)]
-fn segmented_matmul(
+pub(super) fn segmented_matmul(
     line: &mut dyn FnMut(String),
     name: &str,
     w: &str,
@@ -654,7 +675,7 @@ struct Surfaces {
 
 impl Surfaces {
     fn new(rows: usize, hidden: usize, ane: usize, variant: Variant) -> Result<Self> {
-        Ok(Self {
+        let surfaces = Self {
             x: Surface::new(
                 hidden,
                 rows,
@@ -672,13 +693,23 @@ impl Surfaces {
             wd: Surface::new(hidden, ane, Elem::I8)?,
             sd: Surface::new(hidden, 1, Elem::F16)?,
             y: Surface::new(hidden + 1, rows, Elem::F16)?,
-        })
+        };
+        ironmlx_core::ane::retain_surfaces(ironmlx_core::ane::Model::Dense27B, surfaces.bytes());
+        Ok(surfaces)
     }
 
     fn inputs(&self) -> [(&'static str, &Surface); 8] {
         self.inputs_with(self)
     }
 
+    fn bytes(&self) -> usize {
+        [
+            &self.x, &self.tx, &self.wg, &self.wu, &self.sg, &self.su, &self.wd, &self.sd, &self.y,
+        ]
+        .into_iter()
+        .map(|s| s.alloc_bytes)
+        .sum()
+    }
     /// This set's input (`x`, `tx`) with the weights of `weights`.
     fn inputs_with<'a>(&'a self, weights: &'a Surfaces) -> [(&'static str, &'a Surface); 8] {
         [
@@ -691,6 +722,12 @@ impl Surfaces {
             ("wd", &weights.wd),
             ("sd", &weights.sd),
         ]
+    }
+}
+
+impl Drop for Surfaces {
+    fn drop(&mut self) {
+        ironmlx_core::ane::release_surfaces(ironmlx_core::ane::Model::Dense27B, self.bytes());
     }
 }
 
@@ -732,9 +769,10 @@ fn build(
         program_text(rows, hidden, ane, mid_block, variant),
         s.y.buffer_type(s.y.rows)
     );
-    let program = Program::load(
+    let program = Program::load_bounded(
         &mil,
         &ironmlx_ane::fp16_constant_weights(&mid_rotation(ane, mid_block)),
+        std::time::Duration::from_secs(30),
     )?;
     Ok((program, surfaces))
 }
@@ -774,7 +812,10 @@ pub(crate) struct AneFfn {
     /// next.
     parity: usize,
     next_half: usize,
-    jobs: mpsc::Sender<Job>,
+    jobs: Option<mpsc::Sender<Job>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    last_reads: Vec<Option<Array>>,
+    last_weight_use: Vec<u64>,
     failure: Arc<Mutex<Option<String>>>,
 }
 
@@ -784,6 +825,7 @@ unsafe impl Send for AneFfn {}
 
 /// The pending ANE half of one layer's split.
 pub(crate) struct Pending {
+    active: bool,
     /// The layer input once the ANE's operands are written: the GPU's
     /// channels read this, so they run while the ANE does.
     pub(crate) ready: Array,
@@ -792,6 +834,16 @@ pub(crate) struct Pending {
     input: usize,
 }
 
+impl Drop for Pending {
+    fn drop(&mut self) {
+        if self.active {
+            // An error/cancellation between begin and finish must never allow
+            // another request to overwrite an in-flight job's surfaces.
+            ironmlx_core::ane::retire(ironmlx_core::ane::Model::Dense27B);
+            tracing::warn!("unfinished Dense ANE job retired; subsequent work uses GPU");
+        }
+    }
+}
 impl AneFfn {
     pub(crate) fn new(
         rows: usize,
@@ -863,7 +915,7 @@ impl AneFfn {
             .map(|s| {
                 [&s.x, &s.tx, &s.wg, &s.wu, &s.sg, &s.su, &s.wd, &s.sd, &s.y]
                     .into_iter()
-                    .map(surface_array)
+                    .map(|surface| surface_array_owned(surface, Arc::clone(s)))
                     .collect::<Result<Vec<_>>>()
             })
             .collect::<Result<Vec<_>>>()?;
@@ -896,7 +948,7 @@ impl AneFfn {
         let done = Arc::new(HandoffEvent::new()?);
         let failure = Arc::new(Mutex::new(None));
         let (jobs, queue) = mpsc::channel::<Job>();
-        {
+        let worker = {
             let (sets, ready, done, failure) =
                 (sets.clone(), ready.clone(), done.clone(), failure.clone());
             std::thread::Builder::new()
@@ -921,9 +973,16 @@ impl AneFfn {
                         );
                             let ready = std::time::Instant::now();
                             waited = ready.duration_since(last_done).as_secs_f64() * 1e3;
+                            anyhow::ensure!(
+                                diagnostic.as_deref() != Some("fail"),
+                                "injected Dense ANE failure"
+                            );
                             if !skip {
                                 let (input, weights) = (&sets[job.input], &sets[job.weights]);
                                 program.evaluate(0, &input.inputs_with(weights), &input.y)?;
+                                ironmlx_core::ane::record_completed(
+                                    ironmlx_core::ane::Model::Dense27B,
+                                );
                             }
                             evaluated = ready.elapsed().as_secs_f64() * 1e3;
                             Ok(())
@@ -962,8 +1021,9 @@ impl AneFfn {
                         }
                         let _ = done.cpu_signal(job.done);
                     }
-                })?;
-        }
+                })?
+        };
+        let sets_len = sets.len();
         Ok(Self {
             rows,
             hidden,
@@ -978,7 +1038,10 @@ impl AneFfn {
             next: 0,
             parity: 0,
             next_half: 0,
-            jobs,
+            jobs: Some(jobs),
+            worker: Some(worker),
+            last_reads: vec![None; sets_len],
+            last_weight_use: vec![0; sets_len],
             failure,
         })
     }
@@ -990,7 +1053,7 @@ impl AneFfn {
 
     /// An error from the ANE side, once; the outputs it touched are NaN.
     pub(crate) fn take_failure(&self) -> Option<String> {
-        self.failure.lock().unwrap().take()
+        self.failure.lock().unwrap().clone()
     }
 
     /// Converts and hands the ANE its operands for input `x` (`[rows,
@@ -1140,6 +1203,7 @@ impl AneFfn {
                 &self.arrays[input][1],
             ),
         ];
+        let writes_weights = weights.is_some();
         if let Some([(wg, sg), (wu, su), (wd, sd)]) = weights {
             let w = &self.arrays[weight_set];
             sources.extend([
@@ -1151,21 +1215,31 @@ impl AneFfn {
                 (column(&sd, h)?, &w[7]),
             ]);
         }
+        let guarded = if writes_weights && self.last_weight_use[weight_set] > 0 {
+            self.done
+                .wait_before_on(x, self.last_weight_use[weight_set], &[], target)?
+        } else {
+            x.clone()
+        };
+        let mut after = vec![&guarded];
+        if let Some(last) = self.last_reads[input].as_ref() {
+            after.push(last);
+        }
         let mut written = Vec::with_capacity(sources.len());
         for (source, surface) in &sources {
             written.push(mlx::fast::copy_into_external_on(
-                source,
-                surface,
-                &[x],
-                target,
+                source, surface, &after, target,
             )?);
         }
         self.next += 1;
+        self.last_weight_use[weight_set] = self.next;
         let (ready_value, done) = (self.next, self.next);
         let after: Vec<&Array> = written.iter().collect();
         let ready = self.ready.signal_after_on(x, &after, ready_value, target)?;
         mlx::transforms::async_eval(&[&ready])?;
         self.jobs
+            .as_ref()
+            .context("ANE worker closed")?
             .send(Job {
                 ready: ready_value,
                 done,
@@ -1174,6 +1248,7 @@ impl AneFfn {
             })
             .map_err(|_| anyhow::anyhow!("the ANE FFN worker stopped"))?;
         Ok(Pending {
+            active: true,
             ready,
             xs,
             done,
@@ -1184,16 +1259,20 @@ impl AneFfn {
     /// The layer's output: `partial` (`[rows, hidden]` bf16, the GPU's
     /// channels) plus the ANE's.
     pub(crate) fn finish(
-        &self,
-        pending: Pending,
+        &mut self,
+        mut pending: Pending,
         partial: &Array,
         target: StreamOrDevice,
     ) -> Result<Array> {
-        // Diagnostic (`IRONMLX_DIAGNOSTIC_ANE_FFN_COMMIT=1`): commit the GPU's
-        // channels first, so the read of the ANE's output starts a new
-        // command buffer.
-        if std::env::var("IRONMLX_DIAGNOSTIC_ANE_FFN_COMMIT").as_deref() == Ok("1") {
-            mlx::transforms::async_eval(&[partial])?;
+        // Submit GPU work before waiting, so ANE and GPU still overlap.
+        mlx::transforms::async_eval(&[partial])?;
+        anyhow::ensure!(
+            self.done.cpu_wait(pending.done, READY_TIMEOUT_MS)?,
+            "ANE result timeout"
+        );
+        if let Some(error) = self.take_failure() {
+            ironmlx_core::ane::retire(ironmlx_core::ane::Model::Dense27B);
+            anyhow::bail!("ANE job failed: {error}");
         }
         let y = self.done.wait_before_on(
             &self.arrays[pending.input][8],
@@ -1201,59 +1280,120 @@ impl AneFfn {
             &[partial],
             target,
         )?;
-        join(partial, &y, &pending.xs, target)
+        let out = join(partial, &y, &pending.xs, target)?;
+        // Owner leases survive the model; the next write depends on this
+        // detached output, without a per-layer CPU/GPU synchronization.
+        self.last_reads[pending.input] = Some(out.clone());
+        pending.active = false;
+        Ok(out)
     }
 }
 
-static INSTANCE: OnceLock<Option<Mutex<AneFfn>>> = OnceLock::new();
-static PIPELINED: OnceLock<Option<Mutex<AneFfn>>> = OnceLock::new();
-/// Set once the ANE side failed: later chunks keep the MLP on the GPU.
-static RETIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// `Err` when the ANE side of an evaluated split failed since the last call
-/// (its outputs are NaN); the split then retires for the process.
+pub(crate) fn close_worker(worker: std::thread::JoinHandle<()>, model: ironmlx_core::ane::Model) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !worker.is_finished()
+        && !ironmlx_core::ane::retired(model)
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if worker.is_finished() {
+        let _ = worker.join();
+    } else {
+        ironmlx_core::ane::retire(model);
+        tracing::warn!(
+            model = model.as_str(),
+            "ANE worker has not exited; cleanup continues with owned resources until return"
+        );
+    }
+}
+impl Drop for AneFfn {
+    fn drop(&mut self) {
+        self.jobs.take();
+        if let Some(worker) = self.worker.take() {
+            close_worker(worker, ironmlx_core::ane::Model::Dense27B);
+        }
+    }
+}
+/// Programs and IOSurfaces belong to a model instance, never to a process-wide
+/// strong reference. Weak registration lets post-evaluation checks see faults.
+pub(crate) struct DenseContext {
+    full: OnceLock<Option<Arc<Mutex<AneFfn>>>>,
+    pipeline: OnceLock<Option<Arc<Mutex<AneFfn>>>>,
+}
+static CONTEXTS: Mutex<Vec<std::sync::Weak<DenseContext>>> = Mutex::new(Vec::new());
+thread_local! {static CURRENT:std::cell::RefCell<Vec<Arc<DenseContext>>> = const {std::cell::RefCell::new(Vec::new())};}
+pub(crate) struct Scope;
+pub(crate) fn context() -> Arc<DenseContext> {
+    let c = Arc::new(DenseContext {
+        full: OnceLock::new(),
+        pipeline: OnceLock::new(),
+    });
+    let mut registry = CONTEXTS.lock().unwrap();
+    registry.retain(|v| v.strong_count() > 0);
+    registry.push(Arc::downgrade(&c));
+    c
+}
+pub(crate) fn scope(context: &Arc<DenseContext>) -> Scope {
+    CURRENT.with(|s| s.borrow_mut().push(Arc::clone(context)));
+    Scope
+}
+impl Drop for Scope {
+    fn drop(&mut self) {
+        CURRENT.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
+}
+fn current() -> Arc<DenseContext> {
+    static DIAGNOSTIC: OnceLock<Arc<DenseContext>> = OnceLock::new();
+    CURRENT
+        .with(|s| s.borrow().last().cloned())
+        .unwrap_or_else(|| Arc::clone(DIAGNOSTIC.get_or_init(context)))
+}
 pub(crate) fn check() -> Result<()> {
-    for slot in [&INSTANCE, &PIPELINED] {
-        let Some(Some(split)) = slot.get() else {
-            continue;
-        };
-        let failure = split
-            .lock()
-            .map_err(|_| anyhow::anyhow!("ANE FFN split poisoned"))?
-            .take_failure();
-        if let Some(error) = failure {
-            RETIRED.store(true, std::sync::atomic::Ordering::Relaxed);
-            tracing::error!(
-                "Neural Engine FFN share failed, the GPU takes it from now on: {error}"
-            );
-            anyhow::bail!("Neural Engine FFN share failed: {error}")
+    let contexts = CONTEXTS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.upgrade())
+        .collect::<Vec<_>>();
+    for context in contexts {
+        for slot in [&context.full, &context.pipeline] {
+            if let Some(Some(split)) = slot.get() {
+                if let Some(error) = split
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("ANE context poisoned"))?
+                    .take_failure()
+                {
+                    if !ironmlx_core::ane::retired(ironmlx_core::ane::Model::Dense27B) {
+                        tracing::error!(%error,"ANE failure; stateless MLP is recomputed on GPU and later chunks use GPU");
+                    }
+                    ironmlx_core::ane::retire(ironmlx_core::ane::Model::Dense27B);
+                }
+            }
         }
     }
     Ok(())
 }
-
-/// The process's split for `[rows, hidden]` chunks of an `intermediate`-wide
-/// MLP with `units` ANE units, created on first use; `None` (logged once)
-/// where the ANE is unavailable, and once it failed.
 pub(crate) fn instance(
     rows: usize,
     hidden: usize,
     intermediate: usize,
     units: usize,
-) -> Option<&'static Mutex<AneFfn>> {
-    shared(&INSTANCE, rows, hidden, intermediate, units, AneFfn::new)
+) -> Option<Arc<Mutex<AneFfn>>> {
+    let c = current();
+    shared(&c.full, rows, hidden, intermediate, units, AneFfn::new)
 }
-
-/// [`instance`] for the half-chunk pipeline ([`AneFfn::pipelined`], `rows`
-/// a half chunk's).
 pub(crate) fn pipelined_instance(
     rows: usize,
     hidden: usize,
     intermediate: usize,
     units: usize,
-) -> Option<&'static Mutex<AneFfn>> {
+) -> Option<Arc<Mutex<AneFfn>>> {
+    let c = current();
     shared(
-        &PIPELINED,
+        &c.pipeline,
         rows,
         hidden,
         intermediate,
@@ -1261,35 +1401,36 @@ pub(crate) fn pipelined_instance(
         AneFfn::pipelined,
     )
 }
-
 fn shared(
-    slot: &'static OnceLock<Option<Mutex<AneFfn>>>,
+    slot: &OnceLock<Option<Arc<Mutex<AneFfn>>>>,
     rows: usize,
     hidden: usize,
     intermediate: usize,
     units: usize,
     create: fn(usize, usize, usize, usize) -> Result<AneFfn>,
-) -> Option<&'static Mutex<AneFfn>> {
-    if RETIRED.load(std::sync::atomic::Ordering::Relaxed) {
+) -> Option<Arc<Mutex<AneFfn>>> {
+    if ironmlx_core::ane::retired(ironmlx_core::ane::Model::Dense27B) {
         return None;
     }
-    let slot = slot.get_or_init(|| match create(rows, hidden, intermediate, units) {
-        Ok(split) => Some(Mutex::new(split)),
-        Err(error) => {
-            tracing::warn!("Dense prefill FFN stays on the GPU: {error:#}");
-            None
-        }
-    });
-    let split = slot.as_ref()?;
+    let instance = slot
+        .get_or_init(|| match create(rows, hidden, intermediate, units) {
+            Ok(split) => Some(Arc::new(Mutex::new(split))),
+            Err(error) => {
+                tracing::warn!(%error,"Dense ANE initialization failed; using GPU");
+                ironmlx_core::ane::retire(ironmlx_core::ane::Model::Dense27B);
+                None
+            }
+        })
+        .as_ref()?;
     {
-        let s = split.lock().unwrap();
-        if (s.rows, s.hidden, s.intermediate, s.ane)
+        let split = instance.lock().ok()?;
+        if (split.rows, split.hidden, split.intermediate, split.ane)
             != (rows, hidden, intermediate, units * UNIT_CHANNELS as usize)
         {
             return None;
         }
     }
-    Some(split)
+    Some(Arc::clone(instance))
 }
 
 #[cfg(test)]
@@ -1343,7 +1484,11 @@ mod tests {
             y.buffer_type(rows),
             st = y.stride()
         );
-        let program = Program::load(&mil, &ironmlx_ane::empty_weights())?;
+        let program = Program::load_bounded(
+            &mil,
+            &ironmlx_ane::empty_weights(),
+            std::time::Duration::from_secs(30),
+        )?;
         program.evaluate(0, &[("a", &a), ("b", &b)], &y)?;
         // The GPU reads the ANE's output in place.
         let out = surface_array(&y)?;

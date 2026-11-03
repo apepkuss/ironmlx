@@ -883,6 +883,10 @@ where
     S: SchedulerActorSpawner<M>,
 {
     let m1_plan = model.m1_execution_plan();
+    let mut static_memory_estimate = static_memory_estimate;
+    static_memory_estimate.text_cold_bytes = static_memory_estimate
+        .text_cold_bytes
+        .saturating_add(model.auxiliary_memory_bytes());
     let model = Arc::new(Mutex::new(model));
     let admission_deadline = std::time::Duration::from_millis(admission_deadline_ms);
 
@@ -1144,6 +1148,10 @@ where
         crate::core::dflash2::resolve_dflash2_block_size(Some(block_size), checkpoint_block_size)?
             .block_size;
     let m1_plan = model.m1_execution_plan();
+    let mut static_memory_estimate = static_memory_estimate;
+    static_memory_estimate.text_cold_bytes = static_memory_estimate
+        .text_cold_bytes
+        .saturating_add(model.auxiliary_memory_bytes());
     let model = Arc::new(Mutex::new(model));
     let (
         mut meta,

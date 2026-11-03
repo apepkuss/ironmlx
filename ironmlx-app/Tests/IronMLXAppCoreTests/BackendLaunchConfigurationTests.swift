@@ -576,3 +576,19 @@ private func dflash2LaunchArguments(config appConfig: AppConfig) -> [String] {
     #expect(BackendLaunchOptions.ssdPrefixCacheDirectory(" /tmp/x ") == "/tmp/x")
     #expect(BackendLaunchOptions.ssdPrefixCacheDirectory("") == nil)
 }
+
+@Test func ordinaryAndDflashLaunchesCarryAneOffWhenAneOrM5ProfileIsOff() {
+    for profile in [false, true] {
+        for ane in [false, true] {
+            let config = AppConfig(m5Dflash2Profile: profile, ane: ane)
+            let ordinary = BackendLaunchConfiguration(
+                executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+                host: "127.0.0.1", port: 9068, options: BackendLaunchOptions(config: config)).arguments
+            for args in [ordinary, dflash2LaunchArguments(config: config)] {
+                // The App shows ANE as part of the M5 DFlash2 optimization.
+                #expect(args.contains("--ane") == !(ane && profile))
+                if let index = args.firstIndex(of: "--ane") { #expect(args[index + 1] == "off") }
+            }
+        }
+    }
+}
