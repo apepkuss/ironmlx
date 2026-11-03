@@ -247,6 +247,12 @@ impl M5ProfileHealth {
 /// window boundary together run width-8 linear windows as one ragged batch.
 #[derive(Debug, Default, Serialize)]
 pub struct DFlash2RaggedLinearHealth {
+    pub group_cost_enabled: bool,
+    pub group_cost_windows: u64,
+    pub group_cost_shape_fallback_windows: u64,
+    pub group_cost_ordinary_windows: u64,
+    pub group_cost_probe_windows: u64,
+    pub group_cost_resets: u64,
     pub enabled: bool,
     pub max_width_limit: usize,
     /// Batched windows, and windows by batch width 2/3/4.
@@ -284,6 +290,12 @@ pub struct DFlash2RaggedLinearHealth {
 
 #[derive(Clone, Default)]
 pub struct DFlash2RaggedLinearCounters {
+    pub group_cost_enabled: Arc<AtomicU64>,
+    pub group_cost_windows: Arc<AtomicU64>,
+    pub group_cost_shape_fallback_windows: Arc<AtomicU64>,
+    pub group_cost_ordinary_windows: Arc<AtomicU64>,
+    pub group_cost_probe_windows: Arc<AtomicU64>,
+    pub group_cost_resets: Arc<AtomicU64>,
     pub enabled: bool,
     pub max_width_limit: usize,
     pub windows: Arc<AtomicU64>,
@@ -312,6 +324,14 @@ pub struct DFlash2RaggedLinearCounters {
 impl DFlash2RaggedLinearCounters {
     pub fn snapshot(&self) -> DFlash2RaggedLinearHealth {
         DFlash2RaggedLinearHealth {
+            group_cost_enabled: self.group_cost_enabled.load(Ordering::Relaxed) != 0,
+            group_cost_windows: self.group_cost_windows.load(Ordering::Relaxed),
+            group_cost_shape_fallback_windows: self
+                .group_cost_shape_fallback_windows
+                .load(Ordering::Relaxed),
+            group_cost_ordinary_windows: self.group_cost_ordinary_windows.load(Ordering::Relaxed),
+            group_cost_probe_windows: self.group_cost_probe_windows.load(Ordering::Relaxed),
+            group_cost_resets: self.group_cost_resets.load(Ordering::Relaxed),
             enabled: self.enabled,
             max_width_limit: self.max_width_limit,
             windows: self.windows.load(Ordering::Relaxed),

@@ -984,6 +984,14 @@ where
 
     tokio::task::spawn_blocking(move || {
         let model = model.blocking_lock();
+        let group_cost_enabled =
+            crate::core::dflash2_group_cost::enabled(model.dflash2_group_cost_policy())
+                .unwrap_or(false);
+        worker_ragged_linear
+            .group_cost_enabled
+            .store(u64::from(group_cost_enabled), Ordering::Relaxed);
+        let mut group_cost = crate::core::dflash2_group_cost::GroupCostPolicy::default();
+        let cost_epoch = std::time::Instant::now();
         let mut prefix_cache = prefix_cache_max_bytes
             .map(DFlash2PrefixCache::new)
             .transpose()
@@ -1860,8 +1868,18 @@ where
                 let probe_due = ragged_probe_interval > 0
                     && ragged_ordinary_streak >= ragged_probe_interval
                     && speculative_candidates.len() == ordinary_candidates.len();
-                let ordinary_window =
+                let mut ordinary_window =
                     ordinary_candidates.len() >= ragged_ordinary_min_width && !probe_due;
+                // Finish short tails as ordinary groups when drafting is no
+                // longer eligible; fixed/manual policies keep their old path.
+                if group_cost_enabled && speculative_candidates.len() < 2 {
+                    ordinary_window = true;
+                }
+                let ordinary_fallback_candidates = if group_cost_enabled {
+                    ordinary_candidates.clone()
+                } else {
+                    Vec::new()
+                };
                 let candidates = if ordinary_window {
                     ordinary_candidates
                 } else {
@@ -1876,11 +1894,54 @@ where
                     .as_ref()
                     .and_then(|group| tensor_group_positions(&active, &group.request_ids))
                     .unwrap_or_default();
-                let selected = select_ragged_linear_rows(
+                let mut selected = select_ragged_linear_rows(
                     &candidates,
                     &current_positions,
                     ragged_linear_max_width,
                 );
+                let shape_fallback = if group_cost_enabled && !ordinary_window {
+                    let full = select_ragged_linear_rows(
+                        &ordinary_fallback_candidates,
+                        &current_positions,
+                        ragged_linear_max_width,
+                    );
+                    if full.len() > selected.len() && full.len() >= 2 {
+                        selected = full;
+                        ordinary_window = true;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                let cost_choice = if group_cost_enabled && !ordinary_window && selected.len() >= 2 {
+                    let context = selected
+                        .iter()
+                        .map(|&i| active[i].stream.ragged_context_tokens())
+                        .max()
+                        .unwrap_or(0);
+                    let draft = active[selected[0]]
+                        .stream
+                        .ragged_draft_budget()
+                        .unwrap_or(0);
+                    let regime = crate::core::dflash2_group_cost::Regime::new(
+                        selected.len(),
+                        context,
+                        draft,
+                    );
+                    let now = u64::try_from(cost_epoch.elapsed().as_micros()).unwrap_or(u64::MAX);
+                    let remaining = selected
+                        .iter()
+                        .map(|&i| active[i].stream.ragged_remaining_tokens())
+                        .min()
+                        .unwrap_or(0);
+                    let choice = group_cost.choose(regime, now, remaining);
+                    ordinary_window = choice.ordinary;
+                    Some((regime, choice))
+                } else {
+                    None
+                };
                 let reuse = ragged_group.is_some() && selected == current_positions;
                 if !reuse {
                     let members = ragged_member_positions(&active, ragged_group.as_ref());
@@ -1980,6 +2041,33 @@ where
                             DFlash2StepDiagnostic::ragged(&mut step_diagnostic, built, &timing);
                             let width = selected.len();
                             let counters = &worker_ragged_linear;
+                            if let Some((regime, choice)) = cost_choice {
+                                group_cost.observe(
+                                    regime,
+                                    choice,
+                                    timing.window_us,
+                                    timing.cache_build_us,
+                                    timing.emitted.iter().sum(),
+                                    u64::try_from(cost_epoch.elapsed().as_micros())
+                                        .unwrap_or(u64::MAX),
+                                );
+                                counters.group_cost_windows.fetch_add(1, Ordering::Relaxed);
+                                counters
+                                    .group_cost_ordinary_windows
+                                    .fetch_add(u64::from(choice.ordinary), Ordering::Relaxed);
+                                counters
+                                    .group_cost_probe_windows
+                                    .fetch_add(u64::from(choice.probe), Ordering::Relaxed);
+                                counters
+                                    .group_cost_resets
+                                    .fetch_add(u64::from(choice.reset), Ordering::Relaxed);
+                                tracing::debug!(?regime, ?choice, window_us=timing.window_us,
+                                    emitted=?timing.emitted, "DFlash2 measured group cost");
+                            }
+                            let counters = &worker_ragged_linear;
+                            counters
+                                .group_cost_shape_fallback_windows
+                                .fetch_add(u64::from(shape_fallback), Ordering::Relaxed);
                             counters.windows.fetch_add(1, Ordering::Relaxed);
                             if ordinary_window {
                                 counters.ordinary_windows.fetch_add(1, Ordering::Relaxed);
@@ -2192,7 +2280,7 @@ where
                         serde_json::to_value(&metrics).unwrap_or_default(),
                     );
                 }
-                if metrics.ragged_linear_windows > 0 {
+                if metrics.ragged_linear_windows > 0 || metrics.ragged_ordinary_windows > 0 {
                     worker_ragged_linear
                         .requests_with_ragged_windows
                         .fetch_add(1, Ordering::Relaxed);

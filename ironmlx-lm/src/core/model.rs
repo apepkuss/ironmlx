@@ -114,6 +114,11 @@ pub trait Model {
         false
     }
 
+    /// Keep B1 chunk boundaries and the final-token split while batching text.
+    fn requires_b1_prefill_partition(&self) -> bool {
+        false
+    }
+
     /// Extend split-batch prefill to image rows, preserving each row's B1
     /// chunk boundaries before assembling the scheduler cache. Has an effect
     /// only when `requires_split_batched_prefill_for_token_parity` is true.

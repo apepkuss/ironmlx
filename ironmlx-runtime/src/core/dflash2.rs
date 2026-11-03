@@ -664,6 +664,7 @@ where
     /// Shared budget of a ragged linear batch (see [`ragged_group_budget`]).
     ragged_budget: Option<usize>,
     ragged_solo_budget: Option<usize>,
+    adaptive_group_cost: bool,
     prng_state: Array,
     block_size: usize,
     emitted_new_tokens: usize,
@@ -1502,6 +1503,9 @@ where
                 confidence_verify: confidence_verify(max_draft_tokens)?,
                 ragged_budget: ragged_group_budget(max_draft_tokens)?,
                 ragged_solo_budget: ragged_solo_budget(max_draft_tokens)?,
+                adaptive_group_cost: super::dflash2_group_cost::enabled(
+                    model.dflash2_group_cost_policy(),
+                )?,
                 prng_state,
                 block_size,
                 emitted_new_tokens: 0,
@@ -1869,6 +1873,9 @@ where
             confidence_verify: confidence_verify(max_draft_tokens)?,
             ragged_budget: ragged_group_budget(max_draft_tokens)?,
             ragged_solo_budget: ragged_solo_budget(max_draft_tokens)?,
+            adaptive_group_cost: super::dflash2_group_cost::enabled(
+                model.dflash2_group_cost_policy(),
+            )?,
             prng_state,
             block_size,
             emitted_new_tokens: 0,
@@ -2118,6 +2125,16 @@ where
     /// Token capacity this row needs in a ragged batched target cache.
     pub(crate) fn ragged_cache_tokens(&self) -> usize {
         self.target_cache_tokens()
+    }
+
+    pub(crate) fn ragged_context_tokens(&self) -> usize {
+        self.history.len().saturating_sub(1)
+    }
+
+    pub(crate) fn ragged_remaining_tokens(&self) -> usize {
+        self.request
+            .max_new_tokens
+            .saturating_sub(self.emitted_new_tokens)
     }
 
     /// Token capacity of this row's target cache, verify scratch included.
@@ -4642,6 +4659,7 @@ where
         self.experimental_fixed_budget.or_else(|| {
             self.ragged_solo_budget
                 .filter(|_| self.counters.ragged_linear_windows > 0)
+                .filter(|_| !self.adaptive_group_cost)
         })
     }
 

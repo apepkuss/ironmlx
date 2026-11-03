@@ -541,6 +541,11 @@ pub trait DFlash2Target: crate::core::Model {
         false
     }
 
+    /// Whether grouped paged execution can compare ordinary and draft costs.
+    fn dflash2_group_cost_policy(&self) -> bool {
+        false
+    }
+
     /// Identity of this loaded target, when it keeps state across requests
     /// keyed by the loaded instance.
     fn dflash2_instance(&self) -> Option<&DFlash2Instance> {

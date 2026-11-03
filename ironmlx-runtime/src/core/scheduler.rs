@@ -4288,10 +4288,43 @@ fn forward_batched_text_prefill<M: Model>(
     max_len: i32,
     cache: Option<&mut [LayerCache]>,
     target: mlx::StreamOrDevice,
+    complete_prompt: bool,
 ) -> Result<Array> {
     let _paging_prefill = ironmlx_lm::core::paging_stats::PhaseGuard::enter(
         ironmlx_lm::core::paging_stats::PagingPhase::Prefill,
     );
+    if complete_prompt && model.requires_b1_prefill_partition() && max_len > 1 {
+        let mut cache = cache;
+        let batch = per_row_lens.len() as i32;
+        let prefix_lens: Vec<_> = per_row_lens.iter().map(|&n| (n - 1).max(0)).collect();
+        let prefix_ids = input_ids.slice(&[0, 0][..], &[batch, max_len - 1][..])?;
+        let prefix_positions = position_ids.slice(&[0, 0, 0][..], &[3, batch, max_len - 1][..])?;
+        let prefix_mask = build_batch_linear_mask(&prefix_lens, max_len - 1)?;
+        model
+            .forward_text_hidden(
+                &prefix_ids,
+                &prefix_positions,
+                Some(&prefix_lens),
+                Some(&prefix_mask),
+                cache.as_deref_mut(),
+                target,
+            )?
+            .eval()?;
+        let indices = Array::try_from((prefix_lens.as_slice(), [batch, 1]))?;
+        let last_ids = mlx::ops::indexing::take_along_axis_on(input_ids, &indices, 1, target)?;
+        let positions_indices = Array::try_from((prefix_lens.repeat(3).as_slice(), [3, batch, 1]))?;
+        let last_positions =
+            mlx::ops::indexing::take_along_axis_on(position_ids, &positions_indices, 2, target)?;
+        let last_lens: Vec<_> = per_row_lens.iter().map(|&n| i32::from(n > 0)).collect();
+        return model.forward_on(
+            &last_ids,
+            &last_positions,
+            Some(&last_lens),
+            None,
+            cache,
+            target,
+        );
+    }
     if per_row_lens.iter().all(|&len| len == max_len) {
         return model.batched_prefill_causal(input_ids, position_ids, per_row_lens, cache, target);
     }
@@ -4384,6 +4417,7 @@ fn forward_batched_text_cold_miss_with_paged_prefix<M: Model>(
         max_prefix_len,
         Some(&mut *cache),
         mlx::StreamOrDevice::default(),
+        false,
     )?;
     mlx::transforms::eval(&[&prefix_logits])?;
 
@@ -15056,6 +15090,14 @@ impl<M: Model> Scheduler<M> {
         // partition contract (including each row's final text token).
         if active_rows.len() > 1
             && ((any_multimodal && model.requires_row_isolated_multimodal_prefill())
+                || (model.requires_b1_prefill_partition()
+                    && (self.paged_prefix_cache.is_some()
+                        || active_rows.iter().any(|&row| {
+                            self.slots[row].as_ref().is_some_and(|state| {
+                                state.prefill_chunk_size > 0
+                                    && state.prompt_ids.len() > state.prefill_chunk_size as usize
+                            })
+                        })))
                 || (model.requires_split_batched_prefill_for_token_parity()
                     && (model.requires_row_isolated_multimodal_prefill()
                         || active_rows.iter().any(|&row| {
@@ -15789,6 +15831,7 @@ impl<M: Model> Scheduler<M> {
                     max_len,
                     Some(prefill_cache),
                     mlx::StreamOrDevice::default(),
+                    true,
                 )?
             };
             Ok(logits)
@@ -21955,6 +21998,7 @@ mod tests {
     struct RecordingPrefillModel {
         split_batched_prefill: bool,
         isolated_multimodal_prefill: bool,
+        b1_prefill_partition: bool,
         make_cache_batches: std::sync::Mutex<Vec<i32>>,
         text_forward_batches: std::sync::Mutex<Vec<i32>>,
         text_forward_seq_lens: std::sync::Mutex<Vec<i32>>,
@@ -22121,6 +22165,9 @@ mod tests {
         fn requires_row_isolated_multimodal_prefill(&self) -> bool {
             self.isolated_multimodal_prefill
         }
+        fn requires_b1_prefill_partition(&self) -> bool {
+            self.b1_prefill_partition
+        }
     }
 
     impl DenseVlMethods for RecordingPrefillModel {
@@ -22221,6 +22268,7 @@ mod tests {
     #[derive(Default)]
     struct StepDecodeMaskModel {
         hybrid_cache: bool,
+        b1_prefill_partition: bool,
         decode_lens_seen: std::sync::Mutex<Vec<Vec<i32>>>,
         decode_positions_seen: std::sync::Mutex<Vec<Vec<i32>>>,
         decode_mask_seen: std::sync::Mutex<Vec<bool>>,
@@ -22312,6 +22360,10 @@ mod tests {
     }
 
     impl ironmlx_lm::core::model::Model for StepDecodeMaskModel {
+        fn requires_b1_prefill_partition(&self) -> bool {
+            self.b1_prefill_partition
+        }
+
         fn make_cache(
             &self,
             batch: i32,
@@ -30434,6 +30486,53 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!((events[0].id, events[0].token), (id_0, 3));
         assert_eq!((events[1].id, events[1].token), (id_1, 4));
+    }
+
+    #[test]
+    fn native_prefill_preserves_b1_prefix_and_final_token() {
+        let model = RecordingPrefillModel {
+            b1_prefill_partition: true,
+            ..RecordingPrefillModel::default()
+        };
+        let mut scheduler = Scheduler::<RecordingPrefillModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .unwrap();
+        scheduler.admit(mk_req(vec![1, 2, 3])).unwrap();
+        scheduler.admit(mk_req(vec![4, 5, 6, 7, 8])).unwrap();
+        scheduler.prefill_admitted(&model).unwrap();
+        assert_eq!(model.text_hidden_shapes(), vec![(2, 4)]);
+        assert_eq!(model.text_forward_batches(), vec![2]);
+        assert_eq!(model.text_forward_seq_lens(), vec![1]);
+    }
+
+    #[test]
+    fn native_prefill_preserves_request_chunk_boundaries() {
+        let model = StepDecodeMaskModel {
+            b1_prefill_partition: true,
+            ..StepDecodeMaskModel::default()
+        };
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .unwrap();
+        for tokens in [vec![1, 2, 3, 4, 5], vec![6, 7, 8, 9, 10]] {
+            let mut request = mk_req(tokens);
+            request.prefill_chunk_size = 2;
+            scheduler.admit(request).unwrap();
+        }
+        scheduler.prefill_admitted(&model).unwrap();
+        assert!(model.batched_prefill_batches().is_empty());
+        assert!(model.hidden_seq_lens().iter().all(|&n| n <= 2));
+        assert!(model.forward_seq_lens().iter().all(|&n| n <= 2));
+        let LayerCache::Full(cache) = &scheduler.cache.as_ref().unwrap()[0] else {
+            panic!("expected full test cache");
+        };
+        assert_eq!(cache.offsets(), &[5, 5]);
     }
 
     #[test]

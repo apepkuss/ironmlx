@@ -238,6 +238,7 @@ pub struct PagedExperts {
     staging_bytes: usize,
     pack_bytes: usize,
     protected_bytes: usize,
+    scan_resistant: bool,
     stats: ExpertCacheStats,
     telemetry: Arc<PagingTelemetry>,
     pending: Option<PendingExpert>,
@@ -322,6 +323,14 @@ impl PagedExperts {
             staging_bytes,
             pack_bytes,
             protected_bytes: 0,
+            scan_resistant: match std::env::var("IRONMLX_FLASH_EXPERT_CACHE_POLICY")
+                .unwrap_or_else(|_| "segmented".into())
+                .as_str()
+            {
+                "segmented" => true,
+                "lru" => false,
+                _ => anyhow::bail!("IRONMLX_FLASH_EXPERT_CACHE_POLICY must be segmented or lru"),
+            },
             stats: ExpertCacheStats::default(),
             telemetry: Arc::new(PagingTelemetry::new(true)),
             pending: None,
@@ -497,13 +506,13 @@ impl PagedExperts {
         let key = (table, expert);
         if let Some(entry) = self.entries.get_mut(&key) {
             // A scan hit must not change the decode recency/frequency history.
-            if !crate::core::paging_stats::is_prefill() {
+            if !self.scan_resistant || !crate::core::paging_stats::is_prefill() {
                 self.ages.remove(&entry.age);
                 entry.age = self.clock;
-                if !entry.protected {
+                if self.scan_resistant && !entry.protected {
                     self.protected_bytes += entry.charge;
                 }
-                entry.protected = true;
+                entry.protected = self.scan_resistant;
                 self.ages.insert(self.clock, key);
             }
             self.stats.hits = self.stats.hits.saturating_add(1);

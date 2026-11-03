@@ -712,14 +712,24 @@ impl RawRows {
     }
 }
 type IoJob = Box<dyn FnOnce() + Send + 'static>;
+fn reader_count(requested: Option<&str>) -> Result<usize> {
+    match requested {
+        None | Some("2") => Ok(2),
+        Some("1") => Ok(1),
+        _ => anyhow::bail!("IRONMLX_FLASH_IO_WORKERS must be 1 or 2"),
+    }
+}
+
 pub fn io_task<T: Send + 'static>(
     task: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> mpsc::Receiver<Result<T>> {
-    static POOL: OnceLock<mpsc::SyncSender<IoJob>> = OnceLock::new();
+    static POOL: OnceLock<std::result::Result<mpsc::SyncSender<IoJob>, String>> = OnceLock::new();
     let pool = POOL.get_or_init(|| {
+        let workers = reader_count(std::env::var("IRONMLX_FLASH_IO_WORKERS").ok().as_deref())
+            .map_err(|e| e.to_string())?;
         let (sender, receiver) = mpsc::sync_channel::<IoJob>(8);
         let receiver = Arc::new(Mutex::new(receiver));
-        for index in 0..2 {
+        for index in 0..workers {
             let receiver = Arc::clone(&receiver);
             std::thread::Builder::new()
                 .name(format!("paging-reader-{index}"))
@@ -730,14 +740,34 @@ pub fn io_task<T: Send + 'static>(
                         Err(_) => break,
                     }
                 })
-                .expect("start bounded paging reader");
+                .map_err(|e| format!("start bounded paging reader: {e}"))?;
         }
-        sender
+        Ok(sender)
     });
     let (sender, receiver) = mpsc::sync_channel(1);
-    pool.send(Box::new(move || {
-        let _ = sender.send(task());
-    }))
-    .expect("paging readers available");
+    match pool {
+        Ok(pool) => {
+            let _ = pool.send(Box::new(move || {
+                let _ = sender.send(task());
+            }));
+        }
+        Err(error) => {
+            let _ = sender.send(Err(anyhow!(error.clone())));
+        }
+    }
     receiver
+}
+
+#[cfg(test)]
+mod reader_config_tests {
+    use super::reader_count;
+
+    #[test]
+    fn diagnostic_reader_count_is_bounded() {
+        assert_eq!(reader_count(None).unwrap(), 2);
+        assert_eq!(reader_count(Some("1")).unwrap(), 1);
+        assert_eq!(reader_count(Some("2")).unwrap(), 2);
+        assert!(reader_count(Some("0")).is_err());
+        assert!(reader_count(Some("3")).is_err());
+    }
 }
