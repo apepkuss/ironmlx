@@ -7090,6 +7090,7 @@
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "This model is running with DFlash2 acceleration.",
       dflash2_acceleration: "DFlash2 Acceleration", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft Precision", dflash2_tensor_batch_max_width: "Tensor Batch Limit", auto_default_4: "Auto (4)",
       dflash2_tensor_batch_help_label: "About Tensor Batch Limit", dflash2_tensor_batch_help_title: "How Tensor Batch Limit is applied", dflash2_tensor_batch_help_body: "Limits how many compatible requests can be combined in one MLX tensor batch. Leave blank for Auto (4).", dflash2_tensor_batch_help_constraint: "The effective width is the minimum of this limit, Settings > Models and memory > Concurrent requests, and the number of ready compatible requests. This setting does not increase concurrent requests; incompatible or divergent requests use B1.",
+      dflash2_tensor_batch_help_not_applicable: "This limit does not apply to Qwen3.8-Flash-Next. With the M5 DFlash2 Profile active, compatible concurrent requests use automatic ragged batching, up to Concurrent requests or 4 requests, whichever is lower.",
       dflash2_help_label: "About DFlash2 acceleration", dflash2_help_title: "How DFlash2 acceleration works", dflash2_help_body: "DFlash2 uses a dedicated draft model and an isolated verification actor. Tensor Batch Limit caps compatible requests combined in one tensor operation; the actual width is the minimum of concurrent requests, this limit, and ready compatible requests. Empty uses the certified default 4. Changing this setting restarts the backend in single-target mode.", dflash2_help_exclusive: "DFlash2 cannot run together with MTP or repeated-text acceleration.",
       dflash2_help_status_available: "Current status: compatible DFlash2 draft detected. Block Size follows the selected draft checkpoint, capped at the qualified Q8 width, and cannot be edited.", dflash2_help_status_incompatible: "Current status: the detected DFlash2 draft is incompatible with this model.", dflash2_help_status_unavailable: "Current status: no compatible DFlash2 draft was found.", dflash2_status_incompatible: "DFlash2 draft is incompatible", dflash2_status_unavailable: "No compatible DFlash2 draft", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch Limit must be a positive integer, or empty for Auto (4).",
       model_exists_locally: "Model \"{name}\" already exists locally.",
@@ -7904,6 +7905,7 @@
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "该模型正在使用 DFlash2 加速。",
       dflash2_acceleration: "DFlash2 加速", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自动（4）",
       dflash2_tensor_batch_help_label: "了解 Tensor Batch 上限", dflash2_tensor_batch_help_title: "Tensor Batch 上限如何生效", dflash2_tensor_batch_help_body: "限制一次 MLX tensor batch 最多合并的兼容请求数。留空使用自动值 4。", dflash2_tensor_batch_help_constraint: "约束关系：实际宽度取该上限、【设置 → 模型与内存 → 并发请求数】和当前就绪兼容请求数的最小值。该配置不会提高并发请求数；不兼容或发生分叉的请求使用 B1。",
+      dflash2_tensor_batch_help_not_applicable: "此上限不适用于 Qwen3.8-Flash-Next。M5 DFlash2 优化配置生效时，兼容的并发请求自动使用 ragged 合批，上限取最大序列数与 4 的较小值。",
       dflash2_help_label: "了解 DFlash2 加速", dflash2_help_title: "DFlash2 加速如何工作", dflash2_help_body: "DFlash2 使用独立 Draft 模型和隔离的验证 actor。Tensor Batch 上限控制一次 tensor 操作最多合并多少个兼容请求；实际宽度取并发请求数、该上限和当前就绪兼容请求数的最小值。留空使用认证默认值 4。修改此设置后，后端将以单 Target 模式重启。", dflash2_help_exclusive: "DFlash2 不能与 MTP 或重复文本加速同时启用。",
       dflash2_help_status_available: "当前状态：已检测到兼容的 DFlash2 Draft。Block Size 由所选 Draft 的 checkpoint 宽度决定，上限为已资格化的 Q8，不可编辑。", dflash2_help_status_incompatible: "当前状态：检测到的 DFlash2 Draft 与该模型不兼容。", dflash2_help_status_unavailable: "当前状态：未发现兼容的 DFlash2 Draft。", dflash2_status_incompatible: "DFlash2 Draft 不兼容", dflash2_status_unavailable: "未发现兼容的 DFlash2 Draft", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限必须为正整数，或留空使用自动值 4。",
       model_exists_locally: "模型 \"{name}\" 已存在于本地。",
@@ -8718,6 +8720,7 @@
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "此模型正在使用 DFlash2 加速。",
       dflash2_acceleration: "DFlash2 加速", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自動（4）",
       dflash2_tensor_batch_help_label: "瞭解 Tensor Batch 上限", dflash2_tensor_batch_help_title: "Tensor Batch 上限如何生效", dflash2_tensor_batch_help_body: "限制一次 MLX tensor batch 最多合併的相容請求數。留空使用自動值 4。", dflash2_tensor_batch_help_constraint: "約束關係：實際寬度取此上限、【設定 → 模型與記憶體 → 並行請求數】與目前就緒相容請求數的最小值。此設定不會提高並行請求數；不相容或發生分歧的請求使用 B1。",
+      dflash2_tensor_batch_help_not_applicable: "此上限不適用於 Qwen3.8-Flash-Next。M5 DFlash2 最佳化設定生效時，相容的並行請求自動使用 ragged 合批，上限取最大序列數與 4 的較小值。",
       dflash2_help_label: "瞭解 DFlash2 加速", dflash2_help_title: "DFlash2 加速如何運作", dflash2_help_body: "DFlash2 使用獨立 Draft 模型與隔離的驗證 actor。Tensor Batch 上限控制一次 tensor 操作最多合併多少個相容請求；實際寬度取並行請求數、該上限與目前就緒相容請求數的最小值。留空使用認證預設值 4。修改此設定後，後端將以單一 Target 模式重新啟動。", dflash2_help_exclusive: "DFlash2 無法與 MTP 或重複文字加速同時啟用。",
       dflash2_help_status_available: "目前狀態：已偵測到相容的 DFlash2 Draft。Block Size 由所選 Draft 的 checkpoint 寬度決定，上限為已資格化的 Q8，不可編輯。", dflash2_help_status_incompatible: "目前狀態：偵測到的 DFlash2 Draft 與此模型不相容。", dflash2_help_status_unavailable: "目前狀態：未發現相容的 DFlash2 Draft。", dflash2_status_incompatible: "DFlash2 Draft 不相容", dflash2_status_unavailable: "未發現相容的 DFlash2 Draft", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限必須是正整數，或留空使用自動值 4。",
       model_exists_locally: "模型 \"{name}\" 已存在於本地。",
@@ -9535,6 +9538,7 @@
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "このモデルは DFlash2 アクセラレーションで実行中です。",
       dflash2_acceleration: "DFlash2 アクセラレーション", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自動（4）",
       dflash2_tensor_batch_help_label: "Tensor Batch 上限について", dflash2_tensor_batch_help_title: "Tensor Batch 上限の適用方法", dflash2_tensor_batch_help_body: "1 回の MLX tensor batch にまとめる互換リクエスト数を制限します。空欄では自動値 4 を使用します。", dflash2_tensor_batch_help_constraint: "実際の幅は、この上限、［設定 → モデルとメモリ → 同時リクエスト数］、準備済み互換リクエスト数の最小値です。この設定で同時リクエスト数は増えません。非互換または分岐したリクエストは B1 を使用します。",
+      dflash2_tensor_batch_help_not_applicable: "この上限は Qwen3.8-Flash-Next には適用されません。M5 DFlash2 プロファイルが有効な場合、互換性のある同時リクエストは自動で ragged バッチ処理され、最大シーケンス数と 4 の小さい方が上限になります。",
       dflash2_help_label: "DFlash2 アクセラレーションについて", dflash2_help_title: "DFlash2 アクセラレーションの仕組み", dflash2_help_body: "DFlash2 は専用 Draft モデルと分離された検証 actor を使用します。Tensor Batch 上限は、1 回の tensor 演算でまとめる互換リクエスト数を制限します。実際の幅は同時リクエスト数、この上限、準備済み互換リクエスト数の最小値です。空欄では認定済み既定値 4 を使用します。この設定を変更すると、バックエンドは単一 Target モードで再起動します。", dflash2_help_exclusive: "DFlash2 は MTP または繰り返しテキスト高速化と同時に使用できません。",
       dflash2_help_status_available: "現在の状態：互換性のある DFlash2 Draft が見つかりました。Block Size は選択した Draft の checkpoint 幅で決まり、認定済み Q8 を上限とします。編集はできません。", dflash2_help_status_incompatible: "現在の状態：検出された DFlash2 Draft はこのモデルと互換性がありません。", dflash2_help_status_unavailable: "現在の状態：互換性のある DFlash2 Draft が見つかりません。", dflash2_status_incompatible: "DFlash2 Draft は非互換です", dflash2_status_unavailable: "互換性のある DFlash2 Draft はありません", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限は正の整数で指定するか、空欄にして自動値 4 を使用してください。",
       model_exists_locally: "モデル \"{name}\" はローカルに既に存在します。",
@@ -10352,6 +10356,7 @@
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "이 모델은 DFlash2 가속으로 실행 중입니다.",
       dflash2_acceleration: "DFlash2 가속", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 정밀도", dflash2_tensor_batch_max_width: "Tensor Batch 제한", auto_default_4: "자동(4)",
       dflash2_tensor_batch_help_label: "Tensor Batch 제한 정보", dflash2_tensor_batch_help_title: "Tensor Batch 제한 적용 방식", dflash2_tensor_batch_help_body: "한 번의 MLX tensor batch에 결합할 호환 요청 수를 제한합니다. 비워 두면 자동값 4를 사용합니다.", dflash2_tensor_batch_help_constraint: "실제 너비는 이 제한, [설정 → 모델 및 메모리 → 동시 요청 수], 준비된 호환 요청 수 중 최솟값입니다. 이 설정은 동시 요청 수를 늘리지 않으며, 호환되지 않거나 분기된 요청은 B1을 사용합니다.",
+      dflash2_tensor_batch_help_not_applicable: "이 제한은 Qwen3.8-Flash-Next에 적용되지 않습니다. M5 DFlash2 프로필이 활성화되면 호환되는 동시 요청은 자동으로 ragged 배치 처리되며, 최대 시퀀스 수와 4 중 작은 값이 상한입니다.",
       dflash2_help_label: "DFlash2 가속 정보", dflash2_help_title: "DFlash2 가속 작동 방식", dflash2_help_body: "DFlash2는 전용 Draft 모델과 분리된 검증 actor를 사용합니다. Tensor Batch 제한은 한 번의 tensor 연산에 결합되는 호환 요청 수를 제한합니다. 실제 너비는 동시 요청 수, 이 제한, 준비된 호환 요청 수 중 최솟값입니다. 비워 두면 인증된 기본값 4를 사용합니다. 이 설정을 변경하면 백엔드가 단일 Target 모드로 재시작됩니다.", dflash2_help_exclusive: "DFlash2는 MTP 또는 반복 텍스트 가속과 동시에 사용할 수 없습니다.",
       dflash2_help_status_available: "현재 상태: 호환되는 DFlash2 Draft를 찾았습니다. Block Size는 선택한 Draft의 checkpoint 폭으로 정해지며 검증된 Q8을 상한으로 합니다. 편집할 수 없습니다.", dflash2_help_status_incompatible: "현재 상태: 감지된 DFlash2 Draft가 이 모델과 호환되지 않습니다.", dflash2_help_status_unavailable: "현재 상태: 호환되는 DFlash2 Draft를 찾지 못했습니다.", dflash2_status_incompatible: "DFlash2 Draft가 호환되지 않습니다", dflash2_status_unavailable: "호환되는 DFlash2 Draft 없음", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 제한은 양의 정수이거나 자동값 4를 사용하려면 비워 두어야 합니다.",
       model_exists_locally: "모델 \"{name}\"이(가) 이미 로컬에 존재합니다.",
@@ -12781,6 +12786,18 @@
     const blockSize = document.getElementById('modal-dflash2-block-size');
     const draftBits = document.getElementById('modal-dflash2-draft-bits');
     const tensorBatchMaxWidth = document.getElementById('modal-dflash2-tensor-batch-max-width');
+    const tensorBatchApplicable = dflash2.target_family !== 'qwen38_flash_next';
+    const tensorBatchPlaceholderKey = tensorBatchApplicable ? 'auto_default_4' : 'runtime_not_applicable';
+    tensorBatchMaxWidth.dataset.i18nPlaceholder = tensorBatchPlaceholderKey;
+    tensorBatchMaxWidth.placeholder = dict[tensorBatchPlaceholderKey]
+      || (tensorBatchApplicable ? 'Auto (4)' : 'Not applicable');
+    const tensorBatchHelp = document.getElementById('dflash2-tensor-batch-help-tooltip');
+    const tensorBatchHelpBody = tensorBatchHelp.querySelector('.profile-help-tooltip-body');
+    const tensorBatchHelpKey = tensorBatchApplicable
+      ? 'dflash2_tensor_batch_help_body' : 'dflash2_tensor_batch_help_not_applicable';
+    tensorBatchHelpBody.dataset.i18n = tensorBatchHelpKey;
+    tensorBatchHelpBody.textContent = dict[tensorBatchHelpKey] || I18N.en[tensorBatchHelpKey];
+    tensorBatchHelp.querySelector('.profile-help-tooltip-flow').hidden = !tensorBatchApplicable;
     const status = document.getElementById('modal-dflash2-status');
     const helpStatus = document.getElementById('modal-dflash2-help-status');
     select.innerHTML = '';
@@ -12795,7 +12812,7 @@
     select.disabled = !hasCandidates;
     blockSize.disabled = !hasCandidates;
     draftBits.disabled = !hasCandidates;
-    tensorBatchMaxWidth.disabled = !hasCandidates;
+    tensorBatchMaxWidth.disabled = !hasCandidates || !tensorBatchApplicable;
     checkbox.checked = !!saved.dflash2_enabled && hasCandidates;
     if (saved.dflash2_model_id && hasCandidates) select.value = saved.dflash2_model_id;
     else if (hasCandidates) select.value = candidates[0].id;
@@ -12823,7 +12840,8 @@
     });
     const savedDraftBits = String(saved.dflash2_draft_bits || '');
     draftBits.value = draftBitsOptions.includes(savedDraftBits) ? savedDraftBits : draftBitsOptions[0];
-    tensorBatchMaxWidth.value = saved.dflash2_tensor_batch_max_width || '';
+    tensorBatchMaxWidth.value = tensorBatchApplicable
+      ? (saved.dflash2_tensor_batch_max_width || '') : '';
     const isIncompatible = !hasCandidates && dflash2.status === 'incompatible';
     const statusKey = isIncompatible ? 'dflash2_status_incompatible' : 'dflash2_status_unavailable';
     const helpStatusKey = hasCandidates
