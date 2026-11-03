@@ -46,7 +46,7 @@ struct Layer {
 }
 pub(crate) enum LayerState {
     Linear {
-        gdn: GatedDeltaCache,
+        gdn: Box<GatedDeltaCache>,
         ple: Option<PleState>,
     },
     Sparse(QsaState),
@@ -362,7 +362,7 @@ impl FlashTextModel {
                 Attention::Linear(gdn) => {
                     let c = gdn.config();
                     LayerState::Linear {
-                        gdn: GatedDeltaCache::new_with_cap(
+                        gdn: Box::new(GatedDeltaCache::new_with_cap(
                             1,
                             c.conv_kernel_size,
                             c.conv_dim(),
@@ -371,7 +371,7 @@ impl FlashTextModel {
                             c.head_k_dim,
                             Dtype::Bfloat16,
                             cap,
-                        )?,
+                        )?),
                         ple: layer.ple.as_ref().map(PleLayer::new_state).transpose()?,
                     }
                 }

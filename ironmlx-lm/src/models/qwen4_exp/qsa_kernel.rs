@@ -33,6 +33,8 @@ fn kernel() -> Result<&'static MetalKernel> {
     Ok(KERNEL.get().expect("initialized QSA kernel"))
 }
 
+// Keep the native kernel's tensor/scalar inputs explicit, as in the GDN wrapper.
+#[allow(clippy::too_many_arguments)]
 pub fn prefill_on(
     q: &Array,
     k: &Array,

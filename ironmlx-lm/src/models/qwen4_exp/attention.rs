@@ -210,7 +210,7 @@ impl QsaAttention {
         let query = projected.slice(&[0, 0, 0, 0][..], &[1, seq, heads, hd][..])?;
         let query =
             grouped_residual_rms_on(&query, &self.index_q_norm, hd, cfg.rms_norm_eps, target)?;
-        let query = transpose_axes_on(&query, &[0, 2, 1, 3], target)?;
+        let query = transpose_axes_on(&query, [0, 2, 1, 3], target)?;
         let (cos, sin) = self.index_rope.cos_sin(chunk_positions)?;
         let (query, _) = self.index_rope.apply(&query, &query, &cos, &sin)?;
         let previous = state
@@ -244,7 +244,7 @@ impl QsaAttention {
         state.block_keys = Some(pooled.clone());
         let keys_t = transpose_axes_on(
             &pooled.astype_on(Dtype::Float32, target)?,
-            &[0, 1, 3, 2],
+            [0, 1, 3, 2],
             target,
         )?;
         let scores = mlx::ops::matmul::matmul_on(
@@ -368,13 +368,13 @@ impl QsaAttention {
             .forward_on(input, target)?
             .reshape_on([1, seq, kv, hd], target)?;
         let k = grouped_residual_rms_on(&k, &self.k_norm, hd, cfg.rms_norm_eps, target)?;
-        let q = transpose_axes_on(&q, &[0, 2, 1, 3], target)?;
-        let k = transpose_axes_on(&k, &[0, 2, 1, 3], target)?;
+        let q = transpose_axes_on(&q, [0, 2, 1, 3], target)?;
+        let k = transpose_axes_on(&k, [0, 2, 1, 3], target)?;
         let v = self
             .v
             .forward_on(input, target)?
             .reshape_on([1, seq, kv, hd], target)?;
-        let v = transpose_axes_on(&v, &[0, 2, 1, 3], target)?;
+        let v = transpose_axes_on(&v, [0, 2, 1, 3], target)?;
         let (cos, sin) = self.rope.cos_sin(&chunk_positions)?;
         let (q, k) = self.rope.apply(&q, &k, &cos, &sin)?;
         let k = append(&state.keys, &k, 2, target)?;
@@ -409,7 +409,7 @@ impl QsaAttention {
                 target,
             )?
         };
-        let attended = transpose_axes_on(&attended, &[0, 2, 1, 3], target)?
+        let attended = transpose_axes_on(&attended, [0, 2, 1, 3], target)?
             .reshape_on([1, seq, heads * hd], target)?;
         let output = self.out.forward_on(
             &multiply_on(&attended, &gate.sigmoid_on(target)?, target)?,

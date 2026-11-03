@@ -42,7 +42,7 @@ impl PleRows {
         staging_bytes: usize,
     ) -> Result<Self> {
         ensure!(
-            width > 0 && width <= i32::MAX as usize && width % 32 == 0,
+            width > 0 && width <= i32::MAX as usize && width.is_multiple_of(32),
             "PLE affine-4 width must divide by 32 and fit MLX dimensions"
         );
         let row_bytes = width

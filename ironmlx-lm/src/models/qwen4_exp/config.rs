@@ -202,7 +202,7 @@ impl FlashTextConfig {
             prior = id;
             let ple = self.ple_index(index)?;
             ensure!(
-                self.ple_embed_dim as usize % ple.heads() == 0,
+                (self.ple_embed_dim as usize).is_multiple_of(ple.heads()),
                 "PLE width must divide across n-gram heads"
             );
         }
