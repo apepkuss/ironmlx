@@ -1029,6 +1029,11 @@ struct MtpLayerSpecMetadata {
 struct KeyMaterial<'a> {
     schema_version: u32,
     entry_kind: PrefixEntryKind,
+    // Conservative process-wide partition: ANE changes arithmetic, so even
+    // ordinary SSD entries must not cross auto/off execution contracts. Model
+    // ownership stays unchanged for cancellation and the shared disk quota.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    execution_policy: Option<String>,
     model_id: &'a str,
     token_ids: &'a [i32],
     cached_len: i32,
@@ -1078,7 +1083,11 @@ impl PagedPrefixStore {
     }
 
     pub fn key_for(spec: &PagedPrefixKeySpec) -> String {
+        Self::key_for_policy(spec, ironmlx_core::ane::dense_execution_fingerprint())
+    }
+    fn key_for_policy(spec: &PagedPrefixKeySpec, execution_policy: Option<String>) -> String {
         let material = KeyMaterial {
+            execution_policy,
             schema_version: SCHEMA_VERSION,
             entry_kind: spec.entry_kind,
             model_id: &spec.model_id,
@@ -2125,6 +2134,23 @@ mod tests {
             mtp_last_hidden,
             gemma4_drafter_last_hidden: None,
         }
+    }
+
+    #[test]
+    fn arithmetic_backends_partition_disk_keys_without_changing_model_ownership() {
+        let spec = spec(vec![1, 2], 2, None, vec![], vec![], None);
+        let gpu = PagedPrefixStore::key_for_policy(&spec, None);
+        let ane = PagedPrefixStore::key_for_policy(
+            &spec,
+            Some("ane-dense-w8a8-v2;units=9;pipeline=0".into()),
+        );
+        let other = PagedPrefixStore::key_for_policy(
+            &spec,
+            Some("ane-dense-w8a8-v2;units=12;pipeline=1".into()),
+        );
+        assert_ne!(gpu, ane);
+        assert_ne!(ane, other);
+        assert_eq!(spec.model_id, "qwen3-test");
     }
 
     #[test]

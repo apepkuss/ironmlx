@@ -256,6 +256,30 @@ pub unsafe fn array_from_external_buffer(
     Ok(Array::from_inner(inner))
 }
 
+/// No-copy external memory with an owner retained through the Metal buffer's
+/// final asynchronous use, independently of the originating model.
+///
+/// # Safety
+/// The owner must keep the page-aligned region valid; the caller must order
+/// external writes against GPU reads. Shape and byte size follow the raw API.
+pub unsafe fn array_from_external_buffer_owned(
+    address: usize,
+    nbytes: usize,
+    shape: &[i32],
+    dtype: crate::Dtype,
+    owner: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+) -> Result<Array> {
+    let inner = mlx_sys::fast::ffi::array_from_external_buffer_owned(
+        address,
+        nbytes,
+        shape,
+        dtype.as_u8(),
+        mlx_sys::fast::external_buffer_owner(owner),
+    )
+    .map_err(Error::from)?;
+    Ok(Array::from_inner(inner))
+}
+
 fn array_vec(arrays: &[&Array]) -> cxx::UniquePtr<mlx_sys::compile::ffi::ArrayVec> {
     let mut vec = mlx_sys::compile::ffi::array_vec_new();
     for array in arrays {

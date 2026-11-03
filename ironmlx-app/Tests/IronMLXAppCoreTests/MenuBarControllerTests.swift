@@ -216,7 +216,10 @@ private func menuTemporaryDirectory() throws -> URL {
 
 @MainActor
 private func waitForMenuCondition(
-    timeoutSeconds: TimeInterval = 2.0,
+    // Hundreds of WebKit tests share MainActor in the full suite. A two
+    // second scheduling deadline was flaky under build/UI load; keep the
+    // condition unchanged and allow a bounded five second wait.
+    timeoutSeconds: TimeInterval = 5.0,
     condition: @escaping () -> Bool
 ) async throws {
     let deadline = Date().addingTimeInterval(timeoutSeconds)

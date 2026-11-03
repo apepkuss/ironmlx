@@ -184,6 +184,6 @@ fn unsupported_model_type_reports_supported_architectures() {
 
     assert_eq!(
         err.to_string(),
-        "unsupported model_type: qwen2_vl (expected 'qwen3_5', 'qwen3_5_moe', 'gemma4', 'gemma4_unified', 'glm4_moe_lite', 'llama', 'minicpmv4_6', or 'diffusion_gemma')"
+        "unsupported model_type: qwen2_vl (expected 'qwen3_5', 'qwen3_5_moe', 'qwen4_exp', 'gemma4', 'gemma4_unified', 'glm4_moe_lite', 'llama', 'minicpmv4_6', or 'diffusion_gemma')"
     );
 }

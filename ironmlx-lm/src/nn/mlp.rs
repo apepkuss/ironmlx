@@ -32,7 +32,7 @@ struct FusedGateUp {
 
 /// One half's MLP under the half-chunk pipeline, the ANE's channels pending.
 pub(crate) struct AneHalf {
-    split: &'static std::sync::Mutex<super::ane_ffn::AneFfn>,
+    split: std::sync::Arc<std::sync::Mutex<super::ane_ffn::AneFfn>>,
     pending: super::ane_ffn::Pending,
     /// The GPU's channels; submitted before the ANE's output is awaited.
     pub(crate) partial: Array,
@@ -149,6 +149,47 @@ impl Mlp {
     /// Forward pass on the default stream.
     pub fn forward(&self, x: &Array) -> Result<Array> {
         self.forward_on(x, ())
+    }
+
+    pub(crate) fn flash_ane_begin_on(
+        &self,
+        x: &Array,
+        target: StreamOrDevice,
+    ) -> Result<Option<super::flash_ane::Pending>> {
+        let (gate, up) = match &self.gate_up {
+            GateUp::Separate { gate, up } => (gate, up),
+            GateUp::Fused(f) => (&f.gate, &f.up),
+        };
+        match super::flash_ane::begin(x, gate, up, &self.down, target) {
+            Ok(pending) => Ok(pending),
+            Err(error) => {
+                ironmlx_core::ane::retire(ironmlx_core::ane::Model::FlashNext);
+                tracing::warn!(%error,"Flash ANE setup failed; using GPU shared expert");
+                Ok(None)
+            }
+        }
+    }
+    pub(crate) fn flash_ane_finish_on(
+        &self,
+        pending: Option<super::flash_ane::Pending>,
+        x: &Array,
+        routed: &Array,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        if let Some(pending) = pending {
+            if let Some(out) = super::flash_ane::finish(pending, routed, target)? {
+                let out = if out.shape().as_slice().last() == Some(&1280) {
+                    let rows = out.shape().as_slice()[0];
+                    let gate = out.slice(&[0, 0][..], &[rows, 640][..])?;
+                    let up = out.slice(&[0, 640][..], &[rows, 1280][..])?;
+                    self.down.forward_on(&self.swiglu_on(&gate, &up)?, target)?
+                } else {
+                    out
+                };
+                return Ok(out.reshape_on(x.shape().as_slice(), target)?);
+            }
+        }
+        self.forward_on(x, target)
     }
 
     /// Timing diagnostic of a split FFN (`IRONMLX_DIAGNOSTIC_DENSE_FFN_GPU_UNITS`
@@ -290,14 +331,21 @@ impl Mlp {
                     &activated, down, target,
                 )?;
                 Ok(Some(AneHalf {
-                    split,
+                    split: std::sync::Arc::clone(&split),
                     pending,
                     partial,
                     dims: dims.clone(),
                 }))
             })
-        })?;
-        Ok(started.flatten().flatten())
+        });
+        match started {
+            Ok(started) => Ok(started.flatten().flatten()),
+            Err(error) => {
+                ironmlx_core::ane::retire(ironmlx_core::ane::Model::Dense27B);
+                tracing::warn!(%error,"Dense ANE half setup failed; using GPU for this MLP");
+                Ok(None)
+            }
+        }
     }
 
     /// The MLP output of a half started by [`Self::ane_half_begin_on`].
@@ -306,12 +354,24 @@ impl Mlp {
         half: AneHalf,
         target: StreamOrDevice,
     ) -> Result<Array> {
-        let out = half
+        let input = half
+            .pending
+            .ready
+            .clone()
+            .reshape_on(&half.dims[..], target)?;
+        let result = half
             .split
             .lock()
             .map_err(|_| anyhow::anyhow!("ANE FFN split poisoned"))?
-            .finish(half.pending, &half.partial, target)?;
-        Ok(mlx::ops::shape::reshape_on(&out, &half.dims[..], target)?)
+            .finish(half.pending, &half.partial, target);
+        match result {
+            Ok(out) => Ok(out.reshape_on(&half.dims[..], target)?),
+            Err(error) => {
+                ironmlx_core::ane::retire(ironmlx_core::ane::Model::Dense27B);
+                tracing::warn!(%error,"Dense ANE half failed; recomputing on GPU");
+                self.forward_on(&input, target)
+            }
+        }
     }
 
     /// A full prefill chunk split between the GPU (leading intermediate
@@ -374,7 +434,14 @@ impl Mlp {
                 let partial = super::dense_prefill_kernels::prefill_tiled_gemm_leading(
                     &activated, down, target,
                 )?;
-                let out = split.finish(pending, &partial, target)?;
+                let out = match split.finish(pending, &partial, target) {
+                    Ok(out) => out,
+                    Err(error) => {
+                        ironmlx_core::ane::retire(ironmlx_core::ane::Model::Dense27B);
+                        tracing::warn!(%error,"Dense ANE split failed; recomputing on GPU");
+                        return Ok(Some(self.forward_on(x, target)?));
+                    }
+                };
                 Ok(Some(mlx::ops::shape::reshape_on(&out, dims, target)?))
             })
         })?;
@@ -453,7 +520,14 @@ impl Mlp {
             "affine",
             target,
         )?;
-        let mut out = split.finish(pending, &partial, target)?;
+        let mut out = match split.finish(pending, &partial, target) {
+            Ok(out) => out,
+            Err(error) => {
+                ironmlx_core::ane::retire(ironmlx_core::ane::Model::Dense27B);
+                tracing::warn!(%error,"Dense ANE split failed; recomputing on GPU");
+                return Ok(Some(self.forward_on(x, target)?));
+            }
+        };
         // Diagnostic (`IRONMLX_DIAGNOSTIC_ANE_FFN_GPU_REST=1`): the ANE's
         // channels computed on the GPU instead (the split's summation, no
         // int8): the noise floor of splitting alone.
@@ -561,9 +635,16 @@ impl Mlp {
     /// Stream-targeted forward pass.
     pub fn forward_on(&self, x: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
         let target = target.into();
-        if super::dense_fast_path::prefill_dequant_armed() {
-            if let Some(y) = self.forward_ane_split_on(x, target)? {
-                return Ok(y);
+        if ironmlx_core::ane::eligible(ironmlx_core::ane::Model::Dense27B)
+            && super::dense_fast_path::ane_armed()
+        {
+            match self.forward_ane_split_on(x, target) {
+                Ok(Some(y)) => return Ok(y),
+                Ok(None) => {}
+                Err(error) => {
+                    ironmlx_core::ane::retire(ironmlx_core::ane::Model::Dense27B);
+                    tracing::warn!(%error,"Dense ANE setup failed; recomputing MLP on GPU");
+                }
             }
         }
         if super::dense_fast_path::prefill_dequant_armed()

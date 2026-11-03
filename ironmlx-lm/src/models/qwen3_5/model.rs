@@ -42,6 +42,7 @@ pub const MIN_KV_CACHE_CAP_FOR_GPU_PERF: i32 = 256;
 /// AND the config contains a `vision_config` block, and deferred to first use when the
 /// serving path dropped its tensors. Text-only inference is unaffected without it.
 pub struct Qwen35Model {
+    ane_context: std::sync::Arc<crate::nn::ane_ffn::DenseContext>,
     text: Qwen35TextModel,
     exact_batched_verify_profile: super::speculative::ExactBatchedVerifyProfile,
     /// Exact storage bytes retained by the sanitized production loader.
@@ -133,6 +134,7 @@ impl Qwen35Model {
         let vision = VisionSlot::from_loader(loader, cfg.vision_config.as_ref())?;
         let text = Qwen35TextModel::from_loader_dflash2(loader, cfg)?;
         let mut model = Self {
+            ane_context: crate::nn::ane_ffn::context(),
             text,
             exact_batched_verify_profile,
             loaded_weight_bytes: Some(loaded_weight_bytes),
@@ -399,6 +401,7 @@ impl Qwen35Model {
 
         let text = Qwen35TextModel::from_loader(loader, cfg)?;
         Ok(Self {
+            ane_context: crate::nn::ane_ffn::context(),
             text,
             exact_batched_verify_profile,
             loaded_weight_bytes: Some(loaded_weight_bytes),
@@ -411,6 +414,7 @@ impl Qwen35Model {
     #[doc(hidden)]
     pub fn from_components(text: Qwen35TextModel, lm_head: Option<Linear>) -> Self {
         Self {
+            ane_context: crate::nn::ane_ffn::context(),
             text,
             exact_batched_verify_profile: super::speculative::ExactBatchedVerifyProfile::Disabled,
             loaded_weight_bytes: None,
@@ -653,6 +657,30 @@ impl Qwen35Model {
     /// projection work (vocab=151936 in Qwen3.5 — the largest matmul in the
     /// graph). Slice the last hidden state before the projection so the
     /// per-forward lm_head cost is constant in `S`.
+    /// Shared ordinary/speculative prefill eligibility. Decode and partial,
+    /// padded or non-affine4 chunks retain their original GPU graph.
+    fn ane_prefill_eligible(&self, input_ids: &Array, padded: bool, start: i32) -> bool {
+        super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4
+            && ironmlx_core::ane::eligible(ironmlx_core::ane::Model::Dense27B)
+            && crate::nn::dense_fast_path::prefill_ane_ffn_units() > 0
+            && input_ids.shape().as_slice() == [1, 2048]
+            && !padded
+            && start
+                < crate::nn::dense_fast_path::prefill_ane_ffn_max_position().unwrap_or(i32::MAX)
+    }
+    fn ane_chunk_start(cache: Option<&[LayerCache]>) -> i32 {
+        cache
+            .and_then(|layers| {
+                layers.iter().find_map(|layer| match layer {
+                    LayerCache::Linear(c) => c.offsets().first().copied(),
+                    _ => None,
+                })
+            })
+            .unwrap_or(0)
+    }
+
     pub fn forward_on(
         &self,
         input_ids: &Array,
@@ -676,6 +704,26 @@ impl Qwen35Model {
         // concurrent Q=1 decode while retaining one multi-row dispatch.
         let _product_stable_qmm =
             batch_stable_affine8_q1.then(crate::nn::product_stable_qmm::scope);
+        if cache.is_some()
+            && self.ane_prefill_eligible(
+                input_ids,
+                per_row_lens.is_some() || decode_mask.is_some(),
+                Self::ane_chunk_start(cache.as_deref()),
+            )
+        {
+            let _runtime = crate::nn::ane_ffn::scope(&self.ane_context);
+            let _ane = crate::nn::dense_fast_path::ane_scope();
+            let (hidden, _) = self.text.forward_with_dflash2_taps_on(
+                input_ids,
+                None,
+                position_ids,
+                cache,
+                &[0],
+                Some(4),
+                target,
+            )?;
+            return self.slice_last_and_project(&hidden, None, target);
+        }
         let hidden = self.text.forward_on(
             input_ids,
             position_ids,
@@ -826,6 +874,28 @@ impl Qwen35Model {
     ) -> Result<Array> {
         let target = target.into();
 
+        if cache.is_some()
+            && self.ane_prefill_eligible(
+                input_ids,
+                per_row_lens.is_some() || decode_mask.is_some(),
+                Self::ane_chunk_start(cache.as_deref()),
+            )
+        {
+            let _runtime = crate::nn::ane_ffn::scope(&self.ane_context);
+            let _ane = crate::nn::dense_fast_path::ane_scope();
+            return self
+                .text
+                .forward_with_dflash2_taps_on(
+                    input_ids,
+                    vision_embeds_slice.map(|e| (e, image_token_id)),
+                    position_ids,
+                    cache,
+                    &[0],
+                    Some(4),
+                    target,
+                )
+                .map(|(hidden, _)| hidden);
+        }
         let mut hidden = self.text.embed_on(input_ids, target)?;
         if let Some(ve) = vision_embeds_slice {
             hidden =
@@ -1191,6 +1261,7 @@ impl Qwen35Model {
         );
         let text = Qwen35TextModel::from_components(stub_embed, Vec::new(), stub_norm, mrope, cfg);
         Self {
+            ane_context: crate::nn::ane_ffn::context(),
             text,
             exact_batched_verify_profile: super::speculative::ExactBatchedVerifyProfile::Disabled,
             loaded_weight_bytes: None,
@@ -1201,6 +1272,28 @@ impl Qwen35Model {
 }
 
 impl crate::core::model::Model for Qwen35Model {
+    fn execution_cache_fingerprint(&self) -> Option<String> {
+        if super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4
+        {
+            ironmlx_core::ane::dense_execution_fingerprint()
+        } else {
+            None
+        }
+    }
+    fn auxiliary_memory_bytes(&self) -> usize {
+        // Forecast for surfaces, rotations and private program storage. The
+        // process governor still observes the actual process footprint.
+        if self.execution_cache_fingerprint().is_some()
+            && ironmlx_core::ane::eligible(ironmlx_core::ane::Model::Dense27B)
+        {
+            384 << 20
+        } else {
+            0
+        }
+    }
+
     fn make_cache(
         &self,
         batch: i32,
@@ -1255,6 +1348,12 @@ impl crate::core::model::Model for Qwen35Model {
     fn requires_split_batched_prefill_for_token_parity(&self) -> bool {
         true
     }
+    fn prefers_row_isolated_prefill(&self, prompt_tokens: usize) -> bool {
+        prompt_tokens >= 2048
+            && super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4
+    }
 
     fn forward_text_hidden(
         &self,
@@ -1265,6 +1364,28 @@ impl crate::core::model::Model for Qwen35Model {
         cache: Option<&mut [crate::core::cache::layer::LayerCache]>,
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array> {
+        if cache.is_some()
+            && self.ane_prefill_eligible(
+                input_ids,
+                per_row_lens.is_some() || decode_mask.is_some(),
+                Self::ane_chunk_start(cache.as_deref()),
+            )
+        {
+            let _runtime = crate::nn::ane_ffn::scope(&self.ane_context);
+            let _ane = crate::nn::dense_fast_path::ane_scope();
+            return self
+                .text
+                .forward_with_dflash2_taps_on(
+                    input_ids,
+                    None,
+                    position_ids,
+                    cache,
+                    &[0],
+                    Some(4),
+                    target,
+                )
+                .map(|(hidden, _)| hidden);
+        }
         let input_shape = input_ids.shape();
         let input_shape = input_shape.as_slice();
         let exact_batched_verify = crate::nn::verify_qmm::is_armed()
@@ -1410,13 +1531,18 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         {
             return format!(
                 "qwen38-dflash2;{};reference=lane-serial-not-ordinary-mlx;{}",
-                crate::nn::m5_affine4::fingerprint(),
+                format!(
+                    "{};{}",
+                    crate::nn::m5_affine4::fingerprint(),
+                    crate::core::model::Model::execution_cache_fingerprint(self)
+                        .unwrap_or_else(|| "ane=off".into())
+                ),
                 self.dflash2_verify_capabilities().stable_fingerprint()
             );
         }
         format!(
             "qwen35-dflash2-v3-mlx0325;prepared-qmm=lane-product-stable-rows-v1;attention=bulk-position-stable-v1;recurrent=logical-prefix-v2;{}",
-            self.dflash2_verify_capabilities().stable_fingerprint()
+            format!("{};{}",self.dflash2_verify_capabilities().stable_fingerprint(),crate::core::model::Model::execution_cache_fingerprint(self).unwrap_or_else(|| "ane=off".into()))
         )
     }
 
@@ -1648,6 +1774,8 @@ impl Qwen35Model {
         .then(crate::nn::m5_affine4::scope);
         let _dense_gdn = (_m5_lane.is_some() && crate::nn::dense_fast_path::requested())
             .then(crate::nn::dense_fast_path::scope);
+        let independent_ane = mode == crate::models::dflash2::DFlash2TargetForwardMode::Prefill
+            && self.ane_prefill_eligible(input_ids, false, Self::ane_chunk_start(cache.as_deref()));
         let _dense_prefill = (_m5_lane.is_some()
             && mode == crate::models::dflash2::DFlash2TargetForwardMode::Prefill
             && crate::nn::dense_fast_path::prefill_dequant_requested())
@@ -1658,7 +1786,9 @@ impl Qwen35Model {
                 _ => None,
             })
         });
-        let _dense_ane = (_dense_prefill.is_some()
+        let _runtime = crate::nn::ane_ffn::scope(&self.ane_context);
+        let _dense_ane = ((independent_ane || _dense_prefill.is_some())
+            && ironmlx_core::ane::eligible(ironmlx_core::ane::Model::Dense27B)
             && crate::nn::dense_fast_path::prefill_ane_ffn_units() > 0
             && match (
                 crate::nn::dense_fast_path::prefill_ane_ffn_max_position(),

@@ -10,6 +10,7 @@ description = "Language, vision and embedding models backed by MLX"
 publish = false
 
 [dependencies]
+half = "2"
 ironmlx-audio = { path = "../ironmlx-audio" }
 clap = { version = "4", features = ["derive"], optional = true }
 ironmlx-core = { path = "../ironmlx-core" }

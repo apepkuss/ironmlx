@@ -23,7 +23,7 @@ private func loadedDashboard(config: AppConfig, messages: CapturedSettingsMessag
     configuration.userContentController.add(messages, name: "setLogLevel")
     let bootstrap = try DashboardWindowController.bootstrapScript(config: config, route: .status)
     configuration.userContentController.addUserScript(
-        WKUserScript(source: bootstrap, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        WKUserScript(source: bootstrap + "\nwindow.__IRONMLX_ANE_HEALTH__ = {qualified:true, available:true, reason:'eligible'};", injectionTime: .atDocumentStart, forMainFrameOnly: true))
     let webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1000, height: 650), configuration: configuration)
     let html = URL(fileURLWithPath: "Sources/IronMLXAppCore/Resources/dashboard2.html").standardizedFileURL
     webView.loadFileURL(html, allowingReadAccessTo: html.deletingLastPathComponent())
@@ -161,7 +161,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     }
     let en = try await layout(language: "en")
     #expect(en["cardKey"] as? String == "advanced")
-    // The Neural Engine row that depends on it follows it as the card's last row.
+    // The independent Neural Engine row follows it as the card's last row.
     #expect(en["lastRowInCard"] as? Bool == false)
     #expect(en["inCacheCard"] as? Bool == false)
     #expect(en["label"] as? String == "M5 DFlash2 Profile")
@@ -172,7 +172,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     #expect(en["ariaLabel"] as? String == "M5 DFlash2 Profile help")
     #expect(en["role"] as? String == "tooltip")
     #expect(en["title"] as? String == "About the M5 DFlash2 Profile")
-    #expect(en["body"] as? String == "On Apple M5 (GPU generation 17) and newer, automatically selects model-specific DFlash2 optimizations. Qwen 3.8 27B, Qwen 3.6 35B A3B and Qwen3.8-Flash-Next each use their own settings. Flash-Next supports single and concurrent requests, with batching under load; it does not use ANE acceleration. Each optimization is enabled only when applicable. Turn off to use the generic settings.")
+    #expect(en["body"] as? String == "On Apple M5 (GPU generation 17) and newer, automatically selects model-specific DFlash2 optimizations. Qwen 3.8 27B, Qwen 3.6 35B A3B and Qwen3.8-Flash-Next each use their own settings. Flash-Next supports single and concurrent requests, with batching under load. Each optimization is enabled only when applicable. Turn off to use the generic settings.")
     #expect(en["hiddenOpacity"] as? String == "0")
     #expect(en["focusOpen"] as? Bool == true)
     #expect(en["shownOpacity"] as? String == "1")
@@ -186,8 +186,16 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     #expect(zh["desc"] as? String == "在支持的设备上自动优化 DFlash2 推理。")
     #expect(zh["ariaLabel"] as? String == "M5 DFlash2 优化配置说明")
     #expect(zh["title"] as? String == "关于 M5 DFlash2 优化配置")
-    #expect(zh["body"] as? String == "在 Apple M5（GPU 第 17 代）及更新机型上，自动按模型选择 DFlash2 优化配置。Qwen 3.8 27B、Qwen 3.6 35B A3B 和 Qwen3.8-Flash-Next 分别使用独立配置。Flash-Next 支持单请求与多请求，并发时可合批，不启用 ANE 加速。各项优化仅在适用时启用，关闭后使用通用设置。")
+    #expect(zh["body"] as? String == "在 Apple M5（GPU 第 17 代）及更新机型上，自动按模型选择 DFlash2 优化配置。Qwen 3.8 27B、Qwen 3.6 35B A3B 和 Qwen3.8-Flash-Next 分别使用独立配置。Flash-Next 支持单请求与多请求，并发时可合批。各项优化仅在适用时启用，关闭后使用通用设置。")
     try await snapshot(webView, named: "settings-m5-advanced-help-zh")
+    let aneBodiesJSON=try await webView.evaluateJavaScript("JSON.stringify(Object.values(I18N).map(d=>d.ane_help_body))") as? String
+    let aneBodies=try JSONDecoder().decode([String].self,from:Data(try #require(aneBodiesJSON).utf8))
+    #expect(aneBodies.count==5)
+    for body in aneBodies {
+        #expect(body.contains("4-bit") && body.contains("Affine") && body.contains("group size 64"))
+        #expect(!body.contains("Flash-Next") && !body.contains("Qwen 3.6"))
+    }
+
 
     // Hover opens the same tooltip; Escape closes it.
     let hover = try await webView.evaluateJavaScript("""
@@ -300,7 +308,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
 }
 
 @MainActor
-@Test func dashboardAneToggleDefaultsOnFollowsM5ProfileAndSavesOffWithRestart() async throws {
+@Test func dashboardAneToggleIsIndependentOfM5ProfileAndSavesOffWithRestart() async throws {
     let messages = CapturedSettingsMessages()
     let webView = try await loadedDashboard(config: AppConfig(), messages: messages)
     defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
@@ -315,7 +323,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
       const row = ane.closest('.settings-row');
       const card = row.closest('.card-settings');
       const rows = [...card.querySelectorAll(':scope > .settings-row')];
-      const note = document.getElementById('ane-requires-m5-profile');
+      const note = document.getElementById('ane-unavailable-reason');
       const trigger = row.querySelector('.profile-help-trigger');
       const tooltip = document.getElementById(trigger.getAttribute('aria-describedby'));
       const out = {
@@ -355,9 +363,9 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     #expect(state["label"] as? String == "Neural Engine (ANE) Acceleration")
     #expect(state["title"] as? String == "About Neural Engine Acceleration")
     #expect(state["restartField"] as? Bool == true)
-    #expect(state["disabledWithoutM5"] as? Bool == true)
-    #expect(state["noteShownWithoutM5"] as? Bool == true)
-    #expect(state["noteText"] as? String == "Takes effect only with the M5 DFlash2 Profile on.")
+    #expect(state["disabledWithoutM5"] as? Bool == false)
+    #expect(state["noteShownWithoutM5"] as? Bool == false)
+    #expect(state["noteText"] as? String == "Eligible; ANE runs on applicable prefill chunks.")
     #expect(state["checkedKeptWithoutM5"] as? Bool == true)
     #expect(state["enabledAgain"] as? Bool == true)
     #expect(state["afterToggleChecked"] as? Bool == false)
@@ -379,7 +387,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     let missing = try await webView.evaluateJavaScript("""
     JSON.stringify(Object.entries(I18N).flatMap(([lang, dict]) =>
       ['ane_acceleration', 'ane_acceleration_desc', 'ane_help_title', 'ane_help_body', 'ane_help_label',
-       'ane_requires_m5_profile', 'runtime_ane', 'ane_status_active', 'ane_status_disabled', 'ane_status_inactive']
+       'ane_machine_unqualified', 'ane_hardware_unknown', 'ane_runtime_unavailable', 'ane_model_not_adapted', 'runtime_ane', 'ane_status_active', 'ane_status_disabled', 'ane_status_inactive']
         .filter(key => !dict[key]).map(key => lang + ':' + key)))
     """) as? String
     #expect(missing == "[]")
@@ -396,7 +404,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
 }
 
 @MainActor
-@Test func dashboardRuntimeStatusShowsAneStatusExceptWhenNotApplicable() async throws {
+@Test func dashboardLegacyDflashMetadataDoesNotOwnAneStatus() async throws {
     let messages = CapturedSettingsMessages()
     let webView = try await loadedDashboard(config: AppConfig(), messages: messages)
     defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
@@ -417,10 +425,10 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
         })()
         """) as? String
     }
-    #expect(try await meta(ane: "active", language: "en")?.contains("M5 profile active · ANE on") == true)
-    #expect(try await meta(ane: "disabled", language: "en")?.contains("ANE off") == true)
+    #expect(try await meta(ane: "active", language: "en")?.contains("M5 profile active") == true)
+    #expect(try await meta(ane: "disabled", language: "en")?.contains("ANE") == false)
     #expect(try await meta(ane: "not_applicable", language: "en")?.contains("ANE") == false)
-    #expect(try await meta(ane: "disabled", language: "zh")?.contains("神经引擎：已关闭") == true)
+    #expect(try await meta(ane: "disabled", language: "zh")?.contains("神经引擎") == false)
 }
 
 @MainActor
@@ -472,4 +480,51 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
         #expect(flags["values"] == true)
         try await snapshot(webView, named: "runtime-embedding-\(language)")
     }
+}
+
+@MainActor
+@Test func dashboardAneHardwareQualificationControlsSwitchWithoutChangingPreference() async throws {
+    let messages = CapturedSettingsMessages()
+    let webView = try await loadedDashboard(config: AppConfig(ane: true), messages: messages)
+    defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
+    for reason in ["machine_unqualified", "runtime_unavailable", "hardware_unknown"] {
+        let value = try await webView.evaluateJavaScript("""
+        (() => {
+          window.__IRONMLX_ANE_HEALTH__ = {qualified:false, available:false, reason:'\(reason)'};
+          syncAneUI();
+          const toggle=document.getElementById('cfg-ane');
+          const note=document.getElementById('ane-unavailable-reason');
+          return JSON.stringify({disabled:toggle.disabled,checked:toggle.checked,note:!note.hidden,
+            key:note.dataset.i18n,preference:window.__IRONMLX_APP_CONFIG__.ane});
+        })()
+        """) as? String
+        let state = try #require(value.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String:Any] })
+        #expect(state["disabled"] as? Bool == true)
+        #expect(state["checked"] as? Bool == false)
+        #expect(state["note"] as? Bool == true)
+        #expect(state["key"] as? String == "ane_" + reason)
+        #expect(state["preference"] as? Bool == true)
+    }
+    let restored = try await webView.evaluateJavaScript("""
+      window.__IRONMLX_ANE_HEALTH__ = {qualified:true, available:true, reason:'eligible'};
+      syncAneUI();
+      !document.getElementById('cfg-ane').disabled && document.getElementById('cfg-ane').checked
+    """) as? Bool
+    #expect(restored == true)
+}
+
+@MainActor
+@Test func dashboardUnadaptedModelDoesNotDisableGlobalAne() async throws {
+    let messages = CapturedSettingsMessages()
+    let webView = try await loadedDashboard(config: AppConfig(), messages: messages)
+    defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
+    let value = try await webView.evaluateJavaScript("""
+      renderRuntimeModels([{id:'flash',model:'flash',loaded:true,
+        ane:{model:'qwen38-flash-next',reason:'model_not_adapted',completed_jobs:0}}]);
+      JSON.stringify({enabled:!document.getElementById('cfg-ane').disabled,
+        status:document.getElementById('runtime-model-health').textContent})
+    """) as? String
+    let state = try #require(value.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String:Any] })
+    #expect(state["enabled"] as? Bool == true)
+    #expect((state["status"] as? String)?.contains("This model is not adapted for ANE. Using GPU.") == true)
 }

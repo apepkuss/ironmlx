@@ -34,6 +34,15 @@ impl ModelMeta {
 }
 
 pub trait Model {
+    /// Distinguish arithmetic-changing backends in persistent prefix caches.
+    fn execution_cache_fingerprint(&self) -> Option<String> {
+        None
+    }
+    /// Lazy, model-owned accelerator workspace reserved before first use.
+    fn auxiliary_memory_bytes(&self) -> usize {
+        0
+    }
+
     /// Architecture-specific reservation including recurrent/auxiliary state
     /// and transactional overlap. None preserves the ordinary GQA estimate.
     fn scheduler_cache_cost() -> Option<(usize, usize)>
@@ -105,6 +114,13 @@ pub trait Model {
     /// Extend split-batch prefill to image rows, preserving each row's B1
     /// chunk boundaries before assembling the scheduler cache. Has an effect
     /// only when `requires_split_batched_prefill_for_token_parity` is true.
+    /// Long image rows preserve B1 arithmetic with accelerators on or off.
+    /// Compatible fixed-row accelerators run before cache rows are combined.
+    /// Short prompts retain ordinary batching.
+    fn prefers_row_isolated_prefill(&self, _prompt_tokens: usize) -> bool {
+        false
+    }
+
     fn requires_row_isolated_multimodal_prefill(&self) -> bool {
         false
     }

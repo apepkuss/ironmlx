@@ -1271,8 +1271,94 @@ impl PromptLookupHealthConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AneModelHealth {
+    pub model: &'static str,
+    pub reason: &'static str,
+    pub completed_jobs: u64,
+    pub live_surface_bytes: u64,
+}
+impl AneModelHealth {
+    pub fn for_model(model: ironmlx_core::ane::Model) -> Self {
+        Self {
+            model: model.as_str(),
+            reason: ironmlx_core::ane::reason(model),
+            completed_jobs: ironmlx_core::ane::completed(model),
+            live_surface_bytes: ironmlx_core::ane::surface_bytes(model),
+        }
+    }
+}
+pub fn ane_model_from_snapshot(path: &std::path::Path) -> ironmlx_core::ane::Model {
+    use ironmlx_core::ane::Model;
+    let Some(config) = std::fs::read(path.join("config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_slice::<serde_json::Value>(&s).ok())
+    else {
+        return Model::Other;
+    };
+    ane_model_from_config(&config)
+}
+fn ane_model_from_config(config: &serde_json::Value) -> ironmlx_core::ane::Model {
+    use ironmlx_core::ane::Model;
+    if config["model_type"] == "qwen4_exp" {
+        return Model::FlashNext;
+    }
+    let text = config.get("text_config").unwrap_or(&config);
+    let quant = config
+        .get("quantization")
+        .or_else(|| config.get("quantization_config"));
+    if config["model_type"] == "qwen3_5"
+        && text["hidden_size"] == 5120
+        && text["intermediate_size"] == 17408
+        && text["num_hidden_layers"] == 64
+        && text["full_attention_interval"] == 4
+        && text
+            .get("dtype")
+            .or_else(|| text.get("torch_dtype"))
+            .is_some_and(|d| d == "bfloat16")
+        && quant.is_some_and(|q| {
+            q["bits"] == 4 && q["group_size"] == 64 && q.get("mode").is_none_or(|m| m == "affine")
+        })
+    {
+        Model::Dense27B
+    } else {
+        Model::Other
+    }
+}
+#[derive(Debug, Serialize)]
+pub struct AneHealth {
+    pub current_model: Option<AneModelHealth>,
+    pub mode: &'static str,
+    pub chip: Option<String>,
+    pub qualified: bool,
+    pub available: bool,
+    pub runtime_error: Option<String>,
+    pub reason: &'static str,
+    pub models: Vec<AneModelHealth>,
+}
+impl AneHealth {
+    pub fn current() -> Self {
+        use ironmlx_core::ane::{self, Model};
+        let hw = ane::hardware();
+        Self {
+            current_model: ane::fixed_model().map(AneModelHealth::for_model),
+            mode: ane::mode().as_str(),
+            chip: hw.chip.clone(),
+            qualified: hw.qualified,
+            available: hw.available,
+            runtime_error: hw.runtime_error.clone(),
+            reason: hw.reason,
+            models: [Model::Dense27B, Model::FlashNext]
+                .into_iter()
+                .map(|model| AneModelHealth::for_model(model))
+                .collect(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct HealthSnapshot {
+    pub ane: AneHealth,
     pub status: HealthStatus,
     pub degraded_reasons: Vec<HealthDegradedReason>,
     pub uptime_secs: u64,
@@ -1342,6 +1428,7 @@ impl SchedulerHealthCollector {
             &process_governor,
         );
         HealthSnapshot {
+            ane: AneHealth::current(),
             status,
             degraded_reasons,
             uptime_secs,
@@ -2285,6 +2372,7 @@ mod tests {
     #[test]
     fn health_memory_serializes_mlx_allocator_fields() {
         let snapshot = HealthSnapshot {
+            ane: AneHealth::current(),
             status: HealthStatus::Healthy,
             degraded_reasons: Vec::new(),
             uptime_secs: 7,
@@ -2375,5 +2463,33 @@ mod tests {
         assert_eq!(value["memory"]["kv_cache_resident_cap_tokens"], 64);
         assert_eq!(value["memory"]["kv_cache_budget_policy"], "full_resident");
         assert_eq!(value["device_name"], "Apple Test GPU");
+    }
+}
+
+#[cfg(test)]
+mod ane_contract_tests {
+    use super::*;
+    #[test]
+    fn only_the_adapted_dense_geometry_and_precision_are_eligible() {
+        let mut c = serde_json::json!({"model_type":"qwen3_5","text_config":{"hidden_size":5120,"intermediate_size":17408,"num_hidden_layers":64,"full_attention_interval":4,"dtype":"bfloat16"},"quantization":{"bits":4,"group_size":64,"mode":"affine"}});
+        assert_eq!(
+            ane_model_from_config(&c),
+            ironmlx_core::ane::Model::Dense27B
+        );
+        for (path, value) in [
+            ("/text_config/dtype", serde_json::json!("float16")),
+            ("/quantization/group_size", serde_json::json!(32)),
+            ("/text_config/hidden_size", serde_json::json!(4096)),
+            ("/quantization/mode", serde_json::json!("mxfp4")),
+        ] {
+            let old = c.pointer(path).unwrap().clone();
+            *c.pointer_mut(path).unwrap() = value;
+            assert_eq!(ane_model_from_config(&c), ironmlx_core::ane::Model::Other);
+            *c.pointer_mut(path).unwrap() = old;
+        }
+        assert_eq!(
+            ane_model_from_config(&serde_json::json!({"model_type":"qwen4_exp"})),
+            ironmlx_core::ane::Model::FlashNext
+        );
     }
 }

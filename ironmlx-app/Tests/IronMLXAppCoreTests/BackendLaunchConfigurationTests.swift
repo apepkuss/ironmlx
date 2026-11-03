@@ -465,3 +465,18 @@ private func dflash2LaunchArguments(config appConfig: AppConfig) -> [String] {
     let decoded = try JSONDecoder().decode(AppConfig.self, from: encoded)
     #expect(decoded.m5Dflash2Profile == false)
 }
+
+@Test func ordinaryAndDflashLaunchesCarryAneOffIndependentlyOfM5Profile() {
+    for profile in [false, true] {
+        for ane in [false, true] {
+            let config = AppConfig(m5Dflash2Profile: profile, ane: ane)
+            let ordinary = BackendLaunchConfiguration(
+                executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+                host: "127.0.0.1", port: 9068, options: BackendLaunchOptions(config: config)).arguments
+            for args in [ordinary, dflash2LaunchArguments(config: config)] {
+                #expect(args.contains("--ane") == !ane)
+                if let index = args.firstIndex(of: "--ane") { #expect(args[index + 1] == "off") }
+            }
+        }
+    }
+}

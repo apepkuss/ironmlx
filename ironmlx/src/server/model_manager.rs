@@ -888,6 +888,7 @@ impl AdminModelResponse {
 
 #[derive(Debug, Clone, Serialize)]
 struct LoadedModelInfo {
+    ane: ironmlx_runtime::core::runtime_health::AneModelHealth,
     #[serde(skip_serializing_if = "Option::is_none")]
     decision: Option<ironmlx_decision::DecisionSettings>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -941,6 +942,7 @@ struct AppHealthSnapshot {
 impl From<EngineLoadedModelInfo> for LoadedModelInfo {
     fn from(info: EngineLoadedModelInfo) -> Self {
         Self {
+            ane: info.ane,
             id: info.id.clone(),
             model: info.id,
             path: info.path,
@@ -1413,6 +1415,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     );
 
     HealthSnapshot {
+        ane: ironmlx_runtime::core::runtime_health::AneHealth::current(),
         status,
         degraded_reasons,
         uptime_secs: start_time.elapsed().as_secs(),
@@ -1756,6 +1759,9 @@ mod tests {
         active_stats.set_parked_requests(2);
         active_stats.record_error();
         let mut info = EngineLoadedModelInfo {
+            ane: ironmlx_runtime::core::runtime_health::AneModelHealth::for_model(
+                ironmlx_core::ane::Model::Other,
+            ),
             decision: None,
             decision_metrics: None,
             embedding_metrics: None,
@@ -2145,6 +2151,7 @@ mod tests {
     #[test]
     fn aggregate_health_reports_loaded_mtp_state() {
         let snapshot = HealthSnapshot {
+            ane: ironmlx_runtime::core::runtime_health::AneHealth::current(),
             status: ironmlx_runtime::core::runtime_health::HealthStatus::Healthy,
             degraded_reasons: Vec::new(),
             uptime_secs: 0,

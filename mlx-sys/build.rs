@@ -90,6 +90,7 @@ fn main() {
     .include(&include_dir)
     .include(include_dir.join("metal_cpp"))
     .std("c++20")
+    .flag_if_supported("-fblocks")
     .flag_if_supported("-fvisibility=hidden")
     .compile("cxx_mlx_shim");
 }

@@ -254,6 +254,7 @@ public struct BackendLaunchConfiguration: Equatable {
                 arguments.append("--security-bootstrap-stdin")
             }
         }
+        if !options.ane { arguments += ["--ane", "off"] }
         if let dflash2Runtime {
             arguments += [
                 "--model", dflash2Runtime.targetModelDir,
@@ -280,9 +281,6 @@ public struct BackendLaunchConfiguration: Equatable {
             appendIntegerFlag("--prefix-lru-cache-max-bytes", options.prefixLruCacheMaxBytes, to: &arguments)
             if !options.m5DFlash2Profile {
                 arguments += ["--m5-dflash2-profile", "off"]
-            }
-            if !options.ane {
-                arguments += ["--ane", "off"]
             }
             return arguments
         }

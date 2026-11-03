@@ -12,9 +12,22 @@
 //! Each fn carries 4 trailing `StreamOrDevice` args (P5.7) — same encoding
 //! as the array bridge: `(has_target, is_device_only, device_type, stream_index)`.
 
+/// Ownership lease retained by the Metal buffer until its final GPU use.
+pub struct ExternalBufferOwner {
+    _owner: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+}
+pub fn external_buffer_owner(
+    owner: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+) -> Box<ExternalBufferOwner> {
+    Box::new(ExternalBufferOwner { _owner: owner })
+}
+
 #[allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 #[cxx::bridge(namespace = "cxx_mlx")]
 pub mod ffi {
+    extern "Rust" {
+        type ExternalBufferOwner;
+    }
     /// cxx-friendly encoding of `mlx::core::fast::TemplateArg`
     /// (`std::variant<int, bool, Dtype>`). One field per variant arm:
     /// `kind=0` → `int_val` (i32), `kind=1` → `bool_val` (bool),
@@ -167,6 +180,14 @@ pub mod ffi {
             nbytes: usize,
             shape: &[i32],
             dtype_repr: u8,
+        ) -> Result<UniquePtr<MlxArray>>;
+
+        fn array_from_external_buffer_owned(
+            address: usize,
+            nbytes: usize,
+            shape: &[i32],
+            dtype_repr: u8,
+            owner: Box<ExternalBufferOwner>,
         ) -> Result<UniquePtr<MlxArray>>;
 
         /// GPU copy of `src` into the memory of the external array `dst`,

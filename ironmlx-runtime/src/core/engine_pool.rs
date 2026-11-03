@@ -135,6 +135,7 @@ pub struct EnginePoolState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineLoadedModelInfo {
+    pub ane: health::AneModelHealth,
     pub decision: Option<ironmlx_decision::DecisionSettings>,
     pub decision_metrics: Option<crate::core::decision_execution::DecisionMetricsSnapshot>,
     pub embedding_metrics: Option<crate::core::embedding_execution::EmbeddingMetricsSnapshot>,
@@ -167,6 +168,7 @@ struct EnginePoolInner {
 }
 
 struct EngineSlot {
+    ane_model: ironmlx_core::ane::Model,
     /// Cached at registration; loaded engines supply their actual admission cap.
     configured_context_window: Option<usize>,
     model: EngineModelConfig,
@@ -573,6 +575,7 @@ impl EnginePoolState {
         let mut slots = HashMap::with_capacity(config.models.len());
         for model in config.models {
             let slot = Arc::new(EngineSlot {
+                ane_model: health::ane_model_from_snapshot(&model.path),
                 configured_context_window: super::model_capacity::configured_context_window(&model),
                 model: model.clone(),
                 runtime: runtime.clone(),
@@ -963,6 +966,7 @@ impl EnginePoolState {
         }
         let model_id = model.id.clone();
         let new_slot = Arc::new(EngineSlot {
+            ane_model: health::ane_model_from_snapshot(&model.path),
             configured_context_window: super::model_capacity::configured_context_window(&model),
             model: model.clone(),
             runtime: self.inner.runtime.clone(),
@@ -1066,6 +1070,7 @@ impl EnginePoolState {
                 let pinned = pinned
                     .unwrap_or_else(|| existing.as_ref().is_some_and(|slot| slot.is_pinned()));
                 let slot = Arc::new(EngineSlot {
+                    ane_model: health::ane_model_from_snapshot(&model.path),
                     configured_context_window: super::model_capacity::configured_context_window(
                         &model,
                     ),
@@ -1268,6 +1273,7 @@ impl EnginePoolState {
                 ),
             };
             models.push(EngineLoadedModelInfo {
+                ane: health::AneModelHealth::for_model(slot.ane_model),
                 decision: slot.model.decision,
                 decision_metrics,
                 embedding_metrics,
@@ -1484,6 +1490,7 @@ impl EnginePoolState {
         let (status, degraded_reasons) =
             health::classify_process_status(&process_governor, initial_reasons);
         EnginePoolHealth {
+            ane: health::AneHealth::current(),
             status,
             degraded_reasons,
             mode: "engine_pool",
@@ -1986,6 +1993,7 @@ impl EngineSlot {
             let result = load_engine_variant(&self.model, &self.runtime, flash_plan).await;
             match result {
                 Ok(engine) => {
+                    tracing::info!(model_id=%self.model.id,ane_family=self.ane_model.as_str(),ane_mode=ironmlx_core::ane::mode().as_str(),ane_reason=ironmlx_core::ane::reason(self.ane_model),"model ANE execution policy");
                     if let Err(error) = pool
                         .check_memory_limits_after_load(&self.model.id, &engine)
                         .await
@@ -3294,6 +3302,7 @@ pub struct EngineModelControlResult {
 
 #[derive(Debug, Serialize)]
 pub struct EnginePoolHealth {
+    ane: health::AneHealth,
     status: health::HealthStatus,
     degraded_reasons: Vec<health::HealthDegradedReason>,
     mode: &'static str,
@@ -4153,6 +4162,7 @@ mod tests {
         let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
         let model_dir = write_minimal_model_config("qwen3_5");
         let slot = EngineSlot {
+            ane_model: ironmlx_core::ane::Model::Other,
             configured_context_window: None,
             model: model_config("alpha", &model_dir, EngineLoadPolicy::Lazy),
             runtime: runtime_config(),

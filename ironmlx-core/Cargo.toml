@@ -11,6 +11,7 @@ publish = false
 
 [dependencies]
 mlx = { path = "../mlx" }
+ironmlx-ane = { path = "../ironmlx-ane" }
 anyhow = "1"
 
 [features]

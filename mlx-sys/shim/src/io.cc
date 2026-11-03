@@ -92,6 +92,9 @@ std::unique_ptr<MlxReader> open_memory_reader(rust::Slice<const uint8_t> data) {
 
 std::unique_ptr<MlxWriter> create_file_writer(rust::Str path) {
   auto w = std::make_shared<mlx::core::io::FileWriter>(std::string(path));
+  // MLX main defers opening until open(); this Rust factory promises an
+  // opened file writer and must propagate creation failures immediately.
+  w->open();
   if (!w->is_open()) {
     throw std::runtime_error("failed to create file: " + std::string(path));
   }

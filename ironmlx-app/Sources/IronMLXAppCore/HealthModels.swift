@@ -9,6 +9,7 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
     public var scheduler: SchedulerInfo
     public var memory: MemoryInfo
     public var dflash2: DFlash2Info?
+    public var ane: AneInfo? = nil
     public var activeKvOffload: ActiveKvOffloadInfo
     public var deviceName: String?
     public var version: String
@@ -22,9 +23,37 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
         case scheduler
         case memory
         case dflash2
+        case ane
         case activeKvOffload = "active_kv_offload"
         case deviceName = "device_name"
         case version
+    }
+
+    public struct AneInfo: Codable, Equatable, Sendable {
+        public var runtimeError: String? = nil
+        public var currentModel: AneModelInfo? = nil
+        public var mode: String
+        public var chip: String?
+        public var qualified: Bool
+        public var available: Bool
+        public var reason: String
+        public var models: [AneModelInfo]
+        enum CodingKeys: String, CodingKey {
+            case runtimeError = "runtime_error"
+            case currentModel = "current_model"
+            case mode, chip, qualified, available, reason, models
+        }
+    }
+    public struct AneModelInfo: Codable, Equatable, Sendable {
+        public var liveSurfaceBytes: UInt64? = nil
+        public var model: String
+        public var reason: String
+        public var completedJobs: UInt64
+        enum CodingKeys: String, CodingKey {
+            case model, reason
+            case completedJobs = "completed_jobs"
+            case liveSurfaceBytes = "live_surface_bytes"
+        }
     }
 
     public struct ModelInfo: Codable, Equatable, Sendable {
@@ -233,6 +262,7 @@ public struct LegacyHealthStatus: Codable, Equatable, Sendable {
     public var cacheHitRate: Double
     public var activeKvOffload: HealthzSnapshot.ActiveKvOffloadInfo
     public var dflash2: HealthzSnapshot.DFlash2Info?
+    public var ane: HealthzSnapshot.AneInfo? = nil
     public var deviceName: String?
     public var runtimeModels: [BackendLoadedModelInfo]
 
@@ -245,6 +275,7 @@ public struct LegacyHealthStatus: Codable, Equatable, Sendable {
         case cacheHitRate = "cache_hit_rate"
         case activeKvOffload = "active_kv_offload"
         case dflash2
+        case ane
         case deviceName = "device_name"
         case runtimeModels = "runtime_models"
     }
@@ -283,6 +314,7 @@ public struct LegacyHealthAdapter {
             runtimeModels = [
                 BackendLoadedModelInfo(
                     id: snapshot.model.name,
+                    ane: snapshot.ane?.currentModel,
                     model: snapshot.model.name,
                     path: "",
                     architecture: "qwen3_5",
@@ -325,6 +357,7 @@ public struct LegacyHealthAdapter {
             cacheHitRate: 0,
             activeKvOffload: snapshot.activeKvOffload,
             dflash2: snapshot.dflash2,
+            ane: snapshot.ane,
             deviceName: snapshot.deviceName,
             runtimeModels: runtimeModels
         )

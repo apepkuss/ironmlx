@@ -117,6 +117,7 @@ impl FlashCache {
 }
 
 pub struct FlashTextModel {
+    ane_shared: std::sync::OnceLock<Option<crate::nn::flash_ane::Context>>,
     embedding: Embedding,
     layers: Vec<Layer>,
     mixer: HyperConnection,
@@ -278,6 +279,7 @@ impl FlashTextModel {
         let vision =
             crate::models::vision::VisionSlot::from_loader(loader, vision_config.as_ref())?;
         Ok(Self {
+            ane_shared: std::sync::OnceLock::new(),
             vision,
             vision_config,
             embedding: Embedding::from_loader(loader, "model.embed_tokens")?,
@@ -307,6 +309,32 @@ impl FlashTextModel {
         })
     }
 
+    pub(crate) fn ane_scope(
+        &self,
+        batch: usize,
+        seq: i32,
+        prefill: bool,
+    ) -> Option<crate::nn::flash_ane::Scope> {
+        if !prefill || batch != 1 || seq != 2048 || !crate::nn::flash_ane::requested() {
+            return None;
+        }
+        self.ane_shared
+            .get_or_init(|| match crate::nn::flash_ane::SharedExpert::new(2048) {
+                Ok(context) => {
+                    tracing::info!(
+                        surface_bytes = context.surface_bytes(),
+                        "Flash shared-expert ANE context created"
+                    );
+                    Some(Arc::new(Mutex::new(context)))
+                }
+                Err(error) => {
+                    tracing::warn!(%error,"Flash ANE unavailable; shared experts stay on GPU");
+                    None
+                }
+            })
+            .as_ref()
+            .map(|context| crate::nn::flash_ane::scope(Arc::clone(context)))
+    }
     pub fn expert_cache_stats(&self) -> Result<Option<ExpertCacheStats>> {
         self.experts
             .as_ref()

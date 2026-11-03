@@ -784,6 +784,7 @@ public struct BackendEmbeddingMetrics: Codable, Equatable, Sendable {
 }
 
 public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
+    public var ane: HealthzSnapshot.AneModelInfo? = nil
     public var decision: BackendDecisionSettings?
     public var decisionMetrics: BackendDecisionMetrics?
     public var embeddingMetrics: BackendEmbeddingMetrics?
@@ -811,6 +812,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
 
     public init(
         id: String,
+        ane: HealthzSnapshot.AneModelInfo? = nil,
         decision: BackendDecisionSettings? = nil,
         decisionMetrics: BackendDecisionMetrics? = nil,
         embeddingMetrics: BackendEmbeddingMetrics? = nil,
@@ -849,6 +851,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         self.decision = decision
         self.decisionMetrics = decisionMetrics
         self.embeddingMetrics = embeddingMetrics
+        self.ane = ane
         self.id = id
         self.model = model
         self.path = path
@@ -873,6 +876,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
+        case ane
         case decision
         case decisionMetrics = "decision_metrics"
         case embeddingMetrics = "embedding_metrics"
@@ -909,6 +913,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.ane = try container.decodeIfPresent(HealthzSnapshot.AneModelInfo.self, forKey: .ane)
         self.decision = try container.decodeIfPresent(BackendDecisionSettings.self, forKey: .decision)
         self.decisionMetrics = try container.decodeIfPresent(
             BackendDecisionMetrics.self,
@@ -971,6 +976,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(ane, forKey: .ane)
         try container.encodeIfPresent(decision, forKey: .decision)
         try container.encodeIfPresent(decisionMetrics, forKey: .decisionMetrics)
         try container.encodeIfPresent(embeddingMetrics, forKey: .embeddingMetrics)

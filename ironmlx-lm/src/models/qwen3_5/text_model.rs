@@ -61,12 +61,26 @@ impl Qwen35TextModel {
                 linear_conv_kernel_dim: cfg.linear_conv_kernel_dim,
             };
             let kind = cfg.layer_kind(i);
-            layers.push(DecoderLayer::from_loader(
-                loader,
-                &format!("model.layers.{i}"),
-                layer_cfg,
-                kind,
-            )?);
+            let use_ane = super::dflash2_lane::is_qwen38_27b(&cfg)
+                && super::speculative::dense_exact_batched_verify_profile(
+                    loader.quant_meta(),
+                    loader
+                        .config_raw_value()
+                        .pointer("/text_config/dtype")
+                        .and_then(serde_json::Value::as_str),
+                ) == super::speculative::ExactBatchedVerifyProfile::Affine4
+                && ironmlx_core::ane::eligible(ironmlx_core::ane::Model::Dense27B)
+                && loader.quant_meta().is_some_and(|q| {
+                    q.bits == 4
+                        && q.group_size == 64
+                        && q.mode == crate::core::weights::QuantMode::Affine
+                });
+            let load = if use_ane {
+                DecoderLayer::from_loader_ane
+            } else {
+                DecoderLayer::from_loader
+            };
+            layers.push(load(loader, &format!("model.layers.{i}"), layer_cfg, kind)?);
         }
         let norm = RmsNorm::from_loader(loader, "model.norm", cfg.rms_norm_eps)?;
         Ok(Self {

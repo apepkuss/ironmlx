@@ -15044,6 +15044,13 @@ impl<M: Model> Scheduler<M> {
         if active_rows.len() > 1
             && model.requires_split_batched_prefill_for_token_parity()
             && (model.requires_row_isolated_multimodal_prefill()
+                || active_rows.iter().any(|&row| {
+                    model.prefers_row_isolated_prefill(
+                        self.slots[row]
+                            .as_ref()
+                            .map_or(0, |state| state.prompt_ids.len()),
+                    )
+                })
                 || active_rows.iter().all(|&row| {
                     self.slots[row]
                         .as_ref()

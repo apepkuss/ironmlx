@@ -511,8 +511,8 @@ impl std::str::FromStr for M5ProfileMode {
     }
 }
 
-/// Neural Engine use (`--ane`): `auto` follows the active profile (the Dense
-/// prefill MLP share of full chunks), `off` keeps all computation on the GPU.
+/// Compatibility location of the shared Neural Engine mode (`--ane`).
+/// Qualification and dispatch live in `ane`, independent of this GPU profile.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AneMode {
     #[default]
@@ -759,6 +759,9 @@ fn ane_override(ane: AneMode, name: &str) -> Option<String> {
 /// share, otherwise an explicitly set variable, otherwise the active
 /// profile's value for its target family, otherwise unset.
 pub fn setting(name: &str) -> Option<String> {
+    if let Some(value) = crate::ane::dense_setting(name) {
+        return Some(value);
+    }
     let profile = installed();
     if let Some(value) = profile.and_then(|profile| ane_override(profile.ane, name)) {
         return Some(value);
@@ -864,6 +867,7 @@ pub fn install_for_target_with_ane(
     dflash2: bool,
     target: M5ProfileTarget,
 ) -> &'static M5Profile {
+    crate::ane::install(ane);
     INSTALLED.get_or_init(|| {
         let architecture = current_architecture();
         let status = resolve_for_target(

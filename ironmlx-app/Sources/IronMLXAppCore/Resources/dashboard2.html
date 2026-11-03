@@ -5192,7 +5192,7 @@
               <button type="button" class="profile-help-trigger" id="m5-dflash2-profile-help-trigger" aria-describedby="m5-dflash2-profile-help-tooltip" aria-label="M5 DFlash2 Profile help" data-i18n-aria-label="m5_dflash2_profile_help_label">?</button>
               <span class="profile-help-tooltip profile-help-tooltip-fixed" id="m5-dflash2-profile-help-tooltip" role="tooltip">
                 <span class="profile-help-tooltip-title" data-i18n="m5_dflash2_profile_help_title">About the M5 DFlash2 Profile</span>
-                <span class="profile-help-tooltip-body" data-i18n="m5_dflash2_profile_help_body">On Apple M5 (GPU generation 17) and newer, automatically selects model-specific DFlash2 optimizations. Qwen 3.8 27B, Qwen 3.6 35B A3B and Qwen3.8-Flash-Next each use their own settings. Flash-Next supports single and concurrent requests, with batching under load; it does not use ANE acceleration. Each optimization is enabled only when applicable. Turn off to use the generic settings.</span>
+                <span class="profile-help-tooltip-body" data-i18n="m5_dflash2_profile_help_body">On Apple M5 (GPU generation 17) and newer, automatically selects model-specific DFlash2 optimizations. Qwen 3.8 27B, Qwen 3.6 35B A3B and Qwen3.8-Flash-Next each use their own settings. Flash-Next supports single and concurrent requests, with batching under load. Each optimization is enabled only when applicable. Turn off to use the generic settings.</span>
               </span>
             </span>
           </div>
@@ -5208,12 +5208,12 @@
               <button type="button" class="profile-help-trigger" id="ane-help-trigger" aria-describedby="ane-help-tooltip" aria-label="Neural Engine Acceleration help" data-i18n-aria-label="ane_help_label">?</button>
               <span class="profile-help-tooltip profile-help-tooltip-fixed" id="ane-help-tooltip" role="tooltip">
                 <span class="profile-help-tooltip-title" data-i18n="ane_help_title">About Neural Engine Acceleration</span>
-                <span class="profile-help-tooltip-body" data-i18n="ane_help_body">When the M5 DFlash2 Profile is active, supported dense models such as Qwen 3.8 27B hand part of each MLP to the Neural Engine while prefilling prompts of 2,048 tokens or more, shortening the time to first token on long prompts. Turn off to keep all computation on the GPU.</span>
+                <span class="profile-help-tooltip-body" data-i18n="ane_help_body">On qualified devices, Qwen3.8-27B Affine 4-bit models (group size 64) can share long-prompt prefill with the Neural Engine in ordinary inference or DFlash2, for single or concurrent requests. Applicable full chunks use ANE automatically; other work stays on the GPU. Turn off to keep all computation on the GPU.</span>
               </span>
             </span>
           </div>
           <div class="settings-row-desc" data-i18n="ane_acceleration_desc">Shares long-prompt prefill of dense models with the Neural Engine on supported devices.</div>
-          <div class="settings-row-desc" id="ane-requires-m5-profile" data-i18n="ane_requires_m5_profile" hidden>Takes effect only with the M5 DFlash2 Profile on.</div>
+          <div class="settings-row-desc" id="ane-unavailable-reason" data-i18n="ane_hardware_unknown">ANE availability has not been confirmed.</div>
         </div>
         <div class="settings-row-right"><label class="toggle"><input type="checkbox" id="cfg-ane" checked><span class="toggle-slider"></span></label></div>
       </div>
@@ -6412,8 +6412,8 @@
       auto: "Auto",
       cache: "Cache", enable_cache: "Enable Cache", ssd_cache_dir: "SSD Cache Directory",
       active_kv_offload: "Active KV Cache Offload", active_kv_offload_desc: "Experimental. Keep a hot KV window resident and move paused active KV cache payloads to SSD for long logical MAX CONTEXT TOKENS.", active_kv_offload_help_title: "Experimental cache residency", active_kv_offload_help_body: "Moves paused active KV cache payloads to local SSD storage so new requests can run when sequence slots are full.", active_kv_offload_help_trigger: "Enabling it does not mean offload happens immediately. The system triggers it automatically when scheduling, KV residency pressure, or request park/restore requires it; it may stay idle when the system is idle or memory pressure is low.", active_kv_offload_help_applicable: "Applicable: Full Attention dense/paged, TurboQuant packed Full Attention, MLA, and GatedDelta/Linear.", active_kv_offload_help_not_applicable: "Not applicable: MTP speculative side cache.",
-      m5_dflash2_profile: "M5 DFlash2 Profile", m5_dflash2_profile_desc: "Automatically optimizes DFlash2 inference on supported devices.", m5_dflash2_profile_help_title: "About the M5 DFlash2 Profile", m5_dflash2_profile_help_body: "On Apple M5 (GPU generation 17) and newer, automatically selects model-specific DFlash2 optimizations. Qwen 3.8 27B, Qwen 3.6 35B A3B and Qwen3.8-Flash-Next each use their own settings. Flash-Next supports single and concurrent requests, with batching under load; it does not use ANE acceleration. Each optimization is enabled only when applicable. Turn off to use the generic settings.", m5_dflash2_profile_help_label: "M5 DFlash2 Profile help",
-      ane_acceleration: "Neural Engine (ANE) Acceleration", ane_acceleration_desc: "Shares long-prompt prefill of dense models with the Neural Engine on supported devices.", ane_help_title: "About Neural Engine Acceleration", ane_help_body: "When the M5 DFlash2 Profile is active, supported dense models such as Qwen 3.8 27B hand part of each MLP to the Neural Engine while prefilling prompts of 2,048 tokens or more, shortening the time to first token on long prompts. Turn off to keep all computation on the GPU.", ane_help_label: "Neural Engine Acceleration help", ane_requires_m5_profile: "Takes effect only with the M5 DFlash2 Profile on.",
+      m5_dflash2_profile: "M5 DFlash2 Profile", m5_dflash2_profile_desc: "Automatically optimizes DFlash2 inference on supported devices.", m5_dflash2_profile_help_title: "About the M5 DFlash2 Profile", m5_dflash2_profile_help_body: "On Apple M5 (GPU generation 17) and newer, automatically selects model-specific DFlash2 optimizations. Qwen 3.8 27B, Qwen 3.6 35B A3B and Qwen3.8-Flash-Next each use their own settings. Flash-Next supports single and concurrent requests, with batching under load. Each optimization is enabled only when applicable. Turn off to use the generic settings.", m5_dflash2_profile_help_label: "M5 DFlash2 Profile help",
+      ane_acceleration: "Neural Engine (ANE) Acceleration", ane_acceleration_desc: "Shares long-prompt prefill of dense models with the Neural Engine on supported devices.", ane_help_title: "About Neural Engine Acceleration", ane_help_body: "On qualified devices, Qwen3.8-27B Affine 4-bit models (group size 64) can share long-prompt prefill with the Neural Engine in ordinary inference or DFlash2, for single or concurrent requests. Applicable full chunks use ANE automatically; other work stays on the GPU. Turn off to keep all computation on the GPU.", ane_help_label: "Neural Engine Acceleration help", ane_runtime_failed: "ANE execution failed; this model now uses GPU.", ane_machine_unqualified: "ANE acceleration is not yet qualified for this machine. Using GPU.", ane_hardware_unknown: "ANE availability has not been confirmed. Using GPU.", ane_runtime_unavailable: "The ANE backend is unavailable. Using GPU.", ane_model_not_adapted: "This model is not adapted for ANE. Using GPU.", ane_eligible: "Eligible; ANE runs on applicable prefill chunks.", ane_activity: "Completed ANE jobs for this model family in this process: {count}", ane_disabled: "ANE is off. Using GPU.",
       kv_quant: "KV Cache Compression", kv_quant_desc: "Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.", kv_quant_off: "Off", model_ttl: "Model Auto-Unload (TTL)", model_ttl_desc: "Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.", minutes: "minutes",
       advanced: "Advanced", batch_processing: "Batch Processing",
       max_sequences: "Max Sequences", max_sequences_desc: "Maximum number of concurrent parallel requests.",
@@ -7119,8 +7119,8 @@
       auto: "自动",
       cache: "缓存", enable_cache: "启用缓存", ssd_cache_dir: "SSD 缓存目录",
       active_kv_offload: "活跃 KV Cache 分层卸载", active_kv_offload_desc: "实验性能力。为长逻辑 MAX CONTEXT TOKENS 保持热 KV 窗口常驻，并将暂停中的活跃 KV Cache 写入 SSD。", active_kv_offload_help_title: "实验性缓存驻留", active_kv_offload_help_body: "当序列槽位已满时，可将暂停中的活跃 KV Cache 写入本地 SSD，让新的请求先继续运行。", active_kv_offload_help_trigger: "开启后不代表立即发生卸载。系统会在请求调度、KV 驻留压力或请求暂停/恢复需要时自动触发；空闲或内存压力较低时可能保持 idle。", active_kv_offload_help_applicable: "适用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。", active_kv_offload_help_not_applicable: "不适用：MTP speculative side cache。",
-      m5_dflash2_profile: "M5 DFlash2 优化配置", m5_dflash2_profile_desc: "在支持的设备上自动优化 DFlash2 推理。", m5_dflash2_profile_help_title: "关于 M5 DFlash2 优化配置", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新机型上，自动按模型选择 DFlash2 优化配置。Qwen 3.8 27B、Qwen 3.6 35B A3B 和 Qwen3.8-Flash-Next 分别使用独立配置。Flash-Next 支持单请求与多请求，并发时可合批，不启用 ANE 加速。各项优化仅在适用时启用，关闭后使用通用设置。", m5_dflash2_profile_help_label: "M5 DFlash2 优化配置说明",
-      ane_acceleration: "神经引擎（ANE）加速", ane_acceleration_desc: "在支持的设备上，由神经引擎分担 Dense 模型长提示的预填充计算。", ane_help_title: "关于神经引擎加速", ane_help_body: "M5 DFlash2 优化配置生效时，Qwen 3.8 27B 等已适配的 Dense 模型在预填充 2048 词元以上的提示时，把每层 MLP 的一部分交给神经引擎计算，缩短长提示的首词元时间。关闭后全部计算留在 GPU 上。", ane_help_label: "神经引擎加速说明", ane_requires_m5_profile: "仅在开启 M5 DFlash2 优化配置时生效。",
+      m5_dflash2_profile: "M5 DFlash2 优化配置", m5_dflash2_profile_desc: "在支持的设备上自动优化 DFlash2 推理。", m5_dflash2_profile_help_title: "关于 M5 DFlash2 优化配置", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新机型上，自动按模型选择 DFlash2 优化配置。Qwen 3.8 27B、Qwen 3.6 35B A3B 和 Qwen3.8-Flash-Next 分别使用独立配置。Flash-Next 支持单请求与多请求，并发时可合批。各项优化仅在适用时启用，关闭后使用通用设置。", m5_dflash2_profile_help_label: "M5 DFlash2 优化配置说明",
+      ane_acceleration: "神经引擎（ANE）加速", ane_acceleration_desc: "在支持的设备上，由神经引擎分担 Dense 模型长提示的预填充计算。", ane_help_title: "关于神经引擎加速", ane_help_body: "在已适配的设备上，Qwen3.8-27B 4-bit（Affine，group size 64）模型可在普通推理或 DFlash2 的单请求与多请求场景中，由神经引擎分担长提示预填充。适用的完整分块自动使用 ANE，其余计算使用 GPU。关闭后全部计算使用 GPU。", ane_help_label: "神经引擎加速说明", ane_runtime_failed: "ANE 执行失败，此模型已回退到 GPU。", ane_machine_unqualified: "此机型的 ANE 加速尚未适配，当前使用 GPU。", ane_hardware_unknown: "暂时无法确认 ANE 可用性，当前使用 GPU。", ane_runtime_unavailable: "ANE 后端不可用，当前使用 GPU。", ane_model_not_adapted: "此模型尚未适配 ANE，当前使用 GPU。", ane_eligible: "已具备使用条件，适用的预填充分块会使用 ANE。", ane_activity: "当前进程此模型系列已完成 ANE 作业：{count}", ane_disabled: "ANE 已关闭，当前使用 GPU。",
       kv_quant: "KV 缓存压缩", kv_quant_desc: "使用 TurboQuant 降低长上下文运行时 KV Cache 的内存占用。K3V3 更省内存，K4V4 更保守，K3V4 为推荐均衡选项。", kv_quant_off: "无压缩", model_ttl: "模型自动卸载 (TTL)", model_ttl_desc: "已加载模型闲置超过指定分钟数后自动卸载。0 = 不启用；默认模型偏好会保留。", minutes: "分钟",
       advanced: "高级", batch_processing: "批处理",
       max_sequences: "最大序列数", max_sequences_desc: "并行处理的最大并发请求数。",
@@ -7829,8 +7829,8 @@
       auto: "自動",
       cache: "快取", enable_cache: "啟用快取", ssd_cache_dir: "SSD 快取目錄",
       active_kv_offload: "活躍 KV Cache 分層卸載", active_kv_offload_desc: "實驗性能力。為長邏輯 MAX CONTEXT TOKENS 保持熱 KV 視窗常駐，並將暫停中的活躍 KV Cache 寫入 SSD。", active_kv_offload_help_title: "實驗性快取駐留", active_kv_offload_help_body: "當序列槽位已滿時，可將暫停中的活躍 KV Cache 寫入本地 SSD，讓新的請求先繼續執行。", active_kv_offload_help_trigger: "開啟後不代表立即發生卸載。系統會在請求調度、KV 駐留壓力或請求暫停/恢復需要時自動觸發；空閒或記憶體壓力較低時可能保持 idle。", active_kv_offload_help_applicable: "適用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。", active_kv_offload_help_not_applicable: "不適用：MTP speculative side cache。",
-      m5_dflash2_profile: "M5 DFlash2 最佳化設定", m5_dflash2_profile_desc: "在支援的裝置上自動最佳化 DFlash2 推論。", m5_dflash2_profile_help_title: "關於 M5 DFlash2 最佳化設定", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新機型上，自動依模型選擇 DFlash2 最佳化設定。Qwen 3.8 27B、Qwen 3.6 35B A3B 和 Qwen3.8-Flash-Next 分別使用獨立設定。Flash-Next 支援單一與多個請求，並行時可合批，不啟用 ANE 加速。各項最佳化僅在適用時啟用，關閉後使用通用設定。", m5_dflash2_profile_help_label: "M5 DFlash2 最佳化設定說明",
-      ane_acceleration: "神經引擎（ANE）加速", ane_acceleration_desc: "在支援的裝置上，由神經引擎分擔 Dense 模型長提示的預填充運算。", ane_help_title: "關於神經引擎加速", ane_help_body: "M5 DFlash2 最佳化設定生效時，Qwen 3.8 27B 等已適配的 Dense 模型在預填充 2048 個詞元以上的提示時，將每層 MLP 的一部分交給神經引擎運算，縮短長提示的首個詞元時間。關閉後所有運算都留在 GPU 上。", ane_help_label: "神經引擎加速說明", ane_requires_m5_profile: "僅在開啟 M5 DFlash2 最佳化設定時生效。",
+      m5_dflash2_profile: "M5 DFlash2 最佳化設定", m5_dflash2_profile_desc: "在支援的裝置上自動最佳化 DFlash2 推論。", m5_dflash2_profile_help_title: "關於 M5 DFlash2 最佳化設定", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新機型上，自動依模型選擇 DFlash2 最佳化設定。Qwen 3.8 27B、Qwen 3.6 35B A3B 和 Qwen3.8-Flash-Next 分別使用獨立設定。Flash-Next 支援單一與多個請求，並行時可合批。各項最佳化僅在適用時啟用，關閉後使用通用設定。", m5_dflash2_profile_help_label: "M5 DFlash2 最佳化設定說明",
+      ane_acceleration: "神經引擎（ANE）加速", ane_acceleration_desc: "在支援的裝置上，由神經引擎分擔 Dense 模型長提示的預填充運算。", ane_help_title: "關於神經引擎加速", ane_help_body: "在已適配的裝置上，Qwen3.8-27B 4-bit（Affine，group size 64）模型可在一般推論或 DFlash2 的單一與多個請求情境中，由神經引擎分擔長提示預填充。適用的完整分塊自動使用 ANE，其餘運算使用 GPU。關閉後全部運算使用 GPU。", ane_help_label: "神經引擎加速說明", ane_runtime_failed: "ANE 執行失敗，此模型已回退至 GPU。", ane_machine_unqualified: "此機型的 ANE 加速尚未適配，目前使用 GPU。", ane_hardware_unknown: "暫時無法確認 ANE 可用性，目前使用 GPU。", ane_runtime_unavailable: "ANE 後端無法使用，目前使用 GPU。", ane_model_not_adapted: "此模型尚未適配 ANE，目前使用 GPU。", ane_eligible: "已具備使用條件，適用的預填充分塊會使用 ANE。", ane_activity: "目前程序此模型系列已完成 ANE 作業：{count}", ane_disabled: "ANE 已關閉，目前使用 GPU。",
       advanced: "進階", batch_processing: "批次處理",
       max_sequences: "最大序列數", max_sequences_desc: "平行處理的最大並行請求數。",
       max_models: "最大同時載入模型數", max_models_desc: "App 同時保持載入狀態的模型數量上限。達到上限後，新模型不會自動替換舊模型；請先手動卸載暫不使用的模型，再載入新模型。",
@@ -8539,8 +8539,8 @@
       auto: "自動",
       cache: "キャッシュ", enable_cache: "キャッシュを有効化", ssd_cache_dir: "SSDキャッシュディレクトリ",
       active_kv_offload: "Active KV Cache オフロード", active_kv_offload_desc: "実験的機能。長い論理 MAX CONTEXT TOKENS では熱い KV ウィンドウだけを常駐させ、一時停止中の Active KV Cache を SSD に書き出します。", active_kv_offload_help_title: "実験的キャッシュ常駐管理", active_kv_offload_help_body: "シーケンススロットが満杯の場合、一時停止中の Active KV Cache をローカル SSD に書き出し、新しいリクエストを先に実行できます。", active_kv_offload_help_trigger: "有効にしても、すぐにオフロードが発生するとは限りません。スケジューリング、KV 常駐圧力、またはリクエストの一時停止/復元が必要な場合に自動で発動します。アイドル時やメモリ圧力が低い場合は idle のままになることがあります。", active_kv_offload_help_applicable: "適用: Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。", active_kv_offload_help_not_applicable: "非対象: MTP speculative side cache。",
-      m5_dflash2_profile: "M5 DFlash2 プロファイル", m5_dflash2_profile_desc: "対応デバイスで DFlash2 推論を自動的に最適化します。", m5_dflash2_profile_help_title: "M5 DFlash2 プロファイルについて", m5_dflash2_profile_help_body: "Apple M5（GPU 第 17 世代）以降では、モデルに応じた DFlash2 最適化設定を自動で選択します。Qwen 3.8 27B、Qwen 3.6 35B A3B、Qwen3.8-Flash-Next は、それぞれ専用の設定を使います。Flash-Next は単一および同時リクエストに対応し、負荷に応じてバッチ処理を行います。ANE アクセラレーションは使用しません。各最適化は適用可能な場合のみ有効になります。オフにすると汎用設定を使います。", m5_dflash2_profile_help_label: "M5 DFlash2 プロファイルのヘルプ",
-      ane_acceleration: "Neural Engine（ANE）アクセラレーション", ane_acceleration_desc: "対応デバイスで、Dense モデルの長いプロンプトのプレフィルを Neural Engine が分担します。", ane_help_title: "Neural Engine アクセラレーションについて", ane_help_body: "M5 DFlash2 プロファイルが有効なとき、Qwen 3.8 27B などの対応する Dense モデルは 2,048 トークン以上のプロンプトのプレフィルで各 MLP の一部を Neural Engine で計算し、長いプロンプトの最初のトークンまでの時間を短縮します。オフにするとすべての計算を GPU で行います。", ane_help_label: "Neural Engine アクセラレーションのヘルプ", ane_requires_m5_profile: "M5 DFlash2 プロファイルがオンのときのみ有効です。",
+      m5_dflash2_profile: "M5 DFlash2 プロファイル", m5_dflash2_profile_desc: "対応デバイスで DFlash2 推論を自動的に最適化します。", m5_dflash2_profile_help_title: "M5 DFlash2 プロファイルについて", m5_dflash2_profile_help_body: "Apple M5（GPU 第 17 世代）以降では、モデルに応じた DFlash2 最適化設定を自動で選択します。Qwen 3.8 27B、Qwen 3.6 35B A3B、Qwen3.8-Flash-Next は、それぞれ専用の設定を使います。Flash-Next は単一および同時リクエストに対応し、負荷に応じてバッチ処理を行います。各最適化は適用可能な場合のみ有効になります。オフにすると汎用設定を使います。", m5_dflash2_profile_help_label: "M5 DFlash2 プロファイルのヘルプ",
+      ane_acceleration: "Neural Engine（ANE）アクセラレーション", ane_acceleration_desc: "対応デバイスで、Dense モデルの長いプロンプトのプレフィルを Neural Engine が分担します。", ane_help_title: "Neural Engine アクセラレーションについて", ane_help_body: "対応済みデバイスでは、Qwen3.8-27B 4-bit（Affine、group size 64）モデルが、通常推論と DFlash2 の単一・同時リクエストで長いプロンプトのプレフィルを Neural Engine と分担します。適用可能な完全チャンクでは ANE を自動利用し、その他の計算は GPU で実行します。オフにするとすべて GPU で実行します。", ane_help_label: "Neural Engine アクセラレーションのヘルプ", ane_runtime_failed: "ANE の実行に失敗したため、このモデルは GPU に切り替わりました。", ane_machine_unqualified: "この機種の ANE アクセラレーションは未検証です。GPU を使用します。", ane_hardware_unknown: "ANE の利用可否を確認できません。GPU を使用します。", ane_runtime_unavailable: "ANE バックエンドを利用できません。GPU を使用します。", ane_model_not_adapted: "このモデルは ANE に未対応です。GPU を使用します。", ane_eligible: "利用条件を満たしています。適用可能なプレフィルチャンクで ANE を使用します。", ane_activity: "このプロセスの同モデル系列で完了した ANE ジョブ: {count}", ane_disabled: "ANE はオフです。GPU を使用します。",
       advanced: "詳細設定", batch_processing: "バッチ処理",
       max_sequences: "最大シーケンス数", max_sequences_desc: "並列処理の最大同時リクエスト数。",
       max_models: "最大同時ロードモデル数", max_models_desc: "App が同時に読み込み済みとして保持するモデル数の上限。上限に達すると新しいモデルの読み込みは拒否され、既存の読み込み済みモデルは自動的に置き換えられません。不要なモデルを手動でアンロードしてから読み込んでください。",
@@ -9249,8 +9249,8 @@
       auto: "자동",
       cache: "캐시", enable_cache: "캐시 활성화", ssd_cache_dir: "SSD 캐시 디렉토리",
       active_kv_offload: "Active KV Cache 오프로드", active_kv_offload_desc: "실험적 기능입니다. 긴 논리 MAX CONTEXT TOKENS에서는 뜨거운 KV 창만 상주시켜 두고, 일시 중지된 Active KV Cache를 SSD에 기록합니다.", active_kv_offload_help_title: "실험적 캐시 상주 관리", active_kv_offload_help_body: "시퀀스 슬롯이 가득 찼을 때 일시 중지된 Active KV Cache를 로컬 SSD에 기록하여 새 요청을 먼저 실행할 수 있습니다.", active_kv_offload_help_trigger: "켜도 즉시 오프로드가 발생하는 것은 아닙니다. 스케줄링, KV 상주 압력 또는 요청 일시 중지/복원이 필요할 때 시스템이 자동으로 트리거합니다. 유휴 상태이거나 메모리 압력이 낮으면 idle 상태로 유지될 수 있습니다.", active_kv_offload_help_applicable: "적용: Full Attention dense/paged, TurboQuant packed Full Attention, MLA, GatedDelta/Linear.", active_kv_offload_help_not_applicable: "비대상: MTP speculative side cache.",
-      m5_dflash2_profile: "M5 DFlash2 프로필", m5_dflash2_profile_desc: "지원되는 기기에서 DFlash2 추론을 자동으로 최적화합니다.", m5_dflash2_profile_help_title: "M5 DFlash2 프로필 안내", m5_dflash2_profile_help_body: "Apple M5(GPU 17세대) 이상에서는 모델에 맞는 DFlash2 최적화 설정을 자동으로 선택합니다. Qwen 3.8 27B, Qwen 3.6 35B A3B, Qwen3.8-Flash-Next는 각각 전용 설정을 사용합니다. Flash-Next는 단일 및 동시 요청을 지원하며 부하에 따라 배치 처리합니다. ANE 가속은 사용하지 않습니다. 각 최적화는 적용 가능한 경우에만 활성화됩니다. 끄면 일반 설정을 사용합니다.", m5_dflash2_profile_help_label: "M5 DFlash2 프로필 도움말",
-      ane_acceleration: "Neural Engine(ANE) 가속", ane_acceleration_desc: "지원되는 기기에서 Dense 모델의 긴 프롬프트 프리필을 Neural Engine이 분담합니다.", ane_help_title: "Neural Engine 가속 안내", ane_help_body: "M5 DFlash2 프로필이 활성화되면 Qwen 3.8 27B 같은 지원되는 Dense 모델은 2,048 토큰 이상의 프롬프트를 프리필할 때 각 MLP의 일부를 Neural Engine에서 계산해 긴 프롬프트의 첫 토큰까지 걸리는 시간을 줄입니다. 끄면 모든 계산을 GPU에서 수행합니다.", ane_help_label: "Neural Engine 가속 도움말", ane_requires_m5_profile: "M5 DFlash2 프로필이 켜져 있을 때만 적용됩니다.",
+      m5_dflash2_profile: "M5 DFlash2 프로필", m5_dflash2_profile_desc: "지원되는 기기에서 DFlash2 추론을 자동으로 최적화합니다.", m5_dflash2_profile_help_title: "M5 DFlash2 프로필 안내", m5_dflash2_profile_help_body: "Apple M5(GPU 17세대) 이상에서는 모델에 맞는 DFlash2 최적화 설정을 자동으로 선택합니다. Qwen 3.8 27B, Qwen 3.6 35B A3B, Qwen3.8-Flash-Next는 각각 전용 설정을 사용합니다. Flash-Next는 단일 및 동시 요청을 지원하며 부하에 따라 배치 처리합니다. 각 최적화는 적용 가능한 경우에만 활성화됩니다. 끄면 일반 설정을 사용합니다.", m5_dflash2_profile_help_label: "M5 DFlash2 프로필 도움말",
+      ane_acceleration: "Neural Engine(ANE) 가속", ane_acceleration_desc: "지원되는 기기에서 Dense 모델의 긴 프롬프트 프리필을 Neural Engine이 분담합니다.", ane_help_title: "Neural Engine 가속 안내", ane_help_body: "검증된 기기에서는 Qwen3.8-27B 4-bit(Affine, group size 64) 모델이 일반 추론과 DFlash2의 단일 및 동시 요청에서 긴 프롬프트 프리필을 Neural Engine과 분담할 수 있습니다. 적용 가능한 전체 청크는 ANE를 자동 사용하고 나머지 계산은 GPU에서 수행합니다. 끄면 모든 계산을 GPU에서 수행합니다.", ane_help_label: "Neural Engine 가속 도움말", ane_runtime_failed: "ANE 실행 실패로 이 모델은 GPU로 전환되었습니다.", ane_machine_unqualified: "이 기종의 ANE 가속은 아직 검증되지 않았습니다. GPU를 사용합니다.", ane_hardware_unknown: "ANE 사용 가능 여부를 확인하지 못했습니다. GPU를 사용합니다.", ane_runtime_unavailable: "ANE 백엔드를 사용할 수 없습니다. GPU를 사용합니다.", ane_model_not_adapted: "이 모델은 아직 ANE를 지원하지 않습니다. GPU를 사용합니다.", ane_eligible: "사용 조건을 충족합니다. 적용 가능한 프리필 청크에서 ANE를 사용합니다.", ane_activity: "이 프로세스의 동일 모델 계열에서 완료된 ANE 작업: {count}", ane_disabled: "ANE가 꺼져 있습니다. GPU를 사용합니다.",
       advanced: "고급", batch_processing: "배치 처리",
       max_sequences: "최대 시퀀스 수", max_sequences_desc: "병렬 처리의 최대 동시 요청 수.",
       max_models: "최대 동시 로드 모델 수", max_models_desc: "App 이 동시에 로드 상태로 유지하는 모델 수의 상한입니다. 상한에 도달하면 새 모델 로드는 거부되고 기존 로드 모델은 자동으로 교체되지 않습니다. 사용하지 않는 모델을 수동으로 언로드한 뒤 다시 로드하세요.",
@@ -15034,6 +15034,7 @@
     setCheckboxInput('cfg-active-kv-offload', appConfig.active_kv_offload, false);
     setCheckboxInput('cfg-m5-dflash2-profile', appConfig.m5_dflash2_profile, true);
     setCheckboxInput('cfg-ane', appConfig.ane, true);
+    syncAneUI();
     setCheckboxInput('cfg-verify-model-on-load', appConfig.verify_model_on_load, false);
     const cfgKvQuant = document.getElementById('cfg-kv-quant');
     if (cfgKvQuant) cfgKvQuant.value = normalizeKVQuantValue(window.__IRONMLX_KV_QUANT__);
@@ -15190,7 +15191,8 @@
       cache_dir: document.getElementById('cfg-cache-dir').value,
       active_kv_offload: checkedInputValue('cfg-active-kv-offload', false),
       m5_dflash2_profile: checkedInputValue('cfg-m5-dflash2-profile', true),
-      ane: checkedInputValue('cfg-ane', true),
+      ane: document.getElementById('cfg-ane').disabled ? (window.__IRONMLX_APP_CONFIG__ || {}).ane !== false
+        : checkedInputValue('cfg-ane', true),
       verify_model_on_load: checkedInputValue('cfg-verify-model-on-load', false),
       kv_quant: normalizeKVQuantValue(document.getElementById('cfg-kv-quant').value),
       max_sequences: Math.max(1, numberInputValue('cfg-max-sequences', 1)),
@@ -15854,6 +15856,11 @@
         + metric(dict.runtime_queued || 'Queued', '', queuedRequests, '', 0, false)
         + metric(dict.runtime_capacity || 'Queue capacity', '', queueCapacity, '', 0, false)
         + '</div></div>';
+      const aneDetails = model.ane
+        ? '<div class="runtime-model-section"><span class="runtime-section-title">ANE</span> · '
+          + escapeAttr(dict['ane_' + model.ane.reason] || model.ane.reason)
+          + '<div class="runtime-section-meta">' + escapeAttr((dict.ane_activity || I18N.en.ane_activity).replace('{count}', String(model.ane.completed_jobs || 0))) + '</div></div>'
+        : '';
       const dflash2 = model.dflash2;
       let dflash2Details = '';
       if (dflash2 && dflash2.enabled) {
@@ -15871,11 +15878,7 @@
               ? ' · ' + (dict.runtime_m5_profile || 'M5 profile {status}').replace('{status}',
                 dict['m5_profile_' + dflash2.m5_profile.status] || dflash2.m5_profile.status)
               : '')
-            + (dflash2.m5_profile && dflash2.m5_profile.ane_status
-                && dflash2.m5_profile.ane_status !== 'not_applicable'
-              ? ' · ' + (dict.runtime_ane || 'ANE {status}').replace('{status}',
-                dict['ane_status_' + dflash2.m5_profile.ane_status] || dflash2.m5_profile.ane_status)
-              : ''))
+)
           + '</span></div>'
           + '<div class="runtime-metric-rail runtime-performance-rail">'
           + metric(dict.runtime_dflash2_acceptance || 'Acceptance', '', acceptanceRate, '%', 1, true)
@@ -16130,7 +16133,7 @@
         + '<div class="runtime-model-header"><div class="runtime-model-identity">'
         + '<strong class="runtime-model-name">' + escapeAttr(model.id || model.model || '') + '</strong>'
         + mtpBadge + dflash2Badge + (isEmbedding && model.supports_audio ? '<span class="catalog-capability">' + escapeAttr(dict.catalog_audio_embedding || 'Audio embeddings') + '</span>' : '') + '</div></div>'
-        + requestDetails + dflash2Details + performanceDetails
+        + requestDetails + aneDetails + dflash2Details + performanceDetails
         + '<div class="runtime-model-footer"><div class="runtime-usage-summary">'
         + usageItems.join('') + '</div>' + activeKvDetails + '</div></div>';
     }).join('');
@@ -16239,6 +16242,8 @@
           return;
         }
         const data = JSON.parse(jsonStr);
+        window.__IRONMLX_ANE_HEALTH__ = data.ane || null;
+        syncAneUI();
         const runtimeModels = Array.isArray(data.runtime_models) ? data.runtime_models : [];
         renderRuntimeModels(runtimeModels);
         settingsBackendRunning = true;
@@ -16530,17 +16535,21 @@
   syncCacheUI();
   requestColdCacheCapacity();
 
-  // The Neural Engine share belongs to the M5 DFlash2 profile: with the
-  // profile off the ANE toggle has no effect, so it is disabled and says why.
-  const m5ProfileToggle = document.getElementById('cfg-m5-dflash2-profile');
-  const aneToggle = document.getElementById('cfg-ane');
   function syncAneUI() {
-    const available = m5ProfileToggle.checked;
+    const aneToggle = document.getElementById('cfg-ane');
+    const capability = window.__IRONMLX_ANE_HEALTH__;
+    const available = !!(capability && capability.qualified && capability.available);
+    const wasDisabled = aneToggle.disabled;
     aneToggle.disabled = !available;
-    aneToggle.closest('.settings-row-right').style.opacity = available ? '1' : '0.4';
-    document.getElementById('ane-requires-m5-profile').hidden = available;
+    if (!available) aneToggle.checked = false;
+    else if (wasDisabled) aneToggle.checked = (window.__IRONMLX_APP_CONFIG__ || {}).ane !== false;
+    const reason = document.getElementById('ane-unavailable-reason');
+    const key = 'ane_' + (capability && capability.reason || 'hardware_unknown');
+    const dict = I18N[currentLang] || I18N.en;
+    reason.dataset.i18n = key;
+    reason.textContent = dict[key] || I18N.en.ane_hardware_unknown;
+    reason.hidden = available;
   }
-  m5ProfileToggle.addEventListener('change', syncAneUI);
   syncAneUI();
 
   // ─── Cluster Page ────────────────────────────────────────────────────────

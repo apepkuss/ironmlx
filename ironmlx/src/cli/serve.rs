@@ -659,6 +659,19 @@ fn install_m5_profile(args: &mut ServeArgs, dflash2: bool, family: Option<DFlash
             .map(DFlash2TargetFamily::m5_profile_target)
             .unwrap_or(m5_profile::M5ProfileTarget::Unqualified),
     );
+    if let Some(path) = args.model.as_deref() {
+        ironmlx_core::ane::set_fixed_model(
+            ironmlx_runtime::core::runtime_health::ane_model_from_snapshot(std::path::Path::new(
+                path,
+            )),
+        );
+    }
+    let ane_hw = ironmlx_core::ane::hardware();
+    tracing::info!(mode = args.ane.as_str(), chip = ?ane_hw.chip,
+        qualified = ane_hw.qualified, available = ane_hw.available, reason = ane_hw.reason, runtime_error = ?ane_hw.runtime_error,
+        model_family = ?ironmlx_core::ane::fixed_model().map(|m|m.as_str()),
+        model_reason = ?ironmlx_core::ane::fixed_model().map(ironmlx_core::ane::reason),
+        "Independent ANE hardware policy");
     apply_m5_profile_defaults(
         args,
         dflash2,

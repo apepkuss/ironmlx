@@ -371,3 +371,18 @@ import Testing
     #expect(profile.status == "active")
     #expect(profile.architecture == "applegpu_g17s")
 }
+
+@Test func independentAneHealthRoundTripsWithoutDflashMetadata() throws {
+    let data=Data("""
+    {"mode":"auto","chip":"Apple M5 Max","qualified":true,"available":true,"reason":"eligible","runtime_error":null,"current_model":{"model":"qwen38-27b","reason":"eligible","completed_jobs":64,"live_surface_bytes":103186432},"models":[{"model":"qwen38-flash-next","reason":"model_not_adapted","completed_jobs":0,"live_surface_bytes":0}]}
+    """.utf8)
+    let value=try JSONDecoder().decode(HealthzSnapshot.AneInfo.self,from:data)
+    #expect(value.currentModel?.completedJobs==64)
+    #expect(value.currentModel?.liveSurfaceBytes==103186432)
+    #expect(value.models.first?.reason=="model_not_adapted")
+    #expect(try JSONDecoder().decode(HealthzSnapshot.AneInfo.self,from:JSONEncoder().encode(value))==value)
+    let unavailable=Data("""
+    {"mode":"off","chip":"Apple M5 Max","qualified":true,"available":false,"reason":"runtime_unavailable","runtime_error":"ABI probe rejected","models":[]}
+    """.utf8)
+    #expect(try JSONDecoder().decode(HealthzSnapshot.AneInfo.self,from:unavailable).runtimeError=="ABI probe rejected")
+}

@@ -579,10 +579,8 @@ impl DecoderLayer {
             } else {
                 None
             };
-            anyhow::ensure!(
-                half == 0 || started.is_some() == on_ane,
-                "DecoderLayer::forward_pair_on: half 1 left the ANE after half 0"
-            );
+            // A failed second handoff can recompute that stateless MLP on
+            // GPU while the first pending half finishes safely on ANE.
             halves.push(match started {
                 Some(started) => HalfMlp::Ane(started),
                 None => HalfMlp::Gpu(normed_post),
@@ -624,7 +622,7 @@ impl DecoderLayer {
         cfg: DecoderLayerConfig,
         kind: AttnKind,
     ) -> Result<Self> {
-        Self::from_loader_impl(loader, prefix, cfg, kind, false)
+        Self::from_loader_impl(loader, prefix, cfg, kind, false, false)
     }
 
     pub(crate) fn from_loader_dflash2(
@@ -633,7 +631,16 @@ impl DecoderLayer {
         cfg: DecoderLayerConfig,
         kind: AttnKind,
     ) -> Result<Self> {
-        Self::from_loader_impl(loader, prefix, cfg, kind, true)
+        Self::from_loader_impl(loader, prefix, cfg, kind, true, false)
+    }
+
+    pub(crate) fn from_loader_ane(
+        loader: &Loader,
+        prefix: &str,
+        cfg: DecoderLayerConfig,
+        kind: AttnKind,
+    ) -> Result<Self> {
+        Self::from_loader_impl(loader, prefix, cfg, kind, false, true)
     }
 
     fn from_loader_impl(
@@ -642,6 +649,7 @@ impl DecoderLayer {
         cfg: DecoderLayerConfig,
         kind: AttnKind,
         dflash2_projection_fusion: bool,
+        ane_mlp_fusion: bool,
     ) -> Result<Self> {
         let input_layernorm = RmsNorm::from_loader(
             loader,
@@ -699,7 +707,7 @@ impl DecoderLayer {
             &format!("{prefix}.post_attention_layernorm"),
             cfg.rms_norm_eps,
         )?;
-        let mlp = if dflash2_projection_fusion {
+        let mlp = if dflash2_projection_fusion || ane_mlp_fusion {
             Mlp::from_loader_dflash2(loader, &format!("{prefix}.mlp"))?
         } else {
             Mlp::from_loader(loader, &format!("{prefix}.mlp"))?
