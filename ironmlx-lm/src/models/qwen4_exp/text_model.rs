@@ -31,7 +31,7 @@ enum Moe {
     Resident(Box<SparseMoeBlock>),
     Paged(Box<PagedMoe>),
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub struct ExpertPagingOptions {
     pub cache_bytes: usize,
     pub staging_bytes: usize,
@@ -116,18 +116,23 @@ impl FlashCache {
     }
 }
 
+pub(crate) type GroupPrefixes = Vec<Vec<Vec<LayerSnapshot>>>;
+type GroupOutput = (Vec<FlashHiddenOutput>, GroupPrefixes);
 pub struct FlashTextModel {
     embedding: Embedding,
     layers: Vec<Layer>,
     mixer: HyperConnection,
     head: Linear,
     pub config: FlashTextConfig,
+    pub(crate) paging_telemetry: Arc<crate::core::paging_stats::PagingTelemetry>,
     pub(crate) instance: Arc<()>,
     pub(crate) dflash_instance: crate::models::dflash2::DFlash2Instance,
     pub(crate) resident_bytes: usize,
     pub(crate) quant: Option<crate::core::weights::QuantMeta>,
     experts: Option<Arc<Mutex<PagedExperts>>>,
     pub(crate) layer_major_verify: bool,
+    pub(crate) native_paged_batching: bool,
+    pub(crate) native_batch_unqualified: bool,
     pub(crate) vision: crate::models::vision::VisionSlot,
     pub(crate) vision_config: Option<crate::models::qwen3_5::VisionConfig>,
 }
@@ -167,6 +172,19 @@ impl FlashTextModel {
             "token" => false,
             _ => anyhow::bail!("IRONMLX_FLASH_VERIFY_ORDER must be layer or token"),
         };
+        let batch_mode =
+            std::env::var("IRONMLX_FLASH_PAGED_BATCHING").unwrap_or_else(|_| "auto".into());
+        let qualified = native_batch_qualified(mlx::memory::snapshot().device_name.as_deref());
+        let native_paged_batching = match batch_mode.as_str() {
+            "auto" => qualified,
+            "on" => true,
+            "off" => false,
+            _ => anyhow::bail!("IRONMLX_FLASH_PAGED_BATCHING must be auto, on or off"),
+        };
+        let native_batch_unqualified = batch_mode == "auto" && !qualified;
+        let telemetry = Arc::new(crate::core::paging_stats::PagingTelemetry::new(
+            paging.is_some(),
+        ));
         let experts = paging
             .map(|options| -> Result<_> {
                 let mut tables = Vec::new();
@@ -192,13 +210,16 @@ impl FlashTextModel {
                         quant,
                     });
                 }
-                Ok(Arc::new(Mutex::new(PagedExperts::new(
-                    Arc::clone(&files),
-                    tables,
-                    options.cache_bytes,
-                    options.staging_bytes,
-                    options.pack_bytes,
-                )?)))
+                Ok(Arc::new(Mutex::new(
+                    PagedExperts::new(
+                        Arc::clone(&files),
+                        tables,
+                        options.cache_bytes,
+                        options.staging_bytes,
+                        options.pack_bytes,
+                    )?
+                    .with_telemetry(Arc::clone(&telemetry)),
+                )))
             })
             .transpose()?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
@@ -232,7 +253,8 @@ impl FlashTextModel {
                         width,
                         ple_cache_bytes,
                         ple_staging_bytes,
-                    )?;
+                    )?
+                    .with_telemetry(Arc::clone(&telemetry));
                     PleLayer::from_weights(loader, &format!("{prefix}.ple"), &cfg, rows)
                 })
                 .transpose()?;
@@ -303,7 +325,10 @@ impl FlashTextModel {
                 .and_then(|n| n.checked_add(paging.map_or(0, |options| options.cache_bytes)))
                 .context("Flash model residency overflow")?,
             experts,
+            paging_telemetry: telemetry,
             layer_major_verify,
+            native_paged_batching,
+            native_batch_unqualified,
         })
     }
 
@@ -389,6 +414,11 @@ impl FlashTextModel {
         capture_layers: &[usize],
         target: StreamOrDevice,
     ) -> Result<FlashHiddenOutput> {
+        let _phase = crate::core::paging_stats::PhaseGuard::enter(if tokens.len() == 1 {
+            crate::core::paging_stats::PagingPhase::Decode
+        } else {
+            crate::core::paging_stats::PagingPhase::Prefill
+        });
         self.forward_inputs_on(tokens, cache, capture_layers, None, None, target)
     }
 
@@ -469,6 +499,9 @@ impl FlashTextModel {
         embeddings: Option<&Array>,
         target: StreamOrDevice,
     ) -> Result<(FlashHiddenOutput, Vec<Vec<LayerSnapshot>>)> {
+        let _phase = crate::core::paging_stats::PhaseGuard::enter(
+            crate::core::paging_stats::PagingPhase::Verify,
+        );
         self.validate_request(tokens, cache, capture_layers)?;
         ensure!(
             tokens.len() <= 8,
@@ -561,6 +594,28 @@ impl FlashTextModel {
         target: StreamOrDevice,
     ) -> Result<Array> {
         let layer = &self.layers[index];
+        let branch = self.forward_attention_branch_on(
+            index, tokens, state, position, input, positions, target,
+        )?;
+        let output = match &layer.mlp {
+            Moe::Resident(moe) => moe.forward_on(&branch.input, target, index as i32)?,
+            Moe::Paged(moe) => moe.forward_on(&branch.input, target, index as i32)?,
+        };
+        branch.combine_on(&output, target)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_attention_branch_on(
+        &self,
+        index: usize,
+        tokens: &[u32],
+        state: &mut LayerState,
+        position: i32,
+        input: &Array,
+        positions: Option<&Array>,
+        target: StreamOrDevice,
+    ) -> Result<super::hyper::HyperBranch> {
+        let layer = &self.layers[index];
         let mut hyper = input.clone();
         if let (
             Some(ple),
@@ -585,13 +640,153 @@ impl FlashTextModel {
             _ => anyhow::bail!("Flash layer state mismatch"),
         };
         hyper = branch.combine_on(&output, target)?;
-        let branch = layer.mlp_hc.branch_on(&hyper, target)?;
-        let output = match &layer.mlp {
-            Moe::Resident(moe) => moe.forward_on(&branch.input, target, index as i32)?,
-            Moe::Paged(moe) => moe.forward_on(&branch.input, target, index as i32)?,
-        };
-        hyper = branch.combine_on(&output, target)?;
-        Ok(hyper)
+        layer.mlp_hc.branch_on(&hyper, target)
+    }
+
+    /// Layer-major requests with isolated attention/recurrent state and one
+    /// shared routed expert execution per layer. Verification keeps Q1
+    /// attention/HC arithmetic and records each token's rollback snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn forward_group_on(
+        &self,
+        tokens: &[Vec<u32>],
+        rows: &mut [FlashCache],
+        captures: &[usize],
+        positions: &[Option<Array>],
+        embeddings: &[Option<Array>],
+        verify: bool,
+        target: StreamOrDevice,
+    ) -> Result<GroupOutput> {
+        let mut hyper = Vec::new();
+        let mut captured: Vec<Vec<Array>> = (0..rows.len()).map(|_| Vec::new()).collect();
+        let mut prefixes: Vec<Vec<Vec<LayerSnapshot>>> = (0..self.layers.len())
+            .map(|_| (0..rows.len()).map(|_| Vec::new()).collect())
+            .collect();
+        for (r, t) in tokens.iter().enumerate() {
+            if t.is_empty() {
+                hyper.push(None);
+                continue;
+            }
+            self.validate_request(t, &rows[r], captures)?;
+            let ids = Array::try_from((t.as_slice(), [1, t.len() as i32]))?;
+            let embedding = match &embeddings[r] {
+                Some(e) => e.clone(),
+                None => self.embedding.forward_on(&ids, target)?,
+            };
+            hyper.push(Some(mlx::ops::shape::concatenate_on(
+                &vec![&embedding; self.config.hc_count as usize],
+                -1,
+                target,
+            )?));
+        }
+        for (index, layer) in self.layers.iter().enumerate() {
+            let mut branches = Vec::new();
+            let mut owners = Vec::new();
+            for (r, t) in tokens.iter().enumerate() {
+                let Some(hyper) = &hyper[r] else {
+                    continue;
+                };
+                let chunks = if verify { t.len() } else { 1 };
+                for token in 0..chunks {
+                    let (start, end) = if verify {
+                        (token as i32, token as i32 + 1)
+                    } else {
+                        (0, t.len() as i32)
+                    };
+                    let input = hyper.slice(
+                        &[0, start, 0][..],
+                        &[1, end, self.config.hc_count * self.config.hidden_size][..],
+                    )?;
+                    let p = positions[r]
+                        .as_ref()
+                        .map(|p| p.slice(&[0, 0, start][..], &[3, 1, end][..]))
+                        .transpose()?;
+                    let position = rows[r].position + start;
+                    let branch = self.forward_attention_branch_on(
+                        index,
+                        &t[start as usize..end as usize],
+                        &mut rows[r].layers[index],
+                        position,
+                        &input,
+                        p.as_ref(),
+                        target,
+                    )?;
+                    if verify && matches!(rows[r].layers[index], LayerState::Linear { .. }) {
+                        prefixes[index][r].push(rows[r].layers[index].snapshot());
+                    }
+                    branches.push(branch);
+                    owners.push(r);
+                }
+            }
+            if branches.is_empty() {
+                continue;
+            }
+            let inputs: Vec<_> = branches.iter().map(|b| b.input.clone()).collect();
+            let output = match &layer.mlp {
+                Moe::Paged(moe) => moe.forward_rows_on(&inputs, &owners, target, index as i32)?,
+                Moe::Resident(moe) => inputs
+                    .iter()
+                    .map(|x| moe.forward_on(x, target, index as i32))
+                    .collect::<Result<Vec<_>>>()?,
+            };
+            let mut per_row: Vec<Vec<Array>> = (0..rows.len()).map(|_| Vec::new()).collect();
+            for ((branch, output), r) in branches.into_iter().zip(output).zip(owners) {
+                per_row[r].push(branch.combine_on(&output, target)?);
+            }
+            for (r, parts) in per_row.into_iter().enumerate() {
+                if parts.is_empty() {
+                    continue;
+                }
+                let refs: Vec<_> = parts.iter().collect();
+                let joined = mlx::ops::shape::concatenate_on(&refs, 1, target)?;
+                if captures.binary_search(&index).is_ok() {
+                    captured[r].push(capture_hc_mean_on(
+                        &joined,
+                        self.config.hc_count,
+                        self.config.hidden_size,
+                        target,
+                    )?);
+                }
+                if index % 4 == 3 {
+                    joined.eval()?;
+                }
+                hyper[r] = Some(joined);
+            }
+        }
+        let mut outputs = Vec::new();
+        for (r, h) in hyper.into_iter().enumerate() {
+            let hidden = if let Some(h) = h {
+                let hidden = if verify {
+                    let parts = (0..tokens[r].len() as i32)
+                        .map(|t| {
+                            self.mixer.final_mix_on(
+                                &h.slice(
+                                    &[0, t, 0][..],
+                                    &[1, t + 1, self.config.hc_count * self.config.hidden_size][..],
+                                )?,
+                                target,
+                            )
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    mlx::ops::shape::concatenate_on(&parts.iter().collect::<Vec<_>>(), 1, target)?
+                } else {
+                    self.mixer.final_mix_on(&h, target)?
+                };
+                hidden.eval()?;
+                hidden
+            } else {
+                Array::zeros([1, 0, self.config.hidden_size], Dtype::Bfloat16)?
+            };
+            for c in &captured[r] {
+                c.eval()?;
+            }
+            rows[r].position += tokens[r].len() as i32;
+            outputs.push(FlashHiddenOutput {
+                hidden,
+                captures: std::mem::take(&mut captured[r]),
+            });
+        }
+        Ok((outputs, prefixes))
     }
 
     fn forward_inner(
@@ -649,5 +844,26 @@ impl FlashTextModel {
     }
     pub(crate) fn project_on(&self, hidden: &Array, target: StreamOrDevice) -> Result<Array> {
         self.head.forward_on(hidden, target)
+    }
+}
+
+fn native_batch_qualified(device: Option<&str>) -> bool {
+    device == Some("Apple M5 Max")
+}
+#[cfg(test)]
+mod native_batch_tests {
+    use super::*;
+    #[test]
+    fn auto_requires_a_validated_gpu() {
+        assert!(native_batch_qualified(Some("Apple M5 Max")));
+        for device in [
+            None,
+            Some("Apple M1 Pro"),
+            Some("Apple M4 Max"),
+            Some("Apple M5 Pro"),
+            Some("Apple M6 Max"),
+        ] {
+            assert!(!native_batch_qualified(device));
+        }
     }
 }

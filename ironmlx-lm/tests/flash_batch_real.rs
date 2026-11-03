@@ -89,6 +89,7 @@ fn flash_ragged_b4_matches_b1_and_preserves_inactive_and_adopted_rows() {
     let mut batch = model.make_cache(4, 32, Dtype::Bfloat16).unwrap();
     let attention = build_batch_attention_mask(&lengths, max, Dtype::Bfloat16).unwrap();
     let linear = build_batch_linear_mask(&lengths, max).unwrap();
+    let prefill_started = std::time::Instant::now();
     let actual = model
         .batched_prefill(
             &ids(&padded, 4, max),
@@ -100,6 +101,11 @@ fn flash_ragged_b4_matches_b1_and_preserves_inactive_and_adopted_rows() {
             ().into(),
         )
         .unwrap();
+    actual.eval().unwrap();
+    eprintln!(
+        "TIMING prefill_b4_ms={:.3}",
+        prefill_started.elapsed().as_secs_f64() * 1000.0
+    );
     let mut references = Vec::new();
     for (row, prompt) in prompts.iter().enumerate() {
         let mut cache = model.make_cache(1, 32, Dtype::Bfloat16).unwrap();
@@ -131,6 +137,7 @@ fn flash_ragged_b4_matches_b1_and_preserves_inactive_and_adopted_rows() {
         Dtype::Bfloat16,
     )
     .unwrap();
+    let decode_started = std::time::Instant::now();
     let actual = model
         .forward_on(
             &ids(&tokens, 4, 1),
@@ -141,6 +148,11 @@ fn flash_ragged_b4_matches_b1_and_preserves_inactive_and_adopted_rows() {
             ().into(),
         )
         .unwrap();
+    actual.eval().unwrap();
+    eprintln!(
+        "TIMING decode_b4_ms={:.3}",
+        decode_started.elapsed().as_secs_f64() * 1000.0
+    );
     for row in 0..4 {
         let expected = model
             .forward_on(
@@ -167,6 +179,28 @@ fn flash_ragged_b4_matches_b1_and_preserves_inactive_and_adopted_rows() {
         offsets(&batch),
         lengths.iter().map(|n| n + 1).collect::<Vec<_>>()
     );
+    if std::env::var("IRONMLX_FLASH_PAGED_BATCHING").as_deref() != Ok("off") {
+        let stats = model.paging_telemetry().unwrap().snapshot();
+        assert_eq!(
+            stats.experts.phases[0].request_width, 4,
+            "prefill must preserve the B4 input width"
+        );
+        assert_eq!(
+            stats.experts.phases[1].request_width, 4,
+            "decode must preserve the B4 input width"
+        );
+        assert!(stats
+            .experts
+            .phases
+            .iter()
+            .all(|p| p.route_count >= p.hits + p.misses));
+        assert!(stats.experts.charged_bytes <= stats.experts.budget_bytes);
+        assert_eq!(
+            stats.experts.pinned_bytes, 0,
+            "GPU consumers have completed"
+        );
+        eprintln!("paging stats: {}", serde_json::to_string(&stats).unwrap());
+    }
     let mut adopted = model.make_cache(4, 64, Dtype::Bfloat16).unwrap();
     adopt_layer_cache_rows(&mut adopted, &batch, 0, 2).unwrap();
     assert_eq!(offsets(&adopted), [lengths[2] + 1, 0, 0, 0]);
@@ -229,4 +263,77 @@ fn flash_ragged_b4_matches_b1_and_preserves_inactive_and_adopted_rows() {
         "ragged B4, inactive rows, slot adoption, rejection and reset: exact; memory={:?}",
         mlx::memory::snapshot()
     );
+}
+
+#[test]
+#[ignore = "requires actual Flash checkpoint; direct native PagedMoe B2/B4"]
+#[cfg(feature = "test-support")]
+fn flash_paged_moe_direct_b2_b4_merges_expert_work() {
+    use ironmlx_lm::{
+        core::paged_experts::{ExpertTableSpec, PagedExperts},
+        models::qwen4_exp::{config::FlashTextConfig, PagedMoe},
+    };
+    use std::sync::Mutex;
+    let path = std::env::var("IRONMLX_FLASH_SNAPSHOT").unwrap();
+    let loader = Loader::open_flash_text_paged(Path::new(&path), 8u64 << 30).unwrap();
+    let cfg = FlashTextConfig::from_root(loader.config_raw_value()).unwrap();
+    let prefix = "model.layers.0.mlp";
+    let quant = loader
+        .quant_meta_for(&format!("{prefix}.switch_mlp.gate_proj"))
+        .unwrap();
+    let files = Arc::new(ModelTensorFiles::open(Path::new(&path)).unwrap());
+    let store = Arc::new(Mutex::new(
+        PagedExperts::new(
+            files,
+            vec![ExpertTableSpec {
+                prefix: format!("language_model.{prefix}.switch_mlp"),
+                experts: cfg.num_experts as u32,
+                hidden: cfg.hidden_size,
+                intermediate: cfg.moe_intermediate_size,
+                quant,
+            }],
+            64 << 20,
+            16 << 20,
+            64 << 20,
+        )
+        .unwrap(),
+    ));
+    let moe = PagedMoe::from_weights(&loader, prefix, &cfg, Arc::clone(&store), 0).unwrap();
+    for seq in [2, 127, 205, 1024] {
+        let values: Vec<f32> = (0..cfg.hidden_size)
+            .map(|n| ((n % 113) as f32 - 56.0) / 113.0)
+            .collect::<Vec<_>>()
+            .repeat(seq as usize);
+        let one = Array::try_from((values.as_slice(), [1, seq, cfg.hidden_size]))
+            .unwrap()
+            .astype(Dtype::Bfloat16)
+            .unwrap();
+        let expected = moe.forward_on(&one, ().into(), 0).unwrap();
+        expected.eval().unwrap();
+        let before = store.lock().unwrap().stats();
+        for width in [2, 4] {
+            let input = mlx::ops::shape::concatenate(&vec![&one; width], 0).unwrap();
+            let output = moe.forward_on(&input, ().into(), 0).unwrap();
+            output.eval().unwrap();
+            exact(
+                &format!("direct native MoE B{width} S{seq}"),
+                &output,
+                &mlx::ops::shape::concatenate(&vec![&expected; width], 0).unwrap(),
+            );
+        }
+        let cache = store.lock().unwrap();
+        assert_eq!(
+            cache.stats().misses,
+            before.misses,
+            "identical requests must share resident experts"
+        );
+        assert_eq!(cache.telemetry().snapshot().experts.phases[0].max_width, 4);
+    }
+    assert!(moe
+        .forward_on(
+            &Array::zeros([0, 2, cfg.hidden_size], Dtype::Bfloat16).unwrap(),
+            ().into(),
+            0
+        )
+        .is_err());
 }

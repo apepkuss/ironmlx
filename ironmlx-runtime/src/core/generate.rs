@@ -344,6 +344,9 @@ impl<'m, M: ironmlx_lm::core::model::Model + DenseVlMethods> GenerationStream<'m
                     );
                 }
 
+                let _paging_prefill = ironmlx_lm::core::paging_stats::PhaseGuard::enter(
+                    ironmlx_lm::core::paging_stats::PagingPhase::Prefill,
+                );
                 let logits_or_hidden = if vision_embeds_full.is_some() {
                     if is_last {
                         Some(model.forward_vl_chunk(
@@ -562,6 +565,9 @@ impl<'m, M: ironmlx_lm::core::model::Model> GenerationStream<'m, M> {
             };
 
             let is_last = pos + n == prompt_len_i32;
+            let _paging_prefill = ironmlx_lm::core::paging_stats::PhaseGuard::enter(
+                ironmlx_lm::core::paging_stats::PagingPhase::Prefill,
+            );
             let logits_or_hidden = if is_last {
                 Some(model.forward_on(
                     &chunk_arr,

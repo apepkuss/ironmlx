@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:19083")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--baseline", type=Path)
+    parser.add_argument("--max-tokens", type=int, default=24)
     parser.add_argument(
         "--images",
         action="store_true",
@@ -71,12 +72,12 @@ def main():
             prompts[2],
         ]
 
-    def request(prompt, *, stream=False, max_tokens=24):
+    def request(prompt, *, stream=False, max_tokens=None):
         payload = dict(
             model="flash-qualification",
             messages=[dict(role="user", content=prompt)],
             temperature=0,
-            max_tokens=max_tokens,
+            max_tokens=args.max_tokens if max_tokens is None else max_tokens,
             stream=stream,
             chat_template_kwargs=dict(enable_thinking=False),
         )

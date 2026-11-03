@@ -515,6 +515,7 @@ fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Route
         )
         .route("/admin/api/models/register", post(register_model_handler))
         .route("/admin/api/models/load", post(load_model_handler))
+        .route("/admin/api/models/load-plan", post(load_plan_handler))
         .route("/admin/api/models/mtp/validate", post(validate_mtp_handler))
         .route("/admin/api/models/unload", post(unload_model_handler))
         .route(
@@ -660,6 +661,24 @@ async fn update_asr_settings_handler(
     match apply {
         Ok(response) => response.into_response(),
         Err(error) => error.into_response(ApiProtocol::OpenAi),
+    }
+}
+
+async fn load_plan_handler(
+    State(manager): State<ModelManager>,
+    Json(request): Json<LoadModelRequest>,
+) -> Response {
+    let parsed = match parse_load_model_request(request) {
+        Ok(p) => p,
+        Err(e) => return e.into_response(),
+    };
+    if manager.pool.is_model_loaded(&parsed.model_reference).await {
+        return Json(serde_json::json!({"flash":null,"advisory":true,"reason":"already_loaded"}))
+            .into_response();
+    }
+    match manager.management.preview_load(parsed).await {
+        Ok(plan) => Json(serde_json::json!({"flash":plan,"advisory":true})).into_response(),
+        Err(error) => AdminError::from_load_error(error).into_response(),
     }
 }
 
@@ -888,6 +907,7 @@ impl AdminModelResponse {
 
 #[derive(Debug, Clone, Serialize)]
 struct LoadedModelInfo {
+    paging: Option<ironmlx_lm::core::paging_stats::PagingSnapshot>,
     ane: ironmlx_runtime::core::runtime_health::AneModelHealth,
     #[serde(skip_serializing_if = "Option::is_none")]
     decision: Option<ironmlx_decision::DecisionSettings>,
@@ -942,6 +962,7 @@ struct AppHealthSnapshot {
 impl From<EngineLoadedModelInfo> for LoadedModelInfo {
     fn from(info: EngineLoadedModelInfo) -> Self {
         Self {
+            paging: info.paging,
             ane: info.ane,
             id: info.id.clone(),
             model: info.id,
@@ -1415,6 +1436,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     );
 
     HealthSnapshot {
+        paging: None,
         ane: ironmlx_runtime::core::runtime_health::AneHealth::current(),
         status,
         degraded_reasons,
@@ -1759,6 +1781,7 @@ mod tests {
         active_stats.set_parked_requests(2);
         active_stats.record_error();
         let mut info = EngineLoadedModelInfo {
+            paging: None,
             ane: ironmlx_runtime::core::runtime_health::AneModelHealth::for_model(
                 ironmlx_core::ane::Model::Other,
             ),
@@ -2151,6 +2174,7 @@ mod tests {
     #[test]
     fn aggregate_health_reports_loaded_mtp_state() {
         let snapshot = HealthSnapshot {
+            paging: None,
             ane: ironmlx_runtime::core::runtime_health::AneHealth::current(),
             status: ironmlx_runtime::core::runtime_health::HealthStatus::Healthy,
             degraded_reasons: Vec::new(),

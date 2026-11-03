@@ -9,6 +9,7 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
     public var scheduler: SchedulerInfo
     public var memory: MemoryInfo
     public var dflash2: DFlash2Info?
+    public var paging: BackendPagingInfo? = nil
     public var ane: AneInfo? = nil
     public var activeKvOffload: ActiveKvOffloadInfo
     public var deviceName: String?
@@ -23,6 +24,7 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
         case scheduler
         case memory
         case dflash2
+        case paging
         case ane
         case activeKvOffload = "active_kv_offload"
         case deviceName = "device_name"
@@ -315,6 +317,7 @@ public struct LegacyHealthAdapter {
                 BackendLoadedModelInfo(
                     id: snapshot.model.name,
                     ane: snapshot.ane?.currentModel,
+                    paging: snapshot.paging,
                     model: snapshot.model.name,
                     path: "",
                     architecture: "qwen3_5",
@@ -365,5 +368,94 @@ public struct LegacyHealthAdapter {
 
     private func bytesToMegabytes(_ bytes: UInt64) -> Double {
         Double(bytes) / 1_048_576.0
+    }
+}
+
+public struct BackendPagingPhase: Codable, Equatable, Sendable {
+    public var arithmeticSplits: UInt64? = nil
+    public var requestWidth: UInt64? = nil
+    public var budgetSplits: UInt64? = nil
+    public var prefetchScheduled: UInt64? = nil
+    public var prefetchUnused: UInt64? = nil
+    public var phase: String
+    public var hitRate: Double?
+    public var hits: UInt64
+    public var misses: UInt64
+    public var evictions: UInt64
+    public var readBytes: UInt64
+    public var readUs: UInt64
+    public var packUs: UInt64
+    public var lockWaitUs: UInt64
+    public var routeCount: UInt64
+    public var batches: UInt64
+    public var microbatches: UInt64
+    public var maxWidth: UInt64
+    public var scanAdmissions: UInt64
+    public var prefetchHits: UInt64
+    enum CodingKeys: String, CodingKey {
+        case arithmeticSplits = "arithmetic_splits"
+        case requestWidth = "request_width"
+        case budgetSplits = "budget_splits"
+        case prefetchScheduled = "prefetch_scheduled"
+        case prefetchUnused = "prefetch_unused"
+        case phase
+        case hitRate = "hit_rate"
+        case hits
+        case misses
+        case evictions
+        case readBytes = "read_bytes"
+        case readUs = "read_us"
+        case packUs = "pack_us"
+        case lockWaitUs = "lock_wait_us"
+        case routeCount = "route_count"
+        case batches
+        case microbatches
+        case maxWidth = "max_width"
+        case scanAdmissions = "scan_admissions"
+        case prefetchHits = "prefetch_hits"
+    }
+}
+public struct BackendPagingCache: Codable, Equatable, Sendable {
+    public var pendingBytes: UInt64? = nil
+    public var budgetBytes: UInt64
+    public var chargedBytes: UInt64
+    public var payloadBytes: UInt64
+    public var peakChargedBytes: UInt64
+    public var entries: UInt64
+    public var pinnedBytes: UInt64
+    public var phases: [BackendPagingPhase]
+    enum CodingKeys: String, CodingKey {
+        case pendingBytes = "pending_bytes"
+        case budgetBytes = "budget_bytes"
+        case chargedBytes = "charged_bytes"
+        case payloadBytes = "payload_bytes"
+        case peakChargedBytes = "peak_charged_bytes"
+        case entries
+        case pinnedBytes = "pinned_bytes"
+        case phases
+    }
+}
+public struct BackendPagingFallback: Codable, Equatable, Sendable {
+    public var reason: String
+    public var calls: UInt64
+}
+public struct BackendPagingInfo: Codable, Equatable, Sendable {
+    public var fallbacks: [BackendPagingFallback]? = nil
+    public var instanceId: String
+    public var mode: String
+    public var startedUnixMs: UInt64
+    public var sampledUnixMs: UInt64
+    public var elapsedMs: UInt64
+    public var experts: BackendPagingCache
+    public var ple: BackendPagingCache
+    enum CodingKeys: String, CodingKey {
+        case fallbacks
+        case instanceId = "instance_id"
+        case mode
+        case startedUnixMs = "started_unix_ms"
+        case sampledUnixMs = "sampled_unix_ms"
+        case elapsedMs = "elapsed_ms"
+        case experts
+        case ple
     }
 }

@@ -1762,7 +1762,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     config: config,
                     currentLoadedModelCount: loadedModels.count
                 )
-                let response = try await client.loadModel(
+                let response = try await client.loadModelWithPlan(
                     model: model,
                     modelDir: loadModelPath,
                     setDefault: setDefault,
@@ -1779,7 +1779,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         for: model,
                         execution: self.parameterStore.parameters(for: model)?.audioExecution
                     ),
-                    decision: self.parameterStore.parameters(for: model)?.decision
+                    decision: self.parameterStore.parameters(for: model)?.decision,
+                    onLoadPlan: { [weak self] json in
+                        self?.sendJavaScript("onModelLoadPlan(\(Self.jsStringLiteral(json)))")
+                    }
                 )
                 let json = try Self.jsonString(response)
                 await MainActor.run {

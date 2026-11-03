@@ -205,7 +205,41 @@ public struct BackendAPIClient: Sendable {
             deferWhenBusy: nil,
             samplingDefaults: samplingDefaults,
             audio: audio,
-            decision: decision
+            decision: decision,
+            onLoadPlan: nil
+        )
+    }
+
+    public func loadModelWithPlan(
+        model: String,
+        modelDir: String,
+        setDefault: Bool = true,
+        maxCacheCap: Int? = nil,
+        pinned: Bool = false,
+        mtpModelDir: String? = nil,
+        mtpDraftTokens: Int? = nil,
+        promptLookup: BackendPromptLookupConfig? = nil,
+        reloadWhenIdle: Bool,
+        samplingDefaults: BackendSamplingDefaults,
+        audio: BackendAudioResources? = nil,
+        decision: BackendDecisionSettings? = nil,
+        onLoadPlan: (@MainActor @Sendable (String) -> Void)? = nil
+    ) async throws -> BackendModelAdminResponse {
+        try await loadModel(
+            model: model,
+            modelDir: modelDir,
+            setDefault: setDefault,
+            maxCacheCap: maxCacheCap,
+            pinned: pinned,
+            mtpModelDir: mtpModelDir,
+            mtpDraftTokens: mtpDraftTokens,
+            promptLookup: promptLookup,
+            reloadWhenIdle: reloadWhenIdle,
+            deferWhenBusy: nil,
+            samplingDefaults: samplingDefaults,
+            audio: audio,
+            decision: decision,
+            onLoadPlan: onLoadPlan
         )
     }
 
@@ -222,7 +256,8 @@ public struct BackendAPIClient: Sendable {
         deferWhenBusy: Bool? = nil,
         samplingDefaults: BackendSamplingDefaults,
         audio: BackendAudioResources? = nil,
-        decision: BackendDecisionSettings? = nil
+        decision: BackendDecisionSettings? = nil,
+        onLoadPlan: (@MainActor @Sendable (String) -> Void)? = nil
     ) async throws -> BackendModelAdminResponse {
         let request = BackendLoadModelRequest(
             model: model,
@@ -239,6 +274,13 @@ public struct BackendAPIClient: Sendable {
             audio: audio,
             decision: decision
         )
+        let planData = try await postJSON(path: "/admin/api/models/load-plan", body: request)
+        if let root = try JSONSerialization.jsonObject(with: planData) as? [String: Any],
+           let plan = root["flash"] as? [String: Any],
+           let residency = plan["residency"] as? [String: Any] {
+            IronMLXAppLogger.info("Flash load plan: \(residency)")
+            if let json = String(data: planData, encoding: .utf8) { await onLoadPlan?(json) }
+        }
         let data = try await postJSON(path: "/admin/api/models/load", body: request)
         return try JSONDecoder().decode(BackendModelAdminResponse.self, from: data)
     }
@@ -784,6 +826,7 @@ public struct BackendEmbeddingMetrics: Codable, Equatable, Sendable {
 }
 
 public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
+    public var paging: BackendPagingInfo? = nil
     public var ane: HealthzSnapshot.AneModelInfo? = nil
     public var decision: BackendDecisionSettings?
     public var decisionMetrics: BackendDecisionMetrics?
@@ -813,6 +856,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public init(
         id: String,
         ane: HealthzSnapshot.AneModelInfo? = nil,
+        paging: BackendPagingInfo? = nil,
         decision: BackendDecisionSettings? = nil,
         decisionMetrics: BackendDecisionMetrics? = nil,
         embeddingMetrics: BackendEmbeddingMetrics? = nil,
@@ -851,6 +895,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         self.decision = decision
         self.decisionMetrics = decisionMetrics
         self.embeddingMetrics = embeddingMetrics
+        self.paging = paging
         self.ane = ane
         self.id = id
         self.model = model
@@ -876,6 +921,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
+        case paging
         case ane
         case decision
         case decisionMetrics = "decision_metrics"
@@ -913,6 +959,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.paging = try container.decodeIfPresent(BackendPagingInfo.self, forKey: .paging)
         self.ane = try container.decodeIfPresent(HealthzSnapshot.AneModelInfo.self, forKey: .ane)
         self.decision = try container.decodeIfPresent(BackendDecisionSettings.self, forKey: .decision)
         self.decisionMetrics = try container.decodeIfPresent(
@@ -976,6 +1023,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(paging, forKey: .paging)
         try container.encodeIfPresent(ane, forKey: .ane)
         try container.encodeIfPresent(decision, forKey: .decision)
         try container.encodeIfPresent(decisionMetrics, forKey: .decisionMetrics)

@@ -15,6 +15,8 @@ pub mod math;
 mod model;
 #[cfg(unix)]
 mod paged_moe;
+#[cfg(feature = "test-support")]
+pub use paged_moe::PagedMoe;
 #[cfg(unix)]
 pub mod ple;
 pub mod ple_index;

@@ -4289,6 +4289,9 @@ fn forward_batched_text_prefill<M: Model>(
     cache: Option<&mut [LayerCache]>,
     target: mlx::StreamOrDevice,
 ) -> Result<Array> {
+    let _paging_prefill = ironmlx_lm::core::paging_stats::PhaseGuard::enter(
+        ironmlx_lm::core::paging_stats::PagingPhase::Prefill,
+    );
     if per_row_lens.iter().all(|&len| len == max_len) {
         return model.batched_prefill_causal(input_ids, position_ids, per_row_lens, cache, target);
     }
@@ -14924,6 +14927,9 @@ impl<M: Model> Scheduler<M> {
     where
         M: DenseVlMethods,
     {
+        let _paging_prefill = ironmlx_lm::core::paging_stats::PhaseGuard::enter(
+            ironmlx_lm::core::paging_stats::PagingPhase::Prefill,
+        );
         self.ensure_not_poisoned()?;
         let components = self.active_materialization_components(false);
         let cold_materialization = self.begin_cold_materialization(components)?;
@@ -15041,21 +15047,29 @@ impl<M: Model> Scheduler<M> {
             return Err(anyhow!("prefill_admitted: no admitted requests to prefill"));
         }
 
+        let any_multimodal = active_rows.iter().any(|&row| {
+            self.slots[row]
+                .as_ref()
+                .is_some_and(|state| state.pixel_values.is_some())
+        });
+        // Native text batching must not bypass the independent image-prefill
+        // partition contract (including each row's final text token).
         if active_rows.len() > 1
-            && model.requires_split_batched_prefill_for_token_parity()
-            && (model.requires_row_isolated_multimodal_prefill()
-                || active_rows.iter().any(|&row| {
-                    model.prefers_row_isolated_prefill(
-                        self.slots[row]
-                            .as_ref()
-                            .map_or(0, |state| state.prompt_ids.len()),
-                    )
-                })
-                || active_rows.iter().all(|&row| {
-                    self.slots[row]
-                        .as_ref()
-                        .is_some_and(|state| state.pixel_values.is_none())
-                }))
+            && ((any_multimodal && model.requires_row_isolated_multimodal_prefill())
+                || (model.requires_split_batched_prefill_for_token_parity()
+                    && (model.requires_row_isolated_multimodal_prefill()
+                        || active_rows.iter().any(|&row| {
+                            model.prefers_row_isolated_prefill(
+                                self.slots[row]
+                                    .as_ref()
+                                    .map_or(0, |state| state.prompt_ids.len()),
+                            )
+                        })
+                        || active_rows.iter().all(|&row| {
+                            self.slots[row]
+                                .as_ref()
+                                .is_some_and(|state| state.pixel_values.is_none())
+                        }))))
         {
             return self.prefill_admitted_row_isolated(model, &active_rows);
         }
@@ -15984,6 +15998,9 @@ impl<M: Model> Scheduler<M> {
     where
         M: DenseVlMethods,
     {
+        let _paging_prefill = ironmlx_lm::core::paging_stats::PhaseGuard::enter(
+            ironmlx_lm::core::paging_stats::PagingPhase::Prefill,
+        );
         let id = self.slots[row_idx]
             .as_ref()
             .ok_or_else(|| anyhow!("adaptive prefill row is absent"))?
@@ -16954,6 +16971,9 @@ impl<M: Model> Scheduler<M> {
     where
         M: DenseVlMethods,
     {
+        let _paging_prefill = ironmlx_lm::core::paging_stats::PhaseGuard::enter(
+            ironmlx_lm::core::paging_stats::PagingPhase::Prefill,
+        );
         self.ensure_not_poisoned()?;
 
         let requested_tokens = handle
@@ -21934,6 +21954,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingPrefillModel {
         split_batched_prefill: bool,
+        isolated_multimodal_prefill: bool,
         make_cache_batches: std::sync::Mutex<Vec<i32>>,
         text_forward_batches: std::sync::Mutex<Vec<i32>>,
         text_forward_seq_lens: std::sync::Mutex<Vec<i32>>,
@@ -22096,6 +22117,9 @@ mod tests {
 
         fn requires_split_batched_prefill_for_token_parity(&self) -> bool {
             self.split_batched_prefill
+        }
+        fn requires_row_isolated_multimodal_prefill(&self) -> bool {
+            self.isolated_multimodal_prefill
         }
     }
 
@@ -30410,6 +30434,52 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!((events[0].id, events[0].token), (id_0, 3));
         assert_eq!((events[1].id, events[1].token), (id_1, 4));
+    }
+
+    #[test]
+    fn native_text_prefill_keeps_independent_multimodal_isolation() {
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
+        let model = RecordingPrefillModel {
+            split_batched_prefill: false,
+            isolated_multimodal_prefill: true,
+            ..RecordingPrefillModel::default()
+        };
+        let mut mixed = Scheduler::<RecordingPrefillModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .unwrap();
+        mixed.admit(mk_req(vec![1, 2, 3])).unwrap();
+        let mut image = mk_req(vec![1, IMAGE_TOKEN_ID as u32, 2]);
+        image.pixel_values = Some(vec![
+            mlx::Array::zeros([1, 4], mlx::Dtype::Bfloat16).unwrap()
+        ]);
+        image.image_grid_thw = Some(vec![(1, 2, 2)]);
+        image.image_spatial_merge_size = 2;
+        image.image_token_id = IMAGE_TOKEN_ID;
+        mixed.admit(image).unwrap();
+        assert_eq!(mixed.prefill_admitted(&model).unwrap().len(), 2);
+        assert!(model.vl_prefill_batches().is_empty());
+        assert_eq!(model.vl_hidden_shapes(), vec![(1, 2)]);
+        assert_eq!(model.vl_chunk_batches(), vec![1]);
+        assert_eq!(model.make_cache_batches(), vec![2, 1, 1]);
+
+        let text_model = RecordingPrefillModel {
+            split_batched_prefill: false,
+            isolated_multimodal_prefill: true,
+            ..RecordingPrefillModel::default()
+        };
+        let mut text = Scheduler::<RecordingPrefillModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .unwrap();
+        text.admit(mk_req(vec![1, 2, 3])).unwrap();
+        text.admit(mk_req(vec![4, 5, 6])).unwrap();
+        text.prefill_admitted(&text_model).unwrap();
+        assert_eq!(text_model.text_forward_batches(), vec![2]);
     }
 
     #[test]

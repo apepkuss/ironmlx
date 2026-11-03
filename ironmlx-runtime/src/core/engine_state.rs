@@ -866,6 +866,7 @@ where
     static_memory_estimate.text_cold_bytes = static_memory_estimate
         .text_cold_bytes
         .saturating_add(model.auxiliary_memory_bytes());
+    let paging_telemetry = model.paging_telemetry();
     let model = Arc::new(Mutex::new(model));
     let admission_deadline = std::time::Duration::from_millis(admission_deadline_ms);
 
@@ -971,7 +972,7 @@ where
             )
         })
         .unwrap_or_else(health::PromptLookupHealthConfig::disabled);
-    let health_collector = build_health_collector(
+    let mut health_collector = build_health_collector(
         model_id.clone(),
         model_max_context,
         b_max,
@@ -980,6 +981,9 @@ where
         mtp_health,
         prompt_lookup_health,
     );
+    Arc::get_mut(&mut health_collector)
+        .expect("new health collector")
+        .paging = paging_telemetry;
     let runtime_usage = scheduler_handle.runtime_usage.clone();
 
     Ok(CausalEngine {
@@ -1022,6 +1026,7 @@ pub(crate) fn build_health_collector(
     prompt_lookup: health::PromptLookupHealthConfig,
 ) -> Arc<health::SchedulerHealthCollector> {
     Arc::new(health::SchedulerHealthCollector {
+        paging: None,
         start_time: std::time::Instant::now(),
         b_max,
         queue_max: admission_queue_max,
@@ -1124,6 +1129,7 @@ where
     static_memory_estimate.text_cold_bytes = static_memory_estimate
         .text_cold_bytes
         .saturating_add(model.auxiliary_memory_bytes());
+    let paging_telemetry = model.paging_telemetry();
     let model = Arc::new(Mutex::new(model));
     let (
         mut meta,
@@ -1231,6 +1237,7 @@ where
         Arc::clone(&cold_materialization_tracker),
     );
     let health_collector = Arc::new(health::SchedulerHealthCollector {
+        paging: paging_telemetry,
         start_time: std::time::Instant::now(),
         b_max,
         queue_max: admission_queue_max,

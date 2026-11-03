@@ -12,6 +12,7 @@ pub mod model_input;
 pub mod native_output;
 #[cfg(unix)]
 pub mod paged_experts;
+pub mod paging_stats;
 pub mod reasoning_budget;
 pub mod residency;
 pub mod sampler;

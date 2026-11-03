@@ -564,6 +564,32 @@ fn ensure_gpu_memory_headroom() -> std::result::Result<(), ModelManagementError>
 }
 
 impl ModelManagement {
+    pub async fn preview_load(
+        &self,
+        request: ModelLoadRequest,
+    ) -> Result<Option<ironmlx_lm::models::qwen4_exp::load_plan::FlashLoadPlan>> {
+        if !request.model_dir.join("config.json").is_file()
+            || !super::flash_load::is_flash(&request.model_dir)?
+        {
+            return Ok(None);
+        }
+        let load = build_engine_model_config(
+            &self.scheduler_options,
+            EngineModelBuildRequest {
+                audio: request.audio,
+                decision: request.decision,
+                model_id: request.model_reference,
+                model_dir: &request.model_dir,
+                max_cache_cap_override: request.max_cache_cap_override,
+                default_max_output_tokens: request.default_max_output_tokens,
+                sampling_defaults_override: request.sampling_defaults,
+                mtp: request.mtp,
+                prompt_lookup: request.prompt_lookup,
+                pinned: request.pinned,
+            },
+        )?;
+        self.pool.preview_flash_load(&load.config).await
+    }
     pub async fn load_model(
         &self,
         request: ModelLoadRequest,

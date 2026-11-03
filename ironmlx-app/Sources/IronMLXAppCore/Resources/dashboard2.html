@@ -880,6 +880,16 @@
     white-space: nowrap;
   }
 
+  .runtime-paging-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .runtime-paging-details .runtime-section-title,
+  .runtime-paging-details .runtime-section-meta,
+  .runtime-paging-details .runtime-paging-phase { grid-column: 1 / -1; }
+  .runtime-paging-details .runtime-kv-detail-value {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+  }
+
   @media (max-width: 900px) {
     .runtime-performance-rail {
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -6143,6 +6153,11 @@
       runtime_cumulative_tokens: "Cumulative tokens",
       runtime_cache_hit_tokens: "Cache-hit tokens",
       runtime_cache_hit_rate: "Cache hit rate",
+      paging_title: "Weight paging", paging_experts: "Expert cache", paging_ple: "PLE row cache", paging_usage: "Charged / budget", paging_recent: "Recent hit rate (up to 30s)", paging_total: "Cumulative hit rate", paging_app_read: "Application read rate", paging_read_time: "Cumulative read time", paging_wait_time: "Cumulative lock wait", paging_no_data: "No data", paging_not_applicable: "Not applicable", paging_prefill: "Prefill", paging_decode: "Decode", paging_verify: "DFlash2 verify", paging_hme: "Hits/misses/evictions", paging_batch: "Input / expert execution width", paging_micro: "Microbatches", paging_ssd: "SSD expert paging", paging_full: "Full expert residency", paging_help: "Cache lookups count unique experts per microbatch; PLE counts row lookups. Application reads may hit the OS page cache and are not physical SSD throughput. Recent rates cover observed samples only.",
+      paging_load_plan: "Loading with {mode}. Planned reservation {planned}; available budget {available}.",
+      paging_gpu_not_qualified: "Row fallback: GPU not yet qualified for native expert batching",
+      paging_splits: "Budget / arithmetic splits",
+      paging_prefetch: "Prefetch used/scheduled/unused", paging_native_batching_disabled: "Row fallback: native batching disabled", paging_token_major_verifier: "Row fallback: token-major verifier",
       runtime_live_decode_rate: "Live decode",
       runtime_recent_decode_rate: "Recent P50",
       runtime_session_decode_rate: "Session average",
@@ -6850,6 +6865,11 @@
       runtime_cumulative_tokens: "累计 Tokens",
       runtime_cache_hit_tokens: "缓存命中 Tokens",
       runtime_cache_hit_rate: "缓存命中率",
+      paging_title: "权重分页", paging_experts: "专家缓存", paging_ple: "PLE 行缓存", paging_usage: "计费占用／预算", paging_recent: "近期命中率（最多 30 秒）", paging_total: "累计命中率", paging_app_read: "应用读取速率", paging_read_time: "累计读取耗时", paging_wait_time: "累计锁等待", paging_no_data: "暂无数据", paging_not_applicable: "不适用", paging_prefill: "预填充", paging_decode: "普通解码", paging_verify: "DFlash2 验证", paging_hme: "命中／未命中／淘汰", paging_batch: "输入／专家执行合批宽度", paging_micro: "微批次数", paging_ssd: "SSD 专家分页", paging_full: "专家全驻留", paging_help: "专家命中按每个微批去重后的查询计数；PLE 按行查询计数。应用读取可能命中系统页缓存，不代表物理 SSD 吞吐。近期速率仅覆盖已采样时段。",
+      paging_load_plan: "按{mode}加载。计划预留 {planned}，当前可用预算 {available}。",
+      paging_gpu_not_qualified: "逐行回退：此 GPU 的原生专家合批尚未验证",
+      paging_splits: "预算／数值路径拆分",
+      paging_prefetch: "预读使用／调度／未使用", paging_native_batching_disabled: "逐行回退：已关闭原生合批", paging_token_major_verifier: "逐行回退：逐 token 验证模式",
       runtime_live_decode_rate: "实时解码",
       runtime_recent_decode_rate: "近期 P50",
       runtime_session_decode_rate: "会话平均",
@@ -7557,6 +7577,11 @@
       runtime_cumulative_tokens: "累計 Tokens",
       runtime_cache_hit_tokens: "快取命中 Tokens",
       runtime_cache_hit_rate: "快取命中率",
+      paging_title: "權重分頁", paging_experts: "專家快取", paging_ple: "PLE 行快取", paging_usage: "計費占用／預算", paging_recent: "近期命中率（最多 30 秒）", paging_total: "累計命中率", paging_app_read: "應用程式讀取速率", paging_read_time: "累計讀取耗時", paging_wait_time: "累計鎖等待", paging_no_data: "暫無資料", paging_not_applicable: "不適用", paging_prefill: "預填充", paging_decode: "一般解碼", paging_verify: "DFlash2 驗證", paging_hme: "命中／未命中／淘汰", paging_batch: "輸入／專家執行合批寬度", paging_micro: "微批次數", paging_ssd: "SSD 專家分頁", paging_full: "專家全駐留", paging_help: "專家命中按每個微批去重後的查詢計數；PLE 按行查詢計數。應用程式讀取可能命中系統頁面快取，不代表實體 SSD 吞吐。近期速率僅涵蓋已取樣時段。",
+      paging_load_plan: "以{mode}載入。計畫預留 {planned}，目前可用預算 {available}。",
+      paging_gpu_not_qualified: "逐行回退：此 GPU 的原生專家合批尚未驗證",
+      paging_splits: "預算／數值路徑拆分",
+      paging_prefetch: "預讀使用／排程／未使用", paging_native_batching_disabled: "逐行回退：已關閉原生合批", paging_token_major_verifier: "逐行回退：逐 token 驗證模式",
       runtime_live_decode_rate: "即時解碼",
       runtime_recent_decode_rate: "近期 P50",
       runtime_session_decode_rate: "工作階段平均",
@@ -8267,6 +8292,11 @@
       runtime_cumulative_tokens: "累計 Tokens",
       runtime_cache_hit_tokens: "キャッシュヒット Tokens",
       runtime_cache_hit_rate: "キャッシュヒット率",
+      paging_title: "重みページング", paging_experts: "エキスパートキャッシュ", paging_ple: "PLE 行キャッシュ", paging_usage: "計上量／予算", paging_recent: "直近ヒット率（最大30秒）", paging_total: "累積ヒット率", paging_app_read: "アプリ読み取り速度", paging_read_time: "累積読み取り時間", paging_wait_time: "累積ロック待ち", paging_no_data: "データなし", paging_not_applicable: "対象外", paging_prefill: "プレフィル", paging_decode: "通常デコード", paging_verify: "DFlash2 検証", paging_hme: "ヒット／ミス／退避", paging_batch: "入力／エキスパート実行幅", paging_micro: "マイクロバッチ数", paging_ssd: "SSD ページング", paging_full: "全エキスパート常駐", paging_help: "エキスパートはマイクロバッチ内の重複を除いた検索数、PLE は行検索数です。アプリ読み取りは OS キャッシュを利用する場合があり、物理 SSD の速度ではありません。直近速度は観測期間のみ対象です。",
+      paging_load_plan: "{mode}で読み込みます。予約予定 {planned}、利用可能予算 {available}。",
+      paging_gpu_not_qualified: "行別処理：GPU のネイティブバッチは未検証",
+      paging_splits: "予算／演算経路分割",
+      paging_prefetch: "先読み 使用／予定／未使用", paging_native_batching_disabled: "行別処理：ネイティブバッチ無効", paging_token_major_verifier: "行別処理：トークン順検証",
       runtime_live_decode_rate: "リアルタイム",
       runtime_recent_decode_rate: "直近 P50",
       runtime_session_decode_rate: "セッション平均",
@@ -8977,6 +9007,11 @@
       runtime_cumulative_tokens: "누적 Tokens",
       runtime_cache_hit_tokens: "캐시 적중 Tokens",
       runtime_cache_hit_rate: "캐시 적중률",
+      paging_title: "가중치 페이징", paging_experts: "전문가 캐시", paging_ple: "PLE 행 캐시", paging_usage: "계상 사용량 / 예산", paging_recent: "최근 적중률 (최대 30초)", paging_total: "누적 적중률", paging_app_read: "앱 읽기 속도", paging_read_time: "누적 읽기 시간", paging_wait_time: "누적 잠금 대기", paging_no_data: "데이터 없음", paging_not_applicable: "해당 없음", paging_prefill: "프리필", paging_decode: "일반 디코드", paging_verify: "DFlash2 검증", paging_hme: "적중 / 미스 / 제거", paging_batch: "입력 / 전문가 실행 배치 폭", paging_micro: "마이크로배치 수", paging_ssd: "SSD 전문가 페이징", paging_full: "전체 전문가 상주", paging_help: "전문가는 마이크로배치 내 중복을 제거한 조회 수, PLE는 행 조회 수입니다. 앱 읽기는 OS 페이지 캐시에 적중할 수 있으므로 실제 SSD 처리량이 아닙니다. 최근 속도는 관측된 기간만 포함합니다.",
+      paging_load_plan: "{mode}로 로드합니다. 예약 계획 {planned}, 사용 가능 예산 {available}.",
+      paging_gpu_not_qualified: "행별 실행: GPU 네이티브 전문가 배치 미검증",
+      paging_splits: "예산 / 연산 경로 분할",
+      paging_prefetch: "미리 읽기 사용 / 예약 / 미사용", paging_native_batching_disabled: "행별 실행: 네이티브 배치 꺼짐", paging_token_major_verifier: "행별 실행: 토큰 순서 검증",
       runtime_live_decode_rate: "실시간 디코드",
       runtime_recent_decode_rate: "최근 P50",
       runtime_session_decode_rate: "세션 평균",
@@ -10236,6 +10271,18 @@
   }
 
 
+
+  function onModelLoadPlan(resultJson) {
+    try {
+      const plan=JSON.parse(resultJson).flash;
+      if (!plan) return;
+      const dict=I18N[currentLang]||I18N.en;
+      const text=dict.paging_load_plan.replace('{mode}',plan.residency.mode==='ssd'?dict.paging_ssd:dict.paging_full)
+        .replace('{planned}',formatVersionBytes(plan.residency.peak_bytes))
+        .replace('{available}',formatVersionBytes(plan.residency.usable_bytes));
+      showToast(text,'info');
+    } catch (error) { console.error('Invalid load plan',error); }
+  }
 
   function onModelLoaded(resultJson) {
     let result = {};
@@ -15766,11 +15813,67 @@
       : 'idle';
   }
 
+  const pagingSamples = new Map();
+  const pagingOpen = new Set();
+  function pagingTotals(cache) {
+    const total = {hits:0, misses:0, read_bytes:0, read_us:0, lock_wait_us:0};
+    (cache.phases || []).forEach(p => Object.keys(total).forEach(k => total[k] += Number(p[k] || 0)));
+    return total;
+  }
+  function renderPaging(model, dict) {
+    const p = model.paging;
+    if (!p) return '';
+    const id = String(model.id || model.model || '');
+    const previous = pagingSamples.get(id);
+    const history = previous && previous.instance === p.instance_id ? previous.samples : [];
+    const now = Number(p.elapsed_ms ?? p.sampled_unix_ms);
+    const current = {time:now, experts:pagingTotals(p.experts), ple:pagingTotals(p.ple)};
+    if (!history.length || now > history[history.length-1].time) history.push(current);
+    while (history.length > 1 && history[0].time < now - 30000) history.shift();
+    // Bound memory even if a source sends pathological timestamps.
+    if (history.length > 64) history.splice(0, history.length-64);
+    pagingSamples.set(id, {instance:p.instance_id, samples:history});
+    const base = history[0]; const seconds = (now-base.time)/1000;
+    const noData = dict.paging_no_data;
+    const rate = t => t.hits+t.misses ? (100*t.hits/(t.hits+t.misses)).toFixed(1)+'%' : noData;
+    const line = (label,value,full=false) => '<div class="runtime-kv-detail'+(full?' runtime-paging-phase':'')+'"><span class="runtime-kv-detail-label">'
+      + escapeAttr(label) + '</span><span class="runtime-kv-detail-value">' + escapeAttr(String(value)) + '</span></div>';
+    const cache = (key, title) => {
+      const c=p[key]; const t=current[key]; const b=base[key];
+      const applicable = key !== 'experts' || p.mode === 'ssd';
+      if (!applicable) return line(title, dict.paging_not_applicable);
+      const delta={hits:Math.max(0,t.hits-b.hits),misses:Math.max(0,t.misses-b.misses)};
+      let result='<div class="runtime-section-title">'+escapeAttr(title)+'</div>'
+        + line(dict.paging_usage,formatVersionBytes(c.charged_bytes)+' / '+formatVersionBytes(c.budget_bytes))
+        + line(dict.paging_recent,seconds>0 ? rate(delta) : noData)
+        + line(dict.paging_total,rate(t))
+        + line(dict.paging_app_read, seconds>0 ? formatVersionBytes(Math.max(0,t.read_bytes-b.read_bytes)/seconds)+'/s' : noData)
+        + line(dict.paging_read_time,(Number(t.read_us)/1000).toFixed(1)+' ms')
+        + line(dict.paging_wait_time,(Number(t.lock_wait_us)/1000).toFixed(1)+' ms');
+      (c.phases || []).forEach(phase => {
+        result += line(dict['paging_'+phase.phase],rate(phase)+' · '+dict.paging_hme+': '+phase.hits+'/'+phase.misses+'/'+phase.evictions
+          + (key==='experts' ? ' · '+dict.paging_batch+': '+Number(phase.request_width??phase.max_width)+'/'+phase.max_width+' · '+dict.paging_micro+': '+phase.microbatches
+            +' · '+dict.paging_splits+': '+Number(phase.budget_splits||0)+'/'+Number(phase.arithmetic_splits||0)+' · '+dict.paging_prefetch+': '+Number(phase.prefetch_hits||0)+'/'+Number(phase.prefetch_scheduled||0)+'/'+Number(phase.prefetch_unused||0) : ''),true);
+      });
+      return result;
+    };
+    return '<details data-paging-model-id="'+escapeAttr(id)+'" class="runtime-kv-disclosure"'+(pagingOpen.has(id)?' open':'')+'>'
+      + '<summary>'+escapeAttr(dict.paging_title)+' · '+escapeAttr(p.mode==='ssd'?dict.paging_ssd:dict.paging_full)+'</summary>'
+      + '<div class="runtime-kv-details runtime-paging-details">'+cache('experts',dict.paging_experts)+cache('ple',dict.paging_ple)
+      + (p.fallbacks||[]).filter(f=>Number(f.calls)>0).map(f=>line(dict['paging_'+f.reason]||f.reason,f.calls)).join('')
+      + '<div class="runtime-section-meta">'+escapeAttr(dict.paging_help)+'</div></div></details>';
+  }
+
   function renderRuntimeModels(models) {
     const card = document.getElementById('runtime-model-health-card');
     const container = document.getElementById('runtime-model-health');
     if (!card || !container) return;
     captureRuntimeActiveKvOpenState(container);
+    container.querySelectorAll('details[data-paging-model-id]').forEach(el => {
+      if (el.open) pagingOpen.add(el.dataset.pagingModelId); else pagingOpen.delete(el.dataset.pagingModelId);
+    });
+    const liveIds=new Set((Array.isArray(models)?models:[]).map(m=>String(m.id||m.model||'')));
+    for (const id of pagingSamples.keys()) if (!liveIds.has(id)) {pagingSamples.delete(id);pagingOpen.delete(id);}
     renderActiveKvIncident(Array.isArray(models) ? models : []);
     if (!Array.isArray(models) || models.length === 0) {
       window.__RUNTIME_MODELS__ = [];
@@ -16133,7 +16236,7 @@
         + '<div class="runtime-model-header"><div class="runtime-model-identity">'
         + '<strong class="runtime-model-name">' + escapeAttr(model.id || model.model || '') + '</strong>'
         + mtpBadge + dflash2Badge + (isEmbedding && model.supports_audio ? '<span class="catalog-capability">' + escapeAttr(dict.catalog_audio_embedding || 'Audio embeddings') + '</span>' : '') + '</div></div>'
-        + requestDetails + aneDetails + dflash2Details + performanceDetails
+        + requestDetails + aneDetails + renderPaging(model,dict) + dflash2Details + performanceDetails
         + '<div class="runtime-model-footer"><div class="runtime-usage-summary">'
         + usageItems.join('') + '</div>' + activeKvDetails + '</div></div>';
     }).join('');

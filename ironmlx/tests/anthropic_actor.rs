@@ -298,6 +298,7 @@ async fn anthropic_actor_scheduler_path_emits_6_event_sequence() {
     .expect("spawn");
     let health_collector = Arc::new(
         ironmlx_runtime::core::runtime_health::SchedulerHealthCollector {
+            paging: None,
             start_time: std::time::Instant::now(),
             b_max: 4,
             queue_max: 32,

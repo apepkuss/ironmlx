@@ -135,6 +135,7 @@ pub struct EnginePoolState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineLoadedModelInfo {
+    pub paging: Option<ironmlx_lm::core::paging_stats::PagingSnapshot>,
     pub ane: health::AneModelHealth,
     pub decision: Option<ironmlx_decision::DecisionSettings>,
     pub decision_metrics: Option<crate::core::decision_execution::DecisionMetricsSnapshot>,
@@ -910,6 +911,42 @@ impl EnginePoolState {
         Ok((model_id, engine))
     }
 
+    /// Metadata-only preview: no registration, eviction, reservation or MLX load.
+    /// Admission is checked again at load time because host pressure may change.
+    pub async fn preview_flash_load(
+        &self,
+        model: &EngineModelConfig,
+    ) -> Result<Option<ironmlx_lm::models::qwen4_exp::load_plan::FlashLoadPlan>> {
+        if !model.path.join("config.json").is_file() || !super::flash_load::is_flash(&model.path)? {
+            return Ok(None);
+        }
+        let (_, occupied) = self
+            .inner
+            .planned_memory_envelope_excluding(&model.id)
+            .await;
+        let cfg = model
+            .scheduler_runtime_profile
+            .as_ref()
+            .context("Flash scheduler profile missing")?
+            .config;
+        let path = model.path.clone();
+        let limit = self.inner.runtime.memory_limits.model_memory_limit_bytes;
+        tokio::task::spawn_blocking(move || {
+            super::flash_load::plan_with_occupied(
+                &path,
+                cfg.b_max,
+                cfg.max_cache_cap,
+                cfg.prefill_chunk_size,
+                0,
+                limit,
+                occupied,
+            )
+            .map(Some)
+        })
+        .await
+        .context("Flash plan preview task")?
+    }
+
     pub async fn load_model(&self, requested: &str) -> Result<EngineModelControlResult> {
         let model_id = self
             .inner
@@ -1273,6 +1310,10 @@ impl EnginePoolState {
                 ),
             };
             models.push(EngineLoadedModelInfo {
+                paging: match &health {
+                    LoadedEngineHealth::Causal(s) => s.paging.clone(),
+                    _ => None,
+                },
                 ane: health::AneModelHealth::for_model(slot.ane_model),
                 decision: slot.model.decision,
                 decision_metrics,

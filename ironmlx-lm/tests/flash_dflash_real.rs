@@ -372,6 +372,14 @@ fn flash_b2_b4_verify_ragged_commit_matches_independent_requests() {
             );
             states(&actual, &independent[row]);
         }
+        if std::env::var("IRONMLX_FLASH_PAGED_BATCHING").as_deref() != Ok("off") {
+            let stats = model.paging_telemetry().unwrap().snapshot();
+            assert_eq!(
+                stats.experts.phases[2].request_width, width as u64,
+                "verification must preserve its input request width"
+            );
+            assert!(stats.experts.phases[2].microbatches > 0);
+        }
         eprintln!("B{width} Q8 exact verification and ragged prefix commit");
     }
 }

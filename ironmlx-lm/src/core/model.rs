@@ -34,6 +34,9 @@ impl ModelMeta {
 }
 
 pub trait Model {
+    fn paging_telemetry(&self) -> Option<std::sync::Arc<super::paging_stats::PagingTelemetry>> {
+        None
+    }
     /// Distinguish arithmetic-changing backends in persistent prefix caches.
     fn execution_cache_fingerprint(&self) -> Option<String> {
         None
