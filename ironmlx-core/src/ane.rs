@@ -9,14 +9,12 @@ use std::sync::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Model {
     Dense27B,
-    FlashNext,
     Other,
 }
 impl Model {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Dense27B => "qwen38-27b",
-            Self::FlashNext => "qwen38-flash-next",
             Self::Other => "unadapted",
         }
     }
@@ -112,13 +110,10 @@ pub fn dense_execution_fingerprint() -> Option<String> {
     })
 }
 static DENSE_FAILED: AtomicBool = AtomicBool::new(false);
-static FLASH_FAILED: AtomicBool = AtomicBool::new(false);
 static DENSE_SURFACES: AtomicU64 = AtomicU64::new(0);
-static FLASH_SURFACES: AtomicU64 = AtomicU64::new(0);
 pub fn retired(model: Model) -> bool {
     match model {
         Model::Dense27B => &DENSE_FAILED,
-        Model::FlashNext => &FLASH_FAILED,
         Model::Other => return false,
     }
     .load(Ordering::Relaxed)
@@ -126,7 +121,6 @@ pub fn retired(model: Model) -> bool {
 pub fn retire(model: Model) {
     match model {
         Model::Dense27B => &DENSE_FAILED,
-        Model::FlashNext => &FLASH_FAILED,
         Model::Other => return,
     }
     .store(true, Ordering::Relaxed);
@@ -134,7 +128,6 @@ pub fn retire(model: Model) {
 fn surface_counter(model: Model) -> &'static AtomicU64 {
     match model {
         Model::Dense27B => &DENSE_SURFACES,
-        Model::FlashNext => &FLASH_SURFACES,
         Model::Other => panic!("no ANE context for unadapted model"),
     }
 }
@@ -165,11 +158,9 @@ pub fn reason(model: Model) -> &'static str {
     }
 }
 static DENSE_JOBS: AtomicU64 = AtomicU64::new(0);
-static FLASH_JOBS: AtomicU64 = AtomicU64::new(0);
 pub fn record_completed(model: Model) {
     match model {
         Model::Dense27B => &DENSE_JOBS,
-        Model::FlashNext => &FLASH_JOBS,
         Model::Other => return,
     }
     .fetch_add(1, Ordering::Relaxed);
@@ -177,7 +168,6 @@ pub fn record_completed(model: Model) {
 pub fn completed(model: Model) -> u64 {
     match model {
         Model::Dense27B => &DENSE_JOBS,
-        Model::FlashNext => &FLASH_JOBS,
         Model::Other => return 0,
     }
     .load(Ordering::Relaxed)
@@ -246,7 +236,6 @@ mod tests {
     #[test]
     fn model_qualifications_are_separate() {
         assert!(model_adapted(Model::Dense27B));
-        assert!(!model_adapted(Model::FlashNext));
         assert!(!model_adapted(Model::Other));
     }
 }

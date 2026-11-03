@@ -49,7 +49,7 @@ ironmlx serve \
 | `--model-id` | Stable public ID; defaults to the model path if omitted |
 | `--dflash2-tensor-batch-max-width` | Positive tensor-group width limit; default 4; 1 disables cross-request tensor batching, not request concurrency. Qwen3.8 27B Dense only: the Qwen3.6 MoE target accepts the option but never forms tensor groups ([Qwen3.6 35B A3B (MoE)](#qwen36-35b-a3b-moe)) |
 | `--m5-dflash2-profile` | `auto` (default) or `off`; `auto` turns on the qualified M5 settings of the target's family on Apple GPU generation 17 or newer (`healthz.dflash2.m5_profile`) |
-| `--ane` | `auto` (default) or `off`. With the M5 profile active, Qwen3.8 27B Dense prefill MLPs of full 2048-token chunks starting below position 65,536 give 12 of their 34 channel units to the Neural Engine (W8A8); shorter prompts, decoding and MoE targets never use it. `off` keeps all computation on the GPU. `healthz.dflash2.m5_profile.ane_status` reports `active`, `disabled`, `not_applicable` or `inactive`. |
+| `--ane` | `auto` (default) or `off`, independent of the M5 GPU profile. On qualified Apple M5 Max machines, Qwen3.8-27B affine4/group64 prefill MLPs share eligible full 2048-token chunks starting below position 65,536 with the Neural Engine (W8A8), in ordinary and DFlash2 inference. `off` keeps all computation on the GPU. `healthz.ane` and each loaded model's `ane` report the independent policy, eligibility, completed jobs and live shared-buffer bytes. |
 
 Actual group width is the minimum of max sequences, tensor width limit and the number of ready requests with compatible execution shapes. The width limit does not increase active slots or replace max sequences.
 
@@ -110,9 +110,8 @@ and uses BF16 KV even when global settings select another KV format.
 The M5 profile reports target `qwen38-flash-next` and has an independent
 settings table. It retains native group-32 weight layouts, batches draft
 requests and verifies each request's QSA/PLE/GDN state transactionally. Older
-GPUs and `--m5-dflash2-profile off` use the generic path. ANE `auto` reports
-`not_applicable` for this recipe; `off` reports `disabled`. No Flash ANE
-acceleration is claimed. DFlash is adaptive: it measures ordinary and narrow
+GPUs and `--m5-dflash2-profile off` use the generic path. Flash-Next's ordinary
+and DFlash2 computation stays on the GPU. DFlash is adaptive: it measures ordinary and narrow
 windows before wider probes, and can choose ordinary decode when speculation
 costs more. Acceptance and hardware determine any throughput benefit.
 

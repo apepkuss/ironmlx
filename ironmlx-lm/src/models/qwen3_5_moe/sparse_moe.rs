@@ -1616,13 +1616,6 @@ impl SparseMoeBlock {
         let bs = b * s;
         let k = self.num_experts_per_tok;
         let num_experts = self.num_experts;
-        let ane_pending = self
-            .shared_expert
-            .as_ref()
-            .map(|m| m.flash_ane_begin_on(x, target))
-            .transpose()?
-            .flatten();
-
         // --- Flatten [B, S, H] → [BS, H] for routing and expert kernels. ---
         // Setup before the 8 substep spans; not attributed to any substep.
         let flat_x = mlx::ops::shape::reshape(x, [bs, h])
@@ -1751,22 +1744,7 @@ impl SparseMoeBlock {
             };
 
             // (7) Shared expert with independent sigmoid gate.
-            let shared_gated = if let Some(pending) = ane_pending {
-                let shared = self
-                    .shared_expert
-                    .as_ref()
-                    .context("Flash shared expert")?
-                    .flash_ane_finish_on(Some(pending), x, &routed_y, target)?;
-                let gate = self
-                    .shared_expert_gate
-                    .as_ref()
-                    .context("Flash shared gate")?
-                    .forward_singleton_gather_on(x, target)?
-                    .sigmoid_on(target)?;
-                (&shared * &gate).reshape([bs, h])?
-            } else {
-                self.forward_shared_on(x, target)?.reshape([bs, h])?
-            };
+            let shared_gated = self.forward_shared_on(x, target)?.reshape([bs, h])?;
 
             // (8) Combine routed + shared, then reshape back to [B, S, H].
             let out_flat = &routed_y + &shared_gated; // [BS, H]

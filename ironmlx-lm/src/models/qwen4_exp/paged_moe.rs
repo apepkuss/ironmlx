@@ -66,7 +66,6 @@ impl PagedMoe {
         let seq = dims[1];
         let hidden = dims[2];
         let topk = self.cfg.num_experts_per_tok;
-        let ane_pending = self.shared.flash_ane_begin_on(input, target)?;
         let logits = self.router.forward_on(input, target)?;
         let probs = mlx::ops::softmax_on(&logits, -1, true, target)?;
         let indices = mlx::ops::sort::argpartition_on(&probs, -topk, -1, target)?.slice(
@@ -143,9 +142,7 @@ impl PagedMoe {
         let refs: Vec<&Array> = outputs.iter().collect();
         let routed = mlx::ops::shape::concatenate_on(&refs, 0, target)?
             .reshape_on([1, seq, hidden], target)?;
-        let shared = self
-            .shared
-            .flash_ane_finish_on(ane_pending, input, &routed, target)?;
+        let shared = self.shared.forward_on(input, target)?;
         let gate = {
             self.shared_gate
                 .forward_singleton_gather_on(input, target)?

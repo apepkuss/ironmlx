@@ -61,7 +61,7 @@ pub(crate) fn surface_array(surface: &Surface) -> Result<Array> {
     })
 }
 
-pub(crate) fn surface_array_owned<T: std::any::Any + Send + Sync>(
+fn surface_array_owned<T: std::any::Any + Send + Sync>(
     surface: &Surface,
     owner: Arc<T>,
 ) -> Result<Array> {
@@ -1289,7 +1289,7 @@ impl AneFfn {
     }
 }
 
-pub(crate) fn close_worker(worker: std::thread::JoinHandle<()>, model: ironmlx_core::ane::Model) {
+fn close_worker(worker: std::thread::JoinHandle<()>, model: ironmlx_core::ane::Model) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while !worker.is_finished()
         && !ironmlx_core::ane::retired(model)

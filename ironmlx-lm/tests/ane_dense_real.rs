@@ -244,8 +244,8 @@ fn dense_ordinary_and_speculative_full_chunk() {
     if injected {
         assert!(ane::retired(ane::Model::Dense27B));
         assert!(
-            !ane::retired(ane::Model::FlashNext),
-            "ANE failures must not retire another model family"
+            !ane::retired(ane::Model::Other),
+            "ANE failures must not mark unadapted models as retired"
         );
         assert_eq!(jobs, 0);
     } else if mode == AneMode::Auto {

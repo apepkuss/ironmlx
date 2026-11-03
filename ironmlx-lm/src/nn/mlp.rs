@@ -151,47 +151,6 @@ impl Mlp {
         self.forward_on(x, ())
     }
 
-    pub(crate) fn flash_ane_begin_on(
-        &self,
-        x: &Array,
-        target: StreamOrDevice,
-    ) -> Result<Option<super::flash_ane::Pending>> {
-        let (gate, up) = match &self.gate_up {
-            GateUp::Separate { gate, up } => (gate, up),
-            GateUp::Fused(f) => (&f.gate, &f.up),
-        };
-        match super::flash_ane::begin(x, gate, up, &self.down, target) {
-            Ok(pending) => Ok(pending),
-            Err(error) => {
-                ironmlx_core::ane::retire(ironmlx_core::ane::Model::FlashNext);
-                tracing::warn!(%error,"Flash ANE setup failed; using GPU shared expert");
-                Ok(None)
-            }
-        }
-    }
-    pub(crate) fn flash_ane_finish_on(
-        &self,
-        pending: Option<super::flash_ane::Pending>,
-        x: &Array,
-        routed: &Array,
-        target: StreamOrDevice,
-    ) -> Result<Array> {
-        if let Some(pending) = pending {
-            if let Some(out) = super::flash_ane::finish(pending, routed, target)? {
-                let out = if out.shape().as_slice().last() == Some(&1280) {
-                    let rows = out.shape().as_slice()[0];
-                    let gate = out.slice(&[0, 0][..], &[rows, 640][..])?;
-                    let up = out.slice(&[0, 640][..], &[rows, 1280][..])?;
-                    self.down.forward_on(&self.swiglu_on(&gate, &up)?, target)?
-                } else {
-                    out
-                };
-                return Ok(out.reshape_on(x.shape().as_slice(), target)?);
-            }
-        }
-        self.forward_on(x, target)
-    }
-
     /// Timing diagnostic of a split FFN (`IRONMLX_DIAGNOSTIC_DENSE_FFN_GPU_UNITS`
     /// = U, Dense long prefill only): the GPU computes only the first U x 512
     /// intermediate channels (gate, up, SwiGLU, down over those inputs) after
