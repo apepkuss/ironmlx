@@ -1933,6 +1933,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         ),
                         decision: self.parameterStore.parameters(for: model)?.decision
                     )
+                    // The Flash plan is shown when available; a failed preview
+                    // does not stop the load.
+                    if let plan = try? await client.previewLoadPlan(request) {
+                        self.sendJavaScript("onModelLoadPlan(\(Self.jsStringLiteral(plan)))")
+                    }
                     let response = try await loadActivity.loadThroughBackend(ticket, request: request)
                     return (response, loadMtpRuntime)
                 }

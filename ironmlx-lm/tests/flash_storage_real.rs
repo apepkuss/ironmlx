@@ -115,14 +115,14 @@ fn local_flash_snapshot_metadata_and_bounded_reads() {
         "language_model.model.layers.1.ple.ple_embedding.ngram_embedding",
         index,
         width,
-        2 * 1124,
+        2 * 356,
         64 * 1024,
     )
     .unwrap();
     let selected = [rows[0], rows[15], rows[0]];
     let cached = provider.gather_on(&selected, ().into()).unwrap();
     assert_eq!(provider.resident_rows(), 2);
-    assert_eq!(provider.charged_bytes(), 2248);
+    assert_eq!(provider.charged_bytes(), 712);
     assert_eq!((provider.hits, provider.misses), (1, 2));
     let cached = cached
         .astype(mlx::Dtype::Float32)
@@ -189,4 +189,32 @@ fn flash_preflight_selects_bounded_residency_before_any_weight_materialization()
     request.expert_residency = ExpertResidency::Auto;
     request.usable_bytes = 5u64 << 30;
     assert!(FlashLoadPlan::inspect(path, &request).is_err());
+}
+
+#[test]
+#[ignore = "requires actual Flash checkpoint metadata; this is not physical 32 GiB validation"]
+fn flash_32g_candidate_plans_and_default_rejection() {
+    use ironmlx_lm::models::qwen4_exp::load_plan::{FlashLoadPlan, FlashLoadRequest};
+    let path = std::env::var("IRONMLX_FLASH_SNAPSHOT").unwrap();
+    for cap in [4096, 8192, 16384, 32768] {
+        let request = FlashLoadRequest::new(24u64 << 30, 1, cap, 512, 0);
+        let plan = FlashLoadPlan::inspect(std::path::Path::new(&path), &request).unwrap();
+        assert!(plan.residency.peak_bytes <= 24u64 << 30);
+        assert!(plan.residency.resident_expert_bytes <= 4u64 << 30);
+        assert!(plan.paging.unwrap().pack_bytes <= 2usize << 30);
+        eprintln!(
+            "32GiB candidate B1 cap={cap}: {}",
+            serde_json::to_string(&plan).unwrap()
+        );
+    }
+    assert!(FlashLoadPlan::inspect(
+        std::path::Path::new(&path),
+        &FlashLoadRequest::new(24u64 << 30, 2, 32768, 2048, 0)
+    )
+    .is_err());
+    assert!(FlashLoadPlan::inspect(
+        std::path::Path::new(&path),
+        &FlashLoadRequest::new(10u64 << 30, 1, 32768, 2048, 0)
+    )
+    .is_err());
 }

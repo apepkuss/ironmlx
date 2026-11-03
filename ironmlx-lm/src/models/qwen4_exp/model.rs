@@ -125,6 +125,13 @@ impl FlashTextModel {
         );
         let batch = dims[0] as usize;
         let seq = dims[1];
+        let _phase = crate::core::paging_stats::PhaseGuard::enter(if mode.is_verify() {
+            crate::core::paging_stats::PagingPhase::Verify
+        } else if matches!(mode, DFlash2TargetForwardMode::OrdinaryDecode) {
+            crate::core::paging_stats::PagingPhase::Decode
+        } else {
+            crate::core::paging_stats::PagingPhase::Prefill
+        });
         if let Some(p) = position_ids {
             ensure!(
                 p.shape().as_slice() == [3, dims[0], seq],
@@ -154,6 +161,16 @@ impl FlashTextModel {
             "invalid Flash token ID"
         );
         let lengths = row_lengths(batch, seq, lengths, mask)?;
+        if self.expert_paging_enabled() {
+            self.paging_telemetry
+                .experts
+                .current()
+                .request_width
+                .fetch_max(
+                    lengths.iter().filter(|&&n| n > 0).count() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+        }
         let mut fresh;
         let cache = match cache {
             Some(cache) => cache,
@@ -227,6 +244,93 @@ impl FlashTextModel {
             .map(|_| (0..batch).map(|_| Vec::new()).collect())
             .collect();
         let result = (|| {
+            if self.expert_paging_enabled()
+                && self.native_paged_batching
+                && batch > 1
+                && (!mode.is_verify() || self.layer_major_verify)
+            {
+                let row_tokens: Vec<_> = (0..batch)
+                    .map(|r| {
+                        tokens[r * seq as usize..r * seq as usize + lengths[r] as usize].to_vec()
+                    })
+                    .collect();
+                let row_positions = (0..batch)
+                    .map(|r| {
+                        position_ids
+                            .map(|p| {
+                                p.slice(&[0, r as i32, 0][..], &[3, r as i32 + 1, lengths[r]][..])
+                            })
+                            .transpose()
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let row_embeddings = (0..batch)
+                    .map(|r| {
+                        embeddings
+                            .map(|e| {
+                                e.slice(
+                                    &[r as i32, 0, 0][..],
+                                    &[r as i32 + 1, lengths[r], self.config.hidden_size][..],
+                                )
+                            })
+                            .transpose()
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let (outputs, new_prefixes) = self.forward_group_on(
+                    &row_tokens,
+                    &mut rows,
+                    capture_layers,
+                    &row_positions,
+                    &row_embeddings,
+                    mode.is_verify(),
+                    target,
+                )?;
+                prefixes = new_prefixes;
+                let mut hidden = Vec::new();
+                let mut context = Vec::new();
+                for output in outputs {
+                    let length = output.hidden.shape().as_slice()[1];
+                    let c = if output.captures.is_empty() {
+                        Array::zeros(
+                            [
+                                1,
+                                length,
+                                (capture_layers.len() as i32) * self.config.hidden_size,
+                            ],
+                            Dtype::Bfloat16,
+                        )?
+                    } else {
+                        mlx::ops::shape::concatenate_on(
+                            &output.captures.iter().collect::<Vec<_>>(),
+                            -1,
+                            target,
+                        )?
+                    };
+                    hidden.push(pad_time(&output.hidden, seq, target)?);
+                    context.push(pad_time(&c, seq, target)?);
+                }
+                let hidden =
+                    mlx::ops::shape::concatenate_on(&hidden.iter().collect::<Vec<_>>(), 0, target)?;
+                let context_hidden = mlx::ops::shape::concatenate_on(
+                    &context.iter().collect::<Vec<_>>(),
+                    0,
+                    target,
+                )?;
+                mlx::transforms::eval(&[&hidden, &context_hidden])?;
+                return Ok(DFlash2TargetOutput {
+                    hidden,
+                    context_hidden,
+                });
+            }
+            if self.expert_paging_enabled() && batch > 1 {
+                let count = if self.native_batch_unqualified {
+                    &self.paging_telemetry.row_fallback_unqualified
+                } else if !self.native_paged_batching {
+                    &self.paging_telemetry.row_fallback_disabled
+                } else {
+                    &self.paging_telemetry.row_fallback_verify_order
+                };
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             let mut hidden = Vec::new();
             let mut context = Vec::new();
             for (row, state) in rows.iter_mut().enumerate() {
@@ -380,8 +484,14 @@ impl FlashTextModel {
 }
 
 impl Model for FlashTextModel {
+    fn execution_cache_fingerprint(&self) -> Option<String> {
+        Some(<Self as crate::models::dflash2::DFlash2Target>::dflash2_execution_fingerprint(self))
+    }
+    fn paging_telemetry(&self) -> Option<Arc<crate::core::paging_stats::PagingTelemetry>> {
+        Some(Arc::clone(&self.paging_telemetry))
+    }
     fn requires_split_batched_prefill_for_token_parity(&self) -> bool {
-        true
+        !(self.expert_paging_enabled() && self.native_paged_batching)
     }
 
     fn requires_row_isolated_multimodal_prefill(&self) -> bool {
@@ -445,7 +555,16 @@ impl Model for FlashTextModel {
             mask,
             cache,
             &[],
-            DFlash2TargetForwardMode::Prefill,
+            if dims[1] == 1
+                && !matches!(
+                    crate::core::paging_stats::phase_hint(),
+                    Some(crate::core::paging_stats::PagingPhase::Prefill)
+                )
+            {
+                DFlash2TargetForwardMode::OrdinaryDecode
+            } else {
+                DFlash2TargetForwardMode::Prefill
+            },
             target,
         )?;
         self.last_logits_on(&output.hidden, &valid_lengths, target)
@@ -461,15 +580,47 @@ impl Model for FlashTextModel {
         cache: Option<&mut [LayerCache]>,
         target: StreamOrDevice,
     ) -> Result<Array> {
-        self.forward_on(
-            ids,
-            positions,
+        let lengths = row_lengths(
+            ids.shape().as_slice()[0] as usize,
+            ids.shape().as_slice()[1],
             Some(lengths),
             Some(linear_mask),
+        )?;
+        let output = self.runtime_inputs_on(
+            ids,
+            Some(positions),
+            None,
+            Some(&lengths),
+            Some(linear_mask),
             cache,
+            &[],
+            DFlash2TargetForwardMode::Prefill,
             target,
-        )
+        )?;
+        self.last_logits_on(&output.hidden, &lengths, target)
     }
+    fn batched_prefill_causal(
+        &self,
+        ids: &Array,
+        positions: &Array,
+        lengths: &[i32],
+        cache: Option<&mut [LayerCache]>,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        let output = self.runtime_inputs_on(
+            ids,
+            Some(positions),
+            None,
+            Some(lengths),
+            None,
+            cache,
+            &[],
+            DFlash2TargetForwardMode::Prefill,
+            target,
+        )?;
+        self.last_logits_on(&output.hidden, lengths, target)
+    }
+
     fn forward_text_hidden(
         &self,
         ids: &Array,

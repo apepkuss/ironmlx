@@ -68,6 +68,9 @@ pub trait Model {
     ) -> Option<std::sync::Arc<ironmlx_core::m1_profile::M1ExecutionPlan>> {
         None
     }
+    fn paging_telemetry(&self) -> Option<std::sync::Arc<super::paging_stats::PagingTelemetry>> {
+        None
+    }
     /// Distinguish arithmetic-changing backends in persistent prefix caches.
     fn execution_cache_fingerprint(&self) -> Option<String> {
         None

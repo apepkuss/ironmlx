@@ -8,7 +8,7 @@ use std::fs::{File, Metadata};
 use std::io::Read;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, ensure, Context, Result};
 use serde::Deserialize;
@@ -77,6 +77,25 @@ impl TensorFile {
     }
     pub fn open(path: &Path) -> Result<Self> {
         let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        match std::env::var("IRONMLX_FLASH_IO_POLICY")
+            .unwrap_or_else(|_| "cached".into())
+            .as_str()
+        {
+            "cached" => {}
+            "no_cache" => {
+                #[cfg(target_os = "macos")]
+                {
+                    use std::os::fd::AsRawFd;
+                    // This is an explicit A/B policy; it does not promise a cold SSD/controller.
+                    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) } == -1 {
+                        return Err(std::io::Error::last_os_error().into());
+                    }
+                }
+                #[cfg(not(target_os = "macos"))]
+                anyhow::bail!("no_cache paging policy requires macOS");
+            }
+            _ => anyhow::bail!("IRONMLX_FLASH_IO_POLICY must be cached or no_cache"),
+        }
         let metadata = file.metadata()?;
         ensure!(metadata.is_file(), "tensor source must be a regular file");
         let stamp = FileStamp::from(metadata);
@@ -275,16 +294,14 @@ impl TensorFile {
 /// names retain their checkpoint spelling; model-specific sanitization is
 /// performed by the model adapter, without joining full expert/PLE tensors.
 pub struct ModelTensorFiles {
+    sources: Vec<Arc<TensorFile>>,
     tensors: BTreeMap<String, Arc<TensorFile>>,
 }
 
 impl ModelTensorFiles {
     pub fn validate_sources(&self) -> Result<()> {
-        let mut seen = std::collections::HashSet::new();
-        for file in self.tensors.values() {
-            if seen.insert(Arc::as_ptr(file)) {
-                file.validate_source()?;
-            }
+        for file in &self.sources {
+            file.validate_source()?;
         }
         Ok(())
     }
@@ -300,7 +317,10 @@ impl ModelTensorFiles {
             for name in file.tensors.keys() {
                 tensors.insert(name.clone(), Arc::clone(&file));
             }
-            return Ok(Self { tensors });
+            return Ok(Self {
+                sources: vec![file],
+                tensors,
+            });
         }
         let index_path = snapshot_file(&root, "model.safetensors.index.json")?;
         let index_file = File::open(index_path)?;
@@ -343,7 +363,10 @@ impl ModelTensorFiles {
                 );
             }
         }
-        Ok(Self { tensors })
+        Ok(Self {
+            sources: shards.into_values().collect(),
+            tensors,
+        })
     }
 
     pub fn info(&self, name: &str) -> Option<&TensorInfo> {
@@ -367,6 +390,70 @@ impl ModelTensorFiles {
             .get(name)
             .ok_or_else(|| anyhow!("missing tensor {name}"))?
             .read_rows(name, start, count, max_bytes)
+    }
+
+    pub fn read_raw_rows(
+        &self,
+        name: &str,
+        start: u64,
+        count: u64,
+        budget: usize,
+    ) -> Result<RawRows> {
+        let file = self.tensors.get(name).context("missing tensor")?;
+        let mut info = file.tensors[name].clone();
+        let data = file.read_rows(name, start, count, budget)?;
+        info.shape[0] = count;
+        Ok(RawRows { info, data })
+    }
+    /// Bounded CPU-only parallel reads. No MLX value crosses a worker boundary.
+    pub fn read_rows_batch(
+        &self,
+        requests: &[(String, u64, u64)],
+        max_bytes: usize,
+    ) -> Result<Vec<RawRows>> {
+        let mut total = 0usize;
+        let mut pending = Vec::new();
+        for (name, start, count) in requests {
+            let file = Arc::clone(self.tensors.get(name).context("missing tensor")?);
+            let info = file.tensors[name].clone();
+            let rows = *info.shape.first().context("scalar tensor has no rows")?;
+            ensure!(
+                rows > 0 && start.checked_add(*count).is_some_and(|end| end <= rows),
+                "invalid raw row range"
+            );
+            let bytes = usize::try_from(info.bytes() / rows)?
+                .checked_mul(usize::try_from(*count)?)
+                .context("raw row size overflow")?;
+            total = total.checked_add(bytes).context("raw batch overflow")?;
+            ensure!(total <= max_bytes, "raw batch exceeds staging budget");
+            pending.push((file, info, name.clone(), *start, *count, bytes));
+        }
+        let receivers: Vec<_> = pending
+            .into_iter()
+            .map(|(file, mut info, name, start, count, bytes)| {
+                io_task(move || {
+                    let data = file.read_rows(&name, start, count, bytes)?;
+                    info.shape[0] = count;
+                    Ok(RawRows { info, data })
+                })
+            })
+            .collect();
+        let mut output = Vec::new();
+        let mut failure = None;
+        // Drain every submitted operation even on failure (unload/cancel never
+        // leaves unaccounted I/O or buffers running in the background).
+        for receiver in receivers {
+            match receiver.recv().context("paging reader stopped")? {
+                Ok(rows) => output.push(rows),
+                Err(error) => {
+                    failure = Some(error);
+                }
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(output)
     }
 
     pub fn read_rows_array(
@@ -449,6 +536,23 @@ mod tests {
         assert!(f.read_rows("w", u64::MAX, 2, 8).is_err());
         assert!(f.read_tensor("w", 23).is_err());
         assert!(f.read_rows("w", 3, 0, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parallel_raw_reads_preserve_order_and_reject_oversized_batches() {
+        let d = Directory::new();
+        d.file(
+            serde_json::json!({"w":{"dtype":"U32","shape":[3,2],"data_offsets":[0,24]}}),
+            &(0u8..24).collect::<Vec<_>>(),
+        );
+        let files = ModelTensorFiles::open(&d.0).unwrap();
+        let requests = vec![("w".into(), 2, 1), ("w".into(), 0, 1)];
+        let rows = files.read_rows_batch(&requests, 16).unwrap();
+        assert_eq!(rows[0].data, (16u8..24).collect::<Vec<_>>());
+        assert_eq!(rows[1].data, (0u8..8).collect::<Vec<_>>());
+        assert!(files.read_rows_batch(&requests, 15).is_err());
+        std::fs::write(d.0.join("model.safetensors"), [0u8; 32]).unwrap();
+        assert!(files.read_rows_batch(&requests, 16).is_err());
     }
 
     #[test]
@@ -575,4 +679,65 @@ mod tests {
         assert_eq!(model.read_rows("w", 1, 2, 2).unwrap(), vec![2, 3]);
         assert_eq!(model.tensors().count(), 1);
     }
+}
+
+/// CPU bytes plus validated metadata; conversion happens on the GPU owner thread.
+pub struct RawRows {
+    info: TensorInfo,
+    pub data: Vec<u8>,
+}
+impl RawRows {
+    pub fn into_array(self, staging_budget: usize) -> Result<mlx::Array> {
+        let mut header = serde_json::to_vec(
+            &serde_json::json!({"rows":{"dtype":self.info.dtype,"shape":self.info.shape,"data_offsets":[0,self.data.len()]}}),
+        )?;
+        while header.len() % 8 != 0 {
+            header.push(b' ');
+        }
+        ensure!(
+            (self.data.len() + header.len() + 8)
+                .checked_mul(3)
+                .is_some_and(|n| n <= staging_budget),
+            "raw decoder exceeds staging budget"
+        );
+        let mut envelope = Vec::with_capacity(8 + header.len() + self.data.len());
+        envelope.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        envelope.extend(header);
+        envelope.extend(self.data);
+        let mut reader = mlx::io::Reader::from_bytes(&envelope);
+        let (mut arrays, _) = mlx::io::load_safetensors_from_reader(&mut reader)?;
+        let array = arrays.remove("rows").context("decoder returned no rows")?;
+        array.eval()?;
+        Ok(array)
+    }
+}
+type IoJob = Box<dyn FnOnce() + Send + 'static>;
+pub fn io_task<T: Send + 'static>(
+    task: impl FnOnce() -> Result<T> + Send + 'static,
+) -> mpsc::Receiver<Result<T>> {
+    static POOL: OnceLock<mpsc::SyncSender<IoJob>> = OnceLock::new();
+    let pool = POOL.get_or_init(|| {
+        let (sender, receiver) = mpsc::sync_channel::<IoJob>(8);
+        let receiver = Arc::new(Mutex::new(receiver));
+        for index in 0..2 {
+            let receiver = Arc::clone(&receiver);
+            std::thread::Builder::new()
+                .name(format!("paging-reader-{index}"))
+                .spawn(move || loop {
+                    let job = receiver.lock().expect("paging reader lock").recv();
+                    match job {
+                        Ok(job) => job(),
+                        Err(_) => break,
+                    }
+                })
+                .expect("start bounded paging reader");
+        }
+        sender
+    });
+    let (sender, receiver) = mpsc::sync_channel(1);
+    pool.send(Box::new(move || {
+        let _ = sender.send(task());
+    }))
+    .expect("paging readers available");
+    receiver
 }

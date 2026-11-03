@@ -1431,6 +1431,7 @@ pub struct M1HealthInfo {
 pub struct HealthSnapshot {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub m1_profiles: Vec<M1HealthInfo>,
+    pub paging: Option<ironmlx_lm::core::paging_stats::PagingSnapshot>,
     pub ane: AneHealth,
     pub status: HealthStatus,
     pub degraded_reasons: Vec<HealthDegradedReason>,
@@ -1448,6 +1449,7 @@ pub struct HealthSnapshot {
 
 pub struct SchedulerHealthCollector {
     pub m1_plan: Option<Arc<ironmlx_core::m1_profile::M1ExecutionPlan>>,
+    pub paging: Option<Arc<ironmlx_lm::core::paging_stats::PagingTelemetry>>,
     pub start_time: Instant,
     pub b_max: usize,
     pub queue_max: usize,
@@ -1512,6 +1514,7 @@ impl SchedulerHealthCollector {
                 })
                 .into_iter()
                 .collect(),
+            paging: self.paging.as_ref().map(|p| p.snapshot()),
             ane: AneHealth::current(),
             status,
             degraded_reasons,
@@ -1807,6 +1810,7 @@ mod tests {
     ) -> SchedulerHealthCollector {
         SchedulerHealthCollector {
             m1_plan: None,
+            paging: None,
             start_time: Instant::now(),
             b_max: 1,
             queue_max: 8,
@@ -2480,6 +2484,7 @@ mod tests {
     fn health_memory_serializes_mlx_allocator_fields() {
         let snapshot = HealthSnapshot {
             m1_profiles: Vec::new(),
+            paging: None,
             ane: AneHealth::current(),
             status: HealthStatus::Healthy,
             degraded_reasons: Vec::new(),

@@ -423,6 +423,8 @@ pub struct RoutedExperts {
     /// Paging compacts RHS storage; retain the source expert count for the
     /// upstream B/E gather-QMV vs gather-RHS-QMM scheduling decision.
     dispatch_experts: Option<i32>,
+    /// Original B1 paging microbatch shape; merged requests must not change arithmetic dispatch.
+    paged_reference_rows: Option<i32>,
     /// Lazily-built compiled SwiGLU closure for the routed activation.
     /// Owned here so `apply_experts` is self-contained.
     swiglu: std::sync::OnceLock<CompiledFn>,
@@ -445,6 +447,12 @@ impl RoutedExperts {
             "source expert count cannot be smaller than compact storage"
         );
         self.dispatch_experts = Some(original);
+        Ok(())
+    }
+
+    pub(crate) fn set_paged_reference_rows(&mut self, rows: i32) -> Result<()> {
+        anyhow::ensure!(rows > 0, "paged reference shape must be nonempty");
+        self.paged_reference_rows = Some(rows);
         Ok(())
     }
 
@@ -548,6 +556,7 @@ impl RoutedExperts {
             bits: meta.bits,
             num_experts,
             dispatch_experts: None,
+            paged_reference_rows: None,
             swiglu: OnceLock::new(),
             geglu: OnceLock::new(),
         })
@@ -600,6 +609,7 @@ impl RoutedExperts {
             bits: gate_meta.bits,
             num_experts,
             dispatch_experts: None,
+            paged_reference_rows: None,
             swiglu: std::sync::OnceLock::new(),
             geglu: std::sync::OnceLock::new(),
         })
@@ -1008,7 +1018,8 @@ impl RoutedExperts {
             }
         }
         let bs_k = bs * k;
-        let use_sorted = bs_k >= SORTED_ROUTING_MIN_BS_K;
+        let reference_rows = self.paged_reference_rows.unwrap_or(bs);
+        let use_sorted = reference_rows * k >= SORTED_ROUTING_MIN_BS_K;
         let child_spans_enabled = false;
 
         let (gate_out, up_out, rhs_idx_used, sorted_flag, sort_perm_opt) =
@@ -1059,7 +1070,7 @@ impl RoutedExperts {
                         // threshold, preserving the resident QMV arithmetic.
                         let sorted_dispatch = self
                             .dispatch_experts
-                            .is_none_or(|experts| bs_k / experts >= 4);
+                            .is_none_or(|experts| reference_rows * k / experts >= 4);
                         let (gate_out, up_out) = self
                             .gate_up_outputs(&sorted_x_3d, &sorted_topk, sorted_dispatch, target)
                             .context("RoutedExperts::apply_experts: gate/up gather_qmm (sorted)")?;
@@ -1134,7 +1145,9 @@ impl RoutedExperts {
                 let down_out = if let Some(sort_perm) = sort_perm_opt {
                     let inv_perm = argsort_on(&sort_perm, -1_i32, target)
                         .context("RoutedExperts::apply_experts: argsort inv permutation")?;
-                    if sorted_moe_weighted_sum::should_use(&down_out_raw, &inv_perm, weights) {
+                    if reference_rows >= sorted_moe_weighted_sum::MIN_TOKENS
+                        && sorted_moe_weighted_sum::should_use(&down_out_raw, &inv_perm, weights)
+                    {
                         let out = sorted_moe_weighted_sum::apply_on(
                             &down_out_raw,
                             &inv_perm,

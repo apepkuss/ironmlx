@@ -2,17 +2,19 @@
 //! layout. No giant tensor is mapped/evaluated by MLX. This cache is shared
 //! model data; n-gram and convolution history belong to individual requests.
 use super::ple_index::PleIndex;
+use crate::core::paging_stats::{elapsed_us, PagingTelemetry};
 use crate::core::tensor_file::ModelTensorFiles;
 use anyhow::{ensure, Context, Result};
 use mlx::{Array, Dtype, StreamOrDevice};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
+use std::{sync::atomic::Ordering::Relaxed, time::Instant};
 
-// Conservative charge for both map nodes, Vec allocation and allocator
-// bookkeeping. Payload and entry metadata are bounded together.
-const ENTRY_OVERHEAD: usize = 1024;
+// Packed row payload lives in one slab (no allocation per row). The charge
+// bounds the hash entry, ordered-map node and allocator overhead together.
+const ENTRY_OVERHEAD: usize = 256;
 
 pub struct PleRows {
     files: Arc<ModelTensorFiles>,
@@ -22,7 +24,9 @@ pub struct PleRows {
     row_bytes: usize,
     capacity: usize,
     staging_bytes: usize,
-    rows: HashMap<u64, (Vec<u8>, u64)>,
+    rows: HashMap<u64, (usize, u64)>,
+    payload: Vec<u8>,
+    telemetry: Arc<PagingTelemetry>,
     ages: BTreeMap<u64, u64>,
     clock: u64,
     pub hits: u64,
@@ -53,7 +57,8 @@ impl PleRows {
         ensure!(capacity > 0, "PLE cache cannot fit one complete row");
         ensure!(
             width
-                .checked_mul(12)
+                .checked_mul(16)
+                .and_then(|n| n.checked_add(1024))
                 .and_then(|n| n.checked_mul(index.heads()))
                 .is_some_and(|bytes| bytes <= staging_bytes),
             "PLE staging cannot fit one complete token lookup"
@@ -100,6 +105,8 @@ impl PleRows {
             capacity,
             staging_bytes,
             rows: HashMap::new(),
+            payload: vec![0; capacity * row_bytes],
+            telemetry: Arc::new(PagingTelemetry::new(false)),
             ages: BTreeMap::new(),
             clock: 0,
             hits: 0,
@@ -107,17 +114,74 @@ impl PleRows {
         })
     }
 
+    pub fn with_telemetry(mut self, telemetry: Arc<PagingTelemetry>) -> Self {
+        self.telemetry = telemetry;
+        self.telemetry.ple.budget_bytes.fetch_add(
+            (self.capacity * (self.row_bytes + ENTRY_OVERHEAD)) as u64,
+            Relaxed,
+        );
+        let charged = self
+            .telemetry
+            .ple
+            .charged_bytes
+            .fetch_add(self.payload.len() as u64, Relaxed)
+            + self.payload.len() as u64;
+        self.telemetry
+            .ple
+            .peak_charged_bytes
+            .fetch_max(charged, Relaxed);
+        self
+    }
     pub fn index(&self) -> &PleIndex {
         &self.index
     }
     pub fn max_gather_rows(&self) -> usize {
-        (self.staging_bytes / (self.width * 12)).min(i32::MAX as usize)
+        (self.staging_bytes / (self.width * 16 + 1024)).min(i32::MAX as usize)
     }
     pub fn resident_rows(&self) -> usize {
         self.rows.len()
     }
     pub fn charged_bytes(&self) -> usize {
-        self.rows.len() * (self.row_bytes + ENTRY_OVERHEAD)
+        self.payload.len() + self.rows.len() * ENTRY_OVERHEAD
+    }
+
+    fn read_lookup_rows(&self, rows: &[u64]) -> Result<Vec<(u64, Vec<u8>)>> {
+        let mut runs: Vec<(usize, u64, u64, u64)> = Vec::new();
+        for &row in rows {
+            let (shard, local) = self.index.shard_row(row)?;
+            if let Some(last) = runs.last_mut() {
+                if last.0 == shard as usize && last.1 + last.3 == local && last.2 + last.3 == row {
+                    last.3 += 1;
+                    continue;
+                }
+            }
+            runs.push((shard as usize, local, row, 1));
+        }
+        let requests: Vec<_> = runs
+            .iter()
+            .flat_map(|(shard, local, _, count)| {
+                ["weight", "scales", "biases"]
+                    .map(|suffix| (format!("{}.{suffix}", self.shards[*shard]), *local, *count))
+            })
+            .collect();
+        let mut parts = self
+            .files
+            .read_rows_batch(&requests, rows.len() * self.row_bytes)?
+            .into_iter();
+        let sizes = [self.width / 2, self.width / 32 * 2, self.width / 32 * 2];
+        let mut output = Vec::with_capacity(rows.len());
+        for (_, _, row, count) in runs {
+            let columns: Vec<_> = parts.by_ref().take(3).collect();
+            ensure!(columns.len() == 3, "incomplete PLE row read");
+            for offset in 0..count as usize {
+                let mut bytes = Vec::with_capacity(self.row_bytes);
+                for (column, size) in columns.iter().zip(sizes) {
+                    bytes.extend_from_slice(&column.data[offset * size..(offset + 1) * size]);
+                }
+                output.push((row + offset as u64, bytes));
+            }
+        }
+        Ok(output)
     }
 
     /// Returns [row_count, row_width] BF16 entries in caller order, including
@@ -130,8 +194,7 @@ impl PleRows {
         );
         let peak = indices
             .len()
-            .checked_mul(self.width)
-            .and_then(|n| n.checked_mul(12))
+            .checked_mul(self.width * 16 + 1024)
             .context("PLE staging size overflow")?;
         ensure!(
             peak <= self.staging_bytes,
@@ -142,6 +205,30 @@ impl PleRows {
             self.index.shard_row(row)?;
         }
         self.files.validate_sources()?;
+        let missing: Vec<_> = indices
+            .iter()
+            .copied()
+            .filter(|r| !self.rows.contains_key(r))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let prefetched = if missing.is_empty() {
+            Vec::new()
+        } else {
+            let read_start = Instant::now();
+            let rows = self.read_lookup_rows(&missing)?;
+            self.telemetry
+                .ple
+                .current()
+                .read_bytes
+                .fetch_add((missing.len() * self.row_bytes) as u64, Relaxed);
+            self.telemetry
+                .ple
+                .current()
+                .read_us
+                .fetch_add(elapsed_us(read_start), Relaxed);
+            rows
+        };
         let mut output = Vec::with_capacity(indices.len() * self.width);
         for &row in indices {
             if self.clock == u64::MAX {
@@ -152,30 +239,63 @@ impl PleRows {
                 self.ages.remove(age);
                 *age = self.clock;
                 self.hits = self.hits.saturating_add(1);
+                self.telemetry.ple.current().hits.fetch_add(1, Relaxed);
             } else {
-                let (shard, local) = self.index.shard_row(row)?;
-                let prefix = &self.shards[usize::try_from(shard)?];
-                let mut bytes = Vec::with_capacity(self.row_bytes);
-                for suffix in ["weight", "scales", "biases"] {
-                    bytes.extend(self.files.read_rows(
-                        &format!("{prefix}.{suffix}"),
-                        local,
-                        1,
-                        self.row_bytes,
-                    )?);
-                }
+                let bytes =
+                    if let Ok(index) = prefetched.binary_search_by_key(&row, |(key, _)| *key) {
+                        prefetched[index].1.clone()
+                    } else {
+                        // An initially resident row can be evicted earlier in this
+                        // same gather when the configured cache is exceptionally small.
+                        let started = Instant::now();
+                        let mut rows = self.read_lookup_rows(&[row])?;
+                        self.telemetry
+                            .ple
+                            .current()
+                            .read_bytes
+                            .fetch_add(self.row_bytes as u64, Relaxed);
+                        self.telemetry
+                            .ple
+                            .current()
+                            .read_us
+                            .fetch_add(elapsed_us(started), Relaxed);
+                        rows.remove(0).1
+                    };
                 ensure!(bytes.len() == self.row_bytes, "PLE row storage changed");
-                if self.rows.len() == self.capacity {
+                let slot = if self.rows.len() == self.capacity {
                     let (old_age, old_row) =
                         self.ages.pop_first().expect("nonempty bounded row cache");
-                    let (_, age) = self.rows.remove(&old_row).expect("LRU row exists");
+                    let (slot, age) = self.rows.remove(&old_row).expect("LRU row exists");
                     debug_assert_eq!(old_age, age);
-                }
-                self.rows.insert(row, (bytes, self.clock));
+                    self.telemetry.ple.current().evictions.fetch_add(1, Relaxed);
+                    slot
+                } else {
+                    self.telemetry.ple.entries.fetch_add(1, Relaxed);
+                    self.telemetry
+                        .ple
+                        .payload_bytes
+                        .fetch_add(self.row_bytes as u64, Relaxed);
+                    let charge = self
+                        .telemetry
+                        .ple
+                        .charged_bytes
+                        .fetch_add(ENTRY_OVERHEAD as u64, Relaxed)
+                        + ENTRY_OVERHEAD as u64;
+                    self.telemetry
+                        .ple
+                        .peak_charged_bytes
+                        .fetch_max(charge, Relaxed);
+                    self.rows.len()
+                };
+                self.payload[slot * self.row_bytes..(slot + 1) * self.row_bytes]
+                    .copy_from_slice(&bytes);
+                self.rows.insert(row, (slot, self.clock));
                 self.misses = self.misses.saturating_add(1);
+                self.telemetry.ple.current().misses.fetch_add(1, Relaxed);
             }
             self.ages.insert(self.clock, row);
-            let bytes = &self.rows[&row].0;
+            let slot = self.rows[&row].0;
+            let bytes = &self.payload[slot * self.row_bytes..(slot + 1) * self.row_bytes];
             let scales = self.width / 2;
             let biases = scales + self.width / 32 * 2;
             for column in 0..self.width {

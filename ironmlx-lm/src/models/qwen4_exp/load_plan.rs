@@ -39,7 +39,13 @@ impl FlashLoadRequest {
             prefill_chunk_size,
             draft_bytes,
             expert_residency: ExpertResidency::Auto,
-            expert_cache_limit_bytes: 16 * GIB,
+            expert_cache_limit_bytes: if usable_bytes <= 24 * GIB {
+                4 * GIB
+            } else if usable_bytes <= 56 * GIB {
+                8 * GIB
+            } else {
+                16 * GIB
+            },
         }
     }
     /// Optional explicit process configuration, shared by App and CLI. Invalid
@@ -63,7 +69,7 @@ impl FlashLoadRequest {
         Ok(self)
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct FlashLoadPlan {
     pub residency: ResidencyPlan,
     pub fixed_weight_bytes: u64,
@@ -183,7 +189,7 @@ impl FlashLoadPlan {
             )
             .context("Flash batch memory overflow")?;
         let temporary = scratch
-            .checked_add(4 * GIB)
+            .checked_add(4 * GIB + 32 * MIB)
             .context("Flash temporary bytes overflow")?;
         let residency = ResidencyRequest {
             mode: request.expert_residency,
@@ -203,6 +209,9 @@ impl FlashLoadPlan {
         let paging = (residency.mode == ExpertResidency::Ssd).then_some(ExpertPagingOptions {
             cache_bytes: usize::try_from(residency.resident_expert_bytes)?,
             staging_bytes: 16 * MIB as usize,
+            // Already covered by the fixed temporary envelope. Artificially
+            // shrinking this cap on 32 GiB would repeatedly repack the same
+            // layer without releasing any admission reservation.
             pack_bytes: 2 * GIB as usize,
         });
         Ok(Self {
@@ -238,7 +247,7 @@ impl FlashLoadPlan {
             .resident_bytes
             .checked_add(usize::try_from(self.vision_weight_bytes)?)
             .and_then(|n| n.checked_add(self.qsa_scratch_bytes))
-            .and_then(|n| n.checked_add(4 * GIB as usize))
+            .and_then(|n| n.checked_add((4 * GIB + 32 * MIB) as usize))
             .context("Flash runtime reservation overflow")?;
         tracing::info!(mode=?self.residency.mode,expert_cache_bytes=self.residency.resident_expert_bytes,peak_bytes=self.residency.peak_bytes,usable_bytes=self.residency.usable_bytes,"Flash memory plan admitted");
         Ok(model)
@@ -248,3 +257,22 @@ impl FlashLoadPlan {
 // about 116 MB recurrent state). Covers KV copy-on-write and Q8 snapshots.
 pub const FLASH_CACHE_BYTES_PER_TOKEN: u64 = 196_608;
 pub const FLASH_FIXED_BYTES_PER_SEQUENCE: u64 = 2 * GIB;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn low_memory_defaults_bound_cache_without_relaxing_state_cost() {
+        let low = FlashLoadRequest::new(24 * GIB, 1, 4096, 512, 0);
+        assert_eq!(low.expert_cache_limit_bytes, 4 * GIB);
+        assert_eq!(
+            FlashLoadRequest::new(56 * GIB, 2, 8192, 512, 0).expert_cache_limit_bytes,
+            8 * GIB
+        );
+        assert_eq!(
+            FlashLoadRequest::new(100 * GIB, 4, 32768, 2048, 0).expert_cache_limit_bytes,
+            16 * GIB
+        );
+        assert_eq!(FLASH_CACHE_BYTES_PER_TOKEN, 196_608);
+    }
+}

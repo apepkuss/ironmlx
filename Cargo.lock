@@ -1908,6 +1908,7 @@ dependencies = [
  "ironmlx-audio",
  "ironmlx-core",
  "jsonschema",
+ "libc",
  "llguidance",
  "minijinja",
  "mlx",

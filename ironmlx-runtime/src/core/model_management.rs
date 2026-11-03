@@ -647,6 +647,22 @@ impl ModelManagement {
         .map(|load| engine_model_config_fingerprint(&load.config))
     }
 
+    pub async fn preview_load(
+        &self,
+        request: ModelLoadRequest,
+    ) -> Result<Option<ironmlx_lm::models::qwen4_exp::load_plan::FlashLoadPlan>> {
+        if !request.model_dir.join("config.json").is_file()
+            || !super::flash_load::is_flash(&request.model_dir)?
+        {
+            return Ok(None);
+        }
+        let load = build_engine_model_config(
+            &self.scheduler_options,
+            request.engine_model_build_request(),
+        )?;
+        self.pool.preview_flash_load(&load.config).await
+    }
+
     pub async fn load_model(
         &self,
         request: ModelLoadRequest,
