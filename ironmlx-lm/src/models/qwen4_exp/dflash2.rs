@@ -21,6 +21,10 @@ impl DFlash2Target for FlashTextModel {
         true
     }
 
+    fn dflash2_group_cost_policy(&self) -> bool {
+        self.expert_paging_enabled() && self.native_paged_batching
+    }
+
     fn dflash2_validate_draft_config(&self, draft: &DFlash2Config) -> Result<()> {
         draft.ensure_flash_next_compatible(&self.config)
     }

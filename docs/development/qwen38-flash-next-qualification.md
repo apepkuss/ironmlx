@@ -7,7 +7,10 @@ An implementation stage and its qualification are separate gates.
 
 ## Fixed identities
 
-- MLX main: `a8f66b5901791a38ff527f249e1f1a84f46c03b6` (0.32.5).
+- Current MLX build: fork `65383d68c984ce4ef49f4b600820f3b9064c5a82`
+  (0.32.5), integrating the main-thread identity fix.
+- Frozen numeric-reference / upstream baseline MLX main:
+  `a8f66b5901791a38ff527f249e1f1a84f46c03b6` (0.32.5).
 - MLX-VLM reference: `ff788e98d82f6a931992a6a8ee0e74c7a7e6925e`.
 - Target: `mlx-community/Qwen3.8-Flash-Next-4bit`, imported standalone snapshot
   `d5fe7052703f142f839108bb1ace5486de238ab1`. The upstream HF revision is
@@ -389,8 +392,8 @@ Do not attribute the observed difference to scan protection or prefetch alone.
 2. **DFlash2 performance remains incomplete:** default M5 grouped draft windows
    cost more than ordinary native decoding on the 512 MiB/short-output fixture.
    Existing solo-request cost adaptation does not fully govern these grouped
-   windows. A group-level SSD-aware cost/fallback policy remains future work;
-   no general DFlash2 speedup or performance acceptance is claimed here.
+   windows. The follow-up below adds a group cost policy, with a remaining
+   performance gap; no general DFlash2 speedup is claimed.
 3. **No physical M1 Pro 32 GiB, 64 GiB, other M5 or M1–M4 GPU qualification.**
    Header-only 24 GiB budget simulations with B1, no draft, 4 GiB expert cache
    reserve about 14.65 GiB at 4K and 15.40 GiB at 8K, including deferred vision.
@@ -405,7 +408,8 @@ Do not attribute the observed difference to scan protection or prefetch alone.
    were not isolated in a statistically controlled A/B study.
 5. **Existing diagnostics persist:** five CoreAnalytics “Context leak” messages
    appeared in the full Rust run. They are not newly declared fixed; the
-   separately investigated MLX thread-identity issue remains deferred.
+   separately investigated MLX thread-identity issue was deferred at this gate;
+   the independent follow-up below does not change the production MLX pin.
 6. **One transient Swift test failure:**
    `plannedStopInterruptsDefaultReadinessWithoutMarkingFailure` once received
    `NSURLError -1004`; its isolated rerun and two full 574-test runs passed.
@@ -428,3 +432,389 @@ Do not attribute the observed difference to scan protection or prefetch alone.
 Detailed manifests and original logs are retained locally under
 `.build/flash-paging-optimization/` (not committed). Source edits remain on the
 feature branch; qualification does not authorize integration or publication.
+
+
+## SSD follow-up: measured group policy and isolated MLX investigation
+
+This follow-up skips CI inspection and physical M1 Pro 32 GiB testing, as
+requested. All measurements still use the same M5 Max / 128 GiB host. Stages
+7–8 (persistent Flash prefixes and active KV/request-state offload) remain
+out of scope. The production MLX pin remains main `a8f66b590`; an independent
+MLX fix is tested separately and is not silently integrated into the App.
+
+### Group cost and reference partition correctness
+
+Native paged Flash DFlash2 actors now learn ordinary versus speculative full
+window microseconds per emitted token, separately by width, context bucket and
+draft budget. Two ordinary windows establish the baseline, followed by two
+calibration draft windows when the remaining output horizon can amortize them.
+Drafting must improve the measured cost by at least 3%; otherwise ordinary
+windows continue, with bounded two-window recovery probes. Exploration credit
+is capped; short requests cannot accumulate an unlimited later probe burst.
+The policy periodically refreshes its ordinary baseline and resets a regime
+after 60 seconds without observations. Cache construction is measured
+separately and excluded from the steady cost comparison.
+
+`IRONMLX_FLASH_DFLASH_GROUP_POLICY=auto|off` is a process diagnostic, not a
+new Dashboard setting. Explicit existing fixed/ragged/probe/budget overrides
+keep their existing behavior. Other target models keep their existing policy.
+Unqualified speculative widths fall back to a complete native ordinary group,
+including B3; this does not qualify speculative B3 or draft tensor batching.
+Health diagnostics expose enabled, trained/ordinary/probe/reset and shape
+fallback window counters under DFlash2 ragged-linear state.
+
+The longer HTTP gate found a latent numerical partition defect missed by the
+previous 8-token fixture: a 32-token native ordinary B4 answer changed from
+“精准、高效” to “高效、精准”. Independent B1 prefill uses a prefix plus a final
+single token; the native complete-prompt path previously used the entire
+prompt at once. Flash now retains the B1 prefix/final-token partition. Chunked
+or configured-prefix-cache prompts use conservative row-isolated initial
+prefill, preserving their existing per-request partition. Images retain their
+independent isolation contract. Subsequent native decode/target verification
+and the direct native paged MoE B2/B4 implementation remain enabled. This means
+not every server prefill runs as a native group.
+
+After the fix, two rounds per configuration passed independent B1/B2/B4
+messages, completion counts and finish reasons, ordinary-versus-DFlash2 exact
+outputs, SSE cancellation and immediate capacity reuse. A separate unequal
+4/20/48/64-token fixture passed the transition from B4 through ordinary B3,
+restored B2 speculative verification and B1; outputs matched independent B1.
+The original failure and intermediate controls are retained locally.
+
+| 32-token B4 / 512 MiB experts | End-to-end observations |
+| --- | ---: |
+| Ordinary native | 44.71–44.79 s |
+| DFlash2 group policy off | 61.57–61.59 s |
+| DFlash2 measured auto, first run | 52.05–52.57 s |
+| DFlash2 measured auto, repeated run | 52.90–53.14 s |
+
+These are small sequential fixed-fixture observations, not broad performance
+acceptance. Auto improves this DFlash2 case but remains slower than ordinary.
+Admitting a complete ordinary B3 cohort did not prove a further material
+throughput gain over the earlier measured-cost implementation. Sequential
+DFlash2 request prefill and expert/weight movement still contribute; neither
+all causes nor a general optimal policy have been established.
+
+### Storage controls and limits of the measurements
+
+The existing default segmented cache can be compared with a plain LRU control
+using `IRONMLX_FLASH_EXPERT_CACHE_POLICY=segmented|lru`. Bounded reader workers
+can be compared with `IRONMLX_FLASH_IO_WORKERS=1|2` (default two). Invalid worker
+configuration or thread creation failure returns an I/O error rather than
+panicking during pool initialization. These are diagnostic controls.
+
+An opt-in actual-model regression (`flash_paging_ab_real`) restores the same
+request snapshot, replays the single next token with ID 701 twice to promote
+its decode experts, scans 2048 other tokens, then restores and replays that
+same next token. This is a fixed hot expert set, not a 701-token trajectory. All four 4 GiB-cache ABBA runs matched
+replay logits exactly. Segmented retention kept all 480 replay expert requests
+hot (zero misses/read bytes), while plain LRU had 49 hits and 431 misses,
+requesting 1,324,032,000 expert bytes. Replay took about 0.10–0.11 s versus
+0.51–0.55 s. This demonstrates scan resistance for this bounded working set;
+it does not guarantee protected entries survive an oversized working set.
+
+All four 2048-token scans used two readers and took 15.90–17.76 s; their
+earlier/later timing difference cannot be attributed to reader count. Separate
+512 MiB / 63-token controls passed cached/no-cache, serial/parallel and
+prefetch-disabled/auto correctness. That scan took 5.80 s with one reader and
+5.33 s with two (prefetch off), 5.31 s with prefetch auto, and 5.28 s with cached
+I/O. These are single observations; the prefetch difference is within noise.
+Two readers helped this fixture, but no controller-cold disk throughput claim
+is supported.
+
+In the 512 MiB I/O controls, physical device counters increased only about
+77–96 MB while application reads were tens of GB, including `F_NOCACHE` runs.
+The data remained
+largely served from system caches. `F_NOCACHE` and a small application cache do
+not prove cold SSD I/O. No global page-cache purge was performed. Application
+hit/read/pack counters, process RSS and MLX allocator peaks are distinct; none
+of these results proves a 32 GiB Mac can run the same workload.
+
+### Lifecycle and bounded additional memory load
+
+Ordinary and DFlash2 serving passed independent B1/B4 output comparison, 65 seconds of
+idle without target probes, first-request recovery, a held additional 16 GiB
+anonymous allocation, cold image materialization, live SSE cancellation and
+capacity release, B4 recovery, allocation release, and image/text rechecks.
+The allocation stayed resident through the pressure/cancellation requests.
+The first idle-recovery request took 11.49 s for ordinary and 10.18 s for
+DFlash2. DFlash2 recorded a cost-regime idle reset. These lifecycle timings
+are not controlled throughput benchmarks; a separate CPU-only candidate build
+overlapped the initial ordinary warm fixture.
+
+System pressure stayed normal. Existing host swap usage was approximately
+14,885 MiB before testing and did not increase during either route. Thus this
+qualifies bounded extra memory occupancy, not newly induced OS pressure,
+swap-thrashing recovery or operation on a physical 32 GiB machine. Process RSS
+increased after first image materialization; deferred vision weights remain
+loaded for subsequent image requests. Allocator/process/machine counters are
+retained separately in the lifecycle evidence.
+
+### Validation evidence
+
+The initial follow-up pinned-MLX workspace Release Rust suite passed **2,521 tests**, with
+**302 ignored** across **210 targets**; ignored opt-in tests are not passes.
+CI-pinned nightly Clippy with warnings denied and both formatting versions
+passed. Swift Release passed **574 tests** and Dashboard Node passed **4**.
+Five CoreAnalytics “Context leak” diagnostics still appeared with the pinned
+MLX. The independently linked candidate below is evaluated separately.
+
+A workflow error was caught before the special lifecycle gates: a workspace
+`cargo test --all-features` rebuild overwrote the CLI artifact with a version
+linked to test initialization, which requires `MLX_DIR`. A sanitized production
+launch therefore aborted before serving. Rebuilding default-feature production
+helpers after the test run resolved it; `ironmlx --version` also passed with
+`MLX_DIR` unset. This was test artifact reuse, not a fix to hide the test
+initializer. The original failure log is retained.
+
+Detailed manifests, failed controls and passing reruns are retained locally
+under `.build/flash-followup/` (not committed). No CI result, real M1/32 GiB,
+64 GiB, controller-cold SSD, thermal endurance, critical pressure/swap or
+long-duration wear qualification is claimed by this follow-up.
+
+
+### Independent MLX main-thread identity fix
+
+The candidate is isolated on MLX branch `fix/main-thread-identity`, based on
+`a8f66b590`, with no changes to the production IronMLX pin or installed baseline
+library. Darwin now asks `pthread_main_np()` for actual main-thread identity;
+Linux uses kernel TID versus process PID. Other platforms retain the existing
+fallback. Only macOS/Apple GPU execution is physically qualified here; Linux,
+CUDA, Windows and other fallback-platform behavior are not validated.
+
+The original implementation remembered the first calling C++ thread ID. On
+this host, a worker-first probe failed actual-main/256-worker identity checking.
+A worker-created shared-stream lazy GPU graph also failed after worker
+`clear_streams()` and exit: `There is no Stream(gpu, 0) in current thread.`
+The fixed library passes both cases. CPU/GPU pending asynchronous outputs from
+64 sequential producer threads remain usable after their producers exit, and
+CPU worker exception propagation passes. The separate six-case CTest gate
+passes with the candidate.
+
+LLDB sampled the same OS `kIOGPUQueueCount` symbol in both statically linked
+probes, using 350 sequential workers and main-first/reused-worker controls:
+
+| Initialization/lifetime | Original final live queues | Fixed final live queues |
+| --- | ---: | ---: |
+| Worker first, 350 workers exit | 350 | 0 |
+| Main first, 350 workers exit | 1 | 1 |
+| One worker reused 350 times, then exits | 1 | 0 |
+
+The original worker-first process produced six CoreAnalytics “Context leak”
+messages; the corresponding fixed probe produced zero. Both processes exited
+successfully. Final RSS was about 120 MB versus 84 MB, a process observation
+rather than a byte-accurate queue allocation ledger. Global stream registry
+entries remain (350/351 for sequential-worker controls); the fix retires
+thread-owned GPU queues, not the global stream index metadata or all CPU
+scheduler resources. No general registry/allocator leak elimination is claimed.
+
+The isolated candidate uses the same base and private NAX/QMM metallib hashes
+as the production baseline; only its host MLX archive differs. Production App
+qualification continues to use the unmodified pinned host archive.
+
+
+The official C++ suite with the candidate and default GPU reported **313 of
+319 cases passing**, with **six failing cases / 17 assertions**. Relinking the
+exact same test objects against the untouched baseline reproduced the same
+six failures and the same 17 assertion locations. The cases are QR, inversion,
+Cholesky, pseudo-inverse, `eigh` and LU; all combine CPU linear algebra with
+default-device checks. The isolated QR case fails in default GPU mode for both
+libraries and passes with `DEVICE=cpu`. The full candidate suite with
+`DEVICE=cpu` passed **319/319 cases and 5,854 assertions**. The broader six-case
+GPU-default issue is therefore a reproduced baseline limitation in this
+environment, not a newly established thread-fix regression. Its underlying
+cause remains undetermined; no unrelated linear algebra patch or relaxed test
+tolerance was added. The GPU-default official suite is not declared green.
+
+
+The complete IronMLX Release workspace suite linked to the isolated candidate
+passed **2,521 tests, 0 failed, 302 ignored across 210 targets**, matching the
+baseline pass/ignore totals. It produced **zero** CoreAnalytics “Context leak”
+diagnostics versus **five** with the pinned baseline in the same suite. This
+qualifies these scenarios on this macOS host, not every possible framework
+context lifetime. The production App still uses the pinned baseline until a
+separate integration decision; its five-diagnostic baseline is not declared
+fixed by testing another archive.
+
+
+The opt-in NAX/QMM gate passed six actual tests across five targets: Flash MoE
+QMM/gather reference shapes, real 27B gate/up/down QMM byte equality, D256
+prefill, D256 split-K decode and sliding-window attention. The candidate also
+passed actual Flash native B2/B4 ragged prefill/decode, DFlash2 verification and
+transactional commit/rollback, real vision/non-square reference, resident
+reference, text/image generation, and native-disabled/no-cache/prefetch-disabled
+controls. These used actual local snapshots/oracles, not header-only simulation.
+
+Dense 27B ANE ordinary and DFlash2 target execution each completed **64 jobs**,
+with **zero surface bytes after model unload**. Ordinary candidate logits
+matched the earlier pinned-library reference exactly; ordinary and DFlash2
+candidate logits also matched each other exactly for this fixed 2048-token
+teacher-forced prompt and four continuation steps. This does not qualify ANE
+for Flash or new machines; Flash ANE remains removed.
+
+
+### Additional existing-model service issue and final source recheck
+
+The first real 35B MoE ordinary B4 HTTP fixture failed on the bundled
+production-baseline helper, before a candidate-library comparison: prefill
+reported incompatible attention shapes `(1,1,21,21)` and `(1,16,21,19)`, returning
+HTTP 500. The original log and binary are retained in
+`current-models-first-failure/` and `binaries/pre-facade-ironmlx`.
+
+Static inspection found that the Qwen3.6 MoE facade did not forward the inner
+Qwen3.5 MoE model's `requires_split_batched_prefill_for_token_parity` contract.
+The facade now delegates that contract; its existing model-surface regression
+asserts the requirement. This restores the existing B1 prefill partition
+policy rather than changing MLX math or disabling subsequent grouped decode.
+After this final source change, the entire model-library Release unit suite
+passed again with both host archives: **693 passed, 40 ignored each**. The
+2,521-test workspace runs above precede this last facade-only adjustment;
+those complete runs are not relabeled as reruns of later source.
+
+Both format checks and the exact CI-scope nightly Clippy command passed after
+the adjustment. An extra, broader `--all-targets` Clippy attempt failed on
+unchanged legacy `mlx/tests` warnings (needless generic borrows and approximate
+constants). The CI command does not include that extra target scope. These
+warnings were retained as a separate non-green exploratory check; no unrelated
+test cleanup or warning suppression was added.
+
+
+The facade adjustment alone was insufficient: it fixed initial prefill, then
+ragged decode exposed another baseline defect. Batch-stable attention split the
+cache into B1 rows while retaining the batch-wide mask key width. A shorter row
+therefore saw `(1,1,1,22)` mask keys against `(1,16,1,20)` attention scores. The
+second failure is retained in `current-models-facade-only-failure/`, with its
+helper binary in `binaries/facade-only-ironmlx`.
+
+`GatedAttention` row isolation now clips only the mask's trailing key dimension
+to that row's actual post-append KV length, retaining broadcast masks. A new
+nonzero-weight/nonzero-history B2/B4 regression compares unequal row histories
+with independent B1 computation exactly, including resulting cache offsets.
+Before the fix this regression reproduced `(1,1,1,6)` versus `(1,4,1,4)` and
+failed; after it the model-library suite passed **694 tests, 40 ignored** with
+each MLX archive. The bundled pinned-library helper then passed the previously
+failing real 35B MoE ordinary B4 fixture and its DFlash2 counterpart, including
+independent B1 outputs, completion counts, finish reasons and cancellation /
+capacity reuse. No claim that the first facade patch alone fixed the service
+error is made.
+
+
+The final real-service matrix passed all **eight** pinned/candidate × Dense
+27B/MoE 35B × ordinary/DFlash2 cases. Each waited 20 seconds after model loading
+without target work before independent B1 requests, then B4, SSE cancellation
+and immediate capacity reuse. The pinned cases executed the actual signed
+Release App helper. Messages, completion token counts and finish reasons
+matched independent B1 for each case, matched the corresponding pinned case
+for the candidate, and matched across ordinary/DFlash2 for both models. This
+qualifies these text fixtures; MoE 35B image and persistent-prefix reuse are not
+newly qualified by this matrix.
+
+
+The focused candidate Flash HTTP gate also passed ordinary and DFlash2 serving
+with a 512 MiB expert cache: 20 seconds idle after loading, independent B1 and
+concurrent B2, exact messages/counts/finish reasons, exact cross-route output,
+and healthy idle schedulers. This covers real runtime transfer of the loaded
+model to inference threads in addition to standalone graph-lifetime probes.
+
+With both MoE service fixes included, the final **pinned-library** Release
+workspace rerun passed **2,522 tests, 0 failed, 302 ignored across 210 targets**.
+The additional passing test is the unequal-history row-mask regression. Five
+CoreAnalytics diagnostics persist with this pinned library. The exact local
+CI-scope nightly Clippy command passed again for this final source.
+
+
+The final **candidate-library** workspace rerun on the same final source also
+passed **2,522 tests, 0 failed, 302 ignored across 210 targets**, with **zero**
+CoreAnalytics diagnostics. The final pinned run retained five. Production
+helpers were rebuilt with default features after each full test run; the
+sanitized production entry point, not a test-support-linked artifact, is used
+for App restoration. The final local Clippy check uses exactly the repository
+CI scope; no remote CI status was queried.
+
+The Release bundle reuses the unchanged previously built Release Swift shell
+and the exact pinned base/private metallibs, with freshly built production Rust
+helpers, current feature-branch HEAD plus dirty-state metadata, and ad-hoc
+signatures. Static bundle, resource parity and model-distribution-boundary
+verification passed. The one-shot packaging script was not run against the
+dirty independent MLX fix checkout: that script requires a clean pinned source.
+The pinned installed archive was preserved unchanged, and the candidate was
+built/linked separately. This is local build/qualification, not integration,
+commit/push, signing/notarization for publication, or a new public release.
+
+
+At the end of qualification, the updated Release App was started from this
+worktree's `dist/IronMLX.app`. Port 9068 reported healthy with no loaded model
+and no active/queued requests; the listening helper path matched that bundle.
+The App metadata retained MLX `a8f66b590`, feature HEAD `462372701` with a dirty
+source tree, version 0.2.0 / build 9. The three recorded model/App configuration
+file hashes matched their pre-test values. The baseline `libmlx.a` hash also
+matched its original value. New IronMLX and independent MLX source changes
+remain uncommitted and unpushed.
+
+
+## MLX thread-identity fix integration (2026-11-03)
+
+The approved integration commits the four validated MLX source/test files on
+`fix/main-thread-identity` as `65383d68c984ce4ef49f4b600820f3b9064c5a82`.
+The MLX working tree is clean. IronMLX now pins this commit in the release
+configuration and native dependency source verification. Regenerated third-
+party inventory/notices and CycloneDX SBOM carry the new fork revision; the
+upstream baseline remains `a8f66b590`. Frozen reference generators/oracle
+identities retain their original baseline, rather than rewriting expected
+numerical evidence to match the newly integrated library.
+
+The full `scripts/build-app-bundle.sh` pipeline completed from clean build
+outputs, using the clean commit-pinned MLX checkout: fresh MLX/AOT Metal/NAX,
+production Rust helpers, Swift Release shell, bundle assembly/signatures,
+third-party reproducibility, SBOM, static bundle and model-distribution gates.
+This integration did not substitute the earlier manually repackaged bundle.
+App metadata records MLX `65383d68`, IronMLX feature HEAD `462372701` plus dirty
+state, version 0.2.0 / build 9.
+
+The fresh archive SHA differs from the earlier candidate archive, but all
+**128 object members**, in order, match byte-for-byte; the archive container
+metadata is not an implementation difference. The complete AOT Metal library
+also matches byte-for-byte. Source hashes of the four committed MLX files
+matched the previously qualified candidate before committing. Six freshly
+linked identity/error/CPU-GPU graph/pending-output probes passed; the fresh
+350-worker LLDB run ended with **zero live GPU queues and zero Context leak
+diagnostics**. Global stream index metadata is still retained as documented
+above.
+
+The MLX fix was initially qualified locally. Following approval on 2026-11-04
+JST, `fix/main-thread-identity` was pushed to origin at `65383d68`, and the
+remote branch head was verified before committing the IronMLX dependency
+update. No merge, tag or public release was performed, and no remote CI status
+was inspected. Prior
+limitations (physical 32/64 GiB Macs, controller-cold SSD, critical memory
+pressure/swap, other platforms, the six reproduced official GPU-default
+linear algebra failures, and deferred Flash prefix/KV persistence) remain.
+
+
+Integration completed on **2026-11-04 JST** (2026-11-03 UTC). The freshly built,
+signed bundle helper passed six real-service cases: Dense 27B, MoE 35B and
+Flash, each ordinary and DFlash2, with independent B1/B4 output/count/finish
+checks, 20-second post-load idle and live cancellation/capacity reuse. The
+27B/35B text results matched the previously qualified candidate exactly. Flash
+used a forced 512 MiB expert cache and mixed text/single-image/multi-image
+requests; its two routes matched exactly.
+
+Freshly linked NAX/QMM tests passed **six tests across five targets**, including
+real 27B QMM weight data. Fresh Dense 27B ANE ordinary and DFlash2 target runs
+each completed **64 actual jobs**, returned to **zero live surface bytes after
+unload**, and matched the qualified candidate logits exactly. These are the
+post-integration component/runtime gates; the previous two 2,522-test workspace
+runs remain prior same-implementation evidence, not newly claimed executions
+of this integration step. The MLX object-member and Metal-library byte equality
+and unchanged IronMLX numerical source support that evidence transfer.
+
+The exact newly rebuilt App was launched and its own helper on port 9068
+reported healthy, idle and no loaded model. Metadata confirms MLX `65383d68`;
+the recorded user model/App configuration hashes are unchanged. The old App
+and baseline MLX install are retained locally under
+`.build/mlx-identity-integration/previous-IronMLX.app` and
+`previous-mlx-install/`. Detailed new manifests, fresh artifact hashes, model
+comparisons, thread/queue samples and startup identity are in
+`.build/mlx-identity-integration/results.json`. The qualification App was built
+before the feature changes were committed; its recorded dirty-source metadata
+is retained as the tested artifact identity.

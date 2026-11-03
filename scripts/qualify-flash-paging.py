@@ -22,7 +22,10 @@ def main():
     parser.add_argument('--baseline', type=Path)
     parser.add_argument('--images', action='store_true')
     parser.add_argument('--max-tokens', type=int, default=8)
+    parser.add_argument('--rounds', type=int, default=1)
+    parser.add_argument('--stream-timing', action='store_true')
     args = parser.parse_args()
+    assert args.rounds > 0 and args.max_tokens > 0
 
     def health():
         start = time.monotonic()
@@ -54,10 +57,35 @@ def main():
             'model': args.model, 'messages': [{'role': 'user', 'content': prompt}],
             'temperature': 0, 'max_tokens': maximum or args.max_tokens, 'stream': stream,
             'chat_template_kwargs': {'enable_thinking': False},
+            **({'stream_options': {'include_usage': True}} if stream and args.stream_timing else {}),
         }).encode(), headers={'Content-Type': 'application/json'})
 
     def complete(prompt):
         start = time.monotonic()
+        if args.stream_timing:
+            message = {'role': 'assistant', 'content': ''}
+            first, finish, usage = None, None, None
+            with urllib.request.urlopen(request(prompt, stream=True), timeout=600) as response:
+                for raw in response:
+                    if not raw.startswith(b'data: ') or raw.strip() == b'data: [DONE]':
+                        continue
+                    event = json.loads(raw[6:])
+                    if event.get('usage'):
+                        usage = event['usage']
+                    for choice in event.get('choices', []):
+                        delta = choice.get('delta', {})
+                        for key in ['content', 'reasoning_content']:
+                            if delta.get(key):
+                                if first is None:
+                                    first = time.monotonic() - start
+                                message[key] = message.get(key, '') + delta[key]
+                        if choice.get('finish_reason'):
+                            finish = choice['finish_reason']
+            elapsed = time.monotonic() - start
+            assert usage is not None and finish is not None, 'missing terminal SSE usage/finish'
+            return {'message': message, 'finish_reason': finish,
+                    'completion_tokens': usage['completion_tokens'], 'seconds': elapsed,
+                    'first_token_seconds': first, 'decode_seconds': elapsed - (first or elapsed)}
         with urllib.request.urlopen(request(prompt), timeout=600) as response:
             result = json.load(response)
         return {'message': result['choices'][0]['message'],
@@ -66,7 +94,7 @@ def main():
                 'seconds': time.monotonic() - start}
 
     def comparable(rows):
-        return [{k: v for k, v in row.items() if k != 'seconds'} for row in rows]
+        return [{k: v for k, v in row.items() if not k.endswith('seconds')} for row in rows]
 
     prompts = ['请只回答：一加一等于几？', 'Explain recursion briefly.',
                'Write a Python function that adds two numbers.', '请用一句话介绍你自己。']
@@ -77,12 +105,21 @@ def main():
     try:
         reference = [complete(p) for p in prompts]
         result['reference'] = reference
-        for width in [2, 4]:
-            started = time.monotonic()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=width) as executor:
-                rows = list(executor.map(complete, prompts[:width]))
-            result['batches'][str(width)] = {'rows': rows, 'seconds': time.monotonic() - started}
-            assert comparable(rows) == comparable(reference[:width]), f'B{width} differs from B1'
+        result['rounds'] = []
+        for round_index in range(args.rounds):
+            for width in [2, 4]:
+                h_before, m_before, _ = health()
+                started = time.monotonic()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=width) as executor:
+                    rows = list(executor.map(complete, prompts[:width]))
+                batch = {'rows': rows, 'seconds': time.monotonic() - started}
+                h_after, m_after, _ = health()
+                result['batches'][str(width)] = batch
+                result['rounds'].append(dict(round=round_index, width=width, **batch,
+                    dflash2_before=h_before.get('dflash2', m_before.get('dflash2')),
+                    dflash2_after=h_after.get('dflash2', m_after.get('dflash2'))))
+                print(json.dumps({'round': round_index, 'width': width, 'seconds': batch['seconds']}), flush=True)
+                assert comparable(rows) == comparable(reference[:width]), f'B{width} differs from B1'
         if args.images:
             image = Path(__file__).resolve().parents[1] / 'ironmlx-lm/tests/fixtures/embedding_gemma2/images/red-circle.png'
             prompt = [{'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,' + base64.b64encode(image.read_bytes()).decode()}},

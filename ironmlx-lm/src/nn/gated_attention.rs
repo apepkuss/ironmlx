@@ -774,6 +774,29 @@ impl GatedAttention {
             )
             .with_step(cache.cap());
             row_cache.adopt_row_from(cache, 0, row as usize)?;
+            // The batch mask covers the widest history; a B1 cache fetch only
+            // exposes this row's valid keys.
+            let key_len =
+                row_cache.offsets()[0] + row_lens.map_or(row_x.shape()[1], |lens| lens[0]);
+            let row_mask = row_mask
+                .map(|mask| -> Result<Array> {
+                    let mut stops = mask.shape().as_slice().to_vec();
+                    let last = stops.len() - 1;
+                    if stops[last] <= key_len {
+                        return Ok(mask);
+                    }
+                    stops[last] = key_len;
+                    let starts = vec![0; stops.len()];
+                    let strides = vec![1; stops.len()];
+                    Ok(mlx::ops::indexing::slice_strided_on(
+                        &mask,
+                        starts.as_slice(),
+                        stops.as_slice(),
+                        strides.as_slice(),
+                        target,
+                    )?)
+                })
+                .transpose()?;
             let row_output = self.forward_on(
                 &row_x,
                 mrope,
@@ -1600,6 +1623,93 @@ mod tests {
             RmsNorm::new(k_n, cfg.rms_norm_eps),
             cfg,
         )
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn batch_isolated_ragged_decode_matches_independent_rows() -> crate::Result<()> {
+        let values = |dims: &[i32], seed: i32| -> crate::Result<Array> {
+            let data = (0..dims.iter().product::<i32>())
+                .map(|i| ((i * seed % 37) as f32 - 18.0) * 0.01)
+                .collect::<Vec<_>>();
+            Ok(Array::try_from((data.as_slice(), dims))?)
+        };
+        let mut attn = small_gated_attention();
+        attn.input_projections = GatedAttentionInputProjections::Separate {
+            q: Linear::new_fp(values(&[64, 32], 3)?, None),
+            k: Linear::new_fp(values(&[16, 32], 5)?, None),
+            v: Linear::new_fp(values(&[16, 32], 7)?, None),
+        };
+        attn.o_proj = Linear::new_fp(values(&[32, 32], 11)?, None);
+        let mrope = Mrope::new(8, 1e7, 1.0, &[2, 1, 1], true)?;
+        for batch in [2, 4] {
+            let mut cache = KVCache::new(batch, 2, 8, 8, Dtype::Float32, 32);
+            let mut independent = Vec::new();
+            let offsets = (0..batch).map(|row| 3 + 2 * row).collect::<Vec<_>>();
+            for (row, &len) in offsets.iter().enumerate() {
+                let mut solo = KVCache::new(1, 2, 8, 8, Dtype::Float32, 32);
+                solo.update_and_fetch(
+                    &values(&[1, 2, len, 8], row as i32 + 13)?,
+                    &values(&[1, 2, len, 8], row as i32 + 17)?,
+                    &[len],
+                )?;
+                cache.adopt_row_from(&solo, row, 0)?;
+                independent.push(solo);
+            }
+            let x = values(&[batch, 1, 32], 19)?;
+            let cos = constructors::ones((batch, 1, 8), Dtype::Float32)?;
+            let sin = Array::zeros((batch, 1, 8), Dtype::Float32)?;
+            let lens = vec![1; batch as usize];
+            let mask = crate::core::model_input::build_batched_append_attention_mask(
+                &offsets,
+                &lens,
+                1,
+                Dtype::Float32,
+            )?;
+            let batched = {
+                let _scope = crate::nn::batch_stable_qmm::context_scope();
+                attn.forward_on(
+                    &x,
+                    &mrope,
+                    &cos,
+                    &sin,
+                    Some(&mask),
+                    None,
+                    Some(&lens),
+                    Some(&mut cache),
+                    (),
+                    -1,
+                )?
+            };
+            let mut expected = Vec::new();
+            for (row, solo) in independent.iter_mut().enumerate() {
+                let row_mask = crate::core::model_input::build_batched_append_attention_mask(
+                    &[offsets[row]],
+                    &[1],
+                    1,
+                    Dtype::Float32,
+                )?;
+                expected.push(attn.forward_on(
+                    &slice_batch_row_or_broadcast(&x, row as i32, ().into())?,
+                    &mrope,
+                    &slice_batch_row_or_broadcast(&cos, row as i32, ().into())?,
+                    &slice_batch_row_or_broadcast(&sin, row as i32, ().into())?,
+                    Some(&row_mask),
+                    None,
+                    Some(&[1]),
+                    Some(solo),
+                    (),
+                    -1,
+                )?);
+            }
+            let expected = mlx::ops::shape::concatenate(&expected.iter().collect::<Vec<_>>(), 0)?;
+            assert_eq!(batched.to_vec::<f32>()?, expected.to_vec::<f32>()?);
+            assert_eq!(
+                cache.offsets(),
+                offsets.iter().map(|n| n + 1).collect::<Vec<_>>()
+            );
+        }
+        Ok(())
     }
 
     #[test]

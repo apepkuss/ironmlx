@@ -312,6 +312,10 @@ impl Qwen36MoeModel {
 }
 
 impl Model for Qwen36MoeModel {
+    fn requires_split_batched_prefill_for_token_parity(&self) -> bool {
+        self.inner.requires_split_batched_prefill_for_token_parity()
+    }
+
     fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>> {
         Qwen36MoeModel::make_cache(self, batch, cap, dtype)
     }
@@ -568,6 +572,7 @@ mod tests {
     fn qwen36_moe_model_implements_core_and_vl_traits() {
         let model = Qwen36MoeModel::from_cfg_for_test(make_cfg());
         assert_model_surface(&model);
+        assert!(model.requires_split_batched_prefill_for_token_parity());
         assert_eq!(model.num_hidden_layers(), 0);
         assert_eq!(model.config().hidden_size, 32);
     }

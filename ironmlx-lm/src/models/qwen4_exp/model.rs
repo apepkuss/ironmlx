@@ -494,6 +494,10 @@ impl Model for FlashTextModel {
         !(self.expert_paging_enabled() && self.native_paged_batching)
     }
 
+    fn requires_b1_prefill_partition(&self) -> bool {
+        true
+    }
+
     fn requires_row_isolated_multimodal_prefill(&self) -> bool {
         true
     }
