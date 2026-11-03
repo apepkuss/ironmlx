@@ -211,7 +211,7 @@ test('embedding cards show vector metrics in every language and retain generatio
     'latency', 'latency_help', 'input_rate', 'input_rate_help', 'vector_rate', 'vector_rate_help',
     'performance_window', 'performance_empty'];
   const card = { style: {} };
-  const container = { innerHTML: '' };
+  const container = { innerHTML: '', querySelectorAll() { return []; } };
   const context = {
     I18N: translations, currentLang: 'en', window: {}, Date,
     DECISION_RECENT_ACTIVITY_MS: 2500,
