@@ -17,7 +17,7 @@ impl LayerState {
     fn from_snapshot(snapshot: &LayerSnapshot, cap: i32) -> Result<Self> {
         Ok(match snapshot {
             LayerSnapshot::Linear(gdn, ple) => Self::Linear {
-                gdn: GatedDeltaCache::from_snapshot(gdn, cap)?,
+                gdn: Box::new(GatedDeltaCache::from_snapshot(gdn, cap)?),
                 ple: ple.clone(),
             },
             LayerSnapshot::Sparse(state) => {
@@ -80,7 +80,9 @@ mod tests {
     }
     fn linear() -> LayerState {
         LayerState::Linear {
-            gdn: GatedDeltaCache::new_with_cap(1, 4, 8, 1, 2, 32, Dtype::Bfloat16, 16).unwrap(),
+            gdn: Box::new(
+                GatedDeltaCache::new_with_cap(1, 4, 8, 1, 2, 32, Dtype::Bfloat16, 16).unwrap(),
+            ),
             ple: Some(PleState::from_history(index().history())),
         }
     }

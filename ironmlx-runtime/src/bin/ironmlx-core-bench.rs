@@ -592,6 +592,9 @@ fn main() -> Result<()> {
         ModelArchitecture::DiffusionGemma => Err(anyhow!(
             "ironmlx-core-bench measures causal prefill/decode models; DiffusionGemma uses block diffusion"
         )),
+        ModelArchitecture::Qwen38FlashNext => Err(anyhow!(
+            "ironmlx-core-bench has not qualified Flash-Next's storage and cache options; use ironmlx generate/serve or the dedicated Flash qualification tools"
+        )),
     }
 }
 

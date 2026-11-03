@@ -1303,7 +1303,7 @@ fn ane_model_from_config(config: &serde_json::Value) -> ironmlx_core::ane::Model
     if config["model_type"] == "qwen4_exp" {
         return Model::FlashNext;
     }
-    let text = config.get("text_config").unwrap_or(&config);
+    let text = config.get("text_config").unwrap_or(config);
     let quant = config
         .get("quantization")
         .or_else(|| config.get("quantization_config"));
@@ -1350,7 +1350,7 @@ impl AneHealth {
             reason: hw.reason,
             models: [Model::Dense27B, Model::FlashNext]
                 .into_iter()
-                .map(|model| AneModelHealth::for_model(model))
+                .map(AneModelHealth::for_model)
                 .collect(),
         }
     }

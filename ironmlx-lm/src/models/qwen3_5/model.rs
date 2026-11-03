@@ -1530,19 +1530,18 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
             && crate::nn::m5_affine4::enabled()
         {
             return format!(
-                "qwen38-dflash2;{};reference=lane-serial-not-ordinary-mlx;{}",
-                format!(
-                    "{};{}",
-                    crate::nn::m5_affine4::fingerprint(),
-                    crate::core::model::Model::execution_cache_fingerprint(self)
-                        .unwrap_or_else(|| "ane=off".into())
-                ),
+                "qwen38-dflash2;{};{};reference=lane-serial-not-ordinary-mlx;{}",
+                crate::nn::m5_affine4::fingerprint(),
+                crate::core::model::Model::execution_cache_fingerprint(self)
+                    .unwrap_or_else(|| "ane=off".into()),
                 self.dflash2_verify_capabilities().stable_fingerprint()
             );
         }
         format!(
-            "qwen35-dflash2-v3-mlx0325;prepared-qmm=lane-product-stable-rows-v1;attention=bulk-position-stable-v1;recurrent=logical-prefix-v2;{}",
-            format!("{};{}",self.dflash2_verify_capabilities().stable_fingerprint(),crate::core::model::Model::execution_cache_fingerprint(self).unwrap_or_else(|| "ane=off".into()))
+            "qwen35-dflash2-v3-mlx0325;prepared-qmm=lane-product-stable-rows-v1;attention=bulk-position-stable-v1;recurrent=logical-prefix-v2;{};{}",
+            self.dflash2_verify_capabilities().stable_fingerprint(),
+            crate::core::model::Model::execution_cache_fingerprint(self)
+                .unwrap_or_else(|| "ane=off".into())
         )
     }
 
