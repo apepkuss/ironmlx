@@ -137,9 +137,36 @@ pub struct FlashTextModel {
     pub(crate) native_batch_unqualified: bool,
     pub(crate) vision: crate::models::vision::VisionSlot,
     pub(crate) vision_config: Option<crate::models::qwen3_5::VisionConfig>,
+    // Kept until model teardown; does not own KV or paged expert buffers.
+    _weight_residency: Option<mlx::memory::WeightResidency>,
+    residency_binding_status: std::sync::atomic::AtomicU8,
 }
 
 impl FlashTextModel {
+    pub(crate) fn bind_weight_residency(&self, target: StreamOrDevice) {
+        if let Some(lease) = &self._weight_residency {
+            let result = lease.bind_on(target);
+            let status = match &result {
+                Ok(true) => 1,
+                Ok(false) => 2,
+                Err(_) => 3,
+            };
+            let previous = self
+                .residency_binding_status
+                .swap(status, std::sync::atomic::Ordering::Relaxed);
+            if previous != status {
+                match result {
+                    Err(error) => {
+                        tracing::warn!(%error, "Flash weight residency binding failed; using automatic Metal residency")
+                    }
+                    Ok(false) => tracing::debug!(
+                        "Flash weight residency paused or queue capacity unavailable"
+                    ),
+                    Ok(true) => tracing::debug!("Flash weight residency bound to execution queue"),
+                }
+            }
+        }
+    }
     pub fn from_loader(
         loader: &Loader,
         files: Arc<ModelTensorFiles>,
@@ -335,6 +362,8 @@ impl FlashTextModel {
             layer_major_verify,
             native_paged_batching,
             native_batch_unqualified,
+            _weight_residency: super::weight_residency::prepare(loader, paging.is_none())?,
+            residency_binding_status: std::sync::atomic::AtomicU8::new(0),
         })
     }
 
@@ -480,6 +509,7 @@ impl FlashTextModel {
         embeddings: Option<&Array>,
         target: StreamOrDevice,
     ) -> Result<FlashHiddenOutput> {
+        self.bind_weight_residency(target);
         self.validate_request(tokens, cache, capture_layers)?;
         if let Some(p) = positions {
             ensure!(

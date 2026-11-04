@@ -33,6 +33,8 @@ mod qsa_kernel;
 pub mod text_model;
 #[cfg(unix)]
 mod vision;
+#[cfg(unix)]
+mod weight_residency;
 
 #[cfg(unix)]
 pub mod load_plan;

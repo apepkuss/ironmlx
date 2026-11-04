@@ -80,11 +80,34 @@ pub struct MemoryInfo {
     /// Rows whose output budget shrank because K/V growth was refused.
     pub kv_growth_denied_total: u64,
     pub resident_weights: crate::core::resident_weights::ResidentWeightsHealth,
+    pub weight_residency: WeightResidencyInfo,
     pub process_governor: crate::core::process_memory::MemoryGovernorSnapshot,
     pub prefix_store: crate::core::cache::AsyncPrefixStoreStats,
     /// The process-wide hot prefix cache: shared segments counted once.
     pub prefix_lru: crate::core::cache::PrefixLruHealth,
     pub immutable_prefix_blocks: crate::core::scheduler_actor::ImmutablePrefixBlockHealth,
+}
+
+/// Process-wide owned weight requests; Metal may defer physical residency.
+/// These bytes already belong to model weights, not an extra RAM reservation.
+#[derive(Debug, Default, Serialize)]
+pub struct WeightResidencyInfo {
+    pub leases: usize,
+    pub owned_bytes: usize,
+    pub requested_bytes: usize,
+    pub queue_attachments: usize,
+}
+
+impl WeightResidencyInfo {
+    pub fn current() -> Self {
+        let stats = mlx::memory::weight_residency_stats();
+        Self {
+            leases: stats.leases,
+            owned_bytes: stats.reserved_bytes,
+            requested_bytes: stats.requested_bytes,
+            queue_attachments: stats.queue_attachments,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1596,6 +1619,7 @@ impl SchedulerHealthCollector {
                 mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
                 kv_growth_denied_total: crate::core::kv_growth::kv_growth_denied_total(),
                 resident_weights: crate::core::resident_weights::health(),
+                weight_residency: WeightResidencyInfo::current(),
                 process_governor,
                 prefix_store,
                 prefix_lru,
@@ -2567,6 +2591,7 @@ mod tests {
                 mlx_memory_limit_bytes: 44,
                 kv_growth_denied_total: 0,
                 resident_weights: Default::default(),
+                weight_residency: WeightResidencyInfo::default(),
                 process_governor: crate::core::process_memory::MemoryGovernorSnapshot::default(),
                 prefix_store: crate::core::cache::AsyncPrefixStoreStats::default(),
                 prefix_lru: crate::core::cache::PrefixLruHealth::default(),
@@ -2619,6 +2644,8 @@ mod tests {
         assert_eq!(value["memory"]["mlx_cache_bytes"], 22);
         assert_eq!(value["memory"]["mlx_peak_bytes"], 33);
         assert_eq!(value["memory"]["mlx_memory_limit_bytes"], 44);
+        assert_eq!(value["memory"]["weight_residency"]["leases"], 0);
+        assert_eq!(value["memory"]["weight_residency"]["requested_bytes"], 0);
         assert_eq!(value["memory"]["kv_cache_logical_cap_tokens"], 128);
         assert_eq!(value["memory"]["kv_cache_resident_cap_tokens"], 64);
         assert_eq!(value["memory"]["kv_cache_budget_policy"], "full_resident");

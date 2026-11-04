@@ -24,7 +24,9 @@ pub fn plan(
 pub(crate) fn available_bytes(minimum_occupied: usize, limit: Option<usize>) -> Result<usize> {
     let physical = super::memory_budget::system_total_ram_bytes();
     let memory = mlx::memory::snapshot();
-    let telemetry = super::process_memory::global_process_memory_governor().sample_process();
+    // A just-unloaded model may have released its buffers within the poll
+    // interval. Admission must not reuse that model's cached footprint.
+    let telemetry = super::process_memory::global_process_memory_governor().refresh_process();
     anyhow::ensure!(
         !telemetry.telemetry_degraded
             && !matches!(

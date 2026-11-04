@@ -1635,6 +1635,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
             kv_growth_denied_total: ironmlx_runtime::core::kv_growth::kv_growth_denied_total(),
             resident_weights: ironmlx_runtime::core::resident_weights::health(),
+            weight_residency: ironmlx_runtime::core::runtime_health::WeightResidencyInfo::current(),
             process_governor,
             prefix_store,
             prefix_lru: ironmlx_runtime::core::cache::prefix_store::process_prefix_lru_health(),
@@ -2663,6 +2664,7 @@ mod tests {
                 mlx_memory_limit_bytes: 0,
                 kv_growth_denied_total: 0,
                 resident_weights: Default::default(),
+                weight_residency: Default::default(),
                 process_governor:
                     ironmlx_runtime::core::process_memory::MemoryGovernorSnapshot::default(),
                 prefix_store:
