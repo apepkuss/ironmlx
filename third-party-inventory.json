@@ -3283,6 +3283,16 @@
       {
         "license_expression": "MIT",
         "license_files": [
+          "rust-license-85010e75aef5bdcd.txt"
+        ],
+        "name": "sha2-asm",
+        "repository": "https://github.com/RustCrypto/asm-hashes",
+        "source": "registry+https://github.com/rust-lang/crates.io-index",
+        "version": "0.6.4"
+      },
+      {
+        "license_expression": "MIT",
+        "license_files": [
           "rust-license-eafbfa606bc005ed.txt"
         ],
         "name": "sharded-slab",
@@ -4829,6 +4839,13 @@
           "BSD-3-Clause"
         ],
         "sha256": "838118388fe5c2e7f1dbbaeed13e1c7f3ebf88be91319c7c1d77c18e987d1a50"
+      },
+      {
+        "file": "rust-license-85010e75aef5bdcd.txt",
+        "license_ids": [
+          "MIT"
+        ],
+        "sha256": "85010e75aef5bdcd10b9ce39e8865dfab508f620f9ddb6ca6e54833fe97f36fa"
       },
       {
         "file": "rust-license-868478b984f4fdaf.txt",

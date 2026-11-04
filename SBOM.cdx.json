@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:ed508ec0-e230-597b-9568-2f029b0a6ad0",
+  "serialNumber": "urn:uuid:661488c8-2f1e-501b-ac7b-02071040eecc",
   "version": 1,
   "metadata": {
     "component": {
@@ -8984,6 +8984,35 @@
         {
           "type": "vcs",
           "url": "https://github.com/RustCrypto/hashes"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "cargo:sha2-asm@0.6.4",
+      "group": "crates.io",
+      "name": "sha2-asm",
+      "version": "0.6.4",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:source",
+          "value": "registry+https://github.com/rust-lang/crates.io-index"
+        },
+        {
+          "name": "ironmlx:license-files",
+          "value": "rust-license-85010e75aef5bdcd.txt"
+        }
+      ],
+      "purl": "pkg:cargo/sha2-asm@0.6.4",
+      "externalReferences": [
+        {
+          "type": "vcs",
+          "url": "https://github.com/RustCrypto/asm-hashes"
         }
       ]
     },

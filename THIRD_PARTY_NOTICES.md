@@ -323,6 +323,7 @@ development dependencies excluded, build dependencies retained.
 | serde_urlencoded | 0.7.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-b9eb266294324f67.txt` | https://github.com/nox/serde_urlencoded |
 | sha1 | 0.10.7 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-b4eb00df6e2a4d22.txt` | https://github.com/RustCrypto/hashes |
 | sha2 | 0.10.9 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-b4eb00df6e2a4d22.txt` | https://github.com/RustCrypto/hashes |
+| sha2-asm | 0.6.4 | MIT | `THIRD_PARTY_LICENSES/rust-license-85010e75aef5bdcd.txt` | https://github.com/RustCrypto/asm-hashes |
 | sharded-slab | 0.1.7 | MIT | `THIRD_PARTY_LICENSES/rust-license-eafbfa606bc005ed.txt` | https://github.com/hawkw/sharded-slab |
 | shlex | 2.0.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-4455bf75a9115410.txt` | https://github.com/comex/rust-shlex |
 | simd-adler32 | 0.3.10 | MIT | `THIRD_PARTY_LICENSES/rust-license-42a35170233e83e1.txt` | https://github.com/mcountryman/simd-adler32 |
