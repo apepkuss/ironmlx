@@ -77,9 +77,32 @@ pub struct MemoryInfo {
     pub mlx_cache_bytes: usize,
     pub mlx_peak_bytes: usize,
     pub mlx_memory_limit_bytes: usize,
+    pub weight_residency: WeightResidencyInfo,
     pub process_governor: crate::core::process_memory::MemoryGovernorSnapshot,
     pub prefix_store: crate::core::cache::AsyncPrefixStoreStats,
     pub immutable_prefix_blocks: crate::core::scheduler_actor::ImmutablePrefixBlockHealth,
+}
+
+/// Process-wide owned weight requests; Metal may defer physical residency.
+/// These bytes already belong to model weights, not an extra RAM reservation.
+#[derive(Debug, Default, Serialize)]
+pub struct WeightResidencyInfo {
+    pub leases: usize,
+    pub owned_bytes: usize,
+    pub requested_bytes: usize,
+    pub queue_attachments: usize,
+}
+
+impl WeightResidencyInfo {
+    pub fn current() -> Self {
+        let stats = mlx::memory::weight_residency_stats();
+        Self {
+            leases: stats.leases,
+            owned_bytes: stats.reserved_bytes,
+            requested_bytes: stats.requested_bytes,
+            queue_attachments: stats.queue_attachments,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1507,6 +1530,7 @@ impl SchedulerHealthCollector {
                 mlx_cache_bytes: mlx_memory.cache_bytes,
                 mlx_peak_bytes: mlx_memory.peak_bytes,
                 mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
+                weight_residency: WeightResidencyInfo::current(),
                 process_governor,
                 prefix_store,
                 immutable_prefix_blocks: self.immutable_prefix_blocks.snapshot(),
@@ -2454,6 +2478,7 @@ mod tests {
                 mlx_cache_bytes: 22,
                 mlx_peak_bytes: 33,
                 mlx_memory_limit_bytes: 44,
+                weight_residency: WeightResidencyInfo::default(),
                 process_governor: crate::core::process_memory::MemoryGovernorSnapshot::default(),
                 prefix_store: crate::core::cache::AsyncPrefixStoreStats::default(),
                 immutable_prefix_blocks:
@@ -2505,6 +2530,8 @@ mod tests {
         assert_eq!(value["memory"]["mlx_cache_bytes"], 22);
         assert_eq!(value["memory"]["mlx_peak_bytes"], 33);
         assert_eq!(value["memory"]["mlx_memory_limit_bytes"], 44);
+        assert_eq!(value["memory"]["weight_residency"]["leases"], 0);
+        assert_eq!(value["memory"]["weight_residency"]["requested_bytes"], 0);
         assert_eq!(value["memory"]["kv_cache_logical_cap_tokens"], 128);
         assert_eq!(value["memory"]["kv_cache_resident_cap_tokens"], 64);
         assert_eq!(value["memory"]["kv_cache_budget_policy"], "full_resident");

@@ -41,3 +41,51 @@ pub fn set_wired_limit(limit: usize) -> crate::Result<usize> {
 pub fn start_residency_refresh(interval_ms: u32) -> crate::Result<()> {
     Ok(mlx_sys::memory::ffi::start_residency_refresh(interval_ms)?)
 }
+
+/// A standing Metal residency request for only these evaluated weights.
+/// Dropping the lease ends its requests before releasing its storage handles.
+/// It does not change the allocator's wired limit. Bind it to each execution
+/// stream before use; dropping/suspending it removes its queue registrations.
+pub struct WeightResidency(cxx::UniquePtr<mlx_sys::memory::ffi::ScopedResidency>);
+
+// The immutable weight handles move with the lease, like Array. Metal set
+// mutations and destruction are serialized by the shim's registry mutex.
+unsafe impl Send for WeightResidency {}
+
+impl WeightResidency {
+    pub fn new(weights: &[&crate::Array], budget_bytes: usize) -> crate::Result<Self> {
+        let pointers: Vec<_> = weights.iter().map(|a| a.as_inner() as *const _).collect();
+        // SAFETY: all pointers reference arrays that live through this call;
+        // the shim validates availability and retains their storage handles.
+        Ok(Self(unsafe {
+            mlx_sys::memory::ffi::make_scoped_residency(&pointers, budget_bytes)?
+        }))
+    }
+
+    pub fn bytes(&self) -> usize {
+        mlx_sys::memory::ffi::scoped_residency_bytes(self.0.as_ref().expect("residency lease"))
+    }
+
+    pub fn bind_on(&self, target: impl Into<crate::StreamOrDevice>) -> crate::Result<bool> {
+        let (has, device_only, device, stream) = target.into().encode();
+        Ok(mlx_sys::memory::ffi::scoped_residency_bind(
+            self.0.as_ref().expect("residency lease"),
+            has,
+            device_only,
+            device,
+            stream,
+        )?)
+    }
+}
+
+pub use mlx_sys::memory::ffi::ScopedResidencyStats as WeightResidencyStats;
+
+pub fn weight_residency_stats() -> WeightResidencyStats {
+    mlx_sys::memory::ffi::scoped_residency_stats()
+}
+
+/// Suspend only owned weight requests under pressure. Allocations stay valid
+/// for ordinary GPU execution. Recovery reissues these requests, not a timer.
+pub fn set_weight_residency_enabled(enabled: bool) -> crate::Result<()> {
+    Ok(mlx_sys::memory::ffi::set_scoped_residency_enabled(enabled)?)
+}

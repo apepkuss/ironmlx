@@ -82,6 +82,7 @@ fn main() {
     .file("shim/src/io.cc")
     .file("shim/src/metal.cc")
     .file("shim/src/memory.cc")
+    .file("shim/src/scoped_residency.cc")
     .file("shim/src/quantization.cc")
     .file("shim/src/row_stable_affine4.cc")
     .file("shim/src/random.cc")

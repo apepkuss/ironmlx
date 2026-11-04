@@ -123,6 +123,7 @@ impl FlashTextModel {
             dims.len() == 2 && dims[0] > 0 && dims[1] > 0,
             "Flash token input must be [B,S]"
         );
+        self.bind_weight_residency(target);
         let batch = dims[0] as usize;
         let seq = dims[1];
         let _phase = crate::core::paging_stats::PhaseGuard::enter(if mode.is_verify() {

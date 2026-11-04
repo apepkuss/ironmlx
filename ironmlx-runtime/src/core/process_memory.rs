@@ -1002,6 +1002,19 @@ impl ProcessMemoryGovernor {
         } else {
             desired
         };
+        if self.manage_mlx_cache {
+            let enabled =
+                !snapshot.telemetry_degraded && snapshot.pressure_level == PressureLevel::Normal;
+            let before = mlx::memory::weight_residency_stats().requested_bytes;
+            if let Err(error) = mlx::memory::set_weight_residency_enabled(enabled) {
+                tracing::warn!(%error, "scoped GPU weight residency pressure update failed");
+            }
+            let after = mlx::memory::weight_residency_stats().requested_bytes;
+            if before != after {
+                tracing::info!(before, after, ?snapshot.pressure_level,
+                    "scoped GPU weight residency pressure policy updated");
+            }
+        }
     }
 
     pub fn plan_prefill_chunk(
@@ -1456,6 +1469,91 @@ mod tests {
             mlx_cache_bytes: Some(0),
             metal_limit_bytes: Some(gib(24)),
         }
+    }
+
+    #[test]
+    fn flash_load_admission_refreshes_recent_process_telemetry() {
+        const NAME: &str =
+            "core::process_memory::tests::flash_load_admission_refreshes_recent_process_telemetry";
+        if !run_in_isolated_process(NAME) {
+            return;
+        }
+        let governor = global_process_memory_governor();
+        // Simulate a pre-unload footprint still within the sampling interval.
+        let before = governor.update(telemetry(gib(1))).sample_sequence;
+        let _ = crate::core::flash_load::available_bytes(0, None);
+        assert!(
+            governor.snapshot().sample_sequence > before,
+            "Flash admission reused the previous lifecycle's cached sample"
+        );
+    }
+
+    #[test]
+    fn scoped_weight_residency_obeys_pressure_recovery_and_telemetry_failure() {
+        const NAME: &str = "core::process_memory::tests::scoped_weight_residency_obeys_pressure_recovery_and_telemetry_failure";
+        if !run_in_isolated_process(NAME) {
+            return;
+        }
+        let hardware = mlx::memory::snapshot();
+        if hardware.total_bytes.is_none_or(|n| n <= 8usize << 30)
+            || hardware
+                .max_recommended_bytes
+                .is_none_or(|n| n <= 2usize << 30)
+        {
+            eprintln!("scoped residency pressure test requires host/Metal budget headroom");
+            return;
+        }
+        let weight = mlx::Array::try_from((vec![1f32; 1 << 20].as_slice(), [1 << 20])).unwrap();
+        weight.eval().unwrap();
+        let lease = match mlx::memory::WeightResidency::new(&[&weight], 16 << 20) {
+            Ok(lease) => lease,
+            Err(error)
+                if error.to_string().contains("requires macOS 15")
+                    || error.to_string().contains("requires Metal 3") =>
+            {
+                return
+            }
+            Err(error) => panic!("weight residency setup failed: {error}"),
+        };
+        assert!(lease.bind_on(()).unwrap());
+        let governor = ProcessMemoryGovernor::new_inner(
+            MemoryGovernorConfig {
+                promotion_samples: 1,
+                recovery_samples: 1,
+                ..config()
+            },
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            governor.update(telemetry(gib(23))).pressure_level,
+            PressureLevel::Hard
+        );
+        assert_eq!(mlx::memory::weight_residency_stats().requested_bytes, 0);
+        assert_eq!(mlx::memory::weight_residency_stats().queue_attachments, 0);
+        assert!(!lease.bind_on(()).unwrap());
+        assert_eq!(
+            weight
+                .sum(mlx::ops::All, false)
+                .unwrap()
+                .item::<f32>()
+                .unwrap(),
+            1048576.
+        );
+        for _ in 0..3 {
+            governor.update(telemetry(gib(8)));
+        }
+        assert_eq!(governor.snapshot().pressure_level, PressureLevel::Normal);
+        assert!(mlx::memory::weight_residency_stats().requested_bytes > 0);
+        assert!(lease.bind_on(()).unwrap());
+        let mut degraded = telemetry(gib(8));
+        degraded.vm = None;
+        assert!(governor.update(degraded).telemetry_degraded);
+        assert_eq!(mlx::memory::weight_residency_stats().requested_bytes, 0);
+        assert_eq!(mlx::memory::weight_residency_stats().queue_attachments, 0);
+        drop(lease);
+        assert_eq!(mlx::memory::weight_residency_stats().leases, 0);
+        global_process_memory_governor().refresh_process();
     }
 
     #[test]

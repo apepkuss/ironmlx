@@ -74,7 +74,23 @@ std::size_t set_cache_limit(std::size_t limit) {
 }
 
 std::size_t set_wired_limit(std::size_t limit) {
+#if __has_include(<Metal/Metal.hpp>)
+  // A global allocator budget takes precedence. Remove scoped sets before
+  // MLX can grow its own queue registrations to Metal's 32-set limit.
+  static std::mutex setters;
+  std::lock_guard<std::mutex> lock(setters);
+  const auto previous = scoped_residency_external_wired(true);
+  try {
+    const auto result = mlx::core::set_wired_limit(limit);
+    scoped_residency_external_wired(limit != 0);
+    return result;
+  } catch (...) {
+    scoped_residency_external_wired(previous);
+    throw;
+  }
+#else
   return mlx::core::set_wired_limit(limit);
+#endif
 }
 
 #if __has_include(<Metal/Metal.hpp>)
