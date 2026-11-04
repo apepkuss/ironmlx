@@ -931,8 +931,9 @@ impl EnginePoolState {
             .config;
         let path = model.path.clone();
         let limit = self.inner.runtime.memory_limits.model_memory_limit_bytes;
+        let active = self.inner.runtime.active_kv_offload.clone();
         tokio::task::spawn_blocking(move || {
-            super::flash_load::plan_with_occupied(
+            super::flash_load::plan_with_active_occupied(
                 &path,
                 cfg.b_max,
                 cfg.max_cache_cap,
@@ -940,6 +941,7 @@ impl EnginePoolState {
                 0,
                 limit,
                 occupied,
+                &active,
             )
             .map(Some)
         })
@@ -1563,7 +1565,7 @@ impl EnginePoolInner {
                 .as_ref()
                 .context("Flash scheduler profile missing")?
                 .config;
-            Some(super::flash_load::plan_with_occupied(
+            Some(super::flash_load::plan_with_active_occupied(
                 &model.path,
                 cfg.b_max,
                 cfg.max_cache_cap,
@@ -1571,6 +1573,7 @@ impl EnginePoolInner {
                 0,
                 self.runtime.memory_limits.model_memory_limit_bytes,
                 planned_occupied,
+                &self.runtime.active_kv_offload,
             )?)
         } else {
             None
@@ -2289,23 +2292,33 @@ impl EngineSlot {
     }
 }
 
+fn flash_reserved_peak(
+    weights: usize,
+    batch: usize,
+    cap: usize,
+    paging: Option<&ironmlx_lm::core::paging_stats::PagingTelemetry>,
+) -> usize {
+    let active = paging.is_some_and(|p| p.active_state_enabled());
+    let (token, fixed) = ironmlx_lm::models::qwen4_exp::load_plan::flash_cache_cost(active);
+    weights.saturating_add(
+        batch.saturating_mul(
+            cap.saturating_mul(token as usize)
+                .saturating_add(fixed as usize),
+        ),
+    )
+}
+
 impl EngineVariant {
     fn flash_peak_bytes(&self) -> Option<usize> {
         let Self::Qwen38FlashNext(state) = self else {
             return None;
         };
-        use ironmlx_lm::models::qwen4_exp::load_plan::{
-            FLASH_CACHE_BYTES_PER_TOKEN, FLASH_FIXED_BYTES_PER_SEQUENCE,
-        };
-        let per_sequence = state
-            .effective_cap_max
-            .saturating_mul(FLASH_CACHE_BYTES_PER_TOKEN as usize)
-            .saturating_add(FLASH_FIXED_BYTES_PER_SEQUENCE as usize);
-        Some(
-            state
-                .model_weight_bytes
-                .saturating_add(state.b_max.saturating_mul(per_sequence)),
-        )
+        Some(flash_reserved_peak(
+            state.model_weight_bytes,
+            state.b_max,
+            state.effective_cap_max,
+            state.health_collector.paging.as_deref(),
+        ))
     }
 
     fn context_window(&self) -> Option<usize> {
@@ -3433,6 +3446,25 @@ impl LoadedEngineHealth {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn loaded_flash_reservation_uses_active_storage_contract() {
+        use ironmlx_lm::core::{active_pages::ActivePagesStats, paging_stats::PagingTelemetry};
+        let paging = PagingTelemetry::new(false);
+        assert_eq!(
+            super::flash_reserved_peak(4usize << 30, 2, 32768, Some(&paging)),
+            20usize << 30
+        );
+        paging.attach_active_state(std::sync::Arc::new(ActivePagesStats::default()));
+        assert_eq!(
+            super::flash_reserved_peak(4usize << 30, 2, 32768, Some(&paging)),
+            11usize << 30
+        );
+        assert_eq!(
+            super::flash_reserved_peak(4usize << 30, 2, 32768, None),
+            20usize << 30
+        );
+    }
+
     use super::EngineModelCapabilities;
     use ironmlx_lm::models::ModelArchitecture;
     use std::fs::OpenOptions;

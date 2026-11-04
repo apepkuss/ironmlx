@@ -43,14 +43,41 @@ fn restore(cache: &mut [LayerCache], base: &[LayerCacheSnapshot]) {
 }
 fn states(a: &[LayerCache], b: &[LayerCache]) {
     for (layer, (a, b)) in a.iter().zip(b).enumerate() {
-        let a = a.state_arrays();
-        let b = b.state_arrays();
-        assert_eq!(a.len(), b.len(), "state count at layer {layer}");
-        for (index, (a, b)) in a.into_iter().zip(b).enumerate() {
-            exact(&format!("layer {layer} state {index}"), a, b);
+        let (LayerCache::Flash(a), LayerCache::Flash(b)) = (a, b) else {
+            panic!("Flash state")
+        };
+        assert_eq!(a.offsets(), b.offsets());
+        for row in 0..a.offsets().len() {
+            // Compare canonical persistent tensors, independent of RAM/SSD
+            // representation. Rollback intentionally invalidates pooled index
+            // keys, a derived cache rebuilt from raw index history. Continuation
+            // logits/captures must still match exactly after that rebuild.
+            let (a, len_a) = a.durable_prefix_for_row(row).unwrap();
+            let (b, len_b) = b.durable_prefix_for_row(row).unwrap();
+            assert_eq!(len_a, len_b);
+            assert_eq!(a.len(), b.len());
+            let mut meta_a = a[0].to_vec::<i32>().unwrap();
+            let mut meta_b = b[0].to_vec::<i32>().unwrap();
+            let sparse = meta_a[2] == 1;
+            if sparse {
+                meta_a[5] = 0;
+                meta_b[5] = 0;
+            }
+            assert_eq!(meta_a, meta_b, "state metadata layer={layer} row={row}");
+            for index in 1..a.len() {
+                if sparse && index == 5 {
+                    continue;
+                }
+                exact(
+                    &format!("layer {layer} row {row} state {index}"),
+                    &a[index],
+                    &b[index],
+                );
+            }
         }
     }
 }
+
 fn positions(cache: &[LayerCache], seq: i32) -> Array {
     let LayerCache::Flash(first) = &cache[0] else {
         panic!("Flash cache")
@@ -101,7 +128,7 @@ fn flash_pair_proposes_and_verifies_with_exact_transactional_state() {
         .map(|n| n.parse().unwrap())
         .collect();
     for context in contexts {
-        assert!((4..=2048).contains(&context));
+        assert!((4..=4096).contains(&context));
         let mut prompt: Vec<u32> = (0..context).map(|n| 100 + n as u32 % 500).collect();
         prompt[2] = 248044;
         let mut ordinary = model
@@ -223,6 +250,7 @@ fn flash_pair_proposes_and_verifies_with_exact_transactional_state() {
             eprintln!("real Flash DFlash2 proposal: anchor={anchor} draft={proposed:?}");
         }
     }
+    assert_active_cleanup(&model);
     eprintln!(
         "memory={:?} expert_cache={:?}",
         mlx::memory::snapshot(),
@@ -260,11 +288,31 @@ fn fixture() -> (FlashTextModel, DFlash2DraftModel) {
         paged.map(|cache_bytes| ExpertPagingOptions {
             cache_bytes,
             staging_bytes: 16 * 1024 * 1024,
-            pack_bytes: 64 * 1024 * 1024,
+            // Long active-state qualification uses the production load-plan
+            // pack ceiling; the legacy short-context stress fixture is 64 MiB.
+            pack_bytes: if std::env::var("IRONMLX_FLASH_ACTIVE_TEST_ROOT").is_ok() {
+                2 << 30
+            } else {
+                64 << 20
+            },
         }),
     )
     .unwrap();
     drop(loader);
+    #[cfg(unix)]
+    let model = if let Ok(root) = std::env::var("IRONMLX_FLASH_ACTIVE_TEST_ROOT") {
+        model
+            .with_active_state(ironmlx_lm::core::active_pages::ActivePagesConfig {
+                root: root.into(),
+                cache_bytes: 64 << 10,
+                pack_bytes: 16 << 20,
+                disk_bytes: 2 << 30,
+                min_free_bytes: 0,
+            })
+            .unwrap()
+    } else {
+        model
+    };
     let draft_loader = Loader::open_dflash2(Path::new(&draft_path)).unwrap();
     let draft =
         DFlash2DraftModel::from_loader_for_flash(&draft_loader, &model.config, None).unwrap();
@@ -285,8 +333,15 @@ fn flash_b2_b4_verify_ragged_commit_matches_independent_requests() {
     let mut committed = Vec::new();
     let mut expected_hidden = Vec::new();
     let mut expected_context = Vec::new();
+    let long = std::env::var("IRONMLX_FLASH_ACTIVE_TEST_ROOT").is_ok();
+    let cap = if long { 4160 } else { 64 };
     for row in 0..4 {
-        let prompt: Vec<u32> = (0..[8, 12, 17, 24][row])
+        let lengths = if long {
+            [4093, 4096, 4097, 4100]
+        } else {
+            [8, 12, 17, 24]
+        };
+        let prompt: Vec<u32> = (0..lengths[row])
             .map(|n| {
                 if n == 2 {
                     248044
@@ -295,8 +350,11 @@ fn flash_b2_b4_verify_ragged_commit_matches_independent_requests() {
                 }
             })
             .collect();
-        let mut cache = model.make_cache(1, 64, Dtype::Bfloat16).unwrap();
-        run(&model, &prompt, &mut cache, Mode::Prefill, taps);
+        let mut cache = model.make_cache(1, cap, Dtype::Bfloat16).unwrap();
+        for chunk in prompt.chunks(2048) {
+            run(&model, chunk, &mut cache, Mode::Prefill, taps);
+        }
+        eprintln!("B4 base row={row} prefilled tokens={}", prompt.len());
         bases.push(snapshots(&cache));
         let mut prefix = snapshots(&cache);
         let mut hidden = Vec::new();
@@ -315,7 +373,9 @@ fn flash_b2_b4_verify_ragged_commit_matches_independent_requests() {
         independent.push(cache);
     }
     for width in [2, 4] {
-        let mut batch = model.make_cache(width as i32, 64, Dtype::Bfloat16).unwrap();
+        let mut batch = model
+            .make_cache(width as i32, cap, Dtype::Bfloat16)
+            .unwrap();
         for row in 0..width {
             restore(&mut independent[row], &bases[row]);
             adopt_layer_cache_rows(&mut batch, &independent[row], row, 0).unwrap();
@@ -348,7 +408,7 @@ fn flash_b2_b4_verify_ragged_commit_matches_independent_requests() {
             .dflash2_restore_target_prefix_rows_on(&mut batch, &base, &accepted[..width], ().into())
             .unwrap();
         for row in 0..width {
-            let mut actual = model.make_cache(1, 64, Dtype::Bfloat16).unwrap();
+            let mut actual = model.make_cache(1, cap, Dtype::Bfloat16).unwrap();
             adopt_layer_cache_rows(&mut actual, &batch, 0, row).unwrap();
             restore(&mut independent[row], &committed[row]);
             states(&actual, &independent[row]);
@@ -381,5 +441,27 @@ fn flash_b2_b4_verify_ragged_commit_matches_independent_requests() {
             assert!(stats.experts.phases[2].microbatches > 0);
         }
         eprintln!("B{width} Q8 exact verification and ragged prefix commit");
+    }
+    drop(independent);
+    drop(bases);
+    drop(committed);
+    assert_active_cleanup(&model);
+}
+
+fn assert_active_cleanup(model: &FlashTextModel) {
+    #[cfg(unix)]
+    if std::env::var("IRONMLX_FLASH_ACTIVE_TEST_ROOT").is_ok() {
+        let stats = model
+            .paging_telemetry()
+            .unwrap()
+            .snapshot()
+            .active_state
+            .unwrap();
+        eprintln!("DFlash2 active state after release: {stats:?}");
+        assert!(stats.written_bytes > 0 && stats.read_bytes > 0);
+        assert_eq!(stats.failures, 0);
+        assert_eq!(stats.live_files, 0);
+        assert_eq!(stats.disk_bytes, 0);
+        assert_eq!(stats.cache_bytes, 0);
     }
 }

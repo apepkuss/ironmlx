@@ -1435,7 +1435,24 @@ impl SchedulerHealthCollector {
             crate::core::process_memory::global_process_memory_governor().sample_process();
         let prefix_store = crate::core::cache::process_async_prefix_store_queue().stats();
 
+        let paging = self.paging.as_ref().map(|p| p.snapshot());
         let active_kv_offload = self.active_kv_offload.snapshot();
+        #[cfg(unix)]
+        let active_kv_offload =
+            if let Some(active) = paging.as_ref().and_then(|p| p.active_state.as_ref()) {
+                active_kv_offload.with_flash_active(active)
+            } else {
+                active_kv_offload
+            };
+        #[cfg(unix)]
+        let resident_cap = paging
+            .as_ref()
+            .and_then(|p| p.active_state.as_ref())
+            .and_then(|s| s.hot_window_tokens)
+            .map(|n| (n as usize).min(self.kv_cache_logical_cap_tokens))
+            .unwrap_or(self.kv_cache_resident_cap_tokens);
+        #[cfg(not(unix))]
+        let resident_cap = self.kv_cache_resident_cap_tokens;
         let prefix_store_backpressured =
             crate::core::cache::process_async_prefix_store_queue().is_backpressured();
         let (status, degraded_reasons) = classify_status(
@@ -1449,7 +1466,7 @@ impl SchedulerHealthCollector {
         );
         HealthSnapshot {
             prefix_persistence: crate::core::cache::prefix_save::snapshot(),
-            paging: self.paging.as_ref().map(|p| p.snapshot()),
+            paging,
             ane: AneHealth::current(),
             status,
             degraded_reasons,
@@ -1478,8 +1495,12 @@ impl SchedulerHealthCollector {
                 kv_cache_active_bytes: kv_active,
                 kv_cache_soft_limit_bytes: self.kv_cache_soft_limit_bytes,
                 kv_cache_logical_cap_tokens: self.kv_cache_logical_cap_tokens,
-                kv_cache_resident_cap_tokens: self.kv_cache_resident_cap_tokens,
-                kv_cache_budget_policy: self.kv_cache_budget_policy.clone(),
+                kv_cache_resident_cap_tokens: resident_cap,
+                kv_cache_budget_policy: if active_kv_offload.mode == "flash_sparse_history" {
+                    "flash_sparse_ssd".into()
+                } else {
+                    self.kv_cache_budget_policy.clone()
+                },
                 mlx_total_bytes: mlx_memory.total_bytes,
                 mlx_max_recommended_bytes: mlx_memory.max_recommended_bytes,
                 mlx_active_bytes: mlx_memory.active_bytes,

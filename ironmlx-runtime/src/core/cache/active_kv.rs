@@ -446,9 +446,54 @@ impl ActiveKvOffloadHealth {
         ActiveKvOffloadSharedStats::new(&ActiveKvOffloadConfig::disabled()).snapshot()
     }
 
+    #[cfg(unix)]
+    pub fn with_flash_active(
+        mut self,
+        state: &ironmlx_lm::core::active_pages::ActivePagesSnapshot,
+    ) -> Self {
+        self.enabled = true;
+        self.mode = "flash_sparse_history";
+        self.storage_dir = state.storage_dir.clone();
+        self.offloaded_pages = state.live_pages as usize;
+        self.offloaded_bytes = state.disk_bytes as usize;
+        self.swap_out_count = state.write_pages;
+        self.swap_in_count = state.read_pages;
+        self.stream_read_count = state.read_pages;
+        self.swap_error_count = state.failures;
+        self.supported_cache_kinds = vec!["flash_sparse_kv"];
+        self.refresh_status();
+        self.active = state.live_files > 0;
+        self.status = if self.degraded {
+            ActiveKvOffloadStatus::Degraded
+        } else if self.active {
+            ActiveKvOffloadStatus::Active
+        } else {
+            ActiveKvOffloadStatus::Idle
+        };
+        self
+    }
+
     pub fn aggregate(snapshots: impl IntoIterator<Item = Self>) -> Self {
         let mut aggregate = Self::disabled();
+        let mut active = false;
         for snapshot in snapshots {
+            active |= snapshot.active;
+            if snapshot.enabled {
+                aggregate.mode = if aggregate.enabled && aggregate.mode != snapshot.mode {
+                    "mixed"
+                } else {
+                    snapshot.mode
+                };
+                if !aggregate.enabled {
+                    aggregate.supported_cache_kinds = snapshot.supported_cache_kinds.clone();
+                } else {
+                    for kind in &snapshot.supported_cache_kinds {
+                        if !aggregate.supported_cache_kinds.contains(kind) {
+                            aggregate.supported_cache_kinds.push(kind);
+                        }
+                    }
+                }
+            }
             aggregate.enabled |= snapshot.enabled;
             if snapshot.enabled {
                 aggregate.storage_dir = snapshot.storage_dir;
@@ -467,6 +512,16 @@ impl ActiveKvOffloadHealth {
             aggregate.last_swap_in_us = aggregate.last_swap_in_us.max(snapshot.last_swap_in_us);
         }
         aggregate.refresh_status();
+        if aggregate.mode == "flash_sparse_history" {
+            aggregate.active = active;
+            aggregate.status = if aggregate.degraded {
+                ActiveKvOffloadStatus::Degraded
+            } else if active {
+                ActiveKvOffloadStatus::Active
+            } else {
+                ActiveKvOffloadStatus::Idle
+            };
+        }
         aggregate
     }
 
@@ -524,5 +579,47 @@ fn subtract_saturating(value: &AtomicUsize, amount: usize) {
             Ok(_) => return,
             Err(actual) => current = actual,
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod flash_health_tests {
+    use super::*;
+    use ironmlx_lm::core::active_pages::{ActivePagesConfig, ActivePagesPool};
+    #[test]
+    fn flash_health_tracks_live_leases_instead_of_cumulative_writes() {
+        let root = std::env::temp_dir().join(format!("flash-health-{}", uuid::Uuid::new_v4()));
+        let pool = ActivePagesPool::new(ActivePagesConfig {
+            root: root.clone(),
+            cache_bytes: 8192,
+            pack_bytes: 4 << 20,
+            disk_bytes: 8192 + 40,
+            min_free_bytes: 0,
+        })
+        .unwrap();
+        let health = || ActiveKvOffloadHealth::disabled().with_flash_active(&pool.stats.snapshot());
+        assert_eq!(health().status, ActiveKvOffloadStatus::Idle);
+        let file = pool.file(8192).unwrap();
+        let page = file.write(&vec![0; 8192]).unwrap();
+        assert_eq!(health().status, ActiveKvOffloadStatus::Active);
+        assert_eq!(health().offloaded_pages, 1);
+        let merged =
+            ActiveKvOffloadHealth::aggregate([health(), ActiveKvOffloadHealth::disabled()]);
+        assert_eq!(merged.mode, "flash_sparse_history");
+        assert_eq!(merged.supported_cache_kinds, ["flash_sparse_kv"]);
+        drop(page);
+        drop(file);
+        let merged = ActiveKvOffloadHealth::aggregate([health()]);
+        assert_eq!(merged.status, ActiveKvOffloadStatus::Idle);
+        assert!(!merged.active);
+        assert!(merged.swap_out_count > 0);
+        let file = pool.file(8192).unwrap();
+        let page = file.write(&vec![0; 8192]).unwrap();
+        assert!(file.write(&vec![1; 8192]).is_err());
+        assert_eq!(health().status, ActiveKvOffloadStatus::Degraded);
+        drop(page);
+        drop(file);
+        drop(pool);
+        std::fs::remove_dir(root).unwrap();
     }
 }

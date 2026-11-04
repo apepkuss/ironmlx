@@ -213,6 +213,10 @@ impl BudgetState {
         }
     }
 
+    pub fn custom_cost(&self) -> Option<(usize, usize)> {
+        self.custom_cost
+    }
+
     pub fn with_custom_cost(mut self, cost: Option<(usize, usize)>) -> Self {
         self.custom_cost = cost;
         self

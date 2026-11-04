@@ -21,6 +21,7 @@ pub struct FlashLoadRequest {
     pub max_cache_cap: usize,
     pub prefill_chunk_size: usize,
     pub draft_bytes: u64,
+    pub active_pages: Option<crate::core::active_pages::ActivePagesConfig>,
     pub expert_residency: ExpertResidency,
     pub expert_cache_limit_bytes: u64,
 }
@@ -38,6 +39,7 @@ impl FlashLoadRequest {
             max_cache_cap,
             prefill_chunk_size,
             draft_bytes,
+            active_pages: None,
             expert_residency: ExpertResidency::Auto,
             expert_cache_limit_bytes: if usable_bytes <= 24 * GIB {
                 4 * GIB
@@ -66,11 +68,38 @@ impl FlashLoadRequest {
                 .checked_mul(MIB)
                 .context("Flash cache size overflow")?;
         }
+        if let Some(config) = self.active_pages.as_mut() {
+            for (name, target, scale) in [
+                (
+                    "IRONMLX_FLASH_ACTIVE_CACHE_MIB",
+                    &mut config.cache_bytes,
+                    MIB,
+                ),
+                ("IRONMLX_FLASH_ACTIVE_PACK_MIB", &mut config.pack_bytes, MIB),
+            ] {
+                if let Ok(value) = std::env::var(name) {
+                    *target = usize::try_from(
+                        value
+                            .parse::<u64>()?
+                            .checked_mul(scale)
+                            .context("Flash active RAM budget overflow")?,
+                    )?;
+                }
+            }
+            if let Ok(value) = std::env::var("IRONMLX_FLASH_ACTIVE_DISK_GIB") {
+                config.disk_bytes = value
+                    .parse::<u64>()?
+                    .checked_mul(GIB)
+                    .context("Flash active disk quota overflow")?;
+            }
+            config.validate()?;
+        }
         Ok(self)
     }
 }
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct FlashLoadPlan {
+    pub active_pages: Option<crate::core::active_pages::ActivePagesConfig>,
     pub residency: ResidencyPlan,
     pub fixed_weight_bytes: u64,
     pub vision_weight_bytes: u64,
@@ -180,11 +209,40 @@ impl FlashLoadPlan {
         // Include immutable old/new KV handles and up to eight recurrent
         // verification snapshots. This conservative envelope is used by both
         // initial load planning and per-request runtime admission.
+        if let Some(config) = &request.active_pages {
+            validate_active_config(config, &cfg)?;
+            let sparse_layers = cfg
+                .layer_types
+                .iter()
+                .filter(|kind| kind.as_str() != "linear_attention")
+                .count() as u64;
+            let ratio = cfg.indexer_compress_ratio as u64;
+            let token_bytes = (cfg.num_key_value_heads as u64)
+                .checked_mul(cfg.head_dim as u64)
+                .and_then(|n| n.checked_mul(4))
+                .context("Flash active-state token estimate overflow")?;
+            // One ratio-sized immutable record plus its checksum header. Extra
+            // pages cover speculative and branch-local tails without reusing
+            // any slot still pinned by a verification snapshot.
+            let pages = (request.max_cache_cap as u64)
+                .div_ceil(ratio)
+                .checked_add(128)
+                .context("Flash active-state page estimate overflow")?;
+            let disk = token_bytes
+                .checked_mul(ratio)
+                .and_then(|n| n.checked_add(40))
+                .and_then(|n| n.checked_mul(pages))
+                .and_then(|n| n.checked_mul(sparse_layers))
+                .and_then(|n| n.checked_mul(request.max_sequences as u64))
+                .context("Flash active-state disk estimate overflow")?;
+            ensure!(disk <= config.disk_bytes, "Flash active-state disk quota cannot fit configured context/concurrency: required={disk}, quota={}", config.disk_bytes);
+        }
+        let (per_token, fixed_per_sequence) = flash_cache_cost(request.active_pages.is_some());
         let cache_bytes = (request.max_sequences as u64)
             .checked_mul(
                 (request.max_cache_cap as u64)
-                    .checked_mul(FLASH_CACHE_BYTES_PER_TOKEN)
-                    .and_then(|n| n.checked_add(FLASH_FIXED_BYTES_PER_SEQUENCE))
+                    .checked_mul(per_token)
+                    .and_then(|n| n.checked_add(fixed_per_sequence))
                     .context("Flash cache envelope overflow")?,
             )
             .context("Flash batch memory overflow")?;
@@ -215,6 +273,7 @@ impl FlashLoadPlan {
             pack_bytes: 2 * GIB as usize,
         });
         Ok(Self {
+            active_pages: request.active_pages.clone(),
             residency,
             fixed_weight_bytes: fixed,
             vision_weight_bytes: vision,
@@ -243,6 +302,9 @@ impl FlashLoadPlan {
             self.qsa_scratch_bytes,
             self.paging,
         )?;
+        if let Some(config) = &self.active_pages {
+            model = model.with_active_state(config.clone())?;
+        }
         model.resident_bytes = model
             .resident_bytes
             .checked_add(usize::try_from(self.vision_weight_bytes)?)
@@ -256,7 +318,46 @@ impl FlashLoadPlan {
 // Deliberately conservative vs measured persistent cost (28,416 B/token,
 // about 116 MB recurrent state). Covers KV copy-on-write and Q8 snapshots.
 pub const FLASH_CACHE_BYTES_PER_TOKEN: u64 = 196_608;
+// Indexer history, pooled summaries, metadata and transactional copies remain
+// proportional to logical context. Selected KV gathers are separately bounded.
+pub const FLASH_TIERED_CACHE_BYTES_PER_TOKEN: u64 = 16_384;
 pub const FLASH_FIXED_BYTES_PER_SEQUENCE: u64 = 2 * GIB;
+// At the largest warm threshold, eight BF16 KV generations plus recurrent
+// snapshots can exceed 2 GiB. Keep that peak in per-sequence admission rather
+// than borrowing the shared gather/expert temporary reservation.
+pub const FLASH_TIERED_FIXED_BYTES_PER_SEQUENCE: u64 = 3 * GIB;
+pub(crate) fn validate_active_config(
+    config: &crate::core::active_pages::ActivePagesConfig,
+    cfg: &FlashTextConfig,
+) -> Result<()> {
+    config.validate()?;
+    ensure!(
+        cfg.num_attention_heads == 24
+            && cfg.num_key_value_heads == 2
+            && cfg.head_dim == 256
+            && cfg.indexer_compress_ratio == 4,
+        "Flash active-state paging requires qualified 24/2-head D256 ratio-4 geometry"
+    );
+    let token_bytes = cfg.num_key_value_heads as u64 * cfg.head_dim as u64 * 4;
+    let query_bytes = (cfg.indexer_budget as u64)
+        .checked_add(cfg.indexer_compress_ratio as u64)
+        .and_then(|n| n.checked_mul(token_bytes))
+        .context("Flash active-state gather estimate overflow")?;
+    let warm_bytes = (config.cache_bytes as u64).max(4096 * token_bytes);
+    ensure!(config.pack_bytes as u64 >= query_bytes.max(warm_bytes), "Flash active-state gather budget must fit one sparse query and bounded warm-history rollback: minimum={} bytes",query_bytes.max(warm_bytes));
+    Ok(())
+}
+/// Conservative per-token and per-sequence reservation for the storage contract.
+pub fn flash_cache_cost(tiered: bool) -> (u64, u64) {
+    if tiered {
+        (
+            FLASH_TIERED_CACHE_BYTES_PER_TOKEN,
+            FLASH_TIERED_FIXED_BYTES_PER_SEQUENCE,
+        )
+    } else {
+        (FLASH_CACHE_BYTES_PER_TOKEN, FLASH_FIXED_BYTES_PER_SEQUENCE)
+    }
+}
 
 #[cfg(test)]
 mod tests {

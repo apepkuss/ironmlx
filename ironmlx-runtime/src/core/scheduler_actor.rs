@@ -3267,9 +3267,13 @@ where
         paged_prefix_cache.as_ref(),
         &active_kv_offload,
     );
-    let budget_state = if let Some((per_token, fixed)) = M::scheduler_cache_cost() {
-        // Auxiliary recurrent state cannot be swapped by the full-KV-only
-        // offload implementation. Charge the full logical capacity.
+    let resident_cost = model.try_lock().map_or_else(
+        |_| M::scheduler_cache_cost(),
+        |model| model.scheduler_resident_cache_cost(),
+    );
+    let budget_state = if let Some((per_token, fixed)) = resident_cost {
+        // Model-owned sparse tiering still charges index/recurrent state for
+        // the complete logical capacity; it supplies its own bounded KV store.
         crate::core::memory_budget::validate_startup_budget_with_cost(
             b_max,
             effective_cap_max,

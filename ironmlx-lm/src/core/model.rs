@@ -55,6 +55,14 @@ pub trait Model {
         None
     }
 
+    /// Instance-specific RAM cost for architectures with model-owned tiering.
+    fn scheduler_resident_cache_cost(&self) -> Option<(usize, usize)>
+    where
+        Self: Sized,
+    {
+        Self::scheduler_cache_cost()
+    }
+
     fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>>;
 
     /// Dtype expected by this model's KV cache tensors.

@@ -175,6 +175,8 @@ pub struct PagingTelemetry {
     pub row_fallback_verify_order: AtomicU64,
     pub experts: CacheTelemetry,
     pub ple: CacheTelemetry,
+    #[cfg(unix)]
+    active_state: std::sync::OnceLock<std::sync::Arc<super::active_pages::ActivePagesStats>>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PagingFallback {
@@ -191,6 +193,9 @@ pub struct PagingSnapshot {
     pub elapsed_ms: u64,
     pub experts: CacheSnapshot,
     pub ple: CacheSnapshot,
+    #[cfg(unix)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_state: Option<super::active_pages::ActivePagesSnapshot>,
 }
 pub fn elapsed_us(start: Instant) -> u64 {
     start.elapsed().as_micros().min(u64::MAX as u128) as u64
@@ -207,7 +212,20 @@ impl PagingTelemetry {
             row_fallback_verify_order: AtomicU64::new(0),
             experts: CacheTelemetry::default(),
             ple: CacheTelemetry::default(),
+            #[cfg(unix)]
+            active_state: std::sync::OnceLock::new(),
         }
+    }
+    #[cfg(unix)]
+    pub fn active_state_enabled(&self) -> bool {
+        self.active_state.get().is_some()
+    }
+    #[cfg(unix)]
+    pub fn attach_active_state(
+        &self,
+        stats: std::sync::Arc<super::active_pages::ActivePagesStats>,
+    ) {
+        let _ = self.active_state.set(stats);
     }
     pub fn snapshot(&self) -> PagingSnapshot {
         PagingSnapshot {
@@ -232,6 +250,8 @@ impl PagingTelemetry {
             elapsed_ms: self.started.elapsed().as_millis() as u64,
             experts: self.experts.snapshot(),
             ple: self.ple.snapshot(),
+            #[cfg(unix)]
+            active_state: self.active_state.get().map(|s| s.snapshot()),
         }
     }
 }

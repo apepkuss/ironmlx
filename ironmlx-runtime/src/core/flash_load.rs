@@ -71,10 +71,38 @@ pub(crate) fn plan_with_occupied(
     limit: Option<usize>,
     minimum_occupied: usize,
 ) -> Result<FlashLoadPlan> {
-    let available = available_bytes(minimum_occupied, limit)?;
-    FlashLoadPlan::inspect(
+    plan_with_active_occupied(
         path,
-        &FlashLoadRequest::new(available as u64, batch, cap, chunk, draft_bytes)
-            .with_environment()?,
+        batch,
+        cap,
+        chunk,
+        draft_bytes,
+        limit,
+        minimum_occupied,
+        &super::cache::ActiveKvOffloadConfig::disabled(),
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn plan_with_active_occupied(
+    path: &Path,
+    batch: usize,
+    cap: usize,
+    chunk: usize,
+    draft_bytes: u64,
+    limit: Option<usize>,
+    minimum_occupied: usize,
+    active: &super::cache::ActiveKvOffloadConfig,
+) -> Result<FlashLoadPlan> {
+    let available = available_bytes(minimum_occupied, limit)?;
+    let mut request = FlashLoadRequest::new(available as u64, batch, cap, chunk, draft_bytes);
+    if active.enabled {
+        request.active_pages = Some(
+            ironmlx_lm::core::active_pages::ActivePagesConfig::for_memory(
+                active.root.join("flash"),
+                available as u64,
+            ),
+        );
+    }
+    FlashLoadPlan::inspect(path, &request.with_environment()?)
 }

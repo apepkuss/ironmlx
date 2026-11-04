@@ -124,6 +124,7 @@ pub struct FlashTextModel {
     mixer: HyperConnection,
     head: Linear,
     pub config: FlashTextConfig,
+    pub(crate) active_pages: Option<Arc<crate::core::active_pages::ActivePagesPool>>,
     pub(crate) paging_telemetry: Arc<crate::core::paging_stats::PagingTelemetry>,
     pub(crate) instance: Arc<()>,
     pub(crate) artifact_identity: String,
@@ -329,6 +330,7 @@ impl FlashTextModel {
                 .and_then(|n| n.checked_add(paging.map_or(0, |options| options.cache_bytes)))
                 .context("Flash model residency overflow")?,
             experts,
+            active_pages: None,
             paging_telemetry: telemetry,
             layer_major_verify,
             native_paged_batching,
@@ -336,6 +338,42 @@ impl FlashTextModel {
         })
     }
 
+    pub(crate) fn active_cache_cost(&self) -> (usize, usize) {
+        let (token, fixed) = super::load_plan::flash_cache_cost(self.active_pages.is_some());
+        (token as usize, fixed as usize)
+    }
+    /// Configure disposable sparse KV storage before creating request caches.
+    /// Rebinding invalidates older request/draft identities; they cannot be
+    /// mixed with the arithmetic/storage contract of the returned model.
+    pub fn with_active_state(
+        mut self,
+        config: crate::core::active_pages::ActivePagesConfig,
+    ) -> Result<Self> {
+        ensure!(
+            self.active_pages.is_none(),
+            "Flash active state already configured"
+        );
+        super::load_plan::validate_active_config(&config, &self.config)?;
+        let pool = crate::core::active_pages::ActivePagesPool::new(config)?;
+        pool.stats.set_hot_window_tokens(
+            (pool.config.cache_bytes as u64
+                / (self.config.num_key_value_heads as u64 * self.config.head_dim as u64 * 4))
+                .max(4096),
+        );
+        tracing::info!(
+            read_cache_bytes = pool.config.cache_bytes,
+            gather_payload_bytes = pool.config.pack_bytes,
+            disk_quota_bytes = pool.config.disk_bytes,
+            hot_window_tokens = pool.stats.snapshot().hot_window_tokens,
+            "Flash active sparse KV paging enabled; indexer and recurrent state remain in RAM"
+        );
+        self.paging_telemetry
+            .attach_active_state(Arc::clone(&pool.stats));
+        self.active_pages = Some(pool);
+        self.instance = Arc::new(());
+        self.dflash_instance = crate::models::dflash2::DFlash2Instance::new();
+        Ok(self)
+    }
     pub fn expert_cache_stats(&self) -> Result<Option<ExpertCacheStats>> {
         self.experts
             .as_ref()
@@ -376,7 +414,14 @@ impl FlashTextModel {
                         ple: layer.ple.as_ref().map(PleLayer::new_state).transpose()?,
                     }
                 }
-                Attention::Sparse(_) => LayerState::Sparse(QsaState::new(cap)?),
+                Attention::Sparse(_) => {
+                    let state = QsaState::new(cap)?;
+                    LayerState::Sparse(if let Some(pool) = &self.active_pages {
+                        state.with_active_pages(Arc::clone(pool))
+                    } else {
+                        state
+                    })
+                }
             });
         }
         Ok(FlashCache {

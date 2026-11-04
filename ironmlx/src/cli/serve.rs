@@ -281,7 +281,8 @@ pub struct ServeArgs {
     /// Enable paged SSD prefix cache under this directory. Without --kv-quant,
     /// this also switches full-attention KV caches to paged storage and decode
     /// to the paged attention kernel when supported. Flash persists its complete
-    /// prefix state in ordinary and DFlash2 inference; active KV stays in RAM.
+    /// prefix state in ordinary and DFlash2 inference. With --active-kv-offload,
+    /// Flash reads selected historical KV blocks from bounded SSD storage.
     /// With TurboQuant, runtime
     /// K/V stays quantized while prefix cache entries are persisted as packed
     /// TurboQuant tensors. When passed without a value, defaults to
@@ -322,6 +323,9 @@ pub struct ServeArgs {
     /// still be parked to SSD when the scheduler is full; paged full-attention
     /// KV caches also use transparent hot/cold page residency so older decode
     /// pages can be offloaded and streamed back in chunks during attention.
+    /// Flash-Next uses selected sparse KV history paging during ordinary and
+    /// DFlash2 inference; indexer and recurrent state remain in RAM. Disposable
+    /// active pages do not resume a request after a process crash.
     #[arg(long = "active-kv-offload", default_value_t = false)]
     pub active_kv_offload: bool,
 
@@ -621,7 +625,7 @@ fn ensure_dflash2_serve_supported(
     }
     if args.kv_quant.turboquant_bits().is_some()
         || (args.paged_prefix_cache_dir.is_some() && family != DFlash2TargetFamily::Qwen38FlashNext)
-        || args.active_kv_offload
+        || (args.active_kv_offload && family != DFlash2TargetFamily::Qwen38FlashNext)
     {
         bail!(
             "--dflash2-model-dir has not qualified KV quantization, paged/SSD prefix cache, or active KV offload"
@@ -1520,18 +1524,22 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
             "Flash currently requires BF16 KV caches"
         );
         let cfg = resolved_scheduler.scheduler_config;
-        Some(ironmlx_runtime::core::flash_load::plan(
-            &model_dir,
-            cfg.b_max,
-            cfg.max_cache_cap,
-            cfg.prefill_chunk_size,
-            if dflash2_family.is_some() {
-                1536 << 20
-            } else {
-                0
-            },
-            None,
-        )?)
+        Some(
+            ironmlx_runtime::core::flash_load::plan_with_active_occupied(
+                &model_dir,
+                cfg.b_max,
+                cfg.max_cache_cap,
+                cfg.prefill_chunk_size,
+                if dflash2_family.is_some() {
+                    1536 << 20
+                } else {
+                    0
+                },
+                None,
+                0,
+                &resolve_active_kv_offload_config(&args)?,
+            )?,
+        )
     } else {
         None
     };

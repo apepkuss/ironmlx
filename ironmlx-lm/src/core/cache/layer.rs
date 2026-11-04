@@ -269,6 +269,59 @@ pub fn enable_paged_hot_cold_tiering_caches(
     Ok(())
 }
 
+// Optional durable saves must not reconstruct an unbounded active SSD history
+// in RAM. The same metadata-only gate protects lookup and direct exports.
+fn flash_active_prefix_export_allowed(caches: &[LayerCache], len: i32) -> anyhow::Result<bool> {
+    #[cfg(unix)]
+    {
+        if len <= 0 {
+            return Ok(true);
+        }
+        if !caches.iter().any(|cache| matches!(cache, LayerCache::Flash(flash) if flash.active_prefix_budget().is_some())) { return Ok(true); }
+        let mut total = 0usize;
+        let mut active = None;
+        let mut fits = true;
+        for cache in caches {
+            if let LayerCache::Flash(cache) = cache {
+                let spec = cache.durable_prefix_spec(len)?;
+                let bytes = |t: &crate::core::cache::prefix_payload::PrefixTensorSpec| -> anyhow::Result<usize> {
+                    t.shape.iter().try_fold(t.dtype.byte_size(), |n, &d| n.checked_mul(usize::try_from(d)?).ok_or_else(|| anyhow::anyhow!("Flash prefix size overflow")))
+                };
+                for tensor in &spec.tensors {
+                    total = total
+                        .checked_add(bytes(tensor)?)
+                        .ok_or_else(|| anyhow::anyhow!("Flash prefix size overflow"))?;
+                }
+                if let Some((limit, stats)) = cache.active_prefix_budget() {
+                    fits &= bytes(&spec.tensors[1])?
+                        .checked_add(bytes(&spec.tensors[2])?)
+                        .is_some_and(|n| n <= limit);
+                    active = Some(stats);
+                }
+            }
+        }
+        if let Some(stats) = active {
+            if !fits || total > 512 << 20 {
+                stats
+                    .prefix_export_skips
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::debug!(
+                    len,
+                    bytes = total,
+                    reason = "active_state_prefix_budget",
+                    "Flash optional prefix export skipped"
+                );
+                return Ok(false);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (caches, len);
+    }
+    Ok(true)
+}
+
 pub fn prefix_key_spec_for_caches(
     model_id: &str,
     token_ids: &[u32],
@@ -294,6 +347,9 @@ pub fn prefix_key_spec_for_caches(
         anyhow::bail!("prefix_key_spec_for_caches: block_size must be > 0");
     }
 
+    if !flash_active_prefix_export_allowed(caches, cached_len)? {
+        return Ok(None);
+    }
     let mut main_layers = Vec::with_capacity(caches.len());
     let mut kv_cache_profile: Option<String> = None;
     for cache in caches {
@@ -453,6 +509,18 @@ pub fn prefix_entry_for_row(
 ) -> anyhow::Result<Option<(PagedPrefixEntry, i32)>> {
     if caches.is_empty() {
         return Ok(None);
+    }
+    #[cfg(unix)]
+    if let Some(len) = caches.iter().find_map(|c| {
+        if let LayerCache::Flash(c) = c {
+            c.offsets().get(row).copied()
+        } else {
+            None
+        }
+    }) {
+        if !flash_active_prefix_export_allowed(caches, len)? {
+            return Ok(None);
+        }
     }
     let mut layers = Vec::with_capacity(caches.len());
     let mut cached_len: Option<i32> = None;

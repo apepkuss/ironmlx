@@ -18,6 +18,20 @@ fn spec(dtype: Dtype, shape: impl Into<Vec<i32>>) -> PrefixTensorSpec {
 }
 
 impl FlashLayerCache {
+    pub(crate) fn active_prefix_budget(
+        &self,
+    ) -> Option<(
+        usize,
+        std::sync::Arc<crate::core::active_pages::ActivePagesStats>,
+    )> {
+        self.rows.iter().find_map(|row| match row {
+            LayerState::Sparse(qsa) => qsa
+                .active
+                .as_ref()
+                .map(|pool| (pool.config.pack_bytes, std::sync::Arc::clone(&pool.stats))),
+            _ => None,
+        })
+    }
     pub fn durable_prefix_contract(&self) -> Result<String> {
         self.prefix_contract
             .clone()
@@ -129,10 +143,26 @@ impl FlashLayerCache {
             }
             LayerState::Sparse(qsa) => {
                 meta[2] = 1;
-                let mut arrays = [&qsa.keys, &qsa.values, &qsa.raw_index_keys, &qsa.positions]
-                    .into_iter()
-                    .map(|a| a.clone().context("incomplete Flash sparse prefix"))
-                    .collect::<Result<Vec<_>>>()?;
+                let (keys, values) = if let Some(history) = &qsa.paged {
+                    history.materialize(().into())?
+                } else {
+                    (
+                        qsa.keys.clone().context("incomplete Flash sparse keys")?,
+                        qsa.values
+                            .clone()
+                            .context("incomplete Flash sparse values")?,
+                    )
+                };
+                let mut arrays = vec![
+                    keys,
+                    values,
+                    qsa.raw_index_keys
+                        .clone()
+                        .context("incomplete Flash sparse index")?,
+                    qsa.positions
+                        .clone()
+                        .context("incomplete Flash sparse positions")?,
+                ];
                 let block = if let Some(block) = &qsa.block_keys {
                     meta[5] = block.shape().as_slice()[2];
                     let capacity = expected.tensors[5].shape[2];
@@ -250,6 +280,9 @@ impl FlashLayerCache {
             }
             LayerState::Sparse(qsa) => {
                 let mut qsa = qsa.clone();
+                // Import a bounded durable prefix into a fresh logical history;
+                // the next append may convert it to SSD under this model's policy.
+                qsa.paged = None;
                 qsa.keys = Some(tensors[1].clone());
                 qsa.values = Some(tensors[2].clone());
                 qsa.raw_index_keys = Some(tensors[3].clone());

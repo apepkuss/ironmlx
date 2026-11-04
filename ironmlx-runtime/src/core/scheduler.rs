@@ -6095,7 +6095,11 @@ impl<M: Model> Scheduler<M> {
             self.budget_state.resident_cap(),
             self.budget_state.policy(),
         )
-        .with_custom_cost(T::scheduler_cache_cost());
+        .with_custom_cost(
+            self.budget_state
+                .custom_cost()
+                .or(T::scheduler_cache_cost()),
+        );
         let mut scheduler = Scheduler::<T>::new_with_state(
             1,
             self.effective_cap_max,
