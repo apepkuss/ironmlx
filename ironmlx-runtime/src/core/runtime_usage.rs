@@ -93,6 +93,8 @@ pub struct ModelRuntimeRequestTracker {
     input_tokens: u64,
     started_at: Instant,
     first_token_at: Option<Instant>,
+    last_output_at: Option<Instant>,
+    max_output_event_gap: Duration,
     output_tokens: u64,
     finished: bool,
     persistence: Option<PersistenceRequest>,
@@ -129,6 +131,8 @@ impl ModelRuntimeUsageCounters {
             input_tokens,
             started_at,
             first_token_at: None,
+            last_output_at: None,
+            max_output_event_gap: Duration::ZERO,
             output_tokens: 0,
             finished: false,
             persistence: None,
@@ -310,6 +314,14 @@ impl ModelRuntimeRequestTracker {
         if tokens == 0 {
             return;
         }
+        // These are output events, which can contain several speculative tokens.
+        // Keep prefill and time after the final output out of the event gap.
+        if let Some(previous) = self.last_output_at {
+            self.max_output_event_gap = self
+                .max_output_event_gap
+                .max(now.saturating_duration_since(previous));
+        }
+        self.last_output_at = Some(now);
         if let Some(p) = self.persistence.as_mut() {
             p.overlapped |= crate::core::cache::prefix_save::busy();
             let state = self.counters.decode_state();
@@ -345,6 +357,26 @@ impl ModelRuntimeRequestTracker {
             return;
         };
         if let Some(p) = &self.persistence {
+            let persistence = crate::core::cache::prefix_save::snapshot();
+            let overlapped = p.overlapped || persistence.stats.queued_total > p.queued_at_start;
+            tracing::debug!(
+                model = %p.model,
+                route = p.route,
+                request_id = self.request_id,
+                input_tokens = self.input_tokens,
+                output_tokens = self.output_tokens,
+                concurrency = p.concurrency,
+                ttft_ms = ttft.as_secs_f64() * 1000.,
+                decode_ms = decode_duration.as_secs_f64() * 1000.,
+                max_output_event_gap_ms = self.max_output_event_gap.as_secs_f64() * 1000.,
+                completion_tail_ms = completed_at
+                    .saturating_duration_since(self.last_output_at.unwrap_or(first_token_at))
+                    .as_secs_f64() * 1000.,
+                persistence_overlapped = overlapped,
+                persistence_pending = persistence.stats.pending_jobs,
+                persistence_status = %persistence.stats.last_status,
+                "request latency breakdown"
+            );
             crate::core::cache::prefix_save::observe_request(
                 &p.model,
                 p.route,
@@ -353,11 +385,7 @@ impl ModelRuntimeRequestTracker {
                 ttft.as_secs_f64() * 1000.,
                 (decode_tokens > 0)
                     .then(|| decode_duration.as_secs_f64() * 1000. / decode_tokens as f64),
-                p.overlapped
-                    || crate::core::cache::prefix_save::snapshot()
-                        .stats
-                        .queued_total
-                        > p.queued_at_start,
+                overlapped,
                 self.counters
                     .prefix_cache_hit_tokens
                     .load(Ordering::Relaxed)
@@ -411,6 +439,26 @@ fn median(values: impl Iterator<Item = f64>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_event_gap_excludes_prefill_empty_events_and_completion_tail() {
+        let counters = Arc::new(ModelRuntimeUsageCounters::default());
+        let start = Instant::now();
+        let mut request = counters.start_request(100, start);
+        request.record_output_tokens_at(1, start + Duration::from_secs(10));
+        assert_eq!(request.max_output_event_gap, Duration::ZERO);
+        request.record_output_tokens_at(0, start + Duration::from_secs(11));
+        request.record_output_tokens_at(4, start + Duration::from_secs(13));
+        request.record_output_tokens_at(1, start + Duration::from_secs(14));
+        assert_eq!(request.max_output_event_gap, Duration::from_secs(3));
+        request.complete_at(start + Duration::from_secs(20));
+        assert_eq!(request.max_output_event_gap, Duration::from_secs(3));
+        assert_eq!(
+            request.last_output_at,
+            Some(start + Duration::from_secs(14))
+        );
+        assert_eq!(counters.snapshot(true).output_tokens, 6);
+    }
 
     #[test]
     fn snapshot_saturates_hits_to_eligible_tokens() {
