@@ -1023,7 +1023,8 @@ reinvestigated or resolved by Stage 7. MLX native source is unchanged.
 The original App bundle was restored healthy after isolated validation, with
 its bundle files and user preferences unchanged. It has **not** been repackaged
 with Stage 7; the new implementation was tested through the independently
-built Release backend and App source/launch tests. Changes remain uncommitted.
+built Release backend and App source/launch tests. At that Stage 7 checkpoint,
+changes were still uncommitted; the subsequent commit is recorded below.
 
 ## Adaptive completed-prefix saving (2026-11-04)
 
@@ -1299,8 +1300,9 @@ validation. Both user preference files retained their original SHA-256 hashes,
 and the original bundle's backend/benchmark/Metal payload hashes matched the
 recorded bundle identity. The App was **not rebuilt with these adaptive changes**;
 App source/UI changes were covered by Swift and Node checks, while physical
-model tests used the isolated Release CLI. New adaptive changes remain
-uncommitted; only the initial Stage 7 commit `1cbeb7554` was pushed in this turn.
+model tests used the isolated Release CLI. At that checkpoint adaptive changes
+were still uncommitted and only Stage 7 commit `1cbeb7554` had been pushed;
+the follow-up records below supersede that Git status.
 No `Context leak` diagnostic was found in this turn's recorded Rust/model logs.
 
 ## Prefix persistence follow-up: latency investigation (2026-11-04)
@@ -1463,3 +1465,89 @@ results above apply to the actual M5 host and these workloads.
 Artifacts under `.build/prefix-followup/`: `hash-{soft,hardware}.json`,
 `hash-probe/`, `sha-features-{arm,x86}.txt`, `sha-summary.json`, `sha/*.json`,
 `sha-prefix-tests.log`, `sha-compat/result.json` and matching logs.
+
+## Prefix persistence follow-up: backend instance-lock lifetime (2026-11-04)
+
+The CLI guard previously relied only on closing its `File`. BSD `flock` shares
+an open-file-description lock across inherited descriptors, including the
+fork-to-exec window even when FD_CLOEXEC is set. An unrelated child can
+therefore retain the reference after the parent's guard is dropped, producing
+the same `ironmlx_instance_already_running` reacquire failure as the earlier
+parallel test. The original run did not record the inheriting child PID, so
+its exact process history cannot be reconstructed retrospectively.
+
+A controlled fork test reproduced the defect with **unmodified guard code**:
+two lock tests passed, while reacquisition after owner Drop failed as expected
+with the child still alive. The guard now records its acquiring PID and sends
+LOCK_UN explicitly on Drop **in that process only**. Dropping an inherited
+guard in a child only closes its descriptor; it must not unlock the live
+parent's shared lock. No retries were added to hide a failed lock acquisition,
+and the user-facing error, path, permissions and close-on-exec policy remain.
+
+Validation passed:
+
+- Three lock tests in parallel, including inherited-descriptor retention,
+  child Drop protection and the original exclusivity/release test.
+- **100 rounds × three parallel lock tests = 300 passed**.
+- The entire CLI library at **16 threads: 379 passed, 14 ignored, 0 failed**.
+
+Tests use unique temporary paths, not the user's production lock. Child code
+avoids MLX, allocation, logging and unwinding after fork; parent teardown
+kills/reaps its own test children. Ready waits are bounded and handle EINTR;
+pipe close-on-exec, EOF and a child-side deadline limit leaked test processes.
+
+The fixed boundary is normal guard destruction, including inherited-fd races.
+SIGKILL cannot execute Drop: if a child still holds an inherited description,
+kernel lock release still waits for its close/exec/exit. This OS lifetime rule
+has not been replaced by a separate PID-file recovery protocol. External MLX
+thread identity/native source was not changed.
+
+Artifacts: `.build/prefix-followup/lock-before.log`, `lock-after.log`,
+`lock-repeat.json`, `lock-repeat.log`, and `cli-parallel.log`.
+
+## Follow-up closeout
+
+The final Release workspace check passed **2,541 tests, 303 explicitly ignored,
+zero failures**, across 211 test targets. CLI parallel verification and the
+300 repeated lock checks are separately recorded above; they are not added to
+the workspace count. Four qualifier Python tests passed. Stable and pinned
+nightly format checks, whitespace checks and the CI-equivalent pinned-nightly
+workspace Clippy scope passed with `-D warnings`.
+
+An additional CLI **test-target** Clippy attempt failed on two existing
+`items_after_test_module` diagnostics in unmodified files:
+`ironmlx/src/server/embedding_audio.rs:18` and
+`ironmlx/src/server/diarizations.rs:173`. They were not suppressed or repaired
+as part of the three requested items. This failed expanded gate and the
+previously recorded all-target MLX test diagnostics remain distinct from the
+passing CI-equivalent lint scope.
+
+The final production CLI SHA-256 was
+`dc2fc193510831710c3b8ab92de23268cab7368ff52fc070fafd14a28da55066`.
+Actual HTTP qualification passed on ordinary and DFlash2 with mixed text,
+single-image/multi-image prompts, B1/B4 equivalence, cancellation and subsequent
+B2 recovery. DFlash2 results matched the ordinary baseline, pending persistence
+drained with zero failures, and Flash active KV offload stayed disabled.
+The test did not requalify ANE forced-profile combinations or old external MLX
+GPU-default failures. No new `Context leak` diagnostic appeared in these logs.
+
+**The long-tail issue remains open.** A withdrawn GPU-mask candidate also
+showed a 3.949-second DFlash2 Auto content gap despite removing the host readback
+(`mask-latency/dflash-auto.json`). That reinforces the decision not to claim the
+sync point as the sole cause. The delivered change improves checksum/save cost
+and fixes a reproducible lock-lifetime race; it does not certify a general GPU
+latency SLO. Physical M1 Pro 32 GiB/64 GiB, controller-cold SSD, sustained
+pressure and no-SHA-instruction CPU qualification remain outstanding.
+
+The original Release App was restored healthy on port 9068. Both preference
+file hashes and the recorded backend/benchmark/Metal bundle hashes were
+unchanged. The App was **not repackaged** with these follow-ups; the final CLI
+was built/tested separately. No external MLX source or branch changed, and
+Stage 8 was not implemented. The baseline adaptive change `2480914b0` was
+pushed before work; latency diagnostics, checksum acceleration and the lock
+fix are separate follow-up commits, with no further push in this task.
+
+Final artifacts under `.build/prefix-followup/`: `workspace-final.log`,
+`clippy-workspace.log`, `clippy-cli-tests.log`, `fmt-{stable,nightly}.log`,
+`python-final.log`, `final-binary.json`, `final-serving/result.json`,
+`final-serving-driver.log`, and `app-restored.json`.
