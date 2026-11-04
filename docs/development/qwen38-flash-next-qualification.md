@@ -1389,3 +1389,77 @@ The delivered diagnostic changes passed six runtime-usage tests and four
 qualifier Python tests. The long-tail issue remains open; the practical result
 is a reproducible first-miss comparison and better distinction between output
 gaps and request teardown, without speculative changes to memory/GPU policy.
+
+## Prefix persistence follow-up: synchronous save cost (2026-11-04)
+
+The shipped change enables `sha2 0.10.9`'s existing `asm` feature **on AArch64
+only**, adding locked `sha2-asm 0.6.4`. The upstream AArch64 implementation
+detects CPU SHA instructions at runtime and retains its software fallback.
+This accelerates CPU checksumming, not ANE/model computation. Cargo feature
+unification also benefits other users of SHA-2 0.10 in the same ARM binary;
+the digest algorithm, cache format and identity remain unchanged. Target-tree
+checks show the feature on `aarch64-apple-darwin` and absent on
+`x86_64-apple-darwin`; the latter is a resolution check, not an Intel build or
+hardware test.
+
+The existing immutable snapshot ownership, streaming buffer sizes, F_NOCACHE,
+checksums, fsync/rename transaction, memory admission and Sync default remain
+unchanged. A coalescing writer candidate was tested and **withdrawn**: ordinary
+save median 1.587 → 1.526 seconds was insufficient, DFlash2 1.020 → 1.021 showed
+no gain, and end-to-end timing did not establish a benefit. Its additional
+buffering/code was not retained. Evidence remains in `coalescing-candidate.patch`,
+`sync-coalescing-summary.json` and `sync/` under `.build/prefix-followup/`.
+
+### Actual checksumming and model measurements
+
+A standalone Release probe hashed the same 64 MiB input five times. Median
+software time was **106.8 ms**, versus **21.8 ms** with the hardware feature.
+Both digests matched each other and independent Python `hashlib`. This isolates
+hash cost from GPU/prefill/disk timing; it does not measure SSD throughput.
+
+Physical serving measurements again used the M5 Max 128 GiB host, full experts,
+b_max 4, 2,048-token chunks, hot retention off, ANE off, 4,038–4,039 prompt
+tokens, 16 output tokens, two retained warmups and six first-miss measurements
+per route/version. All stores stayed below the 8 GiB quota. The software
+control executable was `2a5ec44685cae4720f05592572a557cf77f0be8050fd5a2af0f1945594a79cd4`;
+hardware executable was
+`02c8adeee268f497f709ef3756534014c9815797e4f9aec50d316096a95c9ece`.
+
+| Route | Software synchronous save median | Hardware synchronous save median (min–max) | Saves per measured request |
+| --- | --- | --- | --- |
+| Ordinary | **1.587 s** | **0.573 s** (0.543–0.621) | 3, no skips/failures |
+| DFlash2 | **1.020 s** | **0.313 s** (0.301–0.323) | 2, no skips/failures |
+
+Savings in the measured persistence operation were approximately 64%/69%.
+Ordinary total save cost was also below the historical 1.267-second pre-adaptive
+sample. A final replay with the unchanged software executable (three measured
+requests) still took median **1.647 seconds**, so the save-cost improvement was
+not obtained by silently disabling saves or only using a faster later control.
+
+**End-to-end timing is less settled.** Hardware ordinary TTFT median was
+5.358 seconds, decode 0.539; DFlash2 TTFT was 6.325 seconds, decode 1.541.
+DFlash2 did not show a corresponding TTFT improvement over its software
+control (6.279 seconds). The unchanged ordinary software replay itself ranged
+6.351–10.104 seconds TTFT, with median 6.517. Save-time reduction must not be
+reported as an equal TTFT/throughput gain or as a cure for all long tails.
+Uncached small-write overhead still exists; this change removes substantial
+CPU hash cost while retaining the resource/durability policy.
+
+### Correctness, compatibility and limits
+
+The hardware-feature prefix suite passed **74 tests, two ignored**. Independent
+Python hashing validated all **40 new payload files / 9,168,594,576 bytes**.
+The pre-adaptive Stage 7 executable read the new ordinary and DFlash2 files,
+reported actual prefix reuse, and returned the exact expected continuations.
+No model source, external MLX source, prefix schema or execution fingerprint
+changed. The coalescing candidate's three extra tests are not counted as tests
+of the delivered implementation.
+
+No physical M1 Pro 32 GiB, 64 GiB or CPU lacking SHA instructions was tested.
+The software probe exercises the portable implementation separately; it does
+not substitute for testing runtime fallback on such a CPU. Native performance
+results above apply to the actual M5 host and these workloads.
+
+Artifacts under `.build/prefix-followup/`: `hash-{soft,hardware}.json`,
+`hash-probe/`, `sha-features-{arm,x86}.txt`, `sha-summary.json`, `sha/*.json`,
+`sha-prefix-tests.log`, `sha-compat/result.json` and matching logs.
