@@ -1302,3 +1302,90 @@ App source/UI changes were covered by Swift and Node checks, while physical
 model tests used the isolated Release CLI. New adaptive changes remain
 uncommitted; only the initial Stage 7 commit `1cbeb7554` was pushed in this turn.
 No `Context leak` diagnostic was found in this turn's recorded Rust/model logs.
+
+## Prefix persistence follow-up: latency investigation (2026-11-04)
+
+The adaptive implementation was committed and pushed as `2480914b0` before
+these follow-up changes. Stage 8 remains deferred. This section records a
+latency investigation, **not a claim that the historical long tail is fixed**.
+
+Added `scripts/qualify-flash-prefix-latency.py`, which retains all warmups and
+measurement requests, records every nonempty SSE event, and optionally records
+macOS `proc_pid_rusage` process counters. Missing terminal SSE events fail the
+check. Small samples report median/min/max rather than a misleading P95.
+Process I/O attribution is not controller-cold SSD throughput; process pageins
+do not cover every possible GPU/driver stall. The qualifier does not purge
+caches, inject memory pressure, or change server policy.
+
+Runtime DEBUG `request latency breakdown` now distinguishes TTFT, maximum gap
+between output events, and time between final output and request completion,
+with route/concurrency and persistence overlap/pending status. An output event
+may contain several speculative tokens; its gap is **not** per-token kernel
+latency. Timing does not force additional graph evaluations or change decode.
+
+### Isolated six-case comparison
+
+On the same M5 Max 128 GiB host, the pre-follow-up Release executable
+`a64bd667148ed405d7a0d194c68d4019cf46a737ec19479e768451051d56ab54`
+ran ordinary/DFlash2 × cache off/Sync/Auto in separate processes, with no build
+or other qualification job running concurrently. Full experts, b_max 4, chunk
+2,048, ANE off, hot retention disabled, 8 GiB disk quota, 4,038–4,039 prompt
+tokens, 16 output tokens. Each case retained two warmups and twelve measurements.
+All 84 requests produced the same expected numeric continuation. This is a
+single-host sequential comparison, not randomized hardware/SLO qualification.
+The last ordinary Sync request also crossed the disk quota and exercised
+eviction; the later dedicated save-cost comparison stays below the quota.
+
+| Route/mode | TTFT median / max (s) | Decode wall median / max (s) | Largest measured content-event gap (s) |
+| --- | --- | --- | --- |
+| Ordinary off | 3.783 / 8.091 | 1.728 / 5.205 | **4.793** |
+| Ordinary Sync | 6.304 / 6.486 | 1.555 / 1.609 | 1.135 |
+| Ordinary Auto | 4.851 / 5.033 | 0.496 / 0.507 | 0.060 |
+| DFlash2 off | 4.555 / 4.769 | 1.460 / 1.560 | 1.085 |
+| DFlash2 Sync | 5.637 / 5.975 | 1.444 / 1.612 | 1.164 |
+| DFlash2 Auto | 4.721 / 4.981 | 1.486 / 1.573 | 1.120 |
+
+Ordinary off additionally had a **6.952 s** output-event gap in its first warmup.
+Its warmed outlier (request index 4) had zero process pageins, zero process disk
+writes, approximately 1.9 MiB attributed reads, and normal governor pressure.
+The prefix writer was disabled. Therefore optional prefix writes are not a
+necessary cause of this reproduced stall, and the counters do not support
+attributing this particular event to process pageins. They do **not** identify
+the ultimate GPU/driver/graph cause or exclude writer interference in other
+workloads. The historical 21-second Auto decode stall was not reproduced here.
+The issue remains open, and no universal latency-degradation bound is certified.
+
+Artifacts: `.build/prefix-followup/latency-summary.json`, `latency-driver.log`,
+`latency/*.json` and matching server logs. Model files and user configuration
+were not modified.
+
+### Profile-guided candidate and disposition
+
+An additional 20-request ordinary-off diagnostic run used the new timing
+instrumentation, executable SHA-256
+`2a5ec44685cae4720f05592572a557cf77f0be8050fd5a2af0f1945594a79cd4`.
+During its first warmup, a 2.088-second content gap triggered a one-second,
+10-millisecond-interval macOS `sample` capture. The stack contained QSA
+`selected.to_vec::<i32>()`, MLX graph evaluation/Metal encoding, and allocator
+cache reclamation. This is a sampled call path, **not proof of the ultimate
+stall cause**. The 20 subsequent measured requests had median decode wall
+1.388 seconds and maximum event gap 1.181 seconds; completion tails in backend
+DEBUG records were negligible. The profiler intervened in the warmup only.
+
+A candidate kept sparse decode mask construction on the GPU using boolean
+block flags, avoiding that host readback and keeping scratch linear in context.
+Two component tests passed (boundaries, sentinels, duplicate blocks and a
+262,145-position mask). Real 4,097/16,385-token prefix readers matched the old
+reference **exactly across the full vocabulary for eight steps at B1/B2/B4**.
+However, twenty ordinary-off requests produced median decode **1.396 seconds**
+and maximum event gap **1.398 seconds**, versus the 1.388/1.181-second control.
+That does not establish a latency improvement or resolve the historical tail.
+The candidate was **withdrawn from the shipping source**, not presented as a
+successful fix. Its patch, correctness tests and performance evidence remain
+in `.build/prefix-followup/gpu-mask-candidate.patch`, `mask-*.log/json`, and
+`mask-latency/`. No model arithmetic change is included in the latency commit.
+
+The delivered diagnostic changes passed six runtime-usage tests and four
+qualifier Python tests. The long-tail issue remains open; the practical result
+is a reproducible first-miss comparison and better distinction between output
+gaps and request teardown, without speculative changes to memory/GPU policy.
