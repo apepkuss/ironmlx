@@ -978,6 +978,56 @@ mod tests {
         use super::super::prefix_store::{flash_durable_tests::fixture, PrefixLoadSource};
         use ironmlx_lm::core::cache::prefix_payload::PrefixLayerPayload;
         use std::os::fd::AsRawFd;
+
+        // The controller/governor are process singletons. Exercise each tier
+        // in its own process instead of inheriting the developer/CI RAM tier
+        // or changing process-global environment while other tests run.
+        const RAM_GIB: &str = "IRONMLX_TEST_PREFIX_SAVE_RAM_GIB";
+        let ram = match std::env::var(RAM_GIB) {
+            Ok(ram) => ram.parse::<usize>().unwrap(),
+            Err(_) => {
+                for ram in [32, 64, 128] {
+                    let output = std::process::Command::new(std::env::current_exe().unwrap())
+                        .args([
+                            "--exact",
+                            "core::cache::prefix_save::tests::pending_reuse_cancellation_and_atomic_background_commit",
+                            "--test-threads=1",
+                            "--nocapture",
+                        ])
+                        .env(RAM_GIB, ram.to_string())
+                        .env("IRONMLX_TOTAL_RAM_BYTES", (ram * GIB).to_string())
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success()
+                            && String::from_utf8_lossy(&output.stdout)
+                                .contains(&format!("tier_verified={ram}")),
+                        "{ram} GiB tier failed:\nstdout:\n{}\nstderr:\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    println!("prefix persistence {ram} GiB tier passed");
+                }
+                return;
+            }
+        };
+        assert!([32, 64, 128].contains(&ram));
+        let expected = PrefixSaveProfile::for_ram(ram * GIB);
+        let actual = controller().profile;
+        assert_eq!(
+            (
+                actual.tier,
+                actual.budget_bytes,
+                actual.max_jobs,
+                actual.chunk_bytes
+            ),
+            (
+                expected.tier,
+                expected.budget_bytes,
+                expected.max_jobs,
+                expected.chunk_bytes
+            )
+        );
         let root = std::env::temp_dir().join(format!("prefix-controller-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let (store, mut spec, mut entry) = fixture(&root);
@@ -1032,11 +1082,24 @@ mod tests {
         }
         let mut queued_spec = spec.clone();
         queued_spec.model_id.push_str("-queued");
-        save(&store, &queued_spec, &entry, PrefixSaveMode::Auto, true)
-            .unwrap()
-            .expect("second queued snapshot admitted");
-        assert_eq!(snapshot().stats.pending_jobs, 2);
-        cancel_model(&queued_spec.model_id);
+        let reserved_before_second = governor.snapshot().reserved_bytes;
+        let queued = save(&store, &queued_spec, &entry, PrefixSaveMode::Auto, true).unwrap();
+        if actual.max_jobs == 1 {
+            assert!(
+                queued.is_none(),
+                "single-job tier must reject a second snapshot"
+            );
+            assert_eq!(snapshot().stats.last_reason, "writer_backpressure");
+            assert_eq!(snapshot().stats.pending_jobs, 1);
+            assert_eq!(governor.snapshot().reserved_bytes, reserved_before_second);
+            assert_eq!(cancel_model(&queued_spec.model_id), 0);
+        } else {
+            queued.expect("two-job tier admits a second snapshot");
+            assert_eq!(snapshot().stats.pending_jobs, 2);
+            assert!(governor.snapshot().reserved_bytes > reserved_before_second);
+            cancel_model(&queued_spec.model_id);
+            assert_eq!(governor.snapshot().reserved_bytes, reserved_before_second);
+        }
         assert_eq!(
             snapshot().stats.pending_jobs,
             1,
@@ -1098,6 +1161,7 @@ mod tests {
         assert!(store.contains_persisted(&different_contract).unwrap());
         std::fs::remove_dir_all(root).unwrap();
         cancel_model(&spec.model_id);
+        println!("tier_verified={ram}");
     }
     #[test]
     #[serial_test::serial(mlx_metal)]
