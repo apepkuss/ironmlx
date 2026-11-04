@@ -818,6 +818,25 @@ impl ProcessMemoryGovernor {
         purpose: &'static str,
         kind: ReservationKind,
     ) -> Result<MemoryReservation, MemoryReservationError> {
+        let first = self.try_reserve_once(bytes, purpose, kind);
+        if first.is_err()
+            && GLOBAL_PROCESS_MEMORY_GOVERNOR
+                .get()
+                .is_some_and(|g| Arc::ptr_eq(self, g))
+            && !purpose.starts_with("prefix_")
+            && crate::core::cache::prefix_save::preempt_for_foreground()
+        {
+            return self.try_reserve_once(bytes, purpose, kind);
+        }
+        first
+    }
+
+    fn try_reserve_once(
+        self: &Arc<Self>,
+        bytes: usize,
+        purpose: &'static str,
+        kind: ReservationKind,
+    ) -> Result<MemoryReservation, MemoryReservationError> {
         let mut state = self.state.lock().expect("memory governor state poisoned");
         let telemetry_stale = state
             .last_sample_at

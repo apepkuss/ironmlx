@@ -1375,6 +1375,7 @@ impl AneHealth {
 
 #[derive(Debug, Serialize)]
 pub struct HealthSnapshot {
+    pub prefix_persistence: crate::core::cache::prefix_save::PrefixPersistenceSnapshot,
     pub paging: Option<ironmlx_lm::core::paging_stats::PagingSnapshot>,
     pub ane: AneHealth,
     pub status: HealthStatus,
@@ -1447,6 +1448,7 @@ impl SchedulerHealthCollector {
             &process_governor,
         );
         HealthSnapshot {
+            prefix_persistence: crate::core::cache::prefix_save::snapshot(),
             paging: self.paging.as_ref().map(|p| p.snapshot()),
             ane: AneHealth::current(),
             status,
@@ -2393,6 +2395,7 @@ mod tests {
     #[test]
     fn health_memory_serializes_mlx_allocator_fields() {
         let snapshot = HealthSnapshot {
+            prefix_persistence: crate::core::cache::prefix_save::snapshot(),
             paging: None,
             ane: AneHealth::current(),
             status: HealthStatus::Healthy,

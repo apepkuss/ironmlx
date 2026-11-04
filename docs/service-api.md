@@ -130,3 +130,30 @@ Both routes exist only on the loopback listener, even with a valid LAN key. App 
 - [Speech synthesis API](audio-speech-api.md): audio output and voice management.
 - [Image generation API](image-generation-api.md): text-to-image and single-image conditional editing.
 - [System One API](laya-systemone-api.md): choice, score and true/false probability.
+
+### Flash prefix persistence mode
+
+`--prefix-save-mode sync|auto` selects completed Flash-Next prefix saving for
+ordinary and qualified DFlash2 serving. Default: `sync`. It requires an enabled
+SSD prefix-cache directory; the App's cache master switch still applies.
+`sync` waits for the atomic durable commit. `auto` copies an immutable CPU
+snapshot under memory admission and queues one background writer; it may skip
+saving to protect requests. A returned answer does not imply that a queued
+snapshot has committed. Hot prefix retention remains independent.
+
+`/healthz.prefix_persistence` is a process-wide snapshot, including profile,
+`last_mode`, `last_model`, status/reason, pending jobs, reserved peak/frozen bytes,
+queued/committed/skipped/cancelled/failed totals, RAM/pending-snapshot/SSD hits,
+and capture/write/synchronous timing counters in microseconds. It is not a
+per-model SSD hit-rate or physical device bandwidth report. Worker write time
+includes lock waits and durable flushes. Governor reservations also cover
+pending-snapshot restores. Unloading cancels optional pending work.
+
+Initial snapshot caps are 512 MiB / one job / 8 MiB chunks through 32 GiB RAM;
+2 GiB / one / 16 MiB through 64 GiB; above 64 GiB, `min(RAM/32, 8 GiB)` /
+two / 32 MiB. These are caps, not allocations or promises of model fit. Admission
+also limits a new peak to one quarter of safe unreserved headroom. The writer
+stops new saves under pressure and uses observed copying/writing and matched
+request timing for conservative reuse/backpressure decisions. Sync remains the
+default while additional hardware is qualified. This does not enable active
+Flash KV/request-state offload.

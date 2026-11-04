@@ -95,6 +95,17 @@ pub struct ModelRuntimeRequestTracker {
     first_token_at: Option<Instant>,
     output_tokens: u64,
     finished: bool,
+    persistence: Option<PersistenceRequest>,
+}
+
+#[derive(Debug)]
+struct PersistenceRequest {
+    model: String,
+    route: &'static str,
+    concurrency: usize,
+    queued_at_start: u64,
+    hits_at_start: u64,
+    overlapped: bool,
 }
 
 impl ModelRuntimeUsageCounters {
@@ -120,6 +131,7 @@ impl ModelRuntimeUsageCounters {
             first_token_at: None,
             output_tokens: 0,
             finished: false,
+            persistence: None,
         }
     }
 
@@ -264,6 +276,28 @@ impl ModelRuntimeUsageCounters {
 }
 
 impl ModelRuntimeRequestTracker {
+    pub(crate) fn with_persistence_context(
+        mut self,
+        model: &str,
+        route: &'static str,
+        concurrency: usize,
+    ) -> Self {
+        self.persistence = Some(PersistenceRequest {
+            model: model.into(),
+            route,
+            concurrency: concurrency.max(1),
+            queued_at_start: crate::core::cache::prefix_save::snapshot()
+                .stats
+                .queued_total,
+            hits_at_start: self
+                .counters
+                .prefix_cache_hit_tokens
+                .load(Ordering::Relaxed),
+            overlapped: crate::core::cache::prefix_save::busy(),
+        });
+        self
+    }
+
     pub fn record_output_tokens(&mut self, tokens: u64) {
         self.record_output_tokens_at(tokens, Instant::now());
     }
@@ -275,6 +309,13 @@ impl ModelRuntimeRequestTracker {
     fn record_output_tokens_at(&mut self, tokens: u64, now: Instant) {
         if tokens == 0 {
             return;
+        }
+        if let Some(p) = self.persistence.as_mut() {
+            p.overlapped |= crate::core::cache::prefix_save::busy();
+            let state = self.counters.decode_state();
+            let active = state.active_requests.len()
+                + usize::from(!state.active_requests.contains_key(&self.request_id));
+            p.concurrency = p.concurrency.max(active);
         }
         let first_token_at = *self.first_token_at.get_or_insert(now);
         self.output_tokens = self.output_tokens.saturating_add(tokens);
@@ -303,6 +344,26 @@ impl ModelRuntimeRequestTracker {
         let Some(prefill_tokens_per_second) = tokens_per_second(self.input_tokens, ttft) else {
             return;
         };
+        if let Some(p) = &self.persistence {
+            crate::core::cache::prefix_save::observe_request(
+                &p.model,
+                p.route,
+                self.input_tokens,
+                p.concurrency,
+                ttft.as_secs_f64() * 1000.,
+                (decode_tokens > 0)
+                    .then(|| decode_duration.as_secs_f64() * 1000. / decode_tokens as f64),
+                p.overlapped
+                    || crate::core::cache::prefix_save::snapshot()
+                        .stats
+                        .queued_total
+                        > p.queued_at_start,
+                self.counters
+                    .prefix_cache_hit_tokens
+                    .load(Ordering::Relaxed)
+                    > p.hits_at_start,
+            );
+        }
         self.counters
             .record_performance_sample(ModelRuntimePerformanceSample {
                 completed_at,

@@ -40,6 +40,7 @@ public struct BackendLaunchOptions: Equatable {
     public var pagedPrefixCacheDir: String?
     public var prefixLruCacheMaxBytes: Int?
     public var ssdPrefixCacheMaxGB: Int?
+    public var prefixSaveMode: String?
     public var activeKvOffload: Bool
     /// M5 DFlash2 profile (`--m5-dflash2-profile auto`); false passes `off`.
     public var m5DFlash2Profile: Bool
@@ -63,6 +64,7 @@ public struct BackendLaunchOptions: Equatable {
         pagedPrefixCacheDir: String? = nil,
         prefixLruCacheMaxBytes: Int? = nil,
         ssdPrefixCacheMaxGB: Int? = nil,
+        prefixSaveMode: String? = nil,
         activeKvOffload: Bool = false,
         m5DFlash2Profile: Bool = true,
         ane: Bool = true,
@@ -83,6 +85,7 @@ public struct BackendLaunchOptions: Equatable {
         self.pagedPrefixCacheDir = Self.normalizedPath(pagedPrefixCacheDir)
         self.prefixLruCacheMaxBytes = prefixLruCacheMaxBytes
         self.ssdPrefixCacheMaxGB = ssdPrefixCacheMaxGB
+        self.prefixSaveMode = prefixSaveMode == "auto" ? "auto" : "sync"
         self.activeKvOffload = activeKvOffload
         self.m5DFlash2Profile = m5DFlash2Profile
         self.ane = ane
@@ -119,6 +122,7 @@ public struct BackendLaunchOptions: Equatable {
             pagedPrefixCacheDir: prefixCacheDir,
             prefixLruCacheMaxBytes: prefixLruCacheMaxBytes,
             ssdPrefixCacheMaxGB: ssdPrefixCacheMaxGB,
+            prefixSaveMode: config.prefixSaveMode,
             activeKvOffload: config.activeKvOffload == true,
             m5DFlash2Profile: config.m5Dflash2Profile != false,
             ane: config.ane != false,
@@ -284,6 +288,7 @@ public struct BackendLaunchConfiguration: Equatable {
                     arguments += ["--paged-prefix-cache-dir", directory]
                 }
                 appendIntegerFlag("--ssd-prefix-cache-max-gb", options.ssdPrefixCacheMaxGB, to: &arguments)
+                if options.pagedPrefixCacheDir != nil { arguments += ["--prefix-save-mode", options.prefixSaveMode ?? "sync"] }
             }
             if !options.m5DFlash2Profile {
                 arguments += ["--m5-dflash2-profile", "off"]
@@ -308,6 +313,7 @@ public struct BackendLaunchConfiguration: Equatable {
         }
         appendIntegerFlag("--prefix-lru-cache-max-bytes", options.prefixLruCacheMaxBytes, to: &arguments)
         appendIntegerFlag("--ssd-prefix-cache-max-gb", options.ssdPrefixCacheMaxGB, to: &arguments)
+        if options.pagedPrefixCacheDir != nil { arguments += ["--prefix-save-mode", options.prefixSaveMode ?? "sync"] }
         appendIntegerFlag("--max-loaded-models", options.maxLoadedModels, to: &arguments)
         appendIntegerFlag("--model-ttl-minutes", options.modelTtlMinutes, to: &arguments)
         appendIntegerFlag("--memory-limit-total-gb", options.memoryLimitTotalGB, to: &arguments)

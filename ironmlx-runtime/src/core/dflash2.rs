@@ -243,7 +243,7 @@ pub(crate) struct DFlash2PrefixCache {
     evictions: u64,
     entries: Vec<DFlash2PrefixArtifact>,
     disk: Option<PagedPrefixCacheConfig>,
-    last_disk_hit: Option<ironmlx_lm::core::cache::prefix_payload::PagedPrefixKeySpec>,
+    last_store_hit: Option<ironmlx_lm::core::cache::prefix_payload::PagedPrefixKeySpec>,
     /// Where a chat prompt's next turn diverges; a prompt ending in a
     /// generation suffix is also saved without it (see [`ChatTurnBoundary`]).
     turn_boundary: Option<ChatTurnBoundary>,
@@ -262,7 +262,7 @@ impl DFlash2PrefixCache {
             evictions: 0,
             entries: Vec::new(),
             disk: None,
-            last_disk_hit: None,
+            last_store_hit: None,
             turn_boundary: None,
         })
     }
@@ -283,7 +283,7 @@ impl DFlash2PrefixCache {
         context_limit: i32,
         dtype: mlx::Dtype,
     ) -> Option<DFlash2PrefixArtifact> {
-        self.last_disk_hit = None;
+        self.last_store_hit = None;
         let memory = self.load_longest(prompt_ids, fingerprint);
         let Some(config) = self.disk.as_ref() else {
             return memory;
@@ -329,9 +329,11 @@ impl DFlash2PrefixCache {
                         },
                     ],
                 });
-                let Some(mut entry) = store.load(&spec)? else {
+                let observed = store.load_observed(&spec)?;
+                let Some(mut entry) = observed.entry else {
                     return Ok(None);
                 };
+                tracing::info!(cached_len=len,source=?observed.source,"DFlash2 stored Flash prefix hit");
                 let Some(PrefixLayerPayload::DFlash2 {
                     context_hidden,
                     last_hidden,
@@ -340,7 +342,7 @@ impl DFlash2PrefixCache {
                     return Ok(None);
                 };
                 let payload_bytes = spec.payload_bytes();
-                self.last_disk_hit = Some(spec);
+                self.last_store_hit = Some(spec);
                 Ok(Some(DFlash2PrefixArtifact {
                     token_ids: tokens.to_vec(),
                     fingerprint,
@@ -358,7 +360,6 @@ impl DFlash2PrefixCache {
                         self.misses = self.misses.saturating_sub(1);
                         self.hits = self.hits.saturating_add(1);
                     }
-                    tracing::info!(cached_len = len, "DFlash2 durable Flash prefix cache hit");
                     return Some(entry);
                 }
                 Ok(None) => (),
@@ -409,16 +410,25 @@ impl DFlash2PrefixCache {
         self.hits = self.hits.saturating_add(1);
         let generation = self.next_generation();
         self.entries[hit_index].generation = generation;
+        if self.entries[hit_index]
+            .target_cache
+            .main_layers
+            .iter()
+            .any(|l| matches!(l, PrefixLayerPayload::Flash { .. }))
+        {
+            crate::core::cache::prefix_save::hot_hit();
+        }
         Some(self.entries[hit_index].clone())
     }
 
-    fn insert(
+    fn insert_at_boundary(
         &mut self,
         token_ids: &[u32],
         fingerprint: &str,
         target_cache: &[LayerCache],
         context_hidden: &Array,
         last_hidden: &Array,
+        preferred: bool,
     ) -> Result<bool> {
         let source_cache = target_cache;
         let Some((target_cache, cached_len)) = prefix_entry_for_row(target_cache, 0)? else {
@@ -454,13 +464,20 @@ impl DFlash2PrefixCache {
                 };
                 spec.main_layers
                     .push(PrefixLayerSpec::from_payload(&auxiliary));
-                // Flash artifacts can exceed the 512 MiB background queue.
-                // Write at this prefill boundary, before decoding mutates state,
-                // rather than pinning another long-lived copy in a worker.
+                // Auto owns a budgeted CPU snapshot; Sync remains blocking.
+                // Neither mode pins request arrays in a background worker.
                 let mut entry = target_cache.clone();
                 entry.main_layers.push(auxiliary);
-                match config.store().save_if_absent(&spec, &entry) {
-                    Ok(_) => disk_queued = true,
+                let preferred = preferred
+                    || config.save_mode == crate::core::cache::prefix_save::PrefixSaveMode::Sync;
+                match crate::core::cache::prefix_save::save(
+                    &config.store(),
+                    &spec,
+                    &entry,
+                    config.save_mode,
+                    preferred,
+                ) {
+                    Ok(key) => disk_queued = key.is_some(),
                     Err(error) => {
                         tracing::warn!(%error, "DFlash2 durable prefix write failed; continuing without persistence")
                     }
@@ -496,7 +513,7 @@ impl DFlash2PrefixCache {
     }
 
     fn invalidate(&mut self, token_ids: &[u32], fingerprint: &str) {
-        if let (Some(disk), Some(spec)) = (&self.disk, self.last_disk_hit.take()) {
+        if let (Some(disk), Some(spec)) = (&self.disk, self.last_store_hit.take()) {
             if spec.fingerprint.as_deref() == Some(fingerprint) {
                 if let Err(error) = disk.store().invalidate(&spec) {
                     tracing::warn!(%error, "DFlash2 invalid prefix removal failed");
@@ -1912,12 +1929,13 @@ where
                 ),
             };
             if let (true, Some(cache)) = (cache_this_boundary, prefix_cache.as_deref_mut()) {
-                match cache.insert(
+                match cache.insert_at_boundary(
                     &request.prompt_ids[..stop],
                     &prefix_key(stop),
                     &target_cache,
                     retained,
                     chunk_last_hidden,
+                    stop == prompt_len,
                 ) {
                     Ok(true) => tracing::debug!(
                         cached_len = stop,

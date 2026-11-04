@@ -1024,3 +1024,281 @@ The original App bundle was restored healthy after isolated validation, with
 its bundle files and user preferences unchanged. It has **not** been repackaged
 with Stage 7; the new implementation was tested through the independently
 built Release backend and App source/launch tests. Changes remain uncommitted.
+
+## Adaptive completed-prefix saving (2026-11-04)
+
+The original Stage 7 implementation above was committed and pushed as
+`1cbeb7554d535ab3fc4c2493b8ab9bec69571175` before this follow-up started.
+Its description of exclusively synchronous Flash writes is historical. This
+follow-up adds opt-in `--prefix-save-mode auto`; `sync` remains the default and
+fallback. The cache master switch, hot-cache budget, source/contract identity,
+opaque Flash format, integrity checks and committed disk quota remain in force.
+This does **not** implement Stage 8 or enable active Flash KV/request offload.
+
+### Admission and ownership
+
+| Physical RAM | Snapshot peak cap, process-wide | Capturing/queued/active jobs | Write chunk |
+| --- | --- | --- | --- |
+| At most 32 GiB | 512 MiB | 1 | 8 MiB |
+| Above 32 through 64 GiB | 2 GiB | 1 | 16 MiB |
+| Above 64 GiB | `min(RAM / 32, 8 GiB)` | 2 | 32 MiB |
+
+For example, the 128 GiB test host gets a 4 GiB cap. Caps are not preallocations.
+For payload `S` and token count `T`, admission reserves a conservative peak of
+`2*S + chunk + 12*T + 1 MiB`, covering owned bytes, compact materialization,
+metadata and bounded I/O. It must fit both the remaining cap and one quarter
+of safe unreserved governor headroom. Existing generic prefix work is accounted
+for and the generic queue cannot enter concurrently with owned Flash snapshots.
+This is not a promise that any particular model/context/concurrency fits 32 GiB.
+
+The foreground thread explicitly materializes row-contiguous tensors and copies
+byte-exact CPU storage, one tensor at a time. The worker owns byte vectors and a
+governor lease, with no model, MLX Array, borrowed request state or lazy graph.
+It still consults the thread-safe global memory governor. A pending snapshot can
+be restored under another budget check; it is counted separately from SSD reuse.
+Hot-memory retention is independent of whether optional persistence was skipped.
+
+Writes stream safetensors and SHA-256 with bounded buffers, preserve the existing
+transaction/flush/rename protocol and recheck cancellation before publication.
+The macOS writer uses utility QoS and `F_NOCACHE` for the prefix output file;
+model expert/PLE read policy is unchanged. A single process-wide worker is a
+conservative serialization bound even for multiple volumes; parallel writers on
+different volumes are not implemented. Switching volumes clears the write-rate
+estimate instead of treating one SSD's observation as another SSD's throughput.
+
+Soft pressure or unavailable telemetry stops new captures. Hard/emergency
+pressure cancels optional work at safe checkpoints. Recovery holds admission for
+five seconds after observed pressure. Estimated queue drain above two seconds
+limits admission to one job; above five seconds stops admission. Copy/write wall
+rates and completed workload-matched requests guide benefit decisions. Repeated
+matched decode slowdowns above ten percent enable cooperative I/O throttling;
+this requires at least three baseline observations and two slow windows, and is
+a heuristic rather than a guarantee of causal attribution or a performance SLO.
+
+Model unloading cancels captures and active writes and immediately drops queued
+snapshots. Foreground reservation failure can preempt optional saves and retry
+after a bounded wait. A native MLX evaluation or OS flush cannot be interrupted
+mid-call; cancellation/reclamation is therefore not instantaneous. An already
+complete, independent snapshot may finish after its originating request is
+cancelled. It never retains that request's active generation state.
+
+Adaptive ordinary serving prefers the reusable turn boundary and coalesces
+adjacent ends; DFlash2 prefers the full prompt with its required draft context.
+It does not repartition numerical prefill chunks. Short/low-benefit prefixes or
+requests failing any budget are skipped rather than put in an unbounded queue.
+Sync uses bounded tensor streaming as well, budgets its buffer/materialization
+and waits for the durable transaction; its resource cost is not zero.
+
+### Configuration and observability
+
+The App forwards `prefix_save_mode` for ordinary serving and qualified Flash
+DFlash2. Advanced settings expose Sync/Adaptive under the existing cache master
+switch, with English, Simplified Chinese, Traditional Chinese, Japanese and
+Korean text. Native `/healthz.prefix_persistence` and the Dashboard health bridge
+expose process-wide status, reason, snapshot budgets, queued/committed/skipped/
+cancelled/failed counters and distinct RAM/pending-snapshot/SSD lookup counts.
+Accepted/queued is explicitly **not** a durable commit. These lookup counts are
+not physical I/O operations or a per-model SSD hit rate; reused-token accounting
+remains available separately. The worker's measured write time includes lock
+wait and durable flush time, not merely physical device transfer.
+
+### Validation record
+
+Local artifacts are kept under `.build/prefix-adaptive/`. Performance runs use
+explicit executable hashes and an isolated loopback service/cache directory;
+user model files and App configuration are not test outputs. The first complete
+workspace run passed 2,536 tests with 303 explicitly ignored across 211 targets.
+Swift passed 576 tests, and Dashboard Node tests passed 84 tests. Final focused
+checks and physical-model results are recorded below after qualification.
+
+The CI-equivalent Clippy scope passed. An additional `--all-targets` attempt was
+blocked by pre-existing diagnostics in unmodified MLX test files (`matmul`,
+`async`, `paged_attention`, `tier2`, `quantization`, `nax_moe_regression`); these
+are not being hidden as a successful all-target lint gate. No external MLX
+native-source changes are included in this follow-up.
+
+### Final adaptive qualification results
+
+The physical host was **Apple M5 Max, 40 GPU cores, 128 GiB**, macOS 26.4.
+The external MLX source remained on `fix/main-thread-identity` at
+`65383d68c984ce4ef49f4b600820f3b9064c5a82`; it was not modified here.
+The final production CLI SHA-256 is
+`a64bd667148ed405d7a0d194c68d4019cf46a737ec19479e768451051d56ab54`.
+The exhaustive HTTP fault/restart matrix used
+`6d86daf62eb8ff61705c57a708b8bc34161a9251b91c48eca762dab24244aa57`;
+the later changes were telemetry ownership and rejecting noncanonical BOOL
+bytes in the general raw-array constructor. Flash snapshot tensor contents and
+numerical paths were unchanged. The final CLI was separately used for the
+existing-model HTTP regressions and final adaptive performance samples.
+
+| Check | Actual result |
+| --- | --- |
+| Final Release workspace, all features, serial harness | **2,538 passed, 303 ignored, 0 failed**, 211 test targets |
+| Swift App source tests | **576 passed** |
+| Dashboard Node tests | **84 passed** |
+| CI-equivalent pinned-nightly Clippy | Passed with `-D warnings` |
+| Stable/pinned-nightly Rust formatters and whitespace | Passed |
+| Array conversion, including final canonical BOOL guard | **17 passed** |
+| Native window/prefill/decode D256 NAX, QMM-down and MoE NAX groups | All six recorded groups passed; QMM-down used a real 27B shard |
+| Existing 27B and 35B-A3B HTTP regressions | Ordinary and DFlash2, all four cases passed; B1/B2/B4 and post-cancel outputs matched the prior qualified baseline |
+| 27B ANE established paths | Ordinary and DFlash2 each completed 64 jobs; context lifetime test completed 192 jobs, surviving model remained bit-exact, surfaces returned to zero after both unloads |
+| DFlash2 GPU auto profile plus ANE auto | 128 half-precision ANE jobs, passed |
+
+The isolated cross-process model test used complete Flash prefixes of **4,097**
+and **16,385** tokens. For each, B1/B2/B4 continuations matched the reference
+**exactly across the full vocabulary for eight steps**, including independent
+continuations and EOS inside the prompt. Payloads were 232,653,290 and
+583,598,570 bytes. Capture plus waiting for background commit took 0.455 and
+1.131 seconds; restoration took 0.386 and 1.013 seconds. These save times are
+**not foreground-only blocking or TTFT measurements**. Tests forced a 64 GiB
+planner/48 GiB wired limit and a 2 GiB expert cache on the 128 GiB host; this is
+not physical 64 GiB hardware qualification.
+
+The isolated HTTP fault/restart matrix passed on ordinary and DFlash2 routes:
+
+- A separately held writer lock exposed a real pending snapshot. Reuse produced
+  the same answer while committed count was still zero, with one pending hit.
+  Pending jobs, frozen bytes and peak reservations returned to zero after drain.
+- B2/B4 independent reuse, cancellation and subsequent requests passed. The
+  DFlash2 prompt had 2,435 tokens, exceeding its 2,047-token retained draft tail.
+- Same-token-count red/blue image requests remained distinct; replies were
+  `Red`/`Blue`, and repeating red was exact. Ordinary and DFlash2 both passed.
+- Restart hit SSD, not the pending map, and returned the exact same answer.
+  Ordinary restored 834 of 835 prompt tokens and read 1,474,560,000 expert bytes
+  for the remaining suffix; DFlash2 restored all 2,435 tokens with zero expert
+  prefill reads. These are cache counters, not controller-cold SSD throughput.
+- Bit corruption caused safe recomputation and repair. A real SIGKILL while a
+  3,229,704-byte temporary payload existed exposed no committed entry; restart
+  ignored/reaped the temporary transaction and recomputed successfully.
+- The pre-adaptive helper read the new Auto file, and the new helper read the
+  old Sync file, on both routes. State-format compatibility was preserved.
+- Flash active KV offload remained disabled throughout.
+
+Artifacts: `workspace-final.log`, `swift-final.log`, `dashboard-delivery-full.log`,
+`clippy-delivery.log`, `native-final.json`, `array-checked.log`, `ane-final.json`,
+`ane-auto-dflash.json`, `exact-auto-results.json`, `exact-auto-*/`,
+`real/functional.json`, `functional-driver.log`, and `real/current-models.json`
+under `.build/prefix-adaptive/`.
+
+### Problems found and corrections
+
+Implementation checks caught and corrected byte-offset handling for contiguous
+views, large raw-array construction without a flat signed-32-bit byte dimension,
+and noncanonical BOOL input. Raw F32/BF16/U32 bits, including NaNs, remain exact.
+The final array conversion tests cover slices, strided rejection, empty arrays,
+shape/length validation and ownership.
+
+Resource/scheduling checks corrected a stalled writer with unknown initial
+bandwidth being admitted indefinitely, stale process-memory sampling in library
+use, and write-rate estimates being reused after a volume switch. Admission now
+also observes oldest-job age, expires measured rates after 30 seconds, and
+associates completed measurements with their originating volume. Cancellation
+releases queued storage immediately; active work stops at bounded checkpoints.
+Relative, not-yet-created cache roots resolve an existing ancestor for free-space
+checks. Adjacent-prefix coalescing includes the execution contract and requires
+an extant committed or owned pending entry. Worker status updates retain the
+correct model/mode ownership.
+
+One crash-test harness initially counted a hidden `.tmp` directory as a
+published entry. Filtering transaction directories corrected the harness, and
+the entire HTTP matrix was rerun successfully. An initial standalone instance
+lock repeat omitted required `MLX_DIR` and aborted before the harness; the
+properly configured repeat passed 100/100. These were validation setup errors,
+not successful product checks at the time they failed.
+
+### Remaining issues and limits
+
+- **Latency stability is not fully qualified.** Preliminary adaptive samples
+  included decode outliers around 21.5 seconds; the old synchronous baseline
+  also exhibited DFlash2 TTFT/decode outliers. There is insufficient evidence to
+  attribute all variation to the writer or certify a universal 5% latency/
+  throughput bound. Auto remains opt-in; Sync remains the default fallback.
+- One unmodified unique-temp backend instance-lock test failed a reacquire
+  assertion in a parallel library run. The final full serial workspace run and
+  100 configured serial repeats passed. The parallel failure's root cause is
+  **not confirmed**; serial success does not rule out a concurrency issue.
+- An extra diagnostic forcing the DFlash2 M5 GPU profile onto **ordinary** 27B
+  execution reported zero ANE jobs and failed its assertion. The same forced
+  combination failed with the pre-adaptive binary. Established ordinary ANE
+  and DFlash2 ANE paths passed; the forced combination is not newly qualified.
+- Additional all-target Clippy diagnostics and historical external MLX GPU
+  default failures are not repaired by this work. Passing CI-equivalent checks
+  must not be represented as those separate issues being resolved.
+- No physical **M1 Pro 32 GiB**, 64 GiB, M1–M4 or other-chip qualification was
+  performed. Tier/unit simulations and forced smaller planner limits do not
+  replace hardware testing. Controller-cold SSD, actual extreme RAM/disk
+  pressure, and multi-volume workloads have not been qualified.
+- Hardware adaptation uses conservative RAM caps, live safe headroom and
+  observed wall rates; it does not run a dedicated hardware bandwidth/SSD
+  benchmark. Decode feedback is a delayed heuristic. It cannot guarantee zero
+  interference or instant interruption of native evaluation/flush operations.
+- One global writer serializes volumes. Oversized or low-benefit snapshots may
+  be skipped, so not every first request creates a durable reusable prefix.
+  A pending hit is not crash durability. This is completed-prefix persistence,
+  **not** active KV tiering or request crash-resume (Stage 8 remains deferred).
+
+### Measured foreground and background cost
+
+The final CLI was run alone after compilation/regression work, using full expert
+residency on the 128 GiB host, max sequences 4, 2,048-token prefill chunks,
+BF16 state, ANE off, hot prefix retention disabled, and 4,036-token chat prompts.
+Each route had a separate warm-up followed by five distinct first-miss prompts
+and 16 generated tokens. The OS/model page cache was not forced cold. SSE TTFT
+means first nonempty answer content with thinking disabled; decode wall time
+runs from that content to completion. It is not a per-token GPU kernel timer.
+
+| Final Auto path | Foreground capture mean (range) | Background commit mean (range) | TTFT median (range) | Decode wall median (range) |
+| --- | --- | --- | --- | --- |
+| Ordinary | **64.1 ms** (49.9–92.6) | **451.6 ms** (432.7–492.6) | **5.053 s** (4.932–5.272) | **0.499 s** (0.486–0.508) |
+| DFlash2 | **32.3 ms** (28.5–41.6) | **538.3 ms** (529.1–556.3) | **4.665 s** (4.592–4.747) | **1.384 s** (1.279–1.634) |
+
+Both routes committed all five measured snapshots with zero failures, and ended
+with zero pending jobs/frozen bytes/reservations. Ordinary saved one reusable
+4,035-token boundary instead of the old three 2,048/4,035/4,036 boundaries;
+DFlash2 saved one full 4,036-token prompt instead of two boundaries. Measured
+capture is the controlled persistence operation, not the entire foreground
+request overhead. Background commit can overlap decoding and still compete for
+memory/I/O resources. Different routes' decode wall times are not a comparative
+claim about DFlash2 acceleration.
+
+Earlier matched-configuration samples retained the pre-adaptive executable
+`3a82dad1e6e7ebeb018e087a57f4ef7d038748165826f38be7b8db6416c0d5b0`
+and implementation candidate
+`303b61d902e9cfe866d6dc4e8998ed2daf87c85da84d5f888658858974721bcb`.
+They are separate runs, not randomized paired trials:
+
+| Route/mode | TTFT median (min–max), five requests | Decode wall median (min–max) |
+| --- | --- | --- |
+| Ordinary, old Sync | 5.986 s (5.863–6.051) | 1.552 s (1.540–1.653) |
+| Ordinary, bounded Sync | 6.253 s (6.216–6.331) | 1.556 s (1.532–1.572) |
+| Ordinary, early Auto | 5.940 s (5.350–6.166) | 0.848 s (0.522–21.665) |
+| Ordinary, cache off | 4.802 s (4.665–5.387) | 1.478 s (1.429–1.556) |
+| DFlash2, old Sync | 7.190 s (5.849–13.527) | 1.530 s (1.399–8.581) |
+| DFlash2, bounded Sync | 5.683 s (5.601–5.764) | 1.471 s (1.390–1.563) |
+| DFlash2, early Auto | 5.306 s (4.916–15.029) | 1.452 s (1.325–6.779) |
+| DFlash2, cache off | 4.935 s (4.854–5.225) | 1.697 s (1.402–1.786) |
+
+The bounded Sync fallback has a measurable cost: ordinary synchronous save
+operations totaled a median **1.549 s/request**, versus **1.267 s** in the old
+Sync run; DFlash2 bounded Sync totaled a median **1.029 s/request**. Bounded
+materialization/buffering and uncached streaming trade predictable memory for
+some write cost. This regression is retained explicitly, not presented as an
+across-the-board speedup. These operation totals are not TTFT deltas.
+
+The final Auto samples were stable over this small run, but do not explain away
+the earlier long tails or qualify sustained load/P95. The first exploratory
+2 GiB expert-cache timing run also overlapped compilation and is unsuitable for
+clean latency attribution; it remains as raw evidence rather than a performance
+claim. No universal throughput/TTFT improvement percentage is asserted.
+
+Artifacts: `real/*-500-full-t16*.json`, matching server logs,
+`performance-delivery-driver.log`, `delivery-binary.json`.
+
+The original Release App was restored healthy on port 9068 after isolated CLI
+validation. Both user preference files retained their original SHA-256 hashes,
+and the original bundle's backend/benchmark/Metal payload hashes matched the
+recorded bundle identity. The App was **not rebuilt with these adaptive changes**;
+App source/UI changes were covered by Swift and Node checks, while physical
+model tests used the isolated Release CLI. New adaptive changes remain
+uncommitted; only the initial Stage 7 commit `1cbeb7554` was pushed in this turn.
+No `Context leak` diagnostic was found in this turn's recorded Rust/model logs.

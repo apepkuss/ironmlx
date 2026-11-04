@@ -10,6 +10,7 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
     public var memory: MemoryInfo
     public var dflash2: DFlash2Info?
     public var paging: BackendPagingInfo? = nil
+    public var prefixPersistence: PrefixPersistenceInfo? = nil
     public var ane: AneInfo? = nil
     public var activeKvOffload: ActiveKvOffloadInfo
     public var deviceName: String?
@@ -25,6 +26,7 @@ public struct HealthzSnapshot: Codable, Equatable, Sendable {
         case memory
         case dflash2
         case paging
+        case prefixPersistence = "prefix_persistence"
         case ane
         case activeKvOffload = "active_kv_offload"
         case deviceName = "device_name"
@@ -264,6 +266,7 @@ public struct LegacyHealthStatus: Codable, Equatable, Sendable {
     public var cacheHitRate: Double
     public var activeKvOffload: HealthzSnapshot.ActiveKvOffloadInfo
     public var dflash2: HealthzSnapshot.DFlash2Info?
+    public var prefixPersistence: PrefixPersistenceInfo? = nil
     public var ane: HealthzSnapshot.AneInfo? = nil
     public var deviceName: String?
     public var runtimeModels: [BackendLoadedModelInfo]
@@ -278,6 +281,7 @@ public struct LegacyHealthStatus: Codable, Equatable, Sendable {
         case activeKvOffload = "active_kv_offload"
         case dflash2
         case ane
+        case prefixPersistence = "prefix_persistence"
         case deviceName = "device_name"
         case runtimeModels = "runtime_models"
     }
@@ -360,6 +364,7 @@ public struct LegacyHealthAdapter {
             cacheHitRate: 0,
             activeKvOffload: snapshot.activeKvOffload,
             dflash2: snapshot.dflash2,
+            prefixPersistence: snapshot.prefixPersistence,
             ane: snapshot.ane,
             deviceName: snapshot.deviceName,
             runtimeModels: runtimeModels
@@ -457,5 +462,42 @@ public struct BackendPagingInfo: Codable, Equatable, Sendable {
         case elapsedMs = "elapsed_ms"
         case experts
         case ple
+    }
+}
+
+/// Process-wide optional snapshot; older backends omit this field.
+public struct PrefixPersistenceInfo: Codable, Equatable, Sendable {
+    public struct Profile: Codable, Equatable, Sendable {
+        public var tier: String
+        public var budgetBytes: UInt64
+        public var maxJobs: Int
+        public var chunkBytes: UInt64
+        enum CodingKeys: String, CodingKey { case tier; case budgetBytes = "budget_bytes"; case maxJobs = "max_jobs"; case chunkBytes = "chunk_bytes" }
+    }
+    public var profile: Profile
+    public var scope: String
+    public var pendingJobs: Int
+    public var reservedPeakBytes: UInt64
+    public var frozenBytes: UInt64
+    public var queuedTotal: UInt64
+    public var committedTotal: UInt64
+    public var skippedTotal: UInt64
+    public var cancelledTotal: UInt64
+    public var failedTotal: UInt64
+    public var hotMemoryHits: UInt64
+    public var pendingSnapshotHits: UInt64
+    public var ssdHits: UInt64
+    public var lastStatus: String
+    public var lastReason: String
+    public var lastMode: String
+    public var lastModel: String
+    public var throttled: Bool
+    enum CodingKeys: String, CodingKey {
+        case profile, scope, throttled
+        case pendingJobs = "pending_jobs", reservedPeakBytes = "reserved_peak_bytes", frozenBytes = "frozen_bytes"
+        case queuedTotal = "queued_total", committedTotal = "committed_total", skippedTotal = "skipped_total"
+        case cancelledTotal = "cancelled_total", failedTotal = "failed_total"
+        case hotMemoryHits = "hot_memory_hits", pendingSnapshotHits = "pending_snapshot_hits", ssdHits = "ssd_hits"
+        case lastStatus = "last_status", lastReason = "last_reason", lastMode = "last_mode", lastModel = "last_model"
     }
 }

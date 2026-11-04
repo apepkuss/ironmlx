@@ -307,6 +307,11 @@ pub struct ServeArgs {
     #[arg(long = "ssd-prefix-cache-max-gb")]
     pub ssd_prefix_cache_max_gb: Option<usize>,
 
+    /// Flash prefix persistence: auto uses a bounded hardware-adaptive background
+    /// writer; sync waits for durable commit. Cache enable settings still apply.
+    #[arg(long = "prefix-save-mode", default_value = "sync")]
+    pub prefix_save_mode: ironmlx_runtime::core::cache::prefix_save::PrefixSaveMode,
+
     /// Maximum bytes for the in-process cross-request prefix LRU cache. Disabled
     /// by default. Ordinary/MTP serving requires --paged-prefix-cache-dir;
     /// DFlash2 uses a dedicated artifact; Flash-Next also supports its SSD persistence.
@@ -370,7 +375,7 @@ pub(crate) fn resolve_paged_prefix_cache_config(
         max_pages,
         max_disk_bytes,
     )
-    .map(Some)
+    .map(|config| Some(config.with_save_mode(args.prefix_save_mode)))
 }
 
 fn resolve_ssd_prefix_cache_max_bytes(args: &ServeArgs) -> Result<Option<usize>> {
@@ -398,6 +403,7 @@ pub(crate) fn resolve_engine_paged_prefix_cache_settings(
     let max_disk_bytes = resolve_ssd_prefix_cache_max_bytes(args)?;
     Ok(Some(
         ironmlx_runtime::core::engine_pool::EnginePagedPrefixCacheSettings {
+            save_mode: args.prefix_save_mode,
             root,
             block_size,
             max_pages: args.paged_prefix_cache_max_pages,
@@ -1971,6 +1977,7 @@ mod scheduler_profile_tests {
             paged_prefix_cache_block_size:
                 ironmlx_runtime::core::cache::prefix_store::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
             paged_prefix_cache_max_pages: None,
+            prefix_save_mode: Default::default(),
             ssd_prefix_cache_max_gb: None,
             prefix_lru_cache_max_bytes: None,
             model_ttl_minutes: None,

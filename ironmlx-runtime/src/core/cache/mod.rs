@@ -1,7 +1,9 @@
 //! Per-layer cache types for inference. See P2 spec § 1 for scope.
 
 pub mod active_kv;
+pub mod prefix_save;
 pub mod prefix_store;
+pub(crate) mod prefix_stream;
 
 pub use active_kv::{
     default_active_kv_offload_dir, timed, ActiveKvOffloadConfig, ActiveKvOffloadHealth,

@@ -148,7 +148,16 @@ impl<M: Model + DenseVlMethods + Send + 'static> CausalEngine<M> {
     ) -> crate::core::runtime_usage::ModelRuntimeRequestTracker {
         let tracker = self
             .runtime_usage
-            .start_request(u64::from(input_tokens), started_at);
+            .start_request(u64::from(input_tokens), started_at)
+            .with_persistence_context(
+                &self.model_id,
+                if self.request_execution.is_dflash2() {
+                    "dflash2"
+                } else {
+                    "ordinary"
+                },
+                self.request_execution.active_and_queued().0,
+            );
         if self.paged_prefix_cache_enabled && !self.request_execution.is_dflash2() {
             self.runtime_usage
                 .record_prefix_cache_eligible_tokens(u64::from(input_tokens.saturating_sub(1)));

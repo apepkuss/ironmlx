@@ -3166,7 +3166,7 @@ fn try_save_turn_boundary_prefix(
         fingerprint,
     ) {
         Ok(Some(key)) => {
-            tracing::debug!("paged SSD prefix cache saved turn boundary: row={row} key={key}");
+            tracing::debug!("prefix cache turn boundary accepted: row={row} key={key}");
         }
         Ok(None) => {}
         Err(err) => {
@@ -3433,6 +3433,13 @@ fn try_restore_paged_prefix_for_prompt_row(
             );
             continue;
         };
+        let hit_label = if observed.source
+            == Some(crate::core::cache::prefix_store::PrefixLoadSource::PendingSnapshot)
+        {
+            "pending_snapshot_hit"
+        } else {
+            "ssd_hit"
+        };
         let key = observed.key;
         let stats = observed
             .stats
@@ -3467,7 +3474,15 @@ fn try_restore_paged_prefix_for_prompt_row(
             }
             return Err(error);
         }
-        log_paged_prefix_hit("hit", &key, cache_row, None, restore_len, stats, load_us);
+        log_paged_prefix_hit(
+            hit_label,
+            &key,
+            cache_row,
+            None,
+            restore_len,
+            stats,
+            load_us,
+        );
         return Ok(Some(cached_len));
     }
     Ok(None)
@@ -3582,6 +3597,13 @@ fn try_restore_paged_prefix_for_prompt_rows(
             );
             continue;
         };
+        let hit_label = if observed.source
+            == Some(crate::core::cache::prefix_store::PrefixLoadSource::PendingSnapshot)
+        {
+            "pending_snapshot_hit"
+        } else {
+            "ssd_hit"
+        };
         let key = observed.key;
         let stats = observed
             .stats
@@ -3619,7 +3641,7 @@ fn try_restore_paged_prefix_for_prompt_rows(
         for (idx, &cache_row) in cache_rows.iter().enumerate() {
             let row_load_us = if idx == 0 { load_us } else { 0 };
             log_paged_prefix_hit(
-                "hit",
+                hit_label,
                 &key,
                 cache_row,
                 None,
@@ -3657,6 +3679,25 @@ fn try_save_paged_prefix_for_prompt_row(
     cache_row: usize,
     prompt_ids: &[u32],
     fingerprint: &PrefixFingerprint,
+) -> Result<Option<String>> {
+    try_save_paged_prefix_for_prompt_row_at_boundary(
+        config,
+        prefix_lru_cache,
+        cache,
+        cache_row,
+        prompt_ids,
+        fingerprint,
+        true,
+    )
+}
+fn try_save_paged_prefix_for_prompt_row_at_boundary(
+    config: Option<&PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<&PrefixLruCacheHandle>,
+    cache: &[LayerCache],
+    cache_row: usize,
+    prompt_ids: &[u32],
+    fingerprint: &PrefixFingerprint,
+    preferred: bool,
 ) -> Result<Option<String>> {
     let Some(config) = config else {
         return Ok(None);
@@ -3699,27 +3740,39 @@ fn try_save_paged_prefix_for_prompt_row(
         let Some((entry, _)) = prefix_entry_for_row(cache, cache_row)? else {
             return Ok(None);
         };
-        // Serialize before the request advances; no retained background copy
-        // and no 512 MiB async-queue limit for long Flash prefixes.
         let save_started = Instant::now();
-        return match store.save_if_absent(&spec, &entry) {
-            Ok((key, written)) => {
-                let stats = entry.observability_stats(cached_len);
-                if written {
+        let result = crate::core::cache::prefix_save::save(
+            &store,
+            &spec,
+            &entry,
+            config.save_mode,
+            preferred || config.save_mode == crate::core::cache::prefix_save::PrefixSaveMode::Sync,
+        );
+        // Hot-memory retention is independent of the optional durable save.
+        try_insert_prefix_lru_entry(
+            prefix_lru_cache,
+            spec.clone(),
+            entry.clone(),
+            cache_row,
+            None,
+        )?;
+        return match result {
+            Ok(Some(key)) => {
+                if config.save_mode == crate::core::cache::prefix_save::PrefixSaveMode::Sync {
                     log_paged_prefix_save(
                         "saved",
                         &key,
                         cache_row,
                         None,
-                        stats,
+                        entry.observability_stats(cached_len),
                         save_started.elapsed().as_micros(),
                     );
                 }
-                try_insert_prefix_lru_entry(prefix_lru_cache, spec, entry, cache_row, None)?;
                 Ok(Some(key))
             }
+            Ok(None) => Ok(None),
             Err(error) => {
-                tracing::warn!(%error, "Flash prefix write failed; continuing without persistence");
+                tracing::warn!(%error, "Flash prefix save failed; continuing inference");
                 Ok(None)
             }
         };
@@ -4053,7 +4106,7 @@ fn log_paged_prefix_hit(
 ) {
     match mtp_row {
         Some(mtp_row) => tracing::info!(
-            "paged SSD prefix cache {label}: key={} main_row={} mtp_row={} tokens={} restored={} load_us={} payload_bytes={} tensors={} main_layers={} full_layers={} linear_layers={} mla_layers={} mtp_layers={} full_pages={}",
+            "paged prefix cache {label}: key={} main_row={} mtp_row={} tokens={} restored={} load_us={} payload_bytes={} tensors={} main_layers={} full_layers={} linear_layers={} mla_layers={} mtp_layers={} full_pages={}",
             key,
             main_row,
             mtp_row,
@@ -4070,7 +4123,7 @@ fn log_paged_prefix_hit(
             stats.full_paged_pages,
         ),
         None => tracing::info!(
-            "paged SSD prefix cache {label}: key={} row={} tokens={} restored={} load_us={} payload_bytes={} tensors={} main_layers={} full_layers={} linear_layers={} mla_layers={} mtp_layers={} full_pages={}",
+            "paged prefix cache {label}: key={} row={} tokens={} restored={} load_us={} payload_bytes={} tensors={} main_layers={} full_layers={} linear_layers={} mla_layers={} mtp_layers={} full_pages={}",
             key,
             main_row,
             stats.cached_len,
@@ -4098,7 +4151,7 @@ fn log_paged_prefix_save(
 ) {
     match mtp_row {
         Some(mtp_row) => tracing::info!(
-            "paged SSD prefix cache {label}: key={} main_row={} mtp_row={} tokens={} save_us={} payload_bytes={} tensors={} main_layers={} full_layers={} linear_layers={} mla_layers={} mtp_layers={} full_pages={}",
+            "paged prefix cache {label}: key={} main_row={} mtp_row={} tokens={} save_us={} payload_bytes={} tensors={} main_layers={} full_layers={} linear_layers={} mla_layers={} mtp_layers={} full_pages={}",
             key,
             main_row,
             mtp_row,
@@ -4114,7 +4167,7 @@ fn log_paged_prefix_save(
             stats.full_paged_pages,
         ),
         None => tracing::info!(
-            "paged SSD prefix cache {label}: key={} row={} tokens={} save_us={} payload_bytes={} tensors={} main_layers={} full_layers={} linear_layers={} mla_layers={} mtp_layers={} full_pages={}",
+            "paged prefix cache {label}: key={} row={} tokens={} save_us={} payload_bytes={} tensors={} main_layers={} full_layers={} linear_layers={} mla_layers={} mtp_layers={} full_pages={}",
             key,
             main_row,
             stats.cached_len,
@@ -4511,7 +4564,7 @@ fn try_save_batched_text_prefix_row(
     ) {
         Ok(Some(key)) => {
             tracing::debug!(
-                "paged SSD prefix cache saved batched text {label}: row={row} key={key}"
+                "prefix cache batched text boundary accepted ({label}): row={row} key={key}"
             );
         }
         Ok(None) => {}
@@ -4755,7 +4808,7 @@ fn forward_batched_text_with_paged_prefix<M: Model>(
                 ) {
                     Ok(Some(key)) => {
                         tracing::debug!(
-                            "paged SSD prefix cache saved batched text prefix: row={row} key={key}"
+                            "prefix cache batched text prefix accepted: row={row} key={key}"
                         );
                     }
                     Ok(None) => {}
@@ -4777,7 +4830,7 @@ fn forward_batched_text_with_paged_prefix<M: Model>(
                 ) {
                     Ok(Some(key)) => {
                         tracing::debug!(
-                            "paged SSD prefix cache saved batched text prompt: row={row} key={key}"
+                            "prefix cache batched text prompt accepted: row={row} key={key}"
                         );
                     }
                     Ok(None) => {}
@@ -4924,7 +4977,9 @@ fn try_save_batched_vl_prefix_row(
         fingerprint,
     ) {
         Ok(Some(key)) => {
-            tracing::debug!("paged SSD prefix cache saved batched VL {label}: row={row} key={key}");
+            tracing::debug!(
+                "prefix cache batched VL boundary accepted ({label}): row={row} key={key}"
+            );
         }
         Ok(None) => {}
         Err(err) => {
@@ -5328,7 +5383,7 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
                 ) {
                     Ok(Some(key)) => {
                         tracing::debug!(
-                            "paged SSD prefix cache saved batched VL prefix: row={row} key={key}"
+                            "prefix cache batched VL prefix accepted: row={row} key={key}"
                         );
                     }
                     Ok(None) => {}
@@ -5350,7 +5405,7 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
                 ) {
                     Ok(Some(key)) => {
                         tracing::debug!(
-                            "paged SSD prefix cache saved batched VL prompt: row={row} key={key}"
+                            "prefix cache batched VL prompt accepted: row={row} key={key}"
                         );
                     }
                     Ok(None) => {}
@@ -15721,9 +15776,7 @@ impl<M: Model> Scheduler<M> {
                             &vl_prefix_fingerprint,
                         ) {
                             Ok(Some(key)) => {
-                                tracing::debug!(
-                                    "paged SSD prefix cache saved VL prefix: key={key}"
-                                );
+                                tracing::debug!("prefix cache VL boundary accepted: key={key}");
                             }
                             Ok(None) => {}
                             Err(err) => {
@@ -15902,7 +15955,7 @@ impl<M: Model> Scheduler<M> {
                         &PrefixFingerprint::text(),
                     ) {
                         Ok(Some(key)) => {
-                            tracing::debug!("paged SSD prefix cache saved prefix: key={key}");
+                            tracing::debug!("prefix cache boundary accepted: key={key}");
                         }
                         Ok(None) => {}
                         Err(err) => {
@@ -16015,7 +16068,7 @@ impl<M: Model> Scheduler<M> {
                     &prefix_fingerprint,
                 ) {
                     Ok(Some(key)) => {
-                        tracing::debug!("paged SSD prefix cache saved: key={key}");
+                        tracing::debug!("prefix cache boundary accepted: key={key}");
                     }
                     Ok(None) => {}
                     Err(err) => {
@@ -17363,16 +17416,19 @@ impl<M: Model> Scheduler<M> {
             mlx::transforms::eval(&[&logits])?;
             handle.last_logits = Some(logits);
         } else {
-            match try_save_paged_prefix_for_prompt(
+            match try_save_paged_prefix_for_prompt_row_at_boundary(
                 self.paged_prefix_cache.as_ref(),
                 self.prefix_lru_cache.as_ref(),
                 &handle.temp_cache,
+                0,
                 &handle.prompt_ids[..chunk_end as usize],
                 &handle.prefix_fingerprint,
+                chunk_end as usize
+                    == prefix_split_point(self.paged_prefix_cache.as_ref(), &handle.prompt_ids, 0),
             ) {
                 Ok(Some(key)) => {
                     tracing::debug!(
-                        "paged SSD prefix cache saved during mid-admit chunk: key={key}"
+                        "prefix cache boundary accepted during mid-admit chunk: key={key}"
                     );
                 }
                 Ok(None) => {}
@@ -17448,7 +17504,7 @@ impl<M: Model> Scheduler<M> {
                 &prefix_fingerprint,
             ) {
                 Ok(Some(key)) => {
-                    tracing::debug!("paged SSD prefix cache saved during mid-admit: key={key}");
+                    tracing::debug!("prefix cache boundary accepted during mid-admit: key={key}");
                 }
                 Ok(None) => {}
                 Err(err) => {

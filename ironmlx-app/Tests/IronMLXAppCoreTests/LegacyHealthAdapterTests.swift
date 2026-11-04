@@ -124,6 +124,23 @@ import Testing
     #expect(legacy.activeKvOffload.parkedRequests == 1)
     #expect(legacy.activeKvOffload.swapOutCount == 4)
     #expect(legacy.deviceName == "Apple M3 Max")
+    #expect(snapshot.prefixPersistence == nil) // older backend remains compatible
+    let persistence: [String: Any] = [
+        "scope": "process", "profile": ["tier": "conservative", "budget_bytes": 536870912, "max_jobs": 1, "chunk_bytes": 8388608],
+        "pending_jobs": 1, "reserved_peak_bytes": 1000, "frozen_bytes": 400,
+        "queued_total": 2, "committed_total": 1, "skipped_total": 0, "cancelled_total": 0, "failed_total": 0,
+        "hot_memory_hits": 3, "pending_snapshot_hits": 4, "ssd_hits": 5,
+        "last_status": "queued", "last_reason": "", "last_mode": "auto", "last_model": "flash", "throttled": false,
+    ]
+    var withPersistence = snapshot
+    withPersistence.prefixPersistence = try JSONDecoder().decode(PrefixPersistenceInfo.self, from: JSONSerialization.data(withJSONObject: persistence))
+    let bridged = LegacyHealthAdapter(statusNow: Date()).legacyStatus(from: withPersistence)
+    #expect(bridged.prefixPersistence?.pendingJobs == 1)
+    #expect(bridged.prefixPersistence?.committedTotal == 1)
+    #expect(bridged.prefixPersistence?.pendingSnapshotHits == 4)
+    let encoded = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(bridged)) as? [String: Any])
+    #expect((encoded["prefix_persistence"] as? [String: Any])?["last_status"] as? String == "queued")
+
 
     var dflash2Snapshot = snapshot
     dflash2Snapshot.models = []

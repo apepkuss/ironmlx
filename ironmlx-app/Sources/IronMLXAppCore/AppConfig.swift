@@ -20,6 +20,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
     public var memModelAuto: Bool?
     public var memModel: Int?
     public var hotCache: Int?
+    public var prefixSaveMode: String?
     public var coldCache: Int?
     public var cacheEnable: Bool?
     public var cacheDir: String?
@@ -65,6 +66,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
         memModelAuto: Bool? = nil,
         memModel: Int? = nil,
         hotCache: Int? = nil,
+        prefixSaveMode: String? = nil,
         coldCache: Int? = nil,
         cacheEnable: Bool? = nil,
         cacheDir: String? = nil,
@@ -106,6 +108,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
         self.memModelAuto = memModelAuto
         self.memModel = memModel
         self.hotCache = hotCache
+        self.prefixSaveMode = prefixSaveMode
         self.coldCache = coldCache
         self.cacheEnable = cacheEnable
         self.cacheDir = cacheDir
@@ -149,6 +152,7 @@ public struct AppConfig: Codable, Equatable, Sendable {
         case memModelAuto = "mem_model_auto"
         case memModel = "mem_model"
         case hotCache = "hot_cache"
+        case prefixSaveMode = "prefix_save_mode"
         case coldCache = "cold_cache"
         case cacheEnable = "cache_enable"
         case cacheDir = "cache_dir"
@@ -574,6 +578,9 @@ public final class AppConfigStore: @unchecked Sendable {
            !["local", "lan"].contains(networkMode.lowercased()) {
             throw ConfigurationPersistenceError.invalidValue("network_mode")
         }
+        if let mode = config.prefixSaveMode, !["auto", "sync"].contains(mode) {
+            throw ConfigurationPersistenceError.invalidValue("prefix_save_mode")
+        }
         try validateReferences(config.loadedModels, field: "loaded_models")
         try validateReferences(config.pinnedModels, field: "pinned_models")
         if let pinned = config.pinnedModels, let loaded = config.loadedModels,
@@ -666,7 +673,7 @@ public final class AppConfigStore: @unchecked Sendable {
         "lan_certificate_fingerprint", "default_model", "loaded_models", "pinned_models",
         "language", "theme", "log_level", "mem_limit_total", "mem_limit_model",
         "mem_total_auto", "mem_total", "mem_model_auto", "mem_model", "hot_cache",
-        "cold_cache", "cache_enable", "cache_dir", "kv_quant", "active_kv_offload",
+        "prefix_save_mode", "cold_cache", "cache_enable", "cache_dir", "kv_quant", "active_kv_offload",
         "m5_dflash2_profile", "ane",
         "max_sequences", "max_models", "model_ttl_minutes", "verify_model_on_load",
         "distributed_backend", "parallel_mode", "prefill_chunk_size", "b_max",

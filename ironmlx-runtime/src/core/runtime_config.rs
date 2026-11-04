@@ -734,6 +734,7 @@ pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<
 
 #[derive(Debug, Clone)]
 pub struct EnginePagedPrefixCacheSettings {
+    pub save_mode: crate::core::cache::prefix_save::PrefixSaveMode,
     pub root: PathBuf,
     pub block_size: i32,
     pub max_pages: Option<i32>,
@@ -813,7 +814,7 @@ impl EngineRuntimeOptions {
             max_pages,
             settings.max_disk_bytes,
         )
-        .map(Some)
+        .map(|config| Some(config.with_save_mode(settings.save_mode)))
     }
 
     pub(crate) fn prefix_lru_cache_config(

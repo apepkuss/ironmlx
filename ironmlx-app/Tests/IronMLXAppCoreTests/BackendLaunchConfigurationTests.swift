@@ -492,3 +492,17 @@ private func dflash2LaunchArguments(config appConfig: AppConfig) -> [String] {
     #expect(arguments.contains("--ssd-prefix-cache-max-gb") == qualified)
     #expect(!arguments.contains("--active-kv-offload"))
 }
+
+@Test func prefixPersistenceModeFollowsCacheMasterAndSupportsSyncFallback() throws {
+    let app = AppConfig(prefixSaveMode: "auto", cacheEnable: true)
+    let options = BackendLaunchOptions(config: app)
+    let launch = BackendLaunchConfiguration(executableURL: URL(fileURLWithPath: "/tmp/ironmlx"), host: "127.0.0.1", port: 9068, options: options)
+    let index = try #require(launch.arguments.firstIndex(of: "--prefix-save-mode"))
+    #expect(launch.arguments[index + 1] == "auto")
+    let disabled = BackendLaunchConfiguration(executableURL: URL(fileURLWithPath: "/tmp/ironmlx"), host: "127.0.0.1", port: 9068, options: BackendLaunchOptions(config: AppConfig(prefixSaveMode: "auto", cacheEnable: false)))
+    #expect(!disabled.arguments.contains("--prefix-save-mode"))
+    #expect(!disabled.arguments.contains("--paged-prefix-cache-dir"))
+    #expect(BackendLaunchOptions(config: AppConfig()).prefixSaveMode == "sync")
+    let roundtrip = try JSONDecoder().decode(AppConfig.self, from: JSONEncoder().encode(app))
+    #expect(roundtrip.prefixSaveMode == "auto")
+}
