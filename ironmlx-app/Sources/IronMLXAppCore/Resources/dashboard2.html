@@ -6019,6 +6019,10 @@
         </div>
         <div class="settings-row-right"><div class="slider-row"><input type="range" min="1" max="10" value="10" id="cfg-cold-cache"><span class="slider-value">10GB</span></div></div>
       </div>
+      <div class="settings-row ds-sub-row" id="prefix-save-mode-row">
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="prefix_save_mode">Flash prefix saving</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="prefix_save_help">Adaptive saving uses a budgeted snapshot and may skip persistence. Sync waits for durable saving. Restart the service to apply.</div><div class="settings-row-desc" id="prefix-persistence-status" aria-live="polite"></div></div>
+        <div class="settings-row-right"><select id="cfg-prefix-save-mode" style="min-width:160px;"><option value="sync" data-i18n="prefix_save_sync">Sync (fallback)</option><option value="auto" data-i18n="prefix_save_auto">Adaptive</option></select></div>
+      </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="kv_quant">KV cache compression</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="kv_quant_desc">Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.</div></div>
         <div class="settings-row-right"><select id="cfg-kv-quant" style="min-width:160px;"><option value="none" data-i18n="kv_quant_off">Off</option><option value="turbo3">TurboQuant K3V3</option><option value="turbo4">TurboQuant K4V4</option><option value="k3v4">TurboQuant K3V4</option></select></div>
@@ -7313,6 +7317,36 @@
       mem_limit_model: "Model memory limit", mem_limit_model_desc: "Limits total memory used by loaded model weights. Set 0 for no limit.",
       hot_cache: "Memory cache limit", hot_cache_desc: "In-memory prefix cache for frequent requests.", hot_cache_help_title: "How the memory cache works", hot_cache_help_body: "Keeps frequently used prompt prefixes in memory. Auto sizes the limit from system unified memory, up to 8GB; turn Auto off to set your own limit.",
       cold_cache: "SSD cache limit", cold_cache_desc: "Limits SSD Prefix Cache disk usage.", cold_cache_help_title: "How SSD cache works", cold_cache_help_body: "Keeps prefix cache data on local SSD so repeated long prompts skip prefill. The maximum follows the free disk space.",
+      prefix_save_mode: "Flash prefix saving",
+      prefix_save_help: "Adaptive copies a budgeted snapshot and saves it in the background; it may skip saving. Sync waits for durable saving. Applies to Flash ordinary and DFlash2 paths, follows Enable Cache, and requires a service restart. Sync remains the default pending wider hardware validation.",
+      prefix_save_sync: "Sync (fallback)",
+      prefix_save_auto: "Adaptive",
+      prefix_save_status: "Process: {status} · pending {pending} · committed {committed} · peak reserved {reserved}/{budget} · RAM / pending / SSD hits: {hits}",
+      prefix_status_idle: "idle",
+      prefix_status_capturing: "capturing",
+      prefix_status_queued: "queued (not durable)",
+      prefix_status_writing: "writing (not durable)",
+      prefix_status_committed: "committed",
+      prefix_status_skipped: "skipped",
+      prefix_status_cancelled: "cancelled",
+      prefix_status_failed: "failed",
+      prefix_save_throttled: "I/O throttled",
+      prefix_reason_memory_budget: "Memory budget insufficient",
+      prefix_reason_memory_pressure_or_telemetry: "Memory pressure or telemetry unavailable",
+      prefix_reason_recovery_hysteresis: "Recovery hold",
+      prefix_reason_writer_backpressure: "Writer busy",
+      prefix_reason_disk_budget: "Disk space or quota insufficient",
+      prefix_reason_disk_telemetry: "Disk telemetry unavailable",
+      prefix_reason_low_expected_benefit: "Low expected reuse benefit",
+      prefix_reason_adjacent_boundary: "Adjacent boundary coalesced",
+      prefix_reason_coalesced: "Save already pending",
+      prefix_reason_capture_in_progress: "Capture already running",
+      prefix_reason_governor_reservation: "Memory reservation unavailable",
+      prefix_reason_non_preferred_boundary: "Nonessential save boundary skipped",
+      prefix_reason_model_unloaded: "Model unloaded",
+      prefix_reason_foreground_priority: "Foreground memory takes priority",
+      prefix_reason_save_cancelled: "Optional saving cancelled",
+      prefix_reason_other: "Save did not complete; check runtime logs",
       auto: "Auto",
       cache: "Cache", enable_cache: "Prefix cache", cache_requires_prefix: "Turn on Prefix cache first.", enable_cache_desc: "Reuses shared prompt prefixes across requests to skip repeated prefill.", ssd_cache_dir: "SSD cache directory", ssd_cache_dir_desc: "Leave empty to keep the prefix cache in memory only.", ssd_requires_dir: "SSD cache is off while the SSD cache directory is empty.",
       active_kv_offload: "Active KV cache offload", active_kv_offload_desc: "Moves the KV cache of in-progress requests to SSD when memory is tight.", active_kv_offload_help_title: "How active KV offload works", active_kv_offload_help_body: "When memory runs short or all sequence slots are busy, writes the KV cache of in-progress requests to local SSD and reads it back when needed, allowing longer contexts and more concurrent requests. Generation gets slower, and a paused request stops briefly.", active_kv_offload_help_not_applicable: "Not applicable: DFlash2 models and the MTP speculative cache.",
@@ -8134,6 +8168,36 @@
       mem_limit_model: "模型内存上限", mem_limit_model_desc: "限制已加载模型权重占用的总内存。设为 0 表示不限制。",
       hot_cache: "内存缓存上限", hot_cache_desc: "用于频繁访问的前缀缓存。", hot_cache_help_title: "内存缓存的作用", hot_cache_help_body: "把常用的提示词前缀保存在内存中。自动模式按系统统一内存估算，上限为 8GB；关闭【自动】可自行设定。",
       cold_cache: "SSD 缓存上限", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁盘占用。", cold_cache_help_title: "SSD 缓存的作用", cold_cache_help_body: "把前缀缓存数据保存到本地 SSD，重复的长提示词可省去预填充。最大值随磁盘可用空间调整。",
+      prefix_save_mode: "Flash 前缀保存",
+      prefix_save_help: "自适应模式按预算复制快照并在后台写入，条件不足时跳过保存；同步模式等待持久化完成。适用于 Flash 普通和 DFlash2 路径，受【启用缓存】控制，重启服务后生效。更多机型验证完成前默认保持同步。",
+      prefix_save_sync: "同步（回退）",
+      prefix_save_auto: "自适应",
+      prefix_save_status: "进程：{status} · 待完成 {pending} · 已提交 {committed} · 峰值预留 {reserved}/{budget} · 内存／待写快照／SSD 命中：{hits}",
+      prefix_status_idle: "空闲",
+      prefix_status_capturing: "复制快照",
+      prefix_status_queued: "排队中（尚未落盘）",
+      prefix_status_writing: "写入中（尚未落盘）",
+      prefix_status_committed: "已提交",
+      prefix_status_skipped: "已跳过",
+      prefix_status_cancelled: "已取消",
+      prefix_status_failed: "失败",
+      prefix_save_throttled: "I/O 已限速",
+      prefix_reason_memory_budget: "内存预算不足",
+      prefix_reason_memory_pressure_or_telemetry: "内存压力或遥测不可用",
+      prefix_reason_recovery_hysteresis: "等待压力恢复",
+      prefix_reason_writer_backpressure: "写入队列繁忙",
+      prefix_reason_disk_budget: "磁盘空间或配额不足",
+      prefix_reason_disk_telemetry: "磁盘遥测不可用",
+      prefix_reason_low_expected_benefit: "预计复用收益不足",
+      prefix_reason_adjacent_boundary: "已合并相邻保存点",
+      prefix_reason_coalesced: "已有待写快照",
+      prefix_reason_capture_in_progress: "正在复制快照",
+      prefix_reason_governor_reservation: "内存预留失败",
+      prefix_reason_non_preferred_boundary: "已跳过非必要的保存点",
+      prefix_reason_model_unloaded: "模型已卸载",
+      prefix_reason_foreground_priority: "优先保障前台请求内存",
+      prefix_reason_save_cancelled: "已取消可选保存",
+      prefix_reason_other: "保存未完成，请检查运行日志",
       auto: "自动",
       cache: "缓存", enable_cache: "前缀缓存", cache_requires_prefix: "需先开启前缀缓存。", enable_cache_desc: "复用请求之间相同的提示词前缀，省去重复的预填充计算。", ssd_cache_dir: "SSD 缓存目录", ssd_cache_dir_desc: "留空则前缀缓存只放在内存中，不写入 SSD。", ssd_requires_dir: "SSD 缓存目录为空，SSD 缓存不启用。",
       active_kv_offload: "活跃 KV Cache 分层卸载", active_kv_offload_desc: "内存紧张时，把生成中请求的 KV Cache 暂存到 SSD。", active_kv_offload_help_title: "分层卸载的作用", active_kv_offload_help_body: "内存不足或并发位置已满时，把生成中请求的 KV Cache 临时写到本地 SSD，需要时再读回，从而支持更长的上下文和更多并发请求。代价是生成变慢，被暂停的请求会短暂停顿。", active_kv_offload_help_not_applicable: "不适用：DFlash2 模型、MTP 推测解码缓存。",
@@ -8958,6 +9022,36 @@
       mem_limit_model: "模型記憶體上限", mem_limit_model_desc: "限制已載入模型權重占用的總記憶體。設為 0 表示不限制。",
       hot_cache: "記憶體快取上限", hot_cache_desc: "用於頻繁存取的前綴快取。", hot_cache_help_title: "記憶體快取的作用", hot_cache_help_body: "把常用的提示詞前綴保存在記憶體中。自動模式依系統統一記憶體估算，上限為 8GB；關閉「自動」可自行設定。",
       cold_cache: "SSD 快取上限", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁碟占用。", cold_cache_help_title: "SSD 快取的作用", cold_cache_help_body: "把前綴快取資料保存到本機 SSD，重複的長提示詞可省去預填充。最大值隨磁碟可用空間調整。",
+      prefix_save_mode: "Flash 前綴儲存",
+      prefix_save_help: "自適應模式按預算複製快照並於背景寫入，條件不足時略過儲存；同步模式等待持久化完成。適用於 Flash 一般與 DFlash2 路徑，受【啟用快取】控制，重啟服務後生效。更多機型驗證完成前預設保持同步。",
+      prefix_save_sync: "同步（回退）",
+      prefix_save_auto: "自適應",
+      prefix_save_status: "程序：{status} · 待完成 {pending} · 已提交 {committed} · 峰值預留 {reserved}/{budget} · 記憶體／待寫快照／SSD 命中：{hits}",
+      prefix_status_idle: "閒置",
+      prefix_status_capturing: "複製快照",
+      prefix_status_queued: "佇列中（尚未落盤）",
+      prefix_status_writing: "寫入中（尚未落盤）",
+      prefix_status_committed: "已提交",
+      prefix_status_skipped: "已略過",
+      prefix_status_cancelled: "已取消",
+      prefix_status_failed: "失敗",
+      prefix_save_throttled: "I/O 已限速",
+      prefix_reason_memory_budget: "記憶體預算不足",
+      prefix_reason_memory_pressure_or_telemetry: "記憶體壓力或遙測不可用",
+      prefix_reason_recovery_hysteresis: "等待壓力恢復",
+      prefix_reason_writer_backpressure: "寫入佇列忙碌",
+      prefix_reason_disk_budget: "磁碟空間或配額不足",
+      prefix_reason_disk_telemetry: "磁碟遙測不可用",
+      prefix_reason_low_expected_benefit: "預期重用效益不足",
+      prefix_reason_adjacent_boundary: "已合併相鄰儲存點",
+      prefix_reason_coalesced: "已有待寫快照",
+      prefix_reason_capture_in_progress: "正在複製快照",
+      prefix_reason_governor_reservation: "記憶體預留失敗",
+      prefix_reason_non_preferred_boundary: "已略過非必要的儲存點",
+      prefix_reason_model_unloaded: "模型已卸載",
+      prefix_reason_foreground_priority: "優先保障前景請求記憶體",
+      prefix_reason_save_cancelled: "已取消可選儲存",
+      prefix_reason_other: "儲存未完成，請檢查執行日誌",
       auto: "自動",
       cache: "快取", enable_cache: "前綴快取", cache_requires_prefix: "需先開啟前綴快取。", enable_cache_desc: "重用請求之間相同的提示詞前綴，省去重複的預填充運算。", ssd_cache_dir: "SSD 快取目錄", ssd_cache_dir_desc: "留空則前綴快取只放在記憶體中，不寫入 SSD。", ssd_requires_dir: "SSD 快取目錄為空，SSD 快取不啟用。",
       active_kv_offload: "活躍 KV Cache 分層卸載", active_kv_offload_desc: "記憶體緊張時，把生成中請求的 KV Cache 暫存到 SSD。", active_kv_offload_help_title: "分層卸載的作用", active_kv_offload_help_body: "記憶體不足或並行位置已滿時，把生成中請求的 KV Cache 暫時寫到本機 SSD，需要時再讀回，從而支援更長的上下文和更多並行請求。代價是生成變慢，被暫停的請求會短暫停頓。", active_kv_offload_help_not_applicable: "不適用：DFlash2 模型、MTP 推測解碼快取。",
@@ -9782,6 +9876,36 @@
       mem_limit_model: "モデルメモリ上限", mem_limit_model_desc: "ロード済みモデル重みが使用する総メモリを制限します。0で制限なし。",
       hot_cache: "メモリキャッシュ上限", hot_cache_desc: "頻繁に利用されるプレフィックスキャッシュです。", hot_cache_help_title: "メモリキャッシュの役割", hot_cache_help_body: "よく使うプロンプトの先頭部分をメモリに保持します。自動ではシステム統合メモリから上限を見積もり、最大 8GB です。「自動」をオフにすると自分で設定できます。",
       cold_cache: "SSDキャッシュ上限", cold_cache_desc: "SSD Prefix Cache の最大ディスク使用量です。", cold_cache_help_title: "SSD キャッシュの役割", cold_cache_help_body: "プレフィックスキャッシュのデータをローカル SSD に保存し、繰り返される長いプロンプトのプレフィルを省きます。最大値はディスクの空き容量に応じて調整されます。",
+      prefix_save_mode: "Flash プレフィックス保存",
+      prefix_save_help: "自動調整は予算内でコピーして背景保存し、条件次第で保存を見送ります。同期は永続化の完了を待ちます。Flash の通常／DFlash2 経路に適用し、キャッシュ設定に従います。反映には再起動が必要です。他機種の検証までは同期が既定です。",
+      prefix_save_sync: "同期（フォールバック）",
+      prefix_save_auto: "自動調整",
+      prefix_save_status: "プロセス: {status} · 保留 {pending} · 確定 {committed} · 最大予約 {reserved}/{budget} · RAM / 保留 / SSD ヒット: {hits}",
+      prefix_status_idle: "待機",
+      prefix_status_capturing: "コピー中",
+      prefix_status_queued: "待機中（未保存）",
+      prefix_status_writing: "書込中（未保存）",
+      prefix_status_committed: "確定済み",
+      prefix_status_skipped: "見送り",
+      prefix_status_cancelled: "取消済み",
+      prefix_status_failed: "失敗",
+      prefix_save_throttled: "I/O 制限中",
+      prefix_reason_memory_budget: "メモリ予算不足",
+      prefix_reason_memory_pressure_or_telemetry: "メモリ圧力または計測不可",
+      prefix_reason_recovery_hysteresis: "圧力回復待ち",
+      prefix_reason_writer_backpressure: "書込キュー使用中",
+      prefix_reason_disk_budget: "ディスク空き容量または割当不足",
+      prefix_reason_disk_telemetry: "ディスク計測不可",
+      prefix_reason_low_expected_benefit: "再利用効果が不十分",
+      prefix_reason_adjacent_boundary: "隣接保存点を統合済み",
+      prefix_reason_coalesced: "保存待機済み",
+      prefix_reason_capture_in_progress: "コピー実行中",
+      prefix_reason_governor_reservation: "メモリ予約不可",
+      prefix_reason_non_preferred_boundary: "不要な保存点を見送り",
+      prefix_reason_model_unloaded: "モデルをアンロード済み",
+      prefix_reason_foreground_priority: "実行中リクエストのメモリを優先",
+      prefix_reason_save_cancelled: "任意の保存を取り消しました",
+      prefix_reason_other: "保存未完了。実行ログを確認してください",
       auto: "自動",
       cache: "キャッシュ", enable_cache: "プレフィックスキャッシュ", cache_requires_prefix: "先に「プレフィックスキャッシュ」をオンにしてください。", enable_cache_desc: "リクエスト間で共通するプロンプトの先頭部分を再利用し、重複するプレフィルを省きます。", ssd_cache_dir: "SSD キャッシュディレクトリ", ssd_cache_dir_desc: "空欄にすると、プレフィックスキャッシュはメモリだけに保持され、SSD には書き込みません。", ssd_requires_dir: "SSD キャッシュディレクトリが空のため、SSD キャッシュは無効です。",
       active_kv_offload: "アクティブ KV キャッシュのオフロード", active_kv_offload_desc: "メモリが逼迫したとき、生成中のリクエストの KV Cache を SSD に一時退避します。", active_kv_offload_help_title: "オフロードの役割", active_kv_offload_help_body: "メモリ不足時や同時実行枠が埋まったときに、生成中のリクエストの KV Cache をローカル SSD に一時的に書き出し、必要に応じて読み戻します。より長いコンテキストと多くの同時リクエストを扱えますが、生成は遅くなり、一時停止したリクエストは少し止まります。", active_kv_offload_help_not_applicable: "非対象: DFlash2 モデル、MTP 推測デコードのキャッシュ。",
@@ -10606,6 +10730,36 @@
       mem_limit_model: "모델 메모리 상한", mem_limit_model_desc: "로드된 모델 가중치가 사용하는 총 메모리를 제한합니다. 0은 제한 없음입니다.",
       hot_cache: "메모리 캐시 한도", hot_cache_desc: "자주 사용하는 프리픽스 캐시입니다.", hot_cache_help_title: "메모리 캐시 역할", hot_cache_help_body: "자주 쓰는 프롬프트 앞부분을 메모리에 보관합니다. 자동은 시스템 통합 메모리를 기준으로 한도를 정하며 최대 8GB입니다. '자동'을 끄면 직접 설정할 수 있습니다.",
       cold_cache: "SSD 캐시 한도", cold_cache_desc: "SSD Prefix Cache의 최대 디스크 사용량입니다.", cold_cache_help_title: "SSD 캐시 역할", cold_cache_help_body: "프리픽스 캐시 데이터를 로컬 SSD에 저장해 반복되는 긴 프롬프트의 프리필을 줄입니다. 최대값은 디스크 여유 공간에 맞춰 조정됩니다.",
+      prefix_save_mode: "Flash 프리픽스 저장",
+      prefix_save_help: "적응형은 예산 내에서 복사하고 백그라운드에서 저장하며 조건이 부족하면 건너뜁니다. 동기는 영구 저장 완료를 기다립니다. Flash 일반 및 DFlash2 경로에 적용되고 캐시 설정을 따릅니다. 재시작 후 적용되며 추가 실기 검증 전까지 기본값은 동기입니다.",
+      prefix_save_sync: "동기 (대체)",
+      prefix_save_auto: "적응형",
+      prefix_save_status: "프로세스: {status} · 대기 {pending} · 완료 {committed} · 최대 예약 {reserved}/{budget} · RAM / 대기 / SSD 적중: {hits}",
+      prefix_status_idle: "유휴",
+      prefix_status_capturing: "복사 중",
+      prefix_status_queued: "대기 (미저장)",
+      prefix_status_writing: "쓰기 중 (미저장)",
+      prefix_status_committed: "저장 완료",
+      prefix_status_skipped: "건너뜀",
+      prefix_status_cancelled: "취소됨",
+      prefix_status_failed: "실패",
+      prefix_save_throttled: "I/O 제한 중",
+      prefix_reason_memory_budget: "메모리 예산 부족",
+      prefix_reason_memory_pressure_or_telemetry: "메모리 압력 또는 측정 불가",
+      prefix_reason_recovery_hysteresis: "압력 회복 대기",
+      prefix_reason_writer_backpressure: "쓰기 대기열 사용 중",
+      prefix_reason_disk_budget: "디스크 공간 또는 할당량 부족",
+      prefix_reason_disk_telemetry: "디스크 측정 불가",
+      prefix_reason_low_expected_benefit: "예상 재사용 이득 부족",
+      prefix_reason_adjacent_boundary: "인접 저장 지점 통합",
+      prefix_reason_coalesced: "저장 대기 중",
+      prefix_reason_capture_in_progress: "복사 실행 중",
+      prefix_reason_governor_reservation: "메모리 예약 불가",
+      prefix_reason_non_preferred_boundary: "불필요한 저장 지점 건너뜀",
+      prefix_reason_model_unloaded: "모델 언로드됨",
+      prefix_reason_foreground_priority: "전경 요청 메모리 우선",
+      prefix_reason_save_cancelled: "선택적 저장 취소됨",
+      prefix_reason_other: "저장 미완료. 실행 로그를 확인하세요",
       auto: "자동",
       cache: "캐시", enable_cache: "프리픽스 캐시", cache_requires_prefix: "먼저 '프리픽스 캐시'를 켜세요.", enable_cache_desc: "요청 간에 같은 프롬프트 앞부분을 재사용해 중복 프리필을 줄입니다.", ssd_cache_dir: "SSD 캐시 디렉토리", ssd_cache_dir_desc: "비워 두면 프리픽스 캐시를 메모리에만 두고 SSD에는 쓰지 않습니다.", ssd_requires_dir: "SSD 캐시 디렉토리가 비어 있어 SSD 캐시를 사용하지 않습니다.",
       active_kv_offload: "활성 KV 캐시 오프로드", active_kv_offload_desc: "메모리가 부족할 때 생성 중인 요청의 KV Cache를 SSD에 임시로 옮깁니다.", active_kv_offload_help_title: "오프로드 역할", active_kv_offload_help_body: "메모리가 부족하거나 동시 실행 슬롯이 가득 차면 생성 중인 요청의 KV Cache를 로컬 SSD에 임시로 기록하고 필요할 때 다시 읽어 옵니다. 더 긴 컨텍스트와 더 많은 동시 요청을 처리할 수 있지만 생성이 느려지고 일시 중지된 요청은 잠시 멈춥니다.", active_kv_offload_help_not_applicable: "비대상: DFlash2 모델, MTP 추측 디코딩 캐시.",
@@ -17582,6 +17736,7 @@
     applyColdCacheCapacity(window.__IRONMLX_COLD_CACHE_CAPACITY__);
     setNumberInput('cfg-cold-cache', clampColdCacheLimit(appConfig.cold_cache && appConfig.cold_cache > 0 ? appConfig.cold_cache : 10), 10);
     setCheckboxInput('cfg-cache-enable', appConfig.cache_enable, true);
+    setSelectInput('cfg-prefix-save-mode', appConfig.prefix_save_mode, 'sync');
     setTextInput('cfg-cache-dir', appConfig.cache_dir, window.__IRONMLX_DEFAULT_CACHE_DIR__ || '~/.ironmlx/cache/paged_prefix_cache');
     setCheckboxInput('cfg-active-kv-offload', appConfig.active_kv_offload, false);
     setCheckboxInput('cfg-m5-dflash2-profile', appConfig.m5_dflash2_profile, true);
@@ -17739,6 +17894,7 @@
       mem_model: manualNumberInputValue('cfg-mem-model', 0),
       hot_cache: checkedInputValue('cfg-hot-cache-auto', true) ? 0 : numberInputValue('cfg-hot-cache', 0),
       cold_cache: coldCache,
+      prefix_save_mode: (document.getElementById('cfg-prefix-save-mode') || {}).value === 'auto' ? 'auto' : 'sync',
       cache_enable: checkedInputValue('cfg-cache-enable', true),
       cache_dir: document.getElementById('cfg-cache-dir').value,
       active_kv_offload: checkedInputValue('cfg-active-kv-offload', false),
@@ -19269,6 +19425,7 @@
   }
 
   function showStatusOffline() {
+    renderPrefixPersistence(null);
     settingsBackendRunning = false;
     updateSettingsSaveBar();
     const dict = I18N[currentLang] || I18N.en;
@@ -20296,6 +20453,19 @@
 
   const pagingSamples = new Map();
   const pagingOpen = new Set();
+  function renderPrefixPersistence(p) {
+    const el = document.getElementById('prefix-persistence-status');
+    if (!el) return;
+    if (!p) { el.textContent = ''; return; }
+    const d = I18N[currentLang] || I18N.en;
+    el.textContent = d.prefix_save_status.replace('{status}', d['prefix_status_'+p.last_status] || d.prefix_status_idle)
+      .replace('{pending}', Number(p.pending_jobs || 0)).replace('{committed}', Number(p.committed_total || 0))
+      .replace('{reserved}', formatVersionBytes(Number(p.reserved_peak_bytes || 0)))
+      .replace('{budget}', formatVersionBytes(Number(p.profile?.budget_bytes || 0)))
+      .replace('{hits}', [p.hot_memory_hits || 0, p.pending_snapshot_hits || 0, p.ssd_hits || 0].join(' / '));
+    if (p.last_reason) el.textContent += ' · ' + (d['prefix_reason_'+p.last_reason] || d.prefix_reason_other);
+    if (p.throttled) el.textContent += ' · ' + d.prefix_save_throttled;
+  }
   function pagingTotals(cache) {
     const total = {hits:0, misses:0, read_bytes:0, read_us:0, lock_wait_us:0};
     (cache.phases || []).forEach(p => Object.keys(total).forEach(k => total[k] += Number(p[k] || 0)));
@@ -20842,6 +21012,7 @@
         }
         const data = JSON.parse(jsonStr);
         window.__IRONMLX_ANE_HEALTH__ = data.ane || null;
+        renderPrefixPersistence(data.prefix_persistence);
         syncAneUI();
         const runtimeModels = Array.isArray(data.runtime_models) ? data.runtime_models : [];
         renderRuntimeModels(runtimeModels);
@@ -21112,6 +21283,8 @@
       hotCacheSlider.disabled = true;
     }
     // Cold cache slider disabled when cache is off
+    const prefixMode = document.getElementById('cfg-prefix-save-mode');
+    if (prefixMode) prefixMode.disabled = !enabled;
     coldCacheSlider.disabled = !enabled;
     coldCacheSlider.parentElement.style.opacity = enabled ? '1' : '0.4';
     // SSD cache dir follows the cache master switch.

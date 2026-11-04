@@ -146,6 +146,35 @@ std::unique_ptr<MlxArray> array_clone(const MlxArray& a) {
   return std::make_unique<MlxArray>(a);
 }
 
+// Byte-exact snapshot IO. Reading never evaluates a lazy graph on a writer
+// thread: the caller must explicitly materialize a row-contiguous tensor.
+void array_read_bytes(const MlxArray& a, size_t offset, rust::Slice<uint8_t> output) {
+  if (!a.is_available() || !a.flags().row_contiguous || offset > a.nbytes() || output.size() > a.nbytes() - offset) {
+    throw std::invalid_argument("snapshot byte read requires an available row-contiguous array and valid range");
+  }
+  if (output.size()) std::memcpy(output.data(), a.data<char>() + offset, output.size());
+}
+std::unique_ptr<MlxArray> array_from_bytes(rust::Slice<const uint8_t> data, rust::Slice<const int32_t> shape, uint8_t dtype) {
+  auto dt = dtype_from_u8(dtype);
+  size_t count = 1;
+  for (auto dim : shape) {
+    if (dim < 0 || (dim && count > SIZE_MAX / static_cast<size_t>(dim))) throw std::invalid_argument("snapshot shape overflow");
+    count *= dim;
+  }
+  if (count > SIZE_MAX / dt.size() || count * dt.size() != data.size()) throw std::invalid_argument("snapshot byte count mismatch");
+  // C++/Rust scalar bool values require a canonical representation.
+  if (dt == mlx::core::bool_) {
+    for (auto byte : data) if (byte > 1) throw std::invalid_argument("snapshot bool byte must be 0 or 1");
+  }
+  // Preserve the tensor's bounded dimensions instead of flattening byte count
+  // into a single int32 dimension (which would reject tensors over 2 GiB).
+  mlx::core::Shape byte_shape(shape.begin(), shape.end());
+  byte_shape.push_back(static_cast<int32_t>(dt.size()));
+  mlx::core::array bytes(data.data(), byte_shape, mlx::core::uint8);
+  auto typed = mlx::core::view(bytes, dt);
+  return std::make_unique<MlxArray>(mlx::core::reshape(typed, mlx::core::Shape(shape.begin(), shape.end())));
+}
+
 bool array_is_available(const MlxArray& a) {
   // NB: mlx::core::array::is_available() is a const method that internally
   // mutates state via shared_ptr<ArrayDesc> (calls detach_event() and

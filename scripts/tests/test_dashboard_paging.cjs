@@ -13,3 +13,17 @@ test('paging computes deltas and resets recent samples on model reload',()=>{con
 test('full expert residency still reports PLE and marks expert cache inapplicable',()=>{const c=page();c.m=model(1000,0,0,'one','full');const output=vm.runInContext('renderPaging(m,I18N.en)',c);assert(output.includes('Not applicable'));assert(output.includes('PLE row cache'));assert.equal(vm.runInContext('renderPaging({id:"other"},I18N.en)',c),'');});
 
 test('a long polling gap cannot masquerade as a recent 30 second window',()=>{const c=page();c.m=model(1000,2,2);vm.runInContext('renderPaging(m,I18N.en)',c);c.m=model(90000,4,4);const output=vm.runInContext('renderPaging(m,I18N.en)',c);assert(output.includes('Recent hit rate (up to 30s)</span><span class="runtime-kv-detail-value">No data'));});
+
+test('prefix persistence distinguishes pending snapshots from durable commits in every language',()=>{
+  const c=page();c.el={textContent:''};c.document={getElementById:()=>c.el};
+  for(const lang of ['en','zh-Hans','zh-Hant','ja','ko']){
+    c.currentLang=lang;c.p={last_status:'queued',last_reason:'memory_budget',pending_jobs:1,committed_total:2,reserved_peak_bytes:1024,profile:{budget_bytes:2048},hot_memory_hits:3,pending_snapshot_hits:4,ssd_hits:5};
+    vm.runInContext('renderPrefixPersistence(p)',c);
+    assert(c.el.textContent.includes(vm.runInContext('I18N[currentLang].prefix_status_queued',c)));
+    assert(c.el.textContent.includes('3 / 4 / 5'));
+    assert(!c.el.textContent.includes('undefined'));
+    c.p.last_status='committed';c.p.last_reason='';vm.runInContext('renderPrefixPersistence(p)',c);
+    assert(c.el.textContent.includes(vm.runInContext('I18N[currentLang].prefix_status_committed',c)));
+    vm.runInContext('renderPrefixPersistence(null)',c);assert.equal(c.el.textContent,'');
+  }
+});

@@ -161,3 +161,62 @@ fn from_slice_negative_dim_returns_err() {
         other => panic!("expected Error::Mlx with 'negative dimension', got {other:?}"),
     }
 }
+
+#[test]
+fn raw_snapshot_preserves_bf16_float_and_integer_bits_without_borrowing() {
+    for (dtype, bytes) in [
+        (Dtype::Bfloat16, vec![1, 0, 1, 127, 128, 255, 0, 128]),
+        (Dtype::Float32, vec![1, 0, 128, 127, 1, 0, 0, 128]),
+        (Dtype::Uint32, vec![255, 255, 255, 255, 0, 0, 0, 0]),
+    ] {
+        let mut owned = bytes.clone();
+        let a = Array::from_bytes(
+            &owned,
+            &[i32::try_from(bytes.len() / dtype.byte_size()).unwrap()],
+            dtype,
+        )
+        .unwrap();
+        owned.fill(0); // constructor must own its storage
+        a.eval().unwrap();
+        let mut read = vec![0; bytes.len()];
+        for (index, chunk) in read.chunks_mut(2).enumerate() {
+            a.read_bytes_into(index * 2, chunk).unwrap();
+        }
+        assert_eq!(read, bytes);
+        assert!(a.read_bytes_into(bytes.len(), &mut [0]).is_err());
+    }
+    assert!(Array::from_bytes(&[2], &[], Dtype::Bool).is_err());
+    assert_eq!(
+        Array::from_bytes(&[0, 1], &[2], Dtype::Bool)
+            .unwrap()
+            .to_vec::<bool>()
+            .unwrap(),
+        [false, true]
+    );
+    let empty = Array::from_bytes(&[], &[0, 3], Dtype::Bfloat16).unwrap();
+    empty.eval().unwrap();
+    assert_eq!(empty.shape().as_slice(), &[0, 3]);
+    assert!(Array::from_bytes(&[0; 3], &[1], Dtype::Float32).is_err());
+    assert!(Array::from_bytes(&[], &[-1], Dtype::Float32).is_err());
+    let matrix = Array::try_from((&[1_i32, 2, 3, 4, 5, 6][..], &[2, 3][..])).unwrap();
+    let offset_row = matrix.slice(&[1, 0][..], &[2, 3][..]).unwrap();
+    offset_row.eval().unwrap();
+    let mut row_bytes = [0; 12];
+    offset_row.read_bytes_into(0, &mut row_bytes).unwrap();
+    assert_eq!(
+        Array::from_bytes(&row_bytes, &[3], Dtype::Int32)
+            .unwrap()
+            .to_vec::<i32>()
+            .unwrap(),
+        [4, 5, 6]
+    );
+    let transpose = matrix.transpose_axes([1, 0]).unwrap();
+    transpose.eval().unwrap();
+    assert!(transpose.read_bytes_into(0, &mut [0; 24]).is_err());
+    let contiguous = transpose.contiguous(false).unwrap();
+    contiguous.eval().unwrap();
+    let mut data = [0; 24];
+    contiguous.read_bytes_into(0, &mut data).unwrap();
+    let restored = Array::from_bytes(&data, &[3, 2], Dtype::Int32).unwrap();
+    assert_eq!(restored.to_vec::<i32>().unwrap(), [1, 4, 2, 5, 3, 6]);
+}

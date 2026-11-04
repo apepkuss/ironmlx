@@ -1451,6 +1451,7 @@ pub struct M1HealthInfo {
 pub struct HealthSnapshot {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub m1_profiles: Vec<M1HealthInfo>,
+    pub prefix_persistence: crate::core::cache::prefix_save::PrefixPersistenceSnapshot,
     pub paging: Option<ironmlx_lm::core::paging_stats::PagingSnapshot>,
     pub ane: AneHealth,
     pub status: HealthStatus,
@@ -1534,6 +1535,7 @@ impl SchedulerHealthCollector {
                 })
                 .into_iter()
                 .collect(),
+            prefix_persistence: crate::core::cache::prefix_save::snapshot(),
             paging: self.paging.as_ref().map(|p| p.snapshot()),
             ane: AneHealth::current(),
             status,
@@ -2504,6 +2506,7 @@ mod tests {
     fn health_memory_serializes_mlx_allocator_fields() {
         let snapshot = HealthSnapshot {
             m1_profiles: Vec::new(),
+            prefix_persistence: crate::core::cache::prefix_save::snapshot(),
             paging: None,
             ane: AneHealth::current(),
             status: HealthStatus::Healthy,

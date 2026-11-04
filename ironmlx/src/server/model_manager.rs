@@ -1595,6 +1595,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
 
     HealthSnapshot {
         m1_profiles,
+        prefix_persistence: ironmlx_runtime::core::cache::prefix_save::snapshot(),
         paging: None,
         ane: ironmlx_runtime::core::runtime_health::AneHealth::current(),
         status,
@@ -2622,6 +2623,7 @@ mod tests {
     fn aggregate_health_reports_loaded_mtp_state() {
         let snapshot = HealthSnapshot {
             m1_profiles: Vec::new(),
+            prefix_persistence: ironmlx_runtime::core::cache::prefix_save::snapshot(),
             paging: None,
             ane: ironmlx_runtime::core::runtime_health::AneHealth::current(),
             status: ironmlx_runtime::core::runtime_health::HealthStatus::Healthy,
@@ -3127,6 +3129,7 @@ mod tests {
             paged_prefix_cache_block_size:
                 ironmlx_runtime::core::cache::prefix_store::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
             paged_prefix_cache_max_pages: None,
+            prefix_save_mode: Default::default(),
             ssd_prefix_cache_max_gb: None,
             prefix_lru_cache_max_bytes: None,
             model_ttl_minutes: None,

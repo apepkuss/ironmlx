@@ -133,7 +133,29 @@ fn flash_prefix_cross_process_exact_b1_b2_b4() {
         let (entry, cached_len) = prefix_entry_for_row(&cache, 0).unwrap().unwrap();
         assert_eq!(cached_len, len as i32);
         let save = std::time::Instant::now();
-        store.save(&spec, &entry).unwrap();
+        if std::env::var("IRONMLX_FLASH_PREFIX_SAVE_MODE").as_deref() == Ok("auto") {
+            let mode = ironmlx_runtime::core::cache::prefix_save::PrefixSaveMode::Auto;
+            ironmlx_runtime::core::cache::prefix_save::save(&store, &spec, &entry, mode, true)
+                .unwrap()
+                .expect("real snapshot admitted");
+            assert!(ironmlx_runtime::core::cache::prefix_save::wait_idle(
+                std::time::Duration::from_secs(30)
+            ));
+            assert_eq!(
+                ironmlx_runtime::core::cache::prefix_save::snapshot()
+                    .stats
+                    .committed_total,
+                1
+            );
+            assert_eq!(
+                ironmlx_runtime::core::cache::prefix_save::snapshot()
+                    .stats
+                    .reserved_peak_bytes,
+                0
+            );
+        } else {
+            store.save(&spec, &entry).unwrap();
+        }
         let save_s = save.elapsed().as_secs_f64();
         let mut reference = HashMap::new();
         for row in 0..4 {

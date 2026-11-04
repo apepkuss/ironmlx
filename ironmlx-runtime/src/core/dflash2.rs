@@ -665,6 +665,14 @@ impl DFlash2PrefixCache {
         self.hits = self.hits.saturating_add(1);
         let generation = self.next_generation();
         self.entries[hit_index].generation = generation;
+        if self.entries[hit_index].layers.iter().any(|layer| {
+            matches!(
+                layer,
+                DFlash2ArtifactLayer::State(PrefixLayerPayload::Flash { .. })
+            )
+        }) {
+            crate::core::cache::prefix_save::hot_hit();
+        }
         Some(self.entries[hit_index].clone())
     }
 

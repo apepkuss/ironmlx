@@ -24,6 +24,8 @@ size_t array_size(const MlxArray& a);
 uint8_t array_dtype(const MlxArray& a);
 std::unique_ptr<MlxArray> array_clone(const MlxArray& a);
 bool array_is_available(const MlxArray& a);
+void array_read_bytes(const MlxArray& a, size_t offset, rust::Slice<uint8_t> output);
+std::unique_ptr<MlxArray> array_from_bytes(rust::Slice<const uint8_t> data, rust::Slice<const int32_t> shape, uint8_t dtype);
 
 // from_slice family — one per Element dtype. Slice element type matches
 // MLX dtype size; bool bridges through uint8_t (cxx limitation),

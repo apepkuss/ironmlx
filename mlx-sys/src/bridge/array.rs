@@ -32,6 +32,8 @@ pub mod ffi {
         fn array_dtype(a: &MlxArray) -> u8;
         fn array_clone(a: &MlxArray) -> UniquePtr<MlxArray>;
         fn array_is_available(a: &MlxArray) -> bool;
+        fn array_read_bytes(a: &MlxArray, offset: usize, output: &mut [u8]) -> Result<()>;
+        fn array_from_bytes(data: &[u8], shape: &[i32], dtype: u8) -> Result<UniquePtr<MlxArray>>;
 
         // from_slice family — Result-wrapped per the shim throw rule
         // (MLX may throw on shape×dtype size mismatch).

@@ -12,6 +12,20 @@ impl Array {
         Array(inner)
     }
 
+    /// Copy an already-evaluated row-contiguous byte span, preserving dtype bits.
+    pub fn read_bytes_into(&self, offset: usize, output: &mut [u8]) -> Result<()> {
+        mlx_sys::array::ffi::array_read_bytes(self.as_inner(), offset, output)
+            .map_err(crate::Error::from)
+    }
+
+    /// Construct an owned, byte-exact tensor (the input bytes are copied).
+    pub fn from_bytes(data: &[u8], shape: &[i32], dtype: Dtype) -> Result<Self> {
+        Ok(Self::from_inner(
+            mlx_sys::array::ffi::array_from_bytes(data, shape, dtype as u8)
+                .map_err(crate::Error::from)?,
+        ))
+    }
+
     /// Copy all elements out as a `Vec<T>`. Implicitly evaluates if needed.
     ///
     /// Returns `Err(Error::DtypeMismatch)` if the array's dtype does not

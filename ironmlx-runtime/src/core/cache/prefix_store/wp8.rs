@@ -322,6 +322,96 @@ impl PagedPrefixStore {
         Ok((key, written))
     }
 
+    /// Write a captured Flash prefix as a `wp8` entry with no segments: its
+    /// private part is streamed from owned bytes in bounded chunks, checked
+    /// against `control` between them, and installed only when complete.
+    pub(super) fn save_frozen_wp8(
+        &self,
+        frozen: &super::super::prefix_stream::FrozenPrefix,
+        control: &super::super::prefix_stream::WriteControl<'_>,
+    ) -> Result<String> {
+        let spec = &frozen.spec;
+        if spec.entry_kind != PrefixEntryKind::WholePrefix {
+            anyhow::bail!("PagedPrefixStore: segmented entries are whole prefixes");
+        }
+        self.validate_spec(spec)?;
+        if let Some(max) = self.max_bytes {
+            anyhow::ensure!(
+                spec.payload_bytes() <= max,
+                "prefix payload exceeds disk quota"
+            );
+        }
+        fs::create_dir_all(&self.root)
+            .with_context(|| format!("create prefix cache root {}", self.root.display()))?;
+        // One background writer per root at a time, across processes too.
+        let _writer = PrefixWriterLock::acquire_controlled(&self.root, control)?;
+        self.ensure_wp8_startup_cleanup();
+        let key = Self::key_for(spec);
+        let layout_dir = wp8_layout_dir(&self.root, &prefix_segment_layout(spec));
+        let entries_dir = layout_dir.join(WP8_ENTRIES_DIR);
+        fs::create_dir_all(&entries_dir)
+            .with_context(|| format!("create prefix cache dir {}", entries_dir.display()))?;
+        let metadata = Wp8EntryMetadata {
+            format: WP8_FORMAT.to_owned(),
+            prefix: metadata_for(spec, &key)?,
+            aligned_len: 0,
+            segments: Vec::new(),
+        };
+        let final_dir = entries_dir.join(&key);
+        let tmp_dir = entries_dir.join(format!(
+            "{TMP_PREFIX}{key}-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&tmp_dir)
+            .with_context(|| format!("create temporary prefix cache dir {}", tmp_dir.display()))?;
+        let write_result = (|| -> Result<()> {
+            let meta_bytes =
+                serde_json::to_vec_pretty(&metadata).context("serialize wp8 prefix metadata")?;
+            fs::write(tmp_dir.join(META_FILE), meta_bytes)
+                .context("write prefix cache metadata")?;
+            let tokens = spec
+                .token_ids
+                .iter()
+                .flat_map(|token| token.to_le_bytes())
+                .collect::<Vec<_>>();
+            fs::write(tmp_dir.join(TOKENS_FILE), tokens).context("write prefix cache tokens")?;
+            let digest = frozen.write(&tmp_dir.join(PRIVATE_FILE), control)?;
+            fs::write(tmp_dir.join(CHECKSUM_FILE), digest)?;
+            for name in [META_FILE, TOKENS_FILE, PRIVATE_FILE, CHECKSUM_FILE] {
+                control.check(0)?;
+                fs::File::open(tmp_dir.join(name))?.sync_all()?;
+            }
+            if let Some(limit) = self.max_bytes {
+                anyhow::ensure!(
+                    directory_disk_bytes(&tmp_dir)? <= limit as u64,
+                    "Flash prefix entry including metadata exceeds disk quota"
+                );
+            }
+            control.check(0)
+        })();
+        if let Err(err) = write_result {
+            let _ = fs::remove_dir_all(&tmp_dir);
+            return Err(err);
+        }
+        if final_dir.exists() {
+            fs::remove_dir_all(&final_dir)
+                .with_context(|| format!("replace prefix cache dir {}", final_dir.display()))?;
+        }
+        fs::rename(&tmp_dir, &final_dir).with_context(|| {
+            format!(
+                "install prefix cache entry {} -> {}",
+                tmp_dir.display(),
+                final_dir.display()
+            )
+        })?;
+        #[cfg(unix)]
+        fs::File::open(&entries_dir)?.sync_all()?;
+        if let Some(max_bytes) = self.max_bytes {
+            self.evict_to_disk_capacity(&key, max_bytes)?;
+        }
+        Ok(key)
+    }
+
     /// Whether a readable `wp8` entry for exactly `spec` is on disk (its
     /// segments are checked when it is loaded).
     pub(super) fn wp8_entry_matches(&self, spec: &PagedPrefixKeySpec, key: &str) -> bool {
@@ -351,6 +441,26 @@ impl PagedPrefixStore {
         {
             return Ok(observed);
         }
+        if spec_holds_flash(spec) {
+            match super::super::prefix_save::pending(self, spec) {
+                Ok(Some(hit)) => {
+                    return Ok(PagedPrefixSegmentedLoadResult {
+                        key: hit.key,
+                        status: hit.status,
+                        entry: hit.entry.map(|private| SegmentedPrefixEntry {
+                            segments: Vec::new(),
+                            aligned_len: 0,
+                            private,
+                        }),
+                        stats: hit.stats,
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "pending Flash snapshot unavailable; trying SSD or recomputing")
+                }
+            }
+        }
         let key = Self::key_for(spec);
         let layout = prefix_segment_layout(spec);
         let layout_dir = wp8_layout_dir(&self.root, &layout);
@@ -375,6 +485,7 @@ impl PagedPrefixStore {
         }
 
         if spec_holds_flash(spec) && !private_digest_matches(&entry_dir) {
+            super::super::prefix_save::invalidated(&self.root, spec);
             remove_path(&entry_dir);
             return Ok(PagedPrefixSegmentedLoadResult::miss(
                 key,
@@ -464,6 +575,7 @@ impl PagedPrefixStore {
         };
         let stats = materialized.observability_stats(spec.cached_len);
         if spec_holds_flash(spec) {
+            super::super::prefix_save::disk_hit(&self.root, spec);
             // Recency is advisory: an unwritable cache must still be usable.
             let _ = fs::write(entry_dir.join(ACCESS_FILE), []);
         }

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::chat_prefix::ChatTurnBoundary;
 use crate::Result;
 
-const SCHEMA_VERSION: u32 = 7;
+pub(super) const SCHEMA_VERSION: u32 = 7;
 const META_FILE: &str = "meta.json";
 const CHECKSUM_FILE: &str = "payload.sha256";
 const PAYLOAD_FILE: &str = "payload.safetensors";
@@ -54,10 +54,18 @@ pub enum PagedPrefixLoadStatus {
     EntryInvalid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrefixLoadSource {
+    HotMemory,
+    PendingSnapshot,
+    Ssd,
+}
+
 #[derive(Debug, Clone)]
 pub struct PagedPrefixLoadResult {
     pub key: String,
     pub status: PagedPrefixLoadStatus,
+    pub source: Option<PrefixLoadSource>,
     pub entry: Option<PagedPrefixEntry>,
     pub stats: Option<PagedPrefixEntryStats>,
 }
@@ -73,6 +81,7 @@ pub struct PagedPrefixCacheConfig {
     pub block_size: i32,
     pub max_pages: i32,
     pub max_disk_bytes: Option<usize>,
+    pub save_mode: super::prefix_save::PrefixSaveMode,
     /// Where a chat prompt's next turn diverges: a prompt ending in its
     /// template's generation suffix is saved without it (see
     /// [`ChatTurnBoundary`]).
@@ -102,6 +111,7 @@ impl PagedPrefixCacheConfig {
             block_size,
             max_pages,
             max_disk_bytes,
+            save_mode: Default::default(),
             turn_boundary: None,
         };
         config.validate()?;
@@ -122,6 +132,7 @@ impl PagedPrefixCacheConfig {
             max_pages,
             max_disk_bytes: None,
             turn_boundary: None,
+            save_mode: Default::default(),
         };
         config.validate()?;
         Ok(config)
@@ -138,6 +149,11 @@ impl PagedPrefixCacheConfig {
         self.turn_boundary
             .as_ref()
             .and_then(|boundary| boundary.reusable_len(prompt_ids))
+    }
+
+    pub fn with_save_mode(mut self, mode: super::prefix_save::PrefixSaveMode) -> Self {
+        self.save_mode = mode;
+        self
     }
 
     /// The SSD store, when this cache has one.
@@ -1125,6 +1141,7 @@ impl AsyncPrefixStoreQueue {
         Some(PagedPrefixLoadResult {
             key,
             status: PagedPrefixLoadStatus::Hit,
+            source: Some(PrefixLoadSource::PendingSnapshot),
             stats: Some(cached_entry.observability_stats(spec.cached_len)),
             entry: Some(cached_entry),
         })
@@ -1192,6 +1209,16 @@ impl AsyncPrefixStoreQueue {
     }
 
     fn reserve_pending(&self, bytes: usize) -> bool {
+        if PROCESS_PREFIX_STORE_QUEUE
+            .get()
+            .is_some_and(|q| Arc::ptr_eq(&q.0, &self.0))
+        {
+            super::prefix_save::admit_legacy(|| self.reserve_pending_inner(bytes))
+        } else {
+            self.reserve_pending_inner(bytes)
+        }
+    }
+    fn reserve_pending_inner(&self, bytes: usize) -> bool {
         if self.0.counters.pending_jobs.load(Ordering::Acquire) >= self.0.capacity {
             return false;
         }
@@ -1300,12 +1327,17 @@ pub fn process_async_prefix_store_queue() -> &'static AsyncPrefixStoreQueue {
 }
 
 pub fn cancel_process_async_prefix_store_model(model_id: &str) -> usize {
-    PROCESS_PREFIX_STORE_QUEUE
-        .get()
-        .map_or(0, |queue| queue.cancel_model(model_id))
+    let flash = super::prefix_save::cancel_model(model_id);
+    flash
+        + PROCESS_PREFIX_STORE_QUEUE
+            .get()
+            .map_or(0, |queue| queue.cancel_model(model_id))
 }
 
 pub fn shutdown_process_async_prefix_store_queue() {
+    if !super::prefix_save::wait_idle(std::time::Duration::from_secs(2)) {
+        super::prefix_save::preempt_for_foreground();
+    }
     if let Some(queue) = PROCESS_PREFIX_STORE_QUEUE.get() {
         queue.shutdown();
     }
@@ -1391,6 +1423,7 @@ impl PrefixLruCache {
             return Ok(PagedPrefixLoadResult {
                 key,
                 status: PagedPrefixLoadStatus::MissingEntry,
+                source: None,
                 entry: None,
                 stats: None,
             });
@@ -1399,9 +1432,17 @@ impl PrefixLruCache {
             return Ok(PagedPrefixLoadResult {
                 key,
                 status: PagedPrefixLoadStatus::MetadataMismatch,
+                source: None,
                 entry: None,
                 stats: Some(entry.stats),
             });
+        }
+        if spec
+            .main_layers
+            .iter()
+            .any(|l| l.kind == PrefixLayerKind::Flash)
+        {
+            super::prefix_save::hot_hit();
         }
         let cached_entry =
             materialize_prefix_entry(&entry.segmented, spec.cached_len, spec.block_size)?;
@@ -1410,6 +1451,7 @@ impl PrefixLruCache {
         Ok(PagedPrefixLoadResult {
             key,
             status: PagedPrefixLoadStatus::Hit,
+            source: Some(PrefixLoadSource::HotMemory),
             entry: Some(cached_entry),
             stats: Some(stats),
         })
@@ -1838,7 +1880,14 @@ struct PrefixMetadata {
 }
 
 impl PagedPrefixStore {
+    pub(super) fn root(&self) -> &Path {
+        &self.root
+    }
+    pub(super) fn max_bytes(&self) -> Option<usize> {
+        self.max_bytes
+    }
     pub fn invalidate(&self, spec: &PagedPrefixKeySpec) -> Result<()> {
+        super::prefix_save::invalidated(&self.root, spec);
         if !self.root.is_dir() {
             return Ok(());
         }
@@ -1944,16 +1993,61 @@ impl PagedPrefixStore {
     ) -> Result<String> {
         self.validate_spec(spec)?;
         self.validate_entry(spec, entry)?;
-
-        if let Some(max_bytes) = self.max_bytes {
-            let payload_bytes = entry.observability_stats(spec.cached_len).payload_bytes;
-            if payload_bytes > max_bytes {
-                anyhow::bail!(
-                    "PagedPrefixStore: entry payload_bytes {payload_bytes} exceeds max_bytes {max_bytes}"
-                );
+        let control = super::prefix_stream::WriteControl::sync();
+        self.save_transaction(spec, &control, |path| {
+            if spec
+                .main_layers
+                .iter()
+                .any(|layer| layer.kind == PrefixLayerKind::Flash)
+            {
+                super::prefix_stream::write_entry(path, spec, entry, &control).map(Some)
+            } else {
+                let tensors = entry_tensors(entry);
+                let metadata = HashMap::from([
+                    ("ironmlx.prefix_cache.key".into(), Self::key_for(spec)),
+                    (
+                        "ironmlx.prefix_cache.schema_version".into(),
+                        SCHEMA_VERSION.to_string(),
+                    ),
+                ]);
+                mlx::io::save_safetensors(&path.to_string_lossy(), &tensors, &metadata)?;
+                Ok(None)
             }
+        })
+    }
+    pub(super) fn validate_capture(
+        &self,
+        spec: &PagedPrefixKeySpec,
+        entry: &PagedPrefixEntry,
+    ) -> Result<()> {
+        self.validate_spec(spec)?;
+        self.validate_entry(spec, entry)
+    }
+    pub(super) fn save_frozen(
+        &self,
+        frozen: &super::prefix_stream::FrozenPrefix,
+        control: &super::prefix_stream::WriteControl<'_>,
+    ) -> Result<String> {
+        if frozen.spec.entry_kind == PrefixEntryKind::WholePrefix {
+            return self.save_frozen_wp8(frozen, control);
         }
-
+        self.save_transaction(&frozen.spec, control, |path| {
+            frozen.write(path, control).map(Some)
+        })
+    }
+    fn save_transaction(
+        &self,
+        spec: &PagedPrefixKeySpec,
+        control: &super::prefix_stream::WriteControl<'_>,
+        writer: impl FnOnce(&Path) -> Result<Option<String>>,
+    ) -> Result<String> {
+        self.validate_spec(spec)?;
+        if let Some(max) = self.max_bytes {
+            anyhow::ensure!(
+                spec.payload_bytes() <= max,
+                "prefix payload exceeds disk quota"
+            );
+        }
         let key = Self::key_for(spec);
         let metadata = metadata_for(spec, &key)?;
         let final_dir = self.root.join(&key);
@@ -1979,17 +2073,7 @@ impl PagedPrefixStore {
             fs::write(&meta_path, meta_bytes)
                 .with_context(|| format!("write prefix cache metadata {}", meta_path.display()))?;
 
-            let mut tensors = HashMap::new();
-            insert_entry_tensors(entry, &mut tensors);
-            let mut safetensors_meta = HashMap::new();
-            safetensors_meta.insert("ironmlx.prefix_cache.key".to_owned(), key.clone());
-            safetensors_meta.insert(
-                "ironmlx.prefix_cache.schema_version".to_owned(),
-                SCHEMA_VERSION.to_string(),
-            );
-            let payload_path = payload_path.to_string_lossy().into_owned();
-            mlx::io::save_safetensors(&payload_path, &tensors, &safetensors_meta)
-                .with_context(|| format!("save prefix cache payload {payload_path}"))?;
+            let checksum = writer(&payload_path)?;
             if spec
                 .main_layers
                 .iter()
@@ -1997,9 +2081,10 @@ impl PagedPrefixStore {
             {
                 fs::write(
                     tmp_dir.join(CHECKSUM_FILE),
-                    payload_digest(Path::new(&payload_path))?,
+                    checksum.context("Flash streaming writer did not produce checksum")?,
                 )?;
                 for name in [META_FILE, PAYLOAD_FILE, CHECKSUM_FILE] {
+                    control.check(0)?;
                     fs::File::open(tmp_dir.join(name))?.sync_all()?;
                 }
                 if let Some(limit) = self.max_bytes {
@@ -2023,6 +2108,10 @@ impl PagedPrefixStore {
             return Err(err);
         }
 
+        if let Err(error) = control.check(0) {
+            let _ = fs::remove_dir_all(&tmp_dir);
+            return Err(error);
+        }
         if final_dir.exists() {
             fs::remove_dir_all(&final_dir)
                 .with_context(|| format!("replace prefix cache dir {}", final_dir.display()))?;
@@ -2077,6 +2166,10 @@ impl PagedPrefixStore {
             .map_or_else(Vec::new, |queue| {
                 queue.pending_cached_lengths(self, max_cached_len)
             });
+        lengths.extend(super::prefix_save::pending_lengths(
+            self.root(),
+            max_cached_len,
+        ));
         // Whole prefixes live under `wp8/`; `<root>/<key>/` holds immutable
         // blocks and legacy whole-prefix entries, which are not read.
         lengths.extend(self.wp8_cached_lengths(max_cached_len)?);
@@ -2097,6 +2190,9 @@ impl PagedPrefixStore {
         {
             return Ok(true);
         }
+        if super::prefix_save::contains_pending(self.root(), spec) {
+            return Ok(true);
+        }
         self.contains_persisted(spec)
     }
 
@@ -2109,6 +2205,9 @@ impl PagedPrefixStore {
     pub fn load_observed(&self, spec: &PagedPrefixKeySpec) -> Result<PagedPrefixLoadResult> {
         self.validate_spec(spec)?;
         if spec.entry_kind == PrefixEntryKind::WholePrefix {
+            if let Ok(Some(hit)) = super::prefix_save::pending(self, spec) {
+                return Ok(hit);
+            }
             let observed = self.load_segmented_observed(spec, None)?;
             let entry = observed
                 .entry
@@ -2116,6 +2215,8 @@ impl PagedPrefixStore {
                 .transpose()?;
             return Ok(PagedPrefixLoadResult {
                 key: observed.key,
+                source: (observed.status == PagedPrefixLoadStatus::Hit)
+                    .then_some(PrefixLoadSource::Ssd),
                 status: observed.status,
                 entry,
                 stats: observed.stats,
@@ -2136,12 +2237,20 @@ impl PagedPrefixStore {
         {
             return Ok(observed);
         }
+        match super::prefix_save::pending(self, spec) {
+            Ok(Some(hit)) => return Ok(hit),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "pending Flash snapshot unavailable; trying SSD or recomputing")
+            }
+        }
         let key = Self::key_for(spec);
         let entry_dir = self.root.join(&key);
         if !entry_dir.is_dir() {
             return Ok(PagedPrefixLoadResult {
                 key,
                 status: PagedPrefixLoadStatus::MissingEntry,
+                source: None,
                 entry: None,
                 stats: None,
             });
@@ -2158,6 +2267,7 @@ impl PagedPrefixStore {
                 return Ok(PagedPrefixLoadResult {
                     key,
                     status: PagedPrefixLoadStatus::InvalidMetadata,
+                    source: None,
                     entry: None,
                     stats: None,
                 });
@@ -2167,6 +2277,7 @@ impl PagedPrefixStore {
             return Ok(PagedPrefixLoadResult {
                 key,
                 status: PagedPrefixLoadStatus::MetadataMismatch,
+                source: None,
                 entry: None,
                 stats: None,
             });
@@ -2182,9 +2293,11 @@ impl PagedPrefixStore {
                 .zip(payload_digest(&payload_path).ok())
                 .is_some_and(|(expected, actual)| expected == actual)
         {
+            super::prefix_save::invalidated(&self.root, spec);
             return Ok(PagedPrefixLoadResult {
                 key,
                 status: PagedPrefixLoadStatus::PayloadInvalid,
+                source: None,
                 entry: None,
                 stats: None,
             });
@@ -2196,6 +2309,7 @@ impl PagedPrefixStore {
                 return Ok(PagedPrefixLoadResult {
                     key,
                     status: PagedPrefixLoadStatus::PayloadReadFailed,
+                    source: None,
                     entry: None,
                     stats: None,
                 });
@@ -2207,6 +2321,7 @@ impl PagedPrefixStore {
                 return Ok(PagedPrefixLoadResult {
                     key,
                     status: PagedPrefixLoadStatus::PayloadInvalid,
+                    source: None,
                     entry: None,
                     stats: None,
                 });
@@ -2216,6 +2331,7 @@ impl PagedPrefixStore {
             return Ok(PagedPrefixLoadResult {
                 key,
                 status: PagedPrefixLoadStatus::PayloadInvalid,
+                source: None,
                 entry: None,
                 stats: None,
             });
@@ -2224,16 +2340,25 @@ impl PagedPrefixStore {
             return Ok(PagedPrefixLoadResult {
                 key,
                 status: PagedPrefixLoadStatus::EntryInvalid,
+                source: None,
                 entry: None,
                 stats: None,
             });
         }
         let stats = entry.observability_stats(spec.cached_len);
+        if spec
+            .main_layers
+            .iter()
+            .any(|l| l.kind == PrefixLayerKind::Flash)
+        {
+            super::prefix_save::disk_hit(&self.root, spec);
+        }
         // Recency is advisory: an unwritable cache must still be usable.
         let _ = fs::write(entry_dir.join(".access"), []);
         Ok(PagedPrefixLoadResult {
             key,
             status: PagedPrefixLoadStatus::Hit,
+            source: Some(PrefixLoadSource::Ssd),
             entry: Some(entry),
             stats: Some(stats),
         })
@@ -2989,6 +3114,12 @@ fn tensor_metadata(spec: &PrefixTensorSpec) -> TensorSpecMetadata {
     }
 }
 
+pub(super) fn entry_tensors(entry: &PagedPrefixEntry) -> HashMap<String, Array> {
+    let mut tensors = HashMap::new();
+    insert_entry_tensors(entry, &mut tensors);
+    tensors
+}
+
 fn insert_entry_tensors(entry: &PagedPrefixEntry, tensors: &mut HashMap<String, Array>) {
     for (idx, layer) in entry.main_layers.iter().enumerate() {
         match layer {
@@ -3051,7 +3182,7 @@ fn insert_entry_tensors(entry: &PagedPrefixEntry, tensors: &mut HashMap<String, 
     }
 }
 
-fn entry_from_tensors(
+pub(super) fn entry_from_tensors(
     spec: &PagedPrefixKeySpec,
     tensors: &mut HashMap<String, Array>,
 ) -> Result<PagedPrefixEntry> {
@@ -4957,6 +5088,12 @@ fn payload_digest(path: &Path) -> Result<String> {
 struct PrefixWriterLock(fs::File);
 impl PrefixWriterLock {
     fn acquire(root: &Path) -> Result<Self> {
+        Self::acquire_controlled(root, &super::prefix_stream::WriteControl::sync())
+    }
+    fn acquire_controlled(
+        root: &Path,
+        control: &super::prefix_stream::WriteControl<'_>,
+    ) -> Result<Self> {
         let file = fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -4966,11 +5103,19 @@ impl PrefixWriterLock {
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
-            anyhow::ensure!(
-                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0,
-                "prefix writer lock: {}",
-                std::io::Error::last_os_error()
-            );
+            loop {
+                control.check(0)?;
+                if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                    break;
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::WouldBlock
+                    && error.kind() != std::io::ErrorKind::Interrupted
+                {
+                    return Err(error.into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
         Ok(Self(file))
     }
@@ -4988,9 +5133,9 @@ impl Drop for PrefixWriterLock {
 }
 
 #[cfg(test)]
-mod flash_durable_tests {
+pub(super) mod flash_durable_tests {
     use super::*;
-    fn fixture(root: &Path) -> (PagedPrefixStore, PagedPrefixKeySpec, PagedPrefixEntry) {
+    pub(crate) fn fixture(root: &Path) -> (PagedPrefixStore, PagedPrefixKeySpec, PagedPrefixEntry) {
         let tensors = vec![
             Array::try_from(([1, 0, 0, 1, 0, 0].as_slice(), [6])).unwrap(),
             Array::zeros([1, 3, 8], Dtype::Bfloat16).unwrap(),
