@@ -502,6 +502,10 @@ impl Model for FlashTextModel {
         true
     }
 
+    fn scheduler_resident_cache_cost(&self) -> Option<(usize, usize)> {
+        Some(self.active_cache_cost())
+    }
+
     fn scheduler_cache_cost() -> Option<(usize, usize)> {
         Some((
             super::load_plan::FLASH_CACHE_BYTES_PER_TOKEN as usize,

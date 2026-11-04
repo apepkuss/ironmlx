@@ -21,6 +21,10 @@ pub struct QsaState {
     pub block_keys: Option<Array>,
     pub positions: Option<Array>,
     pub offset: i32,
+    #[cfg(unix)]
+    pub(crate) active: Option<std::sync::Arc<crate::core::active_pages::ActivePagesPool>>,
+    #[cfg(unix)]
+    pub(crate) paged: Option<super::paged_qsa::PagedQsa>,
     cap: i32,
 }
 
@@ -32,6 +36,10 @@ impl QsaState {
         self.block_keys = None;
         self.positions = None;
         self.offset = 0;
+        #[cfg(unix)]
+        {
+            self.paged = None;
+        }
     }
     pub(crate) fn set_cap(&mut self, cap: i32) -> Result<()> {
         ensure!(
@@ -50,8 +58,41 @@ impl QsaState {
             block_keys: None,
             positions: None,
             offset: 0,
+            #[cfg(unix)]
+            active: None,
+            #[cfg(unix)]
+            paged: None,
             cap,
         })
+    }
+    #[cfg(unix)]
+    pub fn with_active_pages(
+        mut self,
+        pool: std::sync::Arc<crate::core::active_pages::ActivePagesPool>,
+    ) -> Self {
+        self.active = Some(pool);
+        self
+    }
+    fn uses_paged_at(&self, end: i32, heads: i32, dim: i32) -> bool {
+        #[cfg(unix)]
+        {
+            self.paged.is_some()
+                || self.active.as_ref().is_some_and(|pool| {
+                    (end as usize)
+                        .saturating_mul(heads as usize)
+                        .saturating_mul(dim as usize)
+                        .saturating_mul(4)
+                        > pool
+                            .config
+                            .cache_bytes
+                            .max(4096 * heads as usize * dim as usize * 4)
+                })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (end, heads, dim);
+            false
+        }
     }
     /// Rollback trims all token histories and invalidates pooled blocks.
     pub fn trim_on(&mut self, offset: i32, target: StreamOrDevice) -> Result<()> {
@@ -80,6 +121,10 @@ impl QsaState {
         let values = trim(&self.values, 2)?;
         let index = trim(&self.raw_index_keys, 1)?;
         let positions = trim(&self.positions, 2)?;
+        #[cfg(unix)]
+        if let Some(history) = self.paged.as_mut() {
+            history.trim(offset as usize)?;
+        }
         self.keys = keys;
         self.values = values;
         self.raw_index_keys = index;
@@ -275,7 +320,7 @@ impl QsaAttention {
         let valid = selected.less_on(&counts, target)?;
         let sentinel = Array::try_from((&[-1_i32][..], ()))?;
         let selected = mlx::ops::indexing::where_on(&valid, &selected, &sentinel, target)?;
-        if seq > 1 {
+        if seq > 1 || state.uses_paged_at(total, cfg.num_key_value_heads, cfg.head_dim) {
             return Ok((None, Some(selected)));
         }
         let selected_host = selected.to_vec::<i32>()?;
@@ -377,37 +422,76 @@ impl QsaAttention {
         let v = transpose_axes_on(&v, [0, 2, 1, 3], target)?;
         let (cos, sin) = self.rope.cos_sin(&chunk_positions)?;
         let (q, k) = self.rope.apply(&q, &k, &cos, &sin)?;
-        let k = append(&state.keys, &k, 2, target)?;
-        let v = append(&state.values, &v, 2, target)?;
-        let mode = if mask.is_some() || seq == 1 {
-            ""
+        let attended = if state.uses_paged_at(state.offset + seq, kv, hd) {
+            #[cfg(unix)]
+            {
+                let mut history = if let Some(history) = state.paged.take() {
+                    history
+                } else {
+                    let mut history = super::paged_qsa::PagedQsa::new(
+                        state.active.clone().expect("active QSA policy"),
+                        kv,
+                        hd,
+                        cfg.indexer_compress_ratio,
+                    )?;
+                    if let (Some(k), Some(v)) = (&state.keys, &state.values) {
+                        history.append(k, v, target)?;
+                    }
+                    history
+                };
+                history.append(&k, &v, target)?;
+                let output = history.attention(
+                    &q,
+                    selected.as_ref(),
+                    state.offset,
+                    (hd as f32).powf(-0.5),
+                    target,
+                )?;
+                state.paged = Some(history);
+                state.keys = None;
+                state.values = None;
+                output
+            }
+            #[cfg(not(unix))]
+            {
+                unreachable!()
+            }
         } else {
-            "causal"
-        };
-        let attended = if seq > 1 {
-            let ends: Vec<i32> = (0..seq).map(|t| state.offset + t + 1).collect();
-            let ends = Array::try_from((ends.as_slice(), [1, seq]))?;
-            super::qsa_kernel::prefill_on(
-                &q,
-                &k,
-                &v,
-                selected.as_ref().expect("prefill selection"),
-                &ends,
-                (hd as f32).powf(-0.5),
-                cfg.indexer_compress_ratio,
-                target,
-            )?
-        } else {
-            mlx::fast::scaled_dot_product_attention_on(
-                &q,
-                &k,
-                &v,
-                (hd as f32).powf(-0.5),
-                mode,
-                mask.as_ref(),
-                None,
-                target,
-            )?
+            let k = append(&state.keys, &k, 2, target)?;
+            let v = append(&state.values, &v, 2, target)?;
+            let mode = if mask.is_some() || seq == 1 {
+                ""
+            } else {
+                "causal"
+            };
+            let attended = if seq > 1 {
+                let ends: Vec<i32> = (0..seq).map(|t| state.offset + t + 1).collect();
+                let ends = Array::try_from((ends.as_slice(), [1, seq]))?;
+                super::qsa_kernel::prefill_on(
+                    &q,
+                    &k,
+                    &v,
+                    selected.as_ref().expect("prefill selection"),
+                    &ends,
+                    (hd as f32).powf(-0.5),
+                    cfg.indexer_compress_ratio,
+                    target,
+                )?
+            } else {
+                mlx::fast::scaled_dot_product_attention_on(
+                    &q,
+                    &k,
+                    &v,
+                    (hd as f32).powf(-0.5),
+                    mode,
+                    mask.as_ref(),
+                    None,
+                    target,
+                )?
+            };
+            state.keys = Some(k);
+            state.values = Some(v);
+            attended
         };
         let attended = transpose_axes_on(&attended, [0, 2, 1, 3], target)?
             .reshape_on([1, seq, heads * hd], target)?;
@@ -415,8 +499,6 @@ impl QsaAttention {
             &multiply_on(&attended, &gate.sigmoid_on(target)?, target)?,
             target,
         )?;
-        state.keys = Some(k);
-        state.values = Some(v);
         state.offset += seq;
         *cache = state;
         Ok(output)

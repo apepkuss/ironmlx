@@ -10,11 +10,15 @@ pub mod config;
 #[cfg(unix)]
 mod dflash2;
 pub mod hyper;
+#[cfg(unix)]
+mod indexed_sdpa;
 pub mod math;
 #[cfg(unix)]
 mod model;
 #[cfg(unix)]
 mod paged_moe;
+#[cfg(unix)]
+mod paged_qsa;
 #[cfg(feature = "test-support")]
 pub use paged_moe::PagedMoe;
 #[cfg(unix)]

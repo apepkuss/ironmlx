@@ -57,7 +57,7 @@ pub fn prefill_on(
             && bd.len() == 3
             && dims[0] > 0
             && dims[1] > 0
-            && dims[2] > 1
+            && dims[2] > 0
             && dims[3] > 0
             && dims[3] % 32 == 0
             && kd[0] == dims[0]

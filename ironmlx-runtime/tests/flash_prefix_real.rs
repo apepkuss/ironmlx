@@ -86,6 +86,16 @@ fn flash_prefix_cross_process_exact_b1_b2_b4() {
     let mut request = FlashLoadRequest::new(64u64 << 30, 4, len + 64, 2048, 0);
     request.expert_residency = ironmlx_lm::core::residency::ExpertResidency::Ssd;
     request.expert_cache_limit_bytes = 2u64 << 30;
+    #[cfg(unix)]
+    if let Ok(dir) = std::env::var("IRONMLX_FLASH_ACTIVE_TEST_ROOT") {
+        request.active_pages = Some(ironmlx_lm::core::active_pages::ActivePagesConfig {
+            root: dir.into(),
+            cache_bytes: 64 << 10,
+            pack_bytes: 16 << 20,
+            disk_bytes: 2 << 30,
+            min_free_bytes: 0,
+        });
+    }
     let plan = FlashLoadPlan::inspect(Path::new(&snapshot), &request).unwrap();
     let loader = plan.open_loader(Path::new(&snapshot)).unwrap();
     let model = plan.build_model(&loader).unwrap();

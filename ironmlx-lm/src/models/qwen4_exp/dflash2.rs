@@ -70,8 +70,8 @@ impl DFlash2Target for FlashTextModel {
     }
     fn dflash2_target_cache_cost(&self) -> DFlash2TargetCacheCost {
         DFlash2TargetCacheCost {
-            bytes_per_token: super::load_plan::FLASH_CACHE_BYTES_PER_TOKEN as usize,
-            fixed_bytes_per_sequence: super::load_plan::FLASH_FIXED_BYTES_PER_SEQUENCE as usize,
+            bytes_per_token: self.active_cache_cost().0,
+            fixed_bytes_per_sequence: self.active_cache_cost().1,
         }
     }
     fn dflash2_verify_capabilities(&self) -> DFlash2VerifyCapabilities {
@@ -108,7 +108,13 @@ impl DFlash2Target for FlashTextModel {
             || "full".into(),
             |q| format!("{}{}g{}", q.mode.mlx_backend_mode(), q.bits, q.group_size),
         );
-        format!("qwen38-flash-next-vl-v5;mlx=65383d68c;numeric-base=a8f66b590;rope=reference-power;quant={quant};capture=completed-hc-mean;ple=bounded-ssd;experts={};dispatch=source-e512;prefill=scheduler-image-tail-v1;verify={};paging-batch={};prefix=v1;artifact={}",
+        let active = self.active_pages.as_ref().map_or_else(String::new, |pool| {
+            format!(
+                ";active=ssd-indexed-native-sdpa-v1-hot{}-pack{}",
+                pool.config.cache_bytes, pool.config.pack_bytes
+            )
+        });
+        format!("qwen38-flash-next-vl-v5{active};mlx=65383d68c;numeric-base=a8f66b590;rope=reference-power;quant={quant};capture=completed-hc-mean;ple=bounded-ssd;experts={};dispatch=source-e512;prefill=scheduler-image-tail-v1;verify={};paging-batch={};prefix=v1;artifact={}",
             if self.expert_paging_enabled(){"bounded-ssd"}else{"resident"},if self.layer_major_verify{"layer-major-q1"}else{"token-major-q1"},if self.native_paged_batching && self.expert_paging_enabled(){"native"}else{"row"}, self.artifact_identity)
     }
     fn dflash2_instance(&self) -> Option<&DFlash2Instance> {

@@ -651,7 +651,7 @@ mod tests {
     fn output_event_gap_excludes_prefill_empty_events_and_completion_tail() {
         let counters = Arc::new(ModelRuntimeUsageCounters::default());
         let start = Instant::now();
-        let mut request = counters.start_request(100, start);
+        let mut request = counters.start_request(100, start, None);
         request.record_output_tokens_at(1, start + Duration::from_secs(10));
         assert_eq!(request.max_output_event_gap, Duration::ZERO);
         request.record_output_tokens_at(0, start + Duration::from_secs(11));

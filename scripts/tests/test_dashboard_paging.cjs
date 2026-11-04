@@ -27,3 +27,13 @@ test('prefix persistence distinguishes pending snapshots from durable commits in
     vm.runInContext('renderPrefixPersistence(null)',c);assert.equal(c.el.textContent,'');
   }
 });
+
+test('Flash active state reports aggregate RAM separately from per-layer and gather budgets in every language',()=>{
+  const c=page();
+  for(const lang of ['en','zh-Hans','zh-Hant','ja','ko']){
+    c.m=model();c.lang=lang;c.m.paging.active_state={enabled:true,hot_window_tokens:4096,cache_bytes:32768,cache_per_layer_bytes:8192,gather_budget_bytes:16777216,disk_bytes:1048576,disk_quota_bytes:1073741824,read_bytes:81920,written_bytes:163840,hits:3,misses:1,failures:2,prefix_export_skips:4};
+    const output=vm.runInContext('renderPaging(m,I18N[lang])',c);
+    assert(!output.includes('undefined'));assert(output.includes('4096'));assert(output.includes('32768 B'));assert(output.includes('8192 B / 16777216 B'));assert(output.includes('2 / 4'));
+    assert(output.includes(vm.runInContext('I18N[lang].paging_active_state',c)));assert(output.includes(vm.runInContext('I18N[lang].paging_active_help',c)));
+  }
+});

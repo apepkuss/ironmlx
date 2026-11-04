@@ -1,4 +1,6 @@
 //! Model loading, input, output, and computation contracts.
+#[cfg(unix)]
+pub mod active_pages;
 pub mod audio_input;
 pub mod cache;
 pub mod chat_template;
