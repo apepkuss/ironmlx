@@ -30,6 +30,12 @@ libc.workspace = true
 # Enables pre-harness metallib setup for integration/all-target test builds.
 ctor = { version = "1", optional = true }
 
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+# sha2 0.10 gates its ARM hardware backend behind this feature. CPU detection
+# retains the portable fallback and identical checksums; other targets keep
+# their existing backend/build dependencies.
+sha2 = { version = "0.10", features = ["asm"] }
+
 [features]
 default = []
 tools = ["dep:clap"]
