@@ -13,6 +13,9 @@ pub enum PrefixLayerKind {
     FullTurboQuantPacked,
     Linear,
     Mla,
+    /// Complete Flash recurrent, PLE and sparse-attention state (v1).
+    Flash,
+    DFlash2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +49,20 @@ pub struct PrefixLayerSpec {
 impl PrefixLayerSpec {
     pub fn from_payload(payload: &PrefixLayerPayload) -> Self {
         match payload {
+            PrefixLayerPayload::DFlash2 {
+                context_hidden,
+                last_hidden,
+            } => Self {
+                kind: PrefixLayerKind::DFlash2,
+                tensors: vec![
+                    PrefixTensorSpec::from_array(context_hidden),
+                    PrefixTensorSpec::from_array(last_hidden),
+                ],
+            },
+            PrefixLayerPayload::Flash { tensors } => Self {
+                kind: PrefixLayerKind::Flash,
+                tensors: tensors.iter().map(PrefixTensorSpec::from_array).collect(),
+            },
             PrefixLayerPayload::FullDense { k, v } => Self {
                 kind: PrefixLayerKind::FullDense,
                 tensors: vec![
@@ -159,6 +176,13 @@ pub struct PagedPrefixLayer {
 
 #[derive(Debug, Clone)]
 pub enum PrefixLayerPayload {
+    DFlash2 {
+        context_hidden: Array,
+        last_hidden: Array,
+    },
+    Flash {
+        tensors: Vec<Array>,
+    },
     FullDense {
         k: Array,
         v: Array,
@@ -216,6 +240,11 @@ impl PagedPrefixEntry {
         let mut arrays = Vec::new();
         for layer in &self.main_layers {
             match layer {
+                PrefixLayerPayload::DFlash2 {
+                    context_hidden,
+                    last_hidden,
+                } => arrays.extend([context_hidden, last_hidden]),
+                PrefixLayerPayload::Flash { tensors } => arrays.extend(tensors),
                 PrefixLayerPayload::FullDense { k, v }
                 | PrefixLayerPayload::FullPaged {
                     k_pages: k,
@@ -282,6 +311,24 @@ impl PagedPrefixEntry {
         };
         for layer in &self.main_layers {
             match layer {
+                PrefixLayerPayload::DFlash2 {
+                    context_hidden,
+                    last_hidden,
+                } => {
+                    stats.tensor_count += 2;
+                    stats.payload_bytes = stats
+                        .payload_bytes
+                        .saturating_add(tensor_payload_bytes(context_hidden))
+                        .saturating_add(tensor_payload_bytes(last_hidden));
+                }
+                PrefixLayerPayload::Flash { tensors } => {
+                    stats.tensor_count += tensors.len();
+                    for tensor in tensors {
+                        stats.payload_bytes = stats
+                            .payload_bytes
+                            .saturating_add(tensor_payload_bytes(tensor));
+                    }
+                }
                 PrefixLayerPayload::FullDense { k, v } => {
                     stats.full_dense_layers += 1;
                     stats.tensor_count += 2;

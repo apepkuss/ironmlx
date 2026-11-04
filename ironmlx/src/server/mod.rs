@@ -298,6 +298,7 @@ pub(crate) async fn serve_with_dflash2<M>(
     p2_options: ironmlx_runtime::core::dflash2::DFlash2P2Options,
     draft_quantization_bits: Option<i32>,
     prefix_cache: Option<ironmlx_runtime::core::cache::prefix_store::PrefixLruCacheConfig>,
+    prefix_disk_cache: Option<PagedPrefixCacheConfig>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     static_memory_estimate: ironmlx_runtime::core::process_memory::StaticMemoryEstimate,
     vision_input: ironmlx_lm::core::vision_input::VisionInputConfig,
@@ -305,7 +306,7 @@ pub(crate) async fn serve_with_dflash2<M>(
 where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
 {
-    let state = build_dflash2_engine_with_options(
+    let state = build_dflash2_engine_with_prefix_storage(
         model,
         draft,
         tokenizer,
@@ -320,6 +321,7 @@ where
         p2_options,
         draft_quantization_bits,
         prefix_cache,
+        prefix_disk_cache,
         scheduler_runtime_profile,
         static_memory_estimate,
         vision_input,

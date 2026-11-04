@@ -99,13 +99,17 @@ impl DFlash2Target for FlashTextModel {
             ragged_rows_only: true,
         }
     }
+    fn dflash2_supports_durable_prefix(&self) -> bool {
+        true
+    }
+
     fn dflash2_execution_fingerprint(&self) -> String {
         let quant = self.quant.map_or_else(
             || "full".into(),
             |q| format!("{}{}g{}", q.mode.mlx_backend_mode(), q.bits, q.group_size),
         );
-        format!("qwen38-flash-next-vl-v5;mlx=a8f66b590;rope=reference-power;quant={quant};capture=completed-hc-mean;ple=bounded-ssd;experts={};dispatch=source-e512;prefill=scheduler-image-tail-v1;verify={};paging-batch={}",
-            if self.expert_paging_enabled(){"bounded-ssd"}else{"resident"},if self.layer_major_verify{"layer-major-q1"}else{"token-major-q1"},if self.native_paged_batching && self.expert_paging_enabled(){"native"}else{"row"})
+        format!("qwen38-flash-next-vl-v5;mlx=65383d68c;numeric-base=a8f66b590;rope=reference-power;quant={quant};capture=completed-hc-mean;ple=bounded-ssd;experts={};dispatch=source-e512;prefill=scheduler-image-tail-v1;verify={};paging-batch={};prefix=v1;artifact={}",
+            if self.expert_paging_enabled(){"bounded-ssd"}else{"resident"},if self.layer_major_verify{"layer-major-q1"}else{"token-major-q1"},if self.native_paged_batching && self.expert_paging_enabled(){"native"}else{"row"}, self.artifact_identity)
     }
     fn dflash2_instance(&self) -> Option<&DFlash2Instance> {
         Some(&self.dflash_instance)

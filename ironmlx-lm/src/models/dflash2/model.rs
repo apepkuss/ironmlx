@@ -117,6 +117,7 @@ impl DFlash2DraftCache {
 }
 
 pub struct DFlash2DraftModel {
+    artifact_identity: String,
     instance: super::DFlash2Instance,
     config: DFlash2Config,
     fc: Linear,
@@ -190,6 +191,9 @@ impl DFlash2DraftModel {
         }
         Ok(Self {
             instance: super::DFlash2Instance::new(),
+            artifact_identity: crate::core::artifact_identity::artifact_identity(
+                loader.model_dir(),
+            )?,
             fc: load_linear(loader, "fc", draft_bits)?,
             hidden_norm: RmsNorm::from_loader(loader, "hidden_norm", config.rms_norm_eps)?,
             norm: RmsNorm::from_loader(loader, "norm", config.rms_norm_eps)?,
@@ -219,6 +223,10 @@ impl DFlash2DraftModel {
 
     fn m5_scope(&self, requested: bool) -> Option<crate::nn::m5_affine4::Scope> {
         (self.m5_resident || requested).then(crate::nn::m5_affine4::scope)
+    }
+
+    pub fn artifact_identity(&self) -> &str {
+        &self.artifact_identity
     }
 
     pub fn config(&self) -> &DFlash2Config {

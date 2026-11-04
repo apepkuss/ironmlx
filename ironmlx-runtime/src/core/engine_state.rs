@@ -1120,6 +1120,64 @@ pub async fn build_dflash2_engine_with_options<M>(
 where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
 {
+    build_dflash2_engine_with_prefix_storage(
+        model,
+        draft,
+        tokenizer,
+        model_id,
+        prefill_chunk_size,
+        b_max,
+        admission_deadline_ms,
+        tensor_batch_max_width,
+        admission_queue_max,
+        max_cache_cap,
+        block_size,
+        p2_options,
+        draft_quantization_bits,
+        prefix_cache,
+        None,
+        scheduler_runtime_profile,
+        static_memory_estimate,
+        vision_input,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn build_dflash2_engine_with_prefix_storage<M>(
+    model: M,
+    draft: ironmlx_lm::models::DFlash2DraftModel,
+    tokenizer: Tokenizer,
+    model_id: String,
+    prefill_chunk_size: usize,
+    b_max: usize,
+    admission_deadline_ms: u64,
+    tensor_batch_max_width: usize,
+    admission_queue_max: usize,
+    max_cache_cap: usize,
+    block_size: usize,
+    p2_options: crate::core::dflash2::DFlash2P2Options,
+    draft_quantization_bits: Option<i32>,
+    prefix_cache: Option<crate::core::cache::PrefixLruCacheConfig>,
+    prefix_disk_cache: Option<PagedPrefixCacheConfig>,
+    scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
+    static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
+    vision_input: VisionInputConfig,
+) -> Result<CausalEngine<M>>
+where
+    M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
+{
+    if let Some(config) = &prefix_disk_cache {
+        anyhow::ensure!(
+            model.dflash2_supports_durable_prefix(),
+            "DFlash2 target has not qualified durable prefix storage"
+        );
+        anyhow::ensure!(
+            config.model_id == model_id,
+            "DFlash2 prefix namespace does not match model ID"
+        );
+        config.validate()?;
+    }
     let checkpoint_block_size = usize::try_from(draft.config().dflash_config.block_size)
         .context("DFlash2 checkpoint block_size")?;
     let block_size =
@@ -1213,6 +1271,7 @@ where
     };
     let cold_materialization_tracker =
         crate::core::process_memory::ColdMaterializationTracker::new(static_memory_estimate);
+    let prefix_cache_enabled = prefix_cache.is_some() || prefix_disk_cache.is_some();
     let dflash2_handle = dflash2_actor::spawn_dflash2_actor(
         Arc::clone(&model),
         draft,
@@ -1228,6 +1287,7 @@ where
             budget_state,
             cache_cost: dflash2_cache_cost,
             prefix_cache_max_bytes: prefix_cache.map(|config| config.max_bytes),
+            prefix_disk_cache,
             initial_draft_budget,
             target_execution_fingerprint,
             verify_profile,
@@ -1329,7 +1389,7 @@ where
         prefill_chunk_size,
         vision_input,
         request_execution: RequestExecutionHandle::DFlash2(Arc::new(dflash2_handle)),
-        paged_prefix_cache_enabled: prefix_cache.is_some(),
+        paged_prefix_cache_enabled: prefix_cache_enabled,
         b_max,
         admission_deadline_ms: 0,
         admission_queue_max,

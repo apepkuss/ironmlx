@@ -495,6 +495,12 @@ pub trait DFlash2Target: crate::core::Model {
 
     fn dflash2_execution_fingerprint(&self) -> String;
 
+    /// Complete target state and drafter context have a qualified durable
+    /// representation. Memory-only artifacts do not imply SSD qualification.
+    fn dflash2_supports_durable_prefix(&self) -> bool {
+        false
+    }
+
     /// Before serving, run one target forward of every reachable verify
     /// width so kernel libraries are compiled outside scored requests.
     fn dflash2_prewarm(&self) -> anyhow::Result<()> {

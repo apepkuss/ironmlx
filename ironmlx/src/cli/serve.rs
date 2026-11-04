@@ -280,7 +280,9 @@ pub struct ServeArgs {
 
     /// Enable paged SSD prefix cache under this directory. Without --kv-quant,
     /// this also switches full-attention KV caches to paged storage and decode
-    /// to the paged attention kernel when supported. With TurboQuant, runtime
+    /// to the paged attention kernel when supported. Flash persists its complete
+    /// prefix state in ordinary and DFlash2 inference; active KV stays in RAM.
+    /// With TurboQuant, runtime
     /// K/V stays quantized while prefix cache entries are persisted as packed
     /// TurboQuant tensors. When passed without a value, defaults to
     /// ~/.ironmlx/cache/paged_prefix_cache.
@@ -307,7 +309,7 @@ pub struct ServeArgs {
 
     /// Maximum bytes for the in-process cross-request prefix LRU cache. Disabled
     /// by default. Ordinary/MTP serving requires --paged-prefix-cache-dir;
-    /// DFlash2 uses a dedicated in-memory artifact and does not enable SSD.
+    /// DFlash2 uses a dedicated artifact; Flash-Next also supports its SSD persistence.
     #[arg(long = "prefix-lru-cache-max-bytes")]
     pub prefix_lru_cache_max_bytes: Option<usize>,
 
@@ -612,7 +614,7 @@ fn ensure_dflash2_serve_supported(
         bail!("--dflash2-model-dir cannot be combined with PromptLookup");
     }
     if args.kv_quant.turboquant_bits().is_some()
-        || args.paged_prefix_cache_dir.is_some()
+        || (args.paged_prefix_cache_dir.is_some() && family != DFlash2TargetFamily::Qwen38FlashNext)
         || args.active_kv_offload
     {
         bail!(
@@ -1102,11 +1104,12 @@ where
     }
 
     let model_id = single_model_id(args)?;
-    let prefix_cache = if family == super::dflash2_target::DFlash2TargetFamily::Qwen38FlashNext {
-        None
+    let prefix_disk_cache = if family == DFlash2TargetFamily::Qwen38FlashNext {
+        resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?
     } else {
-        resolve_dflash2_prefix_lru_cache_config(args)?
+        None
     };
+    let prefix_cache = resolve_dflash2_prefix_lru_cache_config(args)?;
     let (tensor_batch_requested_max_width, tensor_batch_max_width) =
         resolve_dflash2_tensor_batch_width(
             args,
@@ -1152,6 +1155,7 @@ where
         },
         draft_bits,
         prefix_cache,
+        prefix_disk_cache,
         scheduler_runtime_profile,
         static_memory_estimate,
         vision_input,
@@ -1753,10 +1757,12 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                     vision_input.context("Flash vision input configuration missing")?,
                 )
             } else {
+                let mut flash_args = args.clone();
+                flash_args.active_kv_offload = false;
                 serve_with_model(
                     model,
                     tokenizer,
-                    &args,
+                    &flash_args,
                     scheduler_config,
                     scheduler_runtime_profile,
                     vision_input,

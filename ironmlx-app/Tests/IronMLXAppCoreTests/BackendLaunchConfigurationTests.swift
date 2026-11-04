@@ -480,3 +480,15 @@ private func dflash2LaunchArguments(config appConfig: AppConfig) -> [String] {
         }
     }
 }
+
+@Test(arguments: [false, true]) func dflash2DiskPrefixFlagsRequireQualifiedTarget(qualified: Bool) {
+    let runtime = ModelDFlash2Runtime(
+        targetModelID: "flash", targetModelDir: "/models/flash", draftModelID: "draft", draftModelDir: "/models/draft",
+        checkpointBlockSize: 8, blockSize: 8, draftBits: 0, supportsDiskPrefixCache: qualified
+    )
+    let options = BackendLaunchOptions(config: AppConfig(hotCache: 0, cacheEnable: true, cacheDir: "/tmp/flash-cache"))
+    let arguments = BackendLaunchConfiguration(executableURL: URL(fileURLWithPath: "/tmp/ironmlx"), host: "127.0.0.1", port: 9068, options: options, dflash2Runtime: runtime).arguments
+    #expect(arguments.contains("--paged-prefix-cache-dir") == qualified)
+    #expect(arguments.contains("--ssd-prefix-cache-max-gb") == qualified)
+    #expect(!arguments.contains("--active-kv-offload"))
+}

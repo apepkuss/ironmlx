@@ -1746,6 +1746,11 @@ fn active_kv_entry_supported(entry: &PagedPrefixEntry) -> bool {
         && entry.gemma4_drafter_last_hidden.is_none()
         && ActiveKvEntryChunkReader::new(entry)
             .chunks()
+            .filter(|chunk| chunk.is_main_layer)
+            .count()
+            == entry.main_layers.len()
+        && ActiveKvEntryChunkReader::new(entry)
+            .chunks()
             .all(|chunk| chunk.kind.is_supported_for_active_offload())
 }
 
@@ -3362,9 +3367,21 @@ fn try_restore_paged_prefix_for_prompt_row(
         return Ok(None);
     }
     let store = config.store();
-    for (restore_len, cached_len) in
-        paged_prefix_restore_candidates(&store, prefix_lru_cache, config, prompt_ids)?
-    {
+    let candidates =
+        match paged_prefix_restore_candidates(&store, prefix_lru_cache, config, prompt_ids) {
+            Ok(candidates) => candidates,
+            #[cfg(unix)]
+            Err(error)
+                if cache
+                    .iter()
+                    .any(|layer| matches!(layer, LayerCache::Flash(_))) =>
+            {
+                tracing::warn!(%error, "Flash prefix directory unavailable; recomputing");
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+    for (restore_len, cached_len) in candidates {
         let Some(spec) = prefix_key_spec_for_caches(
             &config.model_id,
             &prompt_ids[..restore_len],
@@ -3379,7 +3396,26 @@ fn try_restore_paged_prefix_for_prompt_row(
         if let Some((key, entry, stats, load_us)) =
             try_load_prefix_lru_entry(prefix_lru_cache, &spec)?
         {
-            restore_prefix_entry_for_row(cache, &entry, cache_row, cached_len)?;
+            if let Err(error) = restore_prefix_entry_for_row(cache, &entry, cache_row, cached_len) {
+                if entry.main_layers.iter().any(|layer| {
+                    matches!(
+                        layer,
+                        ironmlx_lm::core::cache::prefix_payload::PrefixLayerPayload::Flash { .. }
+                    )
+                }) {
+                    tracing::warn!(%error, "Flash prefix restore rejected; recomputing");
+                    if let Err(error) = store.invalidate(&spec) {
+                        tracing::warn!(%error, "failed to invalidate Flash prefix");
+                    }
+                    if let Some(lru) = prefix_lru_cache {
+                        if let Ok(mut lru) = lru.lock() {
+                            lru.invalidate(&spec);
+                        }
+                    }
+                    continue;
+                }
+                return Err(error);
+            }
             log_prefix_lru_hit("hit", &key, cache_row, None, restore_len, stats, load_us);
             return Ok(Some(cached_len));
         }
@@ -3404,8 +3440,33 @@ fn try_restore_paged_prefix_for_prompt_row(
         let entry = observed
             .entry
             .ok_or_else(|| anyhow!("paged prefix observed hit without entry"))?;
-        try_insert_prefix_lru_entry(prefix_lru_cache, spec, entry.clone(), cache_row, None)?;
-        restore_prefix_entry_for_row(cache, &entry, cache_row, cached_len)?;
+        try_insert_prefix_lru_entry(
+            prefix_lru_cache,
+            spec.clone(),
+            entry.clone(),
+            cache_row,
+            None,
+        )?;
+        if let Err(error) = restore_prefix_entry_for_row(cache, &entry, cache_row, cached_len) {
+            if entry.main_layers.iter().any(|layer| {
+                matches!(
+                    layer,
+                    ironmlx_lm::core::cache::prefix_payload::PrefixLayerPayload::Flash { .. }
+                )
+            }) {
+                tracing::warn!(%error, "Flash prefix restore rejected; recomputing");
+                if let Err(error) = store.invalidate(&spec) {
+                    tracing::warn!(%error, "failed to invalidate Flash prefix");
+                }
+                if let Some(lru) = prefix_lru_cache {
+                    if let Ok(mut lru) = lru.lock() {
+                        lru.invalidate(&spec);
+                    }
+                }
+                continue;
+            }
+            return Err(error);
+        }
         log_paged_prefix_hit("hit", &key, cache_row, None, restore_len, stats, load_us);
         return Ok(Some(cached_len));
     }
@@ -3443,9 +3504,21 @@ fn try_restore_paged_prefix_for_prompt_rows(
         return Ok(None);
     }
     let store = config.store();
-    for (restore_len, cached_len) in
-        paged_prefix_restore_candidates(&store, prefix_lru_cache, config, prompt_ids)?
-    {
+    let candidates =
+        match paged_prefix_restore_candidates(&store, prefix_lru_cache, config, prompt_ids) {
+            Ok(candidates) => candidates,
+            #[cfg(unix)]
+            Err(error)
+                if cache
+                    .iter()
+                    .any(|layer| matches!(layer, LayerCache::Flash(_))) =>
+            {
+                tracing::warn!(%error, "Flash prefix directory unavailable; recomputing");
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+    for (restore_len, cached_len) in candidates {
         let Some(spec) = prefix_key_spec_for_caches(
             &config.model_id,
             &prompt_ids[..restore_len],
@@ -3460,7 +3533,27 @@ fn try_restore_paged_prefix_for_prompt_rows(
         if let Some((key, entry, stats, load_us)) =
             try_load_prefix_lru_entry(prefix_lru_cache, &spec)?
         {
-            restore_prefix_entry_for_rows(cache, &entry, cache_rows, cached_len)?;
+            if let Err(error) = restore_prefix_entry_for_rows(cache, &entry, cache_rows, cached_len)
+            {
+                if entry.main_layers.iter().any(|layer| {
+                    matches!(
+                        layer,
+                        ironmlx_lm::core::cache::prefix_payload::PrefixLayerPayload::Flash { .. }
+                    )
+                }) {
+                    tracing::warn!(%error, "Flash prefix restore rejected; recomputing");
+                    if let Err(error) = store.invalidate(&spec) {
+                        tracing::warn!(%error, "failed to invalidate Flash prefix");
+                    }
+                    if let Some(lru) = prefix_lru_cache {
+                        if let Ok(mut lru) = lru.lock() {
+                            lru.invalidate(&spec);
+                        }
+                    }
+                    continue;
+                }
+                return Err(error);
+            }
             for (idx, &cache_row) in cache_rows.iter().enumerate() {
                 let row_load_us = if idx == 0 { load_us } else { 0 };
                 log_prefix_lru_hit(
@@ -3496,8 +3589,33 @@ fn try_restore_paged_prefix_for_prompt_rows(
         let entry = observed
             .entry
             .ok_or_else(|| anyhow!("paged prefix observed hit without entry"))?;
-        try_insert_prefix_lru_entry(prefix_lru_cache, spec, entry.clone(), cache_rows[0], None)?;
-        restore_prefix_entry_for_rows(cache, &entry, cache_rows, cached_len)?;
+        try_insert_prefix_lru_entry(
+            prefix_lru_cache,
+            spec.clone(),
+            entry.clone(),
+            cache_rows[0],
+            None,
+        )?;
+        if let Err(error) = restore_prefix_entry_for_rows(cache, &entry, cache_rows, cached_len) {
+            if entry.main_layers.iter().any(|layer| {
+                matches!(
+                    layer,
+                    ironmlx_lm::core::cache::prefix_payload::PrefixLayerPayload::Flash { .. }
+                )
+            }) {
+                tracing::warn!(%error, "Flash prefix restore rejected; recomputing");
+                if let Err(error) = store.invalidate(&spec) {
+                    tracing::warn!(%error, "failed to invalidate Flash prefix");
+                }
+                if let Some(lru) = prefix_lru_cache {
+                    if let Ok(mut lru) = lru.lock() {
+                        lru.invalidate(&spec);
+                    }
+                }
+                continue;
+            }
+            return Err(error);
+        }
         for (idx, &cache_row) in cache_rows.iter().enumerate() {
             let row_load_us = if idx == 0 { load_us } else { 0 };
             log_paged_prefix_hit(
@@ -3573,6 +3691,39 @@ fn try_save_paged_prefix_for_prompt_row(
         return Ok(None);
     };
     let store = config.store();
+    if spec
+        .main_layers
+        .iter()
+        .any(|layer| layer.kind == ironmlx_lm::core::cache::prefix_payload::PrefixLayerKind::Flash)
+    {
+        let Some((entry, _)) = prefix_entry_for_row(cache, cache_row)? else {
+            return Ok(None);
+        };
+        // Serialize before the request advances; no retained background copy
+        // and no 512 MiB async-queue limit for long Flash prefixes.
+        let save_started = Instant::now();
+        return match store.save_if_absent(&spec, &entry) {
+            Ok((key, written)) => {
+                let stats = entry.observability_stats(cached_len);
+                if written {
+                    log_paged_prefix_save(
+                        "saved",
+                        &key,
+                        cache_row,
+                        None,
+                        stats,
+                        save_started.elapsed().as_micros(),
+                    );
+                }
+                try_insert_prefix_lru_entry(prefix_lru_cache, spec, entry, cache_row, None)?;
+                Ok(Some(key))
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Flash prefix write failed; continuing without persistence");
+                Ok(None)
+            }
+        };
+    }
     let Some((key, permit)) = try_admit_prefix_store_entry(store, &spec, cache_row, None)? else {
         return Ok(None);
     };
@@ -28524,7 +28675,15 @@ mod tests {
         let stats = scheduler.request_owned_kv_stats().immutable_prefix;
         assert_eq!(stats.ssd_blocks_pending, 0);
         assert_eq!(
-            std::fs::read_dir(&root).expect("prefix cache dir").count(),
+            std::fs::read_dir(&root)
+                .expect("prefix cache dir")
+                .filter(|entry| entry
+                    .as_ref()
+                    .expect("prefix entry")
+                    .file_type()
+                    .expect("prefix file type")
+                    .is_dir())
+                .count(),
             published as usize
         );
         scheduler

@@ -626,6 +626,7 @@ pub(crate) struct DFlash2ActorConfig {
     pub(crate) budget_state: BudgetState,
     pub(crate) cache_cost: DFlash2TargetCacheCost,
     pub(crate) prefix_cache_max_bytes: Option<usize>,
+    pub(crate) prefix_disk_cache: Option<crate::core::cache::PagedPrefixCacheConfig>,
     pub(crate) initial_draft_budget: usize,
     pub(crate) target_execution_fingerprint: String,
     pub(crate) verify_profile: String,
@@ -798,6 +799,7 @@ where
         budget_state,
         cache_cost,
         prefix_cache_max_bytes,
+        prefix_disk_cache,
         initial_draft_budget,
         target_execution_fingerprint,
         verify_profile,
@@ -925,7 +927,7 @@ where
     let runtime_usage = Arc::new(crate::core::runtime_usage::ModelRuntimeUsageCounters::default());
     let worker_runtime_usage = Arc::clone(&runtime_usage);
     let prefix_fingerprint = format!(
-        "dflash2-prefix-v2:ironmlx={};backend=mlx;kernel-contract=row-exact-v1;prefill=scheduler-b1-chunk-v2-cold-single;target={};draft-dtype={};draft-hidden={};draft-layer-count={};target-layers={:?};sliding-window={};block-size={}",
+        "dflash2-prefix-v2:ironmlx={};backend=mlx;kernel-contract=row-exact-v1;prefill=scheduler-b1-chunk-v2-cold-single;target={};draft-dtype={};draft-hidden={};draft-layer-count={};target-layers={:?};sliding-window={};block-size={};draft-artifact={}",
         env!("CARGO_PKG_VERSION"),
         target_execution_fingerprint,
         draft.config().dtype,
@@ -934,8 +936,10 @@ where
         draft.config().dflash_config.target_layer_ids,
         draft.config().sliding_window,
         block_size,
+        draft.artifact_identity(),
     );
     let health_prefix_fingerprint = prefix_fingerprint.clone();
+    let prefix_cache_enabled = prefix_cache_max_bytes.is_some() || prefix_disk_cache.is_some();
     let worker_in_flight = Arc::clone(&in_flight);
     let worker_active = Arc::clone(&b_active);
     let worker_queued = Arc::clone(&b_queued);
@@ -993,6 +997,7 @@ where
         let mut group_cost = crate::core::dflash2_group_cost::GroupCostPolicy::default();
         let cost_epoch = std::time::Instant::now();
         let mut prefix_cache = prefix_cache_max_bytes
+            .or_else(|| prefix_disk_cache.as_ref().map(|_| 1))
             .map(DFlash2PrefixCache::new)
             .transpose()
             .expect("validated DFlash2 prefix cache capacity")
@@ -1002,7 +1007,9 @@ where
                     generation_suffixes = ?turn_boundary.as_ref().map(|b| b.suffixes()),
                     "DFlash2 prefix cache chat turn boundary"
                 );
-                cache.with_turn_boundary(turn_boundary)
+                cache
+                    .with_turn_boundary(turn_boundary)
+                    .with_disk(prefix_disk_cache)
             });
         let mut next_request_id = 1_u64;
         let mut active = Vec::<ActiveDFlash2Request<'_, M>>::with_capacity(b_max);
@@ -2375,7 +2382,7 @@ where
         latest_generation_tps_bits,
         latest_acceptance_rate_bits,
         peak_memory_bytes,
-        prefix_cache_enabled: prefix_cache_max_bytes.is_some(),
+        prefix_cache_enabled,
         prefix_cache_max_bytes,
         prefix_cache_entries,
         prefix_cache_bytes,

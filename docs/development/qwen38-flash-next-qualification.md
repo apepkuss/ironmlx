@@ -144,9 +144,10 @@ read/pack timings can overlap or include each other and must not be summed as
 an end-to-end latency breakdown.
 
 The ordinary App path uses BF16 KV for Flash even when other models use a
-global TurboQuant setting. Legacy Active KV swapping and persistent prefix
-formats do not contain the complete Flash auxiliary state, so they are not
-used for this architecture. The default App context remains 32K; explicit
+global TurboQuant setting. Legacy Active KV swapping remains disabled. Stage 7
+adds a versioned complete Flash prefix format for ordinary and DFlash2 reuse
+(see the dedicated section below); legacy KV-only prefixes are never accepted.
+The default App context remains 32K; explicit
 larger requests must pass the complete memory plan.
 
 ## Completed numerical gates
@@ -818,3 +819,208 @@ comparisons, thread/queue samples and startup identity are in
 `.build/mlx-identity-integration/results.json`. The qualification App was built
 before the feature changes were committed; its recorded dirty-source metadata
 is retained as the tested artifact identity.
+
+## Stage 7: durable Flash prefix reuse (2026-11-04)
+
+This stage adds reusable **completed prefill boundaries**, not active request
+checkpoints. It does not offload a live request's KV, recurrent state, sampler,
+PRNG, SSE position or draft verification transaction. Stage 8 remains deferred.
+
+### State and compatibility contract
+
+The version-1 Flash payload includes every row's GatedDelta convolution and
+FP32 recurrent state, PLE n-gram history (including EOS-reset history), PLE
+convolution and history position, sparse-attention K/V, raw indexer keys,
+MRoPE positions and completed compressed index blocks. Optional block summaries
+retain their presence/count; rollback-invalidated summaries are not silently
+invented on restore. Destination rows keep their own model instance identity;
+ordinary rollback snapshots still reject foreign model/layer instances.
+
+Keys bind token IDs, image-covered-boundary fingerprints, local checkpoint
+identity, quantization, execution contract, tensor shapes/dtypes, prefix format,
+IronMLX version and the pinned release backend configuration. Checkpoint identity
+hashes config/index contents and checkpoint canonical paths, file identity,
+length and nanosecond change/modification times. It deliberately does not hash
+112 GB of weights on every load: copying/moving/replacing checkpoints causes a
+conservative miss. The numerical reference remains MLX `a8f66b590`; the pinned
+thread-identity-fix build is `65383d68c984ce4ef49f4b600820f3b9064c5a82`.
+Flash keys have no dependence on the Dense ANE setting.
+
+The canonical per-layer vector starts with `Int32[6]` metadata:
+`[version=1, layer_index, kind, cached_len, ple_flags, block_count]`.
+`kind=0` is linear and `kind=1` is sparse. PLE flags are bit 0 (PLE present)
+and bit 1 (convolution present). PLE history position must equal the common
+layer offset on export and is restored from that validated offset; EOS resets
+the rolling token history, not the absolute position.
+
+| Layer | Remaining tensor order | Canonical layout |
+| --- | --- | --- |
+| Linear | GDN conv, GDN recurrent, PLE token history, PLE conv | BF16 `[1,gdn_kernel-1,conv_dim]`; FP32 `[1,Hv,Dv,Dk]`; UInt32 `[ngram-1]`; BF16 `[1,(ple_kernel-1)*ngram,hidden*hc]` |
+| Sparse | K, V, raw index keys, positions, compressed blocks | BF16 `[1,Hkv,N,D]` twice; BF16 `[1,N,Di]`; Int32 `[3,1,N]`; BF16 `[1,1,max(N/ratio,1),Di]` |
+
+Layers without PLE use one-element zero placeholders for its two tensors.
+Absent compressed blocks use zero padding and `block_count=0`; present blocks
+use the validated count, preserving a shorter completed-block cache if needed.
+The outer store records exact tensor dtypes/shapes and names Flash tensors
+`main_{layer:04}_flash_{index}`. DFlash2 adds a separate final auxiliary layer
+with context `[1,min(N,window-1),captures*hidden]` and final hidden
+`[1,1,hidden]`. Legacy stores that do not understand these layer kinds miss
+rather than interpreting the arrays as ordinary KV.
+
+All Flash layer layouts and metadata are validated before a destination row is
+changed. DFlash2 artifacts additionally store the unprojected target-layer
+hidden-state tail and final target hidden state. Draft checkpoint identity,
+precision, capture layers, sliding window and execution policy are part of the
+DFlash2 key; an ordinary prefix alone is never used as a DFlash2 artifact.
+
+### Storage and runtime behavior
+
+Ordinary inference uses the existing prefix-cache scheduling and optional hot
+LRU. DFlash2 retains its own artifact handling, with durable storage enabled
+only for Flash. App launch qualification forwards SSD cache settings for Flash
+DFlash2, while other DFlash2 targets keep their existing memory-only behavior.
+The existing public `build_dflash2_engine_with_options` API is preserved; the
+new `build_dflash2_engine_with_prefix_storage` entry point opts into storage.
+
+A prefix is staged in a temporary directory, accompanied by SHA-256 payload
+integrity data, flushed and committed by directory rename. Writers use an
+exclusive per-root process lock; abandoned temporary transactions are reaped
+under that lock. Readers ignore temporary directories. Disk capacity includes
+serialized payload and metadata bytes; successful loads update advisory disk
+LRU recency. The quota bounds committed logical file bytes; staging a transaction
+additionally needs space for one record. Invalid/unavailable cache records fall back to computation, and
+bad records can be repaired by a subsequent successful prefill/save.
+
+Flash writes synchronously at a prefill boundary. The existing generic async
+writer is limited to 512 MiB; placing long Flash snapshots there would skip
+saves or require a larger retained-state budget. Synchronous writes avoid that
+background retention, but add first-request I/O latency and form a safe boundary
+that cancellation must wait to finish. They do not make prefill writes free or
+provide streaming/incremental state persistence.
+
+CLI example (explicit isolated cache quota):
+
+```sh
+ironmlx serve --model /path/to/Flash-Next --model-id flash \
+  --paged-prefix-cache-dir /path/to/prefix-cache \
+  --ssd-prefix-cache-max-gb 16
+# Add the following for the qualified Flash draft:
+# --dflash2-model-dir /path/to/Flash-Next-DFlash2 --dflash2-draft-bits 0
+```
+
+App uses its existing cache enable/capacity settings. Active KV offload and
+TurboQuant remain disabled for Flash. Prefix reuse does not increase the
+maximum live context or request-memory capacity of a 32/64 GiB machine.
+
+### Qualification evidence
+
+See `.build/flash-prefix/` for local logs and machine-readable artifacts. The
+committed opt-in test is `ironmlx-runtime/tests/flash_prefix_real.rs`; it spawns
+separate writer and reader processes. It includes EOS history, native B1/B2/B4
+restoration and eight continuation steps with full-vocabulary logits compared
+against uninterrupted independent B1 continuations. The 4097-token fixture
+crosses the compressed sparse-index threshold. This is stronger than merely
+comparing generated text, but is still a bounded fixture, not universal quality
+or performance qualification.
+
+The local evidence is from Apple M5 Max / 128 GiB. Physical M1 Pro / 32 GiB,
+64 GiB, controller-cold SSD, memory pressure/swap and long-duration wear are not
+qualified by these tests. Application expert read bytes can include OS page
+cache hits and must not be described as physical SSD throughput.
+
+### Measured results and remaining limits
+
+Actual model tests used the standalone Flash checkpoint and BF16 draft listed
+above, on the M5 Max / 128 GiB host, with a forced 2 GiB expert cache and cached
+application I/O. No OS page-cache purge was performed. HTTP model fixtures
+use `/v1/chat/completions`; other protocols share the runtime but did not get
+separate real-model durable-prefix runs here. Production integration is in
+`serve` and App cache settings; `generate` gains no new persistence option.
+
+| Gate | Observed result |
+| --- | --- |
+| Cross-process ordinary state | 4097 and 16385 tokens; full-vocabulary logits exact against uninterrupted B1, eight steps at native widths B1/B2/B4 |
+| Larger-than-queue record | 16385-token payload 583,598,570 bytes (556.6 MiB), saved/restored successfully; restored process had zero prefill expert read bytes |
+| Ordinary HTTP | B1, mixed B4, cancellation then B2 reuse, single/multiple images, process restart, appended chat turn and corruption/repair passed |
+| DFlash2 HTTP | Same mixed request/cancellation/restart/corruption gates passed, with outputs matching ordinary HTTP fixtures |
+| Draft sliding-window boundary | 2420-token prompt; persisted context `[1,2047,12800]`, restored after process restart with unchanged output |
+
+For the 820-token HTTP prompt, the first cache-building request took 20.301 s
+on the ordinary route and 18.937 s on DFlash2. The first request after restarting
+with the disk record took 2.019 s and 1.352 s respectively. In-process repeats
+were 1.554–1.572 s and 1.459–1.511 s. These are single development samples,
+including response/decode and first-write costs, not repeated steady-state
+benchmarks; kernel preparation, expert residency and OS caching are additional
+conditions. They do not isolate a universal speedup factor or physical SSD
+throughput. No claim is made for short-prompt net benefit in full-resident mode.
+
+The 4097-token direct fixture recorded 66,109,440,000 application expert bytes
+in its prefill phase. Its restored process recorded zero prefill expert bytes.
+The direct fixture also performs independent decode continuations: decode I/O
+must not be confused with prefill I/O or with total machine disk traffic.
+
+Issues found and resolved during implementation/validation:
+
+- Flash was excluded from the generic prefix payload; merely persisting KV
+  would omit recurrent/PLE/sparse-index state. A separately validated complete
+  codec now binds the durable state to the new model instance.
+- The 512 MiB generic background queue could not cover longer Flash records.
+  Flash uses synchronous boundary writes, with the latency limits stated above.
+- App DFlash2 launch previously omitted SSD flags for every target. An explicit
+  Flash-only qualification now forwards them; the shared engine cache-enabled
+  flag also recognizes disk-only configurations.
+- Existing tests counted a new writer lock file as a cache entry (17 instead of
+  16). The assertion now counts record directories and still requires all 16
+  immutable blocks to persist.
+- An initial security-startup test was blocked by the already-running idle App's
+  instance lock. Tests run with that verified App stopped, and the original App
+  is restored afterwards; the conflict was not a model/security-policy failure.
+
+Remaining limits are material: synchronous writes can delay both the writing
+request and other work on its actor until the safe boundary finishes; the disk
+quota additionally requires one staged record of free space; small-memory and
+controller-cold tests remain outstanding. Flash DFlash2 retains request-private
+ragged verification and its existing Tensor Batch qualification restrictions.
+This stage does not open that separate Tensor Batch setting.
+
+DFlash2 `prefix_cache_entries`, `prefix_cache_bytes` and
+`prefix_cache_evictions` remain **hot-memory** artifact metrics; logical
+hits/misses/saves and reused-token counters also cover Flash disk lookups.
+They are not physical SSD operation or per-record disk-eviction counters.
+Detailed disk source/latency is available in logs; per-model durable-prefix
+I/O/eviction telemetry is not separately exposed in Dashboard. Existing expert
+and PLE paging telemetry is unchanged.
+
+The opt-in cross-process test can be reproduced with the current pinned MLX
+installation and an isolated artifact directory:
+
+```sh
+export IRONMLX_FLASH_SNAPSHOT=/absolute/path/to/Flash-Next
+export IRONMLX_FLASH_PREFIX_ARTIFACTS=/absolute/path/to/test-output
+export IRONMLX_FLASH_PREFIX_LEN=16385
+cargo test --release -p ironmlx-runtime --test flash_prefix_real \
+  -- --ignored --exact flash_prefix_cross_process_exact_b1_b2_b4 --nocapture
+```
+
+The artifact directory retains potentially large prefix and reference files.
+It is test output, separate from the App's configured production cache.
+
+Final validation summary: the full Release workspace suite passed **2529 tests**
+with **303 conditional skips** across 211 targets. After correcting the final
+shared cache-enabled status flag, all library suites passed again (**1941
+passed, 106 skipped**) and the final production Release backend passed both
+ordinary and DFlash2 disk-only smoke runs. The final image check used two
+64×64 images with identical prompt token IDs but different red/blue pixels:
+records had matching token hashes and different image fingerprints; replies
+were `Red` and `Blue`, and the repeated red request remained exact on both
+routes. Swift tests passed **575 tests**; pinned-nightly Clippy with
+`-D warnings`, both formatters and whitespace checks passed.
+
+No `Context leak` diagnostic was found in these Rust/model-run logs. Historical
+unrelated MLX C++ GPU-default linear-algebra failures recorded above were not
+reinvestigated or resolved by Stage 7. MLX native source is unchanged.
+
+The original App bundle was restored healthy after isolated validation, with
+its bundle files and user preferences unchanged. It has **not** been repackaged
+with Stage 7; the new implementation was tested through the independently
+built Release backend and App source/launch tests. Changes remain uncommitted.

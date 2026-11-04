@@ -46,3 +46,5 @@ pub(crate) use weights::logical_width_from_packed;
 pub mod speculative_ops;
 
 pub mod prompt_images;
+
+pub mod artifact_identity;

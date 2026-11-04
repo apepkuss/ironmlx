@@ -279,6 +279,12 @@ public struct BackendLaunchConfiguration: Equatable {
             appendIntegerFlag("--memory-limit-total-gb", options.memoryLimitTotalGB, to: &arguments)
             appendIntegerFlag("--memory-limit-model-gb", options.memoryLimitModelGB, to: &arguments)
             appendIntegerFlag("--prefix-lru-cache-max-bytes", options.prefixLruCacheMaxBytes, to: &arguments)
+            if dflash2Runtime.supportsDiskPrefixCache {
+                if let directory = options.pagedPrefixCacheDir {
+                    arguments += ["--paged-prefix-cache-dir", directory]
+                }
+                appendIntegerFlag("--ssd-prefix-cache-max-gb", options.ssdPrefixCacheMaxGB, to: &arguments)
+            }
             if !options.m5DFlash2Profile {
                 arguments += ["--m5-dflash2-profile", "off"]
             }

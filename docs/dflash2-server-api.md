@@ -92,9 +92,11 @@ group 32) with `incoai/Qwen3.8-Flash-Next-DFlash2` (BF16). It supports text
 and image requests, including concurrent requests. Flash requires draft bits
 `0` (the automatic default for this family), block widths 2–8, linear
 verification and the stateful sampler. Flat trees, position-keyed sampling,
-MTP, Prompt Lookup, TurboQuant KV and persistent prefix payloads are not
+MTP, Prompt Lookup and TurboQuant KV are not
 qualified. The author draft's RoPE theta differs from the target by design;
 the pair is checked against its exact capture-layer and geometry contract.
+Flash also supports complete durable prefix artifacts, including the drafter's
+context tail and final target hidden state (see the storage constraints below).
 
 The complete checkpoint is about 112 GB. Its PLE rows always stay on SSD.
 Before loading, IronMLX reserves the configured concurrency/context envelope,
@@ -181,11 +183,11 @@ See the [Text and vision API](text-vision-api.md) for strict fields, errors and 
 
 ## Incompatible combinations
 
-The path rejects MTP, Prompt Lookup, KV quantization, paged/persistent prefix cache, Active KV offload, Scheduler profiles and Scheduler autotune reports. It does not silently switch to another speculative path. Its own in-memory prefix cache is separate from these excluded caches.
+The path rejects MTP, Prompt Lookup, KV quantization, Active KV offload, Scheduler profiles and Scheduler autotune reports. Persistent prefix caching is supported specifically for Flash-Next: `--paged-prefix-cache-dir` with `--ssd-prefix-cache-max-gb` stores complete target state together with the DFlash2 context tail and final hidden state. Other DFlash2 targets retain their memory-only artifact cache and reject this SSD option. Prefix persistence reuses completed prefill boundaries; it does not swap live request state or expand live context memory capacity. Flash writes at a prefill boundary, so the first request includes disk-write cost. It does not silently switch to another speculative path.
 
 ## Health metrics
 
-`GET /healthz` exposes a `dflash2` object with configuration and accumulated metrics. These numbers illustrate field shapes, not performance guarantees:
+`GET /healthz` exposes a `dflash2` object with configuration and accumulated metrics. Prefix entry/byte/eviction counts describe the hot-memory artifact cache; logical prefix hits/misses/saves and reused-token counters can also include Flash disk records. They are not physical SSD operation counts. These numbers illustrate field shapes, not performance guarantees:
 
 ```json
 {

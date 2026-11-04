@@ -299,7 +299,13 @@ pub fn prefix_key_spec_for_caches(
     for cache in caches {
         match cache {
             #[cfg(unix)]
-            LayerCache::Flash(_) => return Ok(None),
+            LayerCache::Flash(cache) => {
+                remember_kv_cache_profile(
+                    &mut kv_cache_profile,
+                    Some(cache.durable_prefix_contract()?),
+                )?;
+                main_layers.push(cache.durable_prefix_spec(cached_len)?);
+            }
             LayerCache::Full(kv) => {
                 if let Some(paged) = kv.paged() {
                     remember_kv_cache_profile(&mut kv_cache_profile, kv.prefix_cache_profile())?;
@@ -502,7 +508,10 @@ pub fn prefix_entry_for_row(
                 (PrefixLayerPayload::Mla { c_kv, k_pe }, layer_cached_len)
             }
             #[cfg(unix)]
-            LayerCache::Flash(_) => return Ok(None),
+            LayerCache::Flash(cache) => {
+                let (tensors, len) = cache.durable_prefix_for_row(row)?;
+                (PrefixLayerPayload::Flash { tensors }, len)
+            }
         };
         if let Some(expected) = cached_len {
             if layer_cached_len != expected {
@@ -539,6 +548,15 @@ pub fn restore_prefix_entry_for_row(
             caches.len(),
             entry.main_layers.len()
         );
+    }
+    #[cfg(unix)]
+    for (cache, layer) in caches.iter().zip(&entry.main_layers) {
+        if let LayerCache::Flash(cache) = cache {
+            let PrefixLayerPayload::Flash { tensors } = layer else {
+                anyhow::bail!("expected complete Flash prefix payload")
+            };
+            cache.validate_durable_prefix(tensors, row, cached_len)?;
+        }
     }
     for (idx, (cache, layer)) in caches.iter_mut().zip(entry.main_layers.iter()).enumerate() {
         match (cache, layer) {
@@ -588,9 +606,11 @@ pub fn restore_prefix_entry_for_row(
                 mla.restore_prefix_latent_for_row_on(c_kv, k_pe, row, cached_len, ())?;
             }
             #[cfg(unix)]
-            (LayerCache::Flash(_), _) => {
-                anyhow::bail!("Flash auxiliary state is not a legacy persistent prefix payload")
+            (LayerCache::Flash(cache), PrefixLayerPayload::Flash { tensors }) => {
+                cache.restore_durable_prefix(tensors, row, cached_len)?;
             }
+            #[cfg(unix)]
+            (LayerCache::Flash(_), _) => anyhow::bail!("expected complete Flash prefix payload"),
             (LayerCache::Full(_), _) => {
                 anyhow::bail!(
                     "restore_prefix_entry_for_row: layer {idx} expected FullDense, FullPaged, or FullTurboQuantPacked payload"
@@ -629,6 +649,17 @@ pub fn restore_prefix_entry_for_rows(
     for (idx, &row) in rows.iter().enumerate() {
         if rows[..idx].contains(&row) {
             anyhow::bail!("restore_prefix_entry_for_rows: duplicate row {row}");
+        }
+    }
+    #[cfg(unix)]
+    for (cache, layer) in caches.iter().zip(&entry.main_layers) {
+        if let LayerCache::Flash(cache) = cache {
+            let PrefixLayerPayload::Flash { tensors } = layer else {
+                anyhow::bail!("expected complete Flash prefix payload")
+            };
+            for &row in rows {
+                cache.validate_durable_prefix(tensors, row, cached_len)?;
+            }
         }
     }
     for (idx, (cache, layer)) in caches.iter_mut().zip(entry.main_layers.iter()).enumerate() {
@@ -687,9 +718,13 @@ pub fn restore_prefix_entry_for_rows(
                 }
             }
             #[cfg(unix)]
-            (LayerCache::Flash(_), _) => {
-                anyhow::bail!("Flash auxiliary state is not a legacy persistent prefix payload")
+            (LayerCache::Flash(cache), PrefixLayerPayload::Flash { tensors }) => {
+                for &row in rows {
+                    cache.restore_durable_prefix(tensors, row, cached_len)?;
+                }
             }
+            #[cfg(unix)]
+            (LayerCache::Flash(_), _) => anyhow::bail!("expected complete Flash prefix payload"),
             (LayerCache::Full(_), _) => {
                 anyhow::bail!(
                     "restore_prefix_entry_for_rows: layer {idx} expected FullDense, FullPaged, or FullTurboQuantPacked payload"

@@ -2650,6 +2650,11 @@ fn artifact_bits(artifact: &DFlash2PrefixArtifact) -> Vec<(Vec<i32>, Vec<u32>)> 
     let mut arrays = vec![&artifact.context_hidden, &artifact.last_hidden];
     for layer in &artifact.target_cache.main_layers {
         match layer {
+            PrefixLayerPayload::Flash { tensors } => arrays.extend(tensors),
+            PrefixLayerPayload::DFlash2 {
+                context_hidden,
+                last_hidden,
+            } => arrays.extend([context_hidden, last_hidden]),
             PrefixLayerPayload::FullDense { k, v }
             | PrefixLayerPayload::FullPaged {
                 k_pages: k,

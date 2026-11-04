@@ -526,12 +526,10 @@ impl Model for FlashTextModel {
             .into_iter()
             .enumerate()
             .map(|(index, rows)| {
-                Ok(LayerCache::Flash(FlashLayerCache::new(
-                    rows,
-                    Arc::clone(&self.instance),
-                    index,
-                    cap,
-                )?))
+                let mut cache = FlashLayerCache::new(rows, Arc::clone(&self.instance), index, cap)?;
+                cache.prefix_config = Some(Arc::new(self.config.clone()));
+                cache.prefix_contract = self.execution_cache_fingerprint();
+                Ok(LayerCache::Flash(cache))
             })
             .collect()
     }

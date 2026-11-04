@@ -2893,8 +2893,8 @@ async fn load_engine_variant(
                 model,
                 &flash_runtime,
                 estimate,
-                None,
-                None,
+                paged_prefix_cache,
+                prefix_lru_cache,
                 prompt_lookup,
                 vision_input,
             )

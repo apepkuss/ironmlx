@@ -12,6 +12,7 @@ public struct ModelDFlash2Runtime: Equatable, Sendable {
     public var draftBits: Int
     public var tensorBatchMaxWidth: Int?
     public var maxCacheCap: Int?
+    public var supportsDiskPrefixCache: Bool
 
     public init(
         targetModelID: String,
@@ -22,7 +23,8 @@ public struct ModelDFlash2Runtime: Equatable, Sendable {
         blockSize: Int,
         draftBits: Int,
         tensorBatchMaxWidth: Int? = nil,
-        maxCacheCap: Int? = nil
+        maxCacheCap: Int? = nil,
+        supportsDiskPrefixCache: Bool = false
     ) {
         self.targetModelID = targetModelID
         self.targetModelDir = targetModelDir
@@ -33,6 +35,7 @@ public struct ModelDFlash2Runtime: Equatable, Sendable {
         self.draftBits = draftBits
         self.tensorBatchMaxWidth = tensorBatchMaxWidth
         self.maxCacheCap = maxCacheCap
+        self.supportsDiskPrefixCache = supportsDiskPrefixCache
     }
 }
 
@@ -162,7 +165,8 @@ public enum ModelDFlash2RuntimeResolver {
                 scanner: scanner,
                 parameterStore: parameterStore,
                 activeKvOffloadEnabled: false
-            )
+            ),
+            supportsDiskPrefixCache: info?.targetFamily == "qwen38_flash_next"
         )
     }
 

@@ -132,8 +132,9 @@ M5 tensor-unit affine4 投影与专家 kernel、tiled 预填充 GEMM、符合条
 已验证的组合为 `mlx-community/Qwen3.8-Flash-Next-4bit`（affine 4-bit、group 32）
 与 `incoai/Qwen3.8-Flash-Next-DFlash2`（BF16）。支持文本、图片和并发请求。
 Flash 的草稿精度必须为 `0`（本系列默认值），block size 为 2–8，使用线性验证
-与有状态采样。暂不启用平面树、位置键控采样、MTP、Prompt Lookup、TurboQuant KV
-及持久化前缀缓存。草稿与主模型的 RoPE theta 按作者设计不同；兼容性按该组合的
+与有状态采样。暂不启用平面树、位置键控采样、MTP、Prompt Lookup、TurboQuant KV。
+支持完整 Flash 前缀持久化，同时保存 DFlash2 所需的隐藏状态尾部与最后隐藏状态。
+草稿与主模型的 RoPE theta 按作者设计不同；兼容性按该组合的
 捕获层和尺寸合同检查。
 
 完整权重约 112 GB，PLE 始终按需从 SSD 读取。加载前规划并发、上下文、视觉塔、
@@ -239,18 +240,23 @@ HTTP transport、严格字段校验、错误 envelope 与断连语义见
 - MTP；
 - Prompt Lookup；
 - KV quantization；
-- paged/persistent prefix cache；
+- 除 Flash-Next 之外的 target 的 paged/persistent prefix cache；
 - active KV offload；
 - Scheduler profile 与 Scheduler autotune report。
 
-独立路径可使用自己的内存前缀缓存。
+独立路径可使用自己的内存前缀缓存。Flash-Next 还可通过
+`--paged-prefix-cache-dir` 和 `--ssd-prefix-cache-max-gb` 保存完整前缀；App 沿用已有缓存
+开关与容量设置。首次请求包含预填充边界的同步写盘成本。该功能复用已经计算完成的
+前缀，不换出运行中的请求状态，也不增加可用的运行中上下文内存容量。
 
 这些限制用于保持 DFlash2 路径的 cache 所有权、数值正确性与性能资格独立，不会静默
 回退到其他 speculative 路径。
 
 ## `/healthz`
 
-`GET /healthz` 的 `dflash2` 对象公开配置与累计指标。以下数值仅用于展示字段形状：
+`GET /healthz` 的 `dflash2` 对象公开配置与累计指标。前缀条目数、字节数和淘汰数仍指
+热内存中的 artifact；逻辑命中、未命中、保存操作及复用 token 计数也可包含 Flash 的
+磁盘记录，不代表物理 SSD 操作次数。以下数值仅用于展示字段形状：
 
 ```json
 {

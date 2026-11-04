@@ -17,6 +17,7 @@ use crate::Result;
 
 const SCHEMA_VERSION: u32 = 7;
 const META_FILE: &str = "meta.json";
+const CHECKSUM_FILE: &str = "payload.sha256";
 const PAYLOAD_FILE: &str = "payload.safetensors";
 
 use ironmlx_lm::core::cache::prefix_payload::*;
@@ -829,6 +830,12 @@ pub fn shutdown_process_async_prefix_store_queue() {
 }
 
 impl PrefixLruCache {
+    pub fn invalidate(&mut self, spec: &PagedPrefixKeySpec) {
+        if let Some(entry) = self.entries.remove(&PagedPrefixStore::key_for(spec)) {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.stats.payload_bytes);
+        }
+    }
+
     pub fn new(config: PrefixLruCacheConfig) -> Result<Self> {
         config.validate()?;
         Ok(Self {
@@ -1065,6 +1072,19 @@ struct PrefixMetadata {
 }
 
 impl PagedPrefixStore {
+    pub fn invalidate(&self, spec: &PagedPrefixKeySpec) -> Result<()> {
+        if !self.root.is_dir() {
+            return Ok(());
+        }
+        let _writer = PrefixWriterLock::acquire(&self.root)?;
+        let path = self.root.join(Self::key_for(spec));
+        match fs::remove_dir_all(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
@@ -1083,7 +1103,16 @@ impl PagedPrefixStore {
     }
 
     pub fn key_for(spec: &PagedPrefixKeySpec) -> String {
-        Self::key_for_policy(spec, ironmlx_core::ane::dense_execution_fingerprint())
+        let policy = if spec
+            .main_layers
+            .iter()
+            .any(|layer| layer.kind == PrefixLayerKind::Flash)
+        {
+            None // Flash has no ANE execution path.
+        } else {
+            ironmlx_core::ane::dense_execution_fingerprint()
+        };
+        Self::key_for_policy(spec, policy)
     }
     fn key_for_policy(spec: &PagedPrefixKeySpec, execution_policy: Option<String>) -> String {
         let material = KeyMaterial {
@@ -1106,7 +1135,16 @@ impl PagedPrefixStore {
         };
         let json = serde_json::to_string(&material)
             .expect("PagedPrefixStore::key_for serializes fixed metadata");
-        stable_hex_hash(&json)
+        if spec
+            .main_layers
+            .iter()
+            .any(|layer| layer.kind == PrefixLayerKind::Flash)
+        {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(json.as_bytes()))
+        } else {
+            stable_hex_hash(&json)
+        }
     }
 
     pub fn save(&self, spec: &PagedPrefixKeySpec, entry: &PagedPrefixEntry) -> Result<String> {
@@ -1130,6 +1168,17 @@ impl PagedPrefixStore {
             .join(format!(".tmp-{key}-{}", uuid::Uuid::new_v4().simple()));
         fs::create_dir_all(&self.root)
             .with_context(|| format!("create prefix cache root {}", self.root.display()))?;
+        let _writer = PrefixWriterLock::acquire(&self.root)?;
+        // The exclusive writer lock makes remnants from a crashed writer safe
+        // to reap, without deleting another process's in-progress transaction.
+        for entry in fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir()
+                && entry.file_name().to_string_lossy().starts_with(".tmp-")
+            {
+                fs::remove_dir_all(entry.path())?;
+            }
+        }
         fs::create_dir_all(&tmp_dir)
             .with_context(|| format!("create temporary prefix cache dir {}", tmp_dir.display()))?;
 
@@ -1152,6 +1201,31 @@ impl PagedPrefixStore {
             let payload_path = payload_path.to_string_lossy().into_owned();
             mlx::io::save_safetensors(&payload_path, &tensors, &safetensors_meta)
                 .with_context(|| format!("save prefix cache payload {payload_path}"))?;
+            if spec
+                .main_layers
+                .iter()
+                .any(|layer| layer.kind == PrefixLayerKind::Flash)
+            {
+                fs::write(
+                    tmp_dir.join(CHECKSUM_FILE),
+                    payload_digest(Path::new(&payload_path))?,
+                )?;
+                for name in [META_FILE, PAYLOAD_FILE, CHECKSUM_FILE] {
+                    fs::File::open(tmp_dir.join(name))?.sync_all()?;
+                }
+                if let Some(limit) = self.max_bytes {
+                    let bytes = fs::read_dir(&tmp_dir)?.try_fold(
+                        0u64,
+                        |sum, entry| -> std::io::Result<_> {
+                            Ok(sum.saturating_add(entry?.metadata()?.len()))
+                        },
+                    )?;
+                    anyhow::ensure!(
+                        bytes <= limit as u64,
+                        "Flash prefix entry including metadata exceeds disk quota"
+                    );
+                }
+            }
             Ok(())
         })();
 
@@ -1171,6 +1245,8 @@ impl PagedPrefixStore {
                 final_dir.display()
             )
         })?;
+        #[cfg(unix)]
+        fs::File::open(&self.root)?.sync_all()?;
         if let Some(max_bytes) = self.max_bytes {
             self.evict_to_disk_capacity(&key, max_bytes)?;
         }
@@ -1186,7 +1262,20 @@ impl PagedPrefixStore {
         self.validate_entry(spec, entry)?;
 
         let key = Self::key_for(spec);
-        if self.entry_metadata_matches(spec, &key)? {
+        let intact = if spec
+            .main_layers
+            .iter()
+            .any(|layer| layer.kind == PrefixLayerKind::Flash)
+        {
+            let path = self.root.join(&key);
+            fs::read_to_string(path.join(CHECKSUM_FILE))
+                .ok()
+                .zip(payload_digest(&path.join(PAYLOAD_FILE)).ok())
+                .is_some_and(|(expected, actual)| expected == actual)
+        } else {
+            true
+        };
+        if intact && self.entry_metadata_matches(spec, &key)? {
             return Ok((key, false));
         }
         self.save(spec, entry).map(|key| (key, true))
@@ -1227,6 +1316,9 @@ impl PagedPrefixStore {
             let entry =
                 entry.with_context(|| format!("read prefix cache root {}", self.root.display()))?;
             let entry_path = entry.path();
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
             let file_type = entry.file_type().with_context(|| {
                 format!("read prefix cache entry type {}", entry_path.display())
             })?;
@@ -1319,6 +1411,22 @@ impl PagedPrefixStore {
         }
 
         let payload_path = entry_dir.join(PAYLOAD_FILE);
+        if spec
+            .main_layers
+            .iter()
+            .any(|layer| layer.kind == PrefixLayerKind::Flash)
+            && !fs::read_to_string(entry_dir.join(CHECKSUM_FILE))
+                .ok()
+                .zip(payload_digest(&payload_path).ok())
+                .is_some_and(|(expected, actual)| expected == actual)
+        {
+            return Ok(PagedPrefixLoadResult {
+                key,
+                status: PagedPrefixLoadStatus::PayloadInvalid,
+                entry: None,
+                stats: None,
+            });
+        }
         let payload_path_string = payload_path.to_string_lossy().into_owned();
         let (mut tensors, _metadata) = match mlx::io::load_safetensors(&payload_path_string) {
             Ok(loaded) => loaded,
@@ -1359,6 +1467,8 @@ impl PagedPrefixStore {
             });
         }
         let stats = entry.observability_stats(spec.cached_len);
+        // Recency is advisory: an unwritable cache must still be usable.
+        let _ = fs::write(entry_dir.join(".access"), []);
         Ok(PagedPrefixLoadResult {
             key,
             status: PagedPrefixLoadStatus::Hit,
@@ -1446,7 +1556,10 @@ impl PagedPrefixStore {
             let metadata = entry
                 .metadata()
                 .with_context(|| format!("read prefix cache metadata {}", path.display()))?;
-            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+            let modified = fs::metadata(path.join(".access"))
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or_else(|| metadata.modified().unwrap_or(UNIX_EPOCH));
             let bytes = directory_disk_bytes(&path)?;
             result.push(PrefixDiskEntry {
                 key,
@@ -1648,6 +1761,25 @@ fn validate_layer_spec(
         validate_tensor_spec(&format!("layer {idx} tensor {tensor_idx}"), tensor)?;
     }
     match spec.kind {
+        PrefixLayerKind::DFlash2 => {
+            require_tensor_count(idx, spec, 2)?;
+            for tensor in &spec.tensors {
+                anyhow::ensure!(
+                    tensor.shape.len() == 3 && tensor.shape[0] == 1,
+                    "invalid DFlash2 prefix context layout"
+                );
+            }
+        }
+        PrefixLayerKind::Flash => {
+            anyhow::ensure!(
+                (5..=6).contains(&spec.tensors.len()),
+                "invalid Flash tensor count"
+            );
+            anyhow::ensure!(
+                spec.tensors[0].dtype == Dtype::Int32 && spec.tensors[0].shape == [6],
+                "invalid Flash metadata layout"
+            );
+        }
         PrefixLayerKind::FullDense => {
             require_tensor_count(idx, spec, 2)?;
             for (name, tensor) in ["K", "V"].iter().zip(spec.tensors.iter()) {
@@ -1767,6 +1899,25 @@ fn validate_layer_payload(
     payload: &PrefixLayerPayload,
 ) -> Result<()> {
     match (spec.kind, payload) {
+        (PrefixLayerKind::Flash, PrefixLayerPayload::Flash { tensors }) => {
+            anyhow::ensure!(
+                tensors.len() == spec.tensors.len(),
+                "Flash tensor count mismatch"
+            );
+            for (i, (expected, tensor)) in spec.tensors.iter().zip(tensors).enumerate() {
+                validate_tensor_payload(&format!("layer {idx} Flash {i}"), expected, tensor)?;
+            }
+        }
+        (
+            PrefixLayerKind::DFlash2,
+            PrefixLayerPayload::DFlash2 {
+                context_hidden,
+                last_hidden,
+            },
+        ) => {
+            validate_tensor_payload("DFlash2 context", &spec.tensors[0], context_hidden)?;
+            validate_tensor_payload("DFlash2 final hidden", &spec.tensors[1], last_hidden)?;
+        }
         (PrefixLayerKind::FullDense, PrefixLayerPayload::FullDense { k, v }) => {
             validate_tensor_payload(&format!("layer {idx} dense K"), &spec.tensors[0], k)?;
             validate_tensor_payload(&format!("layer {idx} dense V"), &spec.tensors[1], v)?;
@@ -1914,6 +2065,21 @@ fn tensor_metadata(spec: &PrefixTensorSpec) -> TensorSpecMetadata {
 fn insert_entry_tensors(entry: &PagedPrefixEntry, tensors: &mut HashMap<String, Array>) {
     for (idx, layer) in entry.main_layers.iter().enumerate() {
         match layer {
+            PrefixLayerPayload::DFlash2 {
+                context_hidden,
+                last_hidden,
+            } => {
+                tensors.insert(
+                    format!("main_{idx:04}_dflash2_context"),
+                    context_hidden.clone(),
+                );
+                tensors.insert(format!("main_{idx:04}_dflash2_last"), last_hidden.clone());
+            }
+            PrefixLayerPayload::Flash { tensors: arrays } => {
+                for (i, tensor) in arrays.iter().enumerate() {
+                    tensors.insert(format!("main_{idx:04}_flash_{i}"), tensor.clone());
+                }
+            }
             PrefixLayerPayload::FullDense { k, v } => {
                 tensors.insert(main_dense_k_name(idx), k.clone());
                 tensors.insert(main_dense_v_name(idx), v.clone());
@@ -1965,6 +2131,15 @@ fn entry_from_tensors(
     let mut main_layers = Vec::with_capacity(spec.main_layers.len());
     for (idx, layer_spec) in spec.main_layers.iter().enumerate() {
         let layer = match layer_spec.kind {
+            PrefixLayerKind::DFlash2 => PrefixLayerPayload::DFlash2 {
+                context_hidden: take_tensor(tensors, format!("main_{idx:04}_dflash2_context"))?,
+                last_hidden: take_tensor(tensors, format!("main_{idx:04}_dflash2_last"))?,
+            },
+            PrefixLayerKind::Flash => PrefixLayerPayload::Flash {
+                tensors: (0..layer_spec.tensors.len())
+                    .map(|i| take_tensor(tensors, format!("main_{idx:04}_flash_{i}")))
+                    .collect::<Result<_>>()?,
+            },
             PrefixLayerKind::FullDense => PrefixLayerPayload::FullDense {
                 k: take_tensor(tensors, main_dense_k_name(idx))?,
                 v: take_tensor(tensors, main_dense_v_name(idx))?,
@@ -3139,5 +3314,180 @@ mod tests {
 
         assert!(loaded.is_none(), "tampered metadata must miss");
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+fn payload_digest(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+struct PrefixWriterLock(fs::File);
+impl PrefixWriterLock {
+    fn acquire(root: &Path) -> Result<Self> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join(".writer.lock"))?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            anyhow::ensure!(
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0,
+                "prefix writer lock: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        Ok(Self(file))
+    }
+}
+impl Drop for PrefixWriterLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            unsafe {
+                libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod flash_durable_tests {
+    use super::*;
+    fn fixture(root: &Path) -> (PagedPrefixStore, PagedPrefixKeySpec, PagedPrefixEntry) {
+        let tensors = vec![
+            Array::try_from(([1, 0, 0, 1, 0, 0].as_slice(), [6])).unwrap(),
+            Array::zeros([1, 3, 8], Dtype::Bfloat16).unwrap(),
+            Array::zeros([1, 1, 2, 32], Dtype::Float32).unwrap(),
+            Array::zeros([1], Dtype::Uint32).unwrap(),
+            Array::zeros([1], Dtype::Bfloat16).unwrap(),
+        ];
+        let entry = PagedPrefixEntry {
+            main_layers: vec![PrefixLayerPayload::Flash { tensors }],
+            ..Default::default()
+        };
+        let spec = PagedPrefixKeySpec {
+            entry_kind: PrefixEntryKind::WholePrefix,
+            model_id: "flash-test-artifact".into(),
+            token_ids: vec![1],
+            cached_len: 1,
+            fingerprint: Some("flash-text-v1".into()),
+            block_size: 128,
+            kv_cache_profile: Some("weights-v1;affine4g32".into()),
+            main_layers: entry.main_layer_specs(),
+            mtp_layers: vec![],
+            mtp_last_hidden: None,
+            gemma4_drafter_last_hidden: None,
+        };
+        (
+            PagedPrefixStore::new(root).with_max_bytes(1024 * 1024),
+            spec,
+            entry,
+        )
+    }
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn flash_durable_checksum_detects_bitrot_and_recompute_repairs_it() {
+        let root = std::env::temp_dir().join(format!("flash-durable-{}", uuid::Uuid::new_v4()));
+        let (store, spec, entry) = fixture(&root);
+        let key = store.save(&spec, &entry).unwrap();
+        assert_eq!(
+            store.load_observed(&spec).unwrap().status,
+            PagedPrefixLoadStatus::Hit
+        );
+        let path = root.join(&key).join(PAYLOAD_FILE);
+        let mut bytes = fs::read(&path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            store.load_observed(&spec).unwrap().status,
+            PagedPrefixLoadStatus::PayloadInvalid
+        );
+        assert!(store.save_if_absent(&spec, &entry).unwrap().1);
+        assert_eq!(
+            store.load_observed(&spec).unwrap().status,
+            PagedPrefixLoadStatus::Hit
+        );
+        let mut foreign = spec.clone();
+        foreign.kv_cache_profile = Some("weights-v2".into());
+        assert_ne!(
+            PagedPrefixStore::key_for(&spec),
+            PagedPrefixStore::key_for(&foreign)
+        );
+        assert!(store.load(&foreign).unwrap().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn flash_disk_lru_retains_reused_record_and_evicts_older_record() {
+        let root = std::env::temp_dir().join(format!("flash-lru-{}", uuid::Uuid::new_v4()));
+        let (store, first, entry) = fixture(&root);
+        let first_key = store.save(&first, &entry).unwrap();
+        let bytes = directory_disk_bytes(&root.join(&first_key)).unwrap() as usize;
+        let store = PagedPrefixStore::new(&root).with_max_bytes(bytes * 2 + 128);
+        let mut second = first.clone();
+        second.token_ids = vec![2];
+        let second_key = store.save(&second, &entry).unwrap();
+        // Force a deterministic old recency independent of filesystem clock
+        // granularity, then verify that loading first refreshes its recency.
+        for (age, key) in [&first_key, &second_key].into_iter().enumerate() {
+            let path = root.join(key).join(".access");
+            fs::write(&path, []).unwrap();
+            fs::File::open(path)
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new()
+                        .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(age as u64)),
+                )
+                .unwrap();
+        }
+        assert!(store.load(&first).unwrap().is_some());
+        let mut third = first.clone();
+        third.token_ids = vec![3];
+        let third_key = store.save(&third, &entry).unwrap();
+        assert!(root.join(first_key).is_dir());
+        assert!(!root.join(second_key).exists());
+        assert!(root.join(third_key).is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn flash_quota_counts_headers_and_crashed_writes_are_invisible_and_reaped() {
+        let root = std::env::temp_dir().join(format!("flash-quota-{}", uuid::Uuid::new_v4()));
+        let (store, spec, entry) = fixture(&root);
+        let stale = root.join(".tmp-crashed-writer");
+        fs::create_dir_all(&stale).unwrap();
+        fs::write(
+            stale.join(META_FILE),
+            serde_json::to_vec(&metadata_for(&spec, &PagedPrefixStore::key_for(&spec)).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(store.cached_lengths_descending(10).unwrap().is_empty());
+        let tiny = PagedPrefixStore::new(&root).with_max_bytes(spec.payload_bytes());
+        assert!(tiny.save(&spec, &entry).is_err());
+        assert!(!stale.exists());
+        assert!(store.load(&spec).unwrap().is_none());
+        assert!(store.cached_lengths_descending(10).unwrap().is_empty());
+        store.save(&spec, &entry).unwrap();
+        assert_eq!(store.cached_lengths_descending(10).unwrap(), [1]);
+        fs::remove_dir_all(root).unwrap();
     }
 }

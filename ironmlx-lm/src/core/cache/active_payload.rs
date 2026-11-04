@@ -81,7 +81,7 @@ impl<'a> ActiveKvEntryChunkReader<'a> {
             .main_layers
             .iter()
             .enumerate()
-            .map(main_layer_chunk)
+            .filter_map(main_layer_chunk)
             .chain(
                 self.entry
                     .mtp_layers
@@ -94,8 +94,10 @@ impl<'a> ActiveKvEntryChunkReader<'a> {
 
 fn main_layer_chunk<'a>(
     (layer_index, layer): (usize, &'a PrefixLayerPayload),
-) -> ActiveKvLayerChunk<'a> {
-    match layer {
+) -> Option<ActiveKvLayerChunk<'a>> {
+    Some(match layer {
+        // Flash prefix artifacts do not qualify for active KV offload.
+        PrefixLayerPayload::Flash { .. } | PrefixLayerPayload::DFlash2 { .. } => return None,
         PrefixLayerPayload::FullDense { k, v } => ActiveKvLayerChunk {
             layer_index,
             is_main_layer: true,
@@ -142,7 +144,7 @@ fn main_layer_chunk<'a>(
             kind: ActiveKvLayerChunkKind::Mla,
             payload: ActiveKvLayerChunkPayload::Mla { c_kv, k_pe },
         },
-    }
+    })
 }
 
 fn mtp_layer_chunk<'a>(
