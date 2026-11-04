@@ -289,7 +289,9 @@ pub struct ServeArgs {
 
     /// Enable paged SSD prefix cache under this directory. Without --kv-quant,
     /// this also switches full-attention KV caches to paged storage and decode
-    /// to the paged attention kernel when supported. With TurboQuant, runtime
+    /// to the paged attention kernel when supported. Flash persists its complete
+    /// prefix state in ordinary and DFlash2 inference; active KV stays in RAM.
+    /// With TurboQuant, runtime
     /// K/V stays quantized while prefix cache entries are persisted as packed
     /// TurboQuant tensors. When passed without a value, defaults to
     /// <data-root>/cache/paged_prefix_cache (~/.ironmlx/cache/paged_prefix_cache).
@@ -1475,15 +1477,8 @@ where
     }
 
     let model_id = single_model_id(args)?;
-    let (prefix_cache, prefix_cache_disk) =
-        if family == super::dflash2_target::DFlash2TargetFamily::Qwen38FlashNext {
-            (None, None)
-        } else {
-            (
-                resolve_dflash2_prefix_lru_cache_config(args)?,
-                resolve_dflash2_prefix_disk_config(args)?,
-            )
-        };
+    let prefix_cache = resolve_dflash2_prefix_lru_cache_config(args)?;
+    let prefix_cache_disk = resolve_dflash2_prefix_disk_config(args)?;
     let (tensor_batch_requested_max_width, tensor_batch_max_width) =
         resolve_dflash2_tensor_batch_width(
             args,
@@ -2102,10 +2097,13 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
             );
             static_memory_estimate.allocated.vision = false;
             drop(loader);
+            // Flash pages its own history; the generic active-KV offload does not apply.
+            let mut flash_args = args.clone();
+            flash_args.active_kv_offload = false;
             serve_with_model(
                 model,
                 tokenizer,
-                &args,
+                &flash_args,
                 scheduler_config,
                 scheduler_runtime_profile,
                 vision_input,

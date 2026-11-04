@@ -114,7 +114,7 @@ impl DenseVlMethods for FlashTextModel {
         target: StreamOrDevice,
     ) -> Result<Array> {
         self.estimate_vision_prefill_tensor_bytes(pixels, grids)?;
-        self.vision.load_deferred()?;
+        self.vision.load_deferred(&|_| {})?;
         let tower = self
             .vision
             .get()

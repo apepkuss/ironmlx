@@ -92,9 +92,11 @@ group 32) with `incoai/Qwen3.8-Flash-Next-DFlash2` (BF16). It supports text
 and image requests, including concurrent requests. Flash requires draft bits
 `0` (the automatic default for this family), block widths 2–8, linear
 verification and the stateful sampler. Flat trees, position-keyed sampling,
-MTP, Prompt Lookup, TurboQuant KV and persistent prefix payloads are not
+MTP, Prompt Lookup and TurboQuant KV are not
 qualified. The author draft's RoPE theta differs from the target by design;
 the pair is checked against its exact capture-layer and geometry contract.
+Flash also supports complete durable prefix artifacts, including the drafter's
+context tail and final target hidden state (see the storage constraints below).
 
 The complete checkpoint is about 112 GB. Its PLE rows always stay on SSD.
 Before loading, IronMLX reserves the configured concurrency/context envelope,
@@ -188,11 +190,11 @@ in-memory budget; optionally add `--paged-prefix-cache-dir` to persist compatibl
 entries in a separate DFlash2 store across restarts. The directory requires an
 explicit memory budget and does not enable paged attention. Use
 `--ssd-prefix-cache-max-gb` to bound the disk store. The memory cache can shrink
-under pressure and to admit requests. See the [0.5.0 changes](release-notes/0.5.0.md).
+under pressure and to admit requests. Flash-Next entries hold each layer's complete state, so they share no K/V with each other. See the [0.5.0 changes](release-notes/0.5.0.md).
 
 ## Health metrics
 
-`GET /healthz` exposes a `dflash2` object with configuration and accumulated metrics. These numbers illustrate field shapes, not performance guarantees:
+`GET /healthz` exposes a `dflash2` object with configuration and accumulated metrics. Prefix entry/byte/eviction counts describe the hot-memory artifact cache; logical prefix hits/misses/saves and reused-token counters can also include Flash disk records. They are not physical SSD operation counts. These numbers illustrate field shapes, not performance guarantees:
 
 ```json
 {

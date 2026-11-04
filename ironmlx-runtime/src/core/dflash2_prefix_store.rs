@@ -1256,6 +1256,11 @@ fn state_arrays(payload: &PrefixLayerPayload) -> Result<(&'static str, Vec<&Arra
             recurrent_state,
         } => Ok(("linear", vec![conv_state, recurrent_state])),
         PrefixLayerPayload::Mla { c_kv, k_pe } => Ok(("mla", vec![c_kv, k_pe])),
+        PrefixLayerPayload::Flash { tensors } => match tensors.len() {
+            FLASH_STATE_SLOTS_SHORT => Ok((FLASH_STATE_SHORT, tensors.iter().collect())),
+            FLASH_STATE_SLOTS_LONG => Ok((FLASH_STATE_LONG, tensors.iter().collect())),
+            count => Err(anyhow!("Flash prefix state with {count} tensors")),
+        },
         _ => Err(anyhow!(
             "DFlash2 prefix store cannot hold this layer's state"
         )),
@@ -1265,9 +1270,18 @@ fn state_arrays(payload: &PrefixLayerPayload) -> Result<(&'static str, Vec<&Arra
 fn state_slots(kind: &str) -> Result<usize> {
     match kind {
         "linear" | "mla" => Ok(2),
+        FLASH_STATE_SHORT => Ok(FLASH_STATE_SLOTS_SHORT),
+        FLASH_STATE_LONG => Ok(FLASH_STATE_SLOTS_LONG),
         _ => Err(anyhow!("unknown stored state layer kind {kind}")),
     }
 }
+
+/// Flash keeps a layer's whole state: metadata, K/V and recurrent state, with
+/// an optional sixth tensor (see `qwen4_exp::prefix`).
+const FLASH_STATE_SHORT: &str = "flash5";
+const FLASH_STATE_LONG: &str = "flash6";
+const FLASH_STATE_SLOTS_SHORT: usize = 5;
+const FLASH_STATE_SLOTS_LONG: usize = 6;
 
 fn state_payload(kind: &str, mut arrays: Vec<Array>) -> Result<PrefixLayerPayload> {
     let second = arrays.pop();
@@ -1278,6 +1292,10 @@ fn state_payload(kind: &str, mut arrays: Vec<Array>) -> Result<PrefixLayerPayloa
             recurrent_state,
         }),
         ("mla", Some(c_kv), Some(k_pe)) => Ok(PrefixLayerPayload::Mla { c_kv, k_pe }),
+        (FLASH_STATE_SHORT | FLASH_STATE_LONG, Some(first), Some(second)) => {
+            arrays.extend([first, second]);
+            Ok(PrefixLayerPayload::Flash { tensors: arrays })
+        }
         _ => Err(anyhow!("unknown stored state layer kind {kind}")),
     }
 }
@@ -1661,6 +1679,53 @@ pub(crate) mod tests {
         assert_eq!(values(conv_state), vec![40.0, 41.0]);
         assert_eq!(values(recurrent_state), vec![42.0; 3]);
         assert_eq!(store.snapshot().hits, 1);
+        fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn disk_store_round_trips_flash_state_layers() {
+        let dir = temp_root("dflash2-store-flash-state");
+        let flash = |count: usize, seed: f32| -> PrefixLayerPayload {
+            let tensors = (0..count)
+                .map(|slot| {
+                    let value = seed + slot as f32;
+                    ([value, value + 0.5].as_slice(), (1_i32, 2_i32))
+                        .try_into()
+                        .expect("flash tensor")
+                })
+                .collect();
+            PrefixLayerPayload::Flash { tensors }
+        };
+        let tokens: Vec<u32> = (0..40).collect();
+        let key = {
+            let mut store = DFlash2DiskStore::open(&dir, &test_identity(), None).expect("open");
+            let mut save = test_save(&store, &tokens, false);
+            // Flash layers hold their whole state; both stored shapes occur.
+            save.layers = vec![
+                DFlash2DiskLayer::Dense,
+                DFlash2DiskLayer::State(flash(5, 10.0)),
+                DFlash2DiskLayer::State(flash(6, 20.0)),
+                DFlash2DiskLayer::Dense,
+            ];
+            store.save(&save).expect("save");
+            artifact_key(&tokens, "runtime")
+        };
+        let mut store = DFlash2DiskStore::open(&dir, &test_identity(), None).expect("reopen");
+        let loaded = load(&mut store, &key);
+        for (index, (count, seed)) in [(1, (5, 10.0)), (2, (6, 20.0))] {
+            let DFlash2DiskLayer::State(PrefixLayerPayload::Flash { tensors }) =
+                &loaded.layers[index]
+            else {
+                panic!("Flash state layer {index}");
+            };
+            assert_eq!(tensors.len(), count);
+            for (slot, tensor) in tensors.iter().enumerate() {
+                let value = seed + slot as f32;
+                assert_eq!(values(tensor), vec![value, value + 0.5]);
+            }
+        }
+        assert!(state_arrays(&flash(4, 0.0)).is_err());
         fs::remove_dir_all(dir).expect("cleanup");
     }
 

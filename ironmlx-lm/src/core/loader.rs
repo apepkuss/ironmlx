@@ -349,7 +349,10 @@ impl SanitizeMode {
     fn weight_component(self) -> WeightComponent {
         match self {
             Self::Mtp | Self::Gemma4Drafter | Self::DFlash2Draft => WeightComponent::Draft,
-            Self::Text { .. } | Self::VisionOnly | Self::Embedding { .. } => WeightComponent::Main,
+            Self::Text { .. }
+            | Self::VisionOnly
+            | Self::Embedding { .. }
+            | Self::FlashText { .. } => WeightComponent::Main,
         }
     }
 }
@@ -384,6 +387,7 @@ impl Loader {
                 resident_budget_bytes,
                 paged_experts: false,
             },
+            &LoadObserver::noop(),
         )
     }
 
@@ -395,6 +399,7 @@ impl Loader {
                 resident_budget_bytes,
                 paged_experts: true,
             },
+            &LoadObserver::noop(),
         )
     }
     /// Open a directory containing `config.json`, `tokenizer_config.json`,

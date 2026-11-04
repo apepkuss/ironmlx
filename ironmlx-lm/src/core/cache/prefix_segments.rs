@@ -89,6 +89,8 @@ fn layer_kind_name(kind: crate::core::cache::prefix_payload::PrefixLayerKind) ->
         PrefixLayerKind::FullTurboQuantPacked => "full_turboquant_packed",
         PrefixLayerKind::Linear => "linear",
         PrefixLayerKind::Mla => "mla",
+        PrefixLayerKind::DFlash2 => "dflash2",
+        PrefixLayerKind::Flash => "flash",
     }
 }
 

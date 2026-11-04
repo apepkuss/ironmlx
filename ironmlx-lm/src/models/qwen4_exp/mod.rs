@@ -22,6 +22,8 @@ pub mod ple;
 pub mod ple_index;
 #[cfg(unix)]
 pub mod ple_rows;
+#[cfg(unix)]
+mod prefix;
 mod qsa_kernel;
 #[cfg(unix)]
 pub mod text_model;

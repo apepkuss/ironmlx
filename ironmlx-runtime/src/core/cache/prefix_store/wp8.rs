@@ -12,6 +12,11 @@
 //! it by id, possibly only its head. Writing an entry writes the segment
 //! files that are not on disk yet, then the entry directory (temporary
 //! directory + rename). The immutable block pool keeps `<root>/<key>/`.
+//!
+//! An entry holding Flash state also writes `payload.sha256`, the digest of
+//! `private.safetensors`, and syncs its files before it is installed: a
+//! corrupt Flash state would decode wrongly instead of failing. A load whose
+//! digest does not match removes the entry and misses.
 
 use std::collections::HashSet;
 
@@ -26,6 +31,8 @@ const PRIVATE_FILE: &str = "private.safetensors";
 /// longer one covers.
 const TOKENS_FILE: &str = "tokens.bin";
 const TMP_PREFIX: &str = ".tmp-";
+/// Touched when a Flash entry is read, so disk eviction keeps a reused entry.
+const ACCESS_FILE: &str = ".access";
 const SAFETENSORS_EXT: &str = ".safetensors";
 
 pub(super) fn wp8_layout_dir(root: &Path, layout: &PrefixSegmentLayout) -> PathBuf {
@@ -141,7 +148,6 @@ pub(super) struct Wp8DiskEntry {
 }
 
 impl PagedPrefixStore {
-    #[cfg(test)]
     pub(crate) fn wp8_entry_dir(&self, spec: &PagedPrefixKeySpec) -> PathBuf {
         wp8_layout_dir(&self.root, &prefix_segment_layout(spec))
             .join(WP8_ENTRIES_DIR)
@@ -273,6 +279,22 @@ impl PagedPrefixStore {
             let private_path = tmp_dir.join(PRIVATE_FILE).to_string_lossy().into_owned();
             mlx::io::save_safetensors(&private_path, &tensors, &file_meta)
                 .with_context(|| format!("save prefix cache private payload {private_path}"))?;
+            if spec_holds_flash(spec) {
+                fs::write(
+                    tmp_dir.join(CHECKSUM_FILE),
+                    payload_digest(Path::new(&private_path))?,
+                )?;
+                for name in [META_FILE, TOKENS_FILE, PRIVATE_FILE, CHECKSUM_FILE] {
+                    fs::File::open(tmp_dir.join(name))?.sync_all()?;
+                }
+                // The quota counts the whole entry, headers and metadata included.
+                if let Some(limit) = self.max_bytes {
+                    anyhow::ensure!(
+                        directory_disk_bytes(&tmp_dir)? <= limit as u64,
+                        "Flash prefix entry including metadata exceeds disk quota"
+                    );
+                }
+            }
             Ok(())
         })();
         if let Err(err) = write_result {
@@ -290,6 +312,10 @@ impl PagedPrefixStore {
                 final_dir.display()
             )
         })?;
+        #[cfg(unix)]
+        if spec_holds_flash(spec) {
+            fs::File::open(&entries_dir)?.sync_all()?;
+        }
         if let Some(max_bytes) = self.max_bytes {
             self.evict_to_disk_capacity(&key, max_bytes)?;
         }
@@ -348,6 +374,13 @@ impl PagedPrefixStore {
             ));
         }
 
+        if spec_holds_flash(spec) && !private_digest_matches(&entry_dir) {
+            remove_path(&entry_dir);
+            return Ok(PagedPrefixSegmentedLoadResult::miss(
+                key,
+                PagedPrefixLoadStatus::PayloadInvalid,
+            ));
+        }
         let private_path = entry_dir.join(PRIVATE_FILE).to_string_lossy().into_owned();
         let Ok((mut tensors, _)) = mlx::io::load_safetensors(&private_path) else {
             return Ok(PagedPrefixSegmentedLoadResult::miss(
@@ -430,6 +463,10 @@ impl PagedPrefixStore {
             ));
         };
         let stats = materialized.observability_stats(spec.cached_len);
+        if spec_holds_flash(spec) {
+            // Recency is advisory: an unwritable cache must still be usable.
+            let _ = fs::write(entry_dir.join(ACCESS_FILE), []);
+        }
         Ok(PagedPrefixSegmentedLoadResult {
             key,
             status: PagedPrefixLoadStatus::Hit,
@@ -516,9 +553,9 @@ impl PagedPrefixStore {
                 if is_tmp(&key) || !path.is_dir() {
                     continue;
                 }
-                let modified = item
-                    .metadata()
+                let modified = fs::metadata(path.join(ACCESS_FILE))
                     .and_then(|m| m.modified())
+                    .or_else(|_| item.metadata().and_then(|m| m.modified()))
                     .unwrap_or(UNIX_EPOCH);
                 result.push((
                     PrefixDiskEntry {
@@ -714,4 +751,17 @@ impl AsyncPrefixStorePermit {
         let queue = self.queue.clone();
         queue.submit_permit(&mut self, AsyncPrefixStorePayload::Segmented(entry))
     }
+}
+
+fn spec_holds_flash(spec: &PagedPrefixKeySpec) -> bool {
+    spec.main_layers
+        .iter()
+        .any(|layer| layer.kind == PrefixLayerKind::Flash)
+}
+
+fn private_digest_matches(entry_dir: &Path) -> bool {
+    fs::read_to_string(entry_dir.join(CHECKSUM_FILE))
+        .ok()
+        .zip(payload_digest(&entry_dir.join(PRIVATE_FILE)).ok())
+        .is_some_and(|(expected, actual)| expected == actual)
 }

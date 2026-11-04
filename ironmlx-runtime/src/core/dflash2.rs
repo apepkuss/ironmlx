@@ -809,6 +809,17 @@ impl DFlash2PrefixCache {
                         recurrent_state,
                     }));
                 }
+                PrefixLayerPayload::Flash { tensors } => {
+                    // Flash keeps its whole per-layer state, K/V included.
+                    let tensors = tensors
+                        .iter()
+                        .map(|tensor| tensor.contiguous(false))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    written.extend(tensors.iter().cloned());
+                    layers.push(DFlash2DiskLayer::State(PrefixLayerPayload::Flash {
+                        tensors,
+                    }));
+                }
                 _ => anyhow::bail!("DFlash2 prefix store cannot hold this layer's state"),
             }
         }

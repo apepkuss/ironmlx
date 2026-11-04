@@ -2676,6 +2676,11 @@ fn prefix_state_bits(
     let mut arrays = vec![context_tail, last_hidden];
     for layer in &entry.main_layers {
         match layer {
+            PrefixLayerPayload::Flash { tensors } => arrays.extend(tensors),
+            PrefixLayerPayload::DFlash2 {
+                context_hidden,
+                last_hidden,
+            } => arrays.extend([context_hidden, last_hidden]),
             PrefixLayerPayload::FullDense { k, v }
             | PrefixLayerPayload::FullPaged {
                 k_pages: k,

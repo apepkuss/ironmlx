@@ -20,6 +20,7 @@ mlx = { path = "../mlx" }
 anyhow = "1"
 thiserror.workspace = true
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 serde_json = { version = "1", features = ["preserve_order"] }
 tracing = "0.1"
 tokio.workspace = true

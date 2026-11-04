@@ -206,6 +206,8 @@ pub struct FlashLayerCache {
     pub(crate) instance: Arc<()>,
     pub(crate) layer: usize,
     cap: i32,
+    pub(crate) prefix_config: Option<Arc<super::config::FlashTextConfig>>,
+    pub(crate) prefix_contract: Option<String>,
     offsets: Vec<i32>,
     pub(crate) prefixes: Vec<Vec<LayerSnapshot>>,
 }
@@ -232,6 +234,8 @@ impl FlashLayerCache {
             layer,
             cap,
             offsets,
+            prefix_config: None,
+            prefix_contract: None,
             prefixes: Vec::new(),
         })
     }

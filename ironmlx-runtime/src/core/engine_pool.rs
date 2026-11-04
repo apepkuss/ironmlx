@@ -3414,6 +3414,7 @@ impl EngineVariant {
             Self::Glm4MoeLite(state) => state.tokenizer.native_output_dialect(),
             Self::Llama(state) => state.tokenizer.native_output_dialect(),
             Self::MiniCpmV46(state) => state.tokenizer.native_output_dialect(),
+            Self::Qwen38FlashNext(state) => state.tokenizer.native_output_dialect(),
             Self::DiffusionGemma(state) => state.tokenizer.native_output_dialect(),
             Self::QwenImage(_)
             | Self::Audio(_)
@@ -3584,6 +3585,7 @@ impl EngineVariant {
             Self::Glm4MoeLite(state) => causal(&state.health_collector, &state.runtime_usage),
             Self::Llama(state) => causal(&state.health_collector, &state.runtime_usage),
             Self::MiniCpmV46(state) => causal(&state.health_collector, &state.runtime_usage),
+            Self::Qwen38FlashNext(state) => causal(&state.health_collector, &state.runtime_usage),
             Self::Diarization(state) => queue(
                 Box::new(state.queue_counter()),
                 super::diarization_execution::DIARIZATION_QUEUE_CAPACITY,
@@ -4040,20 +4042,15 @@ async fn load_engine_variant(
             }
         }
         ModelArchitecture::Qwen38FlashNext => {
-            let model_impl = flash_plan
-                .as_ref()
-                .context("Flash load plan missing")?
-                .build_model(&loader)?;
-            let estimate = StaticMemoryEstimate {
-                // Flash loader already materialized these MLX buffers; the
-                // retained weights are covered by active_bytes and the plan.
-                text_cold_bytes: 0,
-                vision_cold_bytes: flash_plan
-                    .as_ref()
-                    .context("Flash load plan missing")?
-                    .vision_weight_bytes as usize,
-                speculative_cold_bytes: 0,
-            };
+            let plan = flash_plan.as_ref().context("Flash load plan missing")?;
+            let model_impl = plan.build_model(&loader)?;
+            // The Flash loader already materialized the retained weights;
+            // only the deferred vision tower remains cold.
+            let mut estimate = StaticMemoryEstimate::from_allocated_weights(
+                component_bytes.text,
+                plan.vision_weight_bytes as usize,
+            );
+            estimate.allocated.vision = false;
             drop(loader);
             // Global App KV settings apply only to architectures whose
             // complete auxiliary state has qualified those storage formats.
@@ -4066,10 +4063,11 @@ async fn load_engine_variant(
                 model,
                 &flash_runtime,
                 estimate,
-                None,
-                None,
+                paged_prefix_cache,
+                prefix_lru_cache,
                 prompt_lookup,
                 vision_input,
+                tracker,
             )
             .await?;
             Ok(EngineVariant::Qwen38FlashNext(state))

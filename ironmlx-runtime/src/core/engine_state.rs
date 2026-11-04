@@ -1247,6 +1247,7 @@ where
     };
     let cold_materialization_tracker =
         crate::core::process_memory::ColdMaterializationTracker::new(static_memory_estimate);
+    let prefix_cache_enabled = prefix_cache.is_some() || prefix_cache_disk.is_some();
     let dflash2_handle = dflash2_actor::spawn_dflash2_actor(
         Arc::clone(&model),
         draft,
@@ -1366,7 +1367,7 @@ where
         prefill_chunk_size,
         vision_input,
         request_execution: RequestExecutionHandle::DFlash2(Arc::new(dflash2_handle)),
-        paged_prefix_cache_enabled: prefix_cache.is_some(),
+        paged_prefix_cache_enabled: prefix_cache_enabled,
         b_max,
         admission_deadline_ms: 0,
         admission_queue_max,

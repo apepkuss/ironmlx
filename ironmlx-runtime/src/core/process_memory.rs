@@ -1970,9 +1970,7 @@ mod tests {
             sample
         };
         governor.update(sample(4));
-        let load = governor
-            .try_reserve_model_load(gib(17))
-            .unwrap();
+        let load = governor.try_reserve_model_load(gib(17)).unwrap();
         for _ in 0..3 {
             let during = governor.update(sample(20));
             assert_eq!(during.pressure_level, PressureLevel::Normal);
@@ -2006,9 +2004,7 @@ mod tests {
             sample
         };
         governor.update(sample(4));
-        let load = governor
-            .try_reserve_model_load(gib(17))
-            .unwrap();
+        let load = governor.try_reserve_model_load(gib(17)).unwrap();
         assert_eq!(
             governor.update(sample(26)).pressure_level,
             PressureLevel::Emergency

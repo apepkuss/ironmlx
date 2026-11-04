@@ -58,6 +58,20 @@ pub struct PleHistory {
     pub position: u64,
 }
 impl PleHistory {
+    pub(crate) fn restore(
+        &mut self,
+        tokens: Vec<u32>,
+        position: u64,
+        vocab_size: u32,
+    ) -> Result<()> {
+        ensure!(
+            tokens.len() == self.context.len() && tokens.iter().all(|&t| t < vocab_size),
+            "invalid persisted PLE history"
+        );
+        self.context = tokens;
+        self.position = position;
+        Ok(())
+    }
     pub fn tokens(&self) -> &[u32] {
         &self.context
     }

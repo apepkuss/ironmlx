@@ -2121,6 +2121,10 @@ mod tests {
     fn loaded_models_report_their_scheduler_configuration() {
         use ironmlx_runtime::core::scheduler_resolution::SchedulerProfileKind;
         let info = |scheduler_profile| EngineLoadedModelInfo {
+            paging: None,
+            ane: ironmlx_runtime::core::runtime_health::AneModelHealth::for_model(
+                ironmlx_core::ane::Model::Other,
+            ),
             decision: None,
             decision_metrics: None,
             embedding_metrics: None,
@@ -2167,6 +2171,10 @@ mod tests {
     fn loaded_models_report_reasoning_capability() {
         use ironmlx_lm::core::native_output::NativeOutputDialect;
         let info = |dialect| EngineLoadedModelInfo {
+            paging: None,
+            ane: ironmlx_runtime::core::runtime_health::AneModelHealth::for_model(
+                ironmlx_core::ane::Model::Other,
+            ),
             decision: None,
             decision_metrics: None,
             embedding_metrics: None,

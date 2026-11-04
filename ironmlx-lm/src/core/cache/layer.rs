@@ -337,7 +337,13 @@ pub fn prefix_key_spec_for_caches(
     for cache in caches {
         match cache {
             #[cfg(unix)]
-            LayerCache::Flash(_) => return Ok(None),
+            LayerCache::Flash(cache) => {
+                remember_kv_cache_profile(
+                    &mut kv_cache_profile,
+                    Some(cache.durable_prefix_contract()?),
+                )?;
+                main_layers.push(cache.durable_prefix_spec(cached_len)?);
+            }
             LayerCache::Full(kv) => {
                 if let Some(paged) = kv.paged() {
                     remember_kv_cache_profile(&mut kv_cache_profile, kv.prefix_cache_profile())?;
@@ -513,7 +519,10 @@ pub fn prefix_entry_for_row(
                 )
             }
             #[cfg(unix)]
-            LayerCache::Flash(_) => return Ok(None),
+            LayerCache::Flash(cache) => {
+                let (tensors, len) = cache.durable_prefix_for_row(row)?;
+                (PrefixLayerPayload::Flash { tensors }, len)
+            }
             other => unshared_layer_payload(other, row)?,
         };
         cached_len.check(idx, layer_cached_len)?;
@@ -763,6 +772,7 @@ pub fn restore_prefix_entry_for_row(
     cached_len: i32,
 ) -> anyhow::Result<()> {
     check_prefix_restore_target(caches, entry, &[row], "restore_prefix_entry_for_row")?;
+    validate_flash_prefix_payloads(caches, entry, &[row], cached_len)?;
     for (idx, (cache, layer)) in caches.iter_mut().zip(entry.main_layers.iter()).enumerate() {
         restore_prefix_layer_for_rows(
             cache,
@@ -789,6 +799,7 @@ pub fn restore_prefix_entry_for_rows(
         return restore_prefix_entry_for_row(caches, entry, rows[0], cached_len);
     }
     check_prefix_restore_target(caches, entry, rows, "restore_prefix_entry_for_rows")?;
+    validate_flash_prefix_payloads(caches, entry, rows, cached_len)?;
     for (idx, (cache, layer)) in caches.iter_mut().zip(entry.main_layers.iter()).enumerate() {
         restore_prefix_layer_for_rows(
             cache,
@@ -799,6 +810,30 @@ pub fn restore_prefix_entry_for_rows(
             "restore_prefix_entry_for_rows",
         )?;
     }
+    Ok(())
+}
+
+/// A Flash layer restores only from a complete Flash payload that matches it;
+/// checked for every Flash layer before any layer is restored.
+fn validate_flash_prefix_payloads(
+    caches: &[LayerCache],
+    entry: &PagedPrefixEntry,
+    rows: &[usize],
+    cached_len: i32,
+) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    for (cache, layer) in caches.iter().zip(&entry.main_layers) {
+        if let LayerCache::Flash(cache) = cache {
+            let PrefixLayerPayload::Flash { tensors } = layer else {
+                anyhow::bail!("expected complete Flash prefix payload")
+            };
+            for &row in rows {
+                cache.validate_durable_prefix(tensors, row, cached_len)?;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (caches, entry, rows, cached_len);
     Ok(())
 }
 
@@ -892,8 +927,14 @@ pub(crate) fn restore_prefix_layer_for_rows(
             }
         }
         #[cfg(unix)]
+        (LayerCache::Flash(cache), PrefixLayerPayload::Flash { tensors }) => {
+            for &row in rows {
+                cache.restore_durable_prefix(tensors, row, cached_len)?;
+            }
+        }
+        #[cfg(unix)]
         (LayerCache::Flash(_), _) => {
-            anyhow::bail!("{what}: Flash auxiliary state is not a legacy persistent prefix payload")
+            anyhow::bail!("{what}: layer {idx} expected complete Flash prefix payload")
         }
         (LayerCache::Full(_), _) => {
             anyhow::bail!(

@@ -1227,7 +1227,7 @@ where
     let worker_runtime_usage = Arc::clone(&runtime_usage);
     let disk_target_execution_fingerprint = target_execution_fingerprint.clone();
     let prefix_fingerprint = format!(
-        "dflash2-prefix-v2:ironmlx={};backend=mlx;kernel-contract=row-exact-v1;prefill=scheduler-b1-chunk-v2-cold-single;target={};draft-dtype={};draft-hidden={};draft-layer-count={};target-layers={:?};sliding-window={};block-size={}",
+        "dflash2-prefix-v2:ironmlx={};backend=mlx;kernel-contract=row-exact-v1;prefill=scheduler-b1-chunk-v2-cold-single;target={};draft-dtype={};draft-hidden={};draft-layer-count={};target-layers={:?};sliding-window={};block-size={};draft-artifact={}",
         env!("CARGO_PKG_VERSION"),
         target_execution_fingerprint,
         draft.config().dtype,
@@ -1236,8 +1236,10 @@ where
         draft.config().dflash_config.target_layer_ids,
         draft.config().sliding_window,
         block_size,
+        draft.artifact_identity(),
     );
     let health_prefix_fingerprint = prefix_fingerprint.clone();
+    let prefix_cache_enabled = prefix_cache_max_bytes.is_some() || prefix_cache_disk.is_some();
     let worker_in_flight = Arc::clone(&in_flight);
     let worker_active = Arc::clone(&b_active);
     let worker_queued = Arc::clone(&b_queued);
@@ -2796,7 +2798,7 @@ where
         latest_generation_tps_bits,
         latest_acceptance_rate_bits,
         peak_memory_bytes,
-        prefix_cache_enabled: prefix_cache_max_bytes.is_some(),
+        prefix_cache_enabled,
         prefix_cache_max_bytes,
         prefix_cache_entries,
         prefix_cache_bytes,

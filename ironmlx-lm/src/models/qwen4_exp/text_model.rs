@@ -126,6 +126,7 @@ pub struct FlashTextModel {
     pub config: FlashTextConfig,
     pub(crate) paging_telemetry: Arc<crate::core::paging_stats::PagingTelemetry>,
     pub(crate) instance: Arc<()>,
+    pub(crate) artifact_identity: String,
     pub(crate) dflash_instance: crate::models::dflash2::DFlash2Instance,
     pub(crate) resident_bytes: usize,
     pub(crate) quant: Option<crate::core::weights::QuantMeta>,
@@ -313,6 +314,9 @@ impl FlashTextModel {
             head: Linear::from_loader(loader, "lm_head")?,
             config: cfg.clone(),
             instance: Arc::new(()),
+            artifact_identity: crate::core::artifact_identity::artifact_identity(
+                loader.model_dir(),
+            )?,
             dflash_instance: crate::models::dflash2::DFlash2Instance::new(),
             quant: loader.quant_meta(),
             resident_bytes: loader

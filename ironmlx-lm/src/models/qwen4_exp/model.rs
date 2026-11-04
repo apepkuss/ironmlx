@@ -526,12 +526,10 @@ impl Model for FlashTextModel {
             .into_iter()
             .enumerate()
             .map(|(index, rows)| {
-                Ok(LayerCache::Flash(FlashLayerCache::new(
-                    rows,
-                    Arc::clone(&self.instance),
-                    index,
-                    cap,
-                )?))
+                let mut cache = FlashLayerCache::new(rows, Arc::clone(&self.instance), index, cap)?;
+                cache.prefix_config = Some(Arc::new(self.config.clone()));
+                cache.prefix_contract = self.execution_cache_fingerprint();
+                Ok(LayerCache::Flash(cache))
             })
             .collect()
     }
@@ -679,6 +677,10 @@ impl Model for FlashTextModel {
             weight_bytes: self.resident_bytes,
             max_position_embeddings: cfg.max_position_embeddings as i32,
             spatial_merge_size: 2,
+            cache_cost: Some(crate::core::model::CacheCost {
+                bytes_per_token: super::load_plan::FLASH_CACHE_BYTES_PER_TOKEN as usize,
+                fixed_bytes_per_sequence: super::load_plan::FLASH_FIXED_BYTES_PER_SEQUENCE as usize,
+            }),
         }
     }
     fn num_hidden_layers(&self) -> usize {
