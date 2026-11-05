@@ -52,7 +52,14 @@ fn scoped_residency_owns_only_weights_and_releases_on_every_exit() {
         }
         Err(error) => panic!("scoped residency setup failed: {error}"),
     };
-    assert!(lease.bind_on(()).unwrap());
+    assert!(lease.activate_on_current_queue().unwrap());
+    let activated = memory::weight_residency_stats();
+    assert_eq!(activated.queue_attachments, baseline.queue_attachments + 1);
+    assert!(
+        lease.activate_on_current_queue().unwrap(),
+        "activation of an already attached queue stays idempotent"
+    );
+    assert_eq!(memory::weight_residency_stats(), activated);
     let bytes = lease.bytes();
     let duplicate = memory::WeightResidency::new(&[&weight, &weight, &view], 16 << 20).unwrap();
     assert_eq!(
@@ -97,6 +104,7 @@ fn scoped_residency_owns_only_weights_and_releases_on_every_exit() {
     );
     let paused = memory::WeightResidency::new(&[&weight], 16 << 20).unwrap();
     assert_eq!(memory::weight_residency_stats().requested_bytes, 0);
+    assert!(!paused.activate_on_current_queue().unwrap());
     drop(paused);
     memory::set_weight_residency_enabled(true).unwrap();
     assert_eq!(
