@@ -329,6 +329,7 @@ public struct ModelDownloadStatus: Codable, Equatable, Sendable {
     public var remainingBytes: Int64? = nil
     public var enqueuedAt: Date? = nil
     public var usedCredential: Bool? = nil
+    public var useHfMirror: Bool? = nil
 
     enum CodingKeys: String, CodingKey {
         case repoID = "repo_id"
@@ -346,6 +347,7 @@ public struct ModelDownloadStatus: Codable, Equatable, Sendable {
         case remainingBytes = "remaining_bytes"
         case enqueuedAt = "enqueued_at"
         case usedCredential = "used_credential"
+        case useHfMirror = "use_hf_mirror"
     }
 }
 
@@ -395,6 +397,7 @@ private struct ModelDownloadResumePlan {
 }
 
 private struct QueuedModelDownload: Sendable {
+    var useHfMirror: Bool
     var downloadOnly: Bool
     var provider: ModelRepositoryProvider
     var repoID: String
@@ -417,12 +420,23 @@ private struct DownloadQueuePreflightEstimate: Sendable {
     var observedBytesByPath: [String: Int64]
 }
 
+public enum HuggingFaceMirrorError: LocalizedError {
+    case tokenConsentRequired
+
+    public var errorDescription: String? {
+        "Confirm sending the Hugging Face token to hf-mirror.com before continuing."
+    }
+}
+
 public actor ModelDownloadService {
     public static let defaultMaxConcurrentDownloads = 3
 
     private let rootURL: URL
     private let httpClient: any ModelDownloadHTTPClient
     private let huggingFaceEndpoint: URL
+    private let mirrorResolver: ModelRepositoryResolver
+    private let mirrorEndpoint: URL
+    private let mirrorAudioPreparer: any AudioResourcePreparing
     private let resolver: ModelRepositoryResolver
     private let store: ModelDownloadStore
     private let downloader: any ModelFileDownloading
@@ -457,6 +471,7 @@ public actor ModelDownloadService {
             .appendingPathComponent(".ironmlx", isDirectory: true),
         httpClient: any ModelDownloadHTTPClient = URLSessionModelDownloadHTTPClient(),
         huggingFaceEndpoint: URL = URL(string: "https://huggingface.co")!,
+        huggingFaceMirrorEndpoint: URL = URL(string: "https://hf-mirror.com")!,
         modelScopeEndpoint: URL = URL(string: "https://modelscope.cn/api/v1/models")!,
         modelScopeGitEndpoint: URL = URL(string: "https://www.modelscope.cn")!,
         metadataPreflight: any ModelMetadataPreflighting = IronMLXModelMetadataPreflight(),
@@ -476,6 +491,14 @@ public actor ModelDownloadService {
             huggingFaceEndpoint: huggingFaceEndpoint,
             modelScopeAPIEndpoint: modelScopeEndpoint,
             modelScopeGitEndpoint: modelScopeGitEndpoint
+        )
+        mirrorEndpoint = huggingFaceMirrorEndpoint
+        mirrorResolver = ModelRepositoryResolver(
+            httpClient: httpClient, huggingFaceEndpoint: huggingFaceMirrorEndpoint,
+            modelScopeAPIEndpoint: modelScopeEndpoint, modelScopeGitEndpoint: modelScopeGitEndpoint
+        )
+        mirrorAudioPreparer = audioPreparer ?? AudioResourcePreparationService(
+            rootURL: rootURL, httpClient: httpClient, huggingFaceEndpoint: huggingFaceMirrorEndpoint
         )
         store = ModelDownloadStore(rootURL: rootURL)
         reminderStore = ModelDownloadQueueReminderStore(rootURL: rootURL)
@@ -500,6 +523,7 @@ public actor ModelDownloadService {
                 )
                 status.status = ModelDownloadPhase.paused.rawValue
                 status.usedCredential = reminder.usedCredential
+                status.useHfMirror = reminder.useHfMirror
                 statuses[key] = status
                 currentReminders[key] = reminder
                 resumeRevisions[key] = status.commitSHA
@@ -518,14 +542,19 @@ public actor ModelDownloadService {
     public func searchHuggingFace(
         query: String,
         sort: String,
-        token: String?
+        token: String?,
+        useHfMirror: Bool = false,
+        mirrorTokenConfirmed: Bool = false
     ) async throws -> [HuggingFaceSearchResult] {
+        if useHfMirror, token?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false, !mirrorTokenConfirmed {
+            throw HuggingFaceMirrorError.tokenConsentRequired
+        }
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if Self.isCanonicalHuggingFaceRepoID(normalizedQuery) {
             let repository = try await resolveDownloadRepository(
                 provider: .huggingFace,
                 repoID: normalizedQuery,
-                token: token
+                token: token, useHfMirror: useHfMirror
             )
             return [
                 HuggingFaceSearchResult(
@@ -542,7 +571,7 @@ public actor ModelDownloadService {
         }
 
         var components = URLComponents(
-            url: huggingFaceEndpoint
+            url: (useHfMirror ? mirrorEndpoint : huggingFaceEndpoint)
                 .appendingPathComponent("api")
                 .appendingPathComponent("models"),
             resolvingAgainstBaseURL: false
@@ -571,7 +600,7 @@ public actor ModelDownloadService {
                 let repository = try await resolveDownloadRepository(
                     provider: .huggingFace,
                     repoID: repoID,
-                    token: token
+                    token: token, useHfMirror: useHfMirror
                 )
                 results[index].sha = repository.commitSHA
             } catch is CancellationError {
@@ -598,12 +627,16 @@ public actor ModelDownloadService {
     public func downloadHuggingFace(
         repoID: String,
         token: String?,
+        useHfMirror: Bool = false,
+        mirrorTokenConfirmed: Bool = false,
         progress: @escaping @Sendable (ModelDownloadProgress) async -> Void = { _ in }
     ) async -> ModelDownloadCompletion {
         await downloadAndWait(
             provider: .huggingFace,
             repoID: repoID,
             token: token,
+            useHfMirror: useHfMirror,
+            mirrorTokenConfirmed: mirrorTokenConfirmed,
             progress: progress
         )
     }
@@ -611,12 +644,16 @@ public actor ModelDownloadService {
     public func startHuggingFaceDownload(
         repoID: String,
         token: String?,
+        useHfMirror: Bool = false,
+        mirrorTokenConfirmed: Bool = false,
         progress: @escaping @Sendable (ModelDownloadProgress) async -> Void = { _ in }
     ) -> ModelDownloadStartResponse {
         enqueueDownload(
             provider: .huggingFace,
             repoID: repoID,
             token: token,
+            useHfMirror: useHfMirror,
+            mirrorTokenConfirmed: mirrorTokenConfirmed,
             progress: progress
         )
     }
@@ -698,7 +735,7 @@ public actor ModelDownloadService {
 
     public func resumeDownload(
         provider: ModelRepositoryProvider, repoID: String, token: String? = nil,
-        downloadOnly: Bool = false
+        downloadOnly: Bool = false, mirrorTokenConfirmed: Bool = false
     ) -> ModelDownloadStartResponse {
         let key = Self.taskKey(provider: provider, repoID: repoID)
         guard let status = statuses[key], !Self.isActiveStatus(status.status),
@@ -726,6 +763,8 @@ public actor ModelDownloadService {
         }
         resumeRevisions[key] = status.commitSHA
         return enqueueDownload(provider: provider, repoID: repoID, token: effectiveToken,
+                               useHfMirror: status.useHfMirror == true,
+                               mirrorTokenConfirmed: mirrorTokenConfirmed || (credential?.isEmpty != false && downloadTokens[key] != nil),
                                downloadOnly: downloadOnly || status.downloadOnly == true, progress: { _ in })
     }
 
@@ -883,12 +922,16 @@ public actor ModelDownloadService {
         provider: ModelRepositoryProvider,
         repoID rawRepoID: String,
         token: String?,
+        useHfMirror: Bool = false,
+        mirrorTokenConfirmed: Bool = false,
         progress: @escaping @Sendable (ModelDownloadProgress) async -> Void
     ) async -> ModelDownloadCompletion {
         let response = enqueueDownload(
             provider: provider,
             repoID: rawRepoID,
             token: token,
+            useHfMirror: useHfMirror,
+            mirrorTokenConfirmed: mirrorTokenConfirmed,
             progress: progress
         )
         guard response.success else {
@@ -911,6 +954,8 @@ public actor ModelDownloadService {
         provider: ModelRepositoryProvider,
         repoID rawRepoID: String,
         token: String?,
+        useHfMirror: Bool = false,
+        mirrorTokenConfirmed: Bool = false,
         downloadOnly: Bool = false,
         progress: @escaping @Sendable (ModelDownloadProgress) async -> Void
     ) -> ModelDownloadStartResponse {
@@ -945,6 +990,12 @@ public actor ModelDownloadService {
             )
         }
 
+        let source = provider == .huggingFace && (statuses[key]?.status == ModelDownloadPhase.paused.rawValue
+            ? statuses[key]?.useHfMirror == true : useHfMirror)
+        if source, token?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false, !mirrorTokenConfirmed {
+            return ModelDownloadStartResponse(success: false, status: "error", repoID: repoID,
+                error: HuggingFaceMirrorError.tokenConsentRequired.localizedDescription, code: "mirror_token_consent_required")
+        }
         completionResults[key] = nil
         recoveryReminders[key] = nil
         let credential = token?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -953,6 +1004,7 @@ public actor ModelDownloadService {
         }
         downloadTokens[key] = credential?.isEmpty == false ? credential : nil
         let request = QueuedModelDownload(
+            useHfMirror: source,
             downloadOnly: downloadOnly || (statuses[key]?.status == ModelDownloadPhase.paused.rawValue && statuses[key]?.downloadOnly == true),
             provider: provider,
             repoID: repoID,
@@ -974,6 +1026,7 @@ public actor ModelDownloadService {
             enqueuedAt: request.enqueuedAt,
             downloadOnly: request.downloadOnly
         )
+        statuses[key]?.useHfMirror = source
         currentReminders[key] = ModelDownloadRecoveryReminder(
             provider: provider,
             repoID: repoID,
@@ -982,6 +1035,7 @@ public actor ModelDownloadService {
             usedCredential: request.token != nil,
             enqueuedAt: request.enqueuedAt
         )
+        currentReminders[key]?.useHfMirror = source
         refreshQueuePositions()
         persistReminderState()
         pumpPreflightQueue()
@@ -1035,7 +1089,7 @@ public actor ModelDownloadService {
         let repository = try await resolveDownloadRepository(
             provider: request.provider,
             repoID: request.repoID,
-            token: request.token
+            token: request.token, useHfMirror: request.useHfMirror
         )
         let staging = try store.stagingSnapshotURL(
             provider: request.provider,
@@ -1217,6 +1271,7 @@ public actor ModelDownloadService {
                     provider: request.provider,
                     repoID: request.repoID,
                     token: request.token,
+                    useHfMirror: request.useHfMirror,
                     downloadOnly: request.downloadOnly,
                     progress: request.progress
                 )
@@ -1414,6 +1469,7 @@ public actor ModelDownloadService {
         provider: ModelRepositoryProvider,
         repoID: String,
         token: String?,
+        useHfMirror: Bool,
         downloadOnly: Bool,
         progress: @escaping @Sendable (ModelDownloadProgress) async -> Void
     ) async -> ModelDownloadCompletion {
@@ -1430,7 +1486,7 @@ public actor ModelDownloadService {
         do {
             let repositoryLock = try store.acquireRepositoryLock(provider: provider, repoID: repoID)
             defer { withExtendedLifetime(repositoryLock) {} }
-            let repository = try await resolveDownloadRepository(provider: provider, repoID: repoID, token: token)
+            let repository = try await resolveDownloadRepository(provider: provider, repoID: repoID, token: token, useHfMirror: useHfMirror)
             setStatus(
                 key: key,
                 provider: provider,
@@ -1933,8 +1989,9 @@ public actor ModelDownloadService {
     }
 
     private func resolveDownloadRepository(
-        provider: ModelRepositoryProvider, repoID: String, token: String?
+        provider: ModelRepositoryProvider, repoID: String, token: String?, useHfMirror: Bool = false
     ) async throws -> ResolvedModelRepository {
+        let resolver = useHfMirror ? mirrorResolver : resolver
         let key = Self.taskKey(provider: provider, repoID: repoID)
         if let revision = resumeRevisions[key] {
             var repository: ResolvedModelRepository
@@ -1949,12 +2006,13 @@ public actor ModelDownloadService {
             repository.requestedRevision = provider.mutableRevision
             return repository
         }
-        return try await resolveCurrentRepository(provider: provider, repoID: repoID, token: token)
+        return try await resolveCurrentRepository(provider: provider, repoID: repoID, token: token, useHfMirror: useHfMirror)
     }
 
     private func resolveCurrentRepository(
-        provider: ModelRepositoryProvider, repoID: String, token: String?
+        provider: ModelRepositoryProvider, repoID: String, token: String?, useHfMirror: Bool = false
     ) async throws -> ResolvedModelRepository {
+        let resolver = useHfMirror ? mirrorResolver : resolver
         if provider == .huggingFace, repoID == "mlx-community/IndexTTS-2.5-fp16" {
             let profile = try AudioResourceProfile()
             var repository = try await resolver.resolveHuggingFace(repoID: repoID, revision: profile.source.revision, token: token)
@@ -1971,7 +2029,8 @@ public actor ModelDownloadService {
     ) async throws {
         try adjustDiskReservation(key: key, remainingBytes: AudioResourcePreparationService.diskReservationBytes,
                                   observedBytesByPath: [:])
-        _ = try await audioPreparer.prepare(snapshot: snapshot, token: token) { name, bytes, total in
+        let preparer = repository.huggingFaceEndpoint == mirrorEndpoint ? mirrorAudioPreparer : audioPreparer
+        _ = try await preparer.prepare(snapshot: snapshot, token: token) { name, bytes, total in
             await self.setStatus(key: key, provider: repository.provider, repoID: repository.repoID,
                                  phase: .verifying, progressPct: total > 0 ? Double(bytes) / Double(total) * 100 : 0,
                                  currentFile: name, commitSHA: repository.commitSHA)
@@ -2321,7 +2380,8 @@ public actor ModelDownloadService {
             totalBytes: totalBytes ?? existing?.totalBytes,
             remainingBytes: remainingBytes ?? existing?.remainingBytes,
             enqueuedAt: enqueuedAt ?? existing?.enqueuedAt,
-            usedCredential: downloadTokens[key] != nil || currentReminders[key]?.usedCredential == true
+            usedCredential: downloadTokens[key] != nil || currentReminders[key]?.usedCredential == true,
+            useHfMirror: existing?.useHfMirror
         )
         if currentReminders[key] != nil {
             updateCurrentReminderStatus(key: key, status: phase.rawValue)
@@ -2355,7 +2415,8 @@ public actor ModelDownloadService {
             totalBytes: journal?.totalBytes ?? existing?.totalBytes,
             remainingBytes: existing?.remainingBytes,
             enqueuedAt: existing?.enqueuedAt,
-            usedCredential: existing?.usedCredential
+            usedCredential: existing?.usedCredential,
+            useHfMirror: existing?.useHfMirror
         )
     }
 

@@ -3623,6 +3623,32 @@
   .hf-search-sort-field {
     flex: 1 1 140px;
   }
+  .hf-search-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-top: 12px;
+  }
+  .hf-mirror-option,
+  .hf-mirror-option label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .hf-mirror-option label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    cursor: pointer;
+  }
+  .hf-mirror-option input {
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    accent-color: var(--accent);
+  }
   .search-result-dl {
     min-width: 82px;
     padding-inline: 14px;
@@ -4058,7 +4084,7 @@
                     <button type="button" class="profile-help-trigger" aria-describedby="hf-token-help-tooltip" aria-label="When is an HF token needed?">?</button>
                     <span class="profile-help-tooltip profile-help-tooltip-fixed" id="hf-token-help-tooltip" role="tooltip">
                       <span class="profile-help-tooltip-title" data-i18n="hf_token_help_title">When a token is needed</span>
-                      <span class="profile-help-tooltip-body" data-i18n="hf_token_help_body">Usually leave this blank. Enter a Hugging Face access token for private models, gated models whose license you have accepted, or when Hugging Face requires authentication. The token is used only for Hugging Face requests.</span>
+                      <span class="profile-help-tooltip-body" data-i18n="hf_token_help_body">Usually leave this blank. Enter a Hugging Face access token for private models, gated models whose license you have accepted, or when Hugging Face requires authentication. The token is sent to the selected Hugging Face endpoint; using hf-mirror requires confirmation.</span>
                     </span>
                   </span>
                 </div>
@@ -4072,6 +4098,18 @@
                   <option value="created" data-i18n="recently_created">Recently Created</option>
                   <option value="modified" data-i18n="recently_updated">Recently Updated</option>
                 </select>
+              </div>
+            </div>
+            <div class="hf-search-actions">
+              <div class="hf-mirror-option">
+                <label for="search-hf-mirror">
+                  <input type="checkbox" id="search-hf-mirror" onchange="onHuggingFaceMirrorChange()">
+                  <span id="hf-mirror-label" data-i18n="hf_mirror">Download via hf-mirror</span>
+                </label>
+                <span class="profile-help profile-help-fixed" data-hover-focus-only>
+                  <span class="profile-help-trigger" tabindex="0" aria-describedby="hf-mirror-help-tooltip" data-i18n-aria-label="hf_mirror_help_label" aria-label="About hf-mirror">?</span>
+                  <span class="profile-help-tooltip profile-help-tooltip-fixed" id="hf-mirror-help-tooltip" role="tooltip"><span class="profile-help-tooltip-body" data-i18n="hf_mirror_help">When enabled, access Hugging Face repositories and download models through hf-mirror.</span></span>
+                </span>
               </div>
               <button class="btn-accent" onclick="searchHuggingFace()"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4" stroke="white" stroke-width="1.3"/><line x1="9" y1="9" x2="12.5" y2="12.5" stroke="white" stroke-width="1.3" stroke-linecap="round"/></svg> <span data-i18n="search">Search</span></button>
             </div>
@@ -6186,7 +6224,8 @@
       model_versions_loading: "Loading versions…", model_versions_count: "{n} versions", reclaimable_space: "{size} reclaimable", current_version: "Current", loaded_version: "Loaded", verified_version: "Verified", unverified_version: "Unverified", corrupt_version: "Corrupt",
       activate_version: "Use this version", rollback_reload: "Roll back and reload", delete_version: "Delete version", cleanup_selected_versions: "Clean up selected versions", confirm_delete_versions: "Delete {n} selected versions and reclaim {size}? This cannot be undone.", version_activated: "Model version activated.", versions_deleted: "Selected model versions deleted.",
       local_model_exists: "✓ Exists", local_model_completed: "✓ Completed", local_model_update: "Download update", local_model_inactive: "Use local version", local_model_repair: "Repair download", local_model_identity_unavailable: "Version unavailable",
-      hf_token_help_title: "When a token is needed", hf_token_help_body: "Usually leave this blank. Enter a Hugging Face access token for private models, gated models whose license you have accepted, or when Hugging Face requires authentication. The token is used only for Hugging Face requests.",
+      hf_token_help_title: "When a token is needed", hf_token_help_body: "Usually leave this blank. Enter a Hugging Face access token for private models, gated models whose license you have accepted, or when Hugging Face requires authentication. The token is sent to the selected Hugging Face endpoint; using hf-mirror requires confirmation.",
+      hf_mirror: "Download via hf-mirror", hf_mirror_help_label: "About hf-mirror", hf_mirror_help: "When enabled, access Hugging Face repositories and download models through hf-mirror.", hf_mirror_token_confirm: "Send your Hugging Face token to the third-party service hf-mirror.com?",
       integrity_verified_toast: "Model integrity verified.", integrity_corrupt_toast: "Integrity verification failed. This model is marked corrupt and cannot be loaded.",
       action_loading: "Loading...", action_unloading: "Unloading...", action_load_model_only: "Model only", action_load_mtp: "Model + MTP", action_load_dflash2: "Model + DFlash2",
       pin_model_tooltip: "Pin loaded model: exempt from TTL auto-unload and automatic release policies. Manual unload is still available.",
@@ -6884,7 +6923,8 @@
       model_versions_loading: "正在加载版本…", model_versions_count: "共 {n} 个版本", reclaimable_space: "可释放 {size}", current_version: "当前版本", loaded_version: "已加载", verified_version: "已验证", unverified_version: "未验证", corrupt_version: "已损坏",
       activate_version: "切换到此版本", rollback_reload: "回滚并重新加载", delete_version: "删除版本", cleanup_selected_versions: "清理所选版本", confirm_delete_versions: "确定删除所选 {n} 个版本并释放 {size}？此操作不可恢复。", version_activated: "模型版本已切换。", versions_deleted: "所选模型版本已删除。",
       local_model_exists: "✓ 已存在", local_model_completed: "✓ 已完成", local_model_update: "下载新版本", local_model_inactive: "设为当前版本", local_model_repair: "修复下载", local_model_identity_unavailable: "版本身份无法确认",
-      hf_token_help_title: "什么时候需要 Token", hf_token_help_body: "通常无需填写。下载私有模型、已在 Hugging Face 接受许可的受限模型，或 Hugging Face 要求身份验证时，请输入访问令牌。令牌仅用于 Hugging Face 请求。",
+      hf_token_help_title: "什么时候需要 Token", hf_token_help_body: "通常无需填写。下载私有模型、已在 Hugging Face 接受许可的受限模型，或 Hugging Face 要求身份验证时，请输入访问令牌。令牌会发送至所选的 Hugging Face 访问入口；使用 hf-mirror 时需确认。",
+      hf_mirror: "使用 hf-mirror 下载", hf_mirror_help_label: "关于 hf-mirror", hf_mirror_help: "启用后，通过 hf-mirror 访问 Hugging Face 仓库并下载模型。", hf_mirror_token_confirm: "是否允许将 Hugging Face Token 发送给第三方服务 hf-mirror.com？",
       integrity_verified_toast: "模型完整性验证成功。", integrity_corrupt_toast: "完整性验证失败；该模型已标记为损坏，后续加载将被拒绝。",
       action_loading: "加载中...", action_unloading: "卸载中...", action_load_model_only: "仅模型", action_load_mtp: "模型+MTP", action_load_dflash2: "模型+DFlash2",
       pin_model_tooltip: "固定加载：不会被 TTL 自动卸载，也不会参与自动释放策略。仍可手动卸载。",
@@ -7582,7 +7622,8 @@
       model_versions_loading: "正在載入版本…", model_versions_count: "共 {n} 個版本", reclaimable_space: "可釋放 {size}", current_version: "目前版本", loaded_version: "已載入", verified_version: "已驗證", unverified_version: "未驗證", corrupt_version: "已損壞",
       activate_version: "切換到此版本", rollback_reload: "回滾並重新載入", delete_version: "刪除版本", cleanup_selected_versions: "清理所選版本", confirm_delete_versions: "確定刪除所選 {n} 個版本並釋放 {size}？此操作無法復原。", version_activated: "模型版本已切換。", versions_deleted: "所選模型版本已刪除。",
       local_model_exists: "✓ 已存在", local_model_completed: "✓ 已完成", local_model_update: "下載新版本", local_model_inactive: "設為目前版本", local_model_repair: "修復下載", local_model_identity_unavailable: "無法確認版本身分",
-      hf_token_help_title: "何時需要 Token", hf_token_help_body: "通常無需填寫。下載私人模型、已在 Hugging Face 接受授權的受限模型，或 Hugging Face 要求驗證身分時，請輸入存取權杖。權杖僅用於 Hugging Face 請求。",
+      hf_token_help_title: "何時需要 Token", hf_token_help_body: "通常無需填寫。下載私人模型、已在 Hugging Face 接受授權的受限模型，或 Hugging Face 要求驗證身分時，請輸入存取權杖。權杖會傳送至所選的 Hugging Face 存取端點；使用 hf-mirror 時需確認。",
+      hf_mirror: "使用 hf-mirror 下載", hf_mirror_help_label: "關於 hf-mirror", hf_mirror_help: "啟用後，透過 hf-mirror 存取 Hugging Face 儲存庫並下載模型。", hf_mirror_token_confirm: "是否允許將 Hugging Face Token 傳送給第三方服務 hf-mirror.com？",
       integrity_verified_toast: "模型完整性驗證成功。", integrity_corrupt_toast: "完整性驗證失敗；此模型已標記為損壞，後續載入將被拒絕。",
       action_loading: "載入中...", action_unloading: "卸載中...", action_load_model_only: "僅模型", action_load_mtp: "模型+MTP", action_load_dflash2: "模型+DFlash2",
       pin_model_tooltip: "固定載入：不會被 TTL 自動卸載，也不會參與自動釋放策略。仍可手動卸載。",
@@ -8283,7 +8324,8 @@
       model_versions_loading: "バージョンを読み込み中…", model_versions_count: "{n} バージョン", reclaimable_space: "{size} 解放可能", current_version: "現在", loaded_version: "ロード済み", verified_version: "検証済み", unverified_version: "未検証", corrupt_version: "破損",
       activate_version: "このバージョンを使用", rollback_reload: "ロールバックして再ロード", delete_version: "バージョンを削除", cleanup_selected_versions: "選択したバージョンを整理", confirm_delete_versions: "選択した {n} バージョンを削除して {size} 解放しますか？元に戻せません。", version_activated: "モデルバージョンを切り替えました。", versions_deleted: "選択したモデルバージョンを削除しました。",
       local_model_exists: "✓ 既存", local_model_completed: "✓ 完了", local_model_update: "新バージョンを取得", local_model_inactive: "ローカル版を使用", local_model_repair: "再ダウンロード", local_model_identity_unavailable: "バージョンを確認できません",
-      hf_token_help_title: "Token が必要な場合", hf_token_help_body: "通常は空欄のままで構いません。非公開モデル、Hugging Face でライセンスに同意済みのアクセス制限モデル、または認証を求められた場合は、Hugging Face アクセストークンを入力してください。Token は Hugging Face へのリクエストにのみ使用されます。",
+      hf_token_help_title: "Token が必要な場合", hf_token_help_body: "通常は空欄のままで構いません。非公開モデル、Hugging Face でライセンスに同意済みのアクセス制限モデル、または認証を求められた場合は、Hugging Face アクセストークンを入力してください。Token は選択した Hugging Face エンドポイントに送信されます。hf-mirror の使用時には確認が必要です。",
+      hf_mirror: "hf-mirror 経由でダウンロード", hf_mirror_help_label: "hf-mirror について", hf_mirror_help: "有効にすると、hf-mirror 経由で Hugging Face リポジトリにアクセスしてモデルをダウンロードします。", hf_mirror_token_confirm: "Hugging Face Token を第三者サービス hf-mirror.com に送信しますか？",
       integrity_verified_toast: "モデルの整合性を確認しました。", integrity_corrupt_toast: "整合性検証に失敗しました。このモデルは破損としてマークされ、ロードできません。",
       action_loading: "ロード中...", action_unloading: "アンロード中...", action_load_model_only: "モデルのみ", action_load_mtp: "モデル+MTP", action_load_dflash2: "モデル+DFlash2",
       pin_model_tooltip: "固定ロード：TTL 自動アンロードや自動解放の対象外になります。手動アンロードは引き続き可能です。",
@@ -8984,7 +9026,8 @@
       model_versions_loading: "버전을 불러오는 중…", model_versions_count: "{n}개 버전", reclaimable_space: "{size} 확보 가능", current_version: "현재", loaded_version: "로드됨", verified_version: "검증됨", unverified_version: "미검증", corrupt_version: "손상됨",
       activate_version: "이 버전 사용", rollback_reload: "롤백 후 다시 로드", delete_version: "버전 삭제", cleanup_selected_versions: "선택한 버전 정리", confirm_delete_versions: "선택한 {n}개 버전을 삭제하고 {size}를 확보하시겠습니까? 되돌릴 수 없습니다.", version_activated: "모델 버전을 전환했습니다.", versions_deleted: "선택한 모델 버전을 삭제했습니다.",
       local_model_exists: "✓ 존재함", local_model_completed: "✓ 완료", local_model_update: "새 버전 다운로드", local_model_inactive: "로컬 버전 사용", local_model_repair: "다시 다운로드", local_model_identity_unavailable: "버전을 확인할 수 없음",
-      hf_token_help_title: "Token이 필요한 경우", hf_token_help_body: "일반적으로 비워 두어도 됩니다. 비공개 모델, Hugging Face에서 라이선스에 동의한 접근 제한 모델 또는 인증이 필요한 경우 Hugging Face 액세스 토큰을 입력하세요. Token은 Hugging Face 요청에만 사용됩니다.",
+      hf_token_help_title: "Token이 필요한 경우", hf_token_help_body: "일반적으로 비워 두어도 됩니다. 비공개 모델, Hugging Face에서 라이선스에 동의한 접근 제한 모델 또는 인증이 필요한 경우 Hugging Face 액세스 토큰을 입력하세요. Token은 선택한 Hugging Face 엔드포인트로 전송됩니다. hf-mirror 사용 시 확인이 필요합니다.",
+      hf_mirror: "hf-mirror로 다운로드", hf_mirror_help_label: "hf-mirror 정보", hf_mirror_help: "활성화하면 hf-mirror를 통해 Hugging Face 저장소에 접근하고 모델을 다운로드합니다.", hf_mirror_token_confirm: "Hugging Face Token을 타사 서비스 hf-mirror.com에 전송할까요?",
       integrity_verified_toast: "모델 무결성을 확인했습니다.", integrity_corrupt_toast: "무결성 확인에 실패했습니다. 이 모델은 손상됨으로 표시되어 로드할 수 없습니다.",
       action_loading: "로딩 중...", action_unloading: "언로드 중...", action_load_model_only: "모델만", action_load_mtp: "모델+MTP", action_load_dflash2: "모델+DFlash2",
       pin_model_tooltip: "고정 로드: TTL 자동 언로드와 자동 해제 정책에서 제외됩니다. 수동 언로드는 계속 사용할 수 있습니다.",
@@ -11051,7 +11094,7 @@
         + '<div class="download-task-main"><div class="download-task-identity">'
         + '<div class="download-task-name">' + escapeAttr(task.repo_id || '') + '</div>'
         + '<div class="download-task-meta"><span class="download-provider">'
-        + escapeAttr(task.provider === 'modelscope' ? 'ModelScope' : 'Hugging Face') + '</span>'
+        + escapeAttr(task.provider === 'modelscope' ? 'ModelScope' : task.use_hf_mirror ? 'Hugging Face · hf-mirror' : 'Hugging Face') + '</span>'
         + '<span class="download-task-status ' + statusClass + '">' + escapeAttr(downloadStatusLabel(task)) + '</span>'
         + (detail ? '<span>·</span><span>' + escapeAttr(detail) + '</span>' : '')
         + '</div></div>'
@@ -11103,7 +11146,7 @@
         : 'readdDownloadReminder';
       return '<div class="download-recovery-item"><span><strong>'
         + escapeAttr(reminder.repo_id) + '</strong> · '
-        + escapeAttr(reminder.provider === 'modelscope' ? 'ModelScope' : 'Hugging Face')
+        + escapeAttr(reminder.provider === 'modelscope' ? 'ModelScope' : reminder.use_hf_mirror ? 'Hugging Face · hf-mirror' : 'Hugging Face')
         + ' ' + credential + '</span><span class="download-recovery-actions" style="margin-top:0;"><button class="btn-secondary" type="button" onclick="'
         + action + '(\'' + reminder.provider + '\',\'' + reminder.repo_id + '\')">'
         + escapeAttr(reminder.used_credential
@@ -11136,6 +11179,8 @@
     if (['resume', 'continue'].includes(action) && downloadResumeCredentialTarget === key) {
       body.token = document.getElementById('search-hf-token').value.trim() || null;
     }
+    if (body.token && !confirmHuggingFaceMirrorToken(body.token, task.use_hf_mirror === true)) return;
+    body.mirror_token_confirmed = task.use_hf_mirror === true && !!body.token;
     downloadTaskActionsPending.set(key, action);
     renderDownloadQueue(downloadQueueSnapshot);
     apiPost('/admin/api/models/download/' + (action === 'continue' ? 'resume' : action), body);
@@ -11249,7 +11294,8 @@
     if (provider === 'modelscope') {
       apiPost('/admin/api/models/ms/download', { repo_id: repoId });
     } else {
-      startDownload(repoId, null);
+      const reminder = (downloadQueueSnapshot.recovery_reminders || []).find(item => item.provider === provider && item.repo_id === repoId);
+      if (!startDownload(repoId, null, reminder && reminder.use_hf_mirror === true)) return;
     }
     dismissDownloadReminder(provider, repoId);
   }
@@ -11263,6 +11309,11 @@
   function prepareCredentialDownloadReminder(provider, repoId) {
     switchDlSource('hf');
     document.getElementById('search-hf-query').value = repoId;
+    const reminder = (downloadQueueSnapshot.recovery_reminders || []).find(item => item.provider === provider && item.repo_id === repoId);
+    document.getElementById('search-hf-mirror').checked = !!(reminder && reminder.use_hf_mirror);
+    clearHuggingFaceSearchDebounce();
+    cancelActiveHuggingFaceSearch();
+    clearHuggingFaceSearchResults();
     const token = document.getElementById('search-hf-token');
     token.focus();
     const dict = I18N[currentLang] || I18N.en;
@@ -11596,14 +11647,39 @@
     setTimeout(refreshDownloadQueue, 150);
   }
 
-  function startDownload(repoId, explicitToken) {
+  let approvedHuggingFaceMirrorToken = null;
+
+  function huggingFaceMirrorEnabled() {
+    return document.getElementById('search-hf-mirror').checked;
+  }
+
+  function confirmHuggingFaceMirrorToken(token, useHfMirror) {
+    if (!useHfMirror || !token || approvedHuggingFaceMirrorToken === token) return true;
+    if (!window.confirm(t('hf_mirror_token_confirm'))) return false;
+    approvedHuggingFaceMirrorToken = token;
+    return true;
+  }
+
+  function onHuggingFaceMirrorChange() {
+    clearHuggingFaceSearchDebounce();
+    cancelActiveHuggingFaceSearch();
+    clearHuggingFaceSearchResults();
+    const query = document.getElementById('search-hf-query').value.trim();
+    if (huggingFaceSearchQueryLength(query) >= HUGGING_FACE_SEARCH_MIN_CHARACTERS) searchHuggingFace();
+  }
+
+  function startDownload(repoId, explicitToken, useHfMirror = huggingFaceMirrorEnabled()) {
     const dict = I18N[currentLang] || I18N.en;
     if (!repoId) { showToast(dict.enter_repo_id || 'Please enter a Repo ID.', 'info'); return; }
     if (!confirmModelDownload(repoId)) return false;
     const token = explicitToken === null
       ? ''
       : (explicitToken || document.getElementById('search-hf-token').value.trim());
-    const payload = JSON.stringify({ repo_id: repoId, token: token || null });
+    const existingTask = downloadTask('huggingface', repoId);
+    if (existingTask && existingTask.status === 'paused') useHfMirror = existingTask.use_hf_mirror === true;
+    if (!confirmHuggingFaceMirrorToken(token, useHfMirror)) return false;
+    const payload = JSON.stringify({ repo_id: repoId, token: token || null,
+      use_hf_mirror: useHfMirror, mirror_token_confirmed: useHfMirror && !!token });
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.downloadModel) {
       window.webkit.messageHandlers.downloadModel.postMessage(payload);
       setTimeout(refreshDownloadQueue, 150);
@@ -11735,6 +11811,8 @@
     clearCompletedHuggingFaceSearchState();
     const sort = document.getElementById('search-hf-sort').value;
     const token = document.getElementById('search-hf-token').value.trim();
+    const useHfMirror = huggingFaceMirrorEnabled();
+    if (!confirmHuggingFaceMirrorToken(token, useHfMirror)) return;
     const resultsDiv = document.getElementById('search-results');
     resultsDiv.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-secondary);font-size:12px;">Searching...</div>';
     const requestId = ++nextHuggingFaceSearchRequestId;
@@ -11744,7 +11822,9 @@
       query: query,
       sort: sort,
       token: token || null,
-      request_id: requestId
+      request_id: requestId,
+      use_hf_mirror: useHfMirror,
+      mirror_token_confirmed: useHfMirror && !!token
     });
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.searchHF) {
       window.webkit.messageHandlers.searchHF.postMessage(payload);
@@ -16696,7 +16776,7 @@
       });
       trigger.addEventListener('focus', showTooltip);
       trigger.addEventListener('blur', hideTooltip);
-      trigger.addEventListener('click', showTooltip);
+      if (!wrapper.hasAttribute('data-hover-focus-only')) trigger.addEventListener('click', showTooltip);
       trigger.addEventListener('keydown', function(event) {
         if (event.key === 'Escape') {
           hideTooltip();

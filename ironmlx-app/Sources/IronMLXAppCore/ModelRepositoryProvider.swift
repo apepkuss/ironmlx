@@ -18,6 +18,7 @@ public struct ResolvedModelRepository: Equatable, Sendable {
     public var requestedRevision: String
     public var commitSHA: String
     public var files: [RemoteModelFile]
+    public var huggingFaceEndpoint: URL? = nil
 }
 
 public struct ModelRepositoryResolver: Sendable {
@@ -62,7 +63,7 @@ public struct ModelRepositoryResolver: Sendable {
         switch repository.provider {
         case .huggingFace:
             url = pathURL(
-                base: huggingFaceEndpoint,
+                base: repository.huggingFaceEndpoint ?? huggingFaceEndpoint,
                 components: repoComponents(repository.repoID)
                     + ["resolve", repository.commitSHA]
                     + repositoryPathComponents(file.path)
@@ -157,7 +158,8 @@ public struct ModelRepositoryResolver: Sendable {
             repoID: repoID,
             requestedRevision: revision ?? ModelRepositoryProvider.huggingFace.mutableRevision,
             commitSHA: commitSHA,
-            files: try validatedFiles(files)
+            files: try validatedFiles(files),
+            huggingFaceEndpoint: huggingFaceEndpoint
         )
     }
 

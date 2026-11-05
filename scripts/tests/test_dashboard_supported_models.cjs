@@ -328,3 +328,34 @@ for (const lang of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
     assert.ok(!row.includes(p.context.t('catalog_text')));
   });
 }
+
+
+test('HF mirror selection is explicit and paused tasks keep their original source', () => {
+  const p = page();
+  p.context.startDownload('org/default-model', null);
+  assert.ok(!p.requests.at(-1)[1].use_hf_mirror);
+  p.element('search-hf-mirror').checked = true;
+  p.context.startDownload('org/mirrored-model', null);
+  assert.equal(p.requests.at(-1)[1].use_hf_mirror, true);
+  p.queue([{ provider: 'huggingface', repo_id: 'org/paused-model', status: 'paused', use_hf_mirror: false }]);
+  p.context.startDownload('org/paused-model', null);
+  assert.equal(p.requests.at(-1)[1].use_hf_mirror, false);
+});
+
+test('mirror token consent is required before dispatch and remembered only for the approved token', () => {
+  const p = page();
+  p.element('search-hf-mirror').checked = true;
+  p.element('search-hf-token').value = 'hf_secret';
+  let confirmations = 0;
+  p.context.window.confirm = () => { confirmations++; return false; };
+  assert.equal(p.context.startDownload('org/model'), false);
+  assert.equal(p.requests.length, 0);
+  p.context.window.confirm = () => { confirmations++; return true; };
+  p.context.startDownload('org/model');
+  assert.equal(p.requests[0][1].mirror_token_confirmed, true);
+  p.context.startDownload('org/another-model');
+  assert.equal(confirmations, 2);
+  p.element('search-hf-token').value = 'hf_different';
+  p.context.startDownload('org/third-model');
+  assert.equal(confirmations, 3);
+});
