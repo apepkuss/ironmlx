@@ -1268,15 +1268,14 @@ fn flash_load_plan(
         args.kv_quant.turboquant_bits().is_none(),
         "Flash currently requires BF16 KV caches"
     );
+    // A just-stopped Flash process may still be releasing memory.
     Ok(Some(
-        ironmlx_runtime::core::flash_load::plan_with_active_occupied(
+        ironmlx_runtime::core::flash_load::plan_waiting_for_host_recovery(
             model_dir,
             scheduler_config.b_max,
             scheduler_config.max_cache_cap,
             scheduler_config.prefill_chunk_size,
             extra_bytes,
-            None,
-            0,
             &resolve_active_kv_offload_config(args)?,
         )?,
     ))

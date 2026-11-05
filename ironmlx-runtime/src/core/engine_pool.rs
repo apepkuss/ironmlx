@@ -2195,6 +2195,7 @@ impl EnginePoolInner {
     async fn ensure_capacity_for(
         &self,
         model: &EngineModelConfig,
+        tracker: &LoadTracker,
     ) -> Result<(
         Option<MemoryReservation>,
         Option<ironmlx_lm::models::qwen4_exp::load_plan::FlashLoadPlan>,
@@ -2208,16 +2209,28 @@ impl EnginePoolInner {
                 .as_ref()
                 .context("Flash scheduler profile missing")?
                 .config;
-            Some(super::flash_load::plan_with_active_occupied(
-                &model.path,
-                cfg.b_max,
-                cfg.max_cache_cap,
-                cfg.prefill_chunk_size,
-                0,
-                self.runtime.memory_limits.model_memory_limit_bytes,
-                planned_occupied,
-                &self.runtime.active_kv_offload,
-            )?)
+            let request = super::flash_load::FlashPlanRequest {
+                path: &model.path,
+                batch: cfg.b_max,
+                cap: cfg.max_cache_cap,
+                chunk: cfg.prefill_chunk_size,
+                draft_bytes: 0,
+                limit: self.runtime.memory_limits.model_memory_limit_bytes,
+                minimum_occupied: planned_occupied,
+                active: &self.runtime.active_kv_offload,
+            };
+            let mut admission = request.admission();
+            // The load shows as preparing memory while host memory recovers;
+            // a cancel ends the wait.
+            Some(loop {
+                match admission.poll() {
+                    super::flash_load::AdmissionStep::Done(plan) => break plan?,
+                    super::flash_load::AdmissionStep::Wait(delay) => {
+                        tracker.checkpoint()?;
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            })
         } else {
             None
         };
@@ -2290,12 +2303,46 @@ impl EnginePoolInner {
                         retry_snapshot.pressure_level
                     );
                 }
-                match governor.try_reserve_model_load(estimated_weight_bytes) {
-                    Ok(reservation) => Some(reservation),
-                    Err(retry_error) => {
+                let room = |snapshot: &super::process_memory::MemoryGovernorSnapshot| {
+                    snapshot
+                        .effective_ceiling_bytes
+                        .saturating_sub(snapshot.current_usage_bytes)
+                };
+                let mut wait = flash_plan.is_some().then(|| {
+                    super::flash_load::RecoveryWait::new(
+                        room(&retry_snapshot),
+                        std::time::Instant::now(),
+                    )
+                });
+                loop {
+                    let retry_error = match governor.try_reserve_model_load(estimated_weight_bytes)
+                    {
+                        Ok(reservation) => break Some(reservation),
+                        Err(error) => error,
+                    };
+                    // A just-unloaded Flash model's footprint keeps falling for
+                    // a moment after its buffers are released.
+                    let Some(wait) = wait.as_mut() else {
                         bail!(
                             "process memory governor rejected model load `{target_id}` after one reclaim retry: first={first_error}; retry={retry_error}"
                         )
+                    };
+                    tracing::debug!(%retry_error, "Flash load waiting for its memory reservation");
+                    tracker.checkpoint()?;
+                    tokio::time::sleep(super::flash_load::ADMISSION_POLL).await;
+                    let snapshot = governor.refresh_process();
+                    let verdict = wait.observe(
+                        room(&snapshot),
+                        super::flash_load::ADMISSION_PATIENCE_REJECTED,
+                        std::time::Instant::now(),
+                    );
+                    if snapshot.pressure_level != PressureLevel::Normal
+                        || verdict == super::flash_load::WaitVerdict::Expired
+                    {
+                        bail!(
+                            "process memory governor rejected model load `{target_id}` while waiting for memory to recover: first={first_error}; retry={retry_error}; pressure={:?}",
+                            snapshot.pressure_level
+                        );
                     }
                 }
             }
@@ -2897,25 +2944,26 @@ impl EngineSlot {
         };
         tracker.enter_stage(LoadStage::PreparingMemory);
 
-        let (load_reservation, flash_plan) = match pool.ensure_capacity_for(&self.model).await {
-            Ok(reservation) => reservation,
-            Err(error) => {
-                let message = format!("{error:#}");
-                let load_attempts = self.state.lock().await.load_attempts();
-                settler
-                    .settle(
-                        EngineSlotState::Unloaded {
-                            reason: EngineUnloadReason::CapacityRejected,
-                            last_error: Some(message),
-                            changed_unix_ms: unix_time_ms(),
-                            load_attempts,
-                        },
-                        SlotLoadOutcome::failed(&error),
-                    )
-                    .await;
-                return Err(error);
-            }
-        };
+        let (load_reservation, flash_plan) =
+            match pool.ensure_capacity_for(&self.model, tracker).await {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    let load_attempts = self.state.lock().await.load_attempts();
+                    settler
+                        .settle(
+                            EngineSlotState::Unloaded {
+                                reason: EngineUnloadReason::CapacityRejected,
+                                last_error: Some(message),
+                                changed_unix_ms: unix_time_ms(),
+                                load_attempts,
+                            },
+                            SlotLoadOutcome::failed(&error),
+                        )
+                        .await;
+                    return Err(error);
+                }
+            };
         #[cfg(any(test, feature = "test-support"))]
         if let Some(hook) = pool.test_load_hook() {
             hook.pause(TestLoadPause::AfterPreparingMemory).await;
