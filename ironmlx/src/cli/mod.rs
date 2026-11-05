@@ -97,6 +97,13 @@ impl Cli {
             mlx::metal::set_metallib_path(path)?;
             let _ = CONFIGURED_MLX_METALLIB.set(PathBuf::from(path));
         }
+        if !matches!(
+            &self.command,
+            Command::ModelPreflight(_) | Command::HfTransfer(_)
+        ) {
+            mlx::metal::verify_runtime()
+                .map_err(|error| anyhow::anyhow!("MLX Metal runtime is unavailable: {error}"))?;
+        }
 
         match self.command {
             Command::Transcribe(args) => transcribe::run(args),

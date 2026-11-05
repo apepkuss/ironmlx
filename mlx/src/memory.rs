@@ -16,16 +16,24 @@ pub struct MemorySnapshot {
     pub device_name: Option<String>,
 }
 
-pub fn snapshot() -> MemorySnapshot {
-    MemorySnapshot {
-        active_bytes: mlx_sys::memory::ffi::get_active_memory(),
-        cache_bytes: mlx_sys::memory::ffi::get_cache_memory(),
-        peak_bytes: peak_window_bytes().max(CLOSED_WINDOWS_PEAK_BYTES.load(Ordering::Relaxed)),
-        memory_limit_bytes: mlx_sys::memory::ffi::get_memory_limit(),
+pub fn try_snapshot() -> crate::Result<MemorySnapshot> {
+    Ok(MemorySnapshot {
+        active_bytes: mlx_sys::memory::ffi::get_active_memory()?,
+        cache_bytes: mlx_sys::memory::ffi::get_cache_memory()?,
+        peak_bytes: try_peak_window_bytes()?.max(CLOSED_WINDOWS_PEAK_BYTES.load(Ordering::Relaxed)),
+        memory_limit_bytes: mlx_sys::memory::ffi::get_memory_limit()?,
         total_bytes: mlx_sys::memory::ffi::get_memory_size().ok(),
         max_recommended_bytes: mlx_sys::memory::ffi::get_max_recommended_memory().ok(),
         device_name: mlx_sys::memory::ffi::get_device_name().ok(),
-    }
+    })
+}
+
+/// # Panics
+/// When the MLX device cannot initialize. Zeroed counters would read as free
+/// memory; entry points call [`crate::metal::verify_runtime`] to report this
+/// as an error before any snapshot.
+pub fn snapshot() -> MemorySnapshot {
+    try_snapshot().unwrap_or_else(|error| panic!("MLX memory counters unavailable: {error}"))
 }
 
 /// Start measuring the peak of active memory afresh: [`peak_window_bytes`]
@@ -37,13 +45,24 @@ pub fn begin_peak_window() {
 }
 
 /// Peak active memory since the last [`begin_peak_window`].
+///
+/// # Panics
+/// When the MLX device cannot initialize, as [`snapshot`] does.
 pub fn peak_window_bytes() -> usize {
-    mlx_sys::memory::ffi::get_peak_memory()
+    try_peak_window_bytes().unwrap_or_else(|error| panic!("MLX peak memory unavailable: {error}"))
+}
+
+fn try_peak_window_bytes() -> crate::Result<usize> {
+    Ok(mlx_sys::memory::ffi::get_peak_memory()?)
 }
 
 /// Set the allocator cache limit and return the previous limit.
+///
+/// # Panics
+/// When the MLX device cannot initialize, as [`snapshot`] does.
 pub fn set_cache_limit(limit: usize) -> usize {
     mlx_sys::memory::ffi::set_cache_limit(limit)
+        .unwrap_or_else(|error| panic!("MLX cache limit unavailable: {error}"))
 }
 
 /// Set the wired (GPU-resident) memory limit and return the previous limit.
