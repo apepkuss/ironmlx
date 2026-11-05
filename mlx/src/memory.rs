@@ -76,6 +76,21 @@ impl WeightResidency {
             stream,
         )?)
     }
+
+    /// Bind the lease to the calling thread's default queue and wait for one
+    /// submission on it. Run right after the request: left unattached, the
+    /// system re-establishes the requested pages at a later GPU submission,
+    /// which stalls whichever work happens to come first. One-shot, not a
+    /// keepalive. Returns false, without GPU work, while the lease is paused.
+    pub fn activate_on_current_queue(&self) -> crate::Result<bool> {
+        if !self.bind_on(())? {
+            return Ok(false);
+        }
+        let probe = crate::Array::zeros([1], crate::Dtype::Uint32)?;
+        crate::ops::binary::add(&probe, &probe)?.eval()?;
+        crate::transforms::synchronize()?;
+        Ok(true)
+    }
 }
 
 pub use mlx_sys::memory::ffi::ScopedResidencyStats as WeightResidencyStats;

@@ -47,10 +47,22 @@ pub(super) fn prepare(loader: &Loader, full: bool) -> Result<Option<mlx::memory:
                 .and_then(|n| bytes.checked_add(n))
         })
         .context("Flash weight residency size overflow")?;
+    let started = std::time::Instant::now();
     match mlx::memory::WeightResidency::new(&weights, budget) {
         Ok(lease) => {
+            let request_ms = started.elapsed().as_millis() as u64;
+            let started = std::time::Instant::now();
+            // Later queues then bind in milliseconds, so neither the rest of
+            // the load nor the first request pays to re-establish the pages.
+            let activated = lease.activate_on_current_queue().unwrap_or_else(|error| {
+                tracing::warn!(%error, "Flash GPU residency activation failed; first use pays for it");
+                false
+            });
             tracing::info!(
                 bytes = lease.bytes(),
+                request_ms,
+                activate_ms = started.elapsed().as_millis() as u64,
+                activated,
                 "Flash text weight GPU residency prepared"
             );
             Ok(Some(lease))

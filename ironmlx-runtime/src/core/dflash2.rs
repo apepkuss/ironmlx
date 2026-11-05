@@ -2387,6 +2387,30 @@ where
     }
 
     fn fill_next_window(&mut self, current_token: u32) -> Result<()> {
+        // A request's first windows carry any process-level first-use cost.
+        const LOGGED_WINDOWS: usize = 4;
+        if self.counters.windows >= LOGGED_WINDOWS || !tracing::enabled!(tracing::Level::DEBUG) {
+            return self.fill_routed_window(current_token);
+        }
+        let before = self.counters.clone();
+        let started = Instant::now();
+        let result = self.fill_routed_window(current_token);
+        tracing::debug!(
+            window = before.windows,
+            elapsed_us = elapsed_us(started),
+            draft_build_us = self.counters.draft_build_us - before.draft_build_us,
+            draft_schedule_us = self.counters.draft_schedule_us - before.draft_schedule_us,
+            verify_build_us = self.counters.verify_build_us - before.verify_build_us,
+            verify_schedule_us = self.counters.verify_schedule_us - before.verify_schedule_us,
+            host_sync_us = self.counters.host_sync_us - before.host_sync_us,
+            rollback_us = self.counters.rollback_us - before.rollback_us,
+            drafted = self.counters.drafted_tokens - before.drafted_tokens,
+            "DFlash2 early window timing"
+        );
+        result
+    }
+
+    fn fill_routed_window(&mut self, current_token: u32) -> Result<()> {
         if self.current_draft_budget() == 0 {
             self.fill_ordinary_window(current_token)
         } else if self.tree_eligible() {
