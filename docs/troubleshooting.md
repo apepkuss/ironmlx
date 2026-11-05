@@ -52,6 +52,20 @@ For compatibility troubleshooting, check `model_type` in the model configuration
 | MiniCPM-V 4.6 | `minicpmv4_6` |
 | DiffusionGemma | `diffusion_gemma` |
 | Qwen Image 2.1 | `qwen_image_2_1` |
+| Breeze TTS 2 | `breeze_tts` |
+
+### Breeze speech synthesis
+
+| Symptom | Check |
+| --- | --- |
+| Missing speech codec | Both variants need `audio_tokenizer/model.safetensors` and its configuration. Retry downloading the model through the current App to complete a snapshot; do not use IndexTTS resource preparation. |
+| `unsupported model_type: breeze_tts` | Confirm that the running backend includes Breeze support. Updating source files alone does not replace an already installed App or its bundled backend. |
+| Cloning requires `ref_text` | Provide the exact transcript of the complete reference recording, either in the voice profile or in the request. Replacing a profile recording without a new transcript clears its old transcript. |
+| Voice design rejects the request | Supply nonempty `instructions` and leave reference audio and voice ID absent. For cloning, choose exactly one of `ref_audio` and `voice`. |
+| Streaming sounds too fast or too slow | Read `X-Audio-Sample-Rate`; Breeze outputs 24000 Hz mono s16le PCM. Preserve an unmatched byte across network reads. |
+| No immediate Dashboard playback | Dashboard synthesis waits for the full WAV; use the API for incremental PCM. Smaller chunks do not guarantee faster-than-real-time inference. |
+
+Request examples and parameter limits are in the [Breeze API](audio-speech-api.md#breeze-tts-2).
 
 ## Logs and diagnostics
 

@@ -528,9 +528,23 @@ fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Route
         .with_state(manager)
 }
 
+#[derive(Default, Deserialize)]
+struct AudioProfileQuery {
+    model: Option<String>,
+}
 async fn audio_execution_profile_handler(
-) -> Json<ironmlx_runtime::core::audio_execution::AudioExecutionProfile> {
-    Json(ironmlx_runtime::core::audio_execution::AudioExecutionProfile::current())
+    State(manager): State<ModelManager>,
+    axum::extract::Query(query): axum::extract::Query<AudioProfileQuery>,
+) -> Response {
+    if let Some(model) = query.model {
+        match manager.pool.audio_execution_profile(&model).await {
+            Ok(profile) => Json(profile).into_response(),
+            Err(error) => AdminError::from_load_error(error).into_response(),
+        }
+    } else {
+        Json(ironmlx_runtime::core::audio_execution::AudioExecutionProfile::current())
+            .into_response()
+    }
 }
 
 async fn app_openai_handler(

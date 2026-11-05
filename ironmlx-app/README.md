@@ -135,3 +135,27 @@ an environment without Rust, Xcode, an external MLX installation, or `MLX_*` /
 `DYLD_LIBRARY_PATH`; then loading a real model and completing real inference.
 The same artifact must be copied from the M5 Max builder to an M1 Pro running
 macOS 26.4 or newer without rebuilding or replacing any bundled file.
+
+## Breeze TTS 2
+
+The model catalogue includes `mlx-community/Breeze-TTS-2-mlx` (BF16) and
+`mlx-community/Breeze-TTS-2-mlx-8bit` (MXFP8, group size 32). Both require the
+independent `audio_tokenizer/model.safetensors` in addition to the main weights.
+The downloader validates that component and its configuration; Breeze does not
+use the external IndexTTS text or reference-encoder resources. Verified local
+snapshots previously marked `download_only` are promoted during registration
+only after the current native backend accepts their metadata.
+
+Open the model's parameters to use the Breeze synthesis panel:
+
+- Enter text and a natural-language voice description to design a voice.
+- Enter a managed voice ID to clone its reference recording. The voice profile
+  must contain the exact reference transcript, or supply it in the panel.
+- Add instructions while using a voice ID to direct the cloned voice.
+
+The Voices editor stores the reference transcript beside the audio metadata.
+The panel exposes CFG, seed, maximum audio tokens and temperature. Generate
+returns a complete 24 kHz mono WAV for playback; Stop cancels the request.
+Dashboard playback starts after WAV completion. Incremental PCM generation is
+available through the native `/v1/audio/speech` API and is distinct from the
+Dashboard's complete-WAV player.

@@ -7,7 +7,6 @@ use axum::{
     response::Response,
 };
 use ironmlx_audio::{
-    indextts25::INDEXTTS25_MAX_OUTPUT_FRAMES,
     io::{write_pcm_s16le, write_wav, NativeAudioIo},
     AudioError, AudioIo, DecodeLimits, PcmBuffer, PcmFormat,
 };
@@ -26,7 +25,6 @@ use std::{
 use tokio::sync::Semaphore;
 
 const INPUT_RESERVATION: usize = 256 * 1024 * 1024;
-const MAX_OUTPUT_FRAMES: usize = INDEXTTS25_MAX_OUTPUT_FRAMES as usize;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,6 +39,22 @@ struct SpeechRequest {
     response_format: String,
     #[serde(default)]
     stream: bool,
+    #[serde(default)]
+    ref_text: Option<String>,
+    #[serde(default)]
+    instructions: Option<String>,
+    #[serde(default)]
+    cfg_scale: Option<f32>,
+    #[serde(default)]
+    max_tokens: Option<usize>,
+    #[serde(default)]
+    temperature: Option<f32>,
+    #[serde(default)]
+    top_p: Option<f32>,
+    #[serde(default)]
+    top_k: Option<usize>,
+    #[serde(default)]
+    seed: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,10 +91,42 @@ impl SpeechRequest {
             .voice
             .as_ref()
             .is_some_and(|value| !value.id().trim().is_empty());
-        if has_reference == has_voice {
+        if (has_reference && has_voice)
+            || (!has_reference
+                && !has_voice
+                && self
+                    .instructions
+                    .as_ref()
+                    .is_none_or(|v| v.trim().is_empty()))
+        {
             return Err(Box::new(ApiError::invalid_request(
                 "invalid_audio_reference",
                 "provide exactly one of ref_audio or voice",
+            )));
+        }
+        if self
+            .ref_text
+            .as_ref()
+            .is_some_and(|v| v.trim().is_empty() || v.len() > 16384)
+            || self
+                .instructions
+                .as_ref()
+                .is_some_and(|v| v.trim().is_empty() || v.len() > 16384)
+            || self
+                .cfg_scale
+                .is_some_and(|v| !v.is_finite() || !(1.0..=10.0).contains(&v))
+            || self.max_tokens.is_some_and(|v| v == 0 || v > 1500)
+            || self
+                .temperature
+                .is_some_and(|v| !v.is_finite() || !(0.0..=2.0).contains(&v))
+            || self
+                .top_p
+                .is_some_and(|v| !v.is_finite() || !(0.0..=1.0).contains(&v))
+            || self.top_k.is_some_and(|v| v > 2052)
+        {
+            return Err(Box::new(ApiError::invalid_request(
+                "invalid_audio_request",
+                "invalid Breeze generation parameters",
             )));
         }
         if self.input.len() > 65536 {
@@ -247,6 +293,7 @@ async fn execute(
     .await
     .map_err(|_| ApiError::internal("audio_input_failed", "Input worker failed"))?
     .map_err(|error| *error)?;
+    let mut profile_text = None;
     let (reference, slot, permit, input_memory) = if let Some(encoded) = req.ref_audio {
         tokio::task::spawn_blocking(move || {
             NativeAudioIo
@@ -256,12 +303,12 @@ async fn execute(
         .await
         .map_err(|_| ApiError::internal("audio_input_failed", "Input worker failed"))?
         .map_err(model_error)?
-    } else {
-        let voice = req.voice.expect("validated voice reference");
-        let bytes = voices
-            .reference_bytes(voice.id().trim())
+    } else if let Some(voice) = &req.voice {
+        let (bytes, text) = voices
+            .reference_with_text(voice.id().trim())
             .await
             .map_err(|error| error.api_error())?;
+        profile_text = text;
         tokio::task::spawn_blocking(move || {
             NativeAudioIo
                 .decode(&bytes, &DecodeLimits::default())
@@ -270,12 +317,42 @@ async fn execute(
         .await
         .map_err(|_| ApiError::internal("audio_input_failed", "Input worker failed"))?
         .map_err(model_error)?
+    } else {
+        (
+            PcmBuffer {
+                format: PcmFormat {
+                    sample_rate: 24000,
+                    channels: 1,
+                },
+                samples: Vec::new(),
+            },
+            slot,
+            permit,
+            input_memory,
+        )
     };
     // Input guards stay live through JSON parsing, profile lookup and audio decoding.
     let _guards = (slot, permit);
     let model = req.model;
     let stream = req.stream;
-    let request = speech_request(req.input, reference, stream);
+    let mut request = speech_request(req.input, reference, stream);
+    request.seed = req.seed;
+    let has_breeze_options = req.ref_text.is_some()
+        || req.instructions.is_some()
+        || req.cfg_scale.is_some()
+        || req.max_tokens.is_some()
+        || req.temperature.is_some()
+        || req.top_p.is_some()
+        || req.top_k.is_some();
+    let options = ironmlx_audio::breeze_tts::BreezeOptions {
+        ref_text: req.ref_text.or(profile_text),
+        instructions: req.instructions,
+        cfg_scale: req.cfg_scale.unwrap_or(1.0),
+        max_tokens: req.max_tokens.unwrap_or(750),
+        temperature: req.temperature.unwrap_or(0.9),
+        top_p: req.top_p.unwrap_or(1.0),
+        top_k: req.top_k.unwrap_or(50),
+    };
     if !pool
         .is_audio_model(Some(&model))
         .await
@@ -320,6 +397,22 @@ async fn execute(
         ));
     };
     let runtime = runtime.clone();
+    if runtime.is_breeze() {
+        if !request.reference.samples.is_empty() && options.ref_text.is_none() {
+            return Err(ApiError::invalid_request(
+                "invalid_audio_reference",
+                "Breeze voice cloning requires ref_text matching the complete reference audio",
+            ));
+        }
+        request.breeze = Some(options);
+    } else if has_breeze_options || request.reference.samples.is_empty() {
+        return Err(ApiError::invalid_request(
+            "invalid_audio_request",
+            "Breeze parameters require a Breeze TTS model",
+        ));
+    }
+    let format = runtime.output_format();
+    let granularity = runtime.streaming_granularity();
     let mut output = runtime
         .submit(request, input_memory, lease)
         .await
@@ -366,9 +459,11 @@ async fn execute(
         Ok(audio_headers(
             Response::new(Body::from_stream(chunks)),
             true,
+            format,
+            granularity,
         ))
     } else {
-        collect_wav(output).await
+        collect_wav(output, format).await
     }
 }
 
@@ -390,23 +485,21 @@ fn encode_chunk(output: AudioOutputChunk) -> ironmlx_audio::Result<Bytes> {
         _memory: output.reservation,
     }))
 }
-async fn collect_wav(mut output: AudioResponse) -> Result<Response, ApiError> {
+async fn collect_wav(mut output: AudioResponse, format: PcmFormat) -> Result<Response, ApiError> {
+    let max_output_frames = format.sample_rate as usize * 600;
     let governor = global_process_memory_governor();
     governor.sample_process();
     let memory = governor
-        .try_reserve(MAX_OUTPUT_FRAMES * 6 + 44, "audio complete response")
+        .try_reserve(max_output_frames * 6 + 44, "audio complete response")
         .map_err(|e| runtime_error(e.into()))?;
     let mut pcm = PcmBuffer {
-        format: PcmFormat {
-            sample_rate: 22050,
-            channels: 1,
-        },
-        samples: Vec::with_capacity(MAX_OUTPUT_FRAMES),
+        format,
+        samples: Vec::with_capacity(max_output_frames),
     };
     loop {
         match output.next().await.map_err(runtime_error)? {
             Some(AudioOutput::Chunk(chunk)) => {
-                if chunk.chunk.pcm.samples.len() > MAX_OUTPUT_FRAMES - pcm.samples.len() {
+                if chunk.chunk.pcm.samples.len() > max_output_frames - pcm.samples.len() {
                     return Err(model_error(AudioError::GenerationLimitExceeded));
                 }
                 pcm.samples.extend_from_slice(&chunk.chunk.pcm.samples);
@@ -434,13 +527,20 @@ async fn collect_wav(mut output: AudioResponse) -> Result<Response, ApiError> {
             _memory: memory,
         }))),
         false,
+        format,
+        "segment",
     );
     response
         .headers_mut()
         .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
     Ok(response)
 }
-fn audio_headers(mut response: Response, stream: bool) -> Response {
+fn audio_headers(
+    mut response: Response,
+    stream: bool,
+    format: PcmFormat,
+    granularity: &'static str,
+) -> Response {
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
@@ -454,13 +554,13 @@ fn audio_headers(mut response: Response, stream: bool) -> Response {
             "no-store"
         }),
     );
-    headers.insert("x-audio-sample-rate", HeaderValue::from_static("22050"));
+    headers.insert("x-audio-sample-rate", HeaderValue::from(format.sample_rate));
     headers.insert("x-audio-channels", HeaderValue::from_static("1"));
     headers.insert("x-audio-sample-format", HeaderValue::from_static("s16le"));
     if stream {
         headers.insert(
             "x-ironmlx-streaming-granularity",
-            HeaderValue::from_static("segment"),
+            HeaderValue::from_static(granularity),
         );
     }
     response
@@ -469,6 +569,34 @@ fn audio_headers(mut response: Response, stream: bool) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn breeze_design_contract_and_dynamic_format() {
+        let req: SpeechRequest = serde_json::from_str(r#"{"model":"breeze","input":"你好","instructions":"温柔女声","cfg_scale":4,"seed":42}"#).unwrap();
+        assert!(req.validate().is_ok());
+        for value in [
+            r#"{"model":"b","input":"x","instructions":"a","max_tokens":0}"#,
+            r#"{"model":"b","input":"x","instructions":"a","cfg_scale":-1}"#,
+        ] {
+            assert!(serde_json::from_str::<SpeechRequest>(value)
+                .unwrap()
+                .validate()
+                .is_err());
+        }
+        let response = audio_headers(
+            Response::new(Body::empty()),
+            true,
+            PcmFormat {
+                sample_rate: 24000,
+                channels: 1,
+            },
+            "incremental_waveform",
+        );
+        assert_eq!(response.headers()["x-audio-sample-rate"], "24000");
+        assert_eq!(
+            response.headers()["x-ironmlx-streaming-granularity"],
+            "incremental_waveform"
+        );
+    }
     #[test]
     fn speech_contract_rejects_ambiguous_or_unknown_fields() {
         let ambiguous: SpeechRequest =
@@ -499,6 +627,14 @@ mod tests {
                 voice: None,
                 stream,
                 response_format: format.into(),
+                ref_text: None,
+                instructions: None,
+                cfg_scale: None,
+                max_tokens: None,
+                temperature: None,
+                top_p: None,
+                top_k: None,
+                seed: None,
             };
             assert_eq!(req.validate().is_ok(), valid);
         }

@@ -6,8 +6,39 @@ struct TTSModelDownloadProfile: Sendable {
     let weightPaths: Set<String>
     let auxiliaryPaths: Set<String>
     let externalResources: [String]
+    var modelType: String = "indextts2_5"
+    var quantization: ModelQuantizationPreflight? = nil
 
     static func inspect(directory: URL, files: [RemoteModelFile]) throws -> Self? {
+        let configURL = directory.appendingPathComponent("config.json")
+        if let data = try? Data(contentsOf: configURL),
+           let config = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+           config["model_type"] as? String == "breeze_tts" {
+            guard BreezeTTSModelSupport.isSupported(config) else {
+                throw ModelMetadataPreflightError.rejected("Unsupported Breeze TTS configuration.")
+            }
+            let byPath = Dictionary(uniqueKeysWithValues: files.map { ($0.path, $0) })
+            var weights: Set<String> = [BreezeTTSModelSupport.codecWeight]
+            let indexURL = directory.appendingPathComponent("model.safetensors.index.json")
+            if FileManager.default.fileExists(atPath: indexURL.path) {
+                let index = try JSONSerialization.jsonObject(with: Data(contentsOf: indexURL)) as? [String: Any]
+                guard let map = index?["weight_map"] as? [String: String], !map.isEmpty else {
+                    throw ModelMetadataPreflightError.rejected("Invalid Breeze weight index.")
+                }
+                weights.formUnion(map.values)
+            } else { weights.insert("model.safetensors") }
+            var auxiliary = Set(BreezeTTSModelSupport.requiredMetadata)
+            auxiliary.formUnion(files.filter { ["readme.md", "license", "notice"].contains($0.path.lowercased()) }.map(\.path))
+            for path in weights.union(auxiliary) {
+                _ = try ModelSnapshotVerifier.safeFileURL(path: path, beneath: directory)
+                guard let file = byPath[path], file.size > 0, !weights.contains(path) || file.isWeight else {
+                    throw ModelMetadataPreflightError.rejected("Breeze repository is missing \(path).")
+                }
+            }
+            let quant = config["quantization"] as? [String: Any] ?? config["quantization_config"] as? [String: Any]
+            return Self(weightPaths: weights, auxiliaryPaths: auxiliary, externalResources: [], modelType: "breeze_tts",
+                        quantization: quant == nil ? nil : ModelQuantizationPreflight(mode: "mxfp8", bits: 8, groupSize: 32, overrideCount: 0))
+        }
         let manifestURL = directory.appendingPathComponent("model_manifest.json")
         guard FileManager.default.fileExists(atPath: manifestURL.path) else { return nil }
         let object = try JSONSerialization.jsonObject(with: Data(contentsOf: manifestURL))
@@ -65,7 +96,7 @@ struct TTSModelDownloadProfile: Sendable {
     }
 
     var compatibility: ModelMetadataPreflightResult {
-        ModelMetadataPreflightResult(modelType: "indextts2_5", artifactRole: "tts", quantization: nil)
+        ModelMetadataPreflightResult(modelType: modelType, artifactRole: "tts", quantization: quantization)
     }
 
     /// Conservative queue reservation before the immutable manifest has been downloaded.

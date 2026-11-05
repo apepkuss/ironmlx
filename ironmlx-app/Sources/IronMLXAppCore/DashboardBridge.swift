@@ -69,6 +69,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     var deepSeekHarnessService = DeepSeekHarnessIntegrationService()
     private var deepSeekHarnessSetupPending = false
     private var dshDesktopSetupPending = false
+    private var speechSynthesisTask: Task<Void, Never>?
     private var huggingFaceSearchTask: Task<Void, Never>?
     private var pendingModelImport: ModelImportPreview?
     private var modelImportInspectionTask: Task<ModelImportPreview, Error>?
@@ -138,6 +139,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     deinit {
+        speechSynthesisTask?.cancel()
         huggingFaceSearchTask?.cancel()
         modelImportInspectionTask?.cancel()
         modelImportTask?.cancel()
@@ -149,6 +151,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     public func cancelAllDownloads() {
+        speechSynthesisTask?.cancel()
         diagnosticExportCoordinator.cancel()
         modelImportInspectionTask?.cancel()
         modelImportTask?.cancel()
@@ -790,6 +793,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             restoreBenchmark(path: payload.path)
         case "/admin/api/cache/capacity":
             sendColdCacheCapacity(payload: payload)
+        case "/admin/api/audio/synthesis":
+            synthesizeSpeech(body: payload.body)
+        case "/admin/api/audio/synthesis/cancel":
+            speechSynthesisTask?.cancel()
+            speechSynthesisTask = nil
         case "/v1/audio/voices":
             proxyVoiceMutation(path: payload.path, method: "POST", body: payload.body)
         default:
@@ -843,6 +851,23 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             } catch {
                 let json = (try? Self.jsonString(ErrorPayload(success: false, error: error.localizedDescription))) ?? "null"
                 await MainActor.run { self.sendFetchResult(path: path, jsonString: json) }
+            }
+        }
+    }
+
+    private func synthesizeSpeech(body: [String: JSONValue]) {
+        speechSynthesisTask?.cancel()
+        let config = configStore.load()
+        speechSynthesisTask = Task { [weak self] in
+            do {
+                let response = try await BackendAPIClient(host: config.host, port: config.port).synthesizeSpeech(body: body)
+                try Task.checkCancellation()
+                let json = try Self.jsonString(VoicePreviewPayload(contentType: "audio/wav", dataBase64: response.data.base64EncodedString()))
+                self?.sendFetchResult(path: "/admin/api/audio/synthesis", jsonString: json)
+            } catch {
+                guard !Task.isCancelled else { return }
+                let json = (try? Self.jsonString(ErrorPayload(success: false, error: error.localizedDescription))) ?? "null"
+                self?.sendFetchResult(path: "/admin/api/audio/synthesis", jsonString: json)
             }
         }
     }

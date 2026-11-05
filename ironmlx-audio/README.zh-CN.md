@@ -3,7 +3,7 @@
 [English](README.md)
 
 IronMLX 的原生音频模型基础库。该 crate 负责 PCM 数据、音频解码与编码、
-参考波形准备、文本准备、组件权重加载，以及原生 IndexTTS 2.5 语音合成。
+参考波形准备、文本准备、组件权重加载，以及原生 IndexTTS 2.5 / Breeze TTS 2 语音合成。
 
 ```mermaid
 flowchart TD
@@ -195,7 +195,7 @@ PCM 和 `SessionControl`，生成参考 mel、归一化后的 w2v-BERT
 本库不修改它。这是在支持 TF32 的硬件上，对 float32 参考编码器完成数值验证
 所采用的配置。
 
-转换与基线重新生成方式见[离线工具](tools/README.md)。显式运行完整链路
+转换与基线重新生成方式见[离线音频工具](tools/README.zh-CN.md)。显式运行完整链路
 一致性测试时，除固定版本的快照外，还需提供：
 
 - `IRONMLX_INDEXTTS25_DERIVED`：经校验、转换后的辅助目录。
@@ -334,3 +334,41 @@ RTTM、文件 SSE、Qwen3 三模型组合流程和可选的实时 WebSocket 说�
 `DiarizationStream::snapshot` 在副本中补齐末尾，不消费实时流的右侧上下文。
 丢弃流会取消工作并释放缓存预留和模型租约。服务只标注说话人，不识别真实身份，
 也不提取每个人的独立音轨。
+
+
+## Breeze TTS 2
+
+`breeze_tts::BreezeTts` 支持 mlx-community 的 Breeze-TTS-2 MLX 两个版本：
+BF16 和 MXFP8（8 bit、group size 32）。`preflight` 检查本地资源布局；
+`preflight_model_metadata` 在下载权重前校验配置。快照必须包含独立的
+`audio_tokenizer/model.safetensors`，其中包括参考音频编码器和波形解码器。
+该模型不需要 IndexTTS 辅助权重、WeText FST 或日语字典。
+
+原生推理链使用双向 T5Gemma2 文本编码器、Qwen3 主干、16 路码本的 depth
+生成及 Qwen3-TTS codec。输出为有限的 24000 Hz 单声道 f32。
+`BreezeOptions` 支持无参考音色设计（`instructions`）、声音克隆（`reference`
+和准确的 `ref_text`）以及带指令的声音控制（两者同时提供）。支持中英文及
+模型的内联发声事件 token。参考音频重采样为单声道 24 kHz，完整使用最长
+60 秒的录音，以保持文字稿匹配。指令和参考文字稿分别最多 16384 UTF-8 字节；
+组合后的模型 prompt 最多 8192 个位置。文本按换行或 600 个字符分段，最多 256 段。
+
+流式模式每生成四个音频码帧便输出波形，对应 320 ms 的音频，保留卷积历史、
+转置卷积重叠和 codec 注意力状态。这是音频块长度，不是实际首音延迟。
+收集模式缓冲同一条增量解码路径。两种模式都使用请求级随机 key、取消检查点、
+连续采样偏移及按原生采样帧计数的输出上限，默认服务策略为 600 秒。
+达到 token 或输出上限会明确报错，不会以成功状态返回截断结果。
+会话结束或被丢弃时会重置 codec 状态。
+
+真实验收测试需要显式启用，并使用本地文件：
+
+```sh
+export IRONMLX_BREEZE_SNAPSHOT=/absolute/path/to/model/snapshot
+export IRONMLX_BREEZE_REFERENCE=/absolute/path/to/network-reference.safetensors
+MLX_ENABLE_TF32=0 cargo test -p ironmlx-audio --lib breeze_tts::tests::real_network_parity -- --ignored --nocapture
+MLX_ENABLE_TF32=0 cargo test -p ironmlx-audio --lib breeze_tts::tests::real_synthesis_acceptance -- --ignored --nocapture
+```
+
+每种精度分别运行上述命令。设置 `IRONMLX_BREEZE_OUTPUT` 可保存合成 WAV 证据。
+固定版本的 Python 基线生成方式见[离线音频工具](tools/README.zh-CN.md#breeze-网络数值对齐)。
+网络对齐检查中英文 token ID、文本投影、主干 logits、全部十五个 depth head
+和缓存后的下一帧输出。这些检查验证数值一致性，不代表主观音质或端到端延迟保证。

@@ -286,6 +286,14 @@ pub fn build_engine_model_config(
     if decision.is_some() {
         bail!("decision settings require a decision model");
     }
+    let audio = if super::audio_execution::is_breeze(model_dir)? {
+        ironmlx_audio::breeze_tts::preflight(model_dir)?;
+        let mut audio = audio.unwrap_or_default();
+        audio.execution = audio.execution.resolve_for_sample_rate(24000)?;
+        Some(audio)
+    } else {
+        audio
+    };
     if let Some(audio) = audio {
         if max_cache_cap_override.is_some()
             || default_max_output_tokens.is_some()
@@ -921,7 +929,15 @@ pub fn build_engine_model_config_for_pool(
     if model.decision.is_some() {
         bail!("decision settings require a decision model");
     }
-    if let Some(audio) = model.audio.clone() {
+    let audio = if super::audio_execution::is_breeze(&model.path)? {
+        ironmlx_audio::breeze_tts::preflight(&model.path)?;
+        let mut audio = model.audio.clone().unwrap_or_default();
+        audio.execution = audio.execution.resolve_for_sample_rate(24000)?;
+        Some(audio)
+    } else {
+        model.audio.clone()
+    };
+    if let Some(audio) = audio {
         if model.scheduler_profile.is_some()
             || model.mtp_model_dir.is_some()
             || model.mtp_draft_tokens.is_some()

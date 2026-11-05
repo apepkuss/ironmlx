@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-18",
+  "updatedAt": "2026-11-05",
   "entries": [
     {
       "id": "qwen35-2b-4bit",
@@ -1630,6 +1630,52 @@
         "docs/audio-transcriptions-api.md",
         "ironmlx-audio/src/diarization/model.rs"
       ]
+    },
+    {
+      "id": "breeze-tts2-bf16",
+      "name": "Breeze TTS 2",
+      "parameters": "3.45B",
+      "weightFormat": "BF16",
+      "weightBytes": 7590912274,
+      "downloadBytes": 7625546547,
+      "category": "tts",
+      "capabilities": [
+        "tts"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Breeze-TTS-2-mlx",
+      "msRepo": null,
+      "metadataRevision": "3c8829fb7fd335818f085cd2ef49b4100c0e46c8",
+      "evidence": [
+        "ironmlx-audio/src/breeze_tts/mod.rs"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "breeze-tts2",
+      "variantLabel": "BF16"
+    },
+    {
+      "id": "breeze-tts2-mxfp8",
+      "name": "Breeze TTS 2",
+      "parameters": "3.45B",
+      "weightFormat": "MXFP8",
+      "weightBytes": 4568014628,
+      "downloadBytes": 4602674558,
+      "category": "tts",
+      "capabilities": [
+        "tts"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Breeze-TTS-2-mlx-8bit",
+      "msRepo": null,
+      "metadataRevision": "c6e4a2ff6ab9afba68b7853de802273ffe23fb49",
+      "evidence": [
+        "ironmlx-audio/src/breeze_tts/mod.rs"
+      ],
+      "msMetadataRevision": null,
+      "modelId": "breeze-tts2",
+      "variantLabel": "MXFP8"
     }
   ]
 }

@@ -61,3 +61,11 @@ Text fixtures are authored test sentences and reference tokenization outputs.
   The reference describes the NVIDIA NeMo Speech architecture and AOSC semantics.
   External Nemotron weights and model configuration retain OpenMDW-1.1; no model
   weights are distributed with this implementation.
+
+- Native Breeze TTS 2 transformer and generation behavior follows Blaizzy/mlx-audio
+  at `b1db0f21c1767b40b3496927f12df67495f0088b` (MIT;
+  `licenses/mlx-audio-MIT.txt`). Backbone and depth rotary behavior follows
+  Apple MLX-LM (MIT). Breeze checkpoint weights are external artifacts under
+  the Breeze Research and Non-Commercial License, which also applies to
+  derivative models and self-hosted outputs. This source license does not
+  grant rights to use or redistribute those artifacts.

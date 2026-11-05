@@ -14,7 +14,10 @@ and response contract remains defined on this page.
 
 ## Register local resources
 
-An audio model needs a verified source snapshot, derived reference-encoder
+The following resource example is for IndexTTS 2.5. Breeze requires only its
+complete model snapshot; see [Breeze TTS 2](#breeze-tts-2).
+
+An IndexTTS model needs a verified source snapshot, derived reference-encoder
 resources, the fixed resource lock, WeText FST files and the UniDic-lite dictionary.
 See [ironmlx-audio developer reference](../ironmlx-audio/README.md) for the resource profile and
 conversion tools. Resource paths are explicit local paths. Loading validates the
@@ -44,11 +47,11 @@ For the model-management daemon (`ironmlx serve`), the existing local
 `/admin/api/models/register` and `/admin/api/models/load` endpoints accept the same
 `audio` object, together with `model` (the public identifier) and `model_dir`
 (the source snapshot). Existing unload, pinning, TTL and model-count policies apply.
-Audio models report `runtime_kind: "tts"`, architecture `indextts25` and scheduler
+Audio models report `runtime_kind: "tts"`, architecture `indextts25` or `breeze_tts`, and scheduler
 `serial_audio`. Causal scheduler, sampling, MTP and PromptLookup overrides are rejected.
 
 The executable defaults `MLX_ENABLE_TF32` to `0` before initializing MLX or
-starting workers. Explicit environment settings are preserved; the audio loader
+starting workers. Explicit environment settings are preserved; the IndexTTS loader
 rejects values other than `0`. Applications embedding the Rust runtime must set
 this process-wide precision policy before their first MLX call. Audio workers use
 separate registered streams and request-local random state. Memory and allocator
@@ -115,7 +118,8 @@ PCM stream:
 ```
 
 `model` and `input` are required nonempty strings. Exactly one of `ref_audio` or
-`voice` is required. `voice` accepts a stable string ID or `{ "id": "speaker_a" }`.
+`voice` is required for IndexTTS. Breeze also supports reference-free
+[voice design](#breeze-tts-2). `voice` accepts a stable string ID or `{ "id": "speaker_a" }`.
 `response_format` defaults to `wav`; `stream` defaults to `false`. The two output
 combinations above are supported. Unknown fields, duplicate fields and explicit
 nulls are rejected.
@@ -124,25 +128,28 @@ nulls are rejected.
 Encode the complete audio file into that string; file paths, URLs and data URLs
 are not accepted. Audio format is identified from decoded bytes. Supported inputs
 are WAV (PCM 16/24/32 or IEEE float32), FLAC and MP3. The entire input file is
-validated before the reference is cropped to its first 15 seconds.
+validated first. IndexTTS uses its first 15 seconds; Breeze uses the entire
+reference, up to 60 seconds, with its matching transcript.
 
 Input is a complete JSON request. Automatic language selection and the fixed
-synthesis profile are documented in the audio library. Streaming granularity is
+synthesis profile are documented in the audio library. IndexTTS streaming granularity is
 a completed text segment: each segment must finish acoustic synthesis before its
 PCM can be emitted.
 
 ## Responses and client handling
 
-Both modes produce 22050 Hz, mono, signed 16-bit little-endian samples. Responses
-include `X-Request-Id`, `X-Audio-Sample-Rate: 22050`, `X-Audio-Channels: 1` and
-`X-Audio-Sample-Format: s16le`.
+Both modes produce mono, signed 16-bit little-endian samples: 22050 Hz for
+IndexTTS and 24000 Hz for Breeze. Responses include `X-Request-Id`,
+`X-Audio-Sample-Rate`, `X-Audio-Channels: 1` and `X-Audio-Sample-Format: s16le`.
+Clients must use the reported sample rate.
 
 | Mode | Content-Type | Length | Cache-Control |
 | --- | --- | --- | --- |
 | Complete WAV | `audio/wav` | Full file `Content-Length` | `no-store` |
 | PCM stream | `audio/pcm` | No `Content-Length` | `no-store, no-transform` |
 
-PCM responses also include `X-IronMLX-Streaming-Granularity: segment`. The stream
+PCM responses also include `X-IronMLX-Streaming-Granularity`: `segment` for
+IndexTTS or `incremental_waveform` for Breeze. The stream
 contains raw samples without a WAV header or JSON events. Network reads can end
 on any byte boundary, including an odd byte count: retain the last unmatched byte
 and combine it with the next read before interpreting little-endian samples.
@@ -161,6 +168,9 @@ cancellation checkpoint and final GPU synchronization. Unloading an active model
 enters draining; it cannot free the model beneath its worker.
 
 ## Limits and scheduling
+
+The model-specific values below describe IndexTTS. See [Breeze TTS 2](#breeze-tts-2)
+for its text, output and memory policies.
 
 | Policy | Default |
 | --- | --- |
@@ -284,3 +294,58 @@ FSTs and dictionary data remain explicit external resources; they are not bundle
 with the app. Repeat client playback against the Bundle helper as a separate
 check. A local ad-hoc-signed Bundle is not Developer ID signing, notarization or
 authorization for public distribution.
+
+
+## Breeze TTS 2
+
+Breeze-TTS-2 BF16 and MXFP8 (`group_size=32`, `bits=8`) checkpoints are routed
+from `config.json` (`model_type: breeze_tts`). Register the snapshot path without
+IndexTTS auxiliary resource settings. The snapshot must include its complete
+main safetensors index/shards, fast tokenizer and `audio_tokenizer` configuration
+and weights. Loading is native and does not launch Python.
+
+Register or load either variant through `POST /admin/api/models/load`:
+
+```json
+{"model":"mlx-community/Breeze-TTS-2-mlx-8bit","model_dir":"/absolute/path/to/snapshot"}
+```
+
+`POST /v1/audio/speech` accepts these Breeze fields in addition to `model`,
+`input`, `voice` or `ref_audio`, and output settings:
+
+| Field | Default | Purpose |
+| --- | --- | --- |
+| `instructions` | absent | Voice design or delivery instruction |
+| `ref_text` | absent | Exact transcript of the entire reference recording |
+| `cfg_scale` | 1 | Instruction guidance strength, 1–10 |
+| `max_tokens` | 750 | Audio frames to generate, 1–1500 |
+| `temperature` | 0.9 | Sampling temperature, 0–2 |
+| `top_p` | 1 | Nucleus sampling, 0–1 |
+| `top_k` | 50 | Sampling candidate count, 0–2052; 0 disables |
+| `seed` | absent | Request-local random seed |
+
+Voice design supplies `instructions` without a reference. Voice cloning supplies
+one reference and its exact transcript. Voice direction adds `instructions` to
+cloning. Managed voice creation/update accepts optional `ref_text`; speech uses
+that saved transcript unless the request overrides it. An empty profile
+`ref_text` clears it. Replacing a profile recording without a new transcript
+clears the previous transcript to prevent mismatched conditioning. Instructions
+and reference transcripts are each limited to 16384 UTF-8 bytes.
+
+```json
+{"model":"mlx-community/Breeze-TTS-2-mlx-8bit","input":"你好，欢迎使用 IronMLX。","instructions":"温柔、自然的女声","cfg_scale":4,"seed":42,"response_format":"wav"}
+```
+
+Breeze outputs mono 24000 Hz, with the same WAV or streamed s16le PCM response
+modes. Consumers must read `X-Audio-Sample-Rate` rather than assume 22050 Hz.
+Breeze PCM declares `X-IronMLX-Streaming-Granularity: incremental_waveform`.
+IndexTTS retains its existing reference requirements, 22050 Hz and segment
+streaming. Breeze-specific fields are rejected for IndexTTS.
+
+Queueing, cancellation, deadlines, model leases, bounded output and shared memory
+admission apply to both architectures. Breeze text is split at newlines or 600
+characters into at most 256 segments, with a combined prompt cap of 8192 positions.
+The Breeze execution profile allows at
+most 600 seconds (14400000 output frames); its computation reservation is 4 GiB,
+separate from resident weights and output storage. This is an admission budget,
+not a measured peak-memory or latency guarantee.

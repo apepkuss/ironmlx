@@ -71,6 +71,32 @@ public struct BackendAPIClient: Sendable {
         try await sendJSON(method: "POST", path: path, body: body)
     }
 
+    /// Speech synthesis may exceed ordinary administration request deadlines.
+    public func synthesizeSpeech<T: Encodable>(body: T) async throws -> (data: Data, sampleRate: Int) {
+        guard let url = URL(string: "http://\(host):\(port)/v1/audio/speech") else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(body)
+        request.timeoutInterval = 960
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 960
+        configuration.timeoutIntervalForResource = 960
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+        guard (200..<300).contains(http.statusCode) else {
+            throw BackendAPIError.serverResponse(statusCode: http.statusCode, body: String(data: data, encoding: .utf8))
+        }
+        guard http.value(forHTTPHeaderField: "Content-Type")?.hasPrefix("audio/wav") == true,
+              let rawRate = http.value(forHTTPHeaderField: "X-Audio-Sample-Rate"), let rate = Int(rawRate), rate > 0,
+              http.value(forHTTPHeaderField: "X-Audio-Channels") == "1",
+              data.count >= 44, data.count <= 32 * 1024 * 1024,
+              data.prefix(4) == Data("RIFF".utf8) else { throw URLError(.cannotDecodeContentData) }
+        return (data, rate)
+    }
+
     public func patchJSON<T: Encodable>(path: String, body: T) async throws -> Data {
         try await sendJSON(method: "PATCH", path: path, body: body)
     }

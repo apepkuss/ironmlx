@@ -5,12 +5,12 @@
         "bundled_hash_scope": "Attribution notice text; not a hash of compiled implementations",
         "bundled_modifications": "Notice retained with the complete accompanying upstream license texts. External model and dictionary distributions are not bundled.",
         "bundled_path": "ironmlx-audio/NOTICE.md",
-        "bundled_sha256": "4601628ee010e5187b49b3634e7b668e27ad332bc25de7e816c5851024023f7d",
+        "bundled_sha256": "2a6f369a5fc9766ecf3805e26b8120e0f4f0bc02c8b9659b7819c32eee717894",
         "component": "Audio implementation attribution notice",
         "copyright": "Upstream authors are identified in the bundled attribution notice.",
         "license": "Apache-2.0",
         "license_file": "audio-attributions.txt",
-        "license_sha256": "4601628ee010e5187b49b3634e7b668e27ad332bc25de7e816c5851024023f7d",
+        "license_sha256": "2a6f369a5fc9766ecf3805e26b8120e0f4f0bc02c8b9659b7819c32eee717894",
         "repository": "https://github.com/apepkuss/ironmlx",
         "revision": "555dcc1d484737c4235cd221278244be89876131",
         "source_path": "ironmlx-audio/NOTICE.md",
@@ -175,13 +175,13 @@
         "bundled_modifications": "License text retained for native code linked through ironmlx-audio or algorithms adapted in its implementation. Model weights and external linguistic resources are not bundled.",
         "bundled_path": "ironmlx-audio/licenses/mlx-audio-MIT.txt",
         "bundled_sha256": "11d27e0259dec3a323fa6c04c330621d0950ab96c6760d5aac3e2e97229e6f22",
-        "component": "MLX Audio diarization implementation MIT notice",
+        "component": "MLX Audio implementation MIT notice",
         "copyright": "Copyright (c) 2024 Prince Canuma",
         "license": "MIT",
         "license_file": "audio-mlx-audio-mit.txt",
         "license_sha256": "11d27e0259dec3a323fa6c04c330621d0950ab96c6760d5aac3e2e97229e6f22",
         "repository": "https://github.com/Blaizzy/mlx-audio",
-        "revision": "4ef6c3a577ade12d946e4b1d1870e4ba67fb5b9a",
+        "revision": "b1db0f21c1767b40b3496927f12df67495f0088b",
         "source_path": "LICENSE",
         "source_url": "https://github.com/Blaizzy/mlx-audio",
         "usage": "Required attribution for audio implementation distributed with the server."
@@ -243,7 +243,7 @@
       }
     ],
     "manifest": "compliance/bundled-assets.json",
-    "manifest_sha256": "0ef0e6660895a1a3a3548b9fab634f75e49124e603f60ca982bd88a111736c17"
+    "manifest_sha256": "8d99cac71c03c84a7fcc434cca29228e2336cc591044a07fc2dc155718785a96"
   },
   "generation": {
     "cargo_about_config": "about.toml",

@@ -10,7 +10,7 @@ struct SupportedModelCatalogTests {
     @MainActor
     func bootstrapContainsBundledCatalog() throws {
         let catalog = try SupportedModelCatalog.bundled()
-        #expect(catalog.entries.count == 63)
+        #expect(catalog.entries.count == 65)
         let script = try DashboardWindowController.bootstrapScript(config: AppConfig(), route: .status)
         let context = JSContext()!
         context.evaluateScript("var window = {};\n" + script)
@@ -55,7 +55,7 @@ struct SupportedModelCatalogTests {
     func quantizationGroups() throws {
         let catalog = try SupportedModelCatalog.bundled()
         let groups = Dictionary(grouping: catalog.entries, by: \.modelId)
-        #expect(groups.count == 33)
+        #expect(groups.count == 34)
         #expect(groups["qwen35-2b"]?.map(\.variantLabel) == ["Affine · 4 bit", "Affine · 5 bit", "Affine · 6 bit", "OptiQ · 4 bit"])
         #expect(groups["qwen38-27b"]?.map(\.variantLabel) == ["Affine · 4 bit", "Affine · 8 bit"])
         for entries in groups.values {
@@ -63,6 +63,7 @@ struct SupportedModelCatalogTests {
             #expect(Set(entries.map(\.name)).count == 1)
             #expect(Set(entries.map(\.category)).count == 1)
         }
+        #expect(groups["breeze-tts2"]?.map(\.variantLabel) == ["BF16", "MXFP8"])
         #expect(groups["dflash2-qwen38"]?.count == 1)
         #expect(groups["dflash2-qwen36-35b-a3b"]?.map(\.variantLabel) == ["BF16"])
     }

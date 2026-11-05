@@ -236,6 +236,7 @@ public enum LocalModelBackendRegistrar {
                 continue
             }
             do {
+                try await BreezeTTSModelSupport.upgradeDownloadOnlySnapshot(at: modelDir)
                 try await Qwen3ASRModelSupport.upgradeDownloadOnlySnapshot(at: modelDir)
                 try await NemotronDiarizationModelSupport.upgradeDownloadOnlySnapshot(at: modelDir)
                 let capabilities = model.capabilities

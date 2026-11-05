@@ -59,6 +59,7 @@ pub struct TtsRequest {
     pub language: Language,
     pub seed: Option<u64>,
     pub output_policy: OutputPolicy,
+    pub breeze: Option<crate::breeze_tts::BreezeOptions>,
 }
 
 pub struct TtsSummary {

@@ -109,6 +109,7 @@ fn estimated_engine_weight_bytes(model: &EngineModelConfig) -> Result<usize> {
                 model
                     .audio
                     .iter()
+                    .filter(|audio| !audio.derived_resources.as_os_str().is_empty())
                     .map(|audio| audio.derived_resources.as_path()),
             ),
     )?;
@@ -740,6 +741,39 @@ impl EnginePoolState {
                 })?;
         }
         Ok(())
+    }
+
+    /// Model-specific execution limits without loading the checkpoint.
+    pub async fn audio_execution_profile(
+        &self,
+        requested: &str,
+    ) -> Result<super::audio_execution::AudioExecutionProfile> {
+        let id = self
+            .inner
+            .registry
+            .lock()
+            .await
+            .resolve_model_id(Some(requested))?
+            .to_owned();
+        let path = {
+            let slots = self.inner.slots.lock().await;
+            let slot = slots
+                .get(&id)
+                .ok_or_else(|| anyhow::anyhow!("model is not registered"))?;
+            if slot.model.capabilities.runtime_kind != "tts" {
+                bail!("model is not a TTS model");
+            }
+            slot.model.path.clone()
+        };
+        Ok(
+            super::audio_execution::AudioExecutionProfile::for_sample_rate(
+                if super::audio_execution::is_breeze(&path)? {
+                    24000
+                } else {
+                    22050
+                },
+            ),
+        )
     }
 
     pub async fn is_audio_model(&self, requested: Option<&str>) -> Result<bool> {
@@ -2322,7 +2356,7 @@ impl EngineVariant {
             Self::MiniCpmV46(_) => "minicpmv4_6",
             Self::DiffusionGemma(_) => "diffusion_gemma",
             Self::QwenImage(_) => "qwen_image_2_1",
-            Self::Audio(_) => "indextts25",
+            Self::Audio(runtime) => runtime.architecture(),
             Self::Asr(_) => "qwen3_asr",
             Self::Alignment(_) => "qwen3_forced_aligner",
             Self::Diarization(_) => "nemotron_diarization",

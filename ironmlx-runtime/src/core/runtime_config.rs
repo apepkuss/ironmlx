@@ -641,7 +641,13 @@ pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<
         return Ok(());
     }
     if let Some(audio) = &model.audio {
-        audio.execution.validate()?;
+        audio.execution.validate_for_sample_rate(
+            if super::audio_execution::is_breeze(&model.path)? {
+                24000
+            } else {
+                22050
+            },
+        )?;
         if model.mtp.is_some()
             || model.prompt_lookup.is_some()
             || model.scheduler_runtime_profile.is_some()

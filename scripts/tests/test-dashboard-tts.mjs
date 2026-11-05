@@ -7,7 +7,7 @@ for (const match of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)) new v
 const i18n = html.slice(html.indexOf('  const I18N ='), html.indexOf('  const HTML_LANG_MAP'));
 // Only the dictionary declaration is needed; avoid running page initialization.
 const dictionary = i18n.slice(0, i18n.indexOf('\n  };') + 5);
-const context = vm.createContext({ console });
+const context = vm.createContext({ console, TextEncoder });
 vm.runInContext(dictionary, context);
 const source = name => {
   const match = html.match(new RegExp('  function ' + name + '\\([^]*?\\n  }'));
@@ -37,13 +37,15 @@ assert.match(source('closeVoiceEditor'), /list\.after\(editor\)/);
 assert.doesNotMatch(html, /id="voice-preview-player"/);
 for (const name of ['modelReadiness', 'isModelLoadable', 'modelReadinessTitle', 'modelIntegrityStatus',
   'formatIntegrityTime', 'modelStatusPresentation', 'onModelIntegrityStatus', 'formatVersionBytes',
-  'normalizedWeightDtype', 'weightDtypeLabel', 'quantDisplayLabel', 'hideQuantizationTooltip', 'showQuantizationTooltip', 'renderQuantBadge',
-  'modelTypeLabel', 'renderModelType', 'openTTSDetails', 'closeTTSDetails',
-  'ttsExecutionControls', 'renderTTSExecutionSettings',
+  'normalizedWeightDtype', 'weightDtypeLabel', 'quantDisplayLabel', 'hideModelTableTooltip', 'showModelTableTooltip', 'hideQuantizationTooltip', 'showQuantizationTooltip', 'renderQuantBadge',
+  'modelTypeLabel', 'renderModelType', 'openTTSDetails', 'closeTTSDetails', 'cancelTTSSynthesis',
+  'ttsExecutionControls', 'ttsExecutionProfileForModel', 'renderTTSExecutionSettings',
   'openDecisionDetails', 'saveDecisionParams', 'closeDecisionDetails', 'openParamsModal', 'renderModelLoadActions', 'escapeAttr',
   'openVoiceReferencePicker', 'normalizeVoiceLanguage', 'localizeVoiceFileStatus', 'readVoiceReference',
   'voiceLanguageLabel', 'formatVoicePlayerTime', 'voicePlayerIcon', 'releaseVoicePlayers',
   'renderVoiceProfiles', 'deleteVoice']) vm.runInContext(source(name), context);
+context.ttsSynthesisPending = false;
+context.ttsAudioURL = null;
 let scans = 0;
 const elements = new Map();
 function element() {
@@ -155,11 +157,11 @@ const quantTarget = element();
 quantTarget.hidden = false;
 quantTarget.dataset.quantTooltip = '未量化；dtype=fp16';
 context.showQuantizationTooltip(quantTarget);
-assert.equal(elements.get('quantization-tooltip').hidden, false);
-assert.equal(elements.get('quantization-tooltip').textContent, '未量化；dtype=fp16');
-assert.equal(quantTarget.getAttribute('aria-describedby'), 'quantization-tooltip');
+assert.equal(elements.get('model-table-tooltip').hidden, false);
+assert.equal(elements.get('model-table-tooltip').textContent, '未量化；dtype=fp16');
+assert.equal(quantTarget.getAttribute('aria-describedby'), 'model-table-tooltip');
 context.hideQuantizationTooltip();
-assert.equal(elements.get('quantization-tooltip').hidden, true);
+assert.equal(elements.get('model-table-tooltip').hidden, true);
 assert.equal(quantTarget.getAttribute('aria-describedby'), undefined);
 const tts = { id: 'org/tts', type: 'tts', readiness: { status: 'unsupported', reason_code: 'unsupported_model_type' },
   integrity: { state: 'verified', verified_at: '2026-09-09T00:00:00Z' }, download_info: {
@@ -312,3 +314,52 @@ for (const language of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
   }
 }
 console.log('Decision advanced settings validation, metadata and persistence passed.');
+
+// Breeze requests cover design, cloning, direction and parameter bounds.
+context.t = (key, fallback) => fallback;
+context.ttsSynthesisPending = false;
+context.ttsAudioURL = null;
+for (const name of ['generateBreezeSpeech', 'applyTTSSynthesisResponse']) vm.runInContext(source(name), context);
+let speechRequest;
+context.apiPost = (path, body) => { speechRequest = { path, body }; };
+context.window.__TTS_PARAM_MODEL__ = 'mlx-community/Breeze-TTS-2-mlx-8bit';
+for (const [id, value] of Object.entries({ 'breeze-text': '你好', 'breeze-instructions': '温柔清晰的女声', 'breeze-voice': '', 'breeze-ref-text': '', 'breeze-cfg': '4', 'breeze-temperature': '0.9', 'breeze-max-tokens': '750', 'breeze-seed': '42' })) context.document.getElementById(id).value = value;
+context.generateBreezeSpeech();
+assert.equal(speechRequest.path, '/admin/api/audio/synthesis');
+assert.equal(speechRequest.body.instructions, '温柔清晰的女声');
+assert.equal(speechRequest.body.voice, undefined);
+assert.equal(speechRequest.body.seed, 42);
+assert.equal(speechRequest.body.response_format, 'wav');
+assert.equal(speechRequest.body.stream, undefined);
+context.document.getElementById('breeze-voice').value = 'speaker_a';
+context.document.getElementById('breeze-ref-text').value = '准确文字稿';
+context.document.getElementById('breeze-instructions').value = '';
+context.generateBreezeSpeech();
+assert.equal(speechRequest.body.voice, 'speaker_a');
+assert.equal(speechRequest.body.ref_text, '准确文字稿');
+assert.equal(speechRequest.body.cfg_scale, 1);
+assert.equal(speechRequest.body.instructions, undefined);
+context.document.getElementById('breeze-instructions').value = '语气轻快';
+context.generateBreezeSpeech();
+assert.equal(speechRequest.body.instructions, '语气轻快');
+assert.equal(speechRequest.body.cfg_scale, 4);
+for (const value of ['0', '1501', '2.5']) {
+  speechRequest = null;
+  context.document.getElementById('breeze-max-tokens').value = value;
+  context.generateBreezeSpeech();
+  assert.equal(speechRequest, null);
+}
+for (const language of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
+  for (const key of ['voice_ref_text', 'breeze_synthesis', 'breeze_synthesis_help', 'breeze_generate', 'breeze_generation_failed']) assert.ok(vm.runInContext(`I18N[${JSON.stringify(language)}][${JSON.stringify(key)}]`, context));
+}
+assert.match(html, /max="1500"/);
+console.log('Breeze request modes, validation, cancellation controls and localization passed.');
+const baseProfile = { output_frames_per_second: 22050, defaults: {max_output_frames: 22050 * 600}, constraints: {max_output_frames: {min: 1, max: 22050 * 600}} };
+context.window.__TTS_EXECUTION_PROFILE__ = baseProfile;
+const breezeProfile = context.ttsExecutionProfileForModel({tts_metadata:{output_sample_rate_hz:24000}});
+assert.equal(breezeProfile.output_frames_per_second, 24000);
+assert.equal(breezeProfile.defaults.max_output_frames, 24000 * 600);
+assert.equal(breezeProfile.constraints.max_output_frames.max, 24000 * 600);
+assert.equal(baseProfile.output_frames_per_second, 22050);
+assert.equal(baseProfile.defaults.max_output_frames, 22050 * 600);
+console.log('Breeze execution policy preserves duration at 24 kHz without mutating the IndexTTS profile.');

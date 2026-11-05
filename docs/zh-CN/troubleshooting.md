@@ -51,6 +51,20 @@
 | MiniCPM-V 4.6 | `minicpmv4_6` |
 | DiffusionGemma | `diffusion_gemma` |
 | Qwen Image 2.1 | `qwen_image_2_1` |
+| Breeze TTS 2 | `breeze_tts` |
+
+### Breeze 语音合成
+
+| 现象 | 检查方法 |
+| --- | --- |
+| 缺少语音 codec | 两个版本均需 `audio_tokenizer/model.safetensors` 及其配置。通过当前 App 重试下载以补齐快照，不使用 IndexTTS 资源准备流程。 |
+| `unsupported model_type: breeze_tts` | 确认正在运行的后端包含 Breeze 支持。只更新源码不会替换已安装的 App 或其内置后端。 |
+| 克隆要求 `ref_text` | 在声音配置或请求中提供完整参考录音的准确文字稿。替换参考录音却不提供新文字稿时，会清除旧文字稿。 |
+| 音色设计请求被拒绝 | 提供非空 `instructions`，不传参考音频和声音 ID。克隆时，`ref_audio` 与 `voice` 只能选择一个。 |
+| 流式播放速度异常 | 读取 `X-Audio-Sample-Rate`；Breeze 输出为 24000 Hz 单声道 s16le PCM。网络读取结束时若剩余单个字节，需保留并与下次读取合并。 |
+| Dashboard 没有立即播放 | Dashboard 等待完整 WAV；增量 PCM 使用 API。音频块较短不代表推理速度达到实时。 |
+
+请求示例与参数限制见 [Breeze API](audio-speech-api.md#breeze-tts-2)。
 
 ## 日志与诊断
 

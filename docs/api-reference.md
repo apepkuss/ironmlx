@@ -11,7 +11,7 @@ Choose an API topic by capability or look up a specific route in the endpoint in
 | [Service and management API](service-api.md) | Shared access conventions, health, model discovery and management |
 | [Text and vision API](text-vision-api.md) | Responses, Chat Completions and Messages; text and image understanding, reasoning, tools and structured outputs |
 | [Embedding API](text-embeddings.md) | Text, image, audio and combined inputs; output dimensions and encoding |
-| [Speech synthesis API](audio-speech-api.md) | Speech output, voice profiles and reference recordings |
+| [Speech synthesis API](audio-speech-api.md) | IndexTTS / Breeze speech output, voice design, voice profiles and reference transcripts |
 | [Speech recognition and alignment API](audio-transcriptions-api.md) | Standalone transcription, forced alignment, timestamps and SRT/WebVTT subtitles |
 | [Image generation API](image-generation-api.md) | Text-to-image generation and single-image conditional editing |
 | [System One API](laya-systemone-api.md) | Laya choice, score and true/false probability requests |

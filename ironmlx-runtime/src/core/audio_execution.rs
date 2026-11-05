@@ -5,9 +5,7 @@ use super::{
     process_memory::{global_process_memory_governor, MemoryReservation},
 };
 use ironmlx_audio::{
-    indextts25::{
-        IndexTts25Loader, INDEXTTS25_MAX_OUTPUT_FRAMES, INDEXTTS25_OUTPUT_SAMPLE_RATE_HZ,
-    },
+    indextts25::{IndexTts25Loader, INDEXTTS25_MAX_OUTPUT_FRAMES},
     AudioError, Language, OutputPolicy, PcmChunk, ResolvedModelResources, SessionControl, TtsModel,
     TtsRequest, TtsStep, TtsSummary,
 };
@@ -27,8 +25,8 @@ pub const AUDIO_CHUNK_FRAMES: usize = 8192;
 pub const AUDIO_CHANNEL_CAPACITY: usize = 8;
 
 /// Explicit local resources, outside the immutable source snapshot. No downloads.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct AudioModelResources {
     pub derived_resources: PathBuf,
     pub resource_lock: PathBuf,
@@ -47,21 +45,91 @@ impl AudioModelResources {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioExecutionLimits {
-    #[serde(with = "duration_millis", rename = "queue_timeout_ms")]
     pub queue_timeout: Duration,
-    #[serde(with = "duration_millis", rename = "first_audio_timeout_ms")]
     pub first_audio_timeout: Duration,
-    #[serde(with = "duration_millis", rename = "execution_timeout_ms")]
     pub execution_timeout: Duration,
-    #[serde(with = "duration_millis", rename = "slow_consumer_timeout_ms")]
     pub slow_consumer_timeout: Duration,
-    /// Output service policy, including inter-segment silence. May only lower
-    /// the v1 maximum of 600 seconds at 22050 Hz.
+    /// Output service limit in native model sample frames.
     pub max_output_frames: u64,
     pub segment_tokens: usize,
+    /// Tracks an omitted JSON field until the model's sample rate is known.
+    /// This marker is never serialized.
+    #[doc(hidden)]
+    pub max_output_frames_uses_default: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AudioExecutionLimitsWire {
+    #[serde(with = "duration_millis", rename = "queue_timeout_ms")]
+    queue_timeout: Duration,
+    #[serde(with = "duration_millis", rename = "first_audio_timeout_ms")]
+    first_audio_timeout: Duration,
+    #[serde(with = "duration_millis", rename = "execution_timeout_ms")]
+    execution_timeout: Duration,
+    #[serde(with = "duration_millis", rename = "slow_consumer_timeout_ms")]
+    slow_consumer_timeout: Duration,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "optional_frame_limit"
+    )]
+    max_output_frames: Option<u64>,
+    segment_tokens: usize,
+}
+
+// An omitted field uses the model default; an explicit null is still invalid.
+fn optional_frame_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    u64::deserialize(deserializer).map(Some)
+}
+
+impl Default for AudioExecutionLimitsWire {
+    fn default() -> Self {
+        Self::from(&AudioExecutionLimits::default())
+    }
+}
+impl From<&AudioExecutionLimits> for AudioExecutionLimitsWire {
+    fn from(value: &AudioExecutionLimits) -> Self {
+        Self {
+            queue_timeout: value.queue_timeout,
+            first_audio_timeout: value.first_audio_timeout,
+            execution_timeout: value.execution_timeout,
+            slow_consumer_timeout: value.slow_consumer_timeout,
+            max_output_frames: if value.max_output_frames_uses_default
+                && value.max_output_frames == INDEXTTS25_MAX_OUTPUT_FRAMES
+            {
+                None
+            } else {
+                Some(value.max_output_frames)
+            },
+            segment_tokens: value.segment_tokens,
+        }
+    }
+}
+impl Serialize for AudioExecutionLimits {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        AudioExecutionLimitsWire::from(self).serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for AudioExecutionLimits {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = AudioExecutionLimitsWire::deserialize(deserializer)?;
+        Ok(Self {
+            queue_timeout: value.queue_timeout,
+            first_audio_timeout: value.first_audio_timeout,
+            execution_timeout: value.execution_timeout,
+            slow_consumer_timeout: value.slow_consumer_timeout,
+            max_output_frames: value
+                .max_output_frames
+                .unwrap_or(INDEXTTS25_MAX_OUTPUT_FRAMES),
+            max_output_frames_uses_default: value.max_output_frames.is_none(),
+            segment_tokens: value.segment_tokens,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -86,8 +154,16 @@ pub struct AudioExecutionRange {
 
 impl AudioExecutionProfile {
     pub fn current() -> Self {
+        Self::for_sample_rate(22050)
+    }
+    pub fn for_sample_rate(sample_rate: u32) -> Self {
+        let maximum_frames = u64::from(sample_rate) * 600;
         Self {
-            defaults: AudioExecutionLimits::default(),
+            defaults: AudioExecutionLimits {
+                max_output_frames: maximum_frames,
+                max_output_frames_uses_default: false,
+                ..Default::default()
+            },
             constraints: AudioExecutionConstraints {
                 deadline_ms: AudioExecutionRange {
                     min: 1,
@@ -95,11 +171,11 @@ impl AudioExecutionProfile {
                 },
                 max_output_frames: AudioExecutionRange {
                     min: 1,
-                    max: INDEXTTS25_MAX_OUTPUT_FRAMES,
+                    max: maximum_frames,
                 },
                 segment_tokens: AudioExecutionRange { min: 6, max: 120 },
             },
-            output_frames_per_second: INDEXTTS25_OUTPUT_SAMPLE_RATE_HZ,
+            output_frames_per_second: sample_rate,
         }
     }
 }
@@ -111,6 +187,7 @@ impl Default for AudioExecutionLimits {
             execution_timeout: Duration::from_secs(900),
             slow_consumer_timeout: Duration::from_secs(30),
             max_output_frames: INDEXTTS25_MAX_OUTPUT_FRAMES,
+            max_output_frames_uses_default: true,
             segment_tokens: 120,
         }
     }
@@ -315,6 +392,7 @@ struct WorkerHandle {
     counts: Arc<Counts>,
     model_weight_bytes: usize,
     limits: AudioExecutionLimits,
+    breeze: bool,
 }
 impl Drop for WorkerHandle {
     fn drop(&mut self) {
@@ -333,8 +411,11 @@ impl AudioRuntime {
         snapshot: PathBuf,
         resources: AudioModelResources,
     ) -> anyhow::Result<Self> {
-        let limits = resources.execution.clone();
-        limits.validate()?;
+        let breeze = is_breeze(&snapshot)?;
+        let limits =
+            resources
+                .execution
+                .resolve_for_sample_rate(if breeze { 24000 } else { 22050 })?;
         let max_output_frames = limits.max_output_frames;
         let segment_tokens = limits.segment_tokens;
         let (sender, receiver) = std::sync::mpsc::channel::<Job>();
@@ -342,9 +423,19 @@ impl AudioRuntime {
         let thread = std::thread::Builder::new()
             .name("ironmlx-audio".into())
             .spawn(move || {
-                let load = || -> anyhow::Result<_> {
+                let load = || -> anyhow::Result<(Box<dyn TtsModel>, usize)> {
                     let stream = mlx::new_stream(mlx::Device::gpu(0))?;
                     mlx::set_default_stream(stream);
+                    if breeze {
+                        let bytes = ironmlx_audio::breeze_tts::preflight(&snapshot)? as usize;
+                        return Ok((
+                            Box::new(ironmlx_audio::breeze_tts::BreezeTts::load(
+                                &snapshot,
+                                max_output_frames,
+                            )?),
+                            bytes,
+                        ));
+                    }
                     let loader = IndexTts25Loader::new(
                         resources.wetext_fsts.clone(),
                         resources.unidic_dir.clone(),
@@ -381,13 +472,13 @@ impl AudioRuntime {
                             )?)
                             .ok_or_else(|| anyhow::anyhow!("audio weight size overflow"))?;
                     }
-                    Ok((model, bytes))
+                    Ok((Box::new(model), bytes))
                 };
                 match load() {
                     Ok((mut model, bytes)) => {
                         if ready_tx.send(Ok(bytes)).is_ok() {
                             while let Ok(job) = receiver.recv() {
-                                run_job(&mut model, job);
+                                run_job(model.as_mut(), job);
                             }
                         }
                         let _ = mlx::synchronize();
@@ -414,8 +505,32 @@ impl AudioRuntime {
                 counts: Arc::new(Counts::default()),
                 model_weight_bytes: bytes,
                 limits,
+                breeze,
             }),
         })
+    }
+    pub fn architecture(&self) -> &'static str {
+        if self.inner.breeze {
+            "breeze_tts"
+        } else {
+            "indextts25"
+        }
+    }
+    pub fn output_format(&self) -> ironmlx_audio::PcmFormat {
+        ironmlx_audio::PcmFormat {
+            sample_rate: if self.inner.breeze { 24000 } else { 22050 },
+            channels: 1,
+        }
+    }
+    pub fn streaming_granularity(&self) -> &'static str {
+        if self.inner.breeze {
+            "incremental_waveform"
+        } else {
+            "segment"
+        }
+    }
+    pub fn is_breeze(&self) -> bool {
+        self.inner.breeze
     }
     pub fn model_weight_bytes(&self) -> usize {
         self.inner.model_weight_bytes
@@ -510,7 +625,9 @@ fn run_job(model: &mut dyn TtsModel, job: Job) {
     let governor = global_process_memory_governor();
     // Keep reservations outside the unwind boundary through synchronization.
     governor.sample_process();
-    let reservation = governor.try_reserve_prefill(32 * 1024 * 1024 * 1024, "audio computation");
+    let format = model.capabilities().output_format;
+    let computation_bytes = if format.sample_rate == 24000 { 4 } else { 32 } * 1024 * 1024 * 1024;
+    let reservation = governor.try_reserve_prefill(computation_bytes, "audio computation");
     let result = match reservation.as_ref() {
         Ok(_) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || -> AudioExecutionResult<TtsSummary> {
@@ -538,7 +655,7 @@ fn run_job(model: &mut dyn TtsModel, job: Job) {
                                 || chunk.pcm.samples.is_empty()
                                 || chunk.pcm.samples.len() > AUDIO_CHUNK_FRAMES
                                 || chunk.pcm.format.channels != 1
-                                || chunk.pcm.format.sample_rate != 22050
+                                || chunk.pcm.format != format
                             {
                                 return Err(AudioExecutionError::WorkerStopped);
                             }
@@ -606,6 +723,7 @@ pub fn speech_request(
         reference,
         language: Language::Auto,
         seed: None,
+        breeze: None,
         output_policy: if stream {
             OutputPolicy::Chunks
         } else {
@@ -615,8 +733,23 @@ pub fn speech_request(
 }
 
 impl AudioExecutionLimits {
+    /// Resolve only omitted limits, preserving every explicit frame count.
+    pub fn resolve_for_sample_rate(&self, sample_rate: u32) -> anyhow::Result<Self> {
+        let mut resolved = self.clone();
+        if resolved.max_output_frames_uses_default
+            && resolved.max_output_frames == INDEXTTS25_MAX_OUTPUT_FRAMES
+        {
+            resolved.max_output_frames = u64::from(sample_rate) * 600;
+        }
+        resolved.max_output_frames_uses_default = false;
+        resolved.validate_for_sample_rate(sample_rate)?;
+        Ok(resolved)
+    }
     pub fn validate(&self) -> anyhow::Result<()> {
-        let profile = AudioExecutionProfile::current();
+        self.validate_for_sample_rate(22050)
+    }
+    pub fn validate_for_sample_rate(&self, sample_rate: u32) -> anyhow::Result<()> {
+        let profile = AudioExecutionProfile::for_sample_rate(sample_rate);
         let maximum_deadline = Duration::from_millis(profile.constraints.deadline_ms.max);
         if [
             self.queue_timeout,
@@ -666,7 +799,12 @@ mod tests {
     #[test]
     fn execution_profile_is_the_validation_source_of_truth() {
         let profile = AudioExecutionProfile::current();
-        assert_eq!(profile.defaults, AudioExecutionLimits::default());
+        assert_eq!(
+            profile.defaults,
+            AudioExecutionLimits::default()
+                .resolve_for_sample_rate(22050)
+                .unwrap()
+        );
         assert_eq!(profile.constraints.deadline_ms.min, 1);
         assert_eq!(profile.constraints.deadline_ms.max, 86_400_000);
         assert_eq!(profile.constraints.max_output_frames.max, 13_230_000);
@@ -676,6 +814,87 @@ mod tests {
             AudioExecutionRange { min: 6, max: 120 }
         );
         profile.defaults.validate().unwrap();
+    }
+
+    #[test]
+    fn model_frame_defaults_preserve_explicit_values_and_json_round_trips() {
+        for json in ["{}", r#"{"queue_timeout_ms":1234}"#] {
+            let limits: AudioExecutionLimits = serde_json::from_str(json).unwrap();
+            assert_eq!(
+                limits
+                    .resolve_for_sample_rate(24000)
+                    .unwrap()
+                    .max_output_frames,
+                14400000
+            );
+            assert_eq!(
+                limits
+                    .resolve_for_sample_rate(22050)
+                    .unwrap()
+                    .max_output_frames,
+                13230000
+            );
+            let saved = serde_json::to_value(&limits).unwrap();
+            assert!(saved.get("max_output_frames").is_none());
+            assert!(saved.get("max_output_frames_uses_default").is_none());
+            let restored: AudioExecutionLimits = serde_json::from_value(saved).unwrap();
+            assert_eq!(
+                restored
+                    .resolve_for_sample_rate(24000)
+                    .unwrap()
+                    .max_output_frames,
+                14400000
+            );
+        }
+        let explicit: AudioExecutionLimits =
+            serde_json::from_str(r#"{"max_output_frames":13230000}"#).unwrap();
+        assert_eq!(
+            explicit
+                .resolve_for_sample_rate(24000)
+                .unwrap()
+                .max_output_frames,
+            13230000
+        );
+        let saved = serde_json::to_value(&explicit).unwrap();
+        assert_eq!(saved["max_output_frames"], 13230000);
+        let restored: AudioExecutionLimits = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            restored
+                .resolve_for_sample_rate(24000)
+                .unwrap()
+                .max_output_frames,
+            13230000
+        );
+        let resolved_default = AudioExecutionLimits::default()
+            .resolve_for_sample_rate(24000)
+            .unwrap();
+        let saved = serde_json::to_value(&resolved_default).unwrap();
+        assert_eq!(saved["max_output_frames"], 14400000);
+        let restored: AudioExecutionLimits = serde_json::from_value(saved).unwrap();
+        assert_eq!(
+            restored
+                .resolve_for_sample_rate(24000)
+                .unwrap()
+                .max_output_frames,
+            14400000
+        );
+        let zero: AudioExecutionLimits =
+            serde_json::from_str(r#"{"max_output_frames":0}"#).unwrap();
+        assert!(zero.resolve_for_sample_rate(24000).is_err());
+        assert!(zero.resolve_for_sample_rate(22050).is_err());
+        assert!(
+            serde_json::from_str::<AudioExecutionLimits>(r#"{"max_output_frames":null}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn breeze_profile_uses_native_output_rate() {
+        let profile = AudioExecutionProfile::for_sample_rate(24000);
+        assert_eq!(profile.defaults.max_output_frames, 14400000);
+        assert_eq!(profile.output_frames_per_second, 24000);
+        assert!(profile.defaults.validate_for_sample_rate(24000).is_ok());
+        assert!(profile.defaults.validate().is_err());
+        assert!(serde_json::from_str::<AudioModelResources>("{}").is_ok());
     }
 
     fn response(
@@ -766,4 +985,14 @@ mod tests {
         .validate()
         .is_err());
     }
+}
+
+/// Metadata-only routing; inference resources are validated by the Breeze loader.
+pub fn is_breeze(path: &std::path::Path) -> anyhow::Result<bool> {
+    if !path.join("config.json").is_file() {
+        return Ok(false);
+    }
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path.join("config.json"))?)?;
+    Ok(config.get("model_type").and_then(|v| v.as_str()) == Some("breeze_tts"))
 }

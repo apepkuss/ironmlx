@@ -763,3 +763,98 @@ async fn real_speech_unload_defers_until_worker_stops() {
         started.elapsed()
     );
 }
+
+/// Run once per BF16/MXFP8 snapshot with IRONMLX_BREEZE_SNAPSHOT.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires complete local Breeze snapshot and native GPU inference"]
+async fn real_breeze_design_clone_stream_cancel_and_reload() {
+    let snapshot = std::env::var("IRONMLX_BREEZE_SNAPSHOT").expect("IRONMLX_BREEZE_SNAPSHOT");
+    let server = Server::start().await;
+    let load = json!({"model":"breeze", "model_dir":snapshot});
+    let response = server.post("/admin/api/models/load", &load).await;
+    let status = response.status();
+    let body: Value = response.json().await.unwrap();
+    assert!(
+        status.is_success() && body["success"] == true,
+        "load {status}: {body}"
+    );
+    let profile: Value = server
+        .client
+        .get(format!(
+            "{}/admin/api/audio/execution-profile?model=breeze",
+            server.base
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(profile["output_frames_per_second"], 24000);
+    assert_eq!(profile["defaults"]["max_output_frames"], 14400000);
+    let text = "Hello, welcome to IronMLX. This is a clear and natural voice.";
+    let mut design = json!({"model":"breeze", "input":text, "instructions":"A calm and clear English narrator.", "seed":42, "max_tokens":750, "response_format":"wav"});
+    let response = server.post("/v1/audio/speech", &design).await;
+    if response.status() != 200 {
+        panic!("design: {}", response.text().await.unwrap());
+    }
+    assert_eq!(response.headers()["x-audio-sample-rate"], "24000");
+    let wav = response.bytes().await.unwrap();
+    assert!(wav.len() > 44 && &wav[..4] == b"RIFF");
+    assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 24000);
+    let reference = base64::engine::general_purpose::STANDARD.encode(&wav);
+    let response = server.post("/v1/audio/voices", &json!({"id":"breeze-reference", "name":"Breeze reference", "ref_audio":reference, "ref_text":text})).await;
+    assert_eq!(response.status(), 201);
+    let profile: Value = response.json().await.unwrap();
+    assert_eq!(profile["ref_text"], text);
+    let profiles: Value = server
+        .client
+        .get(format!("{}/admin/api/audio/voices", server.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(profiles["data"][0]["ref_text"], text);
+    let clone = json!({"model":"breeze", "input":"Welcome back. It is nice to hear from you.", "voice":"breeze-reference", "response_format":"wav", "seed":17});
+    let response = server.post("/v1/audio/speech", &clone).await;
+    let status = response.status();
+    let cloned = response.bytes().await.unwrap();
+    assert_eq!(status, 200, "clone: {}", String::from_utf8_lossy(&cloned));
+    assert!(cloned.len() > 44 && &cloned[..4] == b"RIFF");
+    design["stream"] = json!(true);
+    design["response_format"] = json!("pcm");
+    let response = server.post("/v1/audio/speech", &design).await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["x-audio-sample-rate"], "24000");
+    assert_eq!(
+        response.headers()["x-ironmlx-streaming-granularity"],
+        "incremental_waveform"
+    );
+    let pcm = response.bytes().await.unwrap();
+    assert!(!pcm.is_empty() && pcm.len() % 2 == 0);
+    design["input"] = json!("This is a longer recording to exercise cancellation. Please continue speaking clearly and naturally while the client disconnects from the streaming response.");
+    let mut response = server.post("/v1/audio/speech", &design).await;
+    assert_eq!(response.status(), 200);
+    assert!(response.chunk().await.unwrap().is_some());
+    drop(response);
+    server.idle("breeze").await;
+    server.unload("breeze").await;
+    let response = server.post("/admin/api/models/load", &load).await;
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["success"], true, "reload: {body}");
+    server.unload("breeze").await;
+    // Preserve useful evidence when requested, otherwise remove the isolated store.
+    if let Some(output) = std::env::var_os("IRONMLX_BREEZE_HTTP_OUTPUT") {
+        let output = PathBuf::from(output);
+        std::fs::create_dir_all(&output).unwrap();
+        std::fs::write(output.join("design.wav"), &wav).unwrap();
+        std::fs::write(output.join("clone.wav"), &cloned).unwrap();
+        std::fs::write(output.join("design.pcm"), &pcm).unwrap();
+        std::fs::copy(server.root.join("server.log"), output.join("server.log")).unwrap();
+    }
+    let root = server.root.clone();
+    drop(server);
+    std::fs::remove_dir_all(root).unwrap();
+}

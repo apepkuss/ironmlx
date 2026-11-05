@@ -139,7 +139,7 @@ public struct ModelImportService: Sendable {
         ])
         let available = capacity?.volumeAvailableCapacityForImportantUsage
             ?? capacity?.volumeAvailableCapacity.map { Int64($0) }
-        let resourceReservation = ttsProfile == nil ? 0 : AudioResourcePreparationService.diskReservationBytes
+        let resourceReservation = ttsProfile?.modelType == "indextts2_5" ? AudioResourcePreparationService.diskReservationBytes : 0
         let required = totalBytes.addingReportingOverflow(ModelResourcePreflight.diskSafetyBytes)
         let withResources = required.partialValue.addingReportingOverflow(resourceReservation)
         let requiredBytes = required.overflow || withResources.overflow ? Int64.max : withResources.partialValue
@@ -271,7 +271,7 @@ public struct ModelImportService: Sendable {
             progress(ModelImportProgress(phase: "verifying", completedBytes: completed,
                 totalBytes: total, currentFile: path))
         }
-        if preview.compatibility.artifactRole == "tts" {
+        if preview.compatibility.artifactRole == "tts", preview.compatibility.modelType == "indextts2_5" {
             _ = try await AudioResourcePreparationService(rootURL: rootURL).prepare(
                 snapshot: staging, token: nil
             ) { name, _, _ in

@@ -646,6 +646,7 @@ mod tests {
             mlx::io::load_safetensors(path("IRONMLX_REFERENCE_FEATURES").to_str().unwrap())
                 .unwrap();
         let request = TtsRequest {
+            breeze: None,
             text: "你好。".into(),
             reference: PcmBuffer {
                 format: PcmFormat {

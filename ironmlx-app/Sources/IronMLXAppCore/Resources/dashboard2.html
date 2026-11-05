@@ -2382,6 +2382,16 @@
   }
   #tts-details-modal .modal-field { margin-bottom: 0; }
   #tts-details-modal .modal-body { padding-bottom: 28px; }
+  #breeze-synthesis .modal-field { margin-bottom: 12px; }
+  #breeze-synthesis textarea, #voice-ref-text {
+    width:100%; min-width:0; padding:10px 12px; box-sizing:border-box;
+    border:1px solid var(--border); border-radius:6px; background:var(--bg);
+    color:var(--text); font:inherit; font-size:13px; line-height:1.5; resize:vertical;
+    -webkit-user-select:text; user-select:text;
+  }
+  #breeze-synthesis textarea:focus, #voice-ref-text:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  #breeze-synthesis-status { font-size:12px; color:var(--text-secondary); }
+
   .model-params-modal input[readonly] { text-overflow: ellipsis; }
 
   #model-table .tts-model-row .model-status-cell { white-space: normal; line-height: 1.45; }
@@ -4982,6 +4992,7 @@
           <div class="voice-editor-field"><div class="field-label-with-help"><label for="voice-id" data-i18n="voice_id">Voice ID</label><span class="profile-help"><button type="button" class="profile-help-trigger" aria-describedby="voice-id-help-tooltip" data-i18n-aria-label="voice_id_help_label">?</button><span class="profile-help-tooltip" id="voice-id-help-tooltip" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="voice_id_help_title">How Voice ID is used</span><span class="profile-help-tooltip-body" data-i18n="voice_id_help">API requests and compatible clients use this value. Choose a stable identifier such as speaker_a; it cannot be changed after creation.</span></span></span></div><input id="voice-id" type="text" maxlength="64" placeholder="speaker_a"></div>
           <div class="voice-editor-field"><div class="field-label-with-help"><label for="voice-name" data-i18n="voice_name">Voice name</label><span class="profile-help"><button type="button" class="profile-help-trigger" aria-describedby="voice-name-help-tooltip" data-i18n-aria-label="voice_name_help_label">?</button><span class="profile-help-tooltip" id="voice-name-help-tooltip" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="voice_name_help_title">About voice name</span><span class="profile-help-tooltip-body" data-i18n="voice_name_help">A recognizable name shown in the app.</span></span></span></div><input id="voice-name" type="text" maxlength="128" data-i18n-placeholder="voice_name_placeholder"></div>
           <div class="voice-editor-field"><div class="field-label-with-help"><label for="voice-language" data-i18n="voice_language">Reference language</label><span class="profile-help"><button type="button" class="profile-help-trigger" aria-describedby="voice-language-help-tooltip" data-i18n-aria-label="voice_language_help_label">?</button><span class="profile-help-tooltip" id="voice-language-help-tooltip" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="voice_language_help_title">About reference language</span><span class="profile-help-tooltip-body" data-i18n="voice_language_help">Labels the reference recording for identification; it does not restrict the synthesis text language.</span></span></span></div><select id="voice-language"><option value="" data-i18n="voice_language_unspecified">Automatic / unspecified</option><option value="zh" data-i18n="voice_language_zh">Chinese</option><option value="en" data-i18n="voice_language_en">English</option><option value="ja" data-i18n="voice_language_ja">Japanese</option><option value="es" data-i18n="voice_language_es">Spanish</option><option value="ar" data-i18n="voice_language_ar">Arabic</option></select></div>
+          <div class="voice-editor-field voice-file"><label for="voice-ref-text" data-i18n="voice_ref_text">Exact reference transcript (required for Breeze)</label><textarea id="voice-ref-text" rows="3" maxlength="16384"></textarea></div>
           <div class="voice-editor-field voice-file"><div class="field-label-with-help"><span data-i18n="voice_reference_audio">Reference audio (WAV, FLAC or MP3)</span><span class="profile-help"><button type="button" class="profile-help-trigger" aria-describedby="voice-reference-help-tooltip" data-i18n-aria-label="voice_reference_help_label">?</button><span class="profile-help-tooltip" id="voice-reference-help-tooltip" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="voice_reference_help_title">Reference audio requirements</span><span class="profile-help-tooltip-body" data-i18n="voice_reference_help">Use a clear, single-speaker recording between 1 and 60 seconds, up to 16 MiB.</span></span></span></div><div class="voice-file-picker"><input id="voice-file" type="file" accept="audio/wav,audio/flac,audio/mpeg,.wav,.flac,.mp3" onchange="readVoiceReference(this)"><button class="btn-secondary" type="button" onclick="openVoiceReferencePicker()" data-i18n="voice_choose_file">Choose audio file</button><span id="voice-file-status" class="voice-file-status" role="status" aria-live="polite" data-i18n="voice_no_file_selected">No file selected</span></div></div>
         </div>
         <div class="voice-editor-actions">
@@ -5426,6 +5437,24 @@
           <input type="text" id="tts-max-audio-tokens" readonly>
         </div>
       </div>
+      <section id="breeze-synthesis" hidden style="margin-top:22px">
+        <div class="modal-section-title" data-i18n="breeze_synthesis">Breeze speech synthesis</div>
+        <div class="modal-field"><label for="breeze-text" data-i18n="breeze_text">Text to speak</label><textarea id="breeze-text" rows="3" maxlength="65536" style="width:100%"></textarea></div>
+        <div class="modal-field"><label for="breeze-instructions" data-i18n="breeze_instructions">Voice description or direction</label><textarea id="breeze-instructions" rows="2" maxlength="16384" style="width:100%"></textarea></div>
+        <div class="modal-field"><label for="breeze-voice" data-i18n="breeze_voice">Voice profile ID (leave empty for voice design)</label><input id="breeze-voice" type="text" maxlength="64"></div>
+        <div class="modal-field"><label for="breeze-ref-text" data-i18n="breeze_ref_text">Reference transcript (overrides profile transcript)</label><textarea id="breeze-ref-text" rows="2" maxlength="16384" style="width:100%"></textarea></div>
+        <div class="modal-row model-params-setting-row">
+          <div class="modal-field"><label for="breeze-cfg">CFG</label><input id="breeze-cfg" type="number" min="1" max="10" step="0.1" value="4"></div>
+          <div class="modal-field"><label for="breeze-seed" data-i18n="breeze_seed">Seed (optional)</label><input id="breeze-seed" type="number" min="0" max="4294967295" step="1"></div>
+          <div class="modal-field"><label for="breeze-max-tokens" data-i18n="breeze_max_tokens">Maximum audio tokens</label><input id="breeze-max-tokens" type="number" min="1" max="1500" step="1" value="750"></div>
+          <div class="modal-field"><label for="breeze-temperature" data-i18n="breeze_temperature">Temperature</label><input id="breeze-temperature" type="number" min="0" max="2" step="0.1" value="0.9"></div>
+        </div>
+        <p data-i18n="breeze_synthesis_help" style="font-size:12px;color:var(--text-secondary)">Describe a voice to design one, or select a voice profile with its exact transcript to clone it. Add direction to control the cloned voice. Playback starts after the WAV is complete.</p>
+        <button type="button" class="btn-accent" id="breeze-generate" onclick="generateBreezeSpeech()" data-i18n="breeze_generate">Generate speech</button>
+        <button type="button" class="btn-secondary" id="breeze-cancel" onclick="cancelTTSSynthesis()" data-i18n="breeze_cancel" disabled>Stop</button>
+        <p id="breeze-synthesis-status" role="status" aria-live="polite"></p>
+        <audio id="breeze-player" controls hidden style="width:100%"></audio>
+      </section>
       <div class="tts-execution-section">
         <div class="modal-section-title" data-i18n="tts_execution_policy">Runtime Policy</div>
         <div class="modal-row model-params-setting-row tts-execution-row">
@@ -5951,6 +5980,22 @@
       tts_dependencies_empty: "No external dependencies recorded.",
       tts_prepare_resources: "Prepare resources",
       voices_title: "Voices", voices_subtitle: "Manage stable voice IDs and their reference audio.",
+      voice_ref_text: "Exact reference transcript (required for Breeze)",
+      breeze_synthesis: "Breeze speech synthesis",
+      breeze_text: "Text to speak",
+      breeze_instructions: "Voice description or direction",
+      breeze_voice: "Voice profile ID (leave empty for voice design)",
+      breeze_ref_text: "Reference transcript (overrides profile transcript)",
+      breeze_seed: "Seed (optional)",
+      breeze_max_tokens: "Maximum audio tokens",
+      breeze_temperature: "Temperature",
+      breeze_synthesis_help: "Describe a voice to design one, or select a voice profile with its exact transcript to clone it. Add direction to control the cloned voice. Playback starts after the WAV is complete.",
+      breeze_generate: "Generate speech",
+      breeze_cancel: "Stop",
+      breeze_input_required: "Enter text and a voice description or voice profile ID.",
+      breeze_generating: "Generating speech…",
+      breeze_generation_failed: "Speech generation failed.",
+      breeze_ready: "Speech is ready to play.",
       voice_add: "Add Voice", voice_edit: "Edit Voice", voice_id: "Voice ID", voice_id_help_label: "About Voice ID", voice_id_help_title: "How Voice ID is used", voice_id_help: "API requests and compatible clients use this value. Choose a stable identifier such as speaker_a; it cannot be changed after creation.", voice_name: "Voice name", voice_name_placeholder: "For example, Xiaoyu · warm voice", voice_name_help_label: "About voice name", voice_name_help_title: "About voice name", voice_name_help: "A recognizable name shown in the app.",
       voice_language: "Reference language", voice_language_unspecified: "Automatic / unspecified", voice_language_zh: "Chinese", voice_language_en: "English", voice_language_ja: "Japanese", voice_language_es: "Spanish", voice_language_ar: "Arabic", voice_language_help_label: "About reference language", voice_language_help_title: "About reference language", voice_language_help: "Labels the reference recording for identification; it does not restrict the synthesis text language.",
       voice_reference_audio: "Reference audio (WAV, FLAC or MP3)", voice_choose_file: "Choose audio file", voice_no_file_selected: "No file selected", voice_file_unchanged: "Keep current reference audio", voice_reference_help_label: "About reference audio", voice_reference_help_title: "Reference audio requirements", voice_reference_help: "Use a clear, single-speaker recording between 1 and 60 seconds, up to 16 MiB.", voice_save_only: "Save only", voice_save_and_enable: "Save and enable",
@@ -6649,6 +6694,22 @@
       tts_dependencies_empty: "未记录外部依赖。",
       tts_prepare_resources: "准备语音资源",
       voices_title: "声音", voices_subtitle: "管理稳定的声音 ID 及其参考音频。",
+      voice_ref_text: "参考音频准确文字稿（Breeze 必填）",
+      breeze_synthesis: "Breeze 语音合成",
+      breeze_text: "合成文本",
+      breeze_instructions: "音色描述或声音控制指令",
+      breeze_voice: "声音 ID（留空则设计新音色）",
+      breeze_ref_text: "参考文字稿（覆盖声音配置中的文字稿）",
+      breeze_seed: "随机种子（可选）",
+      breeze_max_tokens: "最大音频 Token 数",
+      breeze_temperature: "温度",
+      breeze_synthesis_help: "填写音色描述可设计新音色；填写声音 ID 及准确文字稿可克隆声音，添加指令可控制语气。WAV 生成完成后可播放。",
+      breeze_generate: "生成语音",
+      breeze_cancel: "停止",
+      breeze_input_required: "请填写合成文本，以及音色描述或声音 ID。",
+      breeze_generating: "正在生成语音…",
+      breeze_generation_failed: "语音生成失败。",
+      breeze_ready: "语音已生成，可以播放。",
       voice_add: "添加声音", voice_edit: "编辑声音", voice_id: "声音 ID", voice_id_help_label: "声音 ID 说明", voice_id_help_title: "声音 ID 的用途", voice_id_help: "API 请求及兼容客户端使用此值。请选择稳定的标识，例如 speaker_a；创建后不能修改。", voice_name: "声音名称", voice_name_placeholder: "例如：晓雨 · 温柔女声", voice_name_help_label: "声音名称说明", voice_name_help_title: "声音名称的用途", voice_name_help: "用于在应用中辨识声音。",
       voice_language: "参考音频语言", voice_language_unspecified: "自动识别 / 未指定", voice_language_zh: "中文", voice_language_en: "英语", voice_language_ja: "日语", voice_language_es: "西班牙语", voice_language_ar: "阿拉伯语", voice_language_help_label: "参考音频语言说明", voice_language_help_title: "参考音频语言的用途", voice_language_help: "用于标注参考录音，方便辨识；不会限制合成文本的语言。",
       voice_reference_audio: "参考音频（WAV、FLAC 或 MP3）", voice_choose_file: "选择音频文件", voice_no_file_selected: "未选择文件", voice_file_unchanged: "保留当前参考音频", voice_reference_help_label: "参考音频说明", voice_reference_help_title: "参考音频要求", voice_reference_help: "请选择 1–60 秒、单人清晰且不超过 16 MiB 的录音。", voice_save_only: "仅保存", voice_save_and_enable: "保存并启用",
@@ -7347,6 +7408,22 @@
       tts_dependencies_empty: "未記錄外部相依資源。",
       tts_prepare_resources: "準備語音資源",
       voices_title: "聲音", voices_subtitle: "管理穩定的聲音 ID 及其參考音訊。",
+      voice_ref_text: "參考音訊準確文字稿（Breeze 必填）",
+      breeze_synthesis: "Breeze 語音合成",
+      breeze_text: "合成文字",
+      breeze_instructions: "音色描述或聲音控制指令",
+      breeze_voice: "聲音 ID（留空則設計新音色）",
+      breeze_ref_text: "參考文字稿（覆蓋聲音設定中的文字稿）",
+      breeze_seed: "隨機種子（選填）",
+      breeze_max_tokens: "最大音訊 Token 數",
+      breeze_temperature: "溫度",
+      breeze_synthesis_help: "填寫音色描述可設計新音色；填寫聲音 ID 及準確文字稿可複製聲音，加入指令可控制語氣。WAV 生成完成後可播放。",
+      breeze_generate: "生成語音",
+      breeze_cancel: "停止",
+      breeze_input_required: "請填寫合成文字，以及音色描述或聲音 ID。",
+      breeze_generating: "正在生成語音…",
+      breeze_generation_failed: "語音生成失敗。",
+      breeze_ready: "語音已生成，可以播放。",
       voice_add: "新增聲音", voice_edit: "編輯聲音", voice_id: "聲音 ID", voice_id_help_label: "聲音 ID 說明", voice_id_help_title: "聲音 ID 的用途", voice_id_help: "API 請求及相容用戶端使用此值。請選擇穩定的識別碼，例如 speaker_a；建立後無法修改。", voice_name: "聲音名稱", voice_name_placeholder: "例如：曉雨 · 溫柔女聲", voice_name_help_label: "聲音名稱說明", voice_name_help_title: "聲音名稱的用途", voice_name_help: "用於在應用程式中辨識聲音。",
       voice_language: "參考音訊語言", voice_language_unspecified: "自動辨識 / 未指定", voice_language_zh: "中文", voice_language_en: "英文", voice_language_ja: "日文", voice_language_es: "西班牙文", voice_language_ar: "阿拉伯文", voice_language_help_label: "參考音訊語言說明", voice_language_help_title: "參考音訊語言的用途", voice_language_help: "用於標記參考錄音，方便辨識；不會限制合成文字的語言。",
       voice_reference_audio: "參考音訊（WAV、FLAC 或 MP3）", voice_choose_file: "選擇音訊檔案", voice_no_file_selected: "尚未選擇檔案", voice_file_unchanged: "保留目前的參考音訊", voice_reference_help_label: "參考音訊說明", voice_reference_help_title: "參考音訊要求", voice_reference_help: "請選擇 1–60 秒、單人清晰且不超過 16 MiB 的錄音。", voice_save_only: "僅儲存", voice_save_and_enable: "儲存並啟用",
@@ -8048,6 +8125,22 @@
       tts_dependencies_empty: "外部依存リソースの記録はありません。",
       tts_prepare_resources: "音声リソースを準備",
       voices_title: "音声", voices_subtitle: "安定した音声 ID と参照音声を管理します。",
+      voice_ref_text: "参照音声の正確な文字起こし（Breeze 必須）",
+      breeze_synthesis: "Breeze 音声合成",
+      breeze_text: "読み上げテキスト",
+      breeze_instructions: "声の説明または指示",
+      breeze_voice: "音声 ID（空欄で声を作成）",
+      breeze_ref_text: "参照文字起こし（音声設定を上書き）",
+      breeze_seed: "シード（任意）",
+      breeze_max_tokens: "最大音声 Token 数",
+      breeze_temperature: "温度",
+      breeze_synthesis_help: "声の説明で音声を作成できます。音声 ID と正確な文字起こしで複製し、指示で話し方を変えます。WAV の生成後に再生できます。",
+      breeze_generate: "音声を生成",
+      breeze_cancel: "停止",
+      breeze_input_required: "テキストと声の説明または音声 ID を入力してください。",
+      breeze_generating: "音声を生成中…",
+      breeze_generation_failed: "音声生成に失敗しました。",
+      breeze_ready: "音声を再生できます。",
       voice_add: "音声を追加", voice_edit: "音声を編集", voice_id: "音声 ID", voice_id_help_label: "音声 ID の説明", voice_id_help_title: "音声 ID の用途", voice_id_help: "API リクエストと互換クライアントがこの値を使用します。speaker_a のような安定した識別子を指定してください。作成後は変更できません。", voice_name: "音声名", voice_name_placeholder: "例：Xiaoyu・穏やかな声", voice_name_help_label: "音声名の説明", voice_name_help_title: "音声名の用途", voice_name_help: "アプリ内で音声を識別するための名前です。",
       voice_language: "参照音声の言語", voice_language_unspecified: "自動判定 / 未指定", voice_language_zh: "中国語", voice_language_en: "英語", voice_language_ja: "日本語", voice_language_es: "スペイン語", voice_language_ar: "アラビア語", voice_language_help_label: "参照音声の言語の説明", voice_language_help_title: "参照音声の言語について", voice_language_help: "参照録音を識別するための情報です。合成テキストの言語は制限しません。",
       voice_reference_audio: "参照音声（WAV、FLAC、MP3）", voice_choose_file: "音声ファイルを選択", voice_no_file_selected: "ファイルが選択されていません", voice_file_unchanged: "現在の参照音声を保持", voice_reference_help_label: "参照音声の説明", voice_reference_help_title: "参照音声の要件", voice_reference_help: "1〜60 秒の明瞭な一人の音声（16 MiB 以下）を選択してください。", voice_save_only: "保存のみ", voice_save_and_enable: "保存して有効化",
@@ -8749,6 +8842,22 @@
       tts_dependencies_empty: "기록된 외부 의존성이 없습니다.",
       tts_prepare_resources: "음성 리소스 준비",
       voices_title: "음성", voices_subtitle: "안정적인 음성 ID와 참조 오디오를 관리합니다.",
+      voice_ref_text: "참조 오디오의 정확한 대본 (Breeze 필수)",
+      breeze_synthesis: "Breeze 음성 합성",
+      breeze_text: "읽을 텍스트",
+      breeze_instructions: "음색 설명 또는 지시",
+      breeze_voice: "음성 ID (비우면 새 음색 생성)",
+      breeze_ref_text: "참조 대본 (음성 설정 대본 재정의)",
+      breeze_seed: "시드 (선택)",
+      breeze_max_tokens: "최대 오디오 Token 수",
+      breeze_temperature: "온도",
+      breeze_synthesis_help: "음색 설명으로 새 음성을 만듭니다. 음성 ID와 정확한 대본으로 복제하고 지시로 표현을 바꿉니다. WAV 생성 완료 후 재생할 수 있습니다.",
+      breeze_generate: "음성 생성",
+      breeze_cancel: "중지",
+      breeze_input_required: "텍스트와 음색 설명 또는 음성 ID를 입력하세요.",
+      breeze_generating: "음성 생성 중…",
+      breeze_generation_failed: "음성 생성에 실패했습니다.",
+      breeze_ready: "음성을 재생할 수 있습니다.",
       voice_add: "음성 추가", voice_edit: "음성 편집", voice_id: "음성 ID", voice_id_help_label: "음성 ID 설명", voice_id_help_title: "음성 ID 사용 방식", voice_id_help: "API 요청과 호환 클라이언트에서 이 값을 사용합니다. speaker_a와 같은 안정적인 식별자를 지정하세요. 생성 후에는 변경할 수 없습니다.", voice_name: "음성 이름", voice_name_placeholder: "예: Xiaoyu · 따뜻한 목소리", voice_name_help_label: "음성 이름 설명", voice_name_help_title: "음성 이름 용도", voice_name_help: "앱에서 음성을 알아보기 위한 이름입니다.",
       voice_language: "참조 오디오 언어", voice_language_unspecified: "자동 감지 / 지정 안 함", voice_language_zh: "중국어", voice_language_en: "영어", voice_language_ja: "일본어", voice_language_es: "스페인어", voice_language_ar: "아랍어", voice_language_help_label: "참조 오디오 언어 설명", voice_language_help_title: "참조 오디오 언어 정보", voice_language_help: "참조 녹음을 식별하기 위한 정보이며 합성 텍스트의 언어를 제한하지 않습니다.",
       voice_reference_audio: "참조 오디오(WAV, FLAC 또는 MP3)", voice_choose_file: "오디오 파일 선택", voice_no_file_selected: "선택한 파일 없음", voice_file_unchanged: "현재 참조 오디오 유지", voice_reference_help_label: "참조 오디오 설명", voice_reference_help_title: "참조 오디오 요구 사항", voice_reference_help: "1~60초의 선명한 1인 음성 녹음(16 MiB 이하)을 선택하세요.", voice_save_only: "저장만", voice_save_and_enable: "저장 후 활성화",
@@ -9471,6 +9580,7 @@
     idInput.disabled = !!voice;
     document.getElementById('voice-name').value = voice ? voice.name : '';
     document.getElementById('voice-language').value = normalizeVoiceLanguage(voice && voice.language);
+    document.getElementById('voice-ref-text').value = voice ? (voice.ref_text || '') : '';
     document.getElementById('voice-file').value = '';
     const saveOnlyButton = document.getElementById('voice-save-only');
     saveOnlyButton.dataset.i18n = voice ? 'save' : 'voice_save_only';
@@ -9559,6 +9669,12 @@
       return;
     }
     const body = { name: name, language: language || null };
+    const transcript = document.getElementById('voice-ref-text').value.trim();
+    if (new TextEncoder().encode(transcript).length > 16384) {
+      showToast(t('tts_execution_invalid', 'Reference transcript is too long.'), 'warn');
+      return;
+    }
+    if (transcript || editingVoiceId) body.ref_text = transcript;
     if (voiceReferenceBase64) body.ref_audio = voiceReferenceBase64;
     if (editingVoiceId) {
       apiPatch('/v1/audio/voices/' + encodeURIComponent(editingVoiceId), body);
@@ -10316,7 +10432,82 @@
     return Number.isSafeInteger(parsed) ? parsed : null;
   }
 
+  let ttsAudioURL = null;
+  let ttsSynthesisPending = false;
+
+  function cancelTTSSynthesis() {
+    if (ttsSynthesisPending) apiPost('/admin/api/audio/synthesis/cancel', {});
+    ttsSynthesisPending = false;
+    document.getElementById('breeze-generate').disabled = false;
+    document.getElementById('breeze-cancel').disabled = true;
+    const player = document.getElementById('breeze-player');
+    if (player.pause) player.pause();
+    player.removeAttribute('src');
+    player.hidden = true;
+    if (ttsAudioURL) URL.revokeObjectURL(ttsAudioURL);
+    ttsAudioURL = null;
+  }
+
+  function generateBreezeSpeech() {
+    const input = document.getElementById('breeze-text').value.trim();
+    const instructions = document.getElementById('breeze-instructions').value.trim();
+    const voice = document.getElementById('breeze-voice').value.trim();
+    const refText = document.getElementById('breeze-ref-text').value.trim();
+    if (new TextEncoder().encode(instructions).length > 16384 || new TextEncoder().encode(refText).length > 16384) {
+      showToast(t('tts_execution_invalid', 'Reference transcript or instructions are too long.'), 'warn');
+      return;
+    }
+    if (!input || (!instructions && !voice)) {
+      showToast(t('breeze_input_required', 'Enter text and a voice description or voice profile ID.'), 'warn');
+      return;
+    }
+    const cfg = Number(document.getElementById('breeze-cfg').value);
+    const temperature = Number(document.getElementById('breeze-temperature').value);
+    const maxTokens = Number(document.getElementById('breeze-max-tokens').value);
+    const seedText = document.getElementById('breeze-seed').value.trim();
+    const seed = seedText ? Number(seedText) : null;
+    if (!Number.isFinite(cfg) || cfg < 1 || cfg > 10 || !Number.isFinite(temperature) || temperature < 0 || temperature > 2
+      || !Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 1500
+      || (seed !== null && (!Number.isSafeInteger(seed) || seed < 0 || seed > 4294967295))) {
+      showToast(t('tts_execution_invalid', 'Enter valid generation parameters.'), 'warn');
+      return;
+    }
+    cancelTTSSynthesis();
+    const body = { model: window.__TTS_PARAM_MODEL__, input, response_format: 'wav', cfg_scale: instructions ? cfg : 1, temperature, max_tokens: maxTokens };
+    if (voice) body.voice = voice;
+    if (refText && voice) body.ref_text = refText;
+    if (instructions) body.instructions = instructions;
+    if (seed !== null) body.seed = seed;
+    ttsSynthesisPending = true;
+    document.getElementById('breeze-generate').disabled = true;
+    document.getElementById('breeze-cancel').disabled = false;
+    document.getElementById('breeze-synthesis-status').textContent = t('breeze_generating', 'Generating speech…');
+    apiPost('/admin/api/audio/synthesis', body);
+  }
+
+  function applyTTSSynthesisResponse(result) {
+    if (!ttsSynthesisPending) return;
+    ttsSynthesisPending = false;
+    document.getElementById('breeze-generate').disabled = false;
+    document.getElementById('breeze-cancel').disabled = true;
+    const status = document.getElementById('breeze-synthesis-status');
+    if (!result || result.error || result.content_type !== 'audio/wav' || !result.data_base64) {
+      status.textContent = result && result.error ? String(result.error) : t('breeze_generation_failed', 'Speech generation failed.');
+      return;
+    }
+    try {
+      const raw = atob(result.data_base64);
+      const bytes = Uint8Array.from(raw, c => c.charCodeAt(0));
+      ttsAudioURL = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+      const player = document.getElementById('breeze-player');
+      player.src = ttsAudioURL;
+      player.hidden = false;
+      status.textContent = t('breeze_ready', 'Speech is ready to play.');
+    } catch (_) { status.textContent = t('breeze_generation_failed', 'Speech generation failed.'); }
+  }
+
   function closeTTSDetails() {
+    cancelTTSSynthesis();
     document.getElementById('tts-details-modal').classList.remove('open');
     if (window.__TTS_DETAILS_TRIGGER__) window.__TTS_DETAILS_TRIGGER__.focus();
   }
@@ -10352,6 +10543,9 @@
       if (value) visibleFields += 1;
     });
     document.querySelector('#tts-details-modal .tts-capabilities-row').style.display = visibleFields ? '' : 'none';
+    document.getElementById('breeze-synthesis').hidden = !['breeze_tts', 'breeze-tts'].includes(model.architecture);
+    document.getElementById('breeze-voice').value = '';
+    document.getElementById('breeze-synthesis-status').textContent = '';
     renderTTSExecutionSettings(model, saved);
     applyI18n(currentLang);
     document.getElementById('tts-details-modal').classList.add('open');
@@ -10372,8 +10566,20 @@
     ];
   }
 
-  function renderTTSExecutionSettings(model, saved) {
+  function ttsExecutionProfileForModel(model) {
     const profile = window.__TTS_EXECUTION_PROFILE__;
+    const rate = Number(model && model.tts_metadata && model.tts_metadata.output_sample_rate_hz);
+    if (!profile || !profile.defaults || !profile.constraints || !Number.isSafeInteger(rate) || rate <= 0
+      || rate === profile.output_frames_per_second) return profile;
+    const adjusted = JSON.parse(JSON.stringify(profile));
+    adjusted.defaults.max_output_frames = rate * 600;
+    adjusted.constraints.max_output_frames.max = rate * 600;
+    adjusted.output_frames_per_second = rate;
+    return adjusted;
+  }
+
+  function renderTTSExecutionSettings(model, saved) {
+    const profile = ttsExecutionProfileForModel(model);
     const controls = ttsExecutionControls();
     const save = document.getElementById('tts-save');
     if (!profile || !profile.defaults || !profile.constraints) {
@@ -10418,7 +10624,7 @@
   function saveTTSParams() {
     const modelId = window.__TTS_PARAM_MODEL__;
     const model = (window.__LOCAL_MODELS__ || {})[modelId];
-    const profile = window.__TTS_EXECUTION_PROFILE__;
+    const profile = ttsExecutionProfileForModel(model);
     if (!modelId || !model || !profile?.defaults || !profile?.constraints) return;
     const deadlineRange = profile.constraints.deadline_ms || {};
     const outputRange = profile.constraints.max_output_frames || {};
@@ -16179,6 +16385,8 @@
         if (!result.success) showToast(localizeErrorResult(result), 'warn');
       } else if (path === '/admin/api/models/local') {
         onLocalModelsResult(jsonStr);
+      } else if (path === '/admin/api/audio/synthesis') {
+        applyTTSSynthesisResponse(JSON.parse(jsonStr || 'null'));
       } else if (path === '/admin/api/audio/execution-profile') {
         const profile = JSON.parse(jsonStr || 'null');
         if (profile && profile.defaults && profile.constraints) {
