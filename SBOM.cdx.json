@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:661488c8-2f1e-501b-ac7b-02071040eecc",
+  "serialNumber": "urn:uuid:303628c4-4eab-578a-9006-0c0d8fa7ade7",
   "version": 1,
   "metadata": {
     "component": {
@@ -11686,9 +11686,9 @@
     },
     {
       "type": "library",
-      "bom-ref": "native:MLX C++ with bundled JACCL@65383d68c984ce4ef49f4b600820f3b9064c5a82",
+      "bom-ref": "native:MLX C++ with bundled JACCL@a9c9f3d3634093f431381ccd7aea5bb9ea691484",
       "name": "MLX C++ with bundled JACCL",
-      "version": "65383d68c984ce4ef49f4b600820f3b9064c5a82",
+      "version": "a9c9f3d3634093f431381ccd7aea5bb9ea691484",
       "licenses": [
         {
           "expression": "MIT"
@@ -11705,7 +11705,7 @@
         },
         {
           "name": "ironmlx:source-commit",
-          "value": "65383d68c984ce4ef49f4b600820f3b9064c5a82"
+          "value": "a9c9f3d3634093f431381ccd7aea5bb9ea691484"
         }
       ],
       "externalReferences": [
@@ -11714,7 +11714,7 @@
           "url": "https://github.com/apepkuss/mlx.git"
         }
       ],
-      "purl": "pkg:github/apepkuss/mlx@65383d68c984ce4ef49f4b600820f3b9064c5a82"
+      "purl": "pkg:github/apepkuss/mlx@a9c9f3d3634093f431381ccd7aea5bb9ea691484"
     },
     {
       "type": "library",
