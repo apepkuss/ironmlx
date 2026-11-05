@@ -500,8 +500,10 @@ public actor ModelDownloadService {
                 )
                 status.status = ModelDownloadPhase.paused.rawValue
                 status.usedCredential = reminder.usedCredential
+                status = Self.restoredProgress(status, store: store)
                 statuses[key] = status
                 currentReminders[key] = reminder
+                currentReminders[key]?.pausedStatus = status
                 resumeRevisions[key] = status.commitSHA
             } else {
                 recoveryReminders[key] = reminder
@@ -1042,6 +1044,13 @@ public actor ModelDownloadService {
             repoID: request.repoID,
             commitSHA: repository.commitSHA
         )
+        let published = try store.snapshotURL(provider: request.provider, repoID: request.repoID, commitSHA: repository.commitSHA)
+        let publishedManifest = try? ModelSnapshotVerifier().loadManifest(at: published)
+        let publishedFiles: [String: ModelSnapshotFile]
+        if let manifest = publishedManifest, manifest.provider == request.provider,
+           manifest.repoID == request.repoID, manifest.commitSHA == repository.commitSHA {
+            publishedFiles = Dictionary(uniqueKeysWithValues: manifest.files.map { ($0.path, $0) })
+        } else { publishedFiles = [:] }
         var totalBytes: Int64 = 0
         var remainingBytes: Int64 = 0
         var observedBytesByPath: [String: Int64] = [:]
@@ -1090,6 +1099,14 @@ public actor ModelDownloadService {
                         etag: file.etag
                     )
                 )
+            }
+            // Existing published weights can be cloned during component repair.
+            // Recheck hashes before cloning and reserve any rejected bytes later.
+            if file.isWeight, let old = publishedFiles[file.path], old.size == file.size,
+               old.sha256 == file.sha256?.lowercased(),
+               let url = try? ModelSnapshotVerifier.safeFileURL(path: file.path, beneath: published),
+               let identity = try? ModelSnapshotVerifier.fileIdentity(of: url), identity.size == file.size {
+                existing = max(existing, file.size)
             }
             observedBytesByPath[file.path] = existing
             let remainingResult = remainingBytes.addingReportingOverflow(max(0, file.size - existing))
@@ -1242,6 +1259,9 @@ public actor ModelDownloadService {
         let completion = wasPaused
             ? failure(message: "Download paused.", code: "paused", repoID: statuses[key]?.repoID ?? "") : result
         completionResults[key] = completion
+        if !result.success, let status = statuses[key] {
+            statuses[key] = Self.restoredProgress(status, store: store)
+        }
         if wasPaused {
             statuses[key]?.status = ModelDownloadPhase.paused.rawValue
             statuses[key]?.error = nil
@@ -1361,6 +1381,21 @@ public actor ModelDownloadService {
         }
     }
 
+    /// Paused/failed Rust transfers may retain only a committed prefix, while
+    /// completed files later in the queue are already fully reusable.
+    private static func restoredProgress(_ status: ModelDownloadStatus, store: ModelDownloadStore) -> ModelDownloadStatus {
+        guard let total = status.totalBytes, total > 0,
+              let commit = status.commitSHA,
+              let provider = ModelRepositoryProvider(rawValue: status.provider),
+              let recovered = try? store.recoverableStagingBytes(provider: provider, repoID: status.repoID, commitSHA: commit)
+        else { return status }
+        var corrected = status
+        let completed = min(total, recovered)
+        corrected.remainingBytes = total - completed
+        corrected.progressPct = Double(completed) / Double(total) * 100
+        return corrected
+    }
+
     private func sortedStatuses() -> [ModelDownloadStatus] {
         statuses.values.sorted {
             let lhsActive = Self.isActiveStatus($0.status)
@@ -1455,7 +1490,8 @@ public actor ModelDownloadService {
                    record.provider == provider,
                    record.repoID == repoID,
                    record.commitSHA == repository.commitSHA,
-                   record.state == .verified
+                   record.state == .verified,
+                   snapshotContainsRepositoryWeights(manifest, repository: repository, snapshot: finalSnapshot)
                 {
                     // A download-only snapshot becomes runnable only when the
                     // current backend's metadata preflight accepts it; the
@@ -1602,8 +1638,8 @@ public actor ModelDownloadService {
                     // Audio-frame classification has no text tokenizer. Allow
                     // Native preflight independently gates inference compatibility.
                     requiredMetadataPaths = ["config.json"]
-                } else if compatibility.modelType == "qwen3_asr" {
-                    // Qwen3-ASR checkpoints can ship the split BPE vocabulary
+                } else if ["qwen3_asr", "qwen3_tts"].contains(compatibility.modelType) {
+                    // Qwen3 ASR/TTS checkpoints can ship the split BPE vocabulary
                     // instead of a consolidated tokenizer.json.
                     let tokenizerPaths = metadata.contains { $0.path == "tokenizer.json" }
                         ? ["tokenizer.json"] : ["vocab.json", "merges.txt"]
@@ -1626,6 +1662,7 @@ public actor ModelDownloadService {
                 repoID: repoID,
                 size: \.size
             )
+            try store.reusePublishedWeights(repository: repository, files: weights, staging: staging)
             let resumePlan = try downloadResumePlan(
                 files: weights,
                 staging: staging,
@@ -1660,11 +1697,14 @@ public actor ModelDownloadService {
                 )
             }
             let totalBytes = totalResult.partialValue
+            var pendingResumedBytes = resumePlan.resumedBytesByPath.values.reduce(Int64(0), +)
+            let initialBytes = metadataBytes + pendingResumedBytes
             setStatus(
                 key: key,
                 provider: provider,
                 repoID: repoID,
                 phase: .downloading,
+                progressPct: totalBytes > 0 ? Double(initialBytes) / Double(totalBytes) * 100 : 0,
                 commitSHA: repository.commitSHA,
                 totalBytes: totalBytes,
                 remainingBytes: remainingBytes
@@ -1673,7 +1713,7 @@ public actor ModelDownloadService {
             var completedBase = metadataBytes
             journal?.phase = .downloading
             journal?.totalBytes = totalBytes
-            journal?.progressBytes = completedBase
+            journal?.progressBytes = initialBytes
             journal?.updatedAt = Date()
             try store.writeJournal(journal!)
 
@@ -1700,7 +1740,8 @@ public actor ModelDownloadService {
                 journal?.currentFile = weight.path
                 journal?.updatedAt = Date()
                 try store.writeJournal(journal!)
-                let fileBase = completedBase
+                pendingResumedBytes -= resumePlan.resumedBytesByPath[weight.path] ?? 0
+                let fileBase = completedBase + pendingResumedBytes
                 let validation = try await downloader.download(
                     ResumableDownloadRequest(
                         urlRequest: request,
@@ -1729,7 +1770,7 @@ public actor ModelDownloadService {
                 )
                 validations.append(validation)
                 completedBase += weight.size
-                journal?.progressBytes = completedBase
+                journal?.progressBytes = completedBase + pendingResumedBytes
                 journal?.updatedAt = Date()
                 try store.writeJournal(journal!)
                 downloadedFiles.append(
@@ -2136,46 +2177,23 @@ public actor ModelDownloadService {
         repository: ResolvedModelRepository,
         staging: URL
     ) throws -> [RemoteModelFile] {
-        let byPath = Dictionary(uniqueKeysWithValues: repository.files.map { ($0.path, $0) })
-        var selected = Set<String>()
-        let indexURL = staging.appendingPathComponent("model.safetensors.index.json")
-        if FileManager.default.isReadableFile(atPath: indexURL.path) {
-            let data = try Data(contentsOf: indexURL)
-            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let weightMap = object["weight_map"] as? [String: Any],
-                  !weightMap.isEmpty
-            else {
-                throw DownloadFailure(
-                    repoID: repository.repoID,
-                    code: "repo_broken_shards",
-                    message: "model.safetensors.index.json is invalid."
-                )
-            }
-            selected.formUnion(weightMap.values.compactMap { $0 as? String })
-        } else if byPath["model.safetensors"] != nil {
-            selected.insert("model.safetensors")
-        } else {
-            selected.formUnion(repository.files.filter(\.isWeight).map(\.path))
+        do {
+            let selection = try ModelWeightSelection(directory: staging, inventory: Set(repository.files.map(\.path)))
+            let byPath = Dictionary(uniqueKeysWithValues: repository.files.map { ($0.path, $0) })
+            return selection.paths.sorted().compactMap { byPath[$0] }
+        } catch {
+            throw DownloadFailure(repoID: repository.repoID, code: "repo_broken_shards", message: error.localizedDescription)
         }
+    }
 
-        let configURL = staging.appendingPathComponent("config.json")
-        if let data = try? Data(contentsOf: configURL),
-           let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let optiqVision = config["optiq_vision"] as? [String: Any],
-           let sidecar = optiqVision["sidecar"] as? String,
-           !sidecar.isEmpty {
-            selected.insert(sidecar)
-        }
-
-        return try selected.sorted().map { path in
-            guard let file = byPath[path], file.isWeight else {
-                throw DownloadFailure(
-                    repoID: repository.repoID,
-                    code: "repo_broken_shards",
-                    message: "Repository is missing weight \(path)."
-                )
-            }
-            return file
+    private func snapshotContainsRepositoryWeights(
+        _ manifest: ModelSnapshotManifest, repository: ResolvedModelRepository, snapshot: URL
+    ) -> Bool {
+        guard let weights = try? selectedWeightFiles(repository: repository, staging: snapshot) else { return false }
+        let existing = Dictionary(uniqueKeysWithValues: manifest.files.map { ($0.path, $0) })
+        return weights.allSatisfy { weight in
+            guard let file = existing[weight.path] else { return false }
+            return file.size == weight.size && file.sha256 == weight.sha256?.lowercased()
         }
     }
 

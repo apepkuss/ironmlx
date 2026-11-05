@@ -2032,6 +2032,10 @@ public struct LocalModelScanner: Sendable {
             let status: String
             let reasonCode: String
             switch error {
+            case let .fileMissing(path):
+                status = "incomplete"
+                reasonCode = "missing_required_files"
+                missingFiles = Array(Set(missingFiles + [path])).sorted()
             case .knownCorrupt, .checksumMismatch:
                 status = "corrupt"
                 reasonCode = "snapshot_corrupt"
@@ -2042,7 +2046,8 @@ public struct LocalModelScanner: Sendable {
             readiness = LocalModelReadiness(
                 status: status,
                 reasonCode: reasonCode,
-                message: error.localizedDescription
+                message: error.localizedDescription,
+                missingFiles: missingFiles
             )
             return SnapshotInspection(
                 path: url,

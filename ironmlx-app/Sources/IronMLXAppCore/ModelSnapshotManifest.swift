@@ -556,6 +556,7 @@ public struct ModelSnapshotVerifier: Sendable {
             )
         }
         let expected = Set(manifest.files.map(\.path))
+        _ = try ModelWeightSelection(directory: snapshot, inventory: expected)
         for case let url as URL in enumerator {
             let values = try url.resourceValues(forKeys: [.isDirectoryKey])
             if values.isDirectory == true

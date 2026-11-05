@@ -377,6 +377,80 @@ public struct ModelDownloadStore: Sendable {
         )
     }
 
+    /// Count payload bytes only: hf-hub preallocates its Range file, so its
+    /// filesystem size is not a valid resumable-byte count.
+    func recoverableStagingBytes(provider: ModelRepositoryProvider, repoID: String, commitSHA: String) throws -> Int64? {
+        let staging = try stagingSnapshotURL(provider: provider, repoID: repoID, commitSHA: commitSHA)
+        guard FileManager.default.fileExists(atPath: staging.path),
+              let enumerator = FileManager.default.enumerator(at: staging,
+                includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]) else { return nil }
+        var total: Int64 = 0
+        func add(_ bytes: Int64) {
+            let result = total.addingReportingOverflow(max(0, bytes))
+            total = result.overflow ? Int64.max : result.partialValue
+        }
+        func partialIdentity(at url: URL) -> ModelPartialIdentity? {
+            guard let data = try? Data(contentsOf: url),
+                  let identity = try? JSONDecoder().decode(ModelPartialIdentity.self, from: data),
+                  identity.provider == provider, identity.repoID == repoID, identity.commitSHA == commitSHA else { return nil }
+            return identity
+        }
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            if values.isSymbolicLink == true { enumerator.skipDescendants(); continue }
+            if values.isDirectory == true {
+                if url.pathExtension == "hf-transfer" {
+                    enumerator.skipDescendants()
+                    if let identity = partialIdentity(at: url.appendingPathComponent("identity.json")),
+                       let destination = try? ModelSnapshotVerifier.safeFileURL(path: identity.path, beneath: staging),
+                       !FileManager.default.fileExists(atPath: destination.path) {
+                        add(RustHuggingFaceFileDownloader.recoverableBytes(destination: destination, identity: identity))
+                    }
+                }
+                continue
+            }
+            let name = url.lastPathComponent
+            if name.hasSuffix(".partial.meta.json") {
+                if let identity = partialIdentity(at: url),
+                   let destination = try? ModelSnapshotVerifier.safeFileURL(path: identity.path, beneath: staging),
+                   !FileManager.default.fileExists(atPath: destination.path) {
+                    add(ResumableFileDownloader.recoverableBytes(destination: destination, identity: identity) ?? 0)
+                }
+                continue
+            }
+            if name.hasSuffix(".partial") || name.hasSuffix(".hf-transfer.lock")
+                || name == ModelSnapshotManifest.filename || name == ModelSnapshotIntegrityRecord.filename { continue }
+            if values.isRegularFile == true { add(Int64(values.fileSize ?? 0)) }
+        }
+        return total
+    }
+
+    /// Clone only files whose pinned provider identity matches the old manifest.
+    /// Downloaders still hash these files before trusting them; the published
+    /// snapshot is left untouched until the repaired staging snapshot is verified.
+    func reusePublishedWeights(
+        repository: ResolvedModelRepository, files: [RemoteModelFile], staging: URL
+    ) throws {
+        let source = try snapshotURL(provider: repository.provider, repoID: repository.repoID, commitSHA: repository.commitSHA)
+        guard let manifest = try? ModelSnapshotVerifier().loadManifest(at: source),
+              manifest.provider == repository.provider, manifest.repoID == repository.repoID,
+              manifest.commitSHA == repository.commitSHA else { return }
+        let existing = Dictionary(uniqueKeysWithValues: manifest.files.map { ($0.path, $0) })
+        for file in files {
+            guard let old = existing[file.path], old.size == file.size,
+                  old.sha256 == file.sha256?.lowercased() else { continue }
+            let destination = try ModelSnapshotVerifier.safeFileURL(path: file.path, beneath: staging)
+            if FileManager.default.fileExists(atPath: destination.path) { continue }
+            let original = try ModelSnapshotVerifier.safeFileURL(path: file.path, beneath: source)
+            guard let identity = try? ModelSnapshotVerifier.fileIdentity(of: original), identity.size == file.size,
+                  (try? ModelSnapshotVerifier.sha256(of: original)) == file.sha256 else { continue }
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            // If cloning is unavailable, leave the file for the downloader so
+            // its full disk reservation is restored before network transfer.
+            _ = clonefile(original.path, destination.path, 0)
+        }
+    }
+
     public func publish(_ manifest: ModelSnapshotManifest) throws -> URL {
         let staging = try stagingSnapshotURL(
             provider: manifest.provider,
@@ -416,6 +490,16 @@ public struct ModelDownloadStore: Sendable {
                     with: staging,
                     manifest: manifest
                 )
+            }
+            let replacementFiles = Dictionary(uniqueKeysWithValues: manifest.files.map { ($0.path, $0) })
+            if existing.files.count < manifest.files.count,
+               existing.files.allSatisfy({ file in
+                   guard let replacement = replacementFiles[file.path] else { return false }
+                   return file.size == replacement.size && file.sha256 == replacement.sha256
+               }) {
+                // A verified old manifest can still omit independent components.
+                // Replace atomically only after the complete new snapshot passed verification.
+                return try replaceInvalidSnapshot(at: destination, with: staging, manifest: manifest)
             }
             guard existing.version == manifest.version,
                   existing.provider == manifest.provider,

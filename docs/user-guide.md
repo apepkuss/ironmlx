@@ -44,6 +44,8 @@ Installed variants show **Downloaded · Check for updates**. Checking only compa
 
 In **Download tasks**, **Pause** retains downloaded data and remains paused after restarting the App. **Resume** uses the recorded snapshot and retained files. Credential-protected tasks may require the token again; tokens are not saved to disk. **Delete** removes unfinished tasks and partial files after confirmation. **Clear** on a completed task keeps the installed model.
 
+Independent model components are downloaded alongside the main weight set, using each component's own index. Breeze and Qwen3-TTS downloads require their audio codec weights even for file-only storage; this does not enable inference support. Optional MTP files declared by the repository are included when available. Older snapshots missing required components are marked incomplete; re-download the same revision to repair them. Matching main weights are verified and reused on filesystems that support cloning, and the old snapshot is retained until the repair is verified. `Verified` describes the selected files and component checks, not runtime support.
+
 ## Import a model already on this Mac
 
 In Dashboard, open **Models → Model Manager** and select **Import local model**

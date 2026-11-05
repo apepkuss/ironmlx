@@ -2228,3 +2228,235 @@ private struct AcceptingEmbeddingMetadataPreflight: ModelMetadataPreflighting {
     #expect(manifest.compatibility.runtimeSupportError == nil)
     #expect(try verifier.loadIntegrityRecord(at: snapshot) == originalIntegrity)
 }
+
+private func componentDownloadFiles(
+    modelType: String = "breeze_tts", shardedCodec: Bool = false, includeCodec: Bool = true
+) -> [(path: String, data: Data, sha256: String?)] {
+    let directory = modelType == "qwen3_tts" ? "speech_tokenizer" : "audio_tokenizer"
+    let weights = Data("weights".utf8)
+    let codec = Data("codec weights".utf8)
+    var files: [(path: String, data: Data, sha256: String?)] = [
+        ("config.json", Data("{\"model_type\":\"\(modelType)\"}".utf8), nil),
+        ("model.safetensors.index.json", Data(#"{"weight_map":{"main":"model.safetensors"}}"#.utf8), nil),
+        ("model.safetensors", weights, sha256(weights)),
+        (directory + "/config.json", Data("{}".utf8), nil),
+    ]
+    if modelType == "qwen3_tts" {
+        files += [("vocab.json", Data("{}".utf8), nil), ("merges.txt", Data("#version: 0.2".utf8), nil),
+                  ("tokenizer_config.json", Data("{}".utf8), nil), ("preprocessor_config.json", Data("{}".utf8), nil)]
+    } else { files.append(("tokenizer.json", Data("{}".utf8), nil)) }
+    if includeCodec {
+        let name = shardedCodec ? "codec-00001-of-00001.safetensors" : "model.safetensors"
+        files.append((directory + "/" + name, codec, sha256(codec)))
+        if shardedCodec {
+            files.append((directory + "/model.safetensors.index.json",
+                          Data("{\"weight_map\":{\"codec\":\"\(name)\"}}".utf8), nil))
+        }
+    }
+    return files
+}
+
+@Test(arguments: ["breeze_tts", "qwen3_tts"])
+func componentCodecDownloadOnlyIncludesIndependentWeights(modelType: String) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    let repoID = "org/component-codec"
+    let files = componentDownloadFiles(modelType: modelType, shardedCodec: true)
+    configureHuggingFace(client, repoID: repoID, files: files)
+    client.dataResponses["https://huggingface.co/api/models/\(repoID)/revision/\(testCommit)?blobs=true"] =
+        client.dataResponses["https://huggingface.co/api/models/\(repoID)?blobs=true"]
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: DownloadOnlyRejectingPreflight(message: "Error: unsupported model_type: \(modelType)"),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(!(await service.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    #expect(client.streamRequests.isEmpty)
+    #expect(await service.resumeDownload(provider: .huggingFace, repoID: repoID, downloadOnly: true).success)
+    try await waitForDownloadCondition { await service.downloadStatuses().first?.status == "completed" }
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(Set(manifest.files.map(\.path)) == Set(files.map(\.path)))
+    #expect(manifest.compatibility.downloadOnly == true)
+    #expect(client.streamRequests.count == 2)
+    #expect(manifest.resources.weightBytes == files.filter { $0.sha256 != nil }.reduce(0) { $0 + Int64($1.data.count) })
+}
+
+@Test func componentMissingCodecIsRejectedBeforeAnyWeightDownload() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    configureHuggingFace(client, repoID: "org/incomplete", files: componentDownloadFiles(includeCodec: false))
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: AcceptingMetadataPreflight(), telemetryLogger: { _ in })
+    let result = await service.downloadHuggingFace(repoID: "org/incomplete", token: nil)
+    #expect(!result.success)
+    #expect(result.code == "repo_broken_shards")
+    #expect(result.error?.contains("audio_tokenizer/model.safetensors") == true)
+    #expect(client.streamRequests.isEmpty)
+}
+
+@Test(arguments: [false, true])
+func componentRepairReusesGoodWeightsAndKeepsOldSnapshotUntilPublish(corruptMain: Bool) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/old-component"
+    let files = componentDownloadFiles()
+    let oldFiles = Dictionary(uniqueKeysWithValues: files.filter { $0.path != "audio_tokenizer/model.safetensors" }.map { ($0.path, $0.data) })
+    let snapshot = try writeVerifiedTestSnapshot(root: root, repoID: repoID, files: oldFiles)
+    try ModelDownloadStore.atomicWrite(ModelSnapshotIntegrityRecord(provider: .huggingFace, repoID: repoID,
+        commitSHA: testCommit, state: .verified), to: snapshot.appendingPathComponent(ModelSnapshotIntegrityRecord.filename))
+    #expect(throws: ModelSnapshotVerificationError.self) { try ModelSnapshotVerifier().verifyStructure(snapshot: snapshot) }
+    #expect(throws: ModelSnapshotVerificationError.self) { try ModelSnapshotVerifier().verify(snapshot: snapshot) }
+    let incomplete = try #require(LocalModelScanner(rootURL: root).scan().first)
+    #expect(incomplete.readiness?.status == "incomplete")
+    #expect(incomplete.readiness?.missingFiles.contains("audio_tokenizer/model.safetensors") == true)
+    if corruptMain { try Data("damaged".utf8).write(to: snapshot.appendingPathComponent("model.safetensors")) }
+    let client = FakeModelDownloadHTTPClient()
+    configureHuggingFace(client, repoID: repoID, files: files)
+    let service = ModelDownloadService(rootURL: root, httpClient: client,
+        metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    let result = await service.downloadHuggingFace(repoID: repoID, token: nil)
+    #expect(result.success)
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(manifest.files.contains { $0.path == "audio_tokenizer/model.safetensors" })
+    #expect(client.streamRequests.count == (corruptMain ? 2 : 1))
+    #expect(try Data(contentsOf: snapshot.appendingPathComponent("model.safetensors")) == Data("weights".utf8))
+}
+
+@Test(arguments: [false, true])
+func componentOptionalMTPDoesNotGateBaseAndCanRepairOldManifest(includeMTP: Bool) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/optional-mtp"
+    let weights = Data("weights".utf8)
+    var files: [(path: String, data: Data, sha256: String?)] = [
+        ("config.json", Data(#"{"model_type":"llama","mtp_file":"optiq/mtp.safetensors"}"#.utf8), nil),
+        ("tokenizer.json", Data("{}".utf8), nil), ("model.safetensors", weights, sha256(weights)),
+    ]
+    let snapshot = try writeVerifiedTestSnapshot(root: root, repoID: repoID,
+        files: Dictionary(uniqueKeysWithValues: files.map { ($0.path, $0.data) }))
+    try ModelDownloadStore.atomicWrite(ModelSnapshotIntegrityRecord(provider: .huggingFace, repoID: repoID,
+        commitSHA: testCommit, state: .verified), to: snapshot.appendingPathComponent(ModelSnapshotIntegrityRecord.filename))
+    if includeMTP { files.append(("optiq/mtp.safetensors", weights, sha256(weights))) }
+    let client = FakeModelDownloadHTTPClient()
+    configureHuggingFace(client, repoID: repoID, files: files)
+    let service = ModelDownloadService(rootURL: root, httpClient: client, metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(await service.downloadHuggingFace(repoID: repoID, token: nil).success)
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(manifest.files.contains { $0.path == "optiq/mtp.safetensors" } == includeMTP)
+    #expect(client.streamRequests.count == (includeMTP ? 1 : 0))
+}
+
+@Test func componentBadCodecDoesNotReplaceAnOldPublishedSnapshot() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/corrupt-codec"
+    let files = componentDownloadFiles()
+    let snapshot = try writeVerifiedTestSnapshot(root: root, repoID: repoID,
+        files: Dictionary(uniqueKeysWithValues: files.filter { $0.path != "audio_tokenizer/model.safetensors" }.map { ($0.path, $0.data) }))
+    let original = try Data(contentsOf: snapshot.appendingPathComponent(ModelSnapshotManifest.filename))
+    let client = FakeModelDownloadHTTPClient()
+    configureHuggingFace(client, repoID: repoID, files: files)
+    client.streamResponses["https://huggingface.co/\(repoID)/resolve/\(testCommit)/audio_tokenizer/model.safetensors"] =
+        StreamFixture(data: Data("wrong weights".utf8))
+    let service = ModelDownloadService(rootURL: root, httpClient: client, metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(!(await service.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    #expect(await service.downloadStatuses().first?.status == "corrupt")
+    #expect(try Data(contentsOf: snapshot.appendingPathComponent(ModelSnapshotManifest.filename)) == original)
+    #expect(try Data(contentsOf: snapshot.appendingPathComponent("model.safetensors")) == Data("weights".utf8))
+    #expect(!FileManager.default.fileExists(atPath: snapshot.appendingPathComponent("audio_tokenizer/model.safetensors").path))
+}
+
+@Test func componentDownloadUsesTheSameSelectionForModelScope() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    let repoID = "org/modelscope-components"
+    let files = componentDownloadFiles()
+    let api = URL(string: "https://api.modelscope.test")!
+    let git = URL(string: "https://git.modelscope.test")!
+    client.dataResponses["\(git.absoluteString)/\(repoID).git/info/refs?service=git-upload-pack"] =
+        .success(Data("003f\(testCommit) refs/heads/master\u{0}report-status\n".utf8))
+    let entries = files.map { file in
+        ["Path": file.path, "Type": "blob", "Size": file.data.count, "Sha256": sha256(file.data)] as [String: Any]
+    }
+    client.dataResponses["\(api.absoluteString)/\(repoID)/repo/files?Revision=\(testCommit)&Recursive=true"] =
+        .success(try JSONSerialization.data(withJSONObject: ["Success": true, "Data": ["Files": entries]]))
+    let resolver = ModelRepositoryResolver(httpClient: client, huggingFaceEndpoint: URL(string: "https://huggingface.test")!,
+        modelScopeAPIEndpoint: api, modelScopeGitEndpoint: git)
+    let remoteFiles = files.map { RemoteModelFile(path: $0.path, size: Int64($0.data.count), sha256: sha256($0.data), blobID: nil, etag: nil) }
+    let repository = ResolvedModelRepository(provider: .modelScope, repoID: repoID, requestedRevision: "master",
+        commitSHA: testCommit, files: remoteFiles)
+    for (file, remote) in zip(files, remoteFiles) {
+        let request = try resolver.request(for: remote, repository: repository, token: nil)
+        client.streamResponses[request.url!.absoluteString] = StreamFixture(data: file.data)
+    }
+    let service = ModelDownloadService(rootURL: root, httpClient: client, modelScopeEndpoint: api, modelScopeGitEndpoint: git,
+        metadataPreflight: AcceptingMetadataPreflight(), fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(await service.startModelScopeDownload(repoID: repoID).success)
+    try await waitForDownloadCondition { await service.downloadStatuses().first?.status == "completed" }
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .modelScope, repoID: repoID, commitSHA: testCommit)
+    let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot)
+    #expect(Set(manifest.files.map(\.path)) == Set(files.map(\.path)))
+}
+
+@Test func componentRepairProgressCountsReusedWeightsBeforeCodecCompletes() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/component-progress"
+    let files = componentDownloadFiles()
+    try writeVerifiedTestSnapshot(root: root, repoID: repoID,
+        files: Dictionary(uniqueKeysWithValues: files.filter { $0.path != "audio_tokenizer/model.safetensors" }.map { ($0.path, $0.data) }))
+    let client = FakeModelDownloadHTTPClient()
+    configureHuggingFace(client, repoID: repoID, files: files)
+    client.streamResponses["https://huggingface.co/\(repoID)/resolve/\(testCommit)/audio_tokenizer/model.safetensors"] =
+        StreamFixture(data: Data("codec".utf8), statusCode: 200, headers: [:], error: URLError(.networkConnectionLost))
+    let service = ModelDownloadService(rootURL: root, httpClient: client, metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(!(await service.downloadHuggingFace(repoID: repoID, token: nil)).success)
+    let status = try #require(await service.downloadStatuses().first)
+    #expect(status.status == "interrupted")
+    #expect(status.currentFile == "audio_tokenizer/model.safetensors")
+    #expect(status.remainingBytes == 8) // 13 codec bytes minus 5 committed bytes; main weights already exist.
+    let total = try #require(status.totalBytes)
+    #expect(abs(status.progressPct - Double(total - 8) / Double(total) * 100) < 0.001)
+    #expect(client.streamRequests.count == 1)
+}
+
+@Test func componentPausedProgressRestoresClonesAndOnlyCommittedRustRanges() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/legacy-progress"
+    let files = componentDownloadFiles()
+    let store = ModelDownloadStore(rootURL: root)
+    let staging = try store.prepareStaging(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    for file in files where file.path != "audio_tokenizer/model.safetensors" {
+        let destination = staging.appendingPathComponent(file.path)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try file.data.write(to: destination)
+    }
+    let codec = Data("codec weights".utf8)
+    let digest = sha256(codec)
+    let identity = ModelPartialIdentity(provider: .huggingFace, repoID: repoID, commitSHA: testCommit,
+        path: "audio_tokenizer/model.safetensors", expectedSize: Int64(codec.count), expectedSHA256: digest, etag: digest)
+    let cache = staging.appendingPathComponent(identity.path).appendingPathExtension("hf-transfer")
+    try ModelDownloadStore.atomicWrite(identity, to: cache.appendingPathComponent("identity.json"))
+    let partial = cache.appendingPathComponent("models--org--legacy-progress/blobs/\(digest).sync.part")
+    try FileManager.default.createDirectory(at: partial.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try (codec + UInt64(5).littleEndianData).write(to: partial)
+    let total = files.reduce(Int64(0)) { $0 + Int64($1.data.count) }
+    var reminder = ModelDownloadRecoveryReminder(provider: .huggingFace, repoID: repoID,
+        queueOrder: 0, previousStatus: "paused", usedCredential: false)
+    reminder.pausedStatus = ModelDownloadStatus(repoID: repoID, provider: "huggingface", status: "paused",
+        progressPct: 10, currentFile: identity.path, commitSHA: testCommit,
+        totalBytes: total, remainingBytes: 15)
+    try ModelDownloadQueueReminderStore(rootURL: root).save([reminder])
+    let service = ModelDownloadService(rootURL: root)
+    #expect(await service.downloadStatuses().first?.remainingBytes == 8)
+    await service.cancelAllDownloads()
+    let restored = ModelDownloadService(rootURL: root)
+    #expect(await restored.downloadStatuses().first?.remainingBytes == 8)
+}
