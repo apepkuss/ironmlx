@@ -3828,6 +3828,8 @@ async fn load_engine_variant(
     flash_plan: Option<ironmlx_lm::models::qwen4_exp::load_plan::FlashLoadPlan>,
 ) -> Result<EngineVariant> {
     tracker.enter_stage(LoadStage::ReadingWeights);
+    #[cfg(test)]
+    run_load_section(|| tests::hold_load(&model.path));
     if model.capabilities.runtime_kind == "diarization" {
         return Ok(EngineVariant::Diarization(
             super::diarization_execution::DiarizationRuntime::load(model.path.clone()).await?,
@@ -5705,6 +5707,156 @@ mod tests {
             pool.inner.planned_memory_envelope_excluding("other").await,
             (false, 0)
         );
+        std::fs::remove_dir_all(model_dir).unwrap();
+    }
+
+    /// Blocks `load_engine_variant` for one model, as slow weight reads would.
+    static LOAD_HOLD: std::sync::Mutex<Option<(PathBuf, std::sync::Arc<LoadHold>)>> =
+        std::sync::Mutex::new(None);
+
+    #[derive(Default)]
+    struct LoadHold {
+        released: std::sync::Mutex<bool>,
+        changed: std::sync::Condvar,
+    }
+
+    impl LoadHold {
+        fn release(&self) {
+            *self.released.lock().unwrap() = true;
+            self.changed.notify_all();
+        }
+    }
+
+    pub(super) fn hold_load(path: &Path) {
+        let hold = LOAD_HOLD
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(held, _)| held == path)
+            .map(|(_, hold)| std::sync::Arc::clone(hold));
+        if let Some(hold) = hold {
+            let mut released = hold.released.lock().unwrap();
+            while !*released {
+                released = hold.changed.wait(released).unwrap();
+            }
+        }
+    }
+
+    async fn wait_for_state(pool: &EnginePoolState, id: &str, state: EngineRuntimeState) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let snapshots = pool.model_snapshots().await;
+                if snapshots.iter().any(|m| m.id == id && m.state == state) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("model `{id}` never reached {state:?}"));
+    }
+
+    // One worker: a load blocking it would starve every other request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[serial_test::serial(engine_pool_load_hold)]
+    async fn queries_do_not_wait_for_a_blocked_load_and_failure_is_reported() {
+        let pool = EnginePoolState::new_dynamic(runtime_config(), None).expect("pool");
+        let model_dir = write_minimal_model_config("qwen3_5");
+        std::fs::write(model_dir.join("model.safetensors"), vec![0_u8; 512]).unwrap();
+        let hold = std::sync::Arc::new(LoadHold::default());
+        *LOAD_HOLD.lock().unwrap() = Some((model_dir.clone(), std::sync::Arc::clone(&hold)));
+        pool.register_dynamic_model(
+            model_config("alpha", &model_dir, EngineLoadPolicy::Lazy),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let loading = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.load_model("alpha").await.map(|_| ()) })
+        };
+        wait_for_state(&pool, "alpha", EngineRuntimeState::Loading).await;
+
+        // Concurrent state readers finish while the load stays blocked.
+        let started = std::time::Instant::now();
+        for _ in 0..32 {
+            let readers = (0..8).map(|_| {
+                let pool = pool.clone();
+                tokio::spawn(async move {
+                    let models = pool.model_snapshots().await;
+                    let health = pool.health_snapshot().await;
+                    let loaded = pool.loaded_model_infos().await;
+                    (models, health, loaded)
+                })
+            });
+            for reader in readers {
+                let (models, health, loaded) = reader.await.unwrap();
+                assert_eq!(models[0].state, EngineRuntimeState::Loading);
+                assert_eq!(models[0].last_error, None);
+                assert_eq!(health.models[0].state, EngineRuntimeState::Loading);
+                assert_eq!(health.loaded_models, 0);
+                assert!(loaded.is_empty(), "a loading model must not look ready");
+            }
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "state queries waited for the load: {:?}",
+            started.elapsed()
+        );
+        assert!(!loading.is_finished());
+
+        hold.release();
+        let error = loading
+            .await
+            .unwrap()
+            .expect_err("invalid weights must fail");
+        assert!(format!("{error:#}").contains("alpha"));
+        let models = pool.model_snapshots().await;
+        assert_eq!(models[0].state, EngineRuntimeState::Failed);
+        assert!(models[0].last_error.is_some());
+        assert!(pool.loaded_model_infos().await.is_empty());
+        *LOAD_HOLD.lock().unwrap() = None;
+        std::fs::remove_dir_all(model_dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(engine_pool_load_hold)]
+    async fn caller_disconnect_cannot_strand_a_load_in_loading() {
+        let pool = EnginePoolState::new_dynamic(runtime_config(), None).expect("pool");
+        let model_dir = write_minimal_model_config("qwen3_5");
+        std::fs::write(model_dir.join("model.safetensors"), vec![0_u8; 512]).unwrap();
+        let hold = std::sync::Arc::new(LoadHold::default());
+        *LOAD_HOLD.lock().unwrap() = Some((model_dir.clone(), std::sync::Arc::clone(&hold)));
+        pool.register_dynamic_model(
+            model_config("alpha", &model_dir, EngineLoadPolicy::Lazy),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let caller = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.load_model("alpha").await.map(|_| ()) })
+        };
+        wait_for_state(&pool, "alpha", EngineRuntimeState::Loading).await;
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        // The load gate stays held by the running load, not by the dead caller.
+        let second = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.load_model("alpha").await.map(|_| ()) })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!second.is_finished());
+        hold.release();
+        wait_for_state(&pool, "alpha", EngineRuntimeState::Failed).await;
+        second
+            .await
+            .unwrap()
+            .expect_err("invalid weights must fail");
+        *LOAD_HOLD.lock().unwrap() = None;
         std::fs::remove_dir_all(model_dir).unwrap();
     }
 
