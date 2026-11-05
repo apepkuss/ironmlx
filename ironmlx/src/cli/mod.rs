@@ -85,6 +85,13 @@ impl Cli {
                 .ok_or_else(|| anyhow::anyhow!("--mlx-metallib must be representable as UTF-8"))?;
             mlx::metal::set_metallib_path(path)?;
         }
+        if !matches!(
+            &self.command,
+            Command::ModelPreflight(_) | Command::HfTransfer(_)
+        ) {
+            mlx::metal::verify_runtime()
+                .map_err(|error| anyhow::anyhow!("MLX Metal runtime is unavailable: {error}"))?;
+        }
 
         match self.command {
             Command::Transcribe(args) => transcribe::run(args),

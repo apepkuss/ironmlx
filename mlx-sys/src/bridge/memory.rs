@@ -31,11 +31,13 @@ mod ffi_bridge {
             stream_index: i32,
         ) -> Result<bool>;
 
-        fn get_active_memory() -> usize;
-        fn get_cache_memory() -> usize;
-        fn get_peak_memory() -> usize;
-        fn get_memory_limit() -> usize;
-        fn set_cache_limit(limit: usize) -> usize;
+        // These initialize the Metal device on first use, which throws when
+        // its metallib cannot be loaded.
+        fn get_active_memory() -> Result<usize>;
+        fn get_cache_memory() -> Result<usize>;
+        fn get_peak_memory() -> Result<usize>;
+        fn get_memory_limit() -> Result<usize>;
+        fn set_cache_limit(limit: usize) -> Result<usize>;
         fn set_wired_limit(limit: usize) -> Result<usize>;
         fn start_residency_refresh(interval_ms: u32) -> Result<()>;
         fn get_memory_size() -> Result<usize>;

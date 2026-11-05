@@ -39,6 +39,19 @@ pub fn set_metallib_path(path: &str) -> Result<()> {
     mlx_sys::metal::ffi::set_metallib_path(path).map_err(Error::from)
 }
 
+/// Initialize the MLX device and run one kernel from its metallib, so a
+/// missing, corrupt or unrelated resource fails here with its reason instead
+/// of at the first request.
+pub fn verify_runtime() -> Result<()> {
+    let probe = crate::Array::try_from((&[2_f32][..], &[1_i32][..]))?;
+    let sum = crate::ops::binary::add(&probe, &probe)?.to_vec::<f32>()?;
+    if sum == [4.0] {
+        Ok(())
+    } else {
+        Err(Error::Mlx(format!("Metal probe returned {sum:?}")))
+    }
+}
+
 /// Open an Xcode-compatible `.gputrace` file at `path` and start capturing
 /// every Metal command submitted on the default device until [`stop`] is
 /// called.
