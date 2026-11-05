@@ -1929,13 +1929,16 @@ where
                 ),
             };
             if let (true, Some(cache)) = (cache_this_boundary, prefix_cache.as_deref_mut()) {
+                // The turn boundary is what the next turn restores: bounded
+                // persistence must keep it, like the scheduler's split point.
+                let preferred = stop == prompt_len || turn_boundary == Some(position + chunk_len);
                 match cache.insert_at_boundary(
                     &request.prompt_ids[..stop],
                     &prefix_key(stop),
                     &target_cache,
                     retained,
                     chunk_last_hidden,
-                    stop == prompt_len,
+                    preferred,
                 ) {
                     Ok(true) => tracing::debug!(
                         cached_len = stop,
