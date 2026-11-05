@@ -25,6 +25,8 @@ struct ScopedResidency::Impl {
   std::vector<NS::SharedPtr<MTL::CommandQueue>> queues;
   bool active{false};
   bool retiring{false};
+  // The first request runs unlocked; no other caller may start or end it.
+  bool first_request{false};
   void detach() {
     for (auto& queue : queues)
       for (auto& set : sets) queue->removeResidencySet(set.get());
@@ -34,7 +36,7 @@ struct ScopedResidency::Impl {
     auto pool = mlx::core::metal::new_scoped_memory_pool();
     enabled = enabled && !retiring;
     if (!enabled) detach();
-    if (enabled == active) return;
+    if (first_request || enabled == active) return;
     for (auto& set : sets) {
       if (enabled) set->requestResidency();
       else set->endResidency();
@@ -153,7 +155,7 @@ std::unique_ptr<ScopedResidency> make_scoped_residency(
     const auto ceiling = std::min(recommended > 2*gib ? recommended-2*gib : 0,
                                   physical > 8*gib ? physical-8*gib : 0);
     auto& r = registry();
-    std::lock_guard<std::mutex> lock(r.mutex);
+    std::unique_lock<std::mutex> lock(r.mutex);
     ensure_pressure_monitor(r);
     const auto other = device.residency_sets().wired_size();
     const auto used = r.bytes > ceiling ? ceiling : r.bytes;
@@ -174,17 +176,29 @@ std::unique_ptr<ScopedResidency> make_scoped_residency(
       in_set += allocation->allocatedSize();
     }
     for (auto& set : impl->sets) set->commit();
-    impl->activate(allowed(r));
+    auto* identity = impl.get();
+    // Reserve first so a concurrent lease sees these bytes. requestResidency
+    // takes seconds for a large model; holding the registry through it would
+    // stall health reads and every memory-governor sample behind them.
+    r.leases.insert(identity);
+    r.bytes += identity->bytes;
+    if (allowed(r)) {
+      identity->first_request = true;
+      lock.unlock();
+      for (auto& set : identity->sets) set->requestResidency();
+      lock.lock();
+      identity->first_request = false;
+      identity->active = true;
+      // Policy may have changed during the request; settle before publishing.
+      identity->activate(allowed(r));
+    }
     // Register before constructing the owner, whose destructor takes this lock.
     // No owning ScopedResidency object exists if allocation/registration fails.
-    auto* identity = impl.get();
-    r.leases.insert(identity);
     try {
-      auto lease = std::make_unique<ScopedResidency>(std::move(impl));
-      r.bytes += lease->impl->bytes;
-      return lease;
+      return std::make_unique<ScopedResidency>(std::move(impl));
     } catch (...) {
       r.leases.erase(identity);
+      r.bytes -= identity->bytes;
       throw;
     }
   }
