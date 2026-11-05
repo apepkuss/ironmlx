@@ -3010,6 +3010,39 @@ mod tests {
     }
 
     #[test]
+    fn load_error_maps_memory_shortage_to_gpu_memory_code() {
+        let reservation =
+            ironmlx_runtime::core::process_memory::MemoryReservationError::InsufficientHeadroom {
+                purpose: "model load",
+                requested_bytes: 2,
+                projected_bytes: 3,
+                target_bytes: 1,
+            };
+        for message in [
+            reservation.to_string(),
+            ModelManagementError::GpuMemoryLow.to_string(),
+            "Metal command buffer failed: OOM".to_owned(),
+            "[metal] out of memory".to_owned(),
+        ] {
+            let error = AdminError::from_load_error(anyhow::anyhow!("{message}"));
+            assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE, "{message}");
+            assert_eq!(error.code, Some(GPU_MEMORY_INSUFFICIENT_CODE), "{message}");
+        }
+    }
+
+    #[test]
+    fn load_error_does_not_read_memory_shortage_from_unrelated_words() {
+        for message in [
+            "failed to read /models/bloom-560m/config.json",
+            "failed to read /Users/broom/model/config.json",
+            "memory governor prefill headroom ratio must satisfy 0 < ratio <= 1",
+        ] {
+            let error = AdminError::from_load_error(anyhow::anyhow!("{message}"));
+            assert_ne!(error.code, Some(GPU_MEMORY_INSUFFICIENT_CODE), "{message}");
+        }
+    }
+
+    #[test]
     fn load_error_serializes_engine_pool_capacity_code() {
         let error = AdminError::from_load_error(anyhow::anyhow!(
             "engine pool capacity reached: max_loaded_models=3, unload an existing model before loading `delta`"
