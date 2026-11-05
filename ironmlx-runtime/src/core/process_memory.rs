@@ -673,6 +673,17 @@ impl ProcessMemoryGovernor {
         self.update(native_memory_telemetry())
     }
 
+    /// The hard watermark if host memory stopped limiting this process: what
+    /// this machine and Metal can admit once reclaim by other processes ends.
+    pub fn hard_watermark_without_host_limit(&self, snapshot: &MemoryGovernorSnapshot) -> usize {
+        let ceiling = snapshot
+            .metal_ceiling_bytes
+            .map_or(snapshot.static_ceiling_bytes, |metal| {
+                metal.min(snapshot.static_ceiling_bytes)
+            });
+        ratio_bytes(ceiling, self.config.hard_ratio)
+    }
+
     pub fn update(&self, telemetry: MemoryTelemetry) -> MemoryGovernorSnapshot {
         let mut state = self.state.lock().expect("memory governor state poisoned");
         let current = telemetry.current_usage_bytes().unwrap_or(0);

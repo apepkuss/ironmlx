@@ -441,6 +441,29 @@ struct EngineSlotRuntimeSnapshot {
     request_count: u64,
 }
 
+/// Set when the caller of a load is gone. A load that has started finishing
+/// its weights keeps going; only waiting for admission stops.
+#[derive(Clone, Default)]
+struct LoadCancel(Arc<AtomicBool>);
+
+impl LoadCancel {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    fn on_drop(&self) -> LoadCancelOnDrop {
+        LoadCancelOnDrop(self.clone())
+    }
+}
+
+struct LoadCancelOnDrop(LoadCancel);
+
+impl Drop for LoadCancelOnDrop {
+    fn drop(&mut self) {
+        self.0 .0.store(true, Ordering::SeqCst);
+    }
+}
+
 #[derive(Clone)]
 pub enum EngineVariant {
     Asr(super::asr_execution::AsrRuntime),
@@ -996,7 +1019,10 @@ impl EnginePoolState {
     ) -> Result<EngineModelControlResult> {
         // The swap and its rollback must both finish if the caller disconnects.
         let pool = self.clone();
-        tokio::spawn(async move { pool.reload_transaction(model, set_default).await })
+        let cancel = LoadCancel::default();
+        let _caller = cancel.on_drop();
+        let token = cancel.clone();
+        tokio::spawn(async move { pool.reload_transaction(model, set_default, token).await })
             .await
             .map_err(|error| anyhow::anyhow!("model reload task failed: {error}"))?
     }
@@ -1005,6 +1031,7 @@ impl EnginePoolState {
         &self,
         model: EngineModelConfig,
         set_default: bool,
+        cancel: LoadCancel,
     ) -> Result<EngineModelControlResult> {
         validate_engine_model_config(&model)?;
         if set_default
@@ -1061,7 +1088,7 @@ impl EnginePoolState {
             .insert(model_id.clone(), new_slot.clone());
 
         match new_slot
-            .ensure_loaded(&self.inner, EngineLoadTrigger::Control)
+            .ensure_loaded_or_cancel(&self.inner, EngineLoadTrigger::Control, cancel)
             .await
         {
             Ok(_) => Ok(new_slot.control_result().await),
@@ -1564,6 +1591,8 @@ impl EnginePoolInner {
     async fn ensure_capacity_for(
         &self,
         model: &EngineModelConfig,
+        slot: &EngineSlot,
+        cancel: &LoadCancel,
     ) -> Result<(
         Option<MemoryReservation>,
         Option<ironmlx_lm::models::qwen4_exp::load_plan::FlashLoadPlan>,
@@ -1577,16 +1606,34 @@ impl EnginePoolInner {
                 .as_ref()
                 .context("Flash scheduler profile missing")?
                 .config;
-            Some(super::flash_load::plan_with_active_occupied(
-                &model.path,
-                cfg.b_max,
-                cfg.max_cache_cap,
-                cfg.prefill_chunk_size,
-                0,
-                self.runtime.memory_limits.model_memory_limit_bytes,
-                planned_occupied,
-                &self.runtime.active_kv_offload,
-            )?)
+            let request = super::flash_load::FlashPlanRequest {
+                path: &model.path,
+                batch: cfg.b_max,
+                cap: cfg.max_cache_cap,
+                chunk: cfg.prefill_chunk_size,
+                draft_bytes: 0,
+                limit: self.runtime.memory_limits.model_memory_limit_bytes,
+                minimum_occupied: planned_occupied,
+                active: &self.runtime.active_kv_offload,
+            };
+            let mut admission = request.admission();
+            let mut published = false;
+            Some(loop {
+                match admission.poll() {
+                    super::flash_load::AdmissionStep::Done(plan) => break plan?,
+                    super::flash_load::AdmissionStep::Wait(delay) => {
+                        if !published {
+                            slot.publish_admission_wait().await;
+                            published = true;
+                        }
+                        anyhow::ensure!(
+                            !cancel.is_cancelled(),
+                            "model load `{target_id}` cancelled while waiting for host memory"
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+            })
         } else {
             None
         };
@@ -1652,12 +1699,49 @@ impl EnginePoolInner {
                         retry_snapshot.pressure_level
                     );
                 }
-                match reserve_load() {
-                    Ok(reservation) => Some(reservation),
-                    Err(retry_error) => {
+                let room = |snapshot: &super::process_memory::MemoryGovernorSnapshot| {
+                    snapshot
+                        .effective_ceiling_bytes
+                        .saturating_sub(snapshot.current_usage_bytes)
+                };
+                let mut wait = flash_plan.is_some().then(|| {
+                    super::flash_load::RecoveryWait::new(
+                        room(&retry_snapshot),
+                        std::time::Instant::now(),
+                    )
+                });
+                loop {
+                    let retry_error = match reserve_load() {
+                        Ok(reservation) => break Some(reservation),
+                        Err(error) => error,
+                    };
+                    // A just-unloaded Flash model's footprint keeps falling for
+                    // a moment after its buffers are released.
+                    let Some(wait) = wait.as_mut() else {
                         bail!(
                             "process memory governor rejected model load `{target_id}` after one reclaim retry: first={first_error}; retry={retry_error}"
                         )
+                    };
+                    tracing::debug!(%retry_error, "Flash load waiting for its memory reservation");
+                    slot.publish_admission_wait().await;
+                    anyhow::ensure!(
+                        !cancel.is_cancelled(),
+                        "model load `{target_id}` cancelled while waiting for host memory"
+                    );
+                    tokio::time::sleep(super::flash_load::ADMISSION_POLL).await;
+                    let snapshot = governor.refresh_process();
+                    let verdict = wait.observe(
+                        room(&snapshot),
+                        super::flash_load::ADMISSION_PATIENCE_REJECTED,
+                        std::time::Instant::now(),
+                    );
+                    if snapshot.pressure_level != PressureLevel::Normal
+                        || verdict == super::flash_load::WaitVerdict::Expired
+                    {
+                        bail!(
+                            "process memory governor rejected model load `{target_id}` while waiting for memory to recover: first={first_error}; retry={retry_error}; pressure={:?}",
+                            snapshot.pressure_level
+                        );
                     }
                 }
             }
@@ -1890,6 +1974,18 @@ impl EngineSlot {
         pool: &Arc<EnginePoolInner>,
         trigger: EngineLoadTrigger,
     ) -> Result<EngineLease> {
+        let cancel = LoadCancel::default();
+        let _caller = cancel.on_drop();
+        self.ensure_loaded_or_cancel(pool, trigger, cancel.clone())
+            .await
+    }
+
+    async fn ensure_loaded_or_cancel(
+        self: &Arc<Self>,
+        pool: &Arc<EnginePoolInner>,
+        trigger: EngineLoadTrigger,
+        cancel: LoadCancel,
+    ) -> Result<EngineLease> {
         if let EngineSlotState::Loaded {
             engine,
             snapshot_use_lease,
@@ -1909,7 +2005,7 @@ impl EngineSlot {
         // A load outlives its caller: a disconnected client must not leave the
         // slot `Loading` or release the load gate while weights still arrive.
         let (slot, pool) = (Arc::clone(self), Arc::clone(pool));
-        tokio::spawn(async move { slot.load_transaction(&pool, trigger).await })
+        tokio::spawn(async move { slot.load_transaction(&pool, trigger, cancel).await })
             .await
             .map_err(|error| anyhow::anyhow!("model load task failed: {error}"))?
     }
@@ -1938,10 +2034,22 @@ impl EngineSlot {
         )
     }
 
+    /// A queryable `loading` state while admission waits; the attempt itself
+    /// is counted once weights actually start loading.
+    async fn publish_admission_wait(&self) {
+        let mut state = self.state.lock().await;
+        *state = EngineSlotState::Loading {
+            started_unix_ms: unix_time_ms(),
+            load_attempts: state.load_attempts(),
+        };
+        self.notify.notify_waiters();
+    }
+
     async fn load_transaction(
         &self,
         pool: &EnginePoolInner,
         trigger: EngineLoadTrigger,
+        cancel: LoadCancel,
     ) -> Result<EngineLease> {
         if self.model.load_policy == EngineLoadPolicy::Disabled {
             bail!("engine model `{}` is disabled", self.model.id);
@@ -2044,21 +2152,22 @@ impl EngineSlot {
                 }
             }
 
-            let (load_reservation, flash_plan) = match pool.ensure_capacity_for(&self.model).await {
-                Ok(reservation) => reservation,
-                Err(error) => {
-                    let mut state = self.state.lock().await;
-                    let load_attempts = state.load_attempts();
-                    *state = EngineSlotState::Unloaded {
-                        reason: EngineUnloadReason::CapacityRejected,
-                        last_error: Some(format!("{error:#}")),
-                        changed_unix_ms: unix_time_ms(),
-                        load_attempts,
-                    };
-                    self.notify.notify_waiters();
-                    return Err(error);
-                }
-            };
+            let (load_reservation, flash_plan) =
+                match pool.ensure_capacity_for(&self.model, self, &cancel).await {
+                    Ok(reservation) => reservation,
+                    Err(error) => {
+                        let mut state = self.state.lock().await;
+                        let load_attempts = state.load_attempts();
+                        *state = EngineSlotState::Unloaded {
+                            reason: EngineUnloadReason::CapacityRejected,
+                            last_error: Some(format!("{error:#}")),
+                            changed_unix_ms: unix_time_ms(),
+                            load_attempts,
+                        };
+                        self.notify.notify_waiters();
+                        return Err(error);
+                    }
+                };
 
             let load_attempts = {
                 let mut state = self.state.lock().await;

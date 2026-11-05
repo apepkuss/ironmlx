@@ -1525,7 +1525,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
         );
         let cfg = resolved_scheduler.scheduler_config;
         Some(
-            ironmlx_runtime::core::flash_load::plan_with_active_occupied(
+            ironmlx_runtime::core::flash_load::plan_waiting_for_host_recovery(
                 &model_dir,
                 cfg.b_max,
                 cfg.max_cache_cap,
@@ -1535,8 +1535,6 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 } else {
                     0
                 },
-                None,
-                0,
                 &resolve_active_kv_offload_config(&args)?,
             )?,
         )
