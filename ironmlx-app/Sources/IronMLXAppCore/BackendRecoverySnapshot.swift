@@ -106,9 +106,10 @@ extension BackendRecoveryModel {
                 parameterStore: parameterStore
             )
             : nil
+        // Only the model the launch runs in DFlash2 mode carries its draft.
         let dflash2Runtime = try? ModelDFlash2RuntimeResolver.runtime(
             for: model,
-            useDFlash2: parameters?.dflash2Enabled,
+            useDFlash2: model == config.configuredDFlash2Target(parameterStore: parameterStore),
             scanner: scanner,
             parameterStore: parameterStore
         )

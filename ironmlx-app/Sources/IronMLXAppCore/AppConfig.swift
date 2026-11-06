@@ -269,22 +269,18 @@ public extension AppConfig {
             .filter { $0 != model && references.contains($0) }
     }
 
-    func preferredDFlash2Target(parameterStore: ModelParameterStore) -> String? {
-        guard let target = defaultModelReference,
-              parameterStore.parameters(for: target)?.dflash2Enabled == true
-        else {
-            return nil
-        }
-        return target
+    /// The model the backend runs in DFlash2 mode: a loaded model whose
+    /// `model_params.json` entry enables DFlash2. The default model plays no
+    /// part. Activation leaves the target as the only loaded model, so several
+    /// candidates come only from older or hand-edited files; the earliest in
+    /// the persisted load order then wins, so every caller picks the same one.
+    func configuredDFlash2Target(parameterStore: ModelParameterStore) -> String? {
+        configuredDFlash2Target { parameterStore.parameters(for: $0)?.dflash2Enabled == true }
     }
 
-    func configuredDFlash2Target(parameterStore: ModelParameterStore) -> String? {
-        guard let target = preferredDFlash2Target(parameterStore: parameterStore),
-              restoredModelReferences.contains(target)
-        else {
-            return nil
-        }
-        return target
+    func configuredDFlash2Target(isDFlash2Enabled: (String) -> Bool) -> String? {
+        // Not `restoredModelReferences`, which moves the default to the front.
+        Self.normalizedModelReferences(loadedModels ?? []).first(where: isDFlash2Enabled)
     }
 
     // A status query answered for an older intent must not replace a newer one.
