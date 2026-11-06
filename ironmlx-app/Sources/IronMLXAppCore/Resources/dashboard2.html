@@ -11815,9 +11815,22 @@
     }
   }
 
+  // In-flight native operations. Model scans replace the table, so the busy
+  // state has to live outside the rows until the native callback arrives.
+  window.__MODEL_OPERATIONS__ = {}; // { modelId: 'loading' | 'unloading' }
+
+  function modelOperation(modelId) {
+    return window.__MODEL_OPERATIONS__[modelId] || '';
+  }
+
+  function finishModelOperation(modelId) {
+    delete window.__MODEL_OPERATIONS__[modelId];
+  }
+
   function loadModel(modelId, btn, useMtp, mtpModelId, useDFlash2, dflash2ModelId) {
     const dict = I18N[currentLang] || I18N.en;
     const saved = window.__MODEL_PARAMS__[modelId] || {};
+    window.__MODEL_OPERATIONS__[modelId] = 'loading';
     markModelActionLoading(btn, dict.action_loading || 'Loading...');
     updateModelStatusForAction(btn, 'model-busy', dict.status_loading || 'Loading...');
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loadModel) {
@@ -11867,6 +11880,7 @@
 
   function unloadModel(modelId, btn) {
     const dict = I18N[currentLang] || I18N.en;
+    window.__MODEL_OPERATIONS__[modelId] = 'unloading';
     btn.disabled = true;
     btn.textContent = dict.action_unloading || 'Unloading...';
     updateModelStatusForAction(btn, 'model-busy', dict.status_unloading || 'Unloading...');
@@ -11889,7 +11903,7 @@
     } catch (error) { console.error('Invalid load plan',error); }
   }
 
-  function onModelLoaded(resultJson) {
+  function onModelLoaded(resultJson, modelId) {
     let result = {};
     try {
       result = JSON.parse(resultJson);
@@ -11899,12 +11913,14 @@
       // would otherwise stay pinned at "加载中...". Reset the table
       // from backend state and tell the user something is off.
       console.error('onModelLoaded: JSON.parse failed', e, resultJson);
+      finishModelOperation(modelId);
       const dict = I18N[currentLang] || I18N.en;
       showToast(dict.err_callback_malformed || 'Internal error: callback payload could not be parsed. The button has been reset.', 'warn');
       syncModelList();
       return;
     }
     if (result.success) {
+      finishModelOperation(modelId);
       clearServerBanner();
       // Older backends report every default-configuration load this way;
       // that case is shown passively now.
@@ -11928,6 +11944,7 @@
           }
         } else {
           // User declined — re-render to reset button
+          finishModelOperation(modelId);
           syncModelList();
         }
       });
@@ -11938,6 +11955,9 @@
         showToast(localizeErrorResult(result, 'err_load_failed'), 'warn');
       }
       // Re-render to reset button from "Loading..." back to correct state
+      syncModelList();
+    } else {
+      finishModelOperation(modelId);
       syncModelList();
     }
   }
@@ -12023,7 +12043,8 @@
   }
 
   // Called from Rust after unload completes
-  function onModelUnloaded(resultJson) {
+  function onModelUnloaded(resultJson, modelId) {
+    finishModelOperation(modelId);
     let result = {};
     try {
       result = JSON.parse(resultJson);
@@ -15487,6 +15508,16 @@
       return {
         dot: 'model-corrupt',
         text: dict.status_corrupt || 'Corrupt',
+        title: ''
+      };
+    }
+    const operation = modelOperation(model.id);
+    if (operation) {
+      return {
+        dot: 'model-busy',
+        text: operation === 'unloading'
+          ? (dict.status_unloading || 'Unloading...')
+          : (dict.status_loading || 'Loading...'),
         title: ''
       };
     }

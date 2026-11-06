@@ -210,6 +210,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             configStore: configStore,
             backend: backend,
             dashboard: dashboard,
+            parameterStore: parameterStore,
             updateManager: updateManager,
             configurationRecovery: configurationRecovery,
             glance: glance
