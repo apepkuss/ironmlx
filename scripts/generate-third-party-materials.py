@@ -479,7 +479,7 @@ def render_notices(inventory: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "Hermes Agent, oh-my-pi, Hugging Face and ModelScope names and logos identify",
+            "OpenCode, Hermes Agent, oh-my-pi, Hugging Face and ModelScope names and logos identify",
             "supported third-party integrations. No affiliation or endorsement is",
             "implied. All trademarks remain the property of their respective owners.",
         ]

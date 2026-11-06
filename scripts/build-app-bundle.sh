@@ -180,6 +180,7 @@ for resource in \
   menubar-icon.png \
   menubar-icon@2x.png \
   oh-my-pi-logo.svg \
+  opencode-logo.svg \
   sidebar-logo@2x.png; do
   cp "$APP_SOURCE_DIR/Sources/IronMLXAppCore/Resources/$resource" "$APP_BUNDLE/Contents/Resources/$resource"
 done

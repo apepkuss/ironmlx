@@ -79,6 +79,7 @@ curl -fsS http://127.0.0.1:9068/v1/responses \
 | Agent | 配置方式 |
 | --- | --- |
 | [Hermes Agent](hermes-agent.md) | 本地 Responses 服务 |
+| [OpenCode](opencode.md) | CLI / Desktop 一键配置，使用原生 Chat Completions 和已识别模型的思考档位 |
 | [oh-my-pi](oh-my-pi.md) | 本地 OpenAI 兼容服务 |
 | [DeepSeek Harness（DSH）](dsh.md) | [Desktop App](dsh.md#dsh-desktop-app-配置) 或 [CLI](dsh.md#dsh-cli-配置) |
 

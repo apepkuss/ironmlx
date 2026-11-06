@@ -1,0 +1,704 @@
+{
+  "schema_version": 1,
+  "verified_on": "2026-11-06",
+  "scope": "Earlier native Chat CLI acceptance plus separately verified real Dashboard one-click setup to installed Desktop 2.2.5 and exclusive Qwen3.8 DFlash2 text inference; no broad model/tool/performance qualification",
+  "ironmlx": {
+    "base_dev_commit": "12c757f9f6d937f999436b839d39e46e51995e8d",
+    "branch": "feat/opencode-integration",
+    "source_tree": "uncommitted",
+    "backend_profile": "release",
+    "backend_sha256": "39f02e3f78db12d9a41c3d5b0638500d61b5732f506c068197c0562dd0e3067f",
+    "source_files_sha256": {
+      "ironmlx-app/Package.swift": "7d63a122603a432f3700bdbaffb0fb89ff32de875c7c7bfa923e4877eec1d917",
+      "ironmlx-app/Sources/IronMLXAppCore/OpenCodeIntegrationService.swift": "8b5d9f440454b549f2ad1b1b56cd1b449e4ca4df8ca8a6c908311a871a15a53c",
+      "ironmlx-app/Sources/IronMLXAppCore/DashboardBridge.swift": "e6f23d96b94f9b53c3023846d8c6f86a93864bb553d539cddf9af9447e2fdda3",
+      "ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html": "d9e5ab2846db2932847302f93098887e1756f86508246b97ccafa61b052faa0d",
+      "ironmlx-lm/src/core/constrained.rs": "21a9eb7470429977b9b635023c26756ba7964d2c0334008db6b35ec0d0c5b899",
+      "ironmlx/src/server/openai.rs": "f876dd20637d54b2fea21d9c86c9d8191144a798ee31b187fa9bd9fd6e2b13f9",
+      "ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json": "61585c0da7029e7b78acf7bda59618d6e070d6d3953f1bf2157b39c4f5633864"
+    }
+  },
+  "opencode": {
+    "version": "2.2.5",
+    "commit": "9bbb8ce18c80f099e0e448775f59d965ead40a21",
+    "distribution": "official opencode-darwin-arm64.zip",
+    "archive_sha256": "25ba9908979fa7d764792c82589b4b5768ab1511154e0317d98aa77d216ce767",
+    "binary_sha256": "abe4d88594bffb12b364375b8a6732d2d1f7a977195ed1a35c5c76f8e89c9e0e",
+    "version_output": "opencode v2.2.5"
+  },
+  "model": {
+    "repository": "mlx-community/Qwen3.5-4B-MLX-4bit",
+    "snapshot": "32f3e8ecf65426fc3306969496342d504bfa13f3",
+    "source": "existing ~/.ironmlx/models/huggingface cache; no model download",
+    "public_identifier": "test/model"
+  },
+  "machine": {
+    "device": "Apple M5 Max",
+    "total_ram_bytes": 137438953472,
+    "metallib_sha256": "264855558092d158ec6b2e72c225b532708310b2ae4494f37ec880f6438735c1"
+  },
+  "configuration": {
+    "generated_by": "OpenCodeIntegrationService",
+    "provider": "ironmlx",
+    "package": "@opencode/ai/providers/openai-compatible",
+    "route": "/v1/chat/completions",
+    "context_tokens": 32768,
+    "output_tokens": 4096,
+    "chat_template_kwargs": {
+      "enable_thinking": false
+    },
+    "test_endpoint": "isolated loopback proxy forwarding to local IronMLX; captures requests without changing their bodies"
+  },
+  "checks": {
+    "official_cli_loads_generated_model": true,
+    "text": {
+      "exit_code": 0,
+      "answer": "IRONMLX_OK",
+      "http_status": 200
+    },
+    "read_tool_loop": {
+      "exit_code": 0,
+      "completed_read_calls": 1,
+      "http_requests": 2,
+      "http_statuses": [
+        200,
+        200
+      ],
+      "same_call_id_in_result_history": true,
+      "result_in_history": "IRONMLX_TOOL_OK",
+      "result_in_final_answer": true
+    },
+    "default_tool_schemas": {
+      "count": 12,
+      "accepted": true
+    },
+    "swift_configuration_and_ui_tests": {
+      "passed": 9
+    },
+    "related_swift_regression_tests": {
+      "passed": 196
+    },
+    "rust_constraint_tests": {
+      "passed": 52
+    },
+    "rust_chat_tests": {
+      "passed": 54
+    },
+    "cargo_fmt": "passed",
+    "nightly_fmt_check": "passed",
+    "nightly_clippy_all_features_workspace": "passed",
+    "cargo_build_release": "passed",
+    "swift_release_app_build": "passed",
+    "third_party_materials": "passed",
+    "sbom": "passed",
+    "rust_responses_regression_tests": {
+      "passed": 41
+    },
+    "documentation_parity": "passed",
+    "markdown_links_and_images": "passed",
+    "opencode_bilingual_json_examples": "passed",
+    "license_policy": "passed",
+    "acceptance_source_fingerprints": "match current implementation"
+  },
+  "observed_failures_and_resolution": [
+    {
+      "condition": "Unmodified dev rejects the OpenCode default subagent schema",
+      "error": "unsupported schema for tool `subagent`: pattern requires ^ and $ anchors",
+      "resolution": "Added start-anchored prefix-pattern constraints with native/JSON grammar and output-value regression coverage"
+    },
+    {
+      "condition": "Cached Qwen3.5 template opens thinking by default while Chat channel selection defaults differently",
+      "resolution": "One-click configuration explicitly sets enable_thinking=false; clean text response verified"
+    },
+    {
+      "condition": "A relative read probe resolves at the OpenCode Git workspace root",
+      "resolution": "Read validation uses an absolute path to the disposable probe; no integration workspace settings changed"
+    }
+  ],
+  "transport_generation_requests_total": 15,
+  "boundaries": [
+    "Earlier fixed single-model CLI tests used a forwarding capture proxy, and earlier native-bridge tests used an inventory fixture; the continuous_real_app check supersedes that continuity gap with a direct real-App test",
+    "Continuous acceptance covers one cached Qwen3.5-4B 4bit model and one read tool; it is not broad model/tool compatibility or performance qualification",
+    "Interactive TUI is unverified. Desktop one-click/model selection/text inference is verified separately in desktop_one_click; Desktop tools remain unverified",
+    "No long-context automatic-compaction acceptance; OpenCode 2.2.5 capacity-error classification remains unchanged",
+    "Live reasoning-on and vision requests are outside this acceptance",
+    "Release signing, notarization and full static distribution qualification are outside this local ad-hoc App functional acceptance",
+    "App logs retain an existing unrelated IndexTTS registration HTTP 400 (config.json missing model_type); it did not block this text-model acceptance and was not investigated here"
+  ],
+  "continuous_real_app": {
+    "passed": true,
+    "verified_on": "2026-11-06",
+    "app_version": "0.3.0 (10)",
+    "app_build": "Release, IRONMLX_APP_BUNDLE, local ad-hoc bundle from branch Swift/backend artifacts; existing pinned metallib and Sparkle framework reused",
+    "app_bundle_identifier": "ai.ironmlx.opencode-acceptance",
+    "release_packaging_boundary": "This isolated bundle uses a test identifier and LSEnvironment. codesign --verify --deep --strict passed; the full static release gate stopped at the expected CFBundleIdentifier mismatch. This is functional App acceptance, not release artifact qualification.",
+    "app_file_sha256": {
+      "Contents/MacOS/IronMLX": "5f45a74d489faf474d1d706ba1a4989153c68e851d5f45fbf88baed01f24c532",
+      "Contents/Helpers/ironmlx": "81c1787e2192870ece7affcbfeea8b4dcaf15f9ef354f5f4ed77eb8150766595",
+      "Contents/Resources/dashboard2.html": "d9e5ab2846db2932847302f93098887e1756f86508246b97ccafa61b052faa0d",
+      "Contents/Resources/mlx.metallib": "264855558092d158ec6b2e72c225b532708310b2ae4494f37ec880f6438735c1"
+    },
+    "processes": [
+      {
+        "pid": 23262,
+        "ppid": 1,
+        "executable": "/Users/xin/workspace/feat-opencode-integration/.build/opencode-integration/real-app/IronMLX.app/Contents/MacOS/IronMLX"
+      },
+      {
+        "pid": 23266,
+        "ppid": 23262,
+        "executable": "/Users/xin/workspace/feat-opencode-integration/.build/opencode-integration/real-app/IronMLX.app/Contents/Helpers/ironmlx"
+      },
+      {
+        "pid": 33713,
+        "ppid": 1,
+        "executable": "/Users/xin/workspace/feat-opencode-integration/.build/opencode-integration/cli/opencode"
+      }
+    ],
+    "model": {
+      "id": "mlx-community/Qwen3.5-4B-MLX-4bit",
+      "snapshot": "32f3e8ecf65426fc3306969496342d504bfa13f3",
+      "source": "existing local cache, no download",
+      "load": "real Dashboard model-load control, Model only; live inventory confirmed before configuring",
+      "kv_quant": "k3v4",
+      "max_sequences": 2,
+      "mtp_enabled": false
+    },
+    "dashboard": {
+      "interaction": "native macOS accessibility button click in production WKWebView Dashboard; no injected scripts",
+      "loaded_models_endpoint": "real App-managed /admin/api/models/loaded",
+      "capacity_endpoint": "real App-managed /v1/models",
+      "one_click_success_text": "IronMLX Provider 已配置。请新建 OpenCode 会话，通过 /models 选择 IronMLX，或使用下方命令。",
+      "config_missing_before_first_click": true,
+      "expected_precheck_results": [
+        "Missing CLI rejected before temporary official CLI link was installed",
+        "Unloaded model rejected before real Dashboard model loading completed"
+      ]
+    },
+    "configuration": {
+      "file": "/Users/xin/workspace/feat-opencode-integration/.build/opencode-integration/real-app/profile/config/opencode/opencode.jsonc",
+      "sha256_before": "5c436d57b89f9f919be89e1f8a24fdecfca868db9d8517f67ee6a6ca76b8ed2d",
+      "sha256_after": "5c436d57b89f9f919be89e1f8a24fdecfca868db9d8517f67ee6a6ca76b8ed2d",
+      "unchanged": true,
+      "endpoint": "http://127.0.0.1:9068/v1",
+      "provider": "ironmlx",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "context_tokens": 262144,
+      "output_tokens": 4096,
+      "enable_thinking": false,
+      "profile": "isolated OPENCODE_CONFIG_DIR and XDG paths shared by real App and CLI",
+      "proxy": false,
+      "inventory_fixture": false
+    },
+    "cli": {
+      "version": "2.2.5",
+      "binary_sha256": "abe4d88594bffb12b364375b8a6732d2d1f7a977195ed1a35c5c76f8e89c9e0e",
+      "model_discovery": true,
+      "mode": "run --standalone --format json --title <explicit title> --model ironmlx/mlx-community/Qwen3.5-4B-MLX-4bit"
+    },
+    "text": {
+      "exit_code": 0,
+      "answer": "IRONMLX_OK",
+      "tools": [],
+      "event_types": [
+        "step_start",
+        "text",
+        "step_finish"
+      ]
+    },
+    "read_tool_loop": {
+      "exit_code": 0,
+      "completed_read_calls": 1,
+      "call_id": "call_9d19d9eb2a724dc993c884f35ab26e55_0",
+      "random_marker": "IRONMLX_TOOL_OK_0337e523c63448208e7515faedcf18b4",
+      "marker_was_not_in_prompt": true,
+      "marker_in_completed_tool_output": true,
+      "marker_in_final_answer": true,
+      "answer": "The file contains:\n\n```\nIRONMLX_TOOL_OK_0337e523c63448208e7515faedcf18b4\n```\n\nThis appears to be a probe file with a unique identifier, likely used for testing or validation purposes.",
+      "event_types": [
+        "step_start",
+        "tool_use",
+        "step_finish",
+        "step_start",
+        "text",
+        "step_finish"
+      ],
+      "transport_capture": false,
+      "replay_evidence": "A fresh random marker existed only in the local file; the completed read result and subsequent model answer both contain it. Two backend requests occurred for this scenario."
+    },
+    "backend_request_counts": {
+      "before": 0,
+      "after_text": 1,
+      "after_tool": 3
+    },
+    "generation_request_count": 3,
+    "duration_seconds": 19.32,
+    "duration_is_benchmark": false,
+    "raw_evidence_directory": ".build/opencode-integration/real-app/",
+    "raw_evidence_files": [
+      "direct-results.json",
+      "direct-before.json",
+      "after-text.json",
+      "direct-after.json",
+      "text.stdout",
+      "text.stderr",
+      "read.stdout",
+      "read.stderr",
+      "models.stdout",
+      "process-identities.json",
+      "identities.json",
+      "probe.json",
+      "cleanup.json"
+    ],
+    "cleanup": {
+      "test_processes_stopped": true,
+      "restored_app_config_sha256": {
+        "app_config.pre-minicpm-download-validation-20260907.json": "36f7cc65a730a016be3d0b54c17bf91ae7578af5000f21a948e6b4f322991b8f",
+        "app_config.json": "5a7f5992287ea62d816a00877623ae825dcc6190f066a6d203a1a2e0dfa83774",
+        "recovery/app_config.pre-migration-v0-412585a5df5f5c102135698fd000de37fe8ce4b44e277aa163bb6ca947c98c0a.json": "412585a5df5f5c102135698fd000de37fe8ce4b44e277aa163bb6ca947c98c0a",
+        "recovery/app_config.lkg.json": "5a7f5992287ea62d816a00877623ae825dcc6190f066a6d203a1a2e0dfa83774"
+      },
+      "app_config_restored_byte_for_byte": true,
+      "temporary_cli_link_removed": true,
+      "temporary_probe_project_removed": true,
+      "installed_app_unchanged": true
+    }
+  },
+  "pre_commit_review": {
+    "verified_on": "2026-11-07",
+    "result": "No blocking source findings after reviewing the current uncommitted Desktop/runtime/reasoning changes and completing the live reasoning/tool and unary checks",
+    "reviewed_source_sha256": {
+      "ironmlx/src/server/openai.rs": "daf25f623629db1e0e49f3727da363ccedb750413a5d2bcf37c47948c4732ed6",
+      "ironmlx-app/Sources/IronMLXAppCore/OpenCodeIntegrationService.swift": "68f34a080fe5edf729b7802bf1e7d3a9dfcb19726a3c6e2c2742157251a4a806",
+      "ironmlx-app/Sources/IronMLXAppCore/DashboardBridge.swift": "6b9895b6fa7f1a4ec00f0eeba5bf2398de5e76be714674c047c1b8747bf6db03",
+      "ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html": "857e01b15496147d24b090300d3f747aa733d835b6e09b380e0efd6173d6afb5",
+      "ironmlx-app/Tests/IronMLXAppCoreTests/OpenCodeIntegrationTests.swift": "97aac526a18dc7fcdbaccecf0d9aec194ad32af8a7a63ef0dfafe20222fa1b9a",
+      "ironmlx-app/Tests/IronMLXAppCoreTests/DashboardBridgeSettingsTests.swift": "12d1076f329f6240190c4176155c8d50f38e202a579ab2e526747df7a6908341"
+    },
+    "required_rust_checks": {
+      "cargo_fmt": true,
+      "nightly_fmt_check": true,
+      "nightly_clippy_all_features_workspace_deny_warnings": true,
+      "cargo_build_release": true
+    },
+    "regressions": {
+      "swift_targeted": 11,
+      "rust_chat_all_features": 55,
+      "bilingual_documentation_parity": true,
+      "git_diff_check": true,
+      "sbom_components": 404
+    },
+    "live_native_reasoning_protocol": {
+      "passed": true,
+      "backend_sha256": "f9acca5f2c022800c57b427339f1ff0288913585e6d760fed7559cc4cf39cd1a",
+      "model_snapshot": "3e6447f082e89cc7f0bc6e5441afd38dfce760ff",
+      "runtime": "real App-managed ordinary causal serving; not Desktop or exclusive DFlash2 qualification",
+      "requests": [
+        {
+          "scenario": "stream-tool",
+          "status": 200,
+          "finish_reason": "tool_calls",
+          "reasoning_chars": 96,
+          "answer": "",
+          "tool_calls": [
+            {
+              "id": "call_22a48466e451414f85d4cde19a170706_0",
+              "type": "function",
+              "function": {
+                "name": "read_marker",
+                "arguments": "{}"
+              }
+            }
+          ],
+          "elapsed_seconds": 5.061
+        },
+        {
+          "scenario": "stream-tool-replay",
+          "status": 200,
+          "finish_reason": "stop",
+          "reasoning_chars": 159,
+          "answer": "IRONMLX_TOOL_f325eefd12284d278adfa2df097c6d96",
+          "tool_calls": [],
+          "elapsed_seconds": 8.102
+        },
+        {
+          "scenario": "unary-text",
+          "status": 200,
+          "finish_reason": "stop",
+          "reasoning_chars": 64,
+          "answer": "1610",
+          "tool_calls": [],
+          "elapsed_seconds": 4.108
+        },
+        {
+          "scenario": "unary-tool",
+          "status": 200,
+          "finish_reason": "tool_calls",
+          "reasoning_chars": 96,
+          "answer": null,
+          "tool_calls": [
+            {
+              "id": "call_191ce9169fdd4684a5d7bc56e24df4da_0",
+              "type": "function",
+              "function": {
+                "name": "read_marker",
+                "arguments": "{}"
+              }
+            }
+          ],
+          "elapsed_seconds": 1.296
+        }
+      ],
+      "tool_result_marker_matched": true,
+      "assistant_tool_reasoning_replayed_exactly": true,
+      "initial_app_loaded_models": [],
+      "unload_status": 200,
+      "app_loaded_models_restored": true
+    },
+    "live_scope": "Four direct HTTP requests to the real App ordinary causal backend; does not extend Desktop or exclusive DFlash2 tool execution coverage",
+    "current_app": ".build/opencode-current/IronMLX.app",
+    "current_label_observed": "OpenCode 终端 · 桌面",
+    "public_api_documentation_updated": [
+      "docs/text-vision-api.md",
+      "docs/zh-CN/text-vision-api.md"
+    ],
+    "local_scope": "Targeted local checks and real-model acceptance; complete CI and signed/notarized release qualification were not run",
+    "release_bundle_gate": {
+      "passed": false,
+      "reason": "Backend helper contains embedded developer/Cargo paths; local release build did not use canonical remap-path packaging",
+      "log": ".build/opencode-current/static-bundle.log",
+      "commit_blocking": false,
+      "release_blocking": true
+    },
+    "temporary_service_attempt": "Rejected by the existing per-user single-instance lock before any inference; validation then used the App lazy model and restored the empty loaded-model set",
+    "raw_directory": ".build/opencode-precommit",
+    "post_check_runtime_observation": {
+      "later_health_read": "connection refused after App termination",
+      "last_app_log": "2026-11-06T17:15:00.529Z INFO ironmlx-app: Application will terminate",
+      "probe_cleanup_verified_before_termination": true
+    },
+    "website": {
+      "verified_on": "2026-11-07",
+      "published_locally": [
+        "website/docs/opencode.html",
+        "website/zh/docs/opencode.html"
+      ],
+      "checks": {
+        "website_tests": 14,
+        "bilingual_parity": true,
+        "sidebar_and_overview_agent_group": true,
+        "search_index_entry_both_languages": true,
+        "user_guide_and_api_hub_links_stay_on_site": true,
+        "chat_reasoning_response_documentation_generated": true,
+        "git_diff_check": true
+      },
+      "generator_sha256": "ccbf4ea66bfcdcfe35166db35cbe294db524012d662678e2642bbe34018397f3",
+      "deployed": false
+    }
+  },
+  "desktop_one_click": {
+    "verified_on": "2026-11-07",
+    "passed": true,
+    "source": {
+      "source_commit": "2204898f7e36861df4a33ed9cd4a67d821b1333e",
+      "tree_state": "dirty",
+      "source_sha256": {
+        "ironmlx-app/Sources/IronMLXAppCore/OpenCodeIntegrationService.swift": "4aa24f336b2896ae7728a5e5be2e25db235f6faa15000950e17c6f7ef7c80ac4",
+        "ironmlx-app/Sources/IronMLXAppCore/DashboardBridge.swift": "0afea0ddde2a429844dbe253b20256a9a044ec54b6c60050a1c6ba005255732c",
+        "ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html": "833ed4cf2ffc0d8484e46af3b0585e0882ec1ce57de4d0b066fe6374725ca28e"
+      },
+      "binary_sha256": {
+        "Contents/MacOS/IronMLX": "a8b248413ffefd81fd5954f807dee77cf94b946faefb0bb0081b0d30e6ba0f3d",
+        "Contents/Helpers/ironmlx": "81c1787e2192870ece7affcbfeea8b4dcaf15f9ef354f5f4ed77eb8150766595"
+      },
+      "desktop_binary_sha256": "4365edf9f61588d323bfde9e8fbee7ec90b564e3e92ee5714801178e61f56f84"
+    },
+    "fixes": [
+      "Discover and version-check the installed Desktop bundled runtime without requiring a standalone CLI; supported Desktop remains usable alongside an older shell CLI",
+      "Use configured exclusive DFlash2 target, live health identity and /v1/models capacity instead of requiring daemon-only loaded-model routes"
+    ],
+    "native_dashboard_button_clicked": true,
+    "success_message_observed": true,
+    "manual_provider_edits": false,
+    "standalone_cli_installed": false,
+    "runtime_path": "/Applications/OpenCode.app/Contents/Resources/opencode-cli",
+    "runtime_version": "2.2.5",
+    "configuration": {
+      "path": "/Users/xin/.config/opencode/opencode.jsonc",
+      "scope": "normal per-user global config; no OPENCODE or XDG overrides",
+      "sha256_after_button": "5f27a0d745116fa0d5867aacddd6dc2383c4bf74845a82aae9c3f60ddbcd6678",
+      "sha256_after_desktop_inference": "5f27a0d745116fa0d5867aacddd6dc2383c4bf74845a82aae9c3f60ddbcd6678",
+      "endpoint": "http://127.0.0.1:9068/v1",
+      "context_tokens": 262144,
+      "output_tokens": 4096,
+      "enable_thinking": false
+    },
+    "backend": {
+      "model": "mlx-community/Qwen3.8-27B-4bit",
+      "snapshot": "3e6447f082e89cc7f0bc6e5441afd38dfce760ff",
+      "draft_snapshot": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+      "dflash2": true,
+      "block_size": 8,
+      "draft_bits": 4,
+      "m5_profile": "auto / active",
+      "source": "existing local model cache; no downloads",
+      "admin_loaded_route": "HTTP 404 in exclusive mode; not required by this path",
+      "requests_before": 0,
+      "requests_after": 2,
+      "request_count_note": "One user prompt was sent; Desktop also generated a title. Two model requests occurred during the interaction."
+    },
+    "desktop": {
+      "application": "/Applications/OpenCode.app",
+      "version": "2.2.5",
+      "provider_visible": true,
+      "model_selected": true,
+      "session_id": "ses_e4e4ee2aaffeNK6kSsozdBG0xR",
+      "session_title": "IRONMLX desktop verification",
+      "provider_id": "ironmlx",
+      "model_id": "mlx-community/Qwen3.8-27B-4bit",
+      "response": "IRONMLX_DESKTOP_OK",
+      "finish": "stop",
+      "tools_executed": false
+    },
+    "regressions": {
+      "focused_swift_tests_passed": 10,
+      "covers": [
+        "Desktop without shell CLI",
+        "Older shell CLI with compatible Desktop",
+        "Unsupported Desktop version",
+        "Missing Desktop executable",
+        "Normal daemon configuration",
+        "Exclusive DFlash2 without admin route",
+        "Mismatched live health model refused",
+        "Disabled DFlash2 health refused"
+      ],
+      "release_app_build": "passed",
+      "documentation_parity": "passed",
+      "sbom": "passed"
+    },
+    "evidence_directory": ".build/opencode-desktop/",
+    "raw_files": [
+      "build-identity.json",
+      "health-before-configuration.json",
+      "health-before-desktop.json",
+      "health-after-desktop.json",
+      "generated-config.jsonc",
+      "desktop-session.json"
+    ],
+    "state_left_for_user": "Fixed branch App and installed Desktop remain running; generated provider config and synthetic verification session retained for manual inspection",
+    "limitations": [
+      "No Desktop tool-loop acceptance",
+      "No Web UI acceptance",
+      "No long-context, vision or reasoning-on acceptance",
+      "Local ad-hoc App functional test, not signed distribution qualification"
+    ]
+  },
+  "last_extended_on": "2026-11-07",
+  "desktop_reasoning": {
+    "verified_on": "2026-11-07",
+    "passed": true,
+    "source": {
+      "source_commit": "2204898f7e36861df4a33ed9cd4a67d821b1333e",
+      "tree_state": "dirty",
+      "app": "/Users/xin/workspace/feat-opencode-integration/.build/opencode-reasoning-fixed/IronMLX.app",
+      "source_sha256": {
+        "ironmlx/src/server/openai.rs": "daf25f623629db1e0e49f3727da363ccedb750413a5d2bcf37c47948c4732ed6",
+        "ironmlx-app/Sources/IronMLXAppCore/OpenCodeIntegrationService.swift": "68f34a080fe5edf729b7802bf1e7d3a9dfcb19726a3c6e2c2742157251a4a806",
+        "ironmlx-app/Sources/IronMLXAppCore/DashboardBridge.swift": "6b9895b6fa7f1a4ec00f0eeba5bf2398de5e76be714674c047c1b8747bf6db03",
+        "ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html": "abe885479154573660f5688cba6e746796eb37606c491e5ffe1913dda27c705e"
+      },
+      "binary_sha256": {
+        "Contents/MacOS/IronMLX": "608ae2e9227d563d64050c4569205d3046fd6c9e277f0837c32f44479bc8f951",
+        "Contents/Helpers/ironmlx": "f9acca5f2c022800c57b427339f1ff0288913585e6d760fed7559cc4cf39cd1a",
+        "Contents/Resources/mlx.metallib": "264855558092d158ec6b2e72c225b532708310b2ae4494f37ec880f6438735c1"
+      },
+      "desktop_binary_sha256": "4365edf9f61588d323bfde9e8fbee7ec90b564e3e92ee5714801178e61f56f84"
+    },
+    "desktop_version": "2.2.5",
+    "opencode_source_commit": "9bbb8ce18c80f099e0e448775f59d965ead40a21",
+    "model": "mlx-community/Qwen3.8-27B-4bit",
+    "target_snapshot": "3e6447f082e89cc7f0bc6e5441afd38dfce760ff",
+    "draft": "z-lab/Qwen3.8-27B-DFlash2",
+    "draft_snapshot": "50307d4c4cde6860d4eee73e2547cd786fe8e8a4",
+    "serving": "real App-managed exclusive DFlash2, block 8, affine4 draft, Apple M5 Max",
+    "native_dashboard_button_clicked": true,
+    "manual_provider_edits": false,
+    "configuration_path": "~/.config/opencode/opencode.jsonc",
+    "configuration_sha256": "b47d375e885056b9213fba4b97d4611b230ff239a02bd8c61496a18e71152067",
+    "observer": "temporary read-only OpenCode http.request/http.response hooks; cloned Request/Response; unchanged endpoint and traffic; captures filtered to synthetic marker",
+    "observer_removed_and_both_instances_unloaded": true,
+    "requests": {
+      "primary": 7,
+      "title": 4,
+      "total": 11
+    },
+    "ui_observations": [
+      "Dashboard one-click successful in final production App bundle",
+      "All four variants selected through Desktop model variant menu",
+      "Medium Thought expanded and reasoning text displayed",
+      "Xhigh second turn showed Thinking 2s with Stop before final answer",
+      "None showed exact final text without Thought"
+    ],
+    "turns": [
+      {
+        "session_id": "ses_e4e3404b8ffdtRDZ4yWAGXxfbf",
+        "variant": "low",
+        "reasoning_effort": "low",
+        "chat_template_kwargs": {
+          "enable_thinking": true,
+          "preserve_thinking": true
+        },
+        "max_completion_tokens": 4096,
+        "reasoning_chars": 254,
+        "reasoning_delta_count": 101,
+        "http_chunk_count": 19,
+        "http_chunk_span_ms": 996,
+        "finish_reason": "stop",
+        "answer": "1610 COBALT-17",
+        "request_file": ".build/opencode-reasoning/wire-fixed/1793984297879-ses_e4e3404b8ffdtRDZ4yWAGXxfbf-primary.request.json",
+        "reasoning_sha256": "512c52bf679dbf548c4809cec555aa2f21f73f0b6f5646509b2746a4bdf46ac8",
+        "desktop_export_matches_stream": true
+      },
+      {
+        "session_id": "ses_e4e3404b8ffdtRDZ4yWAGXxfbf",
+        "variant": "low",
+        "reasoning_effort": "low",
+        "chat_template_kwargs": {
+          "enable_thinking": true,
+          "preserve_thinking": true
+        },
+        "max_completion_tokens": 4096,
+        "reasoning_chars": 182,
+        "reasoning_delta_count": 60,
+        "http_chunk_count": 15,
+        "http_chunk_span_ms": 659,
+        "finish_reason": "stop",
+        "answer": "1599 COBALT-17",
+        "request_file": ".build/opencode-reasoning/wire-fixed/1793984320623-ses_e4e3404b8ffdtRDZ4yWAGXxfbf-primary.request.json",
+        "reasoning_sha256": "4efa32bf237a19c47372e0617a7c5a06c017661acc2496579061e45c82e89bbf",
+        "previous_reasoning_replayed_exactly": true,
+        "desktop_export_matches_stream": true
+      },
+      {
+        "session_id": "ses_e4e332685ffd43lKiXMWJsKhkk",
+        "variant": "medium",
+        "reasoning_effort": "medium",
+        "chat_template_kwargs": {
+          "enable_thinking": true,
+          "preserve_thinking": true
+        },
+        "max_completion_tokens": 4096,
+        "reasoning_chars": 622,
+        "reasoning_delta_count": 293,
+        "http_chunk_count": 50,
+        "http_chunk_span_ms": 2392,
+        "finish_reason": "stop",
+        "answer": "311,193 — AMBER-29",
+        "request_file": ".build/opencode-reasoning/wire-fixed/1793984354737-ses_e4e332685ffd43lKiXMWJsKhkk-primary.request.json",
+        "reasoning_sha256": "da059cb19cdd83dbaeaad5f90d65bffee52f2b181296561f7dc3b2e06dc9286e",
+        "desktop_export_matches_stream": true
+      },
+      {
+        "session_id": "ses_e4e332685ffd43lKiXMWJsKhkk",
+        "variant": "medium",
+        "reasoning_effort": "medium",
+        "chat_template_kwargs": {
+          "enable_thinking": true,
+          "preserve_thinking": true
+        },
+        "max_completion_tokens": 4096,
+        "reasoning_chars": 80,
+        "reasoning_delta_count": 49,
+        "http_chunk_count": 11,
+        "http_chunk_span_ms": 515,
+        "finish_reason": "stop",
+        "answer": "311,182 — AMBER-29",
+        "request_file": ".build/opencode-reasoning/wire-fixed/1793984397425-ses_e4e332685ffd43lKiXMWJsKhkk-primary.request.json",
+        "reasoning_sha256": "f4ac3decb5be04eb8b70ab2c545b4e957c867cd05628dac7e977da02061ac528",
+        "previous_reasoning_replayed_exactly": true,
+        "desktop_export_matches_stream": true
+      },
+      {
+        "session_id": "ses_e4e31d479ffdv6cQU1hArkobG7",
+        "variant": "xhigh",
+        "reasoning_effort": "xhigh",
+        "chat_template_kwargs": {
+          "enable_thinking": true,
+          "preserve_thinking": true
+        },
+        "max_completion_tokens": 4096,
+        "reasoning_chars": 1911,
+        "reasoning_delta_count": 1141,
+        "http_chunk_count": 196,
+        "http_chunk_span_ms": 9600,
+        "finish_reason": "stop",
+        "answer": "n = 7417\nJADE-43",
+        "request_file": ".build/opencode-reasoning/wire-fixed/1793984441285-ses_e4e31d479ffdv6cQU1hArkobG7-primary.request.json",
+        "reasoning_sha256": "986cc79f656a81d3c180fe3723ce1b9a9519a7cd9443284b8cc159b9075d2e55",
+        "desktop_export_matches_stream": true
+      },
+      {
+        "session_id": "ses_e4e31d479ffdv6cQU1hArkobG7",
+        "variant": "xhigh",
+        "reasoning_effort": "xhigh",
+        "chat_template_kwargs": {
+          "enable_thinking": true,
+          "preserve_thinking": true
+        },
+        "max_completion_tokens": 4096,
+        "reasoning_chars": 870,
+        "reasoning_delta_count": 489,
+        "http_chunk_count": 92,
+        "http_chunk_span_ms": 4374,
+        "finish_reason": "stop",
+        "answer": "7406 = 2 × 7 × 23²\nJADE-43",
+        "request_file": ".build/opencode-reasoning/wire-fixed/1793984486165-ses_e4e31d479ffdv6cQU1hArkobG7-primary.request.json",
+        "reasoning_sha256": "603a2828ae76fab115152447ef622827702b015f7b92900e001f62af550731d1",
+        "previous_reasoning_replayed_exactly": true,
+        "desktop_export_matches_stream": true
+      },
+      {
+        "session_id": "ses_e4e309c40ffdxyBgHXUgYtUlW4",
+        "variant": "none",
+        "reasoning_effort": null,
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        },
+        "max_completion_tokens": 4096,
+        "reasoning_chars": 0,
+        "reasoning_delta_count": 0,
+        "http_chunk_count": 2,
+        "http_chunk_span_ms": 84,
+        "finish_reason": "stop",
+        "answer": "IRONMLX_THINKING_OFF_OK",
+        "request_file": ".build/opencode-reasoning/wire-fixed/1793984521208-ses_e4e309c40ffdxyBgHXUgYtUlW4-primary.request.json",
+        "reasoning_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "desktop_export_matches_stream": true
+      }
+    ],
+    "validation": {
+      "swift_targeted_tests": 11,
+      "rust_chat_tests_all_features": 55,
+      "cargo_fmt": true,
+      "nightly_fmt_check": true,
+      "nightly_clippy_all_features_workspace_deny_warnings": true,
+      "release_build": true,
+      "documentation_parity": true
+    },
+    "initial_failure": {
+      "model_requests": 3,
+      "symptom": "low was sent correctly, but thoughts and </think> appeared in delta.content; reasoning_content was empty",
+      "root_cause": "Chat Completions resolved native output config for constraints but discarded it before text/tool streaming and unary decoders; the Chat adapter rejected ReasoningDelta",
+      "resolution": "Thread native decoder config through all Chat output paths; serialize independent reasoning_content in streams and unary messages",
+      "initial_session": "ses_e4e39fcb3ffdxmdboR0ET20ReT",
+      "raw_directory": ".build/opencode-reasoning/wire"
+    },
+    "raw_directory": ".build/opencode-reasoning",
+    "boundaries": [
+      "Only verified native template efforts are advertised; unknown templates have no inferred reasoning controls",
+      "Efforts are native hints, not fixed token budgets or a performance/quality guarantee",
+      "Thinking and final answer share the 4096-token output limit; reasoning token usage accounting is not qualified",
+      "No new live tool-call, vision, long-context, release packaging, TUI or Web UI qualification in this reasoning check"
+    ]
+  }
+}

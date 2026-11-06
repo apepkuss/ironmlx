@@ -979,7 +979,7 @@ private func dashboardModel(from script: String, id: String) throws -> [String: 
     return try #require(models.first(where: { $0["id"] as? String == id }))
 }
 
-private func dashboardDFlash2HealthSnapshot(modelID: String) -> HealthzSnapshot {
+func dashboardDFlash2HealthSnapshot(modelID: String) -> HealthzSnapshot {
     HealthzSnapshot(
         status: "healthy",
         uptimeSecs: 10,

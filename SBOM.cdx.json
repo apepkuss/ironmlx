@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:c28d6904-a751-5c4c-8db0-b8cc8d5267a1",
+  "serialNumber": "urn:uuid:79c49f22-3f77-534f-a4d9-a343a6bcf947",
   "version": 1,
   "metadata": {
     "component": {
@@ -526,6 +526,51 @@
         {
           "type": "vcs",
           "url": "https://github.com/lobehub/lobe-icons"
+        }
+      ]
+    },
+    {
+      "type": "file",
+      "bom-ref": "asset:OpenCode logo@9bbb8ce18c80f099e0e448775f59d965ead40a21",
+      "name": "OpenCode logo",
+      "version": "9bbb8ce18c80f099e0e448775f59d965ead40a21",
+      "licenses": [
+        {
+          "expression": "MIT"
+        }
+      ],
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "e29bbe33380ad1c1ada9134b52f229d30e9776d60481512c9d81f2bb6f37def9"
+        }
+      ],
+      "properties": [
+        {
+          "name": "ironmlx:bundled-path",
+          "value": "ironmlx-app/Sources/IronMLXAppCore/Resources/opencode-logo.svg"
+        },
+        {
+          "name": "ironmlx:source-path",
+          "value": "packages/ui/src/assets/favicon/favicon.svg"
+        },
+        {
+          "name": "ironmlx:hash-scope",
+          "value": "entire-file"
+        },
+        {
+          "name": "ironmlx:license-file",
+          "value": "asset-opencode-mit.txt"
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://github.com/anomalyco/opencode/blob/9bbb8ce18c80f099e0e448775f59d965ead40a21/packages/ui/src/assets/favicon/favicon.svg"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/anomalyco/opencode"
         }
       ]
     },

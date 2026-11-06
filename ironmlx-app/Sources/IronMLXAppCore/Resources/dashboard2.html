@@ -4456,6 +4456,11 @@
             </span>
             <span class="agent-guide-nav-arrow" aria-hidden="true">›</span>
           </button>
+          <button class="agent-guide-nav-item" type="button" data-agent-guide="opencode" aria-selected="false" aria-controls="agent-guide-opencode" onclick="selectAgentGuide('opencode')">
+            <span class="agent-guide-mark" aria-hidden="true"><img class="agent-guide-logo" data-agent-logo="opencode" src="opencode-logo.svg" alt=""></span>
+            <span class="agent-guide-nav-copy"><span class="agent-guide-nav-name">OpenCode</span><span class="agent-guide-nav-meta" data-i18n="agent_client_terminal_desktop">Terminal · Desktop</span></span>
+            <span class="agent-guide-nav-arrow" aria-hidden="true">›</span>
+          </button>
         </nav>
 
         <div class="agent-guide-panel">
@@ -4679,6 +4684,108 @@
               <div class="agent-guide-note">
                 <span aria-hidden="true">i</span>
                 <span data-i18n="omp_cwd_note">Replace the project path before running the command. OMP executes bash tools in the directory supplied by --cwd.</span>
+              </div>
+              <div class="agent-guide-note">
+                <span aria-hidden="true">i</span>
+                <span data-i18n="agent_tool_boundary">The agent executes terminal, bash, and MCP tools locally. IronMLX only provides inference and structured tool calls.</span>
+              </div>
+            </section>
+          </article>
+          <article id="agent-guide-opencode" role="tabpanel" aria-label="OpenCode" hidden>
+            <header class="agent-guide-hero">
+              <div>
+                <div class="agent-guide-eyebrow" data-i18n="agent_provider_setup">Provider setup</div>
+                <div class="agent-guide-title-row">
+                  <h2 class="agent-guide-title">OpenCode</h2>
+                  <span class="agent-guide-version-badge"><span data-i18n="agent_applicable_version">Applicable version</span>: <strong>2.2.5+</strong></span>
+                </div>
+                <p class="agent-guide-description" data-i18n="opencode_description">Use a loaded IronMLX model in OpenCode. Add the provider, then start a session in your project.</p>
+              </div>
+              <a id="opencode-official-guide" class="agent-guide-docs-link" href="https://opencode.ai/v2/docs/providers/" target="_blank" rel="noopener noreferrer" onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="agent_official_guide">Official configuration guide</span> <span aria-hidden="true">↗</span></a>
+            </header>
+
+            <section class="agent-guide-section">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="agent_current_connection">Current IronMLX connection</h3>
+                  <p class="agent-guide-section-desc" data-i18n="agent_current_connection_desc">Start IronMLX and load a model before validating the generated configuration.</p>
+                </div>
+              </div>
+              <div class="agent-runtime-grid">
+                <div class="agent-runtime-item">
+                  <span class="agent-runtime-label" data-i18n="agent_api_endpoint">API endpoint</span>
+                  <span class="agent-runtime-value" data-agent-endpoint>http://127.0.0.1:9068/v1</span>
+                </div>
+                <div class="agent-runtime-item">
+                  <span class="agent-runtime-label" data-i18n="agent_loaded_model">Loaded model</span>
+                  <span class="agent-runtime-value" data-agent-model-status data-i18n="agent_no_model">No model loaded</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="agent-guide-section" id="opencode-one-click">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="opencode_auto_title">One-click setup</h3>
+                  <p class="agent-guide-section-desc" data-i18n="opencode_auto_description">Requires OpenCode CLI or Desktop 2.2.5 or later. Keep other providers and your default model.</p>
+                </div>
+                <button id="opencode-configure" class="btn-accent" type="button" onclick="configureOpenCode()" data-i18n="opencode_auto_button">One-click setup</button>
+              </div>
+              <div class="agent-guide-fields" style="grid-template-columns:minmax(0,1fr);">
+                <div class="agent-guide-field">
+                  <label for="opencode-model-select" data-i18n="agent_model">Model</label>
+                  <select id="opencode-model-select" onchange="openCodeSetupResult=null;renderOpenCodeSetupResult();renderAgentGuideConfiguration()"></select>
+                </div>
+              </div>
+              <div id="opencode-feedback" class="agent-setup-feedback" role="status" aria-live="polite" aria-atomic="true" hidden>
+                <span id="opencode-feedback-icon" class="agent-setup-feedback-icon" aria-hidden="true">!</span>
+                <div class="agent-setup-feedback-content">
+                  <p id="opencode-setup-status" class="agent-setup-feedback-message"></p>
+                  <a id="opencode-install" class="agent-setup-feedback-action" href="https://opencode.ai/v2/docs/" target="_blank" rel="noopener noreferrer" hidden onclick="if (window.webkit?.messageHandlers?.openAgentGuide) { window.webkit.messageHandlers.openAgentGuide.postMessage(this.href); return false; }"><span data-i18n="opencode_auto_install">Install OpenCode</span> <span aria-hidden="true">&#8599;</span></a>
+                </div>
+              </div>
+            </section>
+
+            <details class="agent-guide-section" id="opencode-manual">
+              <summary class="agent-guide-section-title agent-manual-summary" data-i18n="dsh_manual_configuration">Manual configuration</summary>
+              <div class="agent-manual-body">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="agent_configure_provider">Configure provider</h3>
+                  <p class="agent-guide-section-desc"><span data-i18n="agent_edit_file">Edit</span> <code>~/.config/opencode/opencode.jsonc</code></p>
+                </div>
+              </div>
+              <div class="agent-code-wrap">
+                <div class="agent-code-toolbar">
+                  <span>opencode.jsonc</span>
+                  <button class="agent-code-copy" type="button" id="copy-opencode-config" onclick="copyAgentCode('opencode-config-code', this)" data-copy-label="copy_configuration" aria-label="Copy configuration" title="Copy configuration">
+                    <svg class="agent-code-copy-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true"><g class="agent-code-copy-glyph" stroke="currentColor" stroke-width="1.35"><rect x="5.25" y="2.25" width="8.5" height="8.5" rx="1.5"/><path d="M10.75 10.75v1.5a1.5 1.5 0 0 1-1.5 1.5h-5.5a1.5 1.5 0 0 1-1.5-1.5v-5.5a1.5 1.5 0 0 1 1.5-1.5h1.5"/></g><path class="agent-code-check-glyph" d="m3.25 8.25 3 3 6.5-6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                </div>
+                <pre class="agent-code"><code id="opencode-config-code"></code></pre>
+              </div>
+            </div>
+            </details>
+
+            <section class="agent-guide-section">
+              <div class="agent-guide-section-header">
+                <div>
+                  <h3 class="agent-guide-section-title" data-i18n="agent_refresh_models">Refresh and select a model</h3>
+                  <p class="agent-guide-section-desc" data-i18n="opencode_launch_desc">Run a quick check, then open the TUI and select IronMLX with /models.</p>
+                </div>
+              </div>
+              <div class="agent-code-wrap">
+                <div class="agent-code-toolbar">
+                  <span>Terminal</span>
+                  <button class="agent-code-copy" type="button" id="copy-opencode-commands" onclick="copyAgentCode('opencode-verify-code', this)" data-copy-label="copy_commands" aria-label="Copy commands" title="Copy commands">
+                    <svg class="agent-code-copy-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true"><g class="agent-code-copy-glyph" stroke="currentColor" stroke-width="1.35"><rect x="5.25" y="2.25" width="8.5" height="8.5" rx="1.5"/><path d="M10.75 10.75v1.5a1.5 1.5 0 0 1-1.5 1.5h-5.5a1.5 1.5 0 0 1-1.5-1.5v-5.5a1.5 1.5 0 0 1 1.5-1.5h1.5"/></g><path class="agent-code-check-glyph" d="m3.25 8.25 3 3 6.5-6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  </button>
+                </div>
+                <pre class="agent-code"><code id="opencode-verify-code"></code></pre>
+              </div>
+              <div class="agent-guide-note">
+                <span aria-hidden="true">i</span>
+                <span data-i18n="opencode_workspace_note">Replace the project path. Merge this provider into your existing configuration; use the model’s actual limits. Project configuration may override global settings.</span>
               </div>
               <div class="agent-guide-note">
                 <span aria-hidden="true">i</span>
@@ -5995,6 +6102,26 @@
       hermes_context_requirement: "Hermes Agent v0.20.0 and later require at least 64K context tokens. Use the model's actual context limit.",
       hermes_workspace_note: "Merge these fields into the existing profile and retain other settings. To choose a terminal workspace, optionally set terminal.cwd to an existing project directory.",
       hermes_verify_desc: "Check the service, complete one inference request, then verify a terminal tool call.",
+      opencode_description: "Use a loaded IronMLX model in OpenCode. Add the provider, then start a session in your project.",
+      opencode_auto_title: "One-click setup",
+      opencode_auto_button: "One-click setup",
+      opencode_auto_description: "Requires OpenCode CLI or Desktop 2.2.5 or later. Keeps other providers and your default model. Thinking defaults to off; verified native effort levels are available in the model variant menu.",
+      opencode_auto_pending: "Checking and configuring OpenCode…",
+      opencode_auto_install: "Install OpenCode",
+      opencode_auto_not_installed: "OpenCode CLI or Desktop was not found. Install {minimum} or later and retry.",
+      opencode_auto_version_too_old: "Upgrade OpenCode {version} to {minimum} or later.",
+      opencode_auto_version_unknown: "Could not verify the OpenCode version. Check the CLI or Desktop installation and retry.",
+      opencode_auto_configured: "Configured the IronMLX provider. Start a new OpenCode session and select IronMLX with /models, or use the commands below.",
+      opencode_auto_configuration_failed: "Could not update OpenCode configuration. Check JSONC syntax and file permissions. Existing files are backed up before modification.",
+      opencode_auto_legacy_configuration: "An older ironmlx provider configuration exists. Convert it to the providers format shown below before retrying.",
+      opencode_auto_custom_configuration: "An explicit OpenCode configuration is selected. Merge the manual configuration below into that file or inline configuration.",
+      opencode_auto_model_unavailable: "Start IronMLX, load and select a conversation model, then retry.",
+      opencode_auto_backend_unavailable: "Could not connect to IronMLX. Start the service and retry.",
+      opencode_auto_local_only: "One-click setup requires IronMLX local mode.",
+      opencode_auto_busy: "OpenCode setup is already in progress.",
+      opencode_auto_native_required: "Open the IronMLX App to use one-click setup.",
+      opencode_launch_desc: "Run a quick check, then open the TUI and select IronMLX with /models.",
+      opencode_workspace_note: "Replace the project path. Merge this provider into your existing configuration using actual model limits. Project configuration may override global settings.",
       omp_description: "Register IronMLX as a keyless Responses provider, discover the models served by the App, and launch OMP in the intended project directory.",
       omp_refresh_desc: "Refresh provider discovery, inspect available models, then start OMP from your project.",
       omp_cwd_note: "Replace the project path before running the command. OMP executes bash tools in the directory supplied by --cwd.",
@@ -6693,6 +6820,26 @@
       hermes_context_requirement: "Hermes Agent v0.20.0 及以上版本需要至少 64K context tokens。请填写模型实际的 context 上限。",
       hermes_workspace_note: "请将这些字段合并到已有 profile，保留其他设置。如需指定 terminal 工作目录，可将 terminal.cwd 设置为已存在的项目目录。",
       hermes_verify_desc: "检查服务、完成一次推理请求，然后验证一次 terminal 工具调用。",
+      opencode_description: "在 OpenCode 中使用已加载的 IronMLX 模型。添加 Provider 后，在项目目录中启动会话。",
+      opencode_auto_title: "一键配置",
+      opencode_auto_button: "一键配置",
+      opencode_auto_description: "需要 OpenCode CLI 或 Desktop 2.2.5 或更新版本。保留其他 Provider 和默认模型，默认关闭思考；已识别模型的原生强度可在模型档位菜单选择。",
+      opencode_auto_pending: "正在检查并配置 OpenCode…",
+      opencode_auto_install: "安装 OpenCode",
+      opencode_auto_not_installed: "未找到 OpenCode CLI 或 Desktop。请安装 {minimum} 或更新版本后重试。",
+      opencode_auto_version_too_old: "请将 OpenCode {version} 升级至 {minimum} 或更新版本。",
+      opencode_auto_version_unknown: "无法确认 OpenCode 版本。请检查 CLI 或 Desktop 安装后重试。",
+      opencode_auto_configured: "IronMLX Provider 已配置。请新建 OpenCode 会话，通过 /models 选择 IronMLX，或使用下方命令。",
+      opencode_auto_configuration_failed: "无法更新 OpenCode 配置。请检查 JSONC 语法和文件权限。修改现有文件前会创建备份。",
+      opencode_auto_legacy_configuration: "发现旧格式的 ironmlx Provider。请参照下方示例转换为 providers 格式后重试。",
+      opencode_auto_custom_configuration: "当前指定了 OpenCode 配置文件或内联配置。请将下方手动配置合并到对应位置。",
+      opencode_auto_model_unavailable: "请启动 IronMLX，加载并选择对话模型后重试。",
+      opencode_auto_backend_unavailable: "无法连接 IronMLX。请启动服务后重试。",
+      opencode_auto_local_only: "一键配置需要 IronMLX 处于本地模式。",
+      opencode_auto_busy: "OpenCode 配置正在进行。",
+      opencode_auto_native_required: "请在 IronMLX App 中使用一键配置。",
+      opencode_launch_desc: "先运行快速检查，再打开 TUI，通过 /models 选择 IronMLX。",
+      opencode_workspace_note: "请替换项目路径。将 Provider 合并到现有配置，并使用模型实际容量。项目配置可能覆盖全局设置。",
       omp_description: "将 IronMLX 注册为免密钥 Responses Provider，发现 App 提供的模型，并在目标项目目录启动 OMP。",
       omp_refresh_desc: "刷新 Provider 发现、查看可用模型，然后从项目目录启动 OMP。",
       omp_cwd_note: "执行前请替换项目路径。OMP 会在 --cwd 指定的目录中执行 bash 工具。",
@@ -7391,6 +7538,26 @@
       hermes_context_requirement: "Hermes Agent v0.20.0 及以上版本需要至少 64K context tokens。請填寫模型實際的 context 上限。",
       hermes_workspace_note: "請將這些欄位合併到既有 profile，保留其他設定。如需指定 terminal 工作目錄，可將 terminal.cwd 設為已存在的專案目錄。",
       hermes_verify_desc: "檢查服務、完成一次推理請求，然後驗證一次 terminal 工具呼叫。",
+      opencode_description: "在 OpenCode 中使用已載入的 IronMLX 模型。加入 Provider 後，在專案目錄中啟動工作階段。",
+      opencode_auto_title: "一鍵設定",
+      opencode_auto_button: "一鍵設定",
+      opencode_auto_description: "需要 OpenCode CLI 或 Desktop 2.2.5 或更新版本。保留其他 Provider 和預設模型，預設關閉思考；已識別模型的原生強度可在模型檔位選單選擇。",
+      opencode_auto_pending: "正在檢查並設定 OpenCode…",
+      opencode_auto_install: "安裝 OpenCode",
+      opencode_auto_not_installed: "未找到 OpenCode CLI 或 Desktop。請安裝 {minimum} 或更新版本後重試。",
+      opencode_auto_version_too_old: "請將 OpenCode {version} 升級至 {minimum} 或更新版本。",
+      opencode_auto_version_unknown: "無法確認 OpenCode 版本。請檢查 CLI 或 Desktop 安裝後重試。",
+      opencode_auto_configured: "IronMLX Provider 已設定。請建立 OpenCode 工作階段，透過 /models 選擇 IronMLX，或使用下方命令。",
+      opencode_auto_configuration_failed: "無法更新 OpenCode 設定。請檢查 JSONC 語法與檔案權限。修改現有檔案前會建立備份。",
+      opencode_auto_legacy_configuration: "發現舊格式的 ironmlx Provider。請參照下方範例轉換為 providers 格式後重試。",
+      opencode_auto_custom_configuration: "目前指定了 OpenCode 設定檔或行內設定。請將下方手動設定合併至對應位置。",
+      opencode_auto_model_unavailable: "請啟動 IronMLX，載入並選擇對話模型後重試。",
+      opencode_auto_backend_unavailable: "無法連線至 IronMLX。請啟動服務後重試。",
+      opencode_auto_local_only: "一鍵設定需要 IronMLX 處於本機模式。",
+      opencode_auto_busy: "OpenCode 設定正在進行。",
+      opencode_auto_native_required: "請在 IronMLX App 中使用一鍵設定。",
+      opencode_launch_desc: "先執行快速檢查，再開啟 TUI，透過 /models 選擇 IronMLX。",
+      opencode_workspace_note: "請替換專案路徑。將 Provider 合併至現有設定，並使用模型實際容量。專案設定可能覆寫全域設定。",
       omp_description: "將 IronMLX 註冊為免金鑰 Responses Provider，探索 App 提供的模型，並在目標專案目錄啟動 OMP。",
       omp_refresh_desc: "重新整理 Provider 探索、檢視可用模型，然後從專案目錄啟動 OMP。",
       omp_cwd_note: "執行前請替換專案路徑。OMP 會在 --cwd 指定的目錄中執行 bash 工具。",
@@ -8092,6 +8259,26 @@
       hermes_context_requirement: "Hermes Agent v0.20.0 以降では 64K 以上のコンテキストトークンが必要です。モデルの実際のコンテキスト上限を指定してください。",
       hermes_workspace_note: "既存の profile にこれらの項目をマージし、他の設定を保持してください。terminal の作業場所を指定する場合は、terminal.cwd に実在するプロジェクトディレクトリを設定します。",
       hermes_verify_desc: "サービスを確認し、推論リクエストを 1 回実行してから terminal ツール呼び出しを検証します。",
+      opencode_description: "読み込んだ IronMLX モデルを OpenCode で使用します。プロバイダーを追加し、プロジェクトでセッションを開始します。",
+      opencode_auto_title: "ワンクリック設定",
+      opencode_auto_button: "ワンクリック設定",
+      opencode_auto_description: "OpenCode CLI または Desktop 2.2.5 以降が必要です。他のプロバイダーと既定モデルを保持し、思考は既定でオフです。対応モデルの推論強度はモデルのバリアントメニューで選択できます。",
+      opencode_auto_pending: "OpenCode を確認して設定中…",
+      opencode_auto_install: "OpenCode をインストール",
+      opencode_auto_not_installed: "OpenCode CLI または Desktop が見つかりません。{minimum} 以降をインストールしてください。",
+      opencode_auto_version_too_old: "OpenCode {version} を {minimum} 以降に更新してください。",
+      opencode_auto_version_unknown: "OpenCode のバージョンを確認できません。CLI または Desktop のインストールを確認してください。",
+      opencode_auto_configured: "IronMLX を設定しました。新しい OpenCode セッションの /models で選ぶか、下のコマンドを使用してください。",
+      opencode_auto_configuration_failed: "OpenCode 設定を更新できません。JSONC の構文とアクセス権を確認してください。変更前に既存ファイルをバックアップします。",
+      opencode_auto_legacy_configuration: "旧形式の ironmlx 設定があります。下の例に従って providers 形式へ移行してください。",
+      opencode_auto_custom_configuration: "明示的な OpenCode 設定が選択されています。下の設定をそのファイルまたはインライン設定に追加してください。",
+      opencode_auto_model_unavailable: "IronMLX を起動し、会話モデルを読み込んで選択してください。",
+      opencode_auto_backend_unavailable: "IronMLX に接続できません。サービスを起動してください。",
+      opencode_auto_local_only: "ワンクリック設定は IronMLX のローカルモードで使用できます。",
+      opencode_auto_busy: "OpenCode を設定中です。",
+      opencode_auto_native_required: "IronMLX App でワンクリック設定を使用してください。",
+      opencode_launch_desc: "動作を確認し、TUI の /models で IronMLX を選択します。",
+      opencode_workspace_note: "プロジェクトのパスを置き換え、実際のモデル容量で既存設定に追加してください。プロジェクト設定が優先される場合があります。",
       omp_description: "IronMLX をキー不要の Responses プロバイダーとして登録し、App が提供するモデルを検出して、目的のプロジェクトディレクトリで OMP を起動します。",
       omp_refresh_desc: "プロバイダー検出を更新し、利用可能なモデルを確認してからプロジェクトで OMP を起動します。",
       omp_cwd_note: "実行前にプロジェクトパスを置き換えてください。OMP は --cwd で指定したディレクトリで bash ツールを実行します。",
@@ -8793,6 +8980,26 @@
       hermes_context_requirement: "Hermes Agent v0.20.0 이상은 최소 64K 컨텍스트 토큰이 필요합니다. 모델의 실제 컨텍스트 한도를 입력하세요.",
       hermes_workspace_note: "기존 profile에 이 필드를 병합하고 다른 설정은 유지하세요. terminal 작업 폴더를 지정하려면 terminal.cwd를 실제 프로젝트 디렉터리로 설정하세요.",
       hermes_verify_desc: "서비스를 확인하고 추론 요청 한 번을 완료한 다음 terminal 도구 호출을 검증하세요.",
+      opencode_description: "로드한 IronMLX 모델을 OpenCode에서 사용합니다. 공급자를 추가한 후 프로젝트에서 세션을 시작하세요.",
+      opencode_auto_title: "원클릭 설정",
+      opencode_auto_button: "원클릭 설정",
+      opencode_auto_description: "OpenCode CLI 또는 Desktop 2.2.5 이상이 필요합니다. 다른 공급자와 기본 모델을 유지하고 사고는 기본적으로 꺼져 있습니다. 지원 모델의 추론 강도는 모델 변형 메뉴에서 선택할 수 있습니다.",
+      opencode_auto_pending: "OpenCode 확인 및 설정 중…",
+      opencode_auto_install: "OpenCode 설치",
+      opencode_auto_not_installed: "OpenCode CLI 또는 Desktop을 찾을 수 없습니다. {minimum} 이상을 설치한 후 다시 시도하세요.",
+      opencode_auto_version_too_old: "OpenCode {version}을 {minimum} 이상으로 업데이트하세요.",
+      opencode_auto_version_unknown: "OpenCode 버전을 확인할 수 없습니다. CLI 또는 Desktop 설치를 확인하세요.",
+      opencode_auto_configured: "IronMLX 공급자가 설정되었습니다. 새 OpenCode 세션에서 /models로 선택하거나 아래 명령을 사용하세요.",
+      opencode_auto_configuration_failed: "OpenCode 설정을 변경할 수 없습니다. JSONC 구문과 파일 권한을 확인하세요. 기존 파일은 변경 전에 백업됩니다.",
+      opencode_auto_legacy_configuration: "이전 ironmlx 공급자 설정이 있습니다. 아래 예시의 providers 형식으로 변환하세요.",
+      opencode_auto_custom_configuration: "별도 OpenCode 설정이 지정되었습니다. 아래 수동 설정을 해당 파일이나 인라인 설정에 병합하세요.",
+      opencode_auto_model_unavailable: "IronMLX를 시작하고 대화 모델을 로드하여 선택하세요.",
+      opencode_auto_backend_unavailable: "IronMLX에 연결할 수 없습니다. 서비스를 시작하세요.",
+      opencode_auto_local_only: "원클릭 설정에는 IronMLX 로컬 모드가 필요합니다.",
+      opencode_auto_busy: "OpenCode 설정이 진행 중입니다.",
+      opencode_auto_native_required: "IronMLX App에서 원클릭 설정을 사용하세요.",
+      opencode_launch_desc: "빠른 확인 후 TUI를 열고 /models에서 IronMLX를 선택하세요.",
+      opencode_workspace_note: "프로젝트 경로를 바꾸고 실제 모델 용량으로 기존 설정에 병합하세요. 프로젝트 설정이 전역 설정보다 우선할 수 있습니다.",
       omp_description: "IronMLX를 키가 필요 없는 Responses 프로바이더로 등록하고 App이 제공하는 모델을 검색한 뒤 원하는 프로젝트 디렉터리에서 OMP를 시작하세요.",
       omp_refresh_desc: "프로바이더 검색을 새로고침하고 사용 가능한 모델을 확인한 다음 프로젝트에서 OMP를 시작하세요.",
       omp_cwd_note: "명령을 실행하기 전에 프로젝트 경로를 바꾸세요. OMP는 --cwd로 지정한 디렉터리에서 bash 도구를 실행합니다.",
@@ -9368,6 +9575,7 @@
     renderDSHDesktopSetupResult();
     renderDeepSeekHarnessSetupResult();
     renderOMPSetupResult();
+    renderOpenCodeSetupResult();
     renderHermesSetupResult();
     updateSettingsSaveBar();
     updateLogLevelControls();
@@ -13997,7 +14205,7 @@
     const scroll = document.querySelector('.agent-guide-scroll');
     if (!scroll) return;
     const pageVisible = document.getElementById('page-chat').classList.contains('active');
-    ['hermes', 'omp', 'dsh', 'dsh-desktop'].forEach(function(name) {
+    ['hermes', 'omp', 'dsh', 'dsh-desktop', 'opencode'].forEach(function(name) {
       const panel = document.getElementById('agent-guide-' + name);
       const hero = panel.querySelector('.agent-guide-hero');
       let bar = panel.querySelector('.agent-guide-compact-bar');
@@ -14040,14 +14248,14 @@
   });
 
   function selectAgentGuide(agent) {
-    if (!['hermes', 'omp', 'dsh', 'dsh-desktop'].includes(agent)) return;
+    if (!['hermes', 'omp', 'dsh', 'dsh-desktop', 'opencode'].includes(agent)) return;
     currentAgentGuide = agent;
     document.querySelectorAll('[data-agent-guide]').forEach(function(button) {
       const selected = button.dataset.agentGuide === agent;
       button.classList.toggle('active', selected);
       button.setAttribute('aria-selected', selected ? 'true' : 'false');
     });
-    ['hermes', 'omp', 'dsh', 'dsh-desktop'].forEach(function(name) {
+    ['hermes', 'omp', 'dsh', 'dsh-desktop', 'opencode'].forEach(function(name) {
       const panel = document.getElementById('agent-guide-' + name);
       if (panel) panel.hidden = name !== agent;
     });
@@ -14144,6 +14352,45 @@
       ? t('omp_auto_' + result.code, t('omp_auto_configuration_failed'))
         .replace('{version}', result.installedVersion || '?').replace('{minimum}', result.minimumVersion || '18.1.16') : '';
     document.getElementById('omp-install').hidden = !result
+      || !['not_installed', 'version_too_old', 'version_unknown'].includes(result.code);
+  }
+
+  let openCodeSetupPending = false;
+  let openCodeSetupResult = null;
+
+  function configureOpenCode() {
+    if (openCodeSetupPending) return;
+    if (!window.webkit?.messageHandlers?.fetchAPIPost) {
+      openCodeSetupResult = { code: 'native_required' };
+      renderOpenCodeSetupResult();
+      return;
+    }
+    openCodeSetupPending = true;
+    openCodeSetupResult = null;
+    renderOpenCodeSetupResult();
+    apiPost('/admin/api/agents/opencode/configure', {
+      model: document.getElementById('opencode-model-select').value
+    });
+  }
+
+  function renderOpenCodeSetupResult() {
+    const button = document.getElementById('opencode-configure');
+    button.disabled = openCodeSetupPending;
+    document.getElementById('opencode-model-select').disabled = openCodeSetupPending;
+    button.textContent = t(openCodeSetupPending ? 'opencode_auto_pending' : 'opencode_auto_button');
+    const result = openCodeSetupResult;
+    const feedback = document.getElementById('opencode-feedback');
+    feedback.hidden = !openCodeSetupPending && !result;
+    const warnings = ['not_installed', 'version_too_old', 'version_unknown', 'legacy_configuration', 'custom_configuration',
+      'model_unavailable', 'local_only', 'busy'];
+    const tone = openCodeSetupPending ? 'info' : result?.success === true ? 'success'
+      : warnings.includes(result?.code) ? 'warning' : 'error';
+    feedback.dataset.tone = tone;
+    document.getElementById('opencode-feedback-icon').textContent = tone === 'success' ? '\u2713' : tone === 'info' ? 'i' : '!';
+    document.getElementById('opencode-setup-status').textContent = openCodeSetupPending ? t('opencode_auto_pending') : result
+      ? t('opencode_auto_' + result.code, t('opencode_auto_configuration_failed'))
+        .replace('{version}', result.installedVersion || '?').replace('{minimum}', result.minimumVersion || '2.2.5') : '';
+    document.getElementById('opencode-install').hidden = !result
       || !['not_installed', 'version_too_old', 'version_unknown'].includes(result.code);
   }
 
@@ -14319,6 +14566,11 @@
     const models = agentLoadedModels();
     const hermesModel = updateAgentModelSelect(document.getElementById('hermes-model-select'), models);
     const ompModel = updateAgentModelSelect(document.getElementById('omp-model-select'), models);
+    const openCodeModels = models.filter(function(id) {
+      const runtime = (window.__RUNTIME_MODELS__ || []).find(function(item) { return item.id === id; });
+      return !runtime || runtime.runtime_kind === 'causal';
+    });
+    const openCodeModel = updateAgentModelSelect(document.getElementById('opencode-model-select'), openCodeModels);
     const dshModel = updateAgentModelSelect(document.getElementById('dsh-model-select'), models);
     updateAgentModelSelect(document.getElementById('dsh-desktop-model-select'), models);
     updateAgentModelSelect(document.getElementById('dsh-harness-model-select'), models);
@@ -14397,6 +14649,32 @@
       'omp --cwd /absolute/path/to/project \\',
       '  --model ' + shellQuote(ompSelector) + ' \\',
       '  -p --auto-approve "Use the bash tool exactly once to run pwd, then report its output."'
+    ].join('\n'));
+
+    const openCodeCapacity = dshModelCapacities.get(openCodeModel);
+    const openCodeValid = openCodeModel !== 'MODEL_ID' && openCodeCapacity?.contextWindow && openCodeCapacity?.maxOutputTokens;
+    const openCodeConfig = { providers: { ironmlx: {
+      name: 'IronMLX',
+      package: '@opencode/ai/providers/openai-compatible',
+      settings: { baseURL: endpoint, apiKey: '', provider: 'ironmlx' },
+      body: { chat_template_kwargs: { enable_thinking: false } },
+      models: { [openCodeModel]: {
+        name: openCodeModel,
+        capabilities: { tools: true, input: ['text'], output: ['text'] },
+        limit: { context: openCodeCapacity?.contextWindow || 'CONTEXT_WINDOW',
+          output: openCodeValid ? Math.min(4096, openCodeCapacity.maxOutputTokens, openCodeCapacity.contextWindow) : 'OUTPUT_BUDGET' }
+      } }
+    } } };
+    setAgentCode('opencode-config-code', JSON.stringify(openCodeConfig, null, 2));
+    document.getElementById('copy-opencode-config').disabled = !openCodeValid;
+    document.getElementById('copy-opencode-commands').disabled = !openCodeValid;
+    const openCodeSelector = shellQuote('ironmlx/' + openCodeModel);
+    setAgentCode('opencode-verify-code', [
+      'cd /absolute/path/to/project',
+      'opencode models',
+      'opencode run --model ' + openCodeSelector + ' "Reply with exactly IRONMLX_OK"',
+      'opencode run --model ' + openCodeSelector + ' "Use the shell tool exactly once to run pwd, then report its output."',
+      'opencode .'
     ].join('\n'));
 
     const dshContextInput = document.getElementById('dsh-context-window');
@@ -16053,6 +16331,10 @@
         hermesSetupPending = false;
         hermesSetupResult = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };
         renderHermesSetupResult();
+      } else if (path === '/admin/api/agents/opencode/configure') {
+        openCodeSetupPending = false;
+        openCodeSetupResult = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };
+        renderOpenCodeSetupResult();
       } else if (path === '/admin/api/agents/omp/configure') {
         ompSetupPending = false;
         ompSetupResult = JSON.parse(jsonStr || 'null') || { code: 'configuration_failed' };

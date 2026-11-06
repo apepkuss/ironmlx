@@ -25,6 +25,7 @@ use crate::server::structured_output::StructuredOutputFormat;
 use ironmlx_core::sampler::Sampler;
 use ironmlx_lm::core::image_input::ImageInputError;
 use ironmlx_lm::core::model::Model;
+use ironmlx_lm::core::native_output::NativeOutputDecoderConfig;
 use ironmlx_lm::core::vision::DenseVlMethods;
 use ironmlx_lm::core::vision_input::VisionInputConfig;
 use ironmlx_runtime::core::generation_types::{GenerateRequest, RequestPriority};
@@ -330,7 +331,24 @@ pub(crate) struct PreparedToolRequest {
 }
 
 #[derive(Debug)]
+struct ChatOutputContext {
+    output_format: StructuredOutputFormat,
+    native_output: Option<NativeOutputDecoderConfig>,
+}
+
+#[cfg(test)]
+impl From<StructuredOutputFormat> for ChatOutputContext {
+    fn from(output_format: StructuredOutputFormat) -> Self {
+        Self {
+            output_format,
+            native_output: None,
+        }
+    }
+}
+
+#[derive(Debug)]
 struct ToolResponseContext {
+    native_output: Option<NativeOutputDecoderConfig>,
     dialect: ToolDialect,
     definitions: Vec<ToolDefinition>,
     constraint_options: ToolConstraintOptions,
@@ -345,6 +363,7 @@ impl ToolResponseContext {
         ToolOutputDecoderConfig,
         ToolConstraintOptions,
         StructuredOutputFormat,
+        Option<NativeOutputDecoderConfig>,
     ) {
         (
             ToolOutputDecoderConfig {
@@ -355,6 +374,7 @@ impl ToolResponseContext {
             },
             self.constraint_options,
             self.output_format,
+            self.native_output,
         )
     }
 }
@@ -469,6 +489,8 @@ impl StreamUsageChunk {
 struct CompletionMessage {
     role: &'static str,
     content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tool_calls: Vec<CompletionToolCall>,
 }
@@ -1125,6 +1147,7 @@ where
             .constraint_options
             .expect("filtered constrained tool request");
         let tool_context = ToolResponseContext {
+            native_output,
             dialect: prepared.dialect,
             definitions: prepared.definitions,
             output_schema: matches!(&constraint_options.choice, ToolChoiceConstraint::Auto)
@@ -1152,11 +1175,24 @@ where
             model_label,
             prompt_tokens,
             include_usage,
-            output_format,
+            ChatOutputContext {
+                output_format,
+                native_output,
+            },
         )
         .await
     } else {
-        serve_via_scheduler_unary(state, request, model_label, prompt_tokens, output_format).await
+        serve_via_scheduler_unary(
+            state,
+            request,
+            model_label,
+            prompt_tokens,
+            ChatOutputContext {
+                output_format,
+                native_output,
+            },
+        )
+        .await
     }
 }
 
@@ -1320,6 +1356,7 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
             .constraint_options
             .expect("filtered constrained tool request");
         let tool_context = ToolResponseContext {
+            native_output,
             dialect: prepared.dialect,
             definitions: prepared.definitions,
             output_schema: matches!(&constraint_options.choice, ToolChoiceConstraint::Auto)
@@ -1347,7 +1384,10 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
             model_label,
             prompt_tokens,
             include_usage,
-            output_format,
+            ChatOutputContext {
+                output_format,
+                native_output,
+            },
         )
         .await
     } else {
@@ -1356,7 +1396,10 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
             request,
             model_label,
             prompt_tokens,
-            output_format,
+            ChatOutputContext {
+                output_format,
+                native_output,
+            },
         )
         .await
     }
@@ -1364,6 +1407,7 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
 
 #[derive(Debug)]
 struct ParsedAssistantOutput {
+    reasoning: String,
     content: String,
     tool_calls: Vec<ToolCall>,
     finish_reason: &'static str,
@@ -1377,6 +1421,7 @@ fn collect_generated_events(
     for event in events {
         match event {
             GeneratedOutputEvent::TextDelta(text) => output.content.push_str(&text),
+            GeneratedOutputEvent::ReasoningDelta(text) => output.reasoning.push_str(&text),
             GeneratedOutputEvent::ToolCall(call) => output.tool_calls.push(call),
             GeneratedOutputEvent::Finished(reason) => output.finish_reason = reason.as_str(),
             other => anyhow::bail!(
@@ -1434,6 +1479,7 @@ fn tool_completion_response(
     let message = CompletionMessage {
         role: "assistant",
         content: (!output.content.is_empty()).then_some(output.content),
+        reasoning_content: (!output.reasoning.is_empty()).then_some(output.reasoning),
         tool_calls: output
             .tool_calls
             .into_iter()
@@ -1620,6 +1666,19 @@ fn format_tool_output_events(
                     }],
                 }));
             }
+            GeneratedOutputEvent::ReasoningDelta(text) => {
+                frames.push(format_sse_data(&ChunkResponse {
+                    id: id.to_owned(),
+                    object: "chat.completion.chunk",
+                    created: now_unix(),
+                    model: model_id.to_owned(),
+                    choices: vec![Choice {
+                        index: 0,
+                        delta: serde_json::json!({"reasoning_content": text}),
+                        finish_reason: None,
+                    }],
+                }));
+            }
             GeneratedOutputEvent::ToolCall(call) => {
                 call_names.push(call.name.clone());
                 let index = *next_call_index;
@@ -1757,7 +1816,8 @@ fn stream_tools_admitted<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let (decoder_config, constraint_options, output_format) = tool_context.decoder_config();
+    let (decoder_config, constraint_options, output_format, native_output) =
+        tool_context.decoder_config();
     let id = gen_id();
     let AdmitReply {
         request_id: _,
@@ -1767,7 +1827,11 @@ where
     let tokenizer = state.tokenizer.clone();
     let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     tokio::spawn(async move {
-        let mut decoder = match GeneratedOutputDecoder::new(&tokenizer, Some(decoder_config)) {
+        let mut decoder = match GeneratedOutputDecoder::new_with_native(
+            &tokenizer,
+            Some(decoder_config),
+            native_output,
+        ) {
             Ok(decoder) => decoder,
             Err(error) => {
                 let _ = tx.send(Ok(format_sse_error(&error))).await;
@@ -1950,18 +2014,24 @@ async fn collect_tools_admitted<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let (decoder_config, constraint_options, output_format) = tool_context.decoder_config();
+    let (decoder_config, constraint_options, output_format, native_output) =
+        tool_context.decoder_config();
     let id = gen_id();
     let AdmitReply {
         request_id: _,
         mut event_rx,
     } = reply;
     let mut performance = state.record_request_started(prompt_tokens, started_at);
-    let mut decoder = match GeneratedOutputDecoder::new(&state.tokenizer, Some(decoder_config)) {
+    let mut decoder = match GeneratedOutputDecoder::new_with_native(
+        &state.tokenizer,
+        Some(decoder_config),
+        native_output,
+    ) {
         Ok(decoder) => decoder,
         Err(error) => return bad_request_response("invalid_tool_parser", format!("{error:#}")),
     };
     let mut output = ParsedAssistantOutput {
+        reasoning: String::new(),
         content: String::new(),
         tool_calls: Vec::new(),
         finish_reason: "stop",
@@ -2027,7 +2097,7 @@ async fn serve_via_scheduler_stream<M>(
     model_id: String,
     prompt_tokens: u32,
     include_usage: bool,
-    output_format: StructuredOutputFormat,
+    output_context: ChatOutputContext,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -2050,7 +2120,7 @@ where
         model_id,
         prompt_tokens,
         include_usage,
-        output_format,
+        output_context,
     )
 }
 
@@ -2062,11 +2132,15 @@ fn stream_admitted<M>(
     model_id: String,
     prompt_tokens: u32,
     include_usage: bool,
-    output_format: StructuredOutputFormat,
+    output_context: ChatOutputContext,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let ChatOutputContext {
+        output_format,
+        native_output,
+    } = output_context;
     let id = gen_id();
     let AdmitReply {
         request_id: _,
@@ -2106,13 +2180,14 @@ where
             return;
         }
 
-        let mut decoder = match GeneratedOutputDecoder::new(&tokenizer, None) {
-            Ok(decoder) => decoder,
-            Err(error) => {
-                let _ = tx.send(Ok(format_sse_error(&error))).await;
-                return;
-            }
-        };
+        let mut decoder =
+            match GeneratedOutputDecoder::new_with_native(&tokenizer, None, native_output) {
+                Ok(decoder) => decoder,
+                Err(error) => {
+                    let _ = tx.send(Ok(format_sse_error(&error))).await;
+                    return;
+                }
+            };
         let mut completion_tokens = 0_u32;
         let mut finish_reason = None;
         let mut model_finished = false;
@@ -2217,7 +2292,7 @@ async fn serve_via_scheduler_unary<M>(
     request: GenerateRequest,
     model_id: String,
     prompt_tokens: u32,
-    output_format: StructuredOutputFormat,
+    output_context: ChatOutputContext,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -2235,7 +2310,7 @@ where
         started_at,
         model_id,
         prompt_tokens,
-        output_format,
+        output_context,
     )
     .await
 }
@@ -2247,11 +2322,15 @@ async fn collect_admitted<M>(
     started_at: Instant,
     model_id: String,
     prompt_tokens: u32,
-    output_format: StructuredOutputFormat,
+    output_context: ChatOutputContext,
 ) -> Response
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    let ChatOutputContext {
+        output_format,
+        native_output,
+    } = output_context;
     let id = gen_id();
     let AdmitReply {
         request_id: _,
@@ -2260,11 +2339,13 @@ where
     let mut performance = state.record_request_started(prompt_tokens, started_at);
 
     // 2. Collect all committed tokens through the protocol-neutral decoder.
-    let mut decoder = match GeneratedOutputDecoder::new(&state.tokenizer, None) {
-        Ok(decoder) => decoder,
-        Err(error) => return generation_err_to_response(error),
-    };
+    let mut decoder =
+        match GeneratedOutputDecoder::new_with_native(&state.tokenizer, None, native_output) {
+            Ok(decoder) => decoder,
+            Err(error) => return generation_err_to_response(error),
+        };
     let mut output = ParsedAssistantOutput {
+        reasoning: String::new(),
         content: String::new(),
         tool_calls: Vec::new(),
         finish_reason: "stop",
@@ -2317,6 +2398,7 @@ where
             message: CompletionMessage {
                 role: "assistant",
                 content: Some(output.content),
+                reasoning_content: (!output.reasoning.is_empty()).then_some(output.reasoning),
                 tool_calls: Vec::new(),
             },
             finish_reason: output.finish_reason,
@@ -2463,7 +2545,7 @@ mod tests {
                 "failure-test".into(),
                 1,
                 true,
-                StructuredOutputFormat::Text,
+                StructuredOutputFormat::Text.into(),
             );
             let raw = sse_body(response).await;
             let events = data_events(&raw);
@@ -2486,7 +2568,7 @@ mod tests {
                 Instant::now(),
                 "guard-test".into(),
                 1,
-                StructuredOutputFormat::Text,
+                StructuredOutputFormat::Text.into(),
             )
             .await;
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -2511,7 +2593,7 @@ mod tests {
                 "guard-test".into(),
                 1,
                 true,
-                StructuredOutputFormat::Text,
+                StructuredOutputFormat::Text.into(),
             );
             let raw = sse_body(response).await;
             let events = data_events(&raw);
@@ -2531,7 +2613,7 @@ mod tests {
                 "eof-test".into(),
                 1,
                 true,
-                StructuredOutputFormat::Text,
+                StructuredOutputFormat::Text.into(),
             );
             let events = data_events(&sse_body(response).await);
             let last = events.last().expect("SSE events");
@@ -2557,7 +2639,7 @@ mod tests {
                 "eof-test".into(),
                 1,
                 true,
-                StructuredOutputFormat::Text,
+                StructuredOutputFormat::Text.into(),
             );
             let events = data_events(&sse_body(response).await);
             assert!(events
@@ -2570,6 +2652,7 @@ mod tests {
 
         fn tool_context() -> ToolResponseContext {
             ToolResponseContext {
+                native_output: None,
                 dialect: ToolDialect::Qwen35,
                 definitions: vec![ToolDefinition {
                     name: "get_weather".into(),
@@ -2583,7 +2666,7 @@ mod tests {
                 }],
                 constraint_options: ToolConstraintOptions::default(),
                 output_schema: None,
-                output_format: StructuredOutputFormat::Text,
+                output_format: StructuredOutputFormat::Text.into(),
             }
         }
 
@@ -2680,7 +2763,7 @@ mod tests {
                 Instant::now(),
                 "eof-test".into(),
                 1,
-                StructuredOutputFormat::Text,
+                StructuredOutputFormat::Text.into(),
             )
             .await;
             assert!(response.status().is_server_error());
@@ -2720,9 +2803,98 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn native_reasoning_is_separate_in_chat_stream_and_unary() {
+        use ironmlx_lm::core::native_output::NativeOutputDialect;
+        for tools in [false, true] {
+            let tool = tools.then(|| ToolOutputDecoderConfig {
+                dialect: ToolDialect::Qwen35,
+                response_id: "reasoning-test".into(),
+                definitions: vec![ToolDefinition {
+                    name: "read".into(),
+                    description: None,
+                    parameters: serde_json::json!({"type":"object","properties":{}}),
+                    strict: None,
+                }],
+                output_schema: None,
+            });
+            let mut decoder = GeneratedOutputDecoder::from_decoded_with_native(
+                tool,
+                Some(NativeOutputDecoderConfig {
+                    dialect: NativeOutputDialect::Qwen38,
+                    reasoning_enabled: true,
+                }),
+            )
+            .unwrap();
+            let mut output = ParsedAssistantOutput {
+                reasoning: String::new(),
+                content: String::new(),
+                tool_calls: Vec::new(),
+                finish_reason: "stop",
+                completion_tokens: 12,
+            };
+            let mut frames = Vec::new();
+            let mut next_call = 0;
+            let mut names = Vec::new();
+            let mut finish = None;
+            let mut visible = String::new();
+            // Split the native marker across chunks; it must never leak into content.
+            for fragment in ["check ", "inputs</thi", "nk>\n\n", "answer"] {
+                let events = decoder.push_text_delta(fragment).unwrap();
+                frames.extend(
+                    format_tool_output_events(
+                        "id",
+                        "model",
+                        events.clone(),
+                        &mut next_call,
+                        &mut names,
+                        &mut finish,
+                        &mut visible,
+                    )
+                    .unwrap(),
+                );
+                collect_generated_events(&mut output, events).unwrap();
+            }
+            let events = decoder.finish("stop").unwrap();
+            frames.extend(
+                format_tool_output_events(
+                    "id",
+                    "model",
+                    events.clone(),
+                    &mut next_call,
+                    &mut names,
+                    &mut finish,
+                    &mut visible,
+                )
+                .unwrap(),
+            );
+            collect_generated_events(&mut output, events).unwrap();
+            assert_eq!(output.reasoning, "check inputs");
+            assert_eq!(output.content, "answer");
+            assert_eq!(visible, "answer");
+            let wire = frames
+                .iter()
+                .map(|b| std::str::from_utf8(b).unwrap())
+                .collect::<String>();
+            assert!(wire.contains("reasoning_content"));
+            assert!(!wire.contains("</think>"));
+            let response = tool_completion_response("id".into(), "model".into(), 3, output);
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                json["choices"][0]["message"]["reasoning_content"],
+                "check inputs"
+            );
+            assert_eq!(json["choices"][0]["message"]["content"], "answer");
+        }
+    }
+
     #[test]
     fn chat_adapter_rejects_unmapped_typed_output() {
         let mut output = ParsedAssistantOutput {
+            reasoning: String::new(),
             content: String::new(),
             tool_calls: Vec::new(),
             finish_reason: "stop",
@@ -2730,12 +2902,14 @@ mod tests {
         };
         let error = collect_generated_events(
             &mut output,
-            vec![GeneratedOutputEvent::ReasoningDelta("hidden".to_owned())],
+            vec![GeneratedOutputEvent::ReasoningSummaryDelta(
+                "hidden".to_owned(),
+            )],
         )
         .unwrap_err();
         assert!(error
             .to_string()
-            .contains("cannot represent generated reasoning"));
+            .contains("cannot represent generated reasoning_summary"));
         assert!(output.content.is_empty());
     }
 
@@ -2975,6 +3149,7 @@ mod tests {
                 message: CompletionMessage {
                     role: "assistant",
                     content: Some("hi".into()),
+                    reasoning_content: None,
                     tool_calls: Vec::new(),
                 },
                 finish_reason: "stop",
@@ -3173,6 +3348,29 @@ mod tests {
     }
 
     #[test]
+    fn opencode_native_chat_default_tool_schemas_are_accepted() {
+        // Captured from the official OpenCode 2.2.5 CLI (9bbb8ce18), with the
+        // conversation replaced by one synthetic user message.
+        let request: ChatRequest = serde_json::from_str(include_str!(
+            "../../tests/fixtures/api_contract_sdk/opencode_chat_request.json"
+        ))
+        .unwrap();
+        let prepared = prepare_tool_request(&request, Some(ToolDialect::Qwen35))
+            .unwrap()
+            .expect("OpenCode advertises its default tools");
+        assert_eq!(prepared.definitions.len(), 12);
+        let subagent = prepared
+            .definitions
+            .iter()
+            .find(|tool| tool.name == "subagent")
+            .unwrap();
+        assert_eq!(
+            subagent.parameters["properties"]["sessionID"]["pattern"],
+            "^ses"
+        );
+    }
+
+    #[test]
     fn strict_tool_request_accepts_only_official_strict_schema_shape() {
         let mut valid = tool_request(serde_json::json!({}));
         let function = &mut valid.tools.as_mut().unwrap()[0].function;
@@ -3359,6 +3557,7 @@ mod tests {
     #[tokio::test]
     async fn tool_sse_reconstructs_parallel_calls_by_stable_index() {
         let output = ParsedAssistantOutput {
+            reasoning: String::new(),
             content: String::new(),
             tool_calls: vec![
                 ToolCall {

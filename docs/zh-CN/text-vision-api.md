@@ -327,6 +327,7 @@ curl http://127.0.0.1:9068/v1/chat/completions \
 | `id / object / created / model` | string / string / integer / string | 响应 ID、chat.completion 类型、Unix 时间戳与模型 ID。 |
 | `choices` | array | 生成结果数组；每项含 index、message 与 finish_reason。 |
 | `choices[].message` | object | role:assistant、content:string 或 null，以及可选 tool_calls。 |
+| `choices[].message.reasoning_content` | string, optional | 与 content 分离的原生思考；在对应 assistant 历史消息中回放。 |
 | `choices[].message.tool_calls` | array, optional | 每项含 id、type:function 与 function.name/arguments；arguments 为 JSON 字符串。 |
 | `choices[].finish_reason` | string | stop、length 或 tool_calls；length 可导致 JSON 或文本截断。 |
 | `usage` | object | prompt_tokens、completion_tokens 与 total_tokens。 |
@@ -357,7 +358,7 @@ curl http://127.0.0.1:9068/v1/chat/completions \
 
 ### 流式响应
 
-设置 `stream:true`。每个 data 帧为 `chat.completion.chunk`，`choices[].delta` 提供角色、文本或工具调用片段，随后返回终止原因和 `data: [DONE]`。文本流示例：
+设置 `stream:true`。每个 data 帧为 `chat.completion.chunk`，`choices[].delta` 提供角色、文本、原生思考或工具调用片段，随后返回终止原因和 `data: [DONE]`。文本流示例：
 
 ```text
 data: {"id":"chatcmpl_example","object":"chat.completion.chunk","created":0,"model":"your-model-id","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
@@ -370,6 +371,12 @@ data: [DONE]
 ```
 
 设置 `stream_options.include_usage:true` 时，在 `[DONE]` 前额外返回含 `choices:[]` 与 `usage` 的最终用量 chunk。工具参数字符串可跨多次 delta，按 index/id 关联，拼接后再解析 JSON。
+
+启用原生思考后，`delta.reasoning_content` 提供思考增量，`delta.content` 提供可见正文。
+后续请求应将累积的思考放入对应 assistant 消息的 `messages[].reasoning_content`，
+包括包含工具调用的 assistant 消息。Qwen3.8 的 `preserve_thinking=true` 在后续模板
+渲染中保留思考，false 则省略它们。思考与正文、工具 token 共用输出预算。
+Chat Completions 不提供独立思考摘要或加密块。
 
 ### Structured Outputs
 
@@ -753,7 +760,7 @@ Responses 响应中的有效 tier 为 `default` 或 `flex`。
 
 ### JSON Schema
 
-支持类型：object、array、string、number、integer、boolean、null 和可空类型数组。支持关键字：properties、required、items、enum、const、anyOf、minItems/maxItems、minLength/maxLength、minimum/maximum、exclusiveMinimum/exclusiveMaximum。最大嵌套深度为 8。`oneOf` 要求各分支声明明确且互斥的 JSON 类型（integer 与 number 视为重叠），同层只允许说明性关键字；类型重叠或未声明类型的分支会被拒绝。 字符串 `pattern` 支持以 `^` 和 `$` 锚定的正则表达式（最多 4096 字节，不支持环视和反向引用），生成约束与输出值校验都会执行该约束。
+支持类型：object、array、string、number、integer、boolean、null 和可空类型数组。支持关键字：properties、required、items、enum、const、anyOf、minItems/maxItems、minLength/maxLength、minimum/maximum、exclusiveMinimum/exclusiveMaximum。最大嵌套深度为 8。`oneOf` 要求各分支声明明确且互斥的 JSON 类型（integer 与 number 视为重叠），同层只允许说明性关键字；类型重叠或未声明类型的分支会被拒绝。 字符串 `pattern` 支持以 `^` 锚定、可选 `$` 进行完整值匹配的正则表达式（例如 `^ses` 匹配会话 ID 前缀）（最多 4096 字节，不支持环视和反向引用），生成约束与输出值校验都会执行该约束。
 
 strict:true 要求每层 object 设置 additionalProperties:false，且所有属性列入 required。顶层工具参数对象必须封闭。非 strict 工具可在嵌套对象使用 additionalProperties:true 或受支持的值 Schema。不支持的关键字在生成前返回 400，strict 约束不静默降级。
 

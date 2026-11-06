@@ -307,6 +307,7 @@ Success returns HTTP 200 JSON. Example IDs, timestamps and token counts are illu
 | `id / object / created / model` | string / string / integer / string | Response ID, chat.completion type, Unix timestamp and model ID. |
 | `choices` | array | Completion choices, each with index, message and finish_reason. |
 | `choices[].message` | object | role:assistant, content:string or null, and optional tool_calls. |
+| `choices[].message.reasoning_content` | string, optional | Native thinking, separate from content; replay it on the corresponding assistant message. |
 | `choices[].message.tool_calls` | array, optional | Each call has id, type:function and function.name/arguments; arguments is a JSON string. |
 | `choices[].finish_reason` | string | stop, length or tool_calls; length can truncate JSON or text. |
 | `usage` | object | prompt_tokens, completion_tokens and total_tokens. |
@@ -337,7 +338,7 @@ Success returns HTTP 200 JSON. Example IDs, timestamps and token counts are illu
 
 ### Streaming
 
-Set `stream:true`. Each `data:` frame is a `chat.completion.chunk`; `choices[].delta` supplies the role, text or tool-call fragments, followed by a finish reason and `data: [DONE]`. A text stream looks like:
+Set `stream:true`. Each `data:` frame is a `chat.completion.chunk`; `choices[].delta` supplies the role, text, native reasoning or tool-call fragments, followed by a finish reason and `data: [DONE]`. A text stream looks like:
 
 ```text
 data: {"id":"chatcmpl_example","object":"chat.completion.chunk","created":0,"model":"your-model-id","choices":[{"index":0,"delta":{"role":"assistant","content":""}}]}
@@ -350,6 +351,14 @@ data: [DONE]
 ```
 
 With `stream_options.include_usage:true`, an additional final usage chunk has `choices:[]` and `usage` before `[DONE]`. Tool argument strings can span multiple deltas; correlate calls by index/id and concatenate before JSON parsing.
+
+When native thinking is enabled, `delta.reasoning_content` carries incremental
+thoughts and `delta.content` carries visible answer text. Replay the accumulated
+thoughts as `messages[].reasoning_content` on the corresponding assistant message,
+including assistant tool calls. Qwen3.8 `preserve_thinking=true` keeps these thoughts
+in subsequent template rendering; false omits them. Thinking and answer/tool tokens
+share the output budget. No independent reasoning summary or encrypted block is
+provided by Chat Completions.
 
 ### Structured Outputs
 
@@ -674,7 +683,7 @@ Replace <Base64> with actual image data and include the block alongside text in 
 
 ### JSON Schema
 
-Supported types: object, array, string, number, integer, boolean, null and nullable type arrays. Supported keywords: properties, required, items, enum, const, anyOf, minItems/maxItems, minLength/maxLength, minimum/maximum and exclusiveMinimum/exclusiveMaximum. Maximum nesting depth is 8. `oneOf` is supported when every branch declares explicit, mutually disjoint JSON types (integer and number overlap). Only annotation siblings are allowed; overlapping or untyped branches are rejected. String `pattern` supports regular expressions anchored with `^` and `$` (up to 4096 bytes, without lookaround or backreferences); decoding and emitted-value validation both enforce the constraint.
+Supported types: object, array, string, number, integer, boolean, null and nullable type arrays. Supported keywords: properties, required, items, enum, const, anyOf, minItems/maxItems, minLength/maxLength, minimum/maximum and exclusiveMinimum/exclusiveMaximum. Maximum nesting depth is 8. `oneOf` is supported when every branch declares explicit, mutually disjoint JSON types (integer and number overlap). Only annotation siblings are allowed; overlapping or untyped branches are rejected. String `pattern` supports regular expressions anchored with `^`, with optional `$` for whole-value matching (for example, `^ses` matches a session-ID prefix) (up to 4096 bytes, without lookaround or backreferences); decoding and emitted-value validation both enforce the constraint.
 
 strict:true requires additionalProperties:false and every property in required at each object level. Top-level tool parameter objects must be closed. Non-strict tools can use nested additionalProperties:true or a supported value schema. Unsupported keywords return 400 before generation; strict constraints do not silently downgrade.
 

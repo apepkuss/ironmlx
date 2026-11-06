@@ -59,4 +59,4 @@
 
 ## Agent 接入
 
-按应用选择 [Hermes Agent](hermes-agent.md)、[oh-my-pi](oh-my-pi.md) 或 [DeepSeek Harness（DSH）](dsh.md) 配置指南。
+按应用选择 [OpenCode](opencode.md)、[Hermes Agent](hermes-agent.md)、[oh-my-pi](oh-my-pi.md) 或 [DeepSeek Harness（DSH）](dsh.md) 配置指南。

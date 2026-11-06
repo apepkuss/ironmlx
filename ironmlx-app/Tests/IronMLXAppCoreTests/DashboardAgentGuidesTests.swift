@@ -43,9 +43,9 @@ import Testing
     #expect(html.contains("<strong>v0.20.0+</strong>"))
     #expect(html.contains("<strong>18.1.16+</strong>"))
     #expect(html.contains(#"agent_applicable_version: "适用版本""#))
-    #expect(html.components(separatedBy: #"class="agent-code-copy""#).count - 1 == 6)
-    #expect(html.components(separatedBy: #"data-copy-label="copy_configuration""#).count - 1 == 3)
-    #expect(html.components(separatedBy: #"data-copy-label="copy_commands""#).count - 1 == 3)
+    #expect(html.components(separatedBy: #"class="agent-code-copy""#).count - 1 == 8)
+    #expect(html.components(separatedBy: #"data-copy-label="copy_configuration""#).count - 1 == 4)
+    #expect(html.components(separatedBy: #"data-copy-label="copy_commands""#).count - 1 == 4)
     #expect(html.contains(#"class="agent-code-copy-icon""#))
     #expect(html.contains("function showAgentCopySuccess(button)"))
     #expect(html.contains("setAgentCopyButtonLabel(button, true)"))
@@ -55,7 +55,7 @@ import Testing
     #expect(!html.contains("selectHermesProfileMode"))
     #expect(html.contains("function selectDshSetupMode(mode)"))
     #expect(html.contains("function renderAgentGuideConfiguration()"))
-    #expect(html.contains("['hermes', 'omp', 'dsh', 'dsh-desktop'].forEach"))
+    #expect(html.contains("['hermes', 'omp', 'dsh', 'dsh-desktop', 'opencode'].forEach"))
     #expect(html.contains(#"data-dsh-setup-mode="desktop" checked"#))
     #expect(html.contains(#"data-dsh-setup-mode="cli" onchange"#))
     #expect(html.contains(#"data-dsh-setup-panel="cli" hidden"#))
@@ -74,6 +74,7 @@ import Testing
         "dsh-desktop-logo.png",
         "hermes-agent-logo.svg",
         "oh-my-pi-logo.svg",
+        "opencode-logo.svg",
     ] {
         #expect(FileManager.default.fileExists(atPath: "\(resourcesDirectory)/\(logo)"))
         #expect(bundleBuildScript.contains(logo), "App assembly omits Agent logo: \(logo)")

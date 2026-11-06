@@ -1220,30 +1220,33 @@ fn validate_schema_node_with_limits(
 }
 
 /// Keep native raw-string grammars and JSON grammars on the same bounded
-/// regular-expression subset. Anchors are required because native terminals
-/// match whole values, while JSON Schema patterns normally search substrings.
+/// regular-expression subset. Native terminals match whole values; a pattern
+/// with only a start anchor needs an explicit arbitrary suffix to preserve
+/// JSON Schema's prefix-match semantics (for example OpenCode's `^ses`).
 fn string_pattern_body(pattern: &Value) -> Result<String> {
     let pattern = pattern
         .as_str()
         .ok_or_else(|| anyhow!("pattern must be a string"))?;
     anyhow::ensure!(pattern.len() <= 4096, "pattern exceeds 4096 bytes");
     anyhow::ensure!(
-        pattern.starts_with('^')
-            && pattern.ends_with('$')
-            && pattern[..pattern.len() - 1]
-                .chars()
-                .rev()
-                .take_while(|c| *c == '\\')
-                .count()
-                % 2
-                == 0,
-        "pattern requires ^ and $ anchors"
+        pattern.starts_with('^'),
+        "pattern requires a ^ start anchor"
     );
+    let anchored_end = pattern.ends_with('$')
+        && pattern[..pattern.len() - 1]
+            .chars()
+            .rev()
+            .take_while(|c| *c == '\\')
+            .count()
+            % 2
+            == 0;
     // Match the JSON compiler's ASCII semantics for JavaScript digit/word classes
     // and escape Lark delimiters before inserting the expression into a terminal.
-    let body = llguidance::regex_to_lark(&pattern[1..pattern.len() - 1], "dw");
+    let end = pattern.len() - usize::from(anchored_end);
+    let body = llguidance::regex_to_lark(&pattern[1..end], "dw");
+    let end_anchor = if anchored_end { "$" } else { "" };
     let full = regex_syntax::Parser::new()
-        .parse(&format!("^{body}$"))
+        .parse(&format!("^{body}{end_anchor}"))
         .context("unsupported string pattern")?;
     let inner = regex_syntax::Parser::new()
         .parse(&body)
@@ -1252,14 +1255,19 @@ fn string_pattern_body(pattern: &Value) -> Result<String> {
         full.properties()
             .look_set_prefix()
             .contains(regex_syntax::hir::Look::Start)
-            && full
-                .properties()
-                .look_set_suffix()
-                .contains(regex_syntax::hir::Look::End)
+            && (!anchored_end
+                || full
+                    .properties()
+                    .look_set_suffix()
+                    .contains(regex_syntax::hir::Look::End))
             && inner.properties().look_set().is_empty(),
-        "pattern requires whole-value anchors and no internal assertions"
+        "pattern requires shared outer anchors and no internal assertions"
     );
-    Ok(body)
+    Ok(if anchored_end {
+        body
+    } else {
+        format!("(?:{body})(.|\\n)*")
+    })
 }
 
 fn compile_string_pattern(pattern: &Value) -> Result<regex::Regex> {
@@ -3335,7 +3343,6 @@ mod tests {
             serde_json::json!("^(?=x)x$"),
             serde_json::json!("^a|b$"),
             serde_json::json!("^(?m:a$)$"),
-            serde_json::json!("^a\\$"),
             serde_json::json!(format!("^{}$", "a".repeat(4096))),
         ] {
             assert!(compile_string_pattern(&pattern).is_err());
@@ -3420,6 +3427,79 @@ mod tests {
                     "<|tool_call>call:rename{to:<|\"|>-agent<|\"|>}<tool_call|>"
                 ))
                 .is_err()
+                || !invalid.is_accepting().unwrap()
+        );
+    }
+
+    #[test]
+    fn prefix_patterns_preserve_json_schema_semantics_in_native_and_json_grammars() {
+        let schema = serde_json::json!({"type":"string", "pattern":"^ses", "maxLength":32});
+        let mut nodes = 0;
+        validate_schema_node(&schema, 0, &mut nodes).unwrap();
+        for value in ["ses", "ses_123", "session\nnext", "ses_日本"] {
+            validate_schema_value(&schema, &serde_json::json!(value)).unwrap();
+        }
+        for value in [
+            "",
+            "xses_123",
+            "SES",
+            "ses_123456789012345678901234567890123",
+        ] {
+            assert!(validate_schema_value(&schema, &serde_json::json!(value)).is_err());
+        }
+        for pattern in ["ses", "ses$", "^ses|other", "^ses\\b", "^(?=ses)ses"] {
+            assert!(compile_string_pattern(&serde_json::json!(pattern)).is_err());
+        }
+        // A final escaped dollar is a literal in a prefix pattern, not an end anchor.
+        assert!(compile_string_pattern(&serde_json::json!(r"^a\$"))
+            .unwrap()
+            .is_match("a$tail"));
+        let tool = ToolDefinition {
+            name: "subagent".to_owned(),
+            description: None,
+            parameters: serde_json::json!({"type":"object", "properties":{"sessionID":schema},
+                                         "required":["sessionID"], "additionalProperties":false}),
+            strict: None,
+        };
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let options = ToolConstraintOptions {
+            choice: ToolChoiceConstraint::Required,
+            allow_parallel_calls: false,
+        };
+        for (plan, prefix, suffix) in [
+            (
+                tokenizer
+                    .compile_qwen_tools(std::slice::from_ref(&tool), &options)
+                    .unwrap(),
+                "<tool_call><function=subagent><parameter=sessionID>",
+                "</parameter></function></tool_call>",
+            ),
+            (
+                tokenizer
+                    .compile_llama_tools(std::slice::from_ref(&tool), &options)
+                    .unwrap(),
+                "{\"name\":\"subagent\",\"parameters\":{\"sessionID\":\"",
+                "\"}}",
+            ),
+        ] {
+            for value in ["ses", "ses_123"] {
+                let mut session = plan.start_session().unwrap();
+                consume_bytes(&mut session, format!("{prefix}{value}{suffix}").as_bytes()).unwrap();
+                assert!(session.is_accepting().unwrap());
+            }
+            let mut invalid = plan.start_session().unwrap();
+            assert!(
+                consume_bytes(&mut invalid, format!("{prefix}xses{suffix}").as_bytes()).is_err()
+                    || !invalid.is_accepting().unwrap()
+            );
+        }
+        let json = tokenizer.compile_json_output(&tool.parameters).unwrap();
+        let mut valid = json.start_session().unwrap();
+        consume_bytes(&mut valid, br#"{"sessionID":"ses_123"}"#).unwrap();
+        assert!(valid.is_accepting().unwrap());
+        let mut invalid = json.start_session().unwrap();
+        assert!(
+            consume_bytes(&mut invalid, br#"{"sessionID":"xses_123"}"#).is_err()
                 || !invalid.is_accepting().unwrap()
         );
     }

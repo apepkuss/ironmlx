@@ -94,6 +94,7 @@ Use IronMLX as an Agent's local inference backend and choose the configuration g
 | Agent | Configuration |
 | --- | --- |
 | [Hermes Agent](hermes-agent.md) | Local Responses service |
+| [OpenCode](opencode.md) | One-click CLI / Desktop setup with native Chat Completions and supported model reasoning variants |
 | [oh-my-pi](oh-my-pi.md) | Local OpenAI-compatible service |
 | [DeepSeek Harness (DSH)](dsh.md) | [Desktop App](dsh.md#dsh-desktop-app-configuration) or [CLI](dsh.md#dsh-cli-configuration) |
 

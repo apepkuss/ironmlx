@@ -40,6 +40,7 @@ PAGES = (
     ("hermes-agent.md", "Hermes Agent", "Hermes Agent", "Connect Hermes Agent to your local inference service.", "将 Hermes Agent 接入本地推理服务。"),
     ("oh-my-pi.md", "oh-my-pi", "oh-my-pi", "Configure oh-my-pi to use IronMLX.", "配置 oh-my-pi 使用 IronMLX。"),
     ("dsh.md", "DeepSeek Harness (DSH)", "DeepSeek Harness（DSH）", "Connect DSH CLI and DSH Desktop to IronMLX.", "将 DSH CLI 与 DSH Desktop 接入 IronMLX。"),
+    ("opencode.md", "OpenCode", "OpenCode", "Set up OpenCode CLI and Desktop with native Chat Completions and model reasoning variants.", "一键配置 OpenCode CLI 与 Desktop，使用原生 Chat Completions 和模型思考档位。"),
     ("dflash2-server-api.md", "DFlash2 configuration and usage", "DFlash2 配置与使用", "Configure DFlash2 for CLI generation, HTTP serving, or the App.", "通过 CLI 或 App 配置 DFlash2 加速与推理服务。"),
     ("mtp-server-api.md", "Qwen MTP configuration and usage", "Qwen MTP 配置与使用", "Enable Qwen MTP in CLI generation and HTTP serving.", "配置 Qwen MTP 的 CLI 生成与 HTTP 服务，了解请求限制。"),
     ("engine-pool.md", "CLI multi-model serving (EnginePool)", "CLI 多模型服务（EnginePool）", "Configure model routing and loading with a CLI manifest.", "通过 CLI 配置多模型路由、加载与卸载。"),
@@ -63,11 +64,11 @@ GROUPS = (
     ("start", "Getting started", "开始使用", "Everything you need for your first local inference.", "从安装到首次请求，开始本地推理。", PAGES[:3]),
     ("benchmarks", "Benchmarks", "性能对比", "Measured comparisons with other local inference applications on the same Mac, and IronMLX long-context measurements.", "在同一台 Mac 上与其他本地推理应用的实测对比，以及 IronMLX 长上下文实测。", PAGES[3:12]),
     ("api", "Development & API", "开发与 API", "Integrate APIs, build from source, and contribute to IronMLX.", "接入 API、从源码构建与参与 IronMLX 开发。", PAGES[12:24]),
-    ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[24:27]),
-    ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[27:31]),
-    ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[31:37]),
-    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[37:41]),
-    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[41:]),
+    ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[24:28]),
+    ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[28:32]),
+    ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[32:38]),
+    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[38:42]),
+    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[42:]),
 )
 PAGE_MAP = {entry[0]: entry for entry in PAGES}
 GROUP_MAP = {entry[0]: group for group in GROUPS for entry in group[5]}

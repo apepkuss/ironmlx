@@ -438,9 +438,10 @@ development dependencies excluded, build dependencies retained.
 | MLX Audio diarization implementation MIT notice | `4ef6c3a577ade12d946e4b1d1870e4ba67fb5b9a` | Copyright (c) 2024 Prince Canuma | MIT | `THIRD_PARTY_LICENSES/audio-mlx-audio-mit.txt` | `ironmlx-audio/licenses/mlx-audio-MIT.txt` | https://github.com/Blaizzy/mlx-audio |
 | ModelScope inline logo (LobeHub) | `a94750e3f5f8fc33757b839d85030e742284e43a` | Copyright (c) 2023 LobeHub; brand marks belong to their respective owners. | MIT | `THIRD_PARTY_LICENSES/asset-modelscope-lobehub-mit.txt` | `ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html` | https://github.com/lobehub/lobe-icons/blob/a94750e3f5f8fc33757b839d85030e742284e43a/src/ModelScope/components/Color.tsx |
 | oh-my-pi logo | `v17.2.12` | Copyright (c) 2025 Mario Zechner; Copyright (c) 2025-2026 Can Bölük | MIT | `THIRD_PARTY_LICENSES/asset-oh-my-pi-mit.txt` | `ironmlx-app/Sources/IronMLXAppCore/Resources/oh-my-pi-logo.svg` | https://github.com/can1357/oh-my-pi/blob/45e12e5bb758198a920c6070e7e64cb33b21beac/assets/icon.svg |
+| OpenCode logo | `v2.2.5` | Copyright (c) 2025 opencode | MIT | `THIRD_PARTY_LICENSES/asset-opencode-mit.txt` | `ironmlx-app/Sources/IronMLXAppCore/Resources/opencode-logo.svg` | https://github.com/anomalyco/opencode/blob/9bbb8ce18c80f099e0e448775f59d965ead40a21/packages/ui/src/assets/favicon/favicon.svg |
 | torchaudio algorithm BSD notice | `v2.10.0` | Copyright (c) 2017 Facebook Inc. (Soumith Chintala) | BSD-2-Clause | `THIRD_PARTY_LICENSES/audio-torchaudio-BSD.txt` | `ironmlx-audio/licenses/torchaudio-BSD.txt` | https://github.com/pytorch/audio |
 
-Hermes Agent, oh-my-pi, Hugging Face and ModelScope names and logos identify
+OpenCode, Hermes Agent, oh-my-pi, Hugging Face and ModelScope names and logos identify
 supported third-party integrations. No affiliation or endorsement is
 implied. All trademarks remain the property of their respective owners.
 

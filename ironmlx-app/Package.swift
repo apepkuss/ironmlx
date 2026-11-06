@@ -50,6 +50,7 @@ let package = Package(
                 .copy("Resources/menubar-icon.png"),
                 .copy("Resources/menubar-icon@2x.png"),
                 .copy("Resources/oh-my-pi-logo.svg"),
+                .copy("Resources/opencode-logo.svg"),
                 .copy("Resources/sidebar-logo@2x.png"),
             ]
         ),

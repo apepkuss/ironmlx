@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parent.parent
 ENGLISH = ROOT / "docs"
 CHINESE = ENGLISH / "zh-CN"
 PAIRED_DOCS = (
-    "automatic-updates.md", "building-from-source.md", "known-issues.md",
+    "automatic-updates.md", "building-from-source.md", "known-issues.md", "opencode.md",
     "privacy.md", "release-notes/0.1.0.md", "release-notes/0.2.0.md",
     "release-notes/0.3.0.md", "release-notes/0.3.0-validation.md",
     "release-notes/0.2.0-rc.4-validation.md",

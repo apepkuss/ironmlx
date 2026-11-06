@@ -59,4 +59,4 @@ For LAN authentication, see [Service and management API](service-api.md#service-
 
 ## Agent integrations
 
-Follow [Hermes Agent](hermes-agent.md), [oh-my-pi](oh-my-pi.md), or [DeepSeek Harness (DSH)](dsh.md) for application setup.
+Follow [OpenCode](opencode.md), [Hermes Agent](hermes-agent.md), [oh-my-pi](oh-my-pi.md), or [DeepSeek Harness (DSH)](dsh.md) for application setup.

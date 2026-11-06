@@ -63,6 +63,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private var settingsSaveInProgress = false
     var hermesService = HermesIntegrationService()
     private var hermesSetupPending = false
+    var openCodeService = OpenCodeIntegrationService()
+    private var openCodeSetupPending = false
     var ompService = OMPIntegrationService()
     private var ompSetupPending = false
     var dshDesktopService = DSHDesktopIntegrationService()
@@ -231,6 +233,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             let isHermesGuide = url.host == "hermes-agent.nousresearch.com"
                 && ["/docs/integrations/providers", "/docs/zh-Hans/integrations/providers",
                     "/docs/getting-started/installation"].contains(url.path)
+            let isOpenCodeGuide = url.host == "opencode.ai" && ["/v2/docs", "/v2/docs/providers"].contains(url.path)
             let isOMPGuide = url.host == "omp.sh" && ["/docs/custom-models", "/docs/quickstart"].contains(url.path)
             let isDSHDesktopDownload = Self.isDSHDesktopDownloadURL(url)
             let isOfficialDSHInstallation = Self.isOfficialDSHInstallationURL(url)
@@ -238,7 +241,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 && ["/deepseek-harness/guide/providers", "/deepseek-harness/en/guide/providers"].contains(url.path)
             let isIronMLXDSHGuide = url.host == "github.com"
                 && ["/apepkuss/ironmlx/blob/dev/docs/dsh.md", "/apepkuss/ironmlx/blob/dev/docs/zh-CN/dsh.md"].contains(url.path)
-            guard isHermesGuide || isOMPGuide || isDSHGuide || isIronMLXDSHGuide || isDSHDesktopDownload || isOfficialDSHInstallation else { return }
+            guard isHermesGuide || isOpenCodeGuide || isOMPGuide || isDSHGuide || isIronMLXDSHGuide || isDSHDesktopDownload || isOfficialDSHInstallation else { return }
             NSWorkspace.shared.open(url)
         case "setLanguage":
             updateConfig { $0.language = stringBody(body) }
@@ -537,6 +540,69 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    private func configureOpenCode(path: String, modelID: String?) {
+        guard !openCodeSetupPending else {
+            sendFetchResult(path: path, jsonString: #"{"success":false,"code":"busy"}"#)
+            return
+        }
+        openCodeSetupPending = true
+        let service = openCodeService
+        Task {
+            defer { openCodeSetupPending = false }
+            let installation = await service.inspect()
+            guard installation.success else {
+                sendFetchResult(path: path, jsonString: (try? Self.jsonString(installation)) ?? "null")
+                return
+            }
+            guard let modelID, !modelID.isEmpty, modelID != "MODEL_ID" else {
+                sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
+                return
+            }
+            let config = configStore.load()
+            guard !config.isLANMode else {
+                sendFetchResult(path: path, jsonString: #"{"success":false,"code":"local_only"}"#)
+                return
+            }
+            do {
+                let client = BackendAPIClient(host: config.host, port: config.port)
+                let loaded: [BackendLoadedModelInfo]
+                if configuredDFlash2Target(in: config) == modelID {
+                    // Exclusive DFlash2 serving exposes health and /v1/models, not daemon admin APIs.
+                    let health = try await client.fetchHealthz()
+                    guard health.status == "healthy", health.dflash2?.enabled == true,
+                          AppConfig.normalizedModelReference(health.model.name) == modelID else {
+                        sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
+                        return
+                    }
+                    loaded = LegacyHealthAdapter().legacyStatus(from: health).runtimeModels
+                } else {
+                    loaded = try await client.fetchLoadedModels()
+                }
+                guard let selected = loaded.first(where: { $0.id == modelID && $0.capabilities.runtimeKind == "causal" }) else {
+                    sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
+                    return
+                }
+                let data = try await client.fetchData(path: "/v1/models")
+                let response = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let models = response?["data"] as? [[String: Any]] ?? []
+                guard let model = models.first(where: { $0["id"] as? String == modelID }),
+                      let context = model["context_window"] as? Int,
+                      let output = model["max_output_tokens"] as? Int else {
+                    sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
+                    return
+                }
+                let reasoning = scanner.scan(loadedModels: [modelID]).first(where: { $0.id == modelID })?.reasoning
+                let result = await service.configure(model: .init(id: modelID, contextWindow: context,
+                                                                 maxTokens: min(output, context),
+                                                                 supportsVision: selected.capabilities.supportsVision,
+                                                                 reasoning: reasoning), port: config.port)
+                sendFetchResult(path: path, jsonString: try Self.jsonString(result))
+            } catch {
+                sendFetchResult(path: path, jsonString: #"{"success":false,"code":"backend_unavailable"}"#)
+            }
+        }
+    }
+
     private func configureOMP(path: String, modelID: String?) {
         guard !ompSetupPending else {
             sendFetchResult(path: path, jsonString: #"{"success":false,"code":"busy"}"#)
@@ -649,6 +715,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                                      mode: payload.body["mode"]?.stringValue)
         case "/admin/api/agents/hermes/configure":
             configureHermes(path: payload.path, modelID: payload.body["model"]?.stringValue)
+        case "/admin/api/agents/opencode/configure":
+            configureOpenCode(path: payload.path, modelID: payload.body["model"]?.stringValue)
         case "/admin/api/agents/omp/configure":
             configureOMP(path: payload.path, modelID: payload.body["model"]?.stringValue)
         case "/admin/api/agents/dsh-desktop/configure":
