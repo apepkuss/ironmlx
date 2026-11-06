@@ -3126,8 +3126,10 @@ fn try_restore_paged_prefix_for_prompt(
 /// its next turn shares, see [`PagedPrefixCacheConfig::turn_reusable_len`])
 /// unless the prefill starts past it, else before the last token. A chunked
 /// prefill passes `start` = where it began or any later chunk start: once at
-/// the boundary it no longer splits. Every prefill path splits there, so
-/// speculative paths reproduce the ordinary cache.
+/// the boundary it no longer splits. Speculative paths split at the turn
+/// boundary too, but not before the last token, so without a turn boundary
+/// their chunks can differ from these and shape-sensitive arithmetic can
+/// diverge.
 fn prefix_split_point(
     config: Option<&PagedPrefixCacheConfig>,
     prompt_ids: &[u32],
