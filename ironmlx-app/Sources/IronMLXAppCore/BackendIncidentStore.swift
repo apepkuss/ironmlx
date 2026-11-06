@@ -41,6 +41,9 @@ public struct BackendIncidentRecord: Codable, Equatable, Sendable {
 
     public var schemaVersion: Int
     public var incidentType: BackendIncidentType
+    // A separate optional key, not a new incident type: older app versions decode
+    // the whole store at once, and one unknown type would discard their history.
+    public var readinessFailure: Bool
     public var id: UUID
     public var occurredAt: Date
     public var updatedAt: Date
@@ -82,6 +85,9 @@ public struct BackendIncidentRecord: Codable, Equatable, Sendable {
     }
 
     public var primaryFailureReason: BackendRecoveryFailureReason? {
+        if readinessFailure {
+            return nil
+        }
         if recoveryStatus == .automaticRecoveryStopped {
             return .crashLoopBreaker
         }
@@ -96,11 +102,13 @@ public struct BackendIncidentRecord: Codable, Equatable, Sendable {
 
     public init(
         id: UUID = UUID(),
+        readinessFailure: Bool = false,
         termination: BackendProcessTermination,
         snapshot: BackendRecoverySnapshot
     ) {
         schemaVersion = Self.currentSchemaVersion
         incidentType = .unexpectedBackendExit
+        self.readinessFailure = readinessFailure
         self.id = id
         occurredAt = termination.occurredAt
         updatedAt = termination.occurredAt
@@ -138,6 +146,7 @@ public struct BackendIncidentRecord: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
         case incidentType
+        case readinessFailure
         case id
         case occurredAt
         case updatedAt
@@ -168,6 +177,7 @@ public struct BackendIncidentRecord: Codable, Equatable, Sendable {
             BackendIncidentType.self,
             forKey: .incidentType
         ) ?? .unexpectedBackendExit
+        readinessFailure = try container.decodeIfPresent(Bool.self, forKey: .readinessFailure) ?? false
         id = try container.decode(UUID.self, forKey: .id)
         occurredAt = try container.decode(Date.self, forKey: .occurredAt)
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? occurredAt
@@ -247,6 +257,7 @@ public struct BackendIncidentSummary: Codable, Equatable, Sendable {
     public var id: UUID
     public var schemaVersion: Int
     public var incidentType: BackendIncidentType
+    public var readinessFailure: Bool
     public var occurredAt: Date
     public var updatedAt: Date
     public var affectedModels: [String]
@@ -258,6 +269,7 @@ public struct BackendIncidentSummary: Codable, Equatable, Sendable {
         id = record.id
         schemaVersion = record.schemaVersion
         incidentType = record.incidentType
+        readinessFailure = record.readinessFailure
         occurredAt = record.occurredAt
         updatedAt = record.updatedAt
         affectedModels = record.modelsBeforeCrash
@@ -270,6 +282,7 @@ public struct BackendIncidentSummary: Codable, Equatable, Sendable {
         case id
         case schemaVersion = "schema_version"
         case incidentType = "incident_type"
+        case readinessFailure = "readiness_failure"
         case occurredAt = "occurred_at"
         case updatedAt = "updated_at"
         case affectedModels = "affected_models"
@@ -282,6 +295,7 @@ public struct BackendIncidentSummary: Codable, Equatable, Sendable {
 public struct BackendIncidentDetail: Codable, Equatable, Sendable {
     public var schemaVersion: Int
     public var incidentType: BackendIncidentType
+    public var readinessFailure: Bool
     public var id: UUID
     public var occurredAt: Date
     public var updatedAt: Date
@@ -306,6 +320,7 @@ public struct BackendIncidentDetail: Codable, Equatable, Sendable {
     init(record: BackendIncidentRecord) {
         schemaVersion = record.schemaVersion
         incidentType = record.incidentType
+        readinessFailure = record.readinessFailure
         id = record.id
         occurredAt = record.occurredAt
         updatedAt = record.updatedAt
@@ -331,6 +346,7 @@ public struct BackendIncidentDetail: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case incidentType = "incident_type"
+        case readinessFailure = "readiness_failure"
         case id
         case occurredAt = "occurred_at"
         case updatedAt = "updated_at"

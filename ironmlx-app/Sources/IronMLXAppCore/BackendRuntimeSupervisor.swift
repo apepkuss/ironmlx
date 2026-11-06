@@ -135,6 +135,7 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
     public typealias Sleep = @Sendable (TimeInterval) async -> Void
     public typealias ReadinessWaiter =
         @Sendable (_ config: AppConfig, _ timeout: TimeInterval) async throws -> Void
+    public typealias ErrorLogger = @Sendable (String) -> Void
 
     public private(set) var lastEvent: BackendRuntimeEvent?
     public private(set) var lastIncident: BackendIncidentRecord?
@@ -169,6 +170,7 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
     private let policy: BackendRecoveryPolicy
     private let sleep: Sleep
     private let readinessWaiter: ReadinessWaiter
+    private let errorLogger: ErrorLogger
     private var activeIncident: ActiveBackendIncident?
     private var breakerActive = false
     private var recoveryTask: Task<Void, Never>?
@@ -204,7 +206,8 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
             try await BackendAPIClient(host: config.host, port: config.port)
                 .waitUntilReady(timeout: timeout)
         },
-        loadActivity: ModelLoadActivityCenter? = nil
+        loadActivity: ModelLoadActivityCenter? = nil,
+        errorLogger: @escaping ErrorLogger = { IronMLXAppLogger.error($0) }
     ) {
         self.processManager = processManager
         self.configStore = configStore
@@ -221,6 +224,7 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
         self.policy = policy
         self.sleep = sleep
         self.readinessWaiter = readinessWaiter
+        self.errorLogger = errorLogger
         self.confirmedSnapshot = BackendRecoverySnapshot.capture(
             config: configStore.load(),
             scanner: scanner,
@@ -437,23 +441,29 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
             guard !Task.isCancelled, !(error is CancellationError) else {
                 throw CancellationError()
             }
-            IronMLXAppLogger.error("Backend readiness failed: \(error.localizedDescription)")
             let startupExit = error as? BackendStartupExitError
+            let detail = "Backend health check failed: \(error.localizedDescription)"
+            let incident = recordReadinessFailure(
+                detail: detail,
+                snapshot: snapshot,
+                launchID: launchID,
+                automaticRecoveryIncidentID: incidentID
+            )
             processManager.transition(to: .failed, error: error.localizedDescription)
             publish(
                 BackendRuntimeEvent(
                     phase: .failed,
                     runtimeState: .failed,
-                    incidentID: incidentID,
+                    incidentID: incident?.id ?? incidentID,
                     launchID: launchID,
                     pid: startupExit?.termination.pid,
                     terminationStatus: startupExit?.termination.terminationStatus,
                     terminationReason: startupExit?.termination.terminationReason,
                     errorCode: .backendReadinessFailed,
-                    detail: "Backend health check failed: \(error.localizedDescription)",
+                    detail: detail,
                     logTail: startupExit.map {
                         BackendIncidentRecord.sanitizedLogTail($0.termination.logTail)
-                    } ?? activeIncident?.record.logTail,
+                    } ?? incident?.logTail ?? activeIncident?.record.logTail,
                     canRetry: true,
                     processHealthy: false
                 )
@@ -567,6 +577,45 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
             isAutomaticRecovery: isAutomaticRecovery,
             onProcessReady: onProcessReady
         )
+    }
+
+    // An automatic recovery already owns an incident, and an unexpected exit is
+    // recorded by processDidTerminate. Only the backend this path stopped itself
+    // would otherwise leave no trace of why it was stopped.
+    private func recordReadinessFailure(
+        detail: String,
+        snapshot: BackendRecoverySnapshot,
+        launchID: UUID,
+        automaticRecoveryIncidentID: UUID?
+    ) -> BackendIncidentRecord? {
+        let termination = processManager.lastTermination?.launchID == launchID
+            ? processManager.lastTermination
+            : nil
+        let timeout = policy.readinessTimeout
+        let models = snapshot.models.map(\.id).joined(separator: ", ")
+        errorLogger(
+            "Backend readiness failed: launch=\(launchID.uuidString)"
+                + " pid=\(termination.map { String($0.pid) } ?? "unknown")"
+                + " timeout=\(Int(timeout))s default=\(snapshot.config.defaultModelReference ?? "none")"
+                + " models=[\(models)] detail=\(detail)"
+        )
+        guard automaticRecoveryIncidentID == nil,
+              let termination,
+              termination.stopIntent == .startupFailureCleanup
+        else {
+            return nil
+        }
+        var record = BackendIncidentRecord(
+            readinessFailure: true,
+            termination: termination,
+            snapshot: snapshot
+        )
+        record.failedModels = record.modelsBeforeCrash
+        record.recoveryResult = "failed"
+        record.error = detail
+        lastIncident = record
+        persistIncident(record)
+        return record
     }
 
     private func applyRecoveryResult(
