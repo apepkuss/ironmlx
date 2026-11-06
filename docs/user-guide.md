@@ -179,6 +179,7 @@ for the corresponding `audio.execution` fields and scheduling semantics.
 
 - [Troubleshooting](troubleshooting.md)
 - [Known issues](known-issues.md)
+- [0.3.0 release notes](release-notes/0.3.0.md)
 - [0.2.0 release notes](release-notes/0.2.0.md)
 - [0.1.0 release notes](release-notes/0.1.0.md)
 

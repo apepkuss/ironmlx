@@ -30,7 +30,7 @@ PAGES = (
     ("text-vision-api.md", "Text and vision API", "文本与视觉 API", "Use Responses, Chat Completions, and Messages for text and image understanding.", "查阅文本与图片理解、思考、工具、结构化输出和流式协议。"),
     ("text-embeddings.md", "Embedding API", "Embedding API", "Create text, image, audio, and combined vectors with EmbeddingGemma 2.", "通过 EmbeddingGemma 2 生成文本、图片、音频与组合向量。"),
     ("audio-speech-api.md", "Speech synthesis API", "语音合成 API", "Generate speech and manage voices through the local API.", "通过本地 API 合成语音与管理声音配置。"),
-    ("audio-transcriptions-api.md", "Speech recognition and alignment API", "语音识别与对齐 API", "Transcribe audio, align supplied text, or return timestamps with the fixed two-model workflow.", "单独转写、对齐已有文字，或通过固定双模型流程返回文字与时间戳。"),
+    ("audio-transcriptions-api.md", "Speech recognition, alignment and diarization API", "语音识别、对齐与说话人分离 API", "Transcribe files or realtime audio, align text, generate subtitles, and add speaker labels.", "转写文件或实时音频、对齐文字、生成字幕，并添加说话人标签。"),
     ("image-generation-api.md", "Image generation API", "图片生成 API", "Generate images and edit a reference image through the local API.", "通过本地 API 生成图片与编辑参考图片。"),
     ("laya-systemone-api.md", "System One API", "System One API", "Send choice, score, and true/false probability requests to Laya.", "通过 Laya 处理选择、评分与真假概率请求。"),
     ("openai-decisions-api.md", "OpenAI Decisions API", "OpenAI Decisions API", "Call Laya with the official OpenAI SDK Decisions API.", "通过官方 OpenAI SDK 的 Decisions API 调用 Laya。"),
@@ -51,6 +51,7 @@ PAGES = (
     ("storage-and-uninstall.md", "Storage and uninstall", "数据位置与卸载", "Find local data and remove the app when needed.", "查找本地数据目录与卸载方法。"),
     ("support.md", "Support", "获取支持", "Find reporting guidance and the supported platform.", "了解支持平台与问题反馈方式。"),
     ("versioning-and-releases.md", "Versioning and releases", "版本与发布", "Understand version numbers and release channels.", "了解版本编号与发布渠道。"),
+    ("release-notes/0.3.0.md", "0.3.0 release notes", "0.3.0 发布说明", "Review the changes in version 0.3.0.", "查看 0.3.0 版本的变更。"),
     ("release-notes/0.2.0.md", "0.2.0 release notes", "0.2.0 发布说明", "Review the changes in version 0.2.0.", "查看 0.2.0 版本的变更。"),
     ("release-notes/0.1.0.md", "0.1.0 release notes", "0.1.0 发布说明", "Review the changes in version 0.1.0.", "查看 0.1.0 版本的变更。"),
     ("security-boundary.md", "Security boundary", "安全边界", "Understand local access and network exposure.", "了解本地访问与网络暴露边界。"),
@@ -65,8 +66,8 @@ GROUPS = (
     ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[24:27]),
     ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[27:31]),
     ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[31:37]),
-    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[37:40]),
-    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[40:]),
+    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[37:41]),
+    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[41:]),
 )
 PAGE_MAP = {entry[0]: entry for entry in PAGES}
 GROUP_MAP = {entry[0]: group for group in GROUPS for entry in group[5]}

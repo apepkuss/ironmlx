@@ -152,6 +152,7 @@ App 自动准备语音资源。如果模型列表提示资源缺失，点击“�
 
 - [故障排查](troubleshooting.md)
 - [Known Issues](known-issues.md)
+- [0.3.0 发布说明](release-notes/0.3.0.md)
 - [0.2.0 发布说明](release-notes/0.2.0.md)
 - [0.1.0 发布说明](release-notes/0.1.0.md)
 

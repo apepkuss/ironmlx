@@ -1,14 +1,15 @@
-# Known issues and limitations — 0.2.0
+# Known issues and limitations — 0.3.0
 
 [简体中文](zh-CN/known-issues.md)
 
 This page lists usage limitations. It is not a record of completed or pending release tests.
-For changes in this release line, see the [0.2.0 release notes](release-notes/0.2.0.md).
+For changes in this release line, see the [0.3.0 release notes](release-notes/0.3.0.md).
 
 ## Model and API limitations
 
 - Image requests accept JPEG/PNG/WebP base64 content, not remote image URLs.
-- Text, image and audio embeddings are limited to EmbeddingGemma 2 BF16 and affine4; video embeddings are unsupported. See the [Embedding API](text-embeddings.md). Other embedding, reranker and ASR metadata recognition does not imply runtime support. Speech synthesis is limited to the documented IndexTTS 2.5 profile and its separate audio runtime.
+- Text, image and audio embeddings are limited to EmbeddingGemma 2 BF16 and affine4; video embeddings are unsupported. See the [Embedding API](text-embeddings.md). Other embedding and reranker metadata recognition does not imply runtime support. Speech synthesis is limited to the documented IndexTTS 2.5 profile and its separate audio runtime.
+- Speech recognition is limited to the documented Qwen3-ASR checkpoints; timestamps/subtitles require Qwen3 ForcedAligner, and speaker labels require Nemotron 3. Realtime sessions support transcription, optional VAD and speaker labels, without translation, speech output or denoising. The Dashboard has no recording/transcription client. See the [audio API](audio-transcriptions-api.md) for limits and extensions; recognizing other ASR metadata does not imply runtime support.
 - Decision serving is limited to the documented Laya model and System One / Decisions contracts; Decisions inputs are text-only. It is not a generic classifier or embedding runtime.
 - DiffusionGemma does not support KV cache, Prompt Lookup or MTP and has a smaller sampling-parameter set.
 - MTP and auxiliary drafter support depends on the Qwen or Gemma model and a compatible auxiliary model. DFlash2 has a separate set of combination limits; see [Supported models](supported-models.md).
