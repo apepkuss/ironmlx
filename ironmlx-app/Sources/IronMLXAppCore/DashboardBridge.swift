@@ -281,9 +281,14 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         case "retryBackendRecovery":
             restartBackend()
         case "loadModel", "forceLoadModel":
-            loadBackendModel(instruction: Self.modelLoadInstruction(from: body), callback: .modelLoaded)
+            let instruction = Self.modelLoadInstruction(from: body)
+            loadBackendModel(
+                instruction: instruction,
+                callback: .modelLoaded(model: instruction.modelReference)
+            )
         case "unloadModel":
-            unloadBackendModel(modelReference: stringBody(body), callback: .modelUnloaded)
+            let model = stringBody(body)
+            unloadBackendModel(modelReference: model, callback: .modelUnloaded(model: model))
         case "downloadModel":
             startHuggingFaceDownload(json: stringBody(body))
         case "cancelModelDownload":
@@ -2772,7 +2777,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     useDFlash2: true,
                     dflash2ModelID: parameters.dflash2ModelID
                 ),
-                callback: .modelLoaded,
+                callback: .modelLoaded(model: model),
                 rollbackConfig: config,
                 rollbackParameters: previousParameters
             )
@@ -3007,10 +3012,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 }
                 guard canSyncBackendModelState,
                       backend.currentLaunchID == launchID,
-                      Self.modelStatusQueryRemainsCurrent(
-                    queriedConfig: config,
-                    currentConfig: currentConfig
-                ) else {
+                      config.hasSameModelIntent(as: currentConfig)
+                else {
                     return persistedModelState(config: currentConfig)
                 }
                 syncPersistedLoadedModelsIfNeeded(models)
@@ -3045,15 +3048,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     // must not replace the persisted startup intent.
     private var canSyncBackendModelState: Bool {
         backend.isRunning && (backend.state == .running || backend.state == .degraded)
-    }
-
-    private static func modelStatusQueryRemainsCurrent(
-        queriedConfig: AppConfig,
-        currentConfig: AppConfig
-    ) -> Bool {
-        queriedConfig.restoredModelReferences == currentConfig.restoredModelReferences
-            && queriedConfig.pinnedModelReferences == currentConfig.pinnedModelReferences
-            && queriedConfig.defaultModelReference == currentConfig.defaultModelReference
     }
 
     private func recoverDFlash2ModelState(
@@ -3368,29 +3362,23 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func configuredDFlash2Target(in config: AppConfig) -> String? {
-        guard let target = preferredDFlash2Target(in: config),
-              config.restoredModelReferences.contains(target)
-        else {
-            return nil
-        }
-        return target
+        config.configuredDFlash2Target(parameterStore: parameterStore)
     }
 
     private func preferredDFlash2Target(in config: AppConfig) -> String? {
-        guard let target = config.defaultModelReference,
-              parameterStore.parameters(for: target)?.dflash2Enabled == true
-        else {
-            return nil
-        }
-        return target
+        config.preferredDFlash2Target(parameterStore: parameterStore)
     }
 
     private func deliverModelOperationResult(jsonString: String, callback: ModelOperationCallback) {
         switch callback {
-        case .modelLoaded:
-            sendJavaScript("onModelLoaded(\(Self.jsStringLiteral(jsonString)))")
-        case .modelUnloaded:
-            sendJavaScript("onModelUnloaded(\(Self.jsStringLiteral(jsonString)))")
+        case .modelLoaded(let model):
+            sendJavaScript(
+                "onModelLoaded(\(Self.jsStringLiteral(jsonString)), \(Self.jsStringLiteral(model)))"
+            )
+        case .modelUnloaded(let model):
+            sendJavaScript(
+                "onModelUnloaded(\(Self.jsStringLiteral(jsonString)), \(Self.jsStringLiteral(model)))"
+            )
         case .fetch(let path):
             sendFetchResult(path: path, jsonString: jsonString)
         case .none:
@@ -3791,8 +3779,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private enum ModelOperationCallback {
-        case modelLoaded
-        case modelUnloaded
+        case modelLoaded(model: String)
+        case modelUnloaded(model: String)
         case fetch(path: String)
         case none
     }

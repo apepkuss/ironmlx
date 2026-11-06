@@ -168,6 +168,35 @@ func menuBarReflectsConfigurationRecoveryAndForwardsRecoveryAction() throws {
     #expect(recovery.presentationCount == 1)
 }
 
+@Test @MainActor
+func menuBarBackendListCannotEraseDFlash2StartupIntent() throws {
+    let root = try menuTemporaryDirectory()
+    let parameters = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    let model = "standalone/flash"
+    try parameters.recordDFlash2LoadPreference(modelID: model, enabled: true, dflash2ModelID: "draft")
+    let idle = AppConfig(defaultModel: "other", loadedModels: [])
+    let dflash2 = AppConfig(defaultModel: model, loadedModels: [model])
+
+    // The query started before the DFlash2 intent was saved.
+    #expect(!MenuBarController.backendModelListCanReplacePersistedState(
+        queriedConfig: idle,
+        currentConfig: dflash2,
+        parameterStore: parameters
+    ))
+    // The query started after the save, while the old daemon still answers.
+    #expect(!MenuBarController.backendModelListCanReplacePersistedState(
+        queriedConfig: dflash2,
+        currentConfig: dflash2,
+        parameterStore: parameters
+    ))
+    // Ordinary daemons stay authoritative for their loaded-model list.
+    #expect(MenuBarController.backendModelListCanReplacePersistedState(
+        queriedConfig: idle,
+        currentConfig: idle,
+        parameterStore: parameters
+    ))
+}
+
 @MainActor
 private final class MenuLoadedModelsNotificationProbe: NSObject {
     private(set) var notified = false

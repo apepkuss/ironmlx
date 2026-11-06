@@ -269,6 +269,31 @@ public extension AppConfig {
             .filter { $0 != model && references.contains($0) }
     }
 
+    func preferredDFlash2Target(parameterStore: ModelParameterStore) -> String? {
+        guard let target = defaultModelReference,
+              parameterStore.parameters(for: target)?.dflash2Enabled == true
+        else {
+            return nil
+        }
+        return target
+    }
+
+    func configuredDFlash2Target(parameterStore: ModelParameterStore) -> String? {
+        guard let target = preferredDFlash2Target(parameterStore: parameterStore),
+              restoredModelReferences.contains(target)
+        else {
+            return nil
+        }
+        return target
+    }
+
+    // A status query answered for an older intent must not replace a newer one.
+    func hasSameModelIntent(as other: AppConfig) -> Bool {
+        restoredModelReferences == other.restoredModelReferences
+            && pinnedModelReferences == other.pinnedModelReferences
+            && defaultModelReference == other.defaultModelReference
+    }
+
     mutating func replaceLoadedModels(_ models: [String], defaultModel: String?) {
         let references = Self.normalizedModelReferences(models)
         loadedModels = references

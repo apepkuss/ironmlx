@@ -54,6 +54,7 @@ enum MenuBarIconLoader {
 public final class MenuBarController: NSObject, NSMenuDelegate {
     private let statusItem: NSStatusItem
     private let configStore: AppConfigStore
+    private let parameterStore: ModelParameterStore
     private let backend: any MenuBarBackendProcessManaging
     private let dashboard: DashboardWindowController
     private let updateManager: any AppUpdateManaging
@@ -69,12 +70,14 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         configStore: AppConfigStore,
         backend: any MenuBarBackendProcessManaging,
         dashboard: DashboardWindowController,
+        parameterStore: ModelParameterStore = .shared,
         updateManager: any AppUpdateManaging = DisabledAppUpdateManager(),
         configurationRecovery: any ConfigurationRecoveryManaging = DisabledConfigurationRecoveryManager(),
         notificationCenter: NotificationCenter = .default
     ) {
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.configStore = configStore
+        self.parameterStore = parameterStore
         self.backend = backend
         self.dashboard = dashboard
         self.updateManager = updateManager
@@ -302,7 +305,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
                 return
             }
             if backendModelListIsAuthoritative {
-                persistLoadedModelsIfNeeded(models)
+                persistLoadedModelsIfNeeded(models, queriedConfig: config)
             }
             let names = MenuBarMenuBuilder.modelNames(from: models)
             guard names != loadedModelNames else {
@@ -332,11 +335,32 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         isRefreshingLoadedModelNames = false
     }
 
-    private func persistLoadedModelsIfNeeded(_ models: [BackendLoadedModelInfo]) {
+    // A pending DFlash2 restart is still answered by the old daemon, whose list
+    // must not erase the startup intent that the restart is about to read.
+    static func backendModelListCanReplacePersistedState(
+        queriedConfig: AppConfig,
+        currentConfig: AppConfig,
+        parameterStore: ModelParameterStore
+    ) -> Bool {
+        queriedConfig.hasSameModelIntent(as: currentConfig)
+            && currentConfig.configuredDFlash2Target(parameterStore: parameterStore) == nil
+    }
+
+    private func persistLoadedModelsIfNeeded(
+        _ models: [BackendLoadedModelInfo],
+        queriedConfig: AppConfig
+    ) {
         let loaded = AppConfig.normalizedModelReferences(models.map(\.id))
         let pinned = AppConfig.normalizedModelReferences(models.filter(\.pinned).map(\.id))
         let backendDefault = AppConfig.normalizedModelReference(models.first(where: \.isDefault)?.id)
         let config = configStore.load()
+        guard Self.backendModelListCanReplacePersistedState(
+            queriedConfig: queriedConfig,
+            currentConfig: config,
+            parameterStore: parameterStore
+        ) else {
+            return
+        }
         let persistedLoaded = AppConfig.normalizedModelReferences(config.loadedModels ?? [])
         let persistedPinned = config.pinnedModelReferences
         let defaultChanged = backendDefault != nil && backendDefault != config.defaultModelReference

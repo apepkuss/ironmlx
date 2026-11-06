@@ -10370,9 +10370,22 @@
     if (label) label.textContent = text;
   }
 
+  // In-flight native operations. Model scans replace the table, so the busy
+  // state has to live outside the rows until the native callback arrives.
+  window.__MODEL_OPERATIONS__ = {}; // { modelId: 'loading' | 'unloading' }
+
+  function modelOperation(modelId) {
+    return window.__MODEL_OPERATIONS__[modelId] || '';
+  }
+
+  function finishModelOperation(modelId) {
+    delete window.__MODEL_OPERATIONS__[modelId];
+  }
+
   function loadModel(modelId, btn, useMtp, mtpModelId, useDFlash2, dflash2ModelId) {
     const dict = I18N[currentLang] || I18N.en;
     const saved = window.__MODEL_PARAMS__[modelId] || {};
+    window.__MODEL_OPERATIONS__[modelId] = 'loading';
     markModelActionLoading(btn, dict.action_loading || 'Loading...');
     updateModelStatusForAction(btn, 'model-busy', dict.status_loading || 'Loading...');
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loadModel) {
@@ -10422,6 +10435,7 @@
 
   function unloadModel(modelId, btn) {
     const dict = I18N[currentLang] || I18N.en;
+    window.__MODEL_OPERATIONS__[modelId] = 'unloading';
     btn.disabled = true;
     btn.textContent = dict.action_unloading || 'Unloading...';
     updateModelStatusForAction(btn, 'model-busy', dict.status_unloading || 'Unloading...');
@@ -10444,7 +10458,7 @@
     } catch (error) { console.error('Invalid load plan',error); }
   }
 
-  function onModelLoaded(resultJson) {
+  function onModelLoaded(resultJson, modelId) {
     let result = {};
     try {
       result = JSON.parse(resultJson);
@@ -10454,12 +10468,14 @@
       // would otherwise stay pinned at "加载中...". Reset the table
       // from backend state and tell the user something is off.
       console.error('onModelLoaded: JSON.parse failed', e, resultJson);
+      finishModelOperation(modelId);
       const dict = I18N[currentLang] || I18N.en;
       showToast(dict.err_callback_malformed || 'Internal error: callback payload could not be parsed. The button has been reset.', 'warn');
       syncModelList();
       return;
     }
     if (result.success) {
+      finishModelOperation(modelId);
       clearServerBanner();
       if (result.warning) {
         showToast(localizeWarningResult(result), 'info');
@@ -10481,13 +10497,18 @@
           }
         } else {
           // User declined — re-render to reset button
+          finishModelOperation(modelId);
           syncModelList();
         }
       });
       return; // async continuation handles both branches above
     } else if (result.error) {
+      finishModelOperation(modelId);
       showToast(localizeErrorResult(result), 'warn');
       // Re-render to reset button from "Loading..." back to correct state
+      syncModelList();
+    } else {
+      finishModelOperation(modelId);
       syncModelList();
     }
   }
@@ -10573,7 +10594,8 @@
   }
 
   // Called from Rust after unload completes
-  function onModelUnloaded(resultJson) {
+  function onModelUnloaded(resultJson, modelId) {
+    finishModelOperation(modelId);
     let result = {};
     try {
       result = JSON.parse(resultJson);
@@ -13143,6 +13165,16 @@
         title: ''
       };
     }
+    const operation = modelOperation(model.id);
+    if (operation) {
+      return {
+        dot: 'model-busy',
+        text: operation === 'unloading'
+          ? (dict.status_unloading || 'Unloading...')
+          : (dict.status_loading || 'Loading...'),
+        title: ''
+      };
+    }
     const readiness = modelReadiness(model);
     if (readiness.status === 'unsupported' || readiness.status === 'incomplete') {
       const text = readiness.status === 'incomplete' ? dict.status_incomplete
@@ -13541,6 +13573,13 @@
   }
 
   function renderModelLoadActions(model, escapedSq, escaped, actionClass, actionText, isLoaded) {
+    const operation = modelOperation(model.id);
+    if (operation) {
+      const dict = I18N[currentLang] || I18N.en;
+      return operation === 'unloading'
+        ? '<button class="action-btn action-unload" disabled data-model="' + escaped + '">' + (dict.action_unloading || 'Unloading...') + '</button>'
+        : '<button class="action-btn action-load" disabled data-model="' + escaped + '">' + (dict.action_loading || 'Loading...') + '</button>';
+    }
     if (isLoaded) {
       return '<button class="action-btn ' + actionClass + '" onclick="toggleModelLoad(\'' + escapedSq + '\', this)" data-model="' + escaped + '">' + actionText + '</button>';
     }
@@ -13629,7 +13668,7 @@
           ? (dict.model_import_source_badge || 'Imported model')
           : (m.source === 'ms' ? 'ModelScope' : 'HuggingFace');
         tr.innerHTML = '<td><div class="model-name"><span class="model-source-icon"' + modelColumnTooltipAttributes(sourceTooltip) + '>' + sourceIcon + '</span><span class="model-name-text"' + modelColumnTooltipAttributes(m.id) + '>' + escapeHTML(displayName) + '</span>' + renderMtpBadge(m) + renderDFlash2Badge(m)
-          + (isLoaded ? ' <button class="icon-btn pin-btn' + (m.pinned ? ' pinned' : '') + '" onclick="event.stopPropagation();togglePin(\'' + escapedSq + '\', this)" data-model="' + escaped + '"' + (dflash2Active ? ' data-dflash2="1"' : '') + modelColumnTooltipAttributes(pinTooltip(m.pinned, dflash2Active)) + ' style="vertical-align:middle;padding:0 2px;font-size:13px;opacity:' + (m.pinned ? '1' : '0.4') + '">&#x1F4CC;</button>' : '')
+          + (isLoaded && !modelOperation(m.id) ? ' <button class="icon-btn pin-btn' + (m.pinned ? ' pinned' : '') + '" onclick="event.stopPropagation();togglePin(\'' + escapedSq + '\', this)" data-model="' + escaped + '"' + (dflash2Active ? ' data-dflash2="1"' : '') + modelColumnTooltipAttributes(pinTooltip(m.pinned, dflash2Active)) + ' style="vertical-align:middle;padding:0 2px;font-size:13px;opacity:' + (m.pinned ? '1' : '0.4') + '">&#x1F4CC;</button>' : '')
           + '</div></td>'
           + '<td>' + renderModelType(m) + '</td>'
           + '<td>' + renderQuantBadge(m) + '</td>'
