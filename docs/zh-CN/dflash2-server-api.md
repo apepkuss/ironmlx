@@ -78,8 +78,9 @@ base model。只有同时满足后端 DFlash2 draft 配置约束，并与 target
 vocab、上下文长度、target 层数、RMS epsilon 和 RoPE theta 一致的
 draft（FFN 宽度不比较，因为 draft 有自己的 FFN；target tap 数量也与 draft 层数无关），才会出现在 target 的 DFlash2 选择器中；不完整或不兼容的 artifact fail closed。
 
-Dashboard 提供 DFlash2 开关、兼容 draft 选择、block size、运行时 draft 精度和
-Tensor Batch 上限。Tensor Batch 上限留空时不下发显式参数，由后端使用默认值
+Dashboard 提供 DFlash2 开关、兼容 draft 选择、运行时 draft 精度和
+Tensor Batch 上限。block size 只读显示，取所选 checkpoint 宽度并以 Q8 为上限；
+旧版 App 保存的值会被忽略，更宽的显式 block 只能通过 CLI 指定。Tensor Batch 上限留空时不下发显式参数，由后端使用默认值
 `4`；填写正整数时作为高级安全护栏下发。App 帮助信息同步说明该值与全局
 Max Sequences 的最小值关系。
 DFlash2 与 MTP、Prompt Lookup 严格互斥。启用后 App 只保留一个 default target，重启

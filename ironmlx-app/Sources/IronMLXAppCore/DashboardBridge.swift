@@ -2734,7 +2734,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     ) -> Bool {
         let changed = parameters.dflash2Enabled != previousParameters?.dflash2Enabled
             || parameters.dflash2ModelID != previousParameters?.dflash2ModelID
-            || parameters.dflash2BlockSizeValue != previousParameters?.dflash2BlockSizeValue
             || parameters.dflash2DraftBitsValue != previousParameters?.dflash2DraftBitsValue
             || parameters.dflash2TensorBatchMaxWidthValue
                 != previousParameters?.dflash2TensorBatchMaxWidthValue

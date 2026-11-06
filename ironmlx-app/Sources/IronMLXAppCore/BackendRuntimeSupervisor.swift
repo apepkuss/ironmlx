@@ -6,11 +6,14 @@ public struct BackendRecoveryPolicy: Equatable, Sendable {
     public var stableWindow: TimeInterval
     public var readinessTimeout: TimeInterval
 
+    /// The ordinary daemon answers health within a second; a DFlash2 launch
+    /// loads its target and draft and runs a startup warmup before it opens
+    /// HTTP. A launch that exits earlier fails at once instead of waiting.
     public init(
         maximumAutomaticRecoveryAttempts: Int = 1,
         automaticRecoveryDelay: TimeInterval = 1.0,
         stableWindow: TimeInterval = 60.0,
-        readinessTimeout: TimeInterval = 5.0
+        readinessTimeout: TimeInterval = 300.0
     ) {
         self.maximumAutomaticRecoveryAttempts = maximumAutomaticRecoveryAttempts
         self.automaticRecoveryDelay = automaticRecoveryDelay
@@ -162,6 +165,11 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
     private var stableWindowTask: Task<Void, Never>?
     private var launchCompletionWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
     private var confirmedSnapshot: BackendRecoverySnapshot
+    /// Launch whose readiness `launchAndRestore` is awaiting. Its exit fails
+    /// that start; it is not a crash for automatic recovery.
+    private var startupLaunchID: UUID?
+    private var startupReadiness: Task<Void, Error>?
+    private var startupExit: BackendProcessTermination?
 
     public init(
         processManager: BackendProcessManager,
@@ -371,7 +379,7 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
             resumeLaunchCompletionWaiters(for: launchID)
         }
         do {
-            try await readinessWaiter(snapshot.config, policy.readinessTimeout)
+            try await waitUntilLaunchIsReady(launchID, config: snapshot.config)
         } catch {
             if processManager.currentLaunchID == launchID, processManager.isRunning {
                 await processManager.stop(
@@ -383,9 +391,12 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
             if launchFailure(for: launchID) == .instanceAlreadyRunning {
                 throw BackendRuntimeSupervisorError.instanceAlreadyRunning
             }
-            guard !Task.isCancelled else {
+            // A planned stop of this launch belongs to whoever requested it.
+            guard !Task.isCancelled, !(error is CancellationError) else {
                 throw CancellationError()
             }
+            IronMLXAppLogger.error("Backend readiness failed: \(error.localizedDescription)")
+            let startupExit = error as? BackendStartupExitError
             processManager.transition(to: .failed, error: error.localizedDescription)
             publish(
                 BackendRuntimeEvent(
@@ -393,9 +404,14 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
                     runtimeState: .failed,
                     incidentID: incidentID,
                     launchID: launchID,
+                    pid: startupExit?.termination.pid,
+                    terminationStatus: startupExit?.termination.terminationStatus,
+                    terminationReason: startupExit?.termination.terminationReason,
                     errorCode: .backendReadinessFailed,
                     detail: "Backend health check failed: \(error.localizedDescription)",
-                    logTail: activeIncident?.record.logTail,
+                    logTail: startupExit.map {
+                        BackendIncidentRecord.sanitizedLogTail($0.termination.logTail)
+                    } ?? activeIncident?.record.logTail,
                     canRetry: true,
                     processHealthy: false
                 )
@@ -469,6 +485,13 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
     }
 
     private func processDidTerminate(_ termination: BackendProcessTermination) {
+        // The start awaiting this launch's health stops waiting at once.
+        let exitedDuringStartup = termination.launchID == startupLaunchID
+        if exitedDuringStartup {
+            startupExit = termination
+            startupReadiness?.cancel()
+        }
+
         if termination.stopIntent.isPlanned {
             processManager.transition(to: .stopped)
             return
@@ -505,6 +528,12 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
                     processHealthy: false
                 )
             )
+            return
+        }
+
+        // That start fails with this exit status; relaunching the same
+        // configuration here would only repeat it.
+        if exitedDuringStartup {
             return
         }
 
@@ -711,6 +740,48 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
         notificationCenter.post(name: .ironMLXBackendRuntimeDidChange, object: self)
     }
 
+    /// Wait for health while the launch is alive. `processDidTerminate`
+    /// cancels the wait when this launch exits, so an exit ends it at once
+    /// with the exit status instead of after the readiness timeout.
+    private func waitUntilLaunchIsReady(_ launchID: UUID, config: AppConfig) async throws {
+        let readinessWaiter = readinessWaiter
+        let timeout = policy.readinessTimeout
+        let readiness = Task { try await readinessWaiter(config, timeout) }
+        // Registered before the first suspension: the termination handler
+        // also runs on the main actor, so it cannot slip in ahead of this.
+        startupLaunchID = launchID
+        startupReadiness = readiness
+        startupExit = nil
+        defer {
+            if startupLaunchID == launchID {
+                startupLaunchID = nil
+                startupReadiness = nil
+                startupExit = nil
+            }
+        }
+        var waitError: Error?
+        do {
+            try await withTaskCancellationHandler {
+                try await readiness.value
+            } onCancel: {
+                readiness.cancel()
+            }
+        } catch {
+            waitError = error
+        }
+        if let startupExit, startupExit.launchID == launchID {
+            if startupExit.stopIntent.isPlanned {
+                throw CancellationError()
+            }
+            throw BackendStartupExitError(termination: startupExit)
+        }
+        if let waitError {
+            throw waitError
+        }
+        // Healthy: a later exit is a crash for automatic recovery.
+        startupLaunchID = nil
+    }
+
     private func waitForLaunchCompletion(_ launchID: UUID) async {
         guard processManager.currentLaunchID == launchID,
               state == .starting || state == .recovering
@@ -734,13 +805,21 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
         return processManager.lastTermination?.failureCode
     }
 
-    nonisolated private static func terminationDetail(
+    nonisolated fileprivate static func terminationDetail(
         _ termination: BackendProcessTermination
     ) -> String {
         if termination.terminationReason == "uncaught_signal" {
             return "signal \(termination.terminationStatus)"
         }
         return "exit code \(termination.terminationStatus)"
+    }
+}
+
+private struct BackendStartupExitError: LocalizedError {
+    let termination: BackendProcessTermination
+
+    var errorDescription: String? {
+        "backend exited during startup (\(BackendRuntimeSupervisor.terminationDetail(termination)))"
     }
 }
 

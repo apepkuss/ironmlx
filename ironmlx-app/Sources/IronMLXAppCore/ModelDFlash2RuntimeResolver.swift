@@ -3,6 +3,10 @@ import Foundation
 public struct ModelDFlash2Runtime: Equatable, Sendable {
     public static let qualifiedAutomaticBlockSizeCap = 8
 
+    public static func blockSize(forCheckpoint checkpointBlockSize: Int) -> Int {
+        min(checkpointBlockSize, qualifiedAutomaticBlockSizeCap)
+    }
+
     public var targetModelID: String
     public var targetModelDir: String
     public var draftModelID: String
@@ -40,7 +44,6 @@ public enum ModelDFlash2RuntimeError: LocalizedError, Equatable {
     case targetPathNotFound(model: String)
     case noCompatibleDraft(model: String)
     case draftPathNotFound(model: String)
-    case blockSizeExceedsCheckpoint(model: String, requested: Int, checkpoint: Int)
     case incompatibleAccelerationConfiguration(model: String)
     case draftPrecisionNotQualified(model: String, bits: Int)
 
@@ -52,8 +55,6 @@ public enum ModelDFlash2RuntimeError: LocalizedError, Equatable {
             return "No compatible DFlash2 draft is available for \(model)."
         case .draftPathNotFound(let model):
             return "DFlash2 draft is not available locally: \(model)."
-        case .blockSizeExceedsCheckpoint(let model, let requested, let checkpoint):
-            return "DFlash2 block size \(requested) exceeds \(model)'s checkpoint block size \(checkpoint)."
         case .incompatibleAccelerationConfiguration(let model):
             return "DFlash2 cannot be combined with MTP or repeated-text acceleration for \(model)."
         case .draftPrecisionNotQualified(let model, let bits):
@@ -125,16 +126,10 @@ public enum ModelDFlash2RuntimeResolver {
         ) else {
             throw ModelDFlash2RuntimeError.draftPathNotFound(model: selected)
         }
-        let requestedBlockSize = parameters?.dflash2BlockSizeValue
-        if let requestedBlockSize, requestedBlockSize > checkpointBlockSize {
-            throw ModelDFlash2RuntimeError.blockSizeExceedsCheckpoint(
-                model: selected,
-                requested: requestedBlockSize,
-                checkpoint: checkpointBlockSize
-            )
-        }
-        let resolvedBlockSize = requestedBlockSize
-            ?? min(checkpointBlockSize, ModelDFlash2Runtime.qualifiedAutomaticBlockSizeCap)
+        // The block size follows the draft checkpoint, capped at the qualified
+        // Q8 width. A `dflash2_block_size` saved by an earlier App is ignored:
+        // a narrower block forfeits draft budget the target profile expects.
+        let resolvedBlockSize = ModelDFlash2Runtime.blockSize(forCheckpoint: checkpointBlockSize)
         // Draft precision is a target qualification. Without an explicit
         // choice the target's first option applies (4-bit for both families);
         // Qwen3.6 MoE targets accept 4-bit and BF16 only.

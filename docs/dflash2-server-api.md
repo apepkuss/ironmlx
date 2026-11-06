@@ -57,7 +57,7 @@ The recorded `z-lab/Qwen3.8-27B-DFlash2` checkpoint declares block size 8, so au
 
 The scanner identifies `DFlash2DraftModel` as an auxiliary artifact. A draft appears in the selector only if it satisfies backend constraints and matches the target's hidden size, vocabulary, context length, layer count, RMS epsilon and RoPE theta. FFN widths are not compared because the draft has its own FFN, and the number of target taps is independent of the draft's depth. Incomplete or incompatible artifacts are rejected.
 
-Dashboard exposes the DFlash2 switch, compatible draft, block size, draft precision and Tensor Batch limit. An empty block size uses the selected checkpoint width capped at Q8. An empty tensor batch limit uses the backend default of 4. The effective tensor batch width is also bounded by Max Sequences.
+Dashboard exposes the DFlash2 switch, compatible draft, draft precision and Tensor Batch limit. Block size is shown read-only: it is the selected checkpoint width capped at Q8, and a value saved by an earlier App version is ignored. Wider explicit blocks remain a CLI option. An empty tensor batch limit uses the backend default of 4. The effective tensor batch width is also bounded by Max Sequences.
 Enabling DFlash2 retains one default target and restarts the backend into the fixed target/draft actor. Disabling or changing its settings also requires a controlled restart. Validation, startup or recovery failure restores the prior configuration and model parameters, then restarts the previous path.
 
 The App retains `GET /v1/models` with the stable target ID but no dynamic model-management API. Dashboard and menu bar recover target/draft state from health and saved settings without exposing the draft as an ordinary model.

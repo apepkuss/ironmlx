@@ -98,7 +98,8 @@ import Testing
     )
     let dflash2Runtime = try #require(resolvedDFlash2Runtime)
     #expect(dflash2Runtime.checkpointBlockSize == 8)
-    #expect(dflash2Runtime.blockSize == 6)
+    // A block size saved by an earlier App is ignored: the draft decides.
+    #expect(dflash2Runtime.blockSize == 8)
     #expect(dflash2Runtime.maxCacheCap == 65_536)
     let snapshot = BackendRecoverySnapshot.capture(
         config: config,
@@ -108,7 +109,7 @@ import Testing
     let recoveredModel = try #require(snapshot.models.first)
     #expect(recoveredModel.modelDir == target.path)
     #expect(recoveredModel.dflash2ModelDir == draft.path)
-    #expect(recoveredModel.dflash2BlockSize == 6)
+    #expect(recoveredModel.dflash2BlockSize == 8)
     #expect(recoveredModel.dflash2DraftBits == 8)
     #expect(recoveredModel.dflash2TensorBatchMaxWidth == 4)
 
@@ -126,7 +127,7 @@ import Testing
     #expect(await loader.calls.isEmpty)
 }
 
-@Test func dflash2RuntimeCapsAutomaticBlockSizeAtQ8AndAllowsExplicitQ16() throws {
+@Test func dflash2RuntimeCapsBlockSizeAtQ8AndIgnoresASavedBlockSize() throws {
     let root = try restartTemporaryDirectory()
     let targetID = "mlx-community/Qwen3.8-27B-4bit"
     let draftID = "z-lab/Qwen3.8-27B-DFlash2-b32"
@@ -168,21 +169,25 @@ import Testing
     #expect(automatic.checkpointBlockSize == 32)
     #expect(automatic.blockSize == 8)
 
-    try parameterStore.save(ModelParameters(
-        modelID: targetID,
-        dflash2Enabled: true,
-        dflash2ModelID: draftID,
-        dflash2BlockSize: "16"
-    ))
-    let resolvedExplicit = try ModelDFlash2RuntimeResolver.runtime(
-        for: targetID,
-        useDFlash2: nil,
-        scanner: scanner,
-        parameterStore: parameterStore
-    )
-    let explicit = try #require(resolvedExplicit)
-    #expect(explicit.checkpointBlockSize == 32)
-    #expect(explicit.blockSize == 16)
+    // Values an earlier App could save: a wider opt-in lane and the narrow
+    // block that failed the M5 profile's fixed budget at startup.
+    for saved in ["16", "4"] {
+        try parameterStore.save(ModelParameters(
+            modelID: targetID,
+            dflash2Enabled: true,
+            dflash2ModelID: draftID,
+            dflash2BlockSize: saved
+        ))
+        let resolvedSaved = try ModelDFlash2RuntimeResolver.runtime(
+            for: targetID,
+            useDFlash2: nil,
+            scanner: scanner,
+            parameterStore: parameterStore
+        )
+        let runtime = try #require(resolvedSaved)
+        #expect(runtime.checkpointBlockSize == 32)
+        #expect(runtime.blockSize == 8, "saved block size \(saved) must be ignored")
+    }
 }
 
 @Test @MainActor func restartDefaultModelReportsLoadFailure() async throws {

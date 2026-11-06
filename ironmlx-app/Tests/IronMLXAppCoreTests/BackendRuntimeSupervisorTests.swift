@@ -466,6 +466,99 @@ func readinessFailureTerminatesUnhealthyProcessAndEntersFailed() async throws {
 }
 
 @Test @MainActor
+func backendExitDuringStartupFailsAtOnceWithoutAutomaticRecovery() async throws {
+    let harness = try runtimeHarness(
+        launchPlan: { _ in
+            BackendProcessLaunchPlan(
+                processURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: [
+                    "-c",
+                    "sleep 0.2; printf '%s\\n' 'Error: fixed DFlash2 budget 7 exceeds supported 3' >&2; exit 1",
+                ]
+            )
+        },
+        // A launch that never answers health, like a DFlash2 warmup.
+        readinessWaiter: { _, _ in
+            try await Task.sleep(for: .seconds(60))
+            throw RuntimeSupervisorTestError.readiness
+        }
+    )
+    #expect(BackendRecoveryPolicy().readinessTimeout == 300)
+
+    let started = Date()
+    do {
+        try await harness.supervisor.ensureRunning()
+        Issue.record("Expected the exiting backend to fail its start")
+    } catch let error as BackendRuntimeSupervisorError {
+        #expect(error.failureCode == .backendReadinessFailed)
+        #expect(error.localizedDescription.contains("exited during startup (exit code 1)"))
+    }
+    // Well inside the 60-second readiness wait, even on a loaded test host.
+    #expect(Date().timeIntervalSince(started) < 30)
+    // Automatic recovery would relaunch after its one-second delay.
+    try await Task.sleep(for: .milliseconds(1500))
+
+    #expect(harness.launchCount.value == 1)
+    #expect(harness.supervisor.state == .failed)
+    #expect(harness.supervisor.lastEvent?.phase == .failed)
+    #expect(harness.supervisor.lastEvent?.errorCode == .backendReadinessFailed)
+    #expect(harness.supervisor.lastEvent?.terminationStatus == 1)
+    #expect(harness.supervisor.lastEvent?.logTail?.contains("exceeds supported 3") == true)
+    #expect(harness.supervisor.lastEvent?.canRetry == true)
+    #expect(harness.supervisor.lastIncident == nil)
+    #expect(harness.incidentStore.records().isEmpty)
+}
+
+@Test @MainActor
+func recoveryLaunchThatExitsDuringStartupIsNotRelaunched() async throws {
+    let readinessCalls = CallCounter()
+    let harness = try runtimeHarness(
+        policy: BackendRecoveryPolicy(
+            maximumAutomaticRecoveryAttempts: 3,
+            automaticRecoveryDelay: 0,
+            stableWindow: 60
+        ),
+        launchPlan: { launchNumber in
+            launchNumber == 1
+                ? BackendProcessLaunchPlan(
+                    processURL: URL(fileURLWithPath: "/bin/sleep"),
+                    arguments: ["30"]
+                )
+                : BackendProcessLaunchPlan(
+                    processURL: URL(fileURLWithPath: "/bin/sh"),
+                    arguments: ["-c", "sleep 0.2; exit 1"]
+                )
+        },
+        // Only the first launch becomes healthy; the recovery launch exits
+        // while it is still starting.
+        readinessWaiter: { _, _ in
+            if await readinessCalls.next() > 1 {
+                try await Task.sleep(for: .seconds(60))
+            }
+        }
+    )
+    try await harness.supervisor.ensureRunning()
+
+    let firstPID = try #require(harness.processManager.currentProcessIdentifier)
+    #expect(Darwin.kill(pid_t(firstPID), SIGKILL) == 0)
+    let deadline = Date().addingTimeInterval(5)
+    while harness.supervisor.lastIncident?.recoveryResult != "failed", Date() < deadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    try await Task.sleep(for: .milliseconds(500))
+
+    // The crash is recovered once; the recovery launch's startup exit is not.
+    #expect(harness.launchCount.value == 2)
+    #expect(harness.supervisor.state == .failed)
+    #expect(harness.supervisor.lastIncident?.recoveryAttempt == 1)
+    #expect(harness.supervisor.lastIncident?.recoveryResult == "failed")
+    #expect(
+        harness.supervisor.lastIncident?.error?.contains("exited during startup") == true
+    )
+    #expect(harness.incidentStore.records().count == 1)
+}
+
+@Test @MainActor
 func partialModelRestoreKeepsHealthyBackendExplicitlyDegraded() async throws {
     let result = BackendRestartResult(
         success: false,
@@ -640,6 +733,13 @@ private func runtimeHarness(
     restorer: any BackendModelRestoring = FixedModelRestorer(
         result: .successful(port: 9068)
     ),
+    policy: BackendRecoveryPolicy = BackendRecoveryPolicy(),
+    launchPlan: @escaping @MainActor (_ launchNumber: Int) -> BackendProcessLaunchPlan = { _ in
+        BackendProcessLaunchPlan(
+            processURL: URL(fileURLWithPath: "/bin/sleep"),
+            arguments: ["30"]
+        )
+    },
     readinessWaiter: @escaping BackendRuntimeSupervisor.ReadinessWaiter = { _, _ in }
 ) throws -> RuntimeHarness {
     let root = try runtimeTemporaryDirectory()
@@ -654,10 +754,7 @@ private func runtimeHarness(
         notificationCenter: notificationCenter,
         launchPlanProvider: {
             launchCount.value += 1
-            return BackendProcessLaunchPlan(
-                processURL: URL(fileURLWithPath: "/bin/sleep"),
-                arguments: ["30"]
-            )
+            return launchPlan(launchCount.value)
         }
     )
     let incidentStore = BackendIncidentStore(url: root.appendingPathComponent("incidents.json"))
@@ -671,6 +768,7 @@ private func runtimeHarness(
         restartCoordinator: restorer,
         incidentStore: incidentStore,
         notificationCenter: notificationCenter,
+        policy: policy,
         readinessWaiter: readinessWaiter
     )
     return RuntimeHarness(
@@ -737,6 +835,15 @@ private extension BackendRestartResult {
 @MainActor
 private final class MainActorCounter {
     var value = 0
+}
+
+private actor CallCounter {
+    private var count = 0
+
+    func next() -> Int {
+        count += 1
+        return count
+    }
 }
 
 @MainActor

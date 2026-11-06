@@ -46,6 +46,8 @@ test('saving an ordinary model keeps output budget separate from the context lim
   vm.runInContext('saveModelParams()', page.context);
   assert.equal(page.payload.mtp_model_id, null);
   assert.equal(page.payload.dflash2_model_id, null);
+  assert.equal(page.payload.dflash2_block_size, '', 'block size follows the draft and is never saved');
+  assert.match(html, /<input type="text" id="modal-dflash2-block-size" readonly>/);
   assert.equal(page.payload.max_tokens, '4096');
   assert.equal(page.payload.max_output_tokens, '1024');
   assert.ok(!Object.hasOwn(page.payload, 'model_type'), 'readonly display must not save a type override');
@@ -261,4 +263,45 @@ test('embedding cards show vector metrics in every language and retain generatio
   assert.equal(context.runtimeOperationalState({ runtime_kind: 'embedding', active_requests: 1 }, 10000), 'busy');
   assert.equal(context.runtimeOperationalState({ runtime_kind: 'embedding', embedding_metrics: { last_request_unix_ms: 9000 } }, 10000), 'recent');
   assert.equal(context.runtimeOperationalState({ runtime_kind: 'embedding', embedding_metrics: { last_request_unix_ms: 7000 } }, 10000), 'idle');
+});
+
+test('the parameter dialog closes only from its own controls and keeps unsaved edits', () => {
+  assert.ok(!html.includes("getElementById('model-params-modal').addEventListener('click'"),
+    'a click outside the dialog must not close it');
+  const controls = [{ type: 'text', value: '4096' }, { type: 'checkbox', checked: false }];
+  const hint = { hidden: true };
+  const overlay = { classList: { open: true, remove() { this.open = false; } } };
+  const dialog = { scrollHeight: 900, scrollTop: 0, querySelectorAll: () => controls };
+  const context = {
+    window: {},
+    document: {
+      getElementById: id => id === 'modal-params-unsaved-hint' ? hint : overlay,
+      querySelector: () => dialog,
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(extract('closeParamsModal', 'saveModelParams'), context);
+  context.window.__PARAMS_MODAL_OPENED_STATE__ = context.paramsModalFormState();
+
+  controls[1].checked = true;
+  context.requestCloseParamsModal();
+  assert.equal(overlay.classList.open, true, 'the close button must not discard edits');
+  assert.equal(hint.hidden, false);
+  assert.equal(dialog.scrollTop, 900, 'Save and Cancel are scrolled into view');
+
+  context.closeParamsModal();
+  assert.equal(overlay.classList.open, false, 'Cancel discards the edits');
+  assert.equal(hint.hidden, true);
+
+  overlay.classList.open = true;
+  controls[1].checked = false;
+  context.requestCloseParamsModal();
+  assert.equal(overlay.classList.open, false, 'an unchanged dialog closes at once');
+
+  const start = html.indexOf('  const I18N =');
+  const translations = vm.runInNewContext(
+    `${html.slice(start, html.indexOf('\n  };', start) + 5)}\nI18N`, {});
+  for (const [language, dictionary] of Object.entries(translations)) {
+    assert.ok(dictionary.params_unsaved_changes, `${language} explains the unsaved changes`);
+  }
 });
