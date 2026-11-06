@@ -57,6 +57,8 @@ struct Registry {
 #if __has_include(<Metal/Metal.hpp>)
   bool os_normal{true};
   dispatch_source_t pressure_source{nullptr};
+  dispatch_source_t renewal_source{nullptr};
+  bool renewal_running{false};
 #endif
 };
 Registry& registry() {
@@ -78,18 +80,53 @@ void pressure_changed(void* context) {
     r.os_normal = true;
   for (auto* lease : r.leases) lease->activate(allowed(r));
 }
-void ensure_pressure_monitor(Registry& r) {
-  if (r.pressure_source) return;
-  auto source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
-      DISPATCH_MEMORYPRESSURE_NORMAL | DISPATCH_MEMORYPRESSURE_WARN |
-          DISPATCH_MEMORYPRESSURE_CRITICAL,
-      dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
-  if (!source) throw std::runtime_error("weight residency pressure monitor unavailable");
-  // Process-wide, with no model/storage capture and no dedicated poll thread.
-  r.pressure_source = source;
-  dispatch_set_context(source, &r);
-  dispatch_source_set_event_handler_f(source, pressure_changed);
-  dispatch_resume(source);
+// macOS drops a set's residency a few seconds after the GPU goes idle, even
+// with a standing request; the next submission then re-wires every weight in
+// kernel time. Renewing active requests keeps them resident without GPU work.
+constexpr std::uint64_t kRenewalIntervalNs = 500 * NSEC_PER_MSEC;
+void renew(void* context) {
+  auto& r = *static_cast<Registry*>(context);
+  auto pool = mlx::core::metal::new_scoped_memory_pool();
+  // Measured at tens of microseconds once resident; up to ~0.3 s once while a
+  // new 78 GB lease is still settling during model load.
+  std::lock_guard<std::mutex> lock(r.mutex);
+  for (auto* lease : r.leases) {
+    if (!lease->active || lease->first_request || lease->retiring) continue;
+    for (auto& set : lease->sets) set->requestResidency();
+  }
+}
+void ensure_monitors(Registry& r) {
+  if (!r.pressure_source) {
+    auto source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
+        DISPATCH_MEMORYPRESSURE_NORMAL | DISPATCH_MEMORYPRESSURE_WARN |
+            DISPATCH_MEMORYPRESSURE_CRITICAL,
+        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    if (!source) throw std::runtime_error("weight residency pressure monitor unavailable");
+    // Process-wide, with no model/storage capture and no dedicated poll thread.
+    r.pressure_source = source;
+    dispatch_set_context(source, &r);
+    dispatch_source_set_event_handler_f(source, pressure_changed);
+    dispatch_resume(source);
+  }
+  if (!r.renewal_source) {
+    // Created suspended; sync_renewal runs it only while a lease exists.
+    auto source = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    if (!source) throw std::runtime_error("weight residency renewal unavailable");
+    dispatch_set_context(source, &r);
+    dispatch_source_set_event_handler_f(source, renew);
+    dispatch_source_set_timer(source, dispatch_time(DISPATCH_TIME_NOW, kRenewalIntervalNs),
+        kRenewalIntervalNs, kRenewalIntervalNs / 5);
+    r.renewal_source = source;
+  }
+}
+// Caller holds the registry lock.
+void sync_renewal(Registry& r) {
+  const bool wanted = r.renewal_source && !r.leases.empty();
+  if (wanted == r.renewal_running) return;
+  if (wanted) dispatch_resume(r.renewal_source);
+  else dispatch_suspend(r.renewal_source);
+  r.renewal_running = wanted;
 }
 #endif
 }  // namespace
@@ -117,6 +154,9 @@ ScopedResidency::~ScopedResidency() {
   }
   std::lock_guard<std::mutex> lock(r.mutex);
   if (r.leases.erase(impl.get())) r.bytes -= impl->bytes;
+#if __has_include(<Metal/Metal.hpp>)
+  sync_renewal(r);
+#endif
 }
 
 std::unique_ptr<ScopedResidency> make_scoped_residency(
@@ -156,7 +196,7 @@ std::unique_ptr<ScopedResidency> make_scoped_residency(
                                   physical > 8*gib ? physical-8*gib : 0);
     auto& r = registry();
     std::unique_lock<std::mutex> lock(r.mutex);
-    ensure_pressure_monitor(r);
+    ensure_monitors(r);
     const auto other = device.residency_sets().wired_size();
     const auto used = r.bytes > ceiling ? ceiling : r.bytes;
     if (other > ceiling-used || impl->bytes > ceiling-used-other)
@@ -182,6 +222,7 @@ std::unique_ptr<ScopedResidency> make_scoped_residency(
     // stall health reads and every memory-governor sample behind them.
     r.leases.insert(identity);
     r.bytes += identity->bytes;
+    sync_renewal(r);
     if (allowed(r)) {
       identity->first_request = true;
       lock.unlock();
@@ -199,6 +240,7 @@ std::unique_ptr<ScopedResidency> make_scoped_residency(
     } catch (...) {
       r.leases.erase(identity);
       r.bytes -= identity->bytes;
+      sync_renewal(r);
       throw;
     }
   }
