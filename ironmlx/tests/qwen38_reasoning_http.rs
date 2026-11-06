@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use ironmlx::server;
+use ironmlx_lm::core::vision_input::VisionInputConfig;
 use ironmlx_lm::models::Qwen35Model;
 use ironmlx_runtime::core::cache::active_kv::ActiveKvOffloadConfig;
 use {
@@ -76,6 +77,14 @@ async fn boot_server(port: u16) -> (tokio::task::JoinHandle<anyhow::Result<()>>,
     let model_id = format!("mlx-community/Qwen3.8-27B-{}bit", quantization.bits);
     let tokenizer = Tokenizer::from_loader(&loader).expect("Tokenizer::from_loader");
     let model = Qwen35Model::from_loader(&loader).expect("Qwen35Model::from_loader");
+    // Like `ironmlx serve`: without an explicit vision config the server is
+    // text-only and rejects the image step.
+    let vision = VisionInputConfig::from_causal_loader(
+        ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+        &loader,
+        None,
+    )
+    .expect("Qwen3.8 vision input config");
     let served_model_id = model_id.clone();
     let profile = scheduler_profile(&model_id);
     let server = tokio::spawn(async move {
@@ -96,7 +105,7 @@ async fn boot_server(port: u16) -> (tokio::task::JoinHandle<anyhow::Result<()>>,
             ActiveKvOffloadConfig::disabled(),
             profile,
             false,
-            None,
+            Some(vision),
             Default::default(),
         )
         .await
