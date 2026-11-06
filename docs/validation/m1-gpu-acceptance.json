@@ -1,0 +1,64 @@
+{
+  "recorded_on": "2026-11-07",
+  "timezone": "Asia/Tokyo",
+  "evidence_type": "Historical development command outputs and source-tree identity; not a new signed-candidate M1 run",
+  "provenance": {
+    "source_chat": "01a1ae92-1bac-71b2-b819-77befff1e476",
+    "functional_turn": "01a1b0d4-86f2-7143-ac44-43a9223be781",
+    "merge_turn": "01a1b1ea-c8a1-74d2-8d4a-a32745cc5cd9",
+    "original_report": "/Volumes/Dev/feat-m1-gpu-inference/.build/validation/m1-gpu-real-regression-20261106T122855Z/report.md",
+    "preserved_archive": "/Volumes/Dev/ironmlx/.build/validation/m1-gpu-branch",
+    "merge_evidence": "/Volumes/Dev/ironmlx/.build/validation/m1-gpu-dev-merge",
+    "archive_files_reported_hash_verified": 912,
+    "remote_archive_reopened_in_this_preparation": false
+  },
+  "source": {
+    "base_commit": "12c757f9f6d937f999436b839d39e46e51995e8d",
+    "feature_commit": "0cad334cd9629feee5624d99001556f0ca2544f5",
+    "feature_with_test_fixture_fix": "1077b5b4de62e01ead9ac6e5135a31bfbb6ffb61",
+    "merged_dev_commit": "59e9fa8f21aa1c32888f4837cf3dbcbb5f00880c",
+    "validated_merged_tree": "745b097f582bac6f4c43994a6052d849994d6887",
+    "source_owner_verified_feature_delta_equal_at_merge": true,
+    "real_regression_release_binary_sha256": "bd5d35a344557cea86a81f8a945c80b1c3c49d7fbd0377be31b41ede44f99865",
+    "critical_source_files_reported_unchanged": 19
+  },
+  "functional_regression": {
+    "device": "Apple M1 Pro",
+    "total_ram_gib": 32,
+    "model": "Qwen3.8-27B affine4/group64",
+    "model_revision": "Retained in the original raw archive; not independently recovered here",
+    "concurrency": 1,
+    "m1_profile": "auto",
+    "cases_passed": 254,
+    "ordinary_cases": 94,
+    "mtp_cases": 95,
+    "dflash2_cases": 65,
+    "draft_weight_bits": 4,
+    "off_control_cases": 1,
+    "successful_generations_increased_m1_route_counters": true,
+    "greedy_prechecks_matched_off_control_text": true,
+    "mtp_and_dflash2_produced_draft_tokens": true,
+    "memory_protection_thresholds_lowered": false,
+    "swap_growth_gib_reported": 0,
+    "stop_condition_triggered": false
+  },
+  "merged_source_checks": {
+    "cargo_fmt": "passed",
+    "nightly_fmt_check": "passed",
+    "nightly_clippy_all_features_workspace_deny_warnings": "passed",
+    "cargo_build_release": "passed",
+    "workspace_tests_passed": 2493,
+    "workspace_tests_failed": 0,
+    "workspace_tests_ignored": 285,
+    "workspace_test_suites": 197,
+    "app_restored_healthy": true
+  },
+  "boundaries": [
+    "The plan is default-off and limited to the documented model, format and real M1 Pro/Max device checks.",
+    "Real-device functional evidence is from M1 Pro, not M1 Max.",
+    "The 254 cases include API/configuration/error checks; they are not 254 independent generation requests or a performance benchmark.",
+    "No controlled speedup, ANE support or dedicated M1 prefill/attention kernel qualification is claimed.",
+    "The latest merged-source tests include a one-line Anthropic actor fixture initialization fix; ignored cases do not count as passes.",
+    "This index does not establish signing, notarization, installation or upgrade acceptance of the refreshed release candidate."
+  ]
+}
