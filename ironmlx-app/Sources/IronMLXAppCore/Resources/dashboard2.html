@@ -5174,7 +5174,7 @@
         <div class="settings-row-right"><label class="toggle"><input type="checkbox" id="cfg-active-kv-offload"><span class="toggle-slider"></span></label></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="kv_quant">KV Cache Compression</span></div><div class="settings-row-desc" data-i18n="kv_quant_desc">Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.</div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="kv_quant">KV Cache Compression</span></div><div class="settings-row-desc" data-i18n="kv_quant_desc">Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option. Compression is lossy, so output for the same prompt can differ from running without it. DFlash2 mode does not use this compression.</div></div>
         <div class="settings-row-right"><select id="cfg-kv-quant" style="min-width:160px;"><option value="none" data-i18n="kv_quant_off">Off</option><option value="turbo3">TurboQuant K3V3</option><option value="turbo4">TurboQuant K4V4</option><option value="k3v4">TurboQuant K3V4</option></select></div>
       </div>
     </div>
@@ -6466,7 +6466,7 @@
       active_kv_offload: "Active KV Cache Offload", active_kv_offload_desc: "Experimental. Keep a hot KV window resident and move paused active KV cache payloads to SSD for long logical MAX CONTEXT TOKENS.", active_kv_offload_help_title: "Experimental cache residency", active_kv_offload_help_body: "Uses local SSD for supported active KV pages or paused request state. Flash-Next pages selected sparse KV history during ordinary and DFlash2 inference.", active_kv_offload_help_trigger: "Enabling it does not mean offload happens immediately. The system triggers it automatically when scheduling, KV residency pressure, or request park/restore requires it; it may stay idle when the system is idle or memory pressure is low.", active_kv_offload_help_applicable: "Applicable: Full Attention dense/paged, TurboQuant packed Full Attention, MLA, and GatedDelta/Linear. Flash-Next also pages active KV blocks during ordinary and DFlash2 inference once its hot KV budget is exceeded.", active_kv_offload_help_not_applicable: "Not applicable: MTP speculative side cache.",
       m5_dflash2_profile: "M5 DFlash2 Profile", m5_dflash2_profile_desc: "Automatically optimizes DFlash2 inference on supported devices.", m5_dflash2_profile_help_title: "About the M5 DFlash2 Profile", m5_dflash2_profile_help_body: "On Apple M5 (GPU generation 17) and newer, automatically selects model-specific DFlash2 optimizations. Qwen 3.8 27B, Qwen 3.6 35B A3B and Qwen3.8-Flash-Next each use their own settings. Flash-Next supports single and concurrent requests, with batching under load. Each optimization is enabled only when applicable. Turn off to use the generic settings.", m5_dflash2_profile_help_label: "M5 DFlash2 Profile help",
       ane_acceleration: "Neural Engine (ANE) Acceleration", ane_acceleration_desc: "Shares long-prompt prefill of dense models with the Neural Engine on supported devices.", ane_help_title: "About Neural Engine Acceleration", ane_help_body: "On qualified devices, Qwen3.8-27B Affine 4-bit models (group size 64) can share long-prompt prefill with the Neural Engine in ordinary inference or DFlash2, for single or concurrent requests. Applicable full chunks use ANE automatically; other work stays on the GPU. Turn off to keep all computation on the GPU.", ane_help_label: "Neural Engine Acceleration help", ane_runtime_failed: "ANE execution failed; this model now uses GPU.", ane_machine_unqualified: "ANE acceleration is not yet qualified for this machine. Using GPU.", ane_hardware_unknown: "ANE availability has not been confirmed. Using GPU.", ane_runtime_unavailable: "The ANE backend is unavailable. Using GPU.", ane_model_not_adapted: "This model is not adapted for ANE. Using GPU.", ane_eligible: "Eligible; ANE runs on applicable prefill chunks.", ane_activity: "Completed ANE jobs for this model family in this process: {count}", ane_disabled: "ANE is off. Using GPU.",
-      kv_quant: "KV Cache Compression", kv_quant_desc: "Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.", kv_quant_off: "Off", model_ttl: "Model Auto-Unload (TTL)", model_ttl_desc: "Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.", minutes: "minutes",
+      kv_quant: "KV Cache Compression", kv_quant_desc: "Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option. Compression is lossy, so output for the same prompt can differ from running without it. DFlash2 mode does not use this compression.", kv_quant_off: "Off", model_ttl: "Model Auto-Unload (TTL)", model_ttl_desc: "Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.", minutes: "minutes",
       advanced: "Advanced", batch_processing: "Batch Processing",
       max_sequences: "Max Sequences", max_sequences_desc: "Maximum number of concurrent parallel requests.",
       max_models: "Max Concurrent Loaded Models", max_models_desc: "Maximum number of models the App keeps loaded at the same time. When the limit is reached, new model loads are rejected; existing loaded models are not automatically replaced. Unload an unused model manually before loading another.",
@@ -7210,7 +7210,7 @@
       active_kv_offload: "活跃 KV Cache 分层卸载", active_kv_offload_desc: "实验性能力。为长逻辑 MAX CONTEXT TOKENS 保持热 KV 窗口常驻，并将暂停中的活跃 KV Cache 写入 SSD。", active_kv_offload_help_title: "实验性缓存驻留", active_kv_offload_help_body: "根据模型适配，将活动 KV 页或暂停请求状态存入本地 SSD。Flash-Next 支持普通及 DFlash2 推理中的稀疏 KV 历史分页。", active_kv_offload_help_trigger: "开启后不代表立即发生卸载。系统会在请求调度、KV 驻留压力或请求暂停/恢复需要时自动触发；空闲或内存压力较低时可能保持 idle。", active_kv_offload_help_applicable: "适用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。 Flash-Next 在热 KV 预算用尽后，也会在普通及 DFlash2 推理中按需分页活动 KV。", active_kv_offload_help_not_applicable: "不适用：MTP speculative side cache。",
       m5_dflash2_profile: "M5 DFlash2 优化配置", m5_dflash2_profile_desc: "在支持的设备上自动优化 DFlash2 推理。", m5_dflash2_profile_help_title: "关于 M5 DFlash2 优化配置", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新机型上，自动按模型选择 DFlash2 优化配置。Qwen 3.8 27B、Qwen 3.6 35B A3B 和 Qwen3.8-Flash-Next 分别使用独立配置。Flash-Next 支持单请求与多请求，并发时可合批。各项优化仅在适用时启用，关闭后使用通用设置。", m5_dflash2_profile_help_label: "M5 DFlash2 优化配置说明",
       ane_acceleration: "神经引擎（ANE）加速", ane_acceleration_desc: "在支持的设备上，由神经引擎分担 Dense 模型长提示的预填充计算。", ane_help_title: "关于神经引擎加速", ane_help_body: "在已适配的设备上，Qwen3.8-27B 4-bit（Affine，group size 64）模型可在普通推理或 DFlash2 的单请求与多请求场景中，由神经引擎分担长提示预填充。适用的完整分块自动使用 ANE，其余计算使用 GPU。关闭后全部计算使用 GPU。", ane_help_label: "神经引擎加速说明", ane_runtime_failed: "ANE 执行失败，此模型已回退到 GPU。", ane_machine_unqualified: "此机型的 ANE 加速尚未适配，当前使用 GPU。", ane_hardware_unknown: "暂时无法确认 ANE 可用性，当前使用 GPU。", ane_runtime_unavailable: "ANE 后端不可用，当前使用 GPU。", ane_model_not_adapted: "此模型尚未适配 ANE，当前使用 GPU。", ane_eligible: "已具备使用条件，适用的预填充分块会使用 ANE。", ane_activity: "当前进程此模型系列已完成 ANE 作业：{count}", ane_disabled: "ANE 已关闭，当前使用 GPU。",
-      kv_quant: "KV 缓存压缩", kv_quant_desc: "使用 TurboQuant 降低长上下文运行时 KV Cache 的内存占用。K3V3 更省内存，K4V4 更保守，K3V4 为推荐均衡选项。", kv_quant_off: "无压缩", model_ttl: "模型自动卸载 (TTL)", model_ttl_desc: "已加载模型闲置超过指定分钟数后自动卸载。0 = 不启用；默认模型偏好会保留。", minutes: "分钟",
+      kv_quant: "KV 缓存压缩", kv_quant_desc: "使用 TurboQuant 降低长上下文运行时 KV Cache 的内存占用。K3V3 更省内存，K4V4 更保守，K3V4 为推荐均衡选项。压缩有损，开启后同一提示词的输出可能与无压缩时不同。DFlash2 模式不使用此压缩。", kv_quant_off: "无压缩", model_ttl: "模型自动卸载 (TTL)", model_ttl_desc: "已加载模型闲置超过指定分钟数后自动卸载。0 = 不启用；默认模型偏好会保留。", minutes: "分钟",
       advanced: "高级", batch_processing: "批处理",
       max_sequences: "最大序列数", max_sequences_desc: "并行处理的最大并发请求数。",
       max_models: "最大同时加载模型数", max_models_desc: "App 同时保持加载状态的模型数量上限。达到上限后，新模型不会自动替换旧模型；请先手动卸载暂不使用的模型，再加载新模型。",
@@ -7776,7 +7776,7 @@
       err_benchmark_model_unavailable: "本機沒有可用的基準測試模型。",
       err_benchmark_exclusive_failed: "無法準備獨佔基準測試工作階段：{error}",
       kv_quant: "KV Cache 壓縮",
-      kv_quant_desc: "使用 TurboQuant 降低長上下文執行時 KV Cache 的記憶體占用。K3V3 更節省記憶體，K4V4 較保守，K3V4 是建議的平衡選項。",
+      kv_quant_desc: "使用 TurboQuant 降低長上下文執行時 KV Cache 的記憶體占用。K3V3 更節省記憶體，K4V4 較保守，K3V4 是建議的平衡選項。壓縮有損，開啟後相同提示詞的輸出可能與不壓縮時不同。DFlash2 模式不使用此壓縮。",
       kv_quant_off: "不壓縮",
       bench_start: "開始",
       bench_loading_model: "正在載入模型：{name}…",
@@ -8523,7 +8523,7 @@
       err_benchmark_model_unavailable: "ベンチマークモデルをローカルで利用できません。",
       err_benchmark_exclusive_failed: "排他ベンチマークセッションを準備できませんでした：{error}",
       kv_quant: "KV Cache 圧縮",
-      kv_quant_desc: "TurboQuant を使用して、長いコンテキストの実行時 KV Cache メモリ使用量を削減します。K3V3 はより省メモリ、K4V4 はより保守的で、K3V4 が推奨されるバランス設定です。",
+      kv_quant_desc: "TurboQuant を使用して、長いコンテキストの実行時 KV Cache メモリ使用量を削減します。K3V3 はより省メモリ、K4V4 はより保守的で、K3V4 が推奨されるバランス設定です。圧縮は非可逆のため、有効にすると同じプロンプトでも圧縮なしの場合と出力が異なることがあります。DFlash2 モードではこの圧縮を使用しません。",
       kv_quant_off: "圧縮なし",
       bench_start: "開始",
       bench_loading_model: "モデル {name} を読み込み中…",
@@ -9270,7 +9270,7 @@
       err_benchmark_model_unavailable: "벤치마크 모델을 로컬에서 사용할 수 없습니다.",
       err_benchmark_exclusive_failed: "독점 벤치마크 세션 준비에 실패했습니다: {error}",
       kv_quant: "KV Cache 압축",
-      kv_quant_desc: "TurboQuant를 사용하여 긴 컨텍스트 실행 시 KV Cache 메모리 사용량을 줄입니다. K3V3는 메모리를 더 절약하고 K4V4는 더 보수적이며 K3V4가 권장 균형 옵션입니다.",
+      kv_quant_desc: "TurboQuant를 사용하여 긴 컨텍스트 실행 시 KV Cache 메모리 사용량을 줄입니다. K3V3는 메모리를 더 절약하고 K4V4는 더 보수적이며 K3V4가 권장 균형 옵션입니다. 압축은 손실 방식이므로 켜면 같은 프롬프트라도 압축 없음일 때와 출력이 달라질 수 있습니다. DFlash2 모드에서는 이 압축을 사용하지 않습니다.",
       kv_quant_off: "압축 없음",
       bench_start: "시작",
       bench_loading_model: "모델 {name} 로드 중…",
