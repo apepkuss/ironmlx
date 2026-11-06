@@ -50,6 +50,7 @@ function page(lang = 'zh-Hans') {
     + slice('  function onDownloadComplete(', '  // ── HuggingFace Search')
     + slice('  function performDownloadTaskAction(', '  async function deleteDownloadTask(')
     + slice('  function onDownloadTaskActionResult(', '  let downloadCleanupPending')
+    + slice('  // In-flight native operations', '  function loadModel(')
     + slice('  function modelReadiness(', '  function updateModelIntegrityRow(')
     + slice('  function renderModelLoadActions(', '  // Called from Rust with local model scan results'), context);
   return { context, element, toasts, navigation, requests,
