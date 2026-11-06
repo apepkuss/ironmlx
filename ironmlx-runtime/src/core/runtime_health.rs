@@ -1272,7 +1272,16 @@ impl PromptLookupHealthConfig {
 }
 
 #[derive(Debug, Serialize)]
+pub struct M1HealthInfo {
+    pub model: String,
+    #[serde(flatten)]
+    pub plan: ironmlx_core::m1_profile::M1PlanSnapshot,
+}
+
+#[derive(Debug, Serialize)]
 pub struct HealthSnapshot {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub m1_profiles: Vec<M1HealthInfo>,
     pub status: HealthStatus,
     pub degraded_reasons: Vec<HealthDegradedReason>,
     pub uptime_secs: u64,
@@ -1288,6 +1297,7 @@ pub struct HealthSnapshot {
 }
 
 pub struct SchedulerHealthCollector {
+    pub m1_plan: Option<Arc<ironmlx_core::m1_profile::M1ExecutionPlan>>,
     pub start_time: Instant,
     pub b_max: usize,
     pub queue_max: usize,
@@ -1342,6 +1352,15 @@ impl SchedulerHealthCollector {
             &process_governor,
         );
         HealthSnapshot {
+            m1_profiles: self
+                .m1_plan
+                .as_ref()
+                .map(|plan| M1HealthInfo {
+                    model: self.model_name.clone(),
+                    plan: plan.snapshot(),
+                })
+                .into_iter()
+                .collect(),
             status,
             degraded_reasons,
             uptime_secs,
@@ -1613,6 +1632,7 @@ mod tests {
         active_kv_offload: ActiveKvOffloadSharedStats,
     ) -> SchedulerHealthCollector {
         SchedulerHealthCollector {
+            m1_plan: None,
             start_time: Instant::now(),
             b_max: 1,
             queue_max: 8,
@@ -2285,6 +2305,7 @@ mod tests {
     #[test]
     fn health_memory_serializes_mlx_allocator_fields() {
         let snapshot = HealthSnapshot {
+            m1_profiles: Vec::new(),
             status: HealthStatus::Healthy,
             degraded_reasons: Vec::new(),
             uptime_secs: 7,

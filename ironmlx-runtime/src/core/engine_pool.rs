@@ -2668,8 +2668,9 @@ async fn load_engine_variant(
     )?);
     match architecture {
         ModelArchitecture::Qwen35Dense => {
-            let model_impl =
+            let mut model_impl =
                 Qwen35Model::from_loader(&loader).context("Qwen35Model::from_loader")?;
+            model_impl.configure_m1_profile(runtime.m1_profile);
             build_qwen35_engine(
                 model_impl,
                 tokenizer,
@@ -3363,6 +3364,7 @@ mod tests {
 
     fn runtime_config() -> EngineRuntimeOptions {
         EngineRuntimeOptions {
+            m1_profile: ironmlx_core::m1_profile::M1ProfileMode::Off,
             kv_cache_turboquant_bits: None,
             scheduler_autotune_report: false,
             paged_prefix_cache: None,

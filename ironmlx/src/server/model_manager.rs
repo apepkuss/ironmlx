@@ -1188,6 +1188,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         ironmlx_runtime::core::cache::prefix_store::process_async_prefix_store_queue().stats();
     let total_ram_bytes = ironmlx_runtime::core::memory_budget::system_total_ram_bytes();
     let free_ram_bytes = system_free_ram_bytes();
+    let mut m1_profiles = Vec::new();
     let mut names = Vec::new();
     let mut max_position_embeddings = 0;
     let mut b_max = 0;
@@ -1240,6 +1241,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
         ironmlx_runtime::core::scheduler_actor::ImmutablePrefixBlockHealth::default();
 
     for snapshot in snapshots {
+        m1_profiles.extend(snapshot.m1_profiles);
         if !snapshot.model.name.is_empty() {
             names.push(snapshot.model.name);
         }
@@ -1413,6 +1415,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
     );
 
     HealthSnapshot {
+        m1_profiles,
         status,
         degraded_reasons,
         uptime_secs: start_time.elapsed().as_secs(),
@@ -2145,6 +2148,7 @@ mod tests {
     #[test]
     fn aggregate_health_reports_loaded_mtp_state() {
         let snapshot = HealthSnapshot {
+            m1_profiles: Vec::new(),
             status: ironmlx_runtime::core::runtime_health::HealthStatus::Healthy,
             degraded_reasons: Vec::new(),
             uptime_secs: 0,
@@ -2626,6 +2630,7 @@ mod tests {
             dflash2_tensor_batch_max_width: None,
             dflash2_tree_max_nodes: None,
             m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode::Auto,
+            m1_profile: ironmlx_core::m1_profile::M1ProfileMode::Off,
             ane: ironmlx_core::m5_profile::AneMode::Auto,
             dflash2_position_keyed_sampling: false,
             prompt_lookup: false,

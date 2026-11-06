@@ -1800,6 +1800,7 @@ dependencies = [
  "anyhow",
  "approx",
  "mlx",
+ "serde",
  "serial_test",
 ]
 

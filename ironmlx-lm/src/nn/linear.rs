@@ -403,6 +403,13 @@ impl Linear {
         if let Some(shared) = &self.shared {
             return shared.forward_on(x, target);
         }
+        if super::m1_gpu::active() {
+            if let Some(parts) = self.quantized_parts() {
+                if let Some(y) = super::m1_gpu::forward(x, parts, target)? {
+                    return Ok(y);
+                }
+            }
+        }
         if super::dense_fast_path::prefill_dequant_armed() {
             if let Some(y) = self.forward_dequant_gemm_on(x, target)? {
                 return Ok(y);

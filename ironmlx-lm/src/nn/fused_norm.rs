@@ -25,9 +25,10 @@ pub fn set_ab_off(off: bool) {
 /// `nn::gdn_prep`).
 pub(crate) fn requested() -> bool {
     static REQUESTED: OnceLock<bool> = OnceLock::new();
-    *REQUESTED.get_or_init(|| {
+    (*REQUESTED.get_or_init(|| {
         ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::FUSED_GLUE)
-    }) && !AB_OFF.load(std::sync::atomic::Ordering::Relaxed)
+    }) || super::m1_gpu::active())
+        && !AB_OFF.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 const SOURCE: &str = r#"

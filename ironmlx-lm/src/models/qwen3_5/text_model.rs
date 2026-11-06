@@ -21,6 +21,7 @@ pub struct Qwen35TextModel {
     norm: RmsNorm,
     mrope: Mrope,
     cfg: Qwen35Config,
+    pub(crate) m1_plan: Option<std::sync::Arc<ironmlx_core::m1_profile::M1ExecutionPlan>>,
 }
 
 impl Qwen35TextModel {
@@ -75,6 +76,7 @@ impl Qwen35TextModel {
             norm,
             mrope,
             cfg,
+            m1_plan: None,
         })
     }
 
@@ -162,6 +164,7 @@ impl Qwen35TextModel {
             norm,
             mrope,
             cfg,
+            m1_plan: None,
         })
     }
 
@@ -180,6 +183,7 @@ impl Qwen35TextModel {
             norm,
             mrope,
             cfg,
+            m1_plan: None,
         }
     }
 
@@ -224,6 +228,7 @@ impl Qwen35TextModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        let _m1 = crate::nn::m1_gpu::Scope::enter_on(self.m1_plan.as_ref(), target);
         if let Some(c) = cache.as_deref() {
             if c.len() != self.layers.len() {
                 return Err(anyhow!(
@@ -380,6 +385,7 @@ impl Qwen35TextModel {
         target: impl Into<StreamOrDevice>,
     ) -> Result<(Array, Array)> {
         let target = target.into();
+        let _m1 = crate::nn::m1_gpu::Scope::enter_on(self.m1_plan.as_ref(), target);
         if input_ids.ndim() != 2 || input_ids.shape().as_slice()[0] <= 0 {
             return Err(anyhow!(
                 "Qwen35 DFlash2 target forward requires input_ids [B,S] with B>0, got {:?}",
@@ -593,6 +599,8 @@ impl Qwen35TextModel {
 
     /// Project hidden state to vocab logits via the (tied) `embed_tokens` matrix.
     pub fn as_output_on(&self, hidden: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
+        let target = target.into();
+        let _m1 = crate::nn::m1_gpu::Scope::enter_on(self.m1_plan.as_ref(), target);
         self.embed_tokens.as_output_on(hidden, target)
     }
 }

@@ -580,7 +580,8 @@ pub async fn build_plain_app_state<M>(
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    let paged_prefix_cache = with_chat_turn_boundary(paged_prefix_cache, &tokenizer);
+    let paged_prefix_cache =
+        with_chat_turn_boundary(paged_prefix_cache, &tokenizer, model.m1_execution_plan());
     build_app_state(
         model,
         tokenizer,
@@ -634,7 +635,8 @@ where
         crate::core::prompt_lookup::PromptLookupQualificationRuntimeConfig::for_scheduler_profile(
             &scheduler_runtime_profile,
         )?;
-    let paged_prefix_cache = with_chat_turn_boundary(paged_prefix_cache, &tokenizer);
+    let paged_prefix_cache =
+        with_chat_turn_boundary(paged_prefix_cache, &tokenizer, model.m1_execution_plan());
     build_app_state(
         model,
         tokenizer,
@@ -703,7 +705,8 @@ where
             &scheduler_runtime_profile,
             crate::core::speculative_qualification::NeuralExactSource::QwenMtp,
         )?;
-    let paged_prefix_cache = with_chat_turn_boundary(paged_prefix_cache, &tokenizer);
+    let paged_prefix_cache =
+        with_chat_turn_boundary(paged_prefix_cache, &tokenizer, model.m1_execution_plan());
     build_app_state(
         model,
         tokenizer,
@@ -785,7 +788,8 @@ pub async fn build_gemma4_drafter_app_state(
             crate::core::speculative_qualification::NeuralExactSource::Gemma4Assistant,
         )?;
     let drafter = Arc::new(Mutex::new(drafter));
-    let paged_prefix_cache = with_chat_turn_boundary(paged_prefix_cache, &tokenizer);
+    let paged_prefix_cache =
+        with_chat_turn_boundary(paged_prefix_cache, &tokenizer, model.m1_execution_plan());
     let base = build_app_state(
         model,
         tokenizer,
@@ -828,8 +832,10 @@ pub async fn build_gemma4_drafter_app_state(
 fn with_chat_turn_boundary(
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     tokenizer: &Tokenizer,
+    plan: Option<Arc<ironmlx_core::m1_profile::M1ExecutionPlan>>,
 ) -> Option<PagedPrefixCacheConfig> {
-    paged_prefix_cache.map(|config| {
+    paged_prefix_cache.map(|mut config| {
+        namespace_m1_prefix_cache(&mut config, plan.as_deref());
         let turn_boundary = crate::core::chat_prefix::ChatTurnBoundary::probe(tokenizer);
         tracing::info!(
             generation_suffixes = ?turn_boundary.as_ref().map(|b| b.suffixes()),
@@ -837,6 +843,17 @@ fn with_chat_turn_boundary(
         );
         config.with_turn_boundary(turn_boundary)
     })
+}
+
+fn namespace_m1_prefix_cache(
+    config: &mut PagedPrefixCacheConfig,
+    plan: Option<&ironmlx_core::m1_profile::M1ExecutionPlan>,
+) {
+    if let Some(plan) = plan.filter(|plan| plan.is_active()) {
+        config
+            .model_id
+            .push_str(&format!(";{}", plan.fingerprint()));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -862,6 +879,7 @@ where
     M: Model + DenseVlMethods + Send + 'static,
     S: SchedulerActorSpawner<M>,
 {
+    let m1_plan = model.m1_execution_plan();
     let model = Arc::new(Mutex::new(model));
     let admission_deadline = std::time::Duration::from_millis(admission_deadline_ms);
 
@@ -975,6 +993,7 @@ where
         &scheduler_handle,
         mtp_health,
         prompt_lookup_health,
+        m1_plan,
     );
     let runtime_usage = scheduler_handle.runtime_usage.clone();
 
@@ -1008,6 +1027,7 @@ pub(crate) fn effective_model_weight_bytes(
 ) -> usize {
     loaded_weight_bytes.max(meta_weight_bytes)
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_health_collector(
     model_id: String,
     model_max_context: usize,
@@ -1016,8 +1036,10 @@ pub(crate) fn build_health_collector(
     scheduler_handle: &scheduler_actor::SchedulerActorHandle,
     mtp: health::MtpHealthConfig,
     prompt_lookup: health::PromptLookupHealthConfig,
+    m1_plan: Option<Arc<ironmlx_core::m1_profile::M1ExecutionPlan>>,
 ) -> Arc<health::SchedulerHealthCollector> {
     Arc::new(health::SchedulerHealthCollector {
+        m1_plan,
         start_time: std::time::Instant::now(),
         b_max,
         queue_max: admission_queue_max,
@@ -1116,6 +1138,7 @@ where
     let block_size =
         crate::core::dflash2::resolve_dflash2_block_size(Some(block_size), checkpoint_block_size)?
             .block_size;
+    let m1_plan = model.m1_execution_plan();
     let model = Arc::new(Mutex::new(model));
     let (
         mut meta,
@@ -1223,6 +1246,7 @@ where
         Arc::clone(&cold_materialization_tracker),
     );
     let health_collector = Arc::new(health::SchedulerHealthCollector {
+        m1_plan,
         start_time: std::time::Instant::now(),
         b_max,
         queue_max: admission_queue_max,
@@ -1353,6 +1377,46 @@ mod health_tests {
     use std::sync::atomic::Ordering;
 
     #[test]
+    fn m1_cache_namespace_and_health_are_per_engine() {
+        use ironmlx_core::m1_profile::{M1Device, M1ExecutionPlan};
+        let pro = Arc::new(M1ExecutionPlan::resolve(true, Some(M1Device::Pro)));
+        let max = M1ExecutionPlan::resolve(true, Some(M1Device::Max));
+        let base =
+            PagedPrefixCacheConfig::new("/tmp/unused-m1-cache", "same-model", 64, 16).unwrap();
+        let mut unchanged = base.clone();
+        namespace_m1_prefix_cache(&mut unchanged, None);
+        assert_eq!(unchanged.model_id, base.model_id);
+        let mut unsupported = base.clone();
+        namespace_m1_prefix_cache(
+            &mut unsupported,
+            Some(&M1ExecutionPlan::resolve(true, None)),
+        );
+        assert_eq!(unsupported.model_id, base.model_id);
+        let mut a = base.clone();
+        let mut b = base;
+        namespace_m1_prefix_cache(&mut a, Some(&pro));
+        namespace_m1_prefix_cache(&mut b, Some(&max));
+        assert_ne!(a.model_id, b.model_id);
+        assert_ne!(a.model_id, unchanged.model_id);
+        let handle = test_scheduler_handle();
+        let collector = build_health_collector(
+            "model-a".into(),
+            4096,
+            1,
+            8,
+            &handle,
+            health::MtpHealthConfig::disabled(),
+            health::PromptLookupHealthConfig::disabled(),
+            Some(pro.clone()),
+        );
+        pro.record_narrow();
+        let snapshot = collector.snapshot();
+        assert_eq!(snapshot.m1_profiles[0].model, "model-a");
+        assert_eq!(snapshot.m1_profiles[0].plan.narrow_projection_calls, 1);
+        assert_eq!(snapshot.m1_profiles[0].plan.ane, "not_implemented");
+    }
+
+    #[test]
     fn health_collector_mtp_disabled_without_server_mtp_config() {
         let handle = test_scheduler_handle();
         let collector = build_health_collector(
@@ -1363,6 +1427,7 @@ mod health_tests {
             &handle,
             health::MtpHealthConfig::disabled(),
             health::PromptLookupHealthConfig::disabled(),
+            None,
         );
         let snapshot = collector.snapshot();
 
@@ -1438,6 +1503,7 @@ mod health_tests {
                 handle.neural_exact_qualification_stats.clone(),
             ),
             health::PromptLookupHealthConfig::disabled(),
+            None,
         );
         let snapshot = collector.snapshot();
 

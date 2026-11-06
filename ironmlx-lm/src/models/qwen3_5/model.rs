@@ -419,6 +419,27 @@ impl Qwen35Model {
         }
     }
 
+    /// Configure once before engine creation. M5/global settings are never touched.
+    pub fn configure_m1_profile(&mut self, mode: ironmlx_core::m1_profile::M1ProfileMode) {
+        use ironmlx_core::m1_profile::{M1Device, M1ExecutionPlan, M1ProfileMode};
+        if mode == M1ProfileMode::Off {
+            self.text.m1_plan = None;
+            return;
+        }
+        let architecture = mlx::metal::architecture().unwrap_or_default();
+        let memory = mlx::memory::snapshot();
+        let device = memory
+            .device_name
+            .as_deref()
+            .and_then(|name| M1Device::detect(name, &architecture));
+        let qualified = super::dflash2_lane::is_qwen38_27b(self.config())
+            && self.exact_batched_verify_profile
+                == super::speculative::ExactBatchedVerifyProfile::Affine4;
+        let plan = std::sync::Arc::new(M1ExecutionPlan::resolve(qualified, device));
+        tracing::info!(status=plan.status, fingerprint=%plan.fingerprint(), "M1 GPU execution plan");
+        self.text.m1_plan = Some(plan);
+    }
+
     pub fn config(&self) -> &Qwen35Config {
         self.text.config()
     }
@@ -503,6 +524,7 @@ impl Qwen35Model {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        let _m1 = crate::nn::m1_gpu::Scope::enter_on(self.text.m1_plan.as_ref(), target);
         let hidden_shape = hidden.shape();
         let hidden_shape = hidden_shape.as_slice();
         let exact_batched_verify = crate::nn::verify_qmm::is_armed()
@@ -550,6 +572,7 @@ impl Qwen35Model {
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
         let target = target.into();
+        let _m1 = crate::nn::m1_gpu::Scope::enter_on(self.text.m1_plan.as_ref(), target);
         let shape = hidden.shape();
         if shape.as_slice().first() == Some(&4)
             && shape.as_slice().get(1) == Some(&2)
@@ -1201,6 +1224,12 @@ impl Qwen35Model {
 }
 
 impl crate::core::model::Model for Qwen35Model {
+    fn m1_execution_plan(
+        &self,
+    ) -> Option<std::sync::Arc<ironmlx_core::m1_profile::M1ExecutionPlan>> {
+        self.text.m1_plan.clone()
+    }
+
     fn make_cache(
         &self,
         batch: i32,
@@ -1403,6 +1432,14 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
     }
 
     fn dflash2_execution_fingerprint(&self) -> String {
+        if let Some(plan) = self.text.m1_plan.as_ref().filter(|plan| plan.is_active()) {
+            return format!(
+                "qwen38-dflash2;{};{}",
+                plan.fingerprint(),
+                self.dflash2_verify_capabilities().stable_fingerprint()
+            );
+        }
+
         if super::dflash2_lane::is_qwen38_27b(self.config())
             && self.exact_batched_verify_profile
                 == super::speculative::ExactBatchedVerifyProfile::Affine4
@@ -1935,6 +1972,202 @@ mod tests {
             vision_config: None,
             max_position_embeddings: 32768,
         }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn m1_plan_runs_complete_quantized_text_model_and_cached_continuation() -> Result<()> {
+        use crate::core::model_input::build_position_ids;
+        use crate::nn::{
+            Conv1d, Conv1dConfig, DecoderLayer, DecoderLayerConfig, GatedDeltaNet,
+            GatedDeltaNetConfig, Mlp, Mrope, RmsNorm, RmsNormGated,
+        };
+        use ironmlx_core::m1_profile::{M1Device, M1ExecutionPlan};
+        let root = std::env::var("MLX_DIR").expect("MLX_DIR");
+        mlx::metal::set_metallib_path(&format!("{root}/lib/mlx.metallib"))?;
+        // Small, non-zero quantized fixture. Only this private test injects
+        // an active plan; production still rejects models outside 27B.
+        let mut cfg = make_cfg();
+        cfg.hidden_size = 512;
+        cfg.intermediate_size = 1024;
+        cfg.num_hidden_layers = 1;
+        cfg.head_dim = Some(128);
+        cfg.linear_num_key_heads = 1;
+        cfg.linear_num_value_heads = 2;
+        cfg.linear_key_head_dim = 128;
+        cfg.linear_value_head_dim = 128;
+        cfg.tie_word_embeddings = false;
+        cfg.rope_parameters.mrope_section = vec![22, 21, 21];
+        let key = mlx::random::key(487)?;
+        let random = |shape: &[i32]| -> Result<Array> {
+            Ok(mlx::random::normal()
+                .shape(shape)
+                .dtype(Dtype::Bfloat16)
+                .scale(0.02)
+                .key(&key)
+                .sample()?)
+        };
+        let quant = |n, k| -> Result<Linear> {
+            let q =
+                mlx::quantization::quantize(&random(&[n, k])?, Some(64), Some(4), "affine", None)?;
+            Ok(Linear::new_quant(
+                q[0].clone(),
+                q[1].clone(),
+                Some(q[2].clone()),
+                None,
+                64,
+                4,
+            ))
+        };
+        let ones = |n| mlx::ops::constructors::ones((n,), Dtype::Bfloat16);
+        let gcfg = GatedDeltaNetConfig {
+            hidden_size: 512,
+            num_v_heads: 2,
+            num_k_heads: 1,
+            head_k_dim: 128,
+            head_v_dim: 128,
+            conv_kernel_size: 4,
+            rms_norm_eps: 1e-6,
+        };
+        let gdn = GatedDeltaNet::from_components(
+            quant(512, 512)?,
+            quant(256, 512)?,
+            quant(2, 512)?,
+            quant(2, 512)?,
+            Conv1d::new(
+                random(&[512, 4, 1])?,
+                None,
+                Conv1dConfig {
+                    in_channels: 512,
+                    out_channels: 512,
+                    kernel_size: 4,
+                    stride: 1,
+                    padding: 0,
+                    dilation: 1,
+                    groups: 512,
+                },
+            ),
+            RmsNormGated::new(ones(128)?, 1e-6),
+            quant(512, 256)?,
+            random(&[2])?,
+            ones(2)?,
+            gcfg,
+        );
+        let layer = DecoderLayer::from_components_linear(
+            RmsNorm::new(ones(512)?, 1e-6),
+            gdn,
+            RmsNorm::new(ones(512)?, 1e-6),
+            Mlp::from_components(quant(1024, 512)?, quant(1024, 512)?, quant(512, 1024)?),
+            DecoderLayerConfig {
+                hidden_size: 512,
+                intermediate_size: 1024,
+                num_heads: 4,
+                num_kv_heads: 2,
+                head_dim: 128,
+                rms_norm_eps: 1e-6,
+                attention_bias: false,
+                linear_num_value_heads: 2,
+                linear_num_key_heads: 1,
+                linear_key_head_dim: 128,
+                linear_value_head_dim: 128,
+                linear_conv_kernel_dim: 4,
+            },
+        );
+        let text = Qwen35TextModel::from_components(
+            crate::nn::Embedding::from_components_fp_for_test(random(&[1024, 512])?),
+            vec![layer],
+            RmsNorm::new(ones(512)?, 1e-6),
+            Mrope::new(128, 1e7, 1.0, &[22, 21, 21], true)?,
+            cfg,
+        );
+        let mut model = Qwen35Model::from_components(text, Some(quant(1024, 512)?));
+        let bits = |a: &Array| -> Result<Vec<u32>> {
+            Ok(mlx::ops::cast::astype(a, Dtype::Float32)?
+                .to_vec::<f32>()?
+                .into_iter()
+                .map(f32::to_bits)
+                .collect())
+        };
+        model.exact_batched_verify_profile =
+            crate::models::qwen3_5::speculative::ExactBatchedVerifyProfile::Affine4;
+        let run = |model: &Qwen35Model, dflash: bool| -> Result<Vec<Vec<u32>>> {
+            let mut cache = model.make_cache(1, 256, Dtype::Bfloat16)?;
+            let mut outputs = Vec::new();
+            for (start, len) in [(0, 32), (32, 1), (33, 4), (37, 1)] {
+                let ids: Vec<u32> = (start..start + len).map(|v| v as u32 + 1).collect();
+                let ids: Array = (ids.as_slice(), &[1, len][..]).try_into()?;
+                let pos = build_position_ids(start, len)?;
+                let _stable = (len == 4).then(crate::nn::product_stable_qmm::scope);
+                let y = if dflash {
+                    use crate::models::dflash2::{DFlash2Target, DFlash2TargetForwardMode as Mode};
+                    let mode = if start == 0 {
+                        Mode::Prefill
+                    } else if len == 1 {
+                        Mode::OrdinaryDecode
+                    } else {
+                        Mode::GreedyVerify
+                    };
+                    let out = model.dflash2_forward_target_on(
+                        &ids,
+                        &pos,
+                        Some(&mut cache),
+                        &[0],
+                        mode,
+                        ().into(),
+                    )?;
+                    model.slice_last_and_project(&out.hidden, None, ().into())?
+                } else {
+                    model.forward_on(&ids, &pos, None, None, Some(&mut cache), ())?
+                };
+                outputs.push(bits(&y)?);
+            }
+            Ok(outputs)
+        };
+        let baseline = run(&model, false)?;
+        let dflash_baseline = run(&model, true)?;
+        let mtp_hidden = random(&[1, 4, 512])?;
+        let mtp_projection = bits(&model.project_mtp_verify_hidden_on(&mtp_hidden, ())?)?;
+        for device in [M1Device::Pro, M1Device::Max] {
+            let plan = std::sync::Arc::new(M1ExecutionPlan::resolve(true, Some(device)));
+            model.text.m1_plan = Some(plan.clone());
+            assert_eq!(
+                run(&model, false)?,
+                baseline,
+                "full text/cache logits {device:?}"
+            );
+            assert_eq!(
+                run(&model, true)?,
+                dflash_baseline,
+                "DFlash2 target/cache logits {device:?}"
+            );
+            assert_eq!(
+                bits(&model.project_mtp_verify_hidden_on(&mtp_hidden, ())?)?,
+                mtp_projection,
+                "MTP target projection {device:?}"
+            );
+            let snapshot = plan.snapshot();
+            assert!(
+                snapshot.narrow_projection_calls > 0
+                    && snapshot.prefill_projection_calls > 0
+                    && snapshot.fallback_projection_calls > 0
+            );
+            assert!(!crate::nn::m1_gpu::active());
+        }
+        // The production selector must reject this fixture despite having
+        // exercised the complete GPU/model wiring under a private test plan.
+        model.configure_m1_profile(ironmlx_core::m1_profile::M1ProfileMode::Auto);
+        println!(
+            "M1_ACTUAL_SELECTOR {:?}",
+            crate::core::Model::m1_execution_plan(&model)
+                .unwrap()
+                .snapshot()
+        );
+        assert!(!crate::core::Model::m1_execution_plan(&model)
+            .unwrap()
+            .is_active());
+        model.configure_m1_profile(ironmlx_core::m1_profile::M1ProfileMode::Off);
+        assert!(crate::core::Model::m1_execution_plan(&model).is_none());
+        Ok(())
     }
 
     #[test]

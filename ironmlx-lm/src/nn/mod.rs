@@ -25,6 +25,7 @@ pub mod gdn_prep;
 pub(crate) mod gdn_scan;
 pub(crate) mod gemma4_verify_attention;
 pub mod linear;
+pub(crate) mod m1_gpu;
 pub(crate) mod m5_affine4;
 pub(crate) mod m5_attention;
 pub(crate) mod m5_tree_attention;

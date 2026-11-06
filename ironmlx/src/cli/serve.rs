@@ -223,6 +223,10 @@ pub struct ServeArgs {
     )]
     pub m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode,
 
+    /// Opt-in M1 Pro/Max Qwen3.8 affine4 GPU plan. ANE is not used.
+    #[arg(long = "m1-profile", default_value = "off", value_parser = parse_m1_profile_mode)]
+    pub m1_profile: ironmlx_core::m1_profile::M1ProfileMode,
+
     /// Neural Engine use. `auto` follows the M5 DFlash2 profile: Dense
     /// targets' prefill MLPs of full 2048-token chunks share part of their
     /// channels with the Neural Engine (MoE targets have no dense MLP and
@@ -637,6 +641,10 @@ fn ensure_dflash2_serve_supported(
         args.dflash2_position_keyed_sampling,
     )?;
     Ok(Some(family))
+}
+
+fn parse_m1_profile_mode(value: &str) -> Result<ironmlx_core::m1_profile::M1ProfileMode, String> {
+    value.parse()
 }
 
 fn parse_m5_profile_mode(value: &str) -> Result<ironmlx_core::m5_profile::M5ProfileMode, String> {
@@ -1310,6 +1318,7 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
         network: args.resolved_network_config()?,
         voice_profile_dir: resolve_voice_profile_dir(&args)?,
         options: ironmlx_runtime::core::runtime_config::EngineRuntimeOptions {
+            m1_profile: args.m1_profile,
             kv_cache_turboquant_bits: args.kv_quant.turboquant_bits(),
             scheduler_autotune_report: args.scheduler_autotune_report,
             paged_prefix_cache,
@@ -1530,13 +1539,14 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
 
     match architecture {
         ironmlx_lm::models::ModelArchitecture::Qwen35Dense => {
-            let model = if args.dflash2_model_dir.is_some() {
+            let mut model = if args.dflash2_model_dir.is_some() {
                 ironmlx_lm::models::Qwen35Model::from_loader_dflash2(&mut loader)
                     .context("Qwen35Model::from_loader_dflash2")?
             } else {
                 ironmlx_lm::models::Qwen35Model::from_loader(&loader)
                     .context("Qwen35Model::from_loader")?
             };
+            model.configure_m1_profile(args.m1_profile);
             if let Some(family) = dflash2_family {
                 serve_with_dflash2_model(
                     model,
@@ -1860,6 +1870,7 @@ mod scheduler_profile_tests {
             dflash2_draft_bits: None,
             dflash2_tree_max_nodes: None,
             m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode::Auto,
+            m1_profile: ironmlx_core::m1_profile::M1ProfileMode::Off,
             ane: ironmlx_core::m5_profile::AneMode::Auto,
             dflash2_position_keyed_sampling: false,
             dflash2_tensor_batch_max_width: None,
@@ -1985,6 +1996,37 @@ mod scheduler_profile_tests {
         );
         assert_eq!(not_dflash2.dflash2_tree_max_nodes, None);
         assert_eq!(not_dflash2.admission_deadline_ms, None);
+    }
+
+    #[test]
+    fn m1_profile_is_explicit_and_independent_of_m5() {
+        #[derive(Parser)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: ServeArgs,
+        }
+        let defaults = Wrapper::try_parse_from(["serve"]).unwrap();
+        assert_eq!(
+            defaults.args.m1_profile,
+            ironmlx_core::m1_profile::M1ProfileMode::Off
+        );
+        let enabled = Wrapper::try_parse_from([
+            "serve",
+            "--m1-profile",
+            "auto",
+            "--m5-dflash2-profile",
+            "off",
+        ])
+        .unwrap();
+        assert_eq!(
+            enabled.args.m1_profile,
+            ironmlx_core::m1_profile::M1ProfileMode::Auto
+        );
+        assert_eq!(
+            enabled.args.m5_dflash2_profile,
+            ironmlx_core::m5_profile::M5ProfileMode::Off
+        );
+        assert!(Wrapper::try_parse_from(["serve", "--m1-profile", "on"]).is_err());
     }
 
     #[test]
@@ -3291,6 +3333,7 @@ pub(crate) fn engine_runtime_config(
         network: args.resolved_network_config()?,
         voice_profile_dir: resolve_voice_profile_dir(args)?,
         options: ironmlx_runtime::core::runtime_config::EngineRuntimeOptions {
+            m1_profile: args.m1_profile,
             kv_cache_turboquant_bits: args.kv_quant.turboquant_bits(),
             scheduler_autotune_report: args.scheduler_autotune_report,
             paged_prefix_cache: resolve_engine_paged_prefix_cache_settings(args)?,

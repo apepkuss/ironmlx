@@ -740,6 +740,7 @@ pub struct EnginePagedPrefixCacheSettings {
 
 #[derive(Debug, Clone)]
 pub struct EngineRuntimeOptions {
+    pub m1_profile: ironmlx_core::m1_profile::M1ProfileMode,
     pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
     pub scheduler_autotune_report: bool,
     pub paged_prefix_cache: Option<EnginePagedPrefixCacheSettings>,

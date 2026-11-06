@@ -34,6 +34,13 @@ impl ModelMeta {
 }
 
 pub trait Model {
+    /// Optional engine-owned M1 plan; other models and M5 retain their existing routes.
+    fn m1_execution_plan(
+        &self,
+    ) -> Option<std::sync::Arc<ironmlx_core::m1_profile::M1ExecutionPlan>> {
+        None
+    }
+
     fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>>;
 
     /// Dtype expected by this model's KV cache tensors.

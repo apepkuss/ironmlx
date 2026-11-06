@@ -173,7 +173,7 @@ pub(crate) fn prefill_ane_ffn_units() -> usize {
 
 /// GatedDeltaNet fused q/k norm and gate kernels: under either fast path.
 pub(crate) fn gdn_kernels_armed() -> bool {
-    super::moe_fast_path::is_armed() || is_armed()
+    super::moe_fast_path::is_armed() || is_armed() || super::m1_gpu::active()
 }
 
 /// GatedDeltaNet fused preparation and gated norm: the MoE fast path with

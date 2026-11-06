@@ -133,6 +133,10 @@ pub struct GenerateArgs {
     #[arg(long = "m5-dflash2-profile", default_value = "auto", value_parser = parse_m5_profile_mode)]
     pub m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode,
 
+    /// Opt-in M1 Pro/Max Qwen3.8 affine4 GPU plan. ANE is not used.
+    #[arg(long = "m1-profile", default_value = "off", value_parser = parse_m1_profile_mode)]
+    pub m1_profile: ironmlx_core::m1_profile::M1ProfileMode,
+
     /// Use versioned position-keyed sampling for DFlash2. This changes output
     /// for the same seed and is therefore explicit rather than a new default.
     #[arg(long, default_value_t = false)]
@@ -529,6 +533,10 @@ fn run_diffusion_gemma_generation(
     Ok(())
 }
 
+fn parse_m1_profile_mode(value: &str) -> Result<ironmlx_core::m1_profile::M1ProfileMode, String> {
+    value.parse()
+}
+
 fn parse_m5_profile_mode(value: &str) -> Result<ironmlx_core::m5_profile::M5ProfileMode, String> {
     value.parse()
 }
@@ -587,13 +595,14 @@ pub fn run(mut args: GenerateArgs) -> Result<()> {
 
     match architecture {
         ironmlx_lm::models::ModelArchitecture::Qwen35Dense => {
-            let model = if args.dflash2_model_dir.is_some() {
+            let mut model = if args.dflash2_model_dir.is_some() {
                 ironmlx_lm::models::Qwen35Model::from_loader_dflash2(&mut loader)
                     .context("Qwen35Model::from_loader_dflash2")?
             } else {
                 ironmlx_lm::models::Qwen35Model::from_loader(&loader)
                     .context("Qwen35Model::from_loader")?
             };
+            model.configure_m1_profile(args.m1_profile);
             if let Some(family) = dflash2_family {
                 run_generation_with_dflash2_model(
                     &model, family, &tokenizer, &loader, model_type, &args,
@@ -688,6 +697,33 @@ mod tests {
             "--enable-thinking",
         ]);
         assert!(enabled_cli.args.enable_thinking);
+    }
+
+    #[test]
+    fn m1_profile_cli_is_opt_in() {
+        let defaults =
+            GenerateTestCli::parse_from(["test", "--model", "/tmp/model", "--prompt", "hello"]);
+        assert_eq!(
+            defaults.args.m1_profile,
+            ironmlx_core::m1_profile::M1ProfileMode::Off
+        );
+        let enabled = GenerateTestCli::parse_from([
+            "test",
+            "--model",
+            "/tmp/model",
+            "--prompt",
+            "hello",
+            "--m1-profile",
+            "auto",
+        ]);
+        assert_eq!(
+            enabled.args.m1_profile,
+            ironmlx_core::m1_profile::M1ProfileMode::Auto
+        );
+        assert_eq!(
+            enabled.args.m5_dflash2_profile,
+            ironmlx_core::m5_profile::M5ProfileMode::Auto
+        );
     }
 
     #[test]

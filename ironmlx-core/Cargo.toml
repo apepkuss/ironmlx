@@ -12,6 +12,7 @@ publish = false
 [dependencies]
 mlx = { path = "../mlx" }
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
 
 [features]
 default = []
