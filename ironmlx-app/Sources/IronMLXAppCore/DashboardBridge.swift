@@ -255,9 +255,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 applyTheme(theme)
             }
         case "setDefaultModel":
-            let model = stringBody(body).trimmingCharacters(in: .whitespacesAndNewlines)
-            updateConfig { $0.defaultModel = model }
-            setBackendDefaultModelIfLoaded(model)
+            setDefaultModel(stringBody(body))
         case "deleteModels":
             deleteModels(json: stringBody(body))
         case "verifyModelIntegrity":
@@ -1374,10 +1372,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         do {
             let result = try deletionService.deleteModels(modelIDs)
             let resultJSON = (try? Self.jsonString(result)) ?? "{}"
-            let defaultSync = result.clearedDefault ? "window.__DEFAULT_MODEL__ = '';" : ""
             syncLoadedModels()
             sendScannedModels(
-                afterScanJavaScript: "\(defaultSync)onModelsDeleted(\(Self.jsStringLiteral(resultJSON)))"
+                afterScanJavaScript: "onModelsDeleted(\(Self.jsStringLiteral(resultJSON)))"
             )
         } catch {
             let result = Self.modelOperationErrorJSON(
@@ -2642,6 +2639,21 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         return nil
     }
 
+    private func setDefaultModel(_ modelReference: String) {
+        let model = modelReference.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A fixed DFlash2 actor serves only its target, and the app recognizes that
+        // target by its being the default. Moving the default away would strand it:
+        // unload would take the ordinary path, which the actor does not serve.
+        if let target = configuredDFlash2Target(in: configStore.load()) {
+            if target != model {
+                sendJavaScript("onDefaultModelRejected(\(Self.jsStringLiteral(target)))")
+            }
+            return
+        }
+        updateConfig { $0.defaultModel = model }
+        setBackendDefaultModelIfLoaded(model)
+    }
+
     private func setBackendDefaultModelIfLoaded(_ modelReference: String) {
         let model = modelReference.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty, backend.isRunning else {
@@ -3114,6 +3126,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func syncPersistedLoadedModelsIfNeeded(_ models: [BackendLoadedModelInfo]) {
+        if parameterStore.clearDFlash2Setting(forOrdinaryModels: models) {
+            sendModelParameters()
+        }
         let backendLoaded = AppConfig.normalizedModelReferences(models.map(\.id))
         let backendPinned = AppConfig.normalizedModelReferences(models.filter(\.pinned).map(\.id))
         let config = configStore.load()
@@ -3135,6 +3150,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         preferredDefaultModel: String? = nil,
         parameterConfirmedModelIDs: Set<String> = []
     ) {
+        if parameterStore.clearDFlash2Setting(forOrdinaryModels: models) {
+            sendModelParameters()
+        }
         let loaded = models.map(\.id)
         let backendDefault = models.first(where: \.isDefault)?.id
         let currentDefault = configStore.load().defaultModelReference
@@ -3173,7 +3191,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             let json = (try? Self.jsonString(dashboardModels)) ?? "[]"
             await MainActor.run {
                 self.sendModelParameters()
-                let scanJavaScript = "onLocalModelsScanned(\(Self.jsStringLiteral(json)))"
+                // The configuration can change without the page: DFlash2 activation
+                // moves the default, and its failure path rolls the default back.
+                let defaultModel = Self.jsStringLiteral(config.defaultModelReference ?? "")
+                let scanJavaScript = "window.__DEFAULT_MODEL__ = \(defaultModel);"
+                    + "onLocalModelsScanned(\(Self.jsStringLiteral(json)))"
                 self.sendJavaScript(afterScanJavaScript.map { "\(scanJavaScript);\($0)" } ?? scanJavaScript)
             }
             if self.canSyncBackendModelState, self.configuredDFlash2Target(in: config) == nil {
@@ -3621,6 +3643,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
            object === self {
             return
         }
+        // Another owner can have changed the settings a page edits along with the list.
+        sendModelParameters()
         sendScannedModels()
     }
 

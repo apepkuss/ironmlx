@@ -296,6 +296,139 @@ import WebKit
 }
 
 @MainActor
+@Test func dashboardScanSelectsDefaultModelFromConfigurationWhenConfigChangedOutsideThePage() async throws {
+    let modelID = "mlx-community/LongContext-4bit"
+    let root = try dashboardBridgeNotificationModelRoot(
+        repoID: modelID,
+        configJSON: #"{"max_position_embeddings":262144}"#
+    )
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(defaultModel: modelID, activeKvOffload: false))
+    let webView = CapturingDashboardWebView()
+    let notificationCenter = NotificationCenter()
+    let bridge = DashboardBridge(
+        webView: webView,
+        configStore: configStore,
+        backend: TestRuntimeBackend(),
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        notificationCenter: notificationCenter
+    )
+
+    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+    let script = try #require(await webView.script(containing: "onLocalModelsScanned"))
+
+    let url = try #require(IronMLXAppResourceResolver.url(forResource: "dashboard2", withExtension: "html"))
+    let page = WKWebView()
+    page.loadHTMLString(try String(contentsOf: url, encoding: .utf8), baseURL: url.deletingLastPathComponent())
+    for _ in 0..<100 {
+        if (try? await page.evaluateJavaScript("typeof onLocalModelsScanned === 'function'")) as? Bool == true {
+            break
+        }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    _ = try await page.evaluateJavaScript("window.__DEFAULT_MODEL__ = 'mlx-community/Previous-Default'; 0")
+    _ = try await page.evaluateJavaScript("\(script); 0")
+    let selected = try await page.evaluateJavaScript(
+        "(document.querySelector('#tab-models-manage tbody input[type=radio]:checked') || {}).value || ''"
+    ) as? String
+    #expect(selected == modelID)
+    withExtendedLifetime(bridge) {}
+}
+
+@MainActor
+@Test func dashboardKeepsLoadedDFlash2TargetAsDefaultUntilItIsUnloaded() async throws {
+    let targetID = "mlx-community/Qwen3.8-27B-4bit"
+    let draftID = "z-lab/Qwen3.8-27B-DFlash2"
+    let root = try dashboardDFlash2ModelRoot(targetID: targetID, draftID: draftID)
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(defaultModel: targetID, loadedModels: [targetID]))
+    let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try parameterStore.save(ModelParameters(
+        modelID: targetID,
+        dflash2Enabled: true,
+        dflash2ModelID: draftID
+    ))
+    let web = WKWebView()
+    let bridge = DashboardBridge(
+        webView: web,
+        configStore: configStore,
+        backend: TestRuntimeBackend(),
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: parameterStore
+    )
+    web.configuration.userContentController.add(bridge, name: "setDefaultModel")
+    defer { web.configuration.userContentController.removeScriptMessageHandler(forName: "setDefaultModel") }
+    let url = try #require(IronMLXAppResourceResolver.url(forResource: "dashboard2", withExtension: "html"))
+    web.loadHTMLString(try String(contentsOf: url, encoding: .utf8), baseURL: url.deletingLastPathComponent())
+    for _ in 0..<100 {
+        if (try? await web.evaluateJavaScript("typeof setDefaultModel === 'function'")) as? Bool == true { break }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+
+    _ = try await web.evaluateJavaScript("currentLang = 'en'; setDefaultModel('z-lab/other'); 0")
+    var reverted = false
+    for _ in 0..<100 {
+        if (try? await web.evaluateJavaScript("window.__DEFAULT_MODEL__")) as? String == targetID {
+            reverted = true
+            break
+        }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(reverted)
+    #expect(configStore.load().defaultModelReference == targetID)
+    let toast = try await web.evaluateJavaScript("document.getElementById('toast-text').textContent") as? String
+    #expect(toast?.contains("DFlash2") == true)
+
+    configStore.update { $0.recordUnloadedModel(targetID) }
+    _ = try await web.evaluateJavaScript("setDefaultModel('z-lab/other'); 0")
+    var changed = false
+    for _ in 0..<100 {
+        if configStore.load().defaultModelReference == "z-lab/other" {
+            changed = true
+            break
+        }
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(changed)
+    withExtendedLifetime(bridge) {}
+}
+
+@MainActor
+@Test func dashboardClearsTheDFlash2SettingOfAModelTheOrdinaryDaemonLoaded() async throws {
+    let targetID = "mlx-community/Qwen3.8-27B-4bit"
+    let draftID = "z-lab/Qwen3.8-27B-DFlash2"
+    let root = try dashboardDFlash2ModelRoot(targetID: targetID, draftID: draftID)
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(defaultModel: targetID, loadedModels: []))
+    let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try parameterStore.save(ModelParameters(modelID: targetID, dflash2Enabled: true, dflash2ModelID: draftID))
+    let client = OrdinaryDashboardModelStatusClient(modelID: targetID)
+    let webView = CapturingDashboardWebView()
+    let notificationCenter = NotificationCenter()
+    let bridge = DashboardBridge(
+        webView: webView,
+        configStore: configStore,
+        backend: TestRuntimeBackend(state: .running, isRunning: true),
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: parameterStore,
+        notificationCenter: notificationCenter,
+        modelStatusClientFactory: { _, _ in client }
+    )
+
+    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+
+    let parameters = try #require(await webView.script(containing: #"\"dflash2_enabled\":false"#))
+    #expect(parameters.contains("onModelParamsLoaded"))
+    let config = configStore.load()
+    #expect(config.restoredModelReferences == [targetID])
+    #expect(parameterStore.parameters(for: targetID)?.dflash2Enabled == false)
+    #expect(parameterStore.parameters(for: targetID)?.dflash2ModelID == draftID)
+    #expect(config.configuredDFlash2Target(parameterStore: parameterStore) == nil)
+    withExtendedLifetime(bridge) {}
+}
+
+@MainActor
 @Test func dashboardScannedModelsExposeQuantizationAndReadiness() async throws {
     let root = try dashboardBridgeNotificationModelRoot(
         repoID: "mlx-community/Affine-6bit",
@@ -875,10 +1008,10 @@ private func dashboardBridgeNotificationModelRoot(repoID: String, configJSON: St
 
 private func decodedJavaScriptStringArgument(from script: String, functionName: String) throws -> String {
     let prefix = "\(functionName)("
-    guard script.hasPrefix(prefix), script.hasSuffix(")") else {
+    guard let call = script.range(of: prefix), script.hasSuffix(")") else {
         throw CocoaError(.coderInvalidValue)
     }
-    let literal = String(script.dropFirst(prefix.count).dropLast())
+    let literal = String(script[call.upperBound...].dropLast())
     return try JSONDecoder().decode(String.self, from: Data(literal.utf8))
 }
 
@@ -1288,6 +1421,26 @@ func dashboardRejectsModelQueryAcrossBackendRestart(restartFinished: Bool) async
     }
     #expect(backend.calls.filter { $0 == "refreshConfirmedSnapshot" }.count >= 2)
     withExtendedLifetime(bridge) {}
+}
+
+private actor OrdinaryDashboardModelStatusClient: DashboardModelStatusFetching {
+    private let modelID: String
+    init(modelID: String) {
+        self.modelID = modelID
+    }
+    func fetchLoadedModels() async throws -> [BackendLoadedModelInfo] {
+        [BackendLoadedModelInfo(
+            id: modelID,
+            model: modelID,
+            path: "/models/\(modelID)",
+            architecture: "qwen3_5",
+            isDefault: true,
+            maxPositionEmbeddings: 262_144
+        )]
+    }
+    func fetchHealthz() async throws -> HealthzSnapshot {
+        throw DashboardModelStatusClientTestError.adminRouteUnavailable
+    }
 }
 
 private actor EmptyDashboardModelStatusClient: DashboardModelStatusFetching {

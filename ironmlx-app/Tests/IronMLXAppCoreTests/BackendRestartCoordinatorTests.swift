@@ -112,6 +112,26 @@ import Testing
     #expect(recoveredModel.dflash2DraftBits == 8)
     #expect(recoveredModel.dflash2TensorBatchMaxWidth == 4)
 
+    // The launch and the readiness timeout read the same state: a saved setting on
+    // a model that is not loaded starts the ordinary daemon, which opens HTTP at once.
+    let launched = try BackendProcessManager.launchDFlash2Runtime(
+        config: config,
+        scanner: scanner,
+        parameterStore: parameterStore
+    )
+    #expect(launched?.draftModelDir == draft.path)
+    let settingOnly = AppConfig(port: 9068, defaultModel: targetID, loadedModels: [])
+    #expect(try BackendProcessManager.launchDFlash2Runtime(
+        config: settingOnly,
+        scanner: scanner,
+        parameterStore: parameterStore
+    ) == nil)
+    #expect(BackendRecoverySnapshot.capture(
+        config: settingOnly,
+        scanner: scanner,
+        parameterStore: parameterStore
+    ).models.isEmpty)
+
     let loader = FakeRestartModelLoader()
     let coordinator = BackendRestartCoordinator(
         scanner: scanner,

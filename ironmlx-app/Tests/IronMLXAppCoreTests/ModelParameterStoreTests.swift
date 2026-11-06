@@ -621,3 +621,26 @@ private final class ConcurrentConfigurationErrorBox: @unchecked Sendable {
     try Data(#"{"max_len":1024,"head_max_len":1024,"temperature":[1,1,1]}"#.utf8).write(to: file)
     #expect(LocalDecisionMetadata.read(from: root) == nil)
 }
+
+@Test func onlyAModelRunningWithoutTheDFlash2ActorLosesItsDFlash2Setting() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try store.save(ModelParameters(modelID: "ordinary", dflash2Enabled: true, dflash2ModelID: "draft"))
+    try store.save(ModelParameters(modelID: "not-loaded", dflash2Enabled: true, dflash2ModelID: "draft"))
+
+    store.clearDFlash2Setting(forOrdinaryModels: [BackendLoadedModelInfo(
+        id: "ordinary",
+        model: "ordinary",
+        path: "/models/ordinary",
+        architecture: "qwen3_5",
+        isDefault: true,
+        maxPositionEmbeddings: 4096
+    )])
+
+    #expect(store.parameters(for: "ordinary")?.dflash2Enabled == false)
+    #expect(store.parameters(for: "ordinary")?.dflash2ModelID == "draft")
+    #expect(store.parameters(for: "not-loaded")?.dflash2Enabled == true)
+}

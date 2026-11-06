@@ -5960,6 +5960,7 @@
       decision_batch_invalid: "Enter a whole number from 1 to 256.",
 
       err_dflash2_unload_required: "Unload the current DFlash2 model before loading another model.",
+      err_dflash2_default_locked: "The DFlash2 model stays the default while it is loaded. Unload it before choosing another default model.",
 
       tts_api_usage: "Load this model to use speech synthesis through /v1/audio/speech.",
       tts_files: "Downloaded files",
@@ -6126,7 +6127,7 @@
       incident_from: "From", incident_to: "To", incident_status: "Status", incident_all: "All", incident_model: "Model", incident_model_placeholder: "Model name", incident_reason: "Failure reason",
       incident_from_date_accessible_label: "Start date", incident_from_time_accessible_label: "Start time, 24-hour clock", incident_to_date_accessible_label: "End date", incident_to_time_accessible_label: "End time, 24-hour clock", incident_time_invalid: "Use 24-hour time HH:mm (00:00–23:59).",
       incident_status_pending: "Recovery pending", incident_status_recovering: "Recovering", incident_status_recovered: "Recovered", incident_status_partial: "Partially recovered", incident_status_failed: "Recovery failed", incident_status_stopped: "Automatic recovery stopped",
-      incident_empty: "No incidents match the current filters.", incident_type_backend_exit: "Unexpected backend exit", incident_view_details: "Details", incident_no_models: "No models",
+      incident_empty: "No incidents match the current filters.", incident_type_backend_exit: "Unexpected backend exit", incident_type_backend_readiness: "Backend readiness failed", incident_error: "Error", incident_view_details: "Details", incident_no_models: "No models",
       incident_id: "Incident ID", incident_occurred_at: "Occurred at", incident_launch_id: "Backend launch ID", incident_process: "Process", incident_exit_reason: "Exit reason", incident_models_before: "Models before incident", incident_recovered_models: "Recovered models", incident_failed_models: "Failed models", incident_attempts: "Automatic recovery attempts", incident_final_status: "Final recovery status", incident_failures: "Structured failures", incident_actions: "Recovery actions", incident_log_tail: "Sanitized log tail",
       incident_step_restart: "Automatic backend restart started", incident_step_readiness: "Backend readiness check passed", incident_step_restore: "Confirmed model restore started", incident_step_stable: "Stability observation window started", incident_step_stopped: "Automatic recovery stopped",
       incident_clear_title: "Clear all incident records?", incident_clear_confirm: "This permanently deletes all incident records and cannot be undone. Runtime logs are not affected.", incident_cleared: "All incident records cleared.", incident_clear_failed: "Could not clear incident history.", incident_exported: "Incident information exported.", incident_export_failed: "Incident export failed.", incident_load_failed: "Could not load incident history.",
@@ -6301,7 +6302,7 @@
       err_shard_download_failed: "Failed to download weight shards for \"{name}\". Check your network and retry.",
       err_server_manager_not_initialized: "Internal error: the server manager has not finished starting up. Try again in a moment.",
       err_backend_start_failed: "Failed to start the backend: {detail}",
-      err_backend_readiness_failed: "Backend health validation failed. The previous runtime configuration has been restored. See ~/.ironmlx/logs/backend.log for details.",
+      err_backend_readiness_failed: "Backend health validation failed. The previous runtime configuration has been restored. See Incident History on the Logs page or ~/.ironmlx/logs/app.log for details.",
       err_backend_load_timeout: "The backend started but did not finish loading the model within 2 minutes. See ~/.ironmlx/logs/backend.log for details.",
       err_backend_unreachable: "Cannot reach the backend: {detail}",
       err_backend_no_response: "Backend gave no response. Is the server running?",
@@ -6703,6 +6704,7 @@
       decision_batch_invalid: "请输入 1 到 256 之间的整数。",
 
       err_dflash2_unload_required: "请先卸载当前 DFlash2 模型，再加载其他模型。",
+      err_dflash2_default_locked: "DFlash2 模型加载期间必须保持为默认模型。请先卸载它，再选择其他默认模型。",
 
       tts_api_usage: "加载模型后，可通过 /v1/audio/speech 接口合成语音。",
       tts_files: "已下载文件",
@@ -6869,7 +6871,7 @@
       incident_from: "开始时间", incident_to: "结束时间", incident_status: "状态", incident_all: "全部", incident_model: "模型", incident_model_placeholder: "模型名称", incident_reason: "失败原因",
       incident_from_date_accessible_label: "开始日期", incident_from_time_accessible_label: "开始时间，24 小时制", incident_to_date_accessible_label: "结束日期", incident_to_time_accessible_label: "结束时间，24 小时制", incident_time_invalid: "请输入 24 小时制时间 HH:mm（00:00–23:59）。",
       incident_status_pending: "等待恢复", incident_status_recovering: "正在恢复", incident_status_recovered: "已恢复", incident_status_partial: "部分恢复", incident_status_failed: "恢复失败", incident_status_stopped: "自动恢复已停止",
-      incident_empty: "没有符合当前筛选条件的故障。", incident_type_backend_exit: "后端异常退出", incident_view_details: "查看详情", incident_no_models: "无受影响模型",
+      incident_empty: "没有符合当前筛选条件的故障。", incident_type_backend_exit: "后端异常退出", incident_type_backend_readiness: "后端就绪失败", incident_error: "错误详情", incident_view_details: "查看详情", incident_no_models: "无受影响模型",
       incident_id: "事故 ID", incident_occurred_at: "发生时间", incident_launch_id: "后端启动 ID", incident_process: "进程信息", incident_exit_reason: "退出原因", incident_models_before: "故障前模型", incident_recovered_models: "成功恢复模型", incident_failed_models: "恢复失败模型", incident_attempts: "自动恢复尝试次数", incident_final_status: "最终恢复结果", incident_failures: "结构化失败", incident_actions: "已执行恢复动作", incident_log_tail: "脱敏日志尾部",
       incident_step_restart: "开始自动重启后端", incident_step_readiness: "后端健康检查通过", incident_step_restore: "开始恢复已确认模型", incident_step_stable: "开始稳定性观察窗口", incident_step_stopped: "停止自动恢复",
       incident_clear_title: "清除全部故障记录？", incident_clear_confirm: "此操作将永久删除所有故障历史记录，删除后无法恢复。运行日志不会受到影响。", incident_cleared: "全部故障记录已清除。", incident_clear_failed: "无法清除故障历史。", incident_exported: "故障信息已导出。", incident_export_failed: "故障信息导出失败。", incident_load_failed: "无法加载故障历史。",
@@ -7044,7 +7046,7 @@
       err_shard_download_failed: "下载 \"{name}\" 的权重分片失败，请检查网络后重试。",
       err_server_manager_not_initialized: "内部错误：服务管理器尚未完成初始化，请稍后再试。",
       err_backend_start_failed: "启动后端失败：{detail}",
-      err_backend_readiness_failed: "后端健康检查失败，已恢复先前的运行配置。详情请查看 ~/.ironmlx/logs/backend.log。",
+      err_backend_readiness_failed: "后端健康检查失败，已恢复先前的运行配置。详情请查看日志页的故障历史或 ~/.ironmlx/logs/app.log。",
       err_backend_load_timeout: "后端已启动，但 2 分钟内未完成模型加载。详情请查看 ~/.ironmlx/logs/backend.log。",
       err_backend_unreachable: "无法连接到后端：{detail}",
       err_backend_no_response: "后端无响应，请确认服务是否正在运行。",
@@ -7446,6 +7448,7 @@
       decision_batch_invalid: "請輸入 1 到 256 之間的整數。",
 
       err_dflash2_unload_required: "請先卸載目前的 DFlash2 模型，再載入其他模型。",
+      err_dflash2_default_locked: "DFlash2 模型載入期間必須保持為預設模型。請先卸載它，再選擇其他預設模型。",
 
       tts_api_usage: "載入模型後，可透過 /v1/audio/speech 介面合成語音。",
       tts_files: "已下載檔案",
@@ -7612,7 +7615,7 @@
       incident_from: "開始時間", incident_to: "結束時間", incident_status: "狀態", incident_all: "全部", incident_model: "模型", incident_model_placeholder: "模型名稱", incident_reason: "失敗原因",
       incident_from_date_accessible_label: "開始日期", incident_from_time_accessible_label: "開始時間，24 小時制", incident_to_date_accessible_label: "結束日期", incident_to_time_accessible_label: "結束時間，24 小時制", incident_time_invalid: "請輸入 24 小時制時間 HH:mm（00:00–23:59）。",
       incident_status_pending: "等待恢復", incident_status_recovering: "正在恢復", incident_status_recovered: "已恢復", incident_status_partial: "部分恢復", incident_status_failed: "恢復失敗", incident_status_stopped: "自動恢復已停止",
-      incident_empty: "沒有符合目前篩選條件的故障。", incident_type_backend_exit: "後端異常退出", incident_view_details: "檢視詳情", incident_no_models: "無受影響模型",
+      incident_empty: "沒有符合目前篩選條件的故障。", incident_type_backend_exit: "後端異常退出", incident_type_backend_readiness: "後端就緒失敗", incident_error: "錯誤詳情", incident_view_details: "檢視詳情", incident_no_models: "無受影響模型",
       incident_id: "事故 ID", incident_occurred_at: "發生時間", incident_launch_id: "後端啟動 ID", incident_process: "程序資訊", incident_exit_reason: "退出原因", incident_models_before: "故障前模型", incident_recovered_models: "成功恢復模型", incident_failed_models: "恢復失敗模型", incident_attempts: "自動恢復嘗試次數", incident_final_status: "最終恢復結果", incident_failures: "結構化失敗", incident_actions: "已執行恢復動作", incident_log_tail: "脫敏日誌尾部",
       incident_step_restart: "開始自動重新啟動後端", incident_step_readiness: "後端健康檢查通過", incident_step_restore: "開始恢復已確認模型", incident_step_stable: "開始穩定性觀察視窗", incident_step_stopped: "停止自動恢復",
       incident_clear_title: "清除全部故障記錄？", incident_clear_confirm: "此操作將永久刪除所有故障歷史記錄，刪除後無法復原。執行日誌不會受到影響。", incident_cleared: "全部故障記錄已清除。", incident_clear_failed: "無法清除故障歷史。", incident_exported: "故障資訊已匯出。", incident_export_failed: "故障資訊匯出失敗。", incident_load_failed: "無法載入故障歷史。",
@@ -7795,7 +7798,7 @@
       err_shard_download_failed: "下載 \"{name}\" 的權重分片失敗，請檢查網路後重試。",
       err_server_manager_not_initialized: "內部錯誤：服務管理器尚未完成初始化，請稍後再試。",
       err_backend_start_failed: "啟動後端失敗：{detail}",
-      err_backend_readiness_failed: "後端健康檢查失敗，已恢復先前的執行設定。詳情請查看 ~/.ironmlx/logs/backend.log。",
+      err_backend_readiness_failed: "後端健康檢查失敗，已恢復先前的執行設定。詳情請查看日誌頁的故障歷史或 ~/.ironmlx/logs/app.log。",
       err_backend_load_timeout: "後端已啟動，但 2 分鐘內未完成模型載入。詳情請查看 ~/.ironmlx/logs/backend.log。",
       err_backend_unreachable: "無法連線到後端：{detail}",
       err_backend_no_response: "後端無回應，請確認服務是否正在執行。",
@@ -8192,6 +8195,7 @@
       decision_batch_invalid: "1〜256 の整数を入力してください。",
 
       err_dflash2_unload_required: "別のモデルを読み込む前に、現在の DFlash2 モデルをアンロードしてください。",
+      err_dflash2_default_locked: "DFlash2 モデルの読み込み中は既定モデルを変更できません。先にアンロードしてから、別の既定モデルを選択してください。",
 
       tts_api_usage: "モデルを読み込むと /v1/audio/speech で音声を合成できます。",
       tts_files: "ダウンロード済みファイル",
@@ -8358,7 +8362,7 @@
       incident_from: "開始", incident_to: "終了", incident_status: "状態", incident_all: "すべて", incident_model: "モデル", incident_model_placeholder: "モデル名", incident_reason: "失敗理由",
       incident_from_date_accessible_label: "開始日", incident_from_time_accessible_label: "開始時刻、24 時間制", incident_to_date_accessible_label: "終了日", incident_to_time_accessible_label: "終了時刻、24 時間制", incident_time_invalid: "24 時間制の HH:mm（00:00〜23:59）で入力してください。",
       incident_status_pending: "復旧待ち", incident_status_recovering: "復旧中", incident_status_recovered: "復旧済み", incident_status_partial: "一部復旧", incident_status_failed: "復旧失敗", incident_status_stopped: "自動復旧停止",
-      incident_empty: "現在のフィルターに一致する障害はありません。", incident_type_backend_exit: "バックエンドの予期しない終了", incident_view_details: "詳細", incident_no_models: "影響モデルなし",
+      incident_empty: "現在のフィルターに一致する障害はありません。", incident_type_backend_exit: "バックエンドの予期しない終了", incident_type_backend_readiness: "バックエンドの起動確認に失敗", incident_error: "エラーの詳細", incident_view_details: "詳細", incident_no_models: "影響モデルなし",
       incident_id: "障害 ID", incident_occurred_at: "発生日時", incident_launch_id: "バックエンド起動 ID", incident_process: "プロセス情報", incident_exit_reason: "終了理由", incident_models_before: "障害前のモデル", incident_recovered_models: "復旧したモデル", incident_failed_models: "復旧失敗モデル", incident_attempts: "自動復旧試行回数", incident_final_status: "最終復旧結果", incident_failures: "構造化された失敗", incident_actions: "実行した復旧操作", incident_log_tail: "秘匿化済みログ末尾",
       incident_step_restart: "バックエンドの自動再起動を開始", incident_step_readiness: "バックエンドの正常性確認に成功", incident_step_restore: "確認済みモデルの復元を開始", incident_step_stable: "安定性監視を開始", incident_step_stopped: "自動復旧を停止",
       incident_clear_title: "すべての障害記録を消去しますか？", incident_clear_confirm: "この操作により、すべての障害履歴が完全に削除され、元に戻すことはできません。実行ログには影響しません。", incident_cleared: "すべての障害記録を消去しました。", incident_clear_failed: "障害履歴を消去できませんでした。", incident_exported: "障害情報をエクスポートしました。", incident_export_failed: "障害情報のエクスポートに失敗しました。", incident_load_failed: "障害履歴を読み込めませんでした。",
@@ -8541,7 +8545,7 @@
       err_shard_download_failed: "\"{name}\" のウェイトシャードのダウンロードに失敗しました。ネットワークを確認して再試行してください。",
       err_server_manager_not_initialized: "内部エラー：サーバーマネージャの初期化が完了していません。少し待ってから再試行してください。",
       err_backend_start_failed: "バックエンドの起動に失敗しました：{detail}",
-      err_backend_readiness_failed: "バックエンドのヘルスチェックに失敗したため、以前の実行設定を復元しました。詳細は ~/.ironmlx/logs/backend.log を確認してください。",
+      err_backend_readiness_failed: "バックエンドのヘルスチェックに失敗したため、以前の実行設定を復元しました。詳細はログページの障害履歴または ~/.ironmlx/logs/app.log を確認してください。",
       err_backend_load_timeout: "バックエンドは起動しましたが、2 分以内にモデルのロードが完了しませんでした。詳細は ~/.ironmlx/logs/backend.log を確認してください。",
       err_backend_unreachable: "バックエンドに接続できません：{detail}",
       err_backend_no_response: "バックエンドから応答がありません。サーバーが動作しているか確認してください。",
@@ -8938,6 +8942,7 @@
       decision_batch_invalid: "1에서 256 사이의 정수를 입력하세요.",
 
       err_dflash2_unload_required: "다른 모델을 로드하기 전에 현재 DFlash2 모델을 언로드하세요.",
+      err_dflash2_default_locked: "DFlash2 모델이 로드된 동안에는 기본 모델을 변경할 수 없습니다. 먼저 언로드한 후 다른 기본 모델을 선택하세요.",
 
       tts_api_usage: "모델을 로드한 후 /v1/audio/speech로 음성을 합성할 수 있습니다.",
       tts_files: "다운로드한 파일",
@@ -9104,7 +9109,7 @@
       incident_from: "시작", incident_to: "종료", incident_status: "상태", incident_all: "전체", incident_model: "모델", incident_model_placeholder: "모델 이름", incident_reason: "실패 원인",
       incident_from_date_accessible_label: "시작 날짜", incident_from_time_accessible_label: "시작 시각, 24시간제", incident_to_date_accessible_label: "종료 날짜", incident_to_time_accessible_label: "종료 시각, 24시간제", incident_time_invalid: "24시간제 HH:mm(00:00~23:59) 형식으로 입력하세요.",
       incident_status_pending: "복구 대기", incident_status_recovering: "복구 중", incident_status_recovered: "복구됨", incident_status_partial: "부분 복구", incident_status_failed: "복구 실패", incident_status_stopped: "자동 복구 중지",
-      incident_empty: "현재 필터와 일치하는 장애가 없습니다.", incident_type_backend_exit: "백엔드 비정상 종료", incident_view_details: "세부 정보", incident_no_models: "영향받은 모델 없음",
+      incident_empty: "현재 필터와 일치하는 장애가 없습니다.", incident_type_backend_exit: "백엔드 비정상 종료", incident_type_backend_readiness: "백엔드 준비 상태 확인 실패", incident_error: "오류 세부 정보", incident_view_details: "세부 정보", incident_no_models: "영향받은 모델 없음",
       incident_id: "장애 ID", incident_occurred_at: "발생 시간", incident_launch_id: "백엔드 시작 ID", incident_process: "프로세스 정보", incident_exit_reason: "종료 원인", incident_models_before: "장애 전 모델", incident_recovered_models: "복구된 모델", incident_failed_models: "복구 실패 모델", incident_attempts: "자동 복구 시도 횟수", incident_final_status: "최종 복구 결과", incident_failures: "구조화된 실패", incident_actions: "실행된 복구 작업", incident_log_tail: "민감정보 제거 로그 끝부분",
       incident_step_restart: "백엔드 자동 재시작 시작", incident_step_readiness: "백엔드 상태 확인 통과", incident_step_restore: "확인된 모델 복원 시작", incident_step_stable: "안정성 관찰 시작", incident_step_stopped: "자동 복구 중지",
       incident_clear_title: "모든 장애 기록을 지우시겠습니까?", incident_clear_confirm: "이 작업은 모든 장애 기록을 영구적으로 삭제하며 되돌릴 수 없습니다. 실행 로그에는 영향을 주지 않습니다.", incident_cleared: "모든 장애 기록을 지웠습니다.", incident_clear_failed: "장애 기록을 지울 수 없습니다.", incident_exported: "장애 정보를 내보냈습니다.", incident_export_failed: "장애 정보 내보내기에 실패했습니다.", incident_load_failed: "장애 기록을 불러올 수 없습니다.",
@@ -9287,7 +9292,7 @@
       err_shard_download_failed: "\"{name}\"의 가중치 샤드 다운로드에 실패했습니다. 네트워크를 확인하고 다시 시도하세요.",
       err_server_manager_not_initialized: "내부 오류: 서버 매니저가 아직 초기화되지 않았습니다. 잠시 후 다시 시도하세요.",
       err_backend_start_failed: "백엔드 시작에 실패했습니다: {detail}",
-      err_backend_readiness_failed: "백엔드 상태 확인에 실패하여 이전 실행 구성을 복원했습니다. 자세한 내용은 ~/.ironmlx/logs/backend.log를 확인하세요.",
+      err_backend_readiness_failed: "백엔드 상태 확인에 실패하여 이전 실행 구성을 복원했습니다. 자세한 내용은 로그 페이지의 장애 기록 또는 ~/.ironmlx/logs/app.log를 확인하세요.",
       err_backend_load_timeout: "백엔드는 시작되었지만 2분 내에 모델 로드를 완료하지 못했습니다. 자세한 내용은 ~/.ironmlx/logs/backend.log를 참조하세요.",
       err_backend_unreachable: "백엔드에 연결할 수 없습니다: {detail}",
       err_backend_no_response: "백엔드가 응답하지 않습니다. 서버가 실행 중인지 확인하세요.",
@@ -10065,6 +10070,13 @@
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.setDefaultModel) {
       window.webkit.messageHandlers.setDefaultModel.postMessage(modelId);
     }
+  }
+
+  function onDefaultModelRejected(modelId) {
+    const dict = I18N[currentLang] || I18N.en;
+    window.__DEFAULT_MODEL__ = modelId;
+    showToast(dict.err_dflash2_default_locked, 'warn');
+    syncModelList();
   }
 
   // ── Model Selection & Deletion ──
@@ -12894,7 +12906,9 @@
       return '<div class="incident-row" id="incident-row-' + escapeHTML(String(item.id)) + '">'
         + '<div class="incident-row-summary">'
         + '<span>' + escapeHTML(incidentDate(item.occurred_at)) + '</span>'
-        + '<span>' + escapeHTML(dict.incident_type_backend_exit || 'Unexpected backend exit') + '</span>'
+        + '<span>' + escapeHTML(item.readiness_failure
+          ? (dict.incident_type_backend_readiness || 'Backend readiness failed')
+          : (dict.incident_type_backend_exit || 'Unexpected backend exit')) + '</span>'
         + '<span title="' + escapeHTML(models) + '">' + escapeHTML(models) + '</span>'
         + '<span>' + escapeHTML(incidentStatusLabel(item.recovery_status)) + '</span>'
         + '<span class="incident-secondary">' + Number(item.recovery_attempt || 0) + '</span>'
@@ -12964,6 +12978,7 @@
       + incidentDetailField(dict.incident_failed_models || 'Failed models', (incident.failed_models || []).join(', '))
       + incidentDetailField(dict.incident_attempts || 'Automatic recovery attempts', incident.recovery_attempt)
       + incidentDetailField(dict.incident_final_status || 'Final recovery status', incidentStatusLabel(incident.recovery_status))
+      + (incident.error ? incidentDetailField(dict.incident_error || 'Error', incident.error) : '')
       + '</div>'
       + '<div style="margin-top:14px;"><div class="incident-detail-label">' + escapeHTML(dict.incident_failures || 'Structured failures') + '</div>' + failureHTML + '</div>'
       + '<div style="margin-top:14px;"><div class="incident-detail-label">' + escapeHTML(dict.incident_actions || 'Recovery actions') + '</div>' + stepHTML + '</div>'

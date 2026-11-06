@@ -124,18 +124,11 @@ public final class BackendProcessManager {
             let config = configStore.load()
             let runtime = try BackendBinaryResolver.resolveValidatedRuntime()
             let options = BackendLaunchOptions(config: config)
-            let dflash2Runtime: ModelDFlash2Runtime?
-            if let defaultModel = config.defaultModelReference {
-                dflash2Runtime = try ModelDFlash2RuntimeResolver.runtime(
-                    for: defaultModel,
-                    useDFlash2: nil,
-                    scanner: scanner,
-                    parameterStore: parameterStore,
-                    fullChecksum: false
-                )
-            } else {
-                dflash2Runtime = nil
-            }
+            let dflash2Runtime = try Self.launchDFlash2Runtime(
+                config: config,
+                scanner: scanner,
+                parameterStore: parameterStore
+            )
             if let validationError = options.validationError {
                 throw BackendProcessError.invalidLaunchConfiguration(validationError)
             }
@@ -177,6 +170,23 @@ public final class BackendProcessManager {
                 logLevel: .saved(config.logLevel)
             )
         }
+    }
+
+    static func launchDFlash2Runtime(
+        config: AppConfig,
+        scanner: LocalModelScanner,
+        parameterStore: ModelParameterStore
+    ) throws -> ModelDFlash2Runtime? {
+        guard let target = config.configuredDFlash2Target(parameterStore: parameterStore) else {
+            return nil
+        }
+        return try ModelDFlash2RuntimeResolver.runtime(
+            for: target,
+            useDFlash2: true,
+            scanner: scanner,
+            parameterStore: parameterStore,
+            fullChecksum: false
+        )
     }
 
     public var isRunning: Bool {

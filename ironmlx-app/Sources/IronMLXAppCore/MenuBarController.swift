@@ -361,6 +361,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         ) else {
             return
         }
+        parameterStore.clearDFlash2Setting(forOrdinaryModels: models)
         let persistedLoaded = AppConfig.normalizedModelReferences(config.loadedModels ?? [])
         let persistedPinned = config.pinnedModelReferences
         let defaultChanged = backendDefault != nil && backendDefault != config.defaultModelReference

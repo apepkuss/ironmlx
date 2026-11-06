@@ -466,6 +466,61 @@ func readinessFailureTerminatesUnhealthyProcessAndEntersFailed() async throws {
 }
 
 @Test @MainActor
+func readinessFailureLeavesAppLogAndIncidentRecord() async throws {
+    let logged = MainActorMessages()
+    let harness = try runtimeHarness(
+        readinessWaiter: { _, _ in
+            throw RuntimeSupervisorTestError.readiness
+        },
+        errorLogger: { message in
+            MainActor.assumeIsolated { logged.values.append(message) }
+        }
+    )
+
+    await #expect(throws: BackendRuntimeSupervisorError.self) {
+        try await harness.supervisor.ensureRunning()
+    }
+
+    let launchID = try #require(harness.processManager.lastTermination?.launchID)
+    let record = try #require(harness.incidentStore.records().last)
+    #expect(harness.incidentStore.records().count == 1)
+    #expect(record.readinessFailure)
+    // Older app versions decode the whole store, so the type must stay one they know.
+    #expect(record.incidentType == .unexpectedBackendExit)
+    #expect(record.launchID == launchID)
+    #expect(record.stopIntent == .startupFailureCleanup)
+    #expect(record.recoveryStatus == .recoveryFailed)
+    #expect(record.primaryFailureReason == nil)
+    #expect(record.error?.contains("health check failed") == true)
+    #expect(harness.supervisor.lastIncident?.id == record.id)
+    #expect(harness.supervisor.lastEvent?.incidentID == record.id)
+    #expect(harness.launchCount.value == 1)
+    #expect(logged.values.count == 1)
+    #expect(logged.values.first?.contains("Backend readiness failed") == true)
+    #expect(logged.values.first?.contains(launchID.uuidString) == true)
+}
+
+@Test @MainActor
+func cancelledReadinessLeavesNoFailureRecord() async throws {
+    let logged = MainActorMessages()
+    let harness = try runtimeHarness(
+        readinessWaiter: { _, _ in
+            throw CancellationError()
+        },
+        errorLogger: { message in
+            MainActor.assumeIsolated { logged.values.append(message) }
+        }
+    )
+
+    await #expect(throws: CancellationError.self) {
+        try await harness.supervisor.ensureRunning()
+    }
+
+    #expect(harness.incidentStore.records().isEmpty)
+    #expect(logged.values.isEmpty)
+}
+
+@Test @MainActor
 func partialModelRestoreKeepsHealthyBackendExplicitlyDegraded() async throws {
     let result = BackendRestartResult(
         success: false,
@@ -640,7 +695,8 @@ private func runtimeHarness(
     restorer: any BackendModelRestoring = FixedModelRestorer(
         result: .successful(port: 9068)
     ),
-    readinessWaiter: @escaping BackendRuntimeSupervisor.ReadinessWaiter = { _, _ in }
+    readinessWaiter: @escaping BackendRuntimeSupervisor.ReadinessWaiter = { _, _ in },
+    errorLogger: @escaping BackendRuntimeSupervisor.ErrorLogger = { _ in }
 ) throws -> RuntimeHarness {
     let root = try runtimeTemporaryDirectory()
     let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
@@ -671,7 +727,8 @@ private func runtimeHarness(
         restartCoordinator: restorer,
         incidentStore: incidentStore,
         notificationCenter: notificationCenter,
-        readinessWaiter: readinessWaiter
+        readinessWaiter: readinessWaiter,
+        errorLogger: errorLogger
     )
     return RuntimeHarness(
         supervisor: supervisor,
@@ -680,6 +737,11 @@ private func runtimeHarness(
         notificationCenter: notificationCenter,
         launchCount: launchCount
     )
+}
+
+@MainActor
+private final class MainActorMessages {
+    var values: [String] = []
 }
 
 private struct FixedModelRestorer: BackendModelRestoring {

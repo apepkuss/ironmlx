@@ -373,6 +373,30 @@ public final class ModelParameterStore: @unchecked Sendable {
         }
     }
 
+    /// A client request can load a model on the ordinary daemon without the App.
+    /// Its saved DFlash2 setting must not outlive that: a default model with the
+    /// setting reads as the fixed DFlash2 actor and starts as one at next launch.
+    @discardableResult
+    public func clearDFlash2Setting(forOrdinaryModels models: [BackendLoadedModelInfo]) -> Bool {
+        var cleared = false
+        for model in models where model.dflash2?.enabled != true
+            && parameters(for: model.id)?.dflash2Enabled == true {
+            do {
+                try recordDFlash2LoadPreference(
+                    modelID: model.id,
+                    enabled: false,
+                    dflash2ModelID: nil
+                )
+                cleared = true
+            } catch {
+                IronMLXAppLogger.error(
+                    "Failed to clear DFlash2 setting of ordinary model \(model.id): \(error)"
+                )
+            }
+        }
+        return cleared
+    }
+
     public func jsonString() -> String {
         let all = (try? loadAll()) ?? [:]
         guard let data = try? JSONEncoder().encode(all),
