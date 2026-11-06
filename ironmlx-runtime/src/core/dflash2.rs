@@ -783,6 +783,9 @@ fn confident_prefix_len(confidence: &[f32], threshold: f32) -> usize {
     prefix.max(1).min(confidence.len())
 }
 
+/// Fixed draft budget; capped at the certified maximum. The M5 profile's
+/// budget is a full 8-token block, and a smaller configured block size lowers
+/// the maximum without changing the profile.
 fn experimental_fixed_budget(maximum: usize) -> Result<Option<usize>> {
     let Some(raw) =
         ironmlx_core::m5_profile::setting(ironmlx_core::m5_profile::settings::DFLASH2_FIXED_BUDGET)
@@ -792,11 +795,7 @@ fn experimental_fixed_budget(maximum: usize) -> Result<Option<usize>> {
     let value: usize = raw
         .parse()
         .map_err(|_| anyhow!("fixed DFlash2 budget must be a non-negative integer"))?;
-    anyhow::ensure!(
-        value <= maximum,
-        "fixed DFlash2 budget {value} exceeds supported {maximum}"
-    );
-    Ok(Some(value))
+    Ok(Some(value.min(maximum)))
 }
 
 /// Text-only, single-request DFlash2 stream with greedy and exact sampled decoding.
@@ -5942,6 +5941,22 @@ mod tests {
             plan(90, 90, DFlash2PrefillExecution::GenerationStream, true),
             91
         );
+    }
+
+    #[test]
+    #[serial]
+    fn fixed_budget_is_capped_by_the_configured_block_size() {
+        let name = ironmlx_core::m5_profile::settings::DFLASH2_FIXED_BUDGET;
+        let previous = std::env::var(name).ok();
+        std::env::set_var(name, "7");
+        let small_block = experimental_fixed_budget(3);
+        let full_block = experimental_fixed_budget(7);
+        match previous {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+        assert_eq!(small_block.expect("block 4"), Some(3));
+        assert_eq!(full_block.expect("block 8"), Some(7));
     }
 
     #[test]
