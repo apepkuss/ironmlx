@@ -116,6 +116,8 @@ pub fn pinned_bytes() -> usize {
 /// Dropping the lease ends its requests before releasing its storage handles.
 /// It does not change the allocator's wired limit. Bind it to each execution
 /// stream before use; dropping/suspending it removes its queue registrations.
+/// While any lease is active its request is renewed every 500 ms, because
+/// macOS drops residency within seconds of GPU idleness; no GPU work is sent.
 pub struct WeightResidency(cxx::UniquePtr<mlx_sys::memory::ffi::ScopedResidency>);
 
 // The immutable weight handles move with the lease, like Array. Metal set
