@@ -54,6 +54,14 @@ preload 在启动时加载，失败会阻止启动；lazy 在首次请求或控�
 lazy 加载失败后保持 failed，普通请求直接失败，需通过 load API 显式重试。
 达到加载上限时，优先卸载最久未使用且不在处理请求的 lazy 模型；preload 模型固定保留。
 
+## 内存记账与执行错误
+
+治理器取 physical footprint 与 MLX active 的较大值。Loader 完成求值后将对应组件标记为已分配；首次执行仍经过 Cold → Warming → Warm，但只为尚未分配的存储预留容量。延迟视觉加载仍保留完整预留，prefill、KV 与临时工作区保护继续生效。
+
+`reserved_bytes` 包含待完成的加载；其中 `model_load_reserved_bytes` 继续限制新准入，但不再次叠加到逐步增长的实测内存上判定压力。真实占用仍参与压力判断和回收。回收缓存后，空闲模型驱逐会重新获取权威采样；实测占用（含非加载预留）已回到原 recovery watermark 时停止驱逐，压力等级仍按原迟滞恢复，准入门槛和遥测降级保护保持生效。
+
+已准入请求的执行失败通过 terminal error 传递，不计入 token。普通、MTP 与 DFlash2 的 prefill、decode 及失败清理保留完整原因消息与调度器分类；Responses 和 Anthropic SSE 沿用非流式的错误分类，失败后不发送成功结束事件。优先级循环尾部失败会先终止活跃及排队请求，再清理调度状态。DFlash2 缓存构建或 prefill 失败属于执行错误，即使准入回复尚未发出；请求校验保留原分类。Chat Completions 保留 HTTP 503、具体错误码与 `Retry-After`；已打开的 SSE 报告错误，不发送成功结束或 `[DONE]`。
+
 ## HTTP API
 
 | 路由 | 用途 |

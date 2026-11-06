@@ -96,7 +96,8 @@ fn main() {
 /// Precompiled prefill kernels for Apple GPU generation 17+ (NAX). Built from
 /// `shaders/` with the pinned MLX kernel headers in `shaders/vendor` (QMM
 /// M-tile: MLX 0.32.2; D256 attention: MLX 0.32.3) using the same flags as
-/// the qualified candidate, so the output is byte-identical to it. The
+/// the qualified candidate. Binary identity additionally requires the same
+/// Metal compiler and SDK; library sizes are not a qualification check. The
 /// libraries are embedded in the crate (`mlx_sys::shaders`) and loaded at
 /// runtime only when the device profile enables them.
 fn compile_prefill_shaders() {

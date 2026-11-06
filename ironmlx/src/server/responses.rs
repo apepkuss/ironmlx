@@ -69,9 +69,11 @@ async fn next_scheduler_event(
     if disconnect.is_some_and(|disconnect| disconnect.is_cancelled()) {
         return Ok(None);
     }
-    event
-        .map(Some)
-        .ok_or_else(|| anyhow::anyhow!(MISSING_TERMINAL_EVENT))
+    let event = event.ok_or_else(|| anyhow::anyhow!(MISSING_TERMINAL_EVENT))?;
+    if let Some(error) = event.error {
+        return Err(anyhow::Error::new(error));
+    }
+    Ok(Some(event))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1249,9 +1251,12 @@ impl ResponsesRequest {
                 stream_options: None,
                 service_tier: self.service_tier,
                 ignore_eos: false,
-                max_tokens: self.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
+                max_tokens: Some(self.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS)),
+                max_completion_tokens: None,
                 temperature: self.temperature,
                 top_p: self.top_p,
+                frequency_penalty: None,
+                presence_penalty: None,
                 seed: None,
                 reasoning_effort: None,
                 chat_template_kwargs: reasoning.template_kwargs(),
@@ -1328,7 +1333,7 @@ where
         tool_aliases,
     } = normalized;
     let stream = chat.stream;
-    let max_output_tokens = chat.max_tokens;
+    let max_output_tokens = chat.output_budget();
     let model = chat.model.clone().unwrap_or_else(|| state.model_id.clone());
     let temperature = chat.temperature;
     let top_p = chat.top_p;
@@ -1704,7 +1709,7 @@ impl ResponseMeta {
             created_at: now_unix(),
             instructions: normalized.instructions.clone(),
             text_format: normalized.text_format.clone(),
-            max_output_tokens: normalized.chat.max_tokens,
+            max_output_tokens: normalized.chat.output_budget(),
             model,
             parallel_tool_calls: normalized.chat.parallel_tool_calls.unwrap_or(true),
             temperature: normalized.chat.temperature,
@@ -2330,6 +2335,11 @@ impl ResponsesStream {
     }
 
     pub(crate) fn failed(&mut self, message: String) -> Bytes {
+        self.failed_error(anyhow::anyhow!(message))
+    }
+
+    fn failed_error(&mut self, error: anyhow::Error) -> Bytes {
+        let error = super::api_error::ApiError::generation(error);
         self.event(
             "response.failed",
             FailedPayload {
@@ -2339,8 +2349,8 @@ impl ResponsesStream {
                     created_at: self.meta.created_at,
                     status: "failed",
                     error: FailedError {
-                        code: "generation_error",
-                        message,
+                        code: error.code(),
+                        message: error.message().to_owned(),
                     },
                 },
             },
@@ -2433,13 +2443,7 @@ where
     let mut finished = false;
     while let Some(event) = match next_scheduler_event(&mut event_rx, None).await {
         Ok(event) => event,
-        Err(error) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "generation_error",
-                error.to_string(),
-            )
-        }
+        Err(error) => return openai::generation_err_to_response(error),
     } {
         output.completion_tokens += 1;
         performance.record_output_tokens(1);
@@ -2583,7 +2587,7 @@ where
         while let Some(event) = match next_scheduler_event(&mut event_rx, Some(&disconnect)).await {
             Ok(event) => event,
             Err(error) => {
-                let _ = tx.send(Ok(formatter.failed(error.to_string()))).await;
+                let _ = tx.send(Ok(formatter.failed_error(error))).await;
                 return;
             }
         } {
@@ -2633,7 +2637,7 @@ where
             return;
         }
         if let Err(error) = require_terminal_event(finished) {
-            let _ = tx.send(Ok(formatter.failed(error.to_string()))).await;
+            let _ = tx.send(Ok(formatter.failed_error(error))).await;
             return;
         }
         let events = match decoder.finish(output.finish_reason) {
@@ -2746,11 +2750,69 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn scheduler_failure_stream_preserves_code_chain_and_no_success() {
+        use ironmlx_runtime::core::scheduler::{
+            GenerationError, RequestId, SchedulerError, StepEvent,
+        };
+        let normalized = serde_json::from_value::<ResponsesRequest>(serde_json::json!({
+            "input":"hello", "store":false, "stream":true,
+        }))
+        .unwrap()
+        .normalize()
+        .unwrap();
+        for typed in [true, false] {
+            let error = if typed {
+                anyhow::Error::new(SchedulerError::ColdMaterializationUnsafe {
+                    requested_bytes: 1,
+                    current_bytes: 2,
+                    target_bytes: 3,
+                })
+                .context("prefill")
+            } else {
+                anyhow::anyhow!("native allocation failure").context("decode")
+            };
+            let expected_message = format!("{error:#}");
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            tx.send(StepEvent {
+                id: RequestId(1),
+                token: 0,
+                finish_reason: None,
+                error: Some(GenerationError::from_error(&error)),
+            })
+            .unwrap();
+            let error = next_scheduler_event(&mut rx, None).await.unwrap_err();
+            let mut formatter =
+                ResponsesStream::new(ResponseMeta::from_normalized(&normalized, "local".into()));
+            let wire = formatter.failed_error(error);
+            let wire = std::str::from_utf8(&wire).unwrap();
+            let payload: serde_json::Value = serde_json::from_str(
+                wire.lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(payload["type"], "response.failed");
+            assert_eq!(
+                payload["response"]["error"]["code"],
+                if typed {
+                    "cold_materialization_unsafe"
+                } else {
+                    "generation_error"
+                }
+            );
+            assert_eq!(payload["response"]["error"]["message"], expected_message);
+            assert!(!wire.contains("response.completed"));
+            assert!(!wire.contains("usage"));
+        }
+    }
+
+    #[tokio::test]
     async fn scheduler_eof_after_zero_or_partial_output_is_an_error() {
         for count in [0, 2] {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             for token in 0..count {
                 tx.send(ironmlx_runtime::core::scheduler::StepEvent {
+                    error: None,
                     id: ironmlx_runtime::core::scheduler::RequestId(1),
                     token,
                     finish_reason: None,
@@ -2767,6 +2829,7 @@ mod tests {
         for reason in ["stop", "length"] {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             tx.send(ironmlx_runtime::core::scheduler::StepEvent {
+                error: None,
                 id: ironmlx_runtime::core::scheduler::RequestId(1),
                 token: 0,
                 finish_reason: Some(reason),
@@ -3332,7 +3395,7 @@ mod tests {
             None,
             output_schema.as_ref(),
             native_output,
-            Some(normalized.chat.max_tokens),
+            Some(normalized.chat.output_budget()),
         )
         .expect("compile reasoning-aware Responses constraint")
         .expect("structured output constraint");

@@ -762,6 +762,13 @@ async fn prepare_openai_request(
     constraint_native_output: Option<NativeOutputDecoderConfig>,
     protocol: RequestProtocol,
 ) -> std::result::Result<(PreparedOpenAiRequest, u32), Response> {
+    if req.frequency_penalty.is_some_and(|value| value != 0.0)
+        || req.presence_penalty.is_some_and(|value| value != 0.0)
+    {
+        return Err(protocol.invalid_request(
+            "DiffusionGemma does not support frequency_penalty or presence_penalty".to_owned(),
+        ));
+    }
     let prepared_tools =
         match super::openai::prepare_tool_request(&req, state.tokenizer.tool_dialect()) {
             Ok(prepared) => prepared,
@@ -1546,7 +1553,7 @@ pub(crate) async fn openai_chat_completions_with_state(
         .stream_options
         .map(|options| options.include_usage)
         .unwrap_or(false);
-    let max_tokens = req.max_tokens;
+    let max_tokens = req.output_budget();
     let temperature = req.temperature.unwrap_or(0.0);
     let seed = req.seed;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
@@ -1676,7 +1683,7 @@ pub(crate) async fn openai_responses_with_state(
         .unwrap_or_else(|| state.model_id.clone());
     let meta = super::responses::ResponseMeta::from_normalized(&normalized, model_label);
     let stream = normalized.chat.stream;
-    let max_tokens = normalized.chat.max_tokens;
+    let max_tokens = normalized.chat.output_budget();
     let temperature = normalized.chat.temperature.unwrap_or(0.0);
     let seed = normalized.chat.seed;
     let output_schema = normalized.output_schema();

@@ -6,7 +6,7 @@
 
 ## 阅读约定
 
-“—”表示省略。未指定采样参数时使用已加载模型的默认值，并非上游托管服务的固定默认值。只有 Responses 会先采用模型配置的输出预算，再回退到 256；不会提高显式指定的预算。标为片段的 JSON 示例需合并到包含必填字段的完整请求中。
+“—”表示省略。未指定采样参数时使用已加载模型的默认值，并非上游托管服务的固定默认值。Chat Completions 与 Responses 会先采用模型配置的输出预算，再回退到 256；不会提高显式指定的预算。Chat 的频次与出现惩罚独立于模型设置，默认均为零。标为片段的 JSON 示例需合并到包含必填字段的完整请求中。
 
 ## API 兼容性与限制
 
@@ -296,21 +296,26 @@ JSON Schema 子集见[通用约束](#json-schema)。
 | `response_format` | object | 否 | `{"type":"text"}` | text、json_object 或包含嵌套 json_schema 的 json_schema。 |
 | `stream` | boolean | 否 | `false` | true 返回 Chat completion SSE chunks。 |
 | `stream_options` | object | 否 | — | 仅接受 include_usage:boolean，默认 false。 |
-| `max_tokens` | integer | 否 | `256` | 包含思考与工具调用的总输出预算，受上下文容量约束。 |
+| `max_completion_tokens` | integer 或 null | 否 | 模型默认值或 256 | 首选的正整数总输出预算，包含思考与工具调用；同时提供时优先于 `max_tokens`。 |
+| `max_tokens` | integer 或 null | 否 | 模型默认值或 256 | 兼容旧客户端的输出预算；`max_completion_tokens` 省略或为 null 时使用。 |
+| `frequency_penalty` | number 或 null | 否 | `0` | 仅作用于当前请求的频次惩罚，须为 [-2,2] 内有限数；零或 null 不启用。仅 causal 模型支持。 |
+| `presence_penalty` | number 或 null | 否 | `0` | 仅作用于当前请求的出现惩罚，须为 [-2,2] 内有限数；零或 null 不启用。仅 causal 模型支持。 |
 | `service_tier` | string | 否 | `default` | auto/default 为前台；flex 在普通因果与 DFlash2 服务中使用后台优先级。见[请求优先级](#请求优先级)。 |
 | `temperature` | number | 否 | 模型采样默认值 | 有限数，范围 [0,2]。 |
 | `top_p` | number | 否 | 模型采样默认值 | 有限数，范围 (0,1]。 |
 | `seed` | integer | 否 | — | IronMLX 扩展：无符号请求种子。 |
-| `ignore_eos` | boolean | 否 | `false` | IronMLX 扩展：忽略 EOS，继续到 max_tokens，用于受控测量。 |
+| `ignore_eos` | boolean | 否 | `false` | IronMLX 扩展：忽略 EOS，继续到最终输出预算，用于受控测量。 |
 | `reasoning_effort` | string | 否 | 原生模板默认值 | Qwen3.8 的 low/medium/xhigh；要求匹配模板。 |
 | `chat_template_kwargs` | object | 否 | — | IronMLX 扩展：enable_thinking 等受支持模板参数。 |
+
+两个预算字段均省略或为 null 时，App 与 CLI 多模型服务使用所选模型的 `default_max_output_tokens`（App 的 **MAX OUTPUT TOKENS**），未配置再回退到 256；固定单模型 CLI 服务回退到 256。同时提供两个字段时，两者都必须是正整数，即使首选字段已决定预算。输入加最终输出预算超出有效上下文容量时返回 413；输出预算不会修改 **MAX CONTEXT TOKENS**。两个惩罚参数只影响当前请求，不修改模型默认值；DiffusionGemma 拒绝非零惩罚。
 
 ### 请求示例
 
 ```bash
 curl http://127.0.0.1:9068/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model": "your-model-id", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 128, "stream": false}'
+  -d '{"model": "your-model-id", "messages": [{"role": "user", "content": "Hello"}], "max_completion_tokens": 128, "stream": false}'
 ```
 
 ### 响应
@@ -478,7 +483,6 @@ Chat tools 当前边界：
 | `output_config` | object | 否 | — | format 使用 type:json_schema 与 schema；effort 要求启用 enabled/adaptive thinking。 |
 | `thinking` | object | 否 | 关闭 | type:disabled/enabled/adaptive；enabled 要求 budget_tokens >=1024 且 <max_tokens。 |
 | `max_tokens` | integer | 否 | `256` | 包含思考与工具调用的总输出预算，受上下文容量约束。 |
-| `stream` | boolean | 否 | `false` | true 返回原生 Messages SSE 事件。 |
 | `temperature` | number | 否 | 模型采样默认值 | 有限数，范围 [0,1]。 |
 | `top_p` | number | 否 | 模型采样默认值 | 有限数，范围 (0,1]。 |
 | `top_k` | integer | 否 | 模型采样默认值 | 正整数。 |

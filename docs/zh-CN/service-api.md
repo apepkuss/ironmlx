@@ -53,17 +53,14 @@ LAN 使用 `https://<selected-ip>:<port>`，所有路由（包括健康检查）
 | `data[].load_policy` | string, optional | 模型池 preload/lazy/disabled 加载策略。 |
 | `data[].state` | string, optional | 模型池状态，如 unloaded/loading/loaded/draining/failed/missing/disabled。 |
 | `data[].context_window` | integer, optional | 有效总上下文容量。 |
-| `data[].max_output_tokens` | integer, optional | 扣除输入 token 前的输出上限。 |
+| `data[].max_output_tokens` | integer, optional | 建议客户端采用的输出预算，并非独立的输出硬上限。 |
 
 能够可靠确定容量时，causal 模型条目还会返回以下 IronMLX 扩展字段：
 
 - `context_window`：有效总 token 容量，取模型上下文容量与部署配置 `max_cache_cap`（App 的 **MAX CONTEXT TOKENS**）中的较小值。
-- `max_output_tokens`：输出 token 上限，包含 reasoning、答案正文和工具调用。当前 causal 推理没有独立的输出硬上限，因此其值等于 `context_window`。具体请求的输出预算仍须满足 `context_window - input_tokens`，其中输入包含聊天模板和多模态输入 token。这**不是** App 的 **MAX OUTPUT TOKENS** 设置值：该设置仅在 Responses 请求未指定输出预算时提供默认值。
+- `max_output_tokens`：建议客户端采用的输出预算，包含 reasoning、答案正文和工具调用。优先使用模型配置的 **MAX OUTPUT TOKENS**，未配置时为 4096；最多取有效上下文窗口的一半（至少 1 token）。它不是独立的输出硬上限；请求可以显式指定更大的预算，只要剩余上下文容量允许。
 
-例如，模型上下文容量为 262144，部署配置 `max_cache_cap=65536`，则返回
-`context_window:65536`、`max_output_tokens:65536`，即使默认输出预算为 256。
-客户端必须扣除输入占用后再选择输出预算；声明的上限不保证非空输入能获得这么多输出，
-也不保证答案完整。请求仍受准入与内存检查约束。
+例如，部署后 `context_window:65536` 且未配置输出预算的模型会公布 `max_output_tokens:4096`；将 **MAX OUTPUT TOKENS** 配置为 8192 后会公布 8192。Chat Completions 与 Responses 在请求省略预算时采用模型配置值；模型也未配置时回退到 256。客户端仍需考虑输入占用，并遵守准入和内存检查。
 
 已加载模型使用实际准入容量；未加载的 causal 模型使用 checkpoint 中明确的容量元数据
 与已注册的调度器配置，无需加载权重。容量缺失、无效或不受支持时省略字段，不返回零，

@@ -144,16 +144,25 @@ pub struct ChatRequest {
     /// decode-round boundary while foreground (`auto`/`default`) work runs.
     #[serde(default)]
     pub service_tier: Option<String>,
-    /// Generate until `max_tokens` even when the model emits an EOS token.
+    /// Generate until the effective output budget even when the model emits EOS.
     /// Intended for controlled full-length performance measurements.
     #[serde(default)]
     pub ignore_eos: bool,
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: usize,
+    /// Legacy per-request output budget. Resolved only after model routing.
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+    /// Preferred output budget, including reasoning and tool-call tokens.
+    /// Takes precedence over `max_tokens` when both are supplied.
+    #[serde(default)]
+    pub max_completion_tokens: Option<usize>,
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
     pub top_p: Option<f32>,
+    #[serde(default)]
+    pub frequency_penalty: Option<f32>,
+    #[serde(default)]
+    pub presence_penalty: Option<f32>,
     #[serde(default)]
     pub seed: Option<u64>,
     /// Qwen3.8 native reasoning depth. The model's official template accepts
@@ -205,6 +214,18 @@ pub(crate) struct ChatJsonSchema {
 }
 
 impl ChatRequest {
+    pub(crate) fn output_budget(&self) -> usize {
+        self.max_completion_tokens
+            .or(self.max_tokens)
+            .unwrap_or_else(default_max_tokens)
+    }
+
+    pub(crate) fn apply_default_output_budget(&mut self, default: Option<usize>) {
+        if self.max_completion_tokens.is_none() && self.max_tokens.is_none() {
+            self.max_tokens = default;
+        }
+    }
+
     fn resolved_chat_template_kwargs(&self) -> anyhow::Result<Option<serde_json::Value>> {
         let Some(reasoning_effort) = self.reasoning_effort else {
             return Ok(self.chat_template_kwargs.clone());
@@ -226,6 +247,25 @@ impl ChatRequest {
     }
 
     pub(crate) fn validate_sampling(&self) -> anyhow::Result<()> {
+        for (name, value) in [
+            ("max_completion_tokens", self.max_completion_tokens),
+            ("max_tokens", self.max_tokens),
+        ] {
+            if let Some(value) = value {
+                anyhow::ensure!(value > 0, "{name} must be greater than zero");
+            }
+        }
+        for (name, value) in [
+            ("frequency_penalty", self.frequency_penalty),
+            ("presence_penalty", self.presence_penalty),
+        ] {
+            if let Some(value) = value {
+                anyhow::ensure!(
+                    value.is_finite() && (-2.0..=2.0).contains(&value),
+                    "{name} must be finite and between -2 and 2"
+                );
+            }
+        }
         if let Some(tier) = self.service_tier.as_deref() {
             anyhow::ensure!(
                 matches!(tier, "auto" | "default" | "flex"),
@@ -905,6 +945,13 @@ pub(crate) fn build_sampler(req: &ChatRequest, defaults: SamplingDefaults) -> Sa
     if let Some(seed) = req.seed {
         s = s.with_seed(seed);
     }
+    // Keep explicit zero equivalent to omission, including fast-path eligibility.
+    if let Some(penalty) = req.frequency_penalty.filter(|value| *value != 0.0) {
+        s = s.with_frequency_penalty(penalty);
+    }
+    if let Some(penalty) = req.presence_penalty.filter(|value| *value != 0.0) {
+        s = s.with_presence_penalty(penalty);
+    }
     s
 }
 
@@ -949,7 +996,7 @@ where
     let ignore_eos = req.ignore_eos;
     let priority = req.request_priority();
 
-    let max_tokens = req.max_tokens;
+    let max_tokens = req.output_budget();
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
     let sampler = build_sampler(&req, state.sampling_defaults);
     if let Err(error) = super::validate_prompt_lookup_sampler(state.prompt_lookup_enabled, sampler)
@@ -1045,7 +1092,7 @@ where
         prepared_tools.as_ref(),
         output_schema.as_ref(),
         native_output,
-        Some(req.max_tokens),
+        Some(max_tokens),
     ) {
         Ok(constraint) => constraint,
         Err(error) => {
@@ -1147,7 +1194,7 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
         .unwrap_or(false);
     let ignore_eos = req.ignore_eos;
     let priority = req.request_priority();
-    let max_tokens = req.max_tokens;
+    let max_tokens = req.output_budget();
     let model_label = req
         .model
         .clone()
@@ -1240,7 +1287,7 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
         prepared_tools.as_ref(),
         output_schema.as_ref(),
         native_output,
-        Some(req.max_tokens),
+        Some(max_tokens),
     ) {
         Ok(constraint) => constraint,
         Err(error) => {
@@ -1739,6 +1786,12 @@ where
         while let Some(event) =
             super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
         {
+            if let Some(error) = event.error {
+                let _ = tx
+                    .send(Ok(format_sse_error(&anyhow::Error::new(error))))
+                    .await;
+                return;
+            }
             completion_tokens += 1;
             performance.record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
@@ -1916,6 +1969,9 @@ where
     };
     let mut finished = false;
     while let Some(event) = event_rx.recv().await {
+        if let Some(error) = event.error {
+            return generation_err_to_response(anyhow::Error::new(error));
+        }
         output.completion_tokens += 1;
         performance.record_output_tokens(1);
         let events = if event.finish_reason == Some("stop") {
@@ -2066,6 +2122,12 @@ where
         while let Some(ev) =
             super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
         {
+            if let Some(error) = ev.error {
+                let _ = tx
+                    .send(Ok(format_sse_error(&anyhow::Error::new(error))))
+                    .await;
+                return;
+            }
             completion_tokens += 1;
             let mut events = if ev.finish_reason == Some("stop") {
                 Vec::new()
@@ -2210,6 +2272,9 @@ where
     };
     let mut finished = false;
     while let Some(ev) = event_rx.recv().await {
+        if let Some(error) = ev.error {
+            return generation_err_to_response(anyhow::Error::new(error));
+        }
         output.completion_tokens += 1;
         performance.record_output_tokens(1);
         let events = if ev.finish_reason == Some("stop") {
@@ -2282,9 +2347,12 @@ fn missing_terminal_event_error() -> anyhow::Error {
 }
 
 fn format_sse_error(e: &anyhow::Error) -> Bytes {
-    let payload =
-        serde_json::json!({"error": {"message": e.to_string(), "type": "internal_error"}});
-    format_sse_data(&payload)
+    format_sse_data(
+        &super::api_error::ApiError::generation(anyhow::Error::new(
+            ironmlx_runtime::core::scheduler::GenerationError::from_error(e),
+        ))
+        .openai_payload(),
+    )
 }
 
 #[cfg(test)]
@@ -2317,6 +2385,7 @@ mod tests {
             }
             for event in events {
                 tx.send(StepEvent {
+                    error: None,
                     id: request_id,
                     token: event.token,
                     finish_reason: event.finish_reason,
@@ -2342,6 +2411,114 @@ mod tests {
                 .filter_map(|line| line.strip_prefix("data: "))
                 .map(str::to_owned)
                 .collect()
+        }
+
+        fn rejected_prefill() -> AdmitReply {
+            let (tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let request_id = RequestId(1);
+            tx.send(StepEvent {
+                id: request_id,
+                token: 0,
+                finish_reason: None,
+                error: Some(
+                    ironmlx_runtime::core::scheduler::SchedulerError::ColdMaterializationUnsafe {
+                        requested_bytes: 20,
+                        current_bytes: 30,
+                        target_bytes: 40,
+                    }
+                    .into(),
+                ),
+            })
+            .unwrap();
+            AdmitReply {
+                request_id,
+                event_rx,
+            }
+        }
+
+        #[tokio::test]
+        async fn native_terminal_failure_preserves_chain_without_success() {
+            let state = crate::server::responses::eof_tests::state().await;
+            let (tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+            let request_id = RequestId(1);
+            tx.send(StepEvent {
+                id: request_id,
+                token: 0,
+                finish_reason: None,
+                error: Some(
+                    ironmlx_runtime::core::scheduler::GenerationError::from_error(
+                        &anyhow::anyhow!("native allocation failure").context("decode"),
+                    ),
+                ),
+            })
+            .unwrap();
+            drop(tx);
+            let response = stream_admitted(
+                state,
+                AdmitReply {
+                    request_id,
+                    event_rx,
+                },
+                Instant::now(),
+                "failure-test".into(),
+                1,
+                true,
+                StructuredOutputFormat::Text,
+            );
+            let raw = sse_body(response).await;
+            let events = data_events(&raw);
+            let body: serde_json::Value = serde_json::from_str(events.last().unwrap()).unwrap();
+            assert_eq!(body["error"]["code"], "generation_error");
+            assert_eq!(
+                body["error"]["message"],
+                "decode: native allocation failure"
+            );
+            assert!(!raw.contains("[DONE]"));
+            assert!(!raw.contains("completion_tokens"));
+        }
+
+        #[tokio::test]
+        async fn refused_prefill_preserves_503_retry_and_does_not_count_a_token() {
+            let state = crate::server::responses::eof_tests::state().await;
+            let response = collect_admitted(
+                state,
+                rejected_prefill(),
+                Instant::now(),
+                "guard-test".into(),
+                1,
+                StructuredOutputFormat::Text,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "5");
+            let raw = sse_body(response).await;
+            let body: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(body["error"]["code"], "cold_materialization_unsafe");
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("requested_bytes=20"));
+            assert!(!raw.contains("completion_tokens"));
+        }
+
+        #[tokio::test]
+        async fn refused_stream_has_typed_error_and_no_successful_end() {
+            let state = crate::server::responses::eof_tests::state().await;
+            let response = stream_admitted(
+                state,
+                rejected_prefill(),
+                Instant::now(),
+                "guard-test".into(),
+                1,
+                true,
+                StructuredOutputFormat::Text,
+            );
+            let raw = sse_body(response).await;
+            let events = data_events(&raw);
+            let body: serde_json::Value = serde_json::from_str(events.last().unwrap()).unwrap();
+            assert_eq!(body["error"]["code"], "cold_materialization_unsafe");
+            assert!(!raw.contains("[DONE]"));
+            assert!(!raw.contains("completion_tokens"));
         }
 
         #[tokio::test]
@@ -3096,7 +3273,7 @@ mod tests {
         for body in [
             serde_json::json!({"messages": [], "top_k": 16}),
             serde_json::json!({"messages": [], "repetition_penalty": 1.1}),
-            serde_json::json!({"messages": [], "max_completion_tokens": 8}),
+            serde_json::json!({"messages": [], "max_completion_tokens": 0}),
             serde_json::json!({"messages": [{"role": "user", "content": "hi", "name": "alice"}]}),
             serde_json::json!({"messages": [], "temperature": -0.1}),
             serde_json::json!({"messages": [], "top_p": 0.0}),
@@ -3219,6 +3396,165 @@ mod tests {
     }
 
     #[test]
+    fn chat_output_budget_precedence_and_null_defaults() {
+        for (fields, expected, configured) in [
+            (serde_json::json!({}), 256, None),
+            (serde_json::json!({}), 8192, Some(8192)),
+            (
+                serde_json::json!({"max_tokens": null, "max_completion_tokens": null}),
+                8192,
+                Some(8192),
+            ),
+            (serde_json::json!({"max_tokens": 64}), 64, Some(8192)),
+            (
+                serde_json::json!({"max_tokens": 64, "max_completion_tokens": null}),
+                64,
+                Some(8192),
+            ),
+            (
+                serde_json::json!({"max_completion_tokens": 32}),
+                32,
+                Some(8192),
+            ),
+            (
+                serde_json::json!({"max_tokens": null, "max_completion_tokens": 32}),
+                32,
+                Some(8192),
+            ),
+            (
+                serde_json::json!({"max_tokens": 64, "max_completion_tokens": 32}),
+                32,
+                Some(8192),
+            ),
+            (
+                serde_json::json!({"max_tokens": 8, "max_completion_tokens": 32}),
+                32,
+                None,
+            ),
+        ] {
+            let mut body = serde_json::json!({"messages": []});
+            body.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let mut request: ChatRequest = serde_json::from_value(body).unwrap();
+            request.apply_default_output_budget(configured);
+            request.validate_sampling().unwrap();
+            assert_eq!(request.output_budget(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_http_accepts_budget_and_penalties_and_rejects_invalid_values() {
+        use axum::{body::to_bytes, http::Request, routing::post, Router};
+        use tower::ServiceExt;
+
+        async fn inspect(ApiJson(mut request): ApiJson<ChatRequest>) -> Response {
+            request.apply_default_output_budget(Some(8192));
+            let sampler = build_sampler(&request, SamplingDefaults::default());
+            axum::Json(serde_json::json!({
+                "budget": request.output_budget(),
+                "frequency_penalty": sampler.frequency_penalty,
+                "presence_penalty": sampler.presence_penalty
+            }))
+            .into_response()
+        }
+        let app = Router::new().route("/v1/chat/completions", post(inspect));
+        for fields in [
+            serde_json::json!({"max_completion_tokens": 12, "max_tokens": 24,
+                "frequency_penalty": -2, "presence_penalty": 2}),
+            serde_json::json!({"max_tokens": 12, "max_completion_tokens": null,
+                "frequency_penalty": -2, "presence_penalty": 2}),
+        ] {
+            let mut body = serde_json::json!({"messages": []});
+            body.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({"budget":12,
+                "frequency_penalty":-2.0,"presence_penalty":2.0})
+            );
+        }
+        for fields in [
+            serde_json::json!({"max_completion_tokens": 0, "max_tokens": 12}),
+            serde_json::json!({"max_completion_tokens": -1}),
+            serde_json::json!({"max_completion_tokens": "12"}),
+            serde_json::json!({"max_completion_tokens": 1.5}),
+            serde_json::json!({"max_completion_tokens": 12, "max_tokens": 0}),
+            serde_json::json!({"max_completion_tokens": 12, "max_tokens": "12"}),
+            serde_json::json!({"frequency_penalty": -2.01}),
+            serde_json::json!({"frequency_penalty": 2.01}),
+            serde_json::json!({"presence_penalty": -2.01}),
+            serde_json::json!({"presence_penalty": 2.01}),
+            serde_json::json!({"frequency_penalty": "1"}),
+            serde_json::json!({"presence_penalty": true}),
+        ] {
+            let mut body = serde_json::json!({"messages": []});
+            body.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+            let error: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                    .unwrap();
+            assert_eq!(error["error"]["type"], "invalid_request_error");
+        }
+    }
+
+    #[test]
+    fn chat_penalties_are_request_scoped_and_zero_keeps_fast_paths() {
+        for fields in [
+            serde_json::json!({}),
+            serde_json::json!({"frequency_penalty": null, "presence_penalty": null}),
+            serde_json::json!({"frequency_penalty": 0, "presence_penalty": -0.0}),
+        ] {
+            let mut body = serde_json::json!({"messages": []});
+            body.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let request: ChatRequest = serde_json::from_value(body).unwrap();
+            request.validate_sampling().unwrap();
+            let sampler = build_sampler(&request, SamplingDefaults::default());
+            assert_eq!(sampler.frequency_penalty, None);
+            assert_eq!(sampler.presence_penalty, None);
+            assert!(sampler.is_pipelinable());
+        }
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut request: ChatRequest =
+                serde_json::from_value(serde_json::json!({"messages": []})).unwrap();
+            request.frequency_penalty = Some(value);
+            assert!(request.validate_sampling().is_err());
+            request.frequency_penalty = None;
+            request.presence_penalty = Some(value);
+            assert!(request.validate_sampling().is_err());
+        }
+    }
+
+    #[test]
     fn build_sampler_uses_model_defaults_when_request_omits_sampling_params() {
         let req: ChatRequest = serde_json::from_value(serde_json::json!({
             "messages": [],
@@ -3269,7 +3605,7 @@ mod tests {
         for body in [
             serde_json::json!({
                 "messages": [],
-                "max_completion_tokens": 8
+                "unsupported_budget": 8
             }),
             serde_json::json!({
                 "messages": [{"role": "user", "content": "hi", "name": "alice"}]

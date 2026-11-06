@@ -6,7 +6,7 @@ Reference for OpenAI Responses, Chat Completions and Anthropic Messages requests
 
 ## Reading conventions
 
-“—” means omitted. Sampling values use the loaded model’s defaults when omitted; they are not fixed upstream-service defaults. Only Responses applies a configured model output budget before falling back to 256. Explicit budgets are never enlarged. JSON feature examples marked as fragments must be merged into a request containing its required fields.
+“—” means omitted. Sampling values use the loaded model’s defaults when omitted; they are not fixed upstream-service defaults. Chat Completions and Responses apply a configured model output budget before falling back to 256. Explicit budgets are never enlarged; Chat frequency/presence penalties default to zero independently of model settings. JSON feature examples marked as fragments must be merged into a request containing its required fields.
 
 ## API compatibility and limits
 
@@ -276,21 +276,26 @@ The JSON Schema subset is defined in [Common constraints](#json-schema).
 | `response_format` | object | No | `{"type":"text"}` | text, json_object or json_schema with nested json_schema. |
 | `stream` | boolean | No | `false` | true returns Chat completion chunks over SSE. |
 | `stream_options` | object | No | — | Only include_usage:boolean; defaults to false. |
-| `max_tokens` | integer | No | `256` | Total output budget including reasoning and tool calls; context limit applies. |
+| `max_completion_tokens` | integer or null | No | Model default or 256 | Preferred positive total output budget including reasoning and tool calls; takes precedence over `max_tokens`. |
+| `max_tokens` | integer or null | No | Model default or 256 | Legacy output budget, used when `max_completion_tokens` is omitted or null. |
+| `frequency_penalty` | number or null | No | `0` | Request-only finite frequency penalty in [-2,2]; zero/null disables it. Causal models only. |
+| `presence_penalty` | number or null | No | `0` | Request-only finite presence penalty in [-2,2]; zero/null disables it. Causal models only. |
 | `service_tier` | string | No | `default` | auto/default for foreground; flex for background priority in ordinary causal and DFlash2 serving. See [Request priority](#request-priority). |
 | `temperature` | number | No | Model sampling default | Finite value in [0,2]. |
 | `top_p` | number | No | Model sampling default | Finite value in (0,1]. |
 | `seed` | integer | No | — | IronMLX extension: unsigned request seed. |
-| `ignore_eos` | boolean | No | `false` | IronMLX extension: continue to max_tokens despite EOS, for controlled measurements. |
+| `ignore_eos` | boolean | No | `false` | IronMLX extension: continue to the effective output budget despite EOS, for controlled measurements. |
 | `reasoning_effort` | string | No | Native template default | Qwen3.8 low/medium/xhigh; requires matching template. |
 | `chat_template_kwargs` | object | No | — | IronMLX extension: supported template parameters such as enable_thinking. |
+
+When both budget fields are omitted or null, App and CLI multi-model serving use the selected model’s `default_max_output_tokens` (App **MAX OUTPUT TOKENS**), then fall back to 256. Fixed single-model CLI serving falls back to 256. Both supplied fields must be positive integers, even when the preferred field takes precedence. Input plus the effective output budget must fit the context capacity or the server returns 413. These budgets do not change **MAX CONTEXT TOKENS**. Penalties apply only to the current request and do not change model defaults; DiffusionGemma rejects nonzero penalties.
 
 ### Request example
 
 ```bash
 curl http://127.0.0.1:9068/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model": "your-model-id", "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 128, "stream": false}'
+  -d '{"model": "your-model-id", "messages": [{"role": "user", "content": "Hello"}], "max_completion_tokens": 128, "stream": false}'
 ```
 
 ### Response

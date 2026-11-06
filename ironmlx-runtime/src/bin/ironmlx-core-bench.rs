@@ -3139,11 +3139,13 @@ mod tests {
         ]);
         let events = [
             ironmlx_runtime::core::scheduler::StepEvent {
+                error: None,
                 id: ironmlx_runtime::core::scheduler::RequestId(11),
                 token: 201,
                 finish_reason: None,
             },
             ironmlx_runtime::core::scheduler::StepEvent {
+                error: None,
                 id: ironmlx_runtime::core::scheduler::RequestId(10),
                 token: 101,
                 finish_reason: None,

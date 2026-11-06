@@ -3596,6 +3596,7 @@ fn driver_loop<M, A>(
                     "[SchedulerActor] outer-loop finalize failed: {e:?}; \
                      actor cannot reset Finished batch safely — terminating"
                 );
+                notify_scheduler_error(&e, &mut event_txs);
                 cleanup_parked_active_kv_requests(
                     &sched,
                     &mut parked_active_kv,
@@ -3757,6 +3758,7 @@ fn driver_loop<M, A>(
                     );
                 }
                 tracing::error!("[SchedulerActor] prefill error: {e:?}");
+                notify_scheduler_error(&e, &mut event_txs);
                 if let Err(evict_err) = sched.evict_all() {
                     tracing::warn!(
                         "[SchedulerActor] evict_all after prefill error also failed: \
@@ -3782,8 +3784,8 @@ fn driver_loop<M, A>(
                 // to land — reject with Err so callers see a clear error
                 // rather than hanging.
                 while let Some(pending) = admission_queue.pop_front() {
-                    let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
-                        "scheduler poisoned after prefill error"
+                    let _ = pending.reply_tx.send(Err(anyhow::Error::new(
+                        crate::core::scheduler::GenerationError::from_error(&e),
                     )));
                 }
                 continue 'outer;
@@ -3838,6 +3840,7 @@ fn driver_loop<M, A>(
                     &background_resumes,
                 ) {
                     tracing::error!(%error, "background priority reconciliation failed");
+                    notify_scheduler_error(&error, &mut event_txs);
                     if let Err(evict_error) = sched.evict_all() {
                         tracing::warn!(%evict_error, "scheduler cleanup after priority failure failed");
                     }
@@ -3855,8 +3858,8 @@ fn driver_loop<M, A>(
                         "background priority reconciliation failed",
                     );
                     while let Some(pending) = admission_queue.pop_front() {
-                        let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
-                            "scheduler failed to reconcile background priority"
+                        let _ = pending.reply_tx.send(Err(anyhow::Error::new(
+                            crate::core::scheduler::GenerationError::from_error(&error),
                         )));
                     }
                     continue 'outer;
@@ -3964,7 +3967,10 @@ fn driver_loop<M, A>(
                         &mut event_txs,
                         &background_paused,
                     );
-                    event_txs.clear();
+                    notify_scheduler_error(
+                        &anyhow::anyhow!("scheduler shutting down"),
+                        &mut event_txs,
+                    );
                     // Reject any queued admits — callers shouldn't hang.
                     while let Some(pending) = admission_queue.pop_front() {
                         let _ = pending
@@ -3982,9 +3988,10 @@ fn driver_loop<M, A>(
                             drain_b1_greedy_pipeline_before_mutation(&mut sched, &mut event_txs)
                         {
                             tracing::error!(%error, "failed to drain B1 greedy pipeline before admission");
+                            notify_scheduler_error(&error, &mut event_txs);
                             let SchedulerCommand::Admit { reply_tx, .. } = cmd;
-                            let _ = reply_tx.send(Err(anyhow::anyhow!(
-                                "scheduler B1 greedy pipeline failed before admission: {error:#}"
+                            let _ = reply_tx.send(Err(anyhow::Error::new(
+                                crate::core::scheduler::GenerationError::from_error(&error),
                             )));
                             if let Err(evict_error) = sched.evict_all() {
                                 tracing::warn!(%evict_error, "scheduler cleanup after B1 pipeline failure failed");
@@ -4006,8 +4013,8 @@ fn driver_loop<M, A>(
                             );
                             event_txs.clear();
                             while let Some(pending) = admission_queue.pop_front() {
-                                let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
-                                    "scheduler B1 greedy pipeline failed before admission"
+                                let _ = pending.reply_tx.send(Err(anyhow::Error::new(
+                                    crate::core::scheduler::GenerationError::from_error(&error),
                                 )));
                             }
                             continue 'outer;
@@ -4189,6 +4196,7 @@ fn driver_loop<M, A>(
                                 Ok(evicted) => evicted.len(),
                                 Err(error) => {
                                     tracing::error!(%error, "request-owned KV release failed");
+                                    notify_scheduler_error(&error, &mut event_txs);
                                     if let Err(evict_err) = sched.evict_all() {
                                         tracing::warn!(
                                             "[SchedulerActor] evict_all after request-owned KV release failure also failed: {evict_err:?}"
@@ -4211,8 +4219,10 @@ fn driver_loop<M, A>(
                                     );
                                     event_txs.clear();
                                     while let Some(pending) = admission_queue.pop_front() {
-                                        let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
-                                            "scheduler poisoned after request-owned KV release failure"
+                                        let _ = pending.reply_tx.send(Err(anyhow::Error::new(
+                                            crate::core::scheduler::GenerationError::from_error(
+                                                &error,
+                                            ),
                                         )));
                                     }
                                     b_active.store(sched.active_count() as u64, Ordering::Relaxed);
@@ -4310,6 +4320,7 @@ fn driver_loop<M, A>(
                                 );
                             }
                             tracing::error!("[SchedulerActor] step error: {e:?}");
+                            notify_scheduler_error(&e, &mut event_txs);
                             if let Err(evict_err) = sched.evict_all() {
                                 tracing::warn!(
                                     "[SchedulerActor] evict_all after step error also failed: \
@@ -4333,8 +4344,8 @@ fn driver_loop<M, A>(
                             );
                             event_txs.clear();
                             while let Some(pending) = admission_queue.pop_front() {
-                                let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
-                                    "scheduler poisoned after step error"
+                                let _ = pending.reply_tx.send(Err(anyhow::Error::new(
+                                    crate::core::scheduler::GenerationError::from_error(&e),
                                 )));
                             }
                             b_active.store(sched.active_count() as u64, Ordering::Relaxed);
@@ -4370,34 +4381,20 @@ fn driver_loop<M, A>(
             active_kv_stats.set_parked_requests(parked_active_kv.len());
             immutable_prefix_stats.store(sched.request_owned_kv_stats().immutable_prefix);
 
-            if let Err(error) = reconcile_background_priority::<M, A>(
+            if !reconcile_background_priority_tail::<M, A>(
                 &mut sched,
                 &model,
-                &admission_queue,
-                &in_flight_mid_admit,
+                &mut admission_queue,
+                &mut in_flight_mid_admit,
                 &mut paused_background,
                 &mut event_txs,
                 &background_paused,
                 &background_preemptions,
                 &background_resumes,
+                &mut parked_active_kv,
+                &active_kv_stats,
+                &mtp_counters,
             ) {
-                tracing::error!(%error, "background priority tail reconciliation failed");
-                if let Err(evict_error) = sched.evict_all() {
-                    tracing::warn!(%evict_error, "scheduler cleanup after tail priority failure failed");
-                }
-                cleanup_paused_background(
-                    &mut sched,
-                    &mut paused_background,
-                    &mut event_txs,
-                    &background_paused,
-                );
-                cleanup_parked_active_kv_requests(
-                    &sched,
-                    &mut parked_active_kv,
-                    &mut event_txs,
-                    &active_kv_stats,
-                    "background priority tail reconciliation failed",
-                );
                 continue 'outer;
             }
 
@@ -4480,7 +4477,10 @@ fn driver_loop<M, A>(
             &mut event_txs,
             &background_paused,
         );
-        event_txs.clear();
+        notify_scheduler_error(
+            &anyhow::anyhow!("scheduler outer loop reset before completion"),
+            &mut event_txs,
+        );
     }
 }
 
@@ -4835,6 +4835,7 @@ where
                 );
             }
             tracing::error!("[SchedulerActor] admit_mid_chunk error: {e:?}");
+            fail_request(id, &e, event_txs);
             let _ = sched.evict(id);
             event_txs.remove(&id);
             return ROLLING_DECODE_STEPS_AFTER_ADMISSION_WORK;
@@ -4903,6 +4904,7 @@ where
                 );
             }
             tracing::error!("[SchedulerActor] admit_mid_finalize error: {e:?}");
+            fail_request(id, &e, event_txs);
             let _ = sched.evict(id);
             event_txs.remove(&id);
         }
@@ -5117,7 +5119,11 @@ fn cleanup_paused_background<M>(
     M: Model + DenseVlMethods + Send + 'static,
 {
     while let Some(paused) = paused_background.pop_front() {
-        event_txs.remove(&paused.id());
+        fail_request(
+            paused.id(),
+            &anyhow::anyhow!("scheduler discarded paused request"),
+            event_txs,
+        );
         sched.discard_paused_background_request(paused);
     }
     sched.set_background_priority_budget_allowance(0);
@@ -5135,6 +5141,61 @@ fn refresh_background_priority_budget_allowance<M>(
         .map(PausedBackgroundRequest::kv_bytes_admitted)
         .fold(0usize, usize::saturating_add);
     sched.set_background_priority_budget_allowance(allowance);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reconcile_background_priority_tail<M, A>(
+    sched: &mut Scheduler<M>,
+    model: &Arc<Mutex<M>>,
+    admission_queue: &mut VecDeque<PendingAdmit>,
+    in_flight_mid_admit: &mut Option<A::MidAdmitHandle>,
+    paused_background: &mut VecDeque<PausedBackgroundRequest>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    background_paused: &AtomicU64,
+    background_preemptions: &AtomicU64,
+    background_resumes: &AtomicU64,
+    parked_active_kv: &mut VecDeque<ActiveKvParkedRequest>,
+    active_kv_stats: &ActiveKvOffloadSharedStats,
+    mtp_counters: &SchedulerActorMtpCounters,
+) -> bool
+where
+    M: Model + DenseVlMethods + Send + 'static,
+    A: SchedulerActorMtpMode<M>,
+{
+    if let Err(error) = reconcile_background_priority::<M, A>(
+        sched,
+        model,
+        admission_queue,
+        in_flight_mid_admit,
+        paused_background,
+        event_txs,
+        background_paused,
+        background_preemptions,
+        background_resumes,
+    ) {
+        tracing::error!(%error, "background priority tail reconciliation failed");
+        notify_scheduler_error(&error, event_txs);
+        while let Some(pending) = admission_queue.pop_front() {
+            let _ = pending.reply_tx.send(Err(anyhow::Error::new(
+                crate::core::scheduler::GenerationError::from_error(&error),
+            )));
+        }
+        *in_flight_mid_admit = None;
+        if let Err(evict_error) = sched.evict_all() {
+            tracing::warn!(%evict_error, "scheduler cleanup after tail priority failure failed");
+        }
+        mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
+        cleanup_paused_background(sched, paused_background, event_txs, background_paused);
+        cleanup_parked_active_kv_requests(
+            sched,
+            parked_active_kv,
+            event_txs,
+            active_kv_stats,
+            "background priority tail reconciliation failed",
+        );
+        return false;
+    }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5302,6 +5363,36 @@ fn route_event(ev: StepEvent, event_txs: &HashMap<RequestId, mpsc::UnboundedSend
     }
 }
 
+fn fail_request(
+    id: RequestId,
+    error: &anyhow::Error,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+) {
+    if let Some(tx) = event_txs.remove(&id) {
+        let _ = tx.send(StepEvent {
+            id,
+            token: 0,
+            finish_reason: None,
+            error: Some(crate::core::scheduler::GenerationError::from_error(error)),
+        });
+    }
+}
+
+fn notify_scheduler_error(
+    error: &anyhow::Error,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+) {
+    let failure = crate::core::scheduler::GenerationError::from_error(error);
+    for (id, tx) in event_txs.drain() {
+        let _ = tx.send(StepEvent {
+            id,
+            token: 0,
+            finish_reason: None,
+            error: Some(failure.clone()),
+        });
+    }
+}
+
 fn drain_b1_greedy_pipeline_before_mutation<M>(
     sched: &mut Scheduler<M>,
     event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
@@ -5433,7 +5524,7 @@ where
                         parked.id.0
                     );
                 }
-                event_txs.remove(&parked.id);
+                fail_request(parked.id, &err, event_txs);
                 active_kv_stats.set_parked_requests(parked_active_kv.len());
             }
         }
@@ -5452,6 +5543,7 @@ fn cleanup_parked_active_kv_requests<M>(
 {
     while let Some(parked) = parked_active_kv.pop_front() {
         if let Err(err) = sched.discard_active_kv_request(&parked) {
+            fail_request(parked.id, &err, event_txs);
             active_kv_stats.record_error();
             tracing::warn!(
                 "[active-kv-offload] event=cleanup_error request_id={} reason={} error={err:#}",
@@ -5459,7 +5551,7 @@ fn cleanup_parked_active_kv_requests<M>(
                 reason
             );
         }
-        event_txs.remove(&parked.id);
+        fail_request(parked.id, &anyhow::anyhow!("{reason}"), event_txs);
     }
     active_kv_stats.set_parked_requests(0);
 }
@@ -5564,7 +5656,8 @@ where
     // must not separately finalize.
     match finalize_finished_batch_if_any(sched, event_txs, mtp_counters) {
         Ok(_) => {}
-        Err(_e) => {
+        Err(error) => {
+            notify_scheduler_error(&error, event_txs);
             cleanup_parked_active_kv_requests(
                 sched,
                 parked_active_kv,
@@ -5573,8 +5666,8 @@ where
                 "scheduler poisoned during Finished-batch finalize",
             );
             while let Some(pending) = admission_queue.pop_front() {
-                let _ = pending.reply_tx.send(Err(anyhow::anyhow!(
-                    "scheduler poisoned during Finished-batch finalize"
+                let _ = pending.reply_tx.send(Err(anyhow::Error::new(
+                    crate::core::scheduler::GenerationError::from_error(&error),
                 )));
             }
             event_txs.clear();
@@ -5601,10 +5694,11 @@ where
                     "[SchedulerActor] evict_all between batches (queue drain) failed: \
                      {evict_err:?}; rejecting queued admits"
                 );
+                notify_scheduler_error(&evict_err, event_txs);
                 while let Some(pending) = admission_queue.pop_front() {
-                    let _ = pending
-                        .reply_tx
-                        .send(Err(anyhow::anyhow!("scheduler evict_all failed")));
+                    let _ = pending.reply_tx.send(Err(anyhow::Error::new(
+                        crate::core::scheduler::GenerationError::from_error(&evict_err),
+                    )));
                 }
                 event_txs.clear();
                 return RollingControl::ContinueOuter;
@@ -5711,6 +5805,7 @@ where
             Ok(_) => {}
             Err(e) => {
                 tracing::error!("[SchedulerActor] re-prefill (queue drain) error: {e:?}");
+                notify_scheduler_error(&e, event_txs);
                 if let Err(evict_err) = sched.evict_all() {
                     tracing::warn!(
                         "[SchedulerActor] evict_all after re-prefill error also failed: \
@@ -5720,8 +5815,8 @@ where
                 mtp_counters.reset_stats_baseline(sched.prompt_lookup_stats());
                 event_txs.clear();
                 while let Some(p) = admission_queue.pop_front() {
-                    let _ = p.reply_tx.send(Err(anyhow::anyhow!(
-                        "scheduler poisoned after re-prefill error"
+                    let _ = p.reply_tx.send(Err(anyhow::Error::new(
+                        crate::core::scheduler::GenerationError::from_error(&e),
                     )));
                 }
                 return RollingControl::ContinueOuter;
@@ -5742,6 +5837,7 @@ where
                         "[SchedulerActor] evict_all between batches failed: \
                          {evict_err:?}; rejecting incoming admit"
                     );
+                    notify_scheduler_error(&evict_err, event_txs);
                     let SchedulerCommand::Admit { reply_tx, .. } = cmd;
                     let _ = reply_tx.send(Err(evict_err));
                     event_txs.clear();
@@ -5791,6 +5887,7 @@ where
                 Ok(_) => {}
                 Err(e) => {
                     tracing::error!("[SchedulerActor] re-prefill error: {e:?}");
+                    notify_scheduler_error(&e, event_txs);
                     if let Err(evict_err) = sched.evict_all() {
                         tracing::warn!(
                             "[SchedulerActor] evict_all after re-prefill error also failed: \
@@ -5806,7 +5903,10 @@ where
         }
         Err(tokio::sync::mpsc::error::TryRecvError::Empty) => RollingControl::BreakRolling,
         Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-            event_txs.clear();
+            notify_scheduler_error(
+                &anyhow::anyhow!("scheduler command channel closed"),
+                event_txs,
+            );
             RollingControl::ReturnActor
         }
     }
@@ -7361,6 +7461,405 @@ pub(crate) mod tests {
         assert_eq!(stats.rejected_regimes_current, 2);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial(mlx_metal)]
+    async fn admitted_cold_refusal_is_delivered_as_typed_terminal_error() {
+        configure_local_test_metallib();
+        let handle = spawn_scheduler_actor(
+            Arc::new(Mutex::new(SchedulerActorFakeModel)),
+            1,
+            Duration::from_millis(1),
+            4,
+            32,
+            256,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .unwrap();
+        handle
+            .install_cold_materialization_tracker(
+                crate::core::process_memory::ColdMaterializationTracker::new(
+                    crate::core::process_memory::StaticMemoryEstimate {
+                        text_cold_bytes: usize::MAX / 2,
+                        ..Default::default()
+                    },
+                ),
+            )
+            .unwrap();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .cmd_tx
+            .send(SchedulerCommand::Admit {
+                request: mk_req(11),
+                reply_tx,
+            })
+            .await
+            .unwrap();
+        let mut reply = reply_rx.await.unwrap().unwrap();
+        let failure = tokio::time::timeout(Duration::from_secs(5), reply.event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            failure.error.and_then(|error| error.scheduler_error),
+            Some(crate::core::scheduler::SchedulerError::ColdMaterializationUnsafe { .. })
+        ));
+        assert!(failure.finish_reason.is_none());
+        assert!(reply.event_rx.recv().await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial(mlx_metal)]
+    async fn native_prefill_and_decode_failures_preserve_causes_in_plain_and_mtp() {
+        // Inject at the model-mode boundary so prompt splitting and the B1
+        // look-ahead cannot accidentally turn the decode case into prefill.
+        struct FaultMode<A> {
+            inner: A,
+            prefill: bool,
+        }
+        impl<A: SchedulerActorMtpMode<SchedulerActorFakeModel>>
+            SchedulerActorMtpMode<SchedulerActorFakeModel> for FaultMode<A>
+        {
+            type MidAdmitHandle = A::MidAdmitHandle;
+            fn mid_admit_request_id(_: &Self::MidAdmitHandle) -> RequestId {
+                unreachable!()
+            }
+            fn mid_admit_chunk_start(_: &Self::MidAdmitHandle) -> i32 {
+                unreachable!()
+            }
+            fn mid_admit_prompt_len(_: &Self::MidAdmitHandle) -> i32 {
+                unreachable!()
+            }
+            fn mid_admit_chunk_size(_: &Self::MidAdmitHandle) -> i32 {
+                unreachable!()
+            }
+            fn set_mid_admit_chunk_size(_: &mut Self::MidAdmitHandle, _: i32) {
+                unreachable!()
+            }
+            fn mid_admit_decode_cadence_mid_chunk_cap(_: &Self::MidAdmitHandle) -> usize {
+                unreachable!()
+            }
+            fn prefill_admitted(
+                &mut self,
+                sched: &mut Scheduler<SchedulerActorFakeModel>,
+                model: &SchedulerActorFakeModel,
+                counters: &SchedulerActorMtpCounters,
+            ) -> Result<Vec<StepEvent>> {
+                if self.prefill {
+                    return Err(
+                        anyhow::anyhow!("injected native allocation failure").context("prefill")
+                    );
+                }
+                self.inner.prefill_admitted(sched, model, counters)
+            }
+            fn step(
+                &mut self,
+                _: &mut Scheduler<SchedulerActorFakeModel>,
+                _: &SchedulerActorFakeModel,
+                _: &SchedulerActorMtpCounters,
+                _: bool,
+            ) -> Result<Vec<StepEvent>> {
+                Err(anyhow::anyhow!("injected native allocation failure").context("decode"))
+            }
+            fn begin_mid_admit(
+                &mut self,
+                _: &mut Scheduler<SchedulerActorFakeModel>,
+                _: &SchedulerActorFakeModel,
+                _: GenerateRequest,
+            ) -> Result<Self::MidAdmitHandle> {
+                unreachable!()
+            }
+            fn advance_mid_admit_chunk(
+                &mut self,
+                _: &mut Scheduler<SchedulerActorFakeModel>,
+                _: &SchedulerActorFakeModel,
+                _: &mut Self::MidAdmitHandle,
+            ) -> Result<bool> {
+                unreachable!()
+            }
+            fn finalize_mid_admit(
+                &mut self,
+                _: &mut Scheduler<SchedulerActorFakeModel>,
+                _: &SchedulerActorFakeModel,
+                _: Self::MidAdmitHandle,
+                _: &SchedulerActorMtpCounters,
+            ) -> Result<(RequestId, StepEvent)> {
+                unreachable!()
+            }
+        }
+        async fn check<A: SchedulerActorMtpMode<SchedulerActorFakeModel> + Send + 'static>(
+            inner: A,
+            prefill: bool,
+        ) {
+            let handle = spawn_scheduler_actor_with_mode(
+                Arc::new(Mutex::new(SchedulerActorFakeModel)),
+                FaultMode { inner, prefill },
+                1,
+                Duration::from_millis(1),
+                4,
+                32,
+                256,
+                crate::core::memory_budget::test_meta_qwen35(),
+                None,
+                None,
+                AdaptiveAdmissionPolicy::disabled(),
+                ActiveKvOffloadConfig::disabled(),
+            )
+            .unwrap();
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let mut request = mk_req(1);
+            request.prompt_ids = vec![1, 2, 3];
+            request.stop_token_ids.clear();
+            handle
+                .cmd_tx
+                .send(SchedulerCommand::Admit { request, reply_tx })
+                .await
+                .unwrap();
+            let mut reply = reply_rx.await.unwrap().unwrap();
+            let mut tokens = 0;
+            loop {
+                let event = tokio::time::timeout(Duration::from_secs(5), reply.event_rx.recv())
+                    .await
+                    .unwrap()
+                    .expect("failure event");
+                if let Some(error) = event.error {
+                    assert_eq!(
+                        error.message.as_ref(),
+                        if prefill {
+                            "prefill: injected native allocation failure"
+                        } else {
+                            "decode: injected native allocation failure"
+                        }
+                    );
+                    assert!(error.scheduler_error.is_none());
+                    assert!(event.finish_reason.is_none());
+                    break;
+                }
+                tokens += 1;
+                assert!(event.finish_reason.is_none());
+            }
+            assert_eq!(
+                tokens == 0,
+                prefill,
+                "decode case must follow real prefill output"
+            );
+            assert!(reply.event_rx.recv().await.is_none());
+            wait_for_scheduler_resources_to_be_released(&handle).await;
+        }
+        configure_local_test_metallib();
+        for prefill in [true, false] {
+            check(SchedulerActorNoMtp, prefill).await;
+            let root = unique_temp_dir("actor-failure");
+            let inner =
+                SchedulerActorMtp::<SchedulerActorFakeMtpHead>::new_with_exact_qualification(
+                    SchedulerActorFakeMtpHead,
+                    1,
+                    NeuralExactQualificationRuntimeConfig::for_test(
+                        NeuralExactSource::QwenMtp,
+                        "fake-qwen",
+                        root.join("qualification.json"),
+                    ),
+                )
+                .unwrap();
+            check(inner, prefill).await;
+            std::fs::remove_dir_all(root).ok();
+        }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn priority_tail_failure_notifies_all_requests_releases_resources_and_recovers() {
+        configure_local_test_metallib();
+        for restore in [false, true] {
+            for successes in [0, 1] {
+                let mut sched = test_scheduler(3, 64);
+                let mut event_txs = HashMap::new();
+                let mut receivers = Vec::new();
+                let mut ids = Vec::new();
+                for token in [1, 3, 4] {
+                    let mut request = mk_req(token);
+                    request.prompt_ids = vec![1, 3, token];
+                    request.priority = crate::core::generation_types::RequestPriority::Background;
+                    let id = sched.admit(request).unwrap();
+                    let (tx, rx) = mpsc::unbounded_channel();
+                    event_txs.insert(id, tx);
+                    receivers.push(rx);
+                    ids.push(id);
+                }
+                sched.prefill_admitted(&SchedulerActorFakeModel).unwrap();
+                let mut paused = VecDeque::new();
+                if restore {
+                    for id in &ids {
+                        paused.push_back(
+                            sched
+                                .pause_background_request(*id, &SchedulerActorFakeModel)
+                                .unwrap(),
+                        );
+                    }
+                }
+                let mut queue = VecDeque::new();
+                let mut pending = Vec::new();
+                for token in [5, 6] {
+                    let (reply_tx, rx) = oneshot::channel();
+                    let mut request = mk_req(token);
+                    if restore {
+                        request.priority =
+                            crate::core::generation_types::RequestPriority::Background;
+                    }
+                    queue.push_back(PendingAdmit {
+                        request,
+                        reply_tx,
+                        queued_at_profile: None,
+                    });
+                    pending.push(rx);
+                }
+                let model = Arc::new(Mutex::new(
+                    SchedulerActorFakeModel::with_cache_failure_after(successes),
+                ));
+                let mut in_flight = None;
+                let mut parked = VecDeque::new();
+                let stats = ActiveKvOffloadSharedStats::new(&ActiveKvOffloadConfig::disabled());
+                let paused_count = AtomicU64::new(paused.len() as u64);
+                let preemptions = AtomicU64::new(0);
+                let resumes = AtomicU64::new(0);
+                let continued = reconcile_background_priority_tail::<_, SchedulerActorNoMtp>(
+                    &mut sched,
+                    &model,
+                    &mut queue,
+                    &mut in_flight,
+                    &mut paused,
+                    &mut event_txs,
+                    &paused_count,
+                    &preemptions,
+                    &resumes,
+                    &mut parked,
+                    &stats,
+                    &test_mtp_counters(),
+                );
+                println!("TAIL_TRACE restore={restore} successes={successes} continued={continued} active={} senders={} queued={} paused={} preemptions={} resumes={} budget={}",sched.active_count(),event_txs.len(),queue.len(),paused.len(),preemptions.load(Ordering::Relaxed),resumes.load(Ordering::Relaxed),sched.budget_state.shared_active().load(Ordering::Relaxed));
+                assert!(
+                    !continued,
+                    "fault must reach the actual tail recovery branch"
+                );
+                assert_eq!(
+                    if restore {
+                        resumes.load(Ordering::Relaxed)
+                    } else {
+                        preemptions.load(Ordering::Relaxed)
+                    },
+                    successes as u64,
+                    "must exercise partial state mutation before the failure"
+                );
+                assert!(
+                    queue.is_empty(),
+                    "tail failure left admission replies waiting"
+                );
+                assert!(
+                    event_txs.is_empty(),
+                    "tail failure left active request channels open"
+                );
+                for mut rx in receivers {
+                    let failure = rx
+                        .try_recv()
+                        .expect("terminal failure")
+                        .error
+                        .expect("error event");
+                    assert!(
+                        failure.message.contains(
+                            "background cache rebuild: injected native cache allocation failure"
+                        ),
+                        "{failure}"
+                    );
+                    assert!(rx.try_recv().is_err());
+                }
+                for mut rx in pending {
+                    let error = rx
+                        .try_recv()
+                        .expect("admission reply")
+                        .err()
+                        .expect("admission failure");
+                    assert!(format!("{error:#}").contains(
+                        "background cache rebuild: injected native cache allocation failure"
+                    ));
+                }
+                assert!(paused.is_empty() && parked.is_empty() && in_flight.is_none());
+                assert_eq!(paused_count.load(Ordering::Relaxed), 0);
+                assert_eq!(
+                    sched.budget_state.shared_active().load(Ordering::Relaxed),
+                    0
+                );
+                sched.admit(mk_req(1)).unwrap();
+                let events = sched
+                    .prefill_admitted(&*model.blocking_lock())
+                    .expect("subsequent request recovers");
+                assert!(!events.is_empty() && events.iter().all(|event| event.error.is_none()));
+                sched.evict_all().unwrap();
+                assert_eq!(
+                    sched.budget_state.shared_active().load(Ordering::Relaxed),
+                    0
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn priority_tail_defers_mutation_while_mid_admit_is_in_flight() {
+        configure_local_test_metallib();
+        let mut sched = test_scheduler(2, 64);
+        let mut background = mk_req(1);
+        background.priority = crate::core::generation_types::RequestPriority::Background;
+        let id = sched.admit(background).unwrap();
+        sched.prefill_admitted(&SchedulerActorFakeModel).unwrap();
+        let mut request = mk_req(3);
+        request.prompt_ids = vec![1, 3, 4];
+        request.prefill_chunk_size = 1;
+        let mut mode = SchedulerActorNoMtp;
+        let handle = mode
+            .begin_mid_admit(&mut sched, &SchedulerActorFakeModel, request)
+            .unwrap();
+        let mut in_flight = Some(handle);
+        let model = Arc::new(Mutex::new(
+            SchedulerActorFakeModel::with_cache_failure_after(0),
+        ));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut txs = HashMap::from([(id, tx)]);
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        let mut queue = VecDeque::from([PendingAdmit {
+            request: mk_req(5),
+            reply_tx,
+            queued_at_profile: None,
+        }]);
+        let mut paused = VecDeque::new();
+        let mut parked = VecDeque::new();
+        let counter = AtomicU64::new(0);
+        let stats = ActiveKvOffloadSharedStats::new(&ActiveKvOffloadConfig::disabled());
+        assert!(
+            reconcile_background_priority_tail::<_, SchedulerActorNoMtp>(
+                &mut sched,
+                &model,
+                &mut queue,
+                &mut in_flight,
+                &mut paused,
+                &mut txs,
+                &counter,
+                &counter,
+                &counter,
+                &mut parked,
+                &stats,
+                &test_mtp_counters()
+            )
+        );
+        assert!(
+            in_flight.is_some()
+                && queue.len() == 1
+                && txs.len() == 1
+                && reply_rx.try_recv().is_err()
+        );
+        println!("TAIL_IN_FLIGHT deferred=true priority_mutations=0 no_failure=no_cancel");
+        drop(in_flight);
+        sched.evict_all().unwrap();
+    }
+
     #[test]
     fn recovered_prefill_failure_publishes_idle_scheduler_depth() {
         let mut scheduler = test_scheduler(4, 32);
@@ -8388,16 +8887,21 @@ pub mod test_support {
     use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
     use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
     use ironmlx_lm::nn::MtpStepOutput;
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
+    #[cfg_attr(not(test), derive(Copy))]
     pub struct SchedulerActorFakeModel {
         forward_delay: Duration,
         mtp_accepted_prefix_restore: bool,
+        #[cfg(test)]
+        cache_failure_after: Option<Arc<std::sync::atomic::AtomicIsize>>,
     }
 
     #[allow(non_upper_case_globals)]
     pub const SchedulerActorFakeModel: SchedulerActorFakeModel = SchedulerActorFakeModel {
         forward_delay: Duration::ZERO,
         mtp_accepted_prefix_restore: false,
+        #[cfg(test)]
+        cache_failure_after: None,
     };
 
     impl SchedulerActorFakeModel {
@@ -8405,6 +8909,8 @@ pub mod test_support {
             Self {
                 forward_delay,
                 mtp_accepted_prefix_restore: false,
+                #[cfg(test)]
+                cache_failure_after: None,
             }
         }
 
@@ -8413,6 +8919,15 @@ pub mod test_support {
             Self {
                 forward_delay,
                 mtp_accepted_prefix_restore: true,
+                cache_failure_after: None,
+            }
+        }
+
+        #[cfg(test)]
+        pub(super) fn with_cache_failure_after(successes: isize) -> Self {
+            Self {
+                cache_failure_after: Some(Arc::new(std::sync::atomic::AtomicIsize::new(successes))),
+                ..SchedulerActorFakeModel
             }
         }
 
@@ -8464,6 +8979,15 @@ pub mod test_support {
             cap: i32,
             dtype: mlx::Dtype,
         ) -> Result<Vec<ironmlx_lm::core::cache::layer::LayerCache>> {
+            #[cfg(test)]
+            if self
+                .cache_failure_after
+                .as_ref()
+                .is_some_and(|counter| counter.fetch_sub(1, Ordering::SeqCst) == 0)
+            {
+                return Err(anyhow::anyhow!("injected native cache allocation failure")
+                    .context("background cache rebuild"));
+            }
             Ok(vec![ironmlx_lm::core::cache::layer::LayerCache::Full(
                 ironmlx_lm::core::cache::kv_cache::KVCache::new(batch, 1, 1, 1, dtype, cap),
             )])

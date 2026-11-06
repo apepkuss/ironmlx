@@ -5596,7 +5596,7 @@
       <div class="model-params-output-section" id="modal-generation-settings">
       <div class="modal-row model-params-setting-row model-params-capacity-row">
         <div class="modal-field"><div class="field-label-with-help"><label for="modal-max-tokens" data-i18n="max_context_tokens">MAX CONTEXT TOKENS</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" aria-label="About max context tokens" data-i18n-aria-label="max_context_tokens_help_label" aria-describedby="max-context-tokens-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="max-context-tokens-help" role="tooltip" data-i18n="max_context_tokens_help">Runtime KV cache limit for one sequence. Input and generated tokens share this context; this is not the output limit.</span></span></div><input type="text" placeholder="--" id="modal-max-tokens"></div>
-        <div class="modal-field"><div class="field-label-with-help"><label for="modal-max-output-tokens" data-i18n="default_max_output_tokens">MAX OUTPUT TOKENS</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" aria-label="About max output tokens" data-i18n-aria-label="default_max_output_tokens_help_label" aria-describedby="max-output-tokens-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="max-output-tokens-help" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="default_max_output_tokens">MAX OUTPUT TOKENS</span><span class="profile-help-tooltip-body" data-i18n="default_max_output_tokens_help">Default token budget for one Responses reply when the request omits max_output_tokens.</span><span class="profile-help-tooltip-flow" data-i18n="default_max_output_tokens_help_budget">Reasoning and visible answer tokens share this budget. If it runs out, the answer may be cut off or may not appear at all.</span><span class="profile-help-tooltip-flow" data-i18n="default_max_output_tokens_help_priority">An explicit request value takes precedence. Leave this field empty to use the server default of 256.</span><span class="profile-help-tooltip-flow" data-i18n="default_max_output_tokens_help_scope">This is not the model's fixed output capability and does not change its context or KV cache size. The remaining context also limits usable output.</span></span></span></div><input type="text" inputmode="numeric" placeholder="256" id="modal-max-output-tokens"></div>
+        <div class="modal-field"><div class="field-label-with-help"><label for="modal-max-output-tokens" data-i18n="default_max_output_tokens">MAX OUTPUT TOKENS</label><span class="profile-help profile-help-fixed"><button type="button" class="profile-help-trigger" aria-label="About max output tokens" data-i18n-aria-label="default_max_output_tokens_help_label" aria-describedby="max-output-tokens-help">?</button><span class="profile-help-tooltip profile-help-tooltip-fixed" id="max-output-tokens-help" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="default_max_output_tokens">MAX OUTPUT TOKENS</span><span class="profile-help-tooltip-body" data-i18n="default_max_output_tokens_help">Default token budget for a Chat Completions or Responses reply when the request omits its output budget.</span><span class="profile-help-tooltip-flow" data-i18n="default_max_output_tokens_help_budget">Reasoning and visible answer tokens share this budget. If it runs out, the answer may be cut off or may not appear at all.</span><span class="profile-help-tooltip-flow" data-i18n="default_max_output_tokens_help_priority">An explicit request value takes precedence. Leave this field empty to use the server default of 256.</span><span class="profile-help-tooltip-flow" data-i18n="default_max_output_tokens_help_scope">This is not the model's fixed output capability and does not change its context or KV cache size. The remaining context also limits usable output.</span></span></span></div><input type="text" inputmode="numeric" placeholder="256" id="modal-max-output-tokens"></div>
         <div class="modal-field"><label for="modal-temperature">TEMPERATURE</label><input type="text" placeholder="1.0" id="modal-temperature"></div>
       </div>
       <div class="modal-row model-params-setting-row" id="modal-causal-sampling-row">
@@ -6339,9 +6339,9 @@
       default_max_output_tokens: "MAX OUTPUT TOKENS",
       context_size_help_label: "About context size", context_size_help: "Read-only model context window from its configuration. It does not set the runtime context limit.",
       max_context_tokens_help_label: "About max context tokens", max_context_tokens_help: "Runtime KV cache limit per sequence. Input and generated tokens share this context; this is not the output limit.",
-      default_max_output_tokens_help_label: "About max output tokens", default_max_output_tokens_help: "Used as this model's per-reply output budget only when a Responses request omits max_output_tokens.",
+      default_max_output_tokens_help_label: "About max output tokens", default_max_output_tokens_help: "Used as this model's per-reply output budget when Chat Completions or Responses requests omit their output budget.",
       default_max_output_tokens_help_budget: "Reasoning and visible answer tokens share the budget. If it runs out, the answer may be incomplete or may not begin at all.",
-      default_max_output_tokens_help_priority: "A request-supplied max_output_tokens takes precedence. Leave blank to use the server default (256).",
+      default_max_output_tokens_help_priority: "Chat requests prefer max_completion_tokens, then max_tokens; Responses uses max_output_tokens. Explicit request values take precedence. Leave blank to use 256.",
       default_max_output_tokens_help_scope: "This is not the model's fixed output capability and does not change CONTEXT SIZE or MAX CONTEXT TOKENS. Remaining context can further limit output.",
       reasoning_capability: "REASONING CAPABILITY", reasoning_native_efforts: "NATIVE EFFORTS", reasoning_default_effort: "DEFAULT EFFORT",
       reasoning_supported_disable: "Supported · can be disabled", reasoning_supported: "Supported",
@@ -7037,9 +7037,9 @@
       default_max_output_tokens: "MAX OUTPUT TOKENS",
       context_size_help_label: "关于上下文长度", context_size_help: "只读：从模型配置读取的上下文长度，不用于设置运行时上限。",
       max_context_tokens_help_label: "关于最大上下文 Token 数", max_context_tokens_help: "每条序列的运行时 KV Cache 上限。输入与生成内容共享该容量；这不是输出上限。",
-      default_max_output_tokens_help_label: "关于 MAX OUTPUT TOKENS", default_max_output_tokens_help: "仅当 Responses 请求未指定 max_output_tokens 时，此值才作为该模型每次回答的默认输出预算。",
+      default_max_output_tokens_help_label: "关于 MAX OUTPUT TOKENS", default_max_output_tokens_help: "Chat Completions 或 Responses 请求未指定输出预算时，此值作为该模型每次回答的默认输出预算。",
       default_max_output_tokens_help_budget: "推理过程（reasoning）与可见正文共同消耗预算；耗尽时，正文可能不完整，甚至还未开始输出。",
-      default_max_output_tokens_help_priority: "请求显式传入 max_output_tokens 时以请求值为准；留空则使用服务端默认值 256。",
+      default_max_output_tokens_help_priority: "Chat 请求优先使用 max_completion_tokens，其次为 max_tokens；Responses 使用 max_output_tokens。请求值优先；此处留空则默认 256。",
       default_max_output_tokens_help_scope: "这不是模型固定的输出能力上限，也不修改 CONTEXT SIZE 或 MAX CONTEXT TOKENS；剩余上下文空间还会限制实际可输出长度。",
       reasoning_capability: "推理能力", reasoning_native_efforts: "原生推理等级", reasoning_default_effort: "默认推理等级",
       reasoning_supported_disable: "支持 · 可关闭", reasoning_supported: "支持",
@@ -7737,9 +7737,9 @@
       default_max_output_tokens: "MAX OUTPUT TOKENS",
       context_size_help_label: "關於上下文長度", context_size_help: "唯讀：從模型設定讀取的上下文長度，不用於設定執行時上限。",
       max_context_tokens_help_label: "關於最大上下文 Token 數", max_context_tokens_help: "每條序列的執行時 KV Cache 上限。輸入與生成內容共用此容量；這不是輸出上限。",
-      default_max_output_tokens_help_label: "關於 MAX OUTPUT TOKENS", default_max_output_tokens_help: "僅當 Responses 請求未指定 max_output_tokens 時，此值才作為該模型每次回答的預設輸出預算。",
+      default_max_output_tokens_help_label: "關於 MAX OUTPUT TOKENS", default_max_output_tokens_help: "Chat Completions 或 Responses 請求未指定輸出預算時，此值作為該模型每次回答的預設輸出預算。",
       default_max_output_tokens_help_budget: "推理過程（reasoning）與可見正文共同消耗預算；耗盡時，正文可能不完整，甚至尚未開始輸出。",
-      default_max_output_tokens_help_priority: "請求明確傳入 max_output_tokens 時以請求值為準；留空則使用伺服器預設值 256。",
+      default_max_output_tokens_help_priority: "Chat 請求優先使用 max_completion_tokens，其次為 max_tokens；Responses 使用 max_output_tokens。請求值優先；此處留空則預設 256。",
       default_max_output_tokens_help_scope: "這不是模型固定的輸出能力上限，也不修改 CONTEXT SIZE 或 MAX CONTEXT TOKENS；剩餘上下文空間還會限制實際可輸出長度。",
       reasoning_capability: "推理能力", reasoning_native_efforts: "原生推理等級", reasoning_default_effort: "預設推理等級",
       reasoning_supported_disable: "支援 · 可關閉", reasoning_supported: "支援",
@@ -8438,9 +8438,9 @@
       default_max_output_tokens: "MAX OUTPUT TOKENS",
       context_size_help_label: "コンテキスト長について", context_size_help: "読み取り専用。モデル設定に記載されたコンテキスト長で、実行時の上限設定ではありません。",
       max_context_tokens_help_label: "最大コンテキストトークン数について", max_context_tokens_help: "シーケンスごとの実行時 KV Cache 上限です。入力と生成トークンで共有し、出力上限とは異なります。",
-      default_max_output_tokens_help_label: "MAX OUTPUT TOKENS について", default_max_output_tokens_help: "Responses リクエストで max_output_tokens が省略された場合にのみ、このモデルの回答ごとの既定の出力予算として使います。",
+      default_max_output_tokens_help_label: "MAX OUTPUT TOKENS について", default_max_output_tokens_help: "Chat Completions または Responses リクエストで出力予算が省略された場合、このモデルの回答ごとの既定値として使います。",
       default_max_output_tokens_help_budget: "推論（reasoning）と表示される回答は同じ予算を消費します。使い切ると回答が途中で終わるか、本文を出せない場合があります。",
-      default_max_output_tokens_help_priority: "リクエストで max_output_tokens を明示した場合はその値が優先されます。空欄ならサーバーの既定値 256 を使います。",
+      default_max_output_tokens_help_priority: "Chat は max_completion_tokens、次に max_tokens を優先し、Responses は max_output_tokens を使います。リクエスト値が優先され、空欄なら既定値は 256 です。",
       default_max_output_tokens_help_scope: "モデル固有の出力能力の上限ではなく、CONTEXT SIZE や MAX CONTEXT TOKENS も変更しません。残りのコンテキスト量によって実際の出力はさらに制限されます。",
       reasoning_capability: "推論機能", reasoning_native_efforts: "ネイティブ推論レベル", reasoning_default_effort: "既定の推論レベル",
       reasoning_supported_disable: "対応 · 無効化可能", reasoning_supported: "対応",
@@ -9139,9 +9139,9 @@
       default_max_output_tokens: "MAX OUTPUT TOKENS",
       context_size_help_label: "컨텍스트 크기 정보", context_size_help: "읽기 전용입니다. 모델 설정의 컨텍스트 길이를 표시하며 실행 시 상한을 설정하지 않습니다.",
       max_context_tokens_help_label: "최대 컨텍스트 토큰 정보", max_context_tokens_help: "시퀀스별 실행 시 KV Cache 상한입니다. 입력과 생성 토큰이 이 용량을 공유하며 출력 상한은 아닙니다.",
-      default_max_output_tokens_help_label: "MAX OUTPUT TOKENS 정보", default_max_output_tokens_help: "Responses 요청에서 max_output_tokens를 생략한 경우에만 이 모델의 응답당 기본 출력 예산으로 사용합니다.",
+      default_max_output_tokens_help_label: "MAX OUTPUT TOKENS 정보", default_max_output_tokens_help: "Chat Completions 또는 Responses 요청에서 출력 예산을 생략하면 이 모델의 응답당 기본값으로 사용합니다.",
       default_max_output_tokens_help_budget: "추론(reasoning)과 표시되는 답변이 같은 예산을 사용합니다. 예산이 소진되면 답변이 중간에 끊기거나 본문이 시작되지 않을 수 있습니다.",
-      default_max_output_tokens_help_priority: "요청에 max_output_tokens가 명시되어 있으면 그 값이 우선합니다. 비워 두면 서버 기본값 256을 사용합니다.",
+      default_max_output_tokens_help_priority: "Chat은 max_completion_tokens, 다음으로 max_tokens를 사용하며 Responses는 max_output_tokens를 사용합니다. 요청 값이 우선하며 비워 두면 기본값은 256입니다.",
       default_max_output_tokens_help_scope: "모델 고유의 출력 능력 상한이 아니며 CONTEXT SIZE 또는 MAX CONTEXT TOKENS를 바꾸지 않습니다. 남은 컨텍스트에 따라 실제 출력 길이는 더 제한될 수 있습니다.",
       reasoning_capability: "추론 기능", reasoning_native_efforts: "네이티브 추론 수준", reasoning_default_effort: "기본 추론 수준",
       reasoning_supported_disable: "지원 · 비활성화 가능", reasoning_supported: "지원",

@@ -2172,7 +2172,7 @@ fn qwen36_moe_dflash2_ragged_one_token_windows_take_constrained_rows() {
 /// first token that is a stop token finish with one event; a receiver dropped
 /// right after admission is cancelled. A failure injected after the first
 /// token is taken
-/// fails the request through the normal completion: no event, no further
+/// fails the request through a terminal error event: no generated token or further
 /// window, and the admission slot and KV charge are released (the final
 /// concurrent admission fills every slot of a zero-length queue, so a leaked
 /// slot would be rejected).
@@ -2335,6 +2335,15 @@ fn qwen36_moe_dflash2_actor_admission_first_token_lifecycle() {
         let mut reply = admit(&prompt_ids[0], max_new_tokens, Vec::new())
             .await
             .unwrap_or_else(|_| panic!("failing admission"));
+        let failure = tokio::time::timeout(Duration::from_secs(120), reply.event_rx.recv())
+            .await
+            .expect("failure timeout")
+            .expect("terminal failure");
+        assert!(
+            failure.error.is_some(),
+            "first-token error must reach the receiver"
+        );
+        assert!(failure.finish_reason.is_none());
         assert_closed(&mut reply, "failed first token").await;
         assert!(
             !FAIL_NEXT_ADMISSION_FIRST_TOKEN.load(Ordering::SeqCst),

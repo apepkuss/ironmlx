@@ -194,7 +194,7 @@ where
                 crate::core::scheduler::SchedulerError::ColdMaterializationUnsafe {
                     requested_bytes: components.requested_bytes(state.static_memory_estimate),
                     current_bytes: snapshot.current_usage_bytes,
-                    target_bytes: snapshot.hard_watermark_bytes,
+                    target_bytes: governor.reservation_target_bytes(),
                 },
             )
         })?;

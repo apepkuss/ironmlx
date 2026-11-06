@@ -1357,6 +1357,11 @@ where
             i32::try_from(cap)?.max(ironmlx_lm::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let mut batched_target_cache =
             model.make_cache(batch_size_i32, cap, model.cache_dtype())?;
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            batched_target_cache =
+                diagnostic_construction_cache(batched_target_cache, batch_size_i32)?;
+        }
         let target_layer_ids = &draft.config().dflash_config.target_layer_ids;
         let context_limit = draft.config().sliding_window - 1;
         let prefill_started = Instant::now();
@@ -1576,6 +1581,10 @@ where
         .context("DFlash2 target cache capacity is too large")?
         .max(ironmlx_lm::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF);
         let mut target_cache = model.make_cache(1, cap, model.cache_dtype())?;
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            target_cache = diagnostic_construction_cache(target_cache, 1)?;
+        }
         let target_layer_ids = &draft.config().dflash_config.target_layer_ids;
         let context_limit = draft.config().sliding_window - 1;
         let prefill_started = Instant::now();
@@ -4880,6 +4889,41 @@ fn sample_tree_position_keyed_targets(
         .map_err(Into::into)
 }
 
+/// Controlled constructor failure after real cache allocation. This hook is
+/// absent from production builds and never alters the governor or limits.
+#[cfg(any(test, feature = "test-support"))]
+fn diagnostic_construction_cache(
+    cache: Vec<ironmlx_lm::core::cache::layer::LayerCache>,
+    width: i32,
+) -> Result<Vec<ironmlx_lm::core::cache::layer::LayerCache>> {
+    static REMAINING: std::sync::OnceLock<std::sync::atomic::AtomicUsize> =
+        std::sync::OnceLock::new();
+    let remaining = REMAINING.get_or_init(|| {
+        std::sync::atomic::AtomicUsize::new(
+            std::env::var("IRONMLX_DIAGNOSTIC_DFLASH2_CONSTRUCTION_FAILURES")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+        )
+    });
+    if remaining
+        .fetch_update(
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+            |count| count.checked_sub(1),
+        )
+        .is_ok()
+    {
+        tracing::warn!(
+            width,
+            "controlled DFlash2 constructor failure after real cache allocation"
+        );
+        return Err(anyhow!("injected native allocation failure")
+            .context(format!("DFlash2 initial target cache width={width}")));
+    }
+    Ok(cache)
+}
+
 fn ensure_dflash2_request_not_cancelled(is_cancelled: Option<&dyn Fn() -> bool>) -> Result<()> {
     if is_cancelled.is_some_and(|is_cancelled| is_cancelled()) {
         anyhow::bail!("DFlash2 request cancelled");
@@ -6862,18 +6906,22 @@ mod tests {
         )
             .try_into()
             .expect("logits");
-        let sampler = ironmlx_core::sampler::Sampler::greedy().with_repetition_penalty(2.0);
-        let mut key = mlx::random::key(0).expect("key");
-
-        let resolution = resolve_dflash2_window(&[1, 1], None, &logits, sampler, &[1], &mut key)
-            .expect("resolution");
-
-        assert_eq!(resolution.tokens_to_append[0], 2);
-        assert_eq!(resolution.accepted_draft_len, 0);
-        assert_eq!(
-            resolution.exact_sampling(),
-            ExactSamplingCounters::default()
-        );
+        for sampler in [
+            ironmlx_core::sampler::Sampler::greedy().with_repetition_penalty(2.0),
+            ironmlx_core::sampler::Sampler::greedy().with_frequency_penalty(2.0),
+            ironmlx_core::sampler::Sampler::greedy().with_presence_penalty(2.0),
+        ] {
+            let mut key = mlx::random::key(0).expect("key");
+            let resolution =
+                resolve_dflash2_window(&[1, 1], None, &logits, sampler, &[1], &mut key)
+                    .expect("resolution");
+            assert_eq!(resolution.tokens_to_append[0], 2);
+            assert_eq!(resolution.accepted_draft_len, 0);
+            assert_eq!(
+                resolution.exact_sampling(),
+                ExactSamplingCounters::default()
+            );
+        }
     }
 
     #[test]

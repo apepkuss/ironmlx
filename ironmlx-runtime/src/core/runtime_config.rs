@@ -413,7 +413,7 @@ pub struct EngineModelConfig {
     pub mtp: Option<EngineMtpSettings>,
     pub prompt_lookup: Option<PromptLookupConfig>,
     pub sampling_defaults: SamplingDefaults,
-    /// Used by Responses requests that omit max_output_tokens.
+    /// Used by Chat Completions and Responses requests that omit their output budget.
     pub default_max_output_tokens: Option<usize>,
     pub capabilities: EngineModelCapabilities,
 }

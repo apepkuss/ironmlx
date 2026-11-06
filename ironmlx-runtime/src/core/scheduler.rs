@@ -34,7 +34,7 @@ use ironmlx_lm::core::vision::DenseVlMethods;
 ///
 /// Replaces the pre-3e.3 string-match `err.to_string().contains("admission
 /// queue full")` pattern (spec §9 R3 acknowledged-fragile).
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerError {
     /// Admission queue rejected a request because the queue was already
     /// at `capacity`. Maps to HTTP 503 + Retry-After.
@@ -749,14 +749,44 @@ pub enum Phase {
     Finished,
 }
 
+/// A shareable terminal failure preserving the complete display chain and
+/// the scheduler classification, when one exists. No token is generated.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{message}")]
+pub struct GenerationError {
+    pub scheduler_error: Option<SchedulerError>,
+    pub message: std::sync::Arc<str>,
+}
+
+impl GenerationError {
+    pub fn from_error(error: &anyhow::Error) -> Self {
+        Self {
+            scheduler_error: error.downcast_ref::<SchedulerError>().copied().or_else(|| {
+                error
+                    .downcast_ref::<Self>()
+                    .and_then(|error| error.scheduler_error)
+            }),
+            message: format!("{error:#}").into(),
+        }
+    }
+}
+
+impl From<SchedulerError> for GenerationError {
+    fn from(error: SchedulerError) -> Self {
+        Self::from_error(&anyhow::Error::new(error))
+    }
+}
+
 /// One per-row event emitted by [`Scheduler::step`].
 ///
 /// Only rows that were not yet `finished` at the start of the step appear
 /// in the event list. The step in which a row first transitions to
 /// `finished` produces an event with `finish_reason = Some("stop"|"length")`.
 /// Subsequent steps never emit anything for that row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepEvent {
+    /// A terminal failure, not a generated token.
+    pub error: Option<GenerationError>,
     pub id: RequestId,
     pub token: u32,
     pub finish_reason: Option<&'static str>,
@@ -5567,7 +5597,7 @@ impl<M: Model> Scheduler<M> {
             anyhow::Error::new(SchedulerError::ColdMaterializationUnsafe {
                 requested_bytes: components.requested_bytes(tracker.estimate()),
                 current_bytes: snapshot.current_usage_bytes,
-                target_bytes: snapshot.hard_watermark_bytes,
+                target_bytes: governor.reservation_target_bytes(),
             })
         })
     }
@@ -7546,6 +7576,7 @@ impl<M: Model> Scheduler<M> {
             state.finish_reason = Some("length");
         }
         Ok(StepEvent {
+            error: None,
             id: state.id,
             token,
             finish_reason: state.finish_reason,
@@ -12396,6 +12427,7 @@ impl<M: Model> Scheduler<M> {
         }
 
         Ok(vec![StepEvent {
+            error: None,
             id,
             token: first_token,
             finish_reason,
@@ -15892,6 +15924,7 @@ impl<M: Model> Scheduler<M> {
             }
 
             events.push(StepEvent {
+                error: None,
                 id: state.id,
                 token,
                 finish_reason: state.finish_reason,
@@ -16129,6 +16162,7 @@ impl<M: Model> Scheduler<M> {
             state.finish_reason = Some("length");
         }
         let event = StepEvent {
+            error: None,
             id: state.id,
             token,
             finish_reason: state.finish_reason,
@@ -16458,6 +16492,7 @@ impl<M: Model> Scheduler<M> {
             }
 
             events.push(StepEvent {
+                error: None,
                 id: state.id,
                 token,
                 finish_reason: state.finish_reason,
@@ -17238,6 +17273,7 @@ impl<M: Model> Scheduler<M> {
         Ok((
             id,
             StepEvent {
+                error: None,
                 id,
                 token,
                 finish_reason,
@@ -17797,6 +17833,7 @@ impl<M: Model> Scheduler<M> {
         Ok((
             id,
             StepEvent {
+                error: None,
                 id,
                 token: first_token,
                 finish_reason,
@@ -18400,6 +18437,7 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
         Ok((
             id,
             StepEvent {
+                error: None,
                 id,
                 token: first_token,
                 finish_reason,
@@ -19270,6 +19308,7 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
         }
 
         Ok(vec![StepEvent {
+            error: None,
             id,
             token: first_token,
             finish_reason,
@@ -23008,6 +23047,7 @@ mod tests {
         assert_eq!(
             warm_events,
             vec![StepEvent {
+                error: None,
                 id: warm_id,
                 token: 5,
                 finish_reason: Some("length")
@@ -23047,6 +23087,7 @@ mod tests {
         assert_eq!(
             hit_events,
             vec![StepEvent {
+                error: None,
                 id: hit_id,
                 token: 5,
                 finish_reason: Some("length")
@@ -23117,11 +23158,13 @@ mod tests {
             hit_events,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 5,
                     finish_reason: Some("length")
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 5,
                     finish_reason: Some("length")
@@ -23239,6 +23282,7 @@ mod tests {
         assert_eq!(
             warm_events,
             vec![StepEvent {
+                error: None,
                 id: warm_id,
                 token: 5,
                 finish_reason: Some("length")
@@ -23274,6 +23318,7 @@ mod tests {
         assert_eq!(
             hit_events,
             vec![StepEvent {
+                error: None,
                 id: hit_id,
                 token: 5,
                 finish_reason: Some("length")
@@ -23348,11 +23393,13 @@ mod tests {
             hit_events,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 5,
                     finish_reason: Some("length")
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 5,
                     finish_reason: Some("length")
@@ -23414,6 +23461,7 @@ mod tests {
         assert_eq!(
             first,
             vec![StepEvent {
+                error: None,
                 id,
                 token: 3,
                 finish_reason: None
@@ -23430,6 +23478,7 @@ mod tests {
         assert_eq!(
             step_1,
             vec![StepEvent {
+                error: None,
                 id,
                 token: 4,
                 finish_reason: None
@@ -23441,6 +23490,7 @@ mod tests {
         assert_eq!(
             step_2,
             vec![StepEvent {
+                error: None,
                 id,
                 token: 5,
                 finish_reason: None
@@ -23452,6 +23502,7 @@ mod tests {
         assert_eq!(
             step_3,
             vec![StepEvent {
+                error: None,
                 id,
                 token: 6,
                 finish_reason: Some("length")
@@ -23490,6 +23541,7 @@ mod tests {
         assert_eq!(
             first,
             vec![StepEvent {
+                error: None,
                 id,
                 token: 3,
                 finish_reason: None
@@ -24487,6 +24539,7 @@ mod tests {
         assert_eq!(
             events,
             vec![StepEvent {
+                error: None,
                 id: active,
                 token: 4,
                 finish_reason: None,
@@ -25499,11 +25552,13 @@ mod tests {
             events,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 1,
                     finish_reason: None,
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 11,
                     finish_reason: None,
@@ -25621,11 +25676,13 @@ mod tests {
             events,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 1,
                     finish_reason: None,
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 11,
                     finish_reason: None,
@@ -25713,6 +25770,7 @@ mod tests {
         assert_eq!(
             events,
             vec![StepEvent {
+                error: None,
                 id: id1,
                 token: 11,
                 finish_reason: None,
@@ -26146,6 +26204,7 @@ mod tests {
         assert_eq!(
             first,
             vec![StepEvent {
+                error: None,
                 id,
                 token: 3,
                 finish_reason: None
@@ -26174,6 +26233,7 @@ mod tests {
         assert_eq!(
             step,
             vec![StepEvent {
+                error: None,
                 id,
                 token: 4,
                 finish_reason: Some("length")
@@ -26208,11 +26268,13 @@ mod tests {
             first,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 3,
                     finish_reason: None
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 3,
                     finish_reason: None
@@ -26227,11 +26289,13 @@ mod tests {
             step_1,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 4,
                     finish_reason: None
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 6,
                     finish_reason: None
@@ -26246,11 +26310,13 @@ mod tests {
             step_2,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 5,
                     finish_reason: Some("length")
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 7,
                     finish_reason: Some("length")
@@ -26492,11 +26558,13 @@ mod tests {
             first,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 3,
                     finish_reason: None
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 3,
                     finish_reason: None
@@ -26519,11 +26587,13 @@ mod tests {
             step_2,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 5,
                     finish_reason: None
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 7,
                     finish_reason: None
@@ -26600,11 +26670,13 @@ mod tests {
             step_2,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 5,
                     finish_reason: None
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 7,
                     finish_reason: None
@@ -26639,11 +26711,13 @@ mod tests {
             step_4,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 10,
                     finish_reason: None
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 11,
                     finish_reason: None
@@ -26720,11 +26794,13 @@ mod tests {
             step_4,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 10,
                     finish_reason: None
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 11,
                     finish_reason: None
@@ -26782,11 +26858,13 @@ mod tests {
             step_2,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 5,
                     finish_reason: None
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 7,
                     finish_reason: None
@@ -26847,11 +26925,13 @@ mod tests {
             first,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 3,
                     finish_reason: None
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 3,
                     finish_reason: None
@@ -26866,11 +26946,13 @@ mod tests {
             step_1,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 10,
                     finish_reason: None
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 6,
                     finish_reason: None
@@ -26888,11 +26970,13 @@ mod tests {
             step_2,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 8,
                     finish_reason: None
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 7,
                     finish_reason: None
@@ -26966,6 +27050,7 @@ mod tests {
         assert_eq!(
             first,
             vec![StepEvent {
+                error: None,
                 id: id0,
                 token: 3,
                 finish_reason: None
@@ -26987,6 +27072,7 @@ mod tests {
         assert_eq!(
             first_mid,
             StepEvent {
+                error: None,
                 id: id1,
                 token: 3,
                 finish_reason: None
@@ -27020,11 +27106,13 @@ mod tests {
             step_1,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 4,
                     finish_reason: None
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 6,
                     finish_reason: None
@@ -27039,11 +27127,13 @@ mod tests {
             step_2,
             vec![
                 StepEvent {
+                    error: None,
                     id: id0,
                     token: 5,
                     finish_reason: Some("length")
                 },
                 StepEvent {
+                    error: None,
                     id: id1,
                     token: 7,
                     finish_reason: Some("length")
@@ -27083,6 +27173,7 @@ mod tests {
         assert_eq!(
             step,
             vec![StepEvent {
+                error: None,
                 id: id0,
                 token: 4,
                 finish_reason: None
@@ -27122,6 +27213,7 @@ mod tests {
         assert_eq!(
             event,
             StepEvent {
+                error: None,
                 id,
                 token: 42,
                 finish_reason: None
@@ -27152,6 +27244,7 @@ mod tests {
         assert_eq!(
             event,
             StepEvent {
+                error: None,
                 id,
                 token: 42,
                 finish_reason: Some("length")
@@ -27194,6 +27287,7 @@ mod tests {
         assert_eq!(
             event,
             StepEvent {
+                error: None,
                 id,
                 token: u32::from(b'{'),
                 finish_reason: Some("length")
@@ -30548,7 +30642,7 @@ mod tests {
 
         let mut s = Scheduler::<ironmlx_lm::models::Gemma4Model>::new(
             2,
-            32768,
+            256,
             crate::core::memory_budget::test_meta_gemma4_12b(),
         )
         .expect("scheduler startup");
@@ -30619,7 +30713,7 @@ mod tests {
     fn scheduler_evict_removes_gemma4_drafter_row_state_for_evicted_slot() {
         let mut s = Scheduler::<ironmlx_lm::models::Gemma4Model>::new(
             2,
-            32768,
+            256,
             crate::core::memory_budget::test_meta_gemma4_12b(),
         )
         .expect("scheduler startup");
@@ -31030,6 +31124,7 @@ mod tests {
         assert_eq!(
             first,
             vec![StepEvent {
+                error: None,
                 id,
                 token: 3,
                 finish_reason: None
@@ -31048,6 +31143,7 @@ mod tests {
         assert_eq!(
             second,
             vec![StepEvent {
+                error: None,
                 id,
                 token: 3,
                 finish_reason: None
@@ -31063,6 +31159,7 @@ mod tests {
         assert_eq!(
             third,
             vec![StepEvent {
+                error: None,
                 id,
                 token: 3,
                 finish_reason: None
@@ -31075,6 +31172,7 @@ mod tests {
         assert_eq!(
             fourth,
             vec![StepEvent {
+                error: None,
                 id,
                 token: 3,
                 finish_reason: Some("length")
@@ -31110,6 +31208,7 @@ mod tests {
         assert_eq!(
             event,
             StepEvent {
+                error: None,
                 id,
                 token: 3,
                 finish_reason: Some("length")

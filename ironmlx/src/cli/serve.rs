@@ -957,7 +957,7 @@ where
     let mtp = model
         .load_mtp_head(&mtp_loader)
         .with_context(|| format!("loading MTP head from {}", mtp_config.model_dir.display()))?;
-    static_memory_estimate.speculative_cold_bytes = mtp_loader.loaded_tensor_bytes();
+    static_memory_estimate.set_allocated_speculative_weights(mtp_loader.loaded_tensor_bytes());
 
     let model_id = single_model_id(args)?;
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
@@ -1051,7 +1051,7 @@ where
     family.ensure_tree_supported(&model, dflash2_tree_max_nodes(args))?;
     let block_size_resolution =
         family.resolve_block_size(&model, args.dflash2_block_size, checkpoint_block_size)?;
-    static_memory_estimate.speculative_cold_bytes = draft_loader.loaded_tensor_bytes();
+    static_memory_estimate.set_allocated_speculative_weights(draft_loader.loaded_tensor_bytes());
     drop(draft_loader);
     model.dflash2_prewarm().context("DFlash2 kernel prewarm")?;
     if model.dflash2_window_cost_budget_policy() {
@@ -1174,7 +1174,7 @@ fn serve_with_gemma4_drafter_model(
             mtp_config.model_dir.display()
         )
     })?;
-    static_memory_estimate.speculative_cold_bytes = drafter_loader.loaded_tensor_bytes();
+    static_memory_estimate.set_allocated_speculative_weights(drafter_loader.loaded_tensor_bytes());
     let drafter = ironmlx_lm::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
         .with_context(|| {
             format!(
@@ -1490,11 +1490,9 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
         // estimate as a cold component materialized by that request.
         loader.drop_vision_tower();
     }
-    let static_memory_estimate = StaticMemoryEstimate {
-        text_cold_bytes: component_bytes.text,
-        vision_cold_bytes: component_bytes.vision,
-        speculative_cold_bytes: 0,
-    };
+    let mut static_memory_estimate =
+        StaticMemoryEstimate::from_allocated_weights(component_bytes.text, component_bytes.vision);
+    static_memory_estimate.allocated.vision = dflash2_family.is_none();
     let mtp_config = resolve_serve_mtp_config(
         &args,
         architecture,

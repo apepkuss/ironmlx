@@ -468,6 +468,9 @@ async fn run_actor(
     let mut tokens = Vec::with_capacity(args.max_tokens);
     let mut finish_reason = None;
     while let Some(event) = event_rx.recv().await {
+        if let Some(error) = event.error {
+            return Err(anyhow::Error::new(error));
+        }
         first_ms.get_or_insert_with(|| started.elapsed().as_secs_f64() * 1000.0);
         tokens.push(event.token);
         finish_reason = event.finish_reason;

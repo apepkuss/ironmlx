@@ -254,6 +254,7 @@ impl EnginePoolHttpAdapter for EnginePoolState {
 
     async fn app_openai_chat_completions(&self, mut req: openai::ChatRequest) -> Result<Response> {
         let engine = self.resolve_request_engine(&mut req).await?;
+        req.apply_default_output_budget(engine.default_max_output_tokens());
         Ok(engine.openai_chat_completions(req).await)
     }
 

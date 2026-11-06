@@ -112,7 +112,10 @@ fn base_request() -> serde_json::Value {
             "content": "Return city Tokyo and days 2. Output only the requested JSON."
         }],
         "temperature": 0,
-        "max_tokens": 64,
+        "max_completion_tokens": 64,
+        "max_tokens": 8,
+        "frequency_penalty": 0.3,
+        "presence_penalty": 0.2,
         "response_format": response_format()
     })
 }
@@ -164,7 +167,7 @@ async fn chat_structured_outputs_real_http_acceptance() {
     assert_eq!(content, serde_json::json!({"city": "Tokyo", "days": 2}));
 
     let mut truncated = base_request();
-    truncated["max_tokens"] = serde_json::json!(1);
+    truncated["max_completion_tokens"] = serde_json::json!(1);
     let response = client
         .post(&endpoint)
         .json(&truncated)
@@ -201,5 +204,30 @@ async fn chat_structured_outputs_real_http_acceptance() {
         .expect("unknown response_format field request");
     assert_eq!(response.status(), 400);
 
+    if let Some(python) = std::env::var_os("CHAT_PARAMETERS_SDK_PYTHON") {
+        let output = std::process::Command::new(python)
+            .arg(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../scripts/api-contract-sdk/live_chat.py"),
+            )
+            .args([
+                "--base-url",
+                &format!("http://127.0.0.1:{port}/v1"),
+                "--model",
+                "llama-3.2-1b",
+            ])
+            .output()
+            .expect("run official SDK live check");
+        assert!(
+            output.status.success(),
+            "SDK stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        println!(
+            "official SDK live check: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
     server.abort();
 }

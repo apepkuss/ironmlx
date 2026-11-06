@@ -22,7 +22,7 @@ use crate::core::dflash2_step_diagnostic::DFlash2StepDiagnostic;
 use crate::core::generation_types::{GenerateEvent, GenerateRequest, RequestPriority};
 use crate::core::memory_budget::BudgetState;
 use crate::core::runtime_health::DFlash2RaggedLinearCounters;
-use crate::core::scheduler::{RequestId, SchedulerError, StepEvent};
+use crate::core::scheduler::{GenerationError, RequestId, SchedulerError, StepEvent};
 use crate::core::scheduler_actor::AdmitReply;
 use crate::Result;
 use ironmlx_lm::core::vision::DenseVlMethods;
@@ -44,7 +44,7 @@ where
     /// Error from taking the first token for publication at admission. The
     /// token has left the stream, so the next step fails the request through
     /// the normal completion instead of decoding on without it.
-    admission_failure: Option<String>,
+    admission_failure: Option<GenerationError>,
 }
 
 /// Test fault injection: fail the next admission first-token publication
@@ -53,12 +53,34 @@ where
 pub(crate) static FAIL_NEXT_ADMISSION_FIRST_TOKEN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(any(test, feature = "test-support"))]
+fn diagnostic_first_token_failure() -> bool {
+    #[cfg(test)]
+    if FAIL_NEXT_ADMISSION_FIRST_TOKEN.swap(false, Ordering::SeqCst) {
+        return true;
+    }
+    static REMAINING: std::sync::OnceLock<AtomicUsize> = std::sync::OnceLock::new();
+    REMAINING
+        .get_or_init(|| {
+            AtomicUsize::new(
+                std::env::var("IRONMLX_DIAGNOSTIC_DFLASH2_PUBLICATION_FAILURES")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0),
+            )
+        })
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            count.checked_sub(1)
+        })
+        .is_ok()
+}
+
 #[derive(Default)]
 struct DFlash2StepOutcome {
     events: Vec<GenerateEvent>,
     cancelled: bool,
     finished: bool,
-    failure: Option<String>,
+    failure: Option<GenerationError>,
 }
 
 struct DFlash2TensorGroup {
@@ -777,6 +799,21 @@ impl DFlash2ActorHandle {
     }
 }
 
+fn reply_stream_construction_error(
+    error: &anyhow::Error,
+    replies: Vec<oneshot::Sender<Result<AdmitReply>>>,
+    in_flight: &AtomicUsize,
+) {
+    // Request validation already ran before entering construction. Failures
+    // from cache allocation / prefill are execution failures, even though
+    // the admission reply has not been delivered yet.
+    let failure = GenerationError::from_error(error);
+    for reply in replies {
+        let _ = reply.send(Err(anyhow::Error::new(failure.clone())));
+        in_flight.fetch_sub(1, Ordering::Release);
+    }
+}
+
 pub(crate) fn spawn_dflash2_actor<M>(
     model: Arc<Mutex<M>>,
     draft: DFlash2DraftModel,
@@ -1331,7 +1368,7 @@ where
                             requested_bytes: components
                                 .requested_bytes(cold_materialization_tracker.estimate()),
                             current_bytes: snapshot.current_usage_bytes,
-                            target_bytes: snapshot.hard_watermark_bytes,
+                            target_bytes: governor.reservation_target_bytes(),
                         };
                         let _ = reply_tx.send(Err(anyhow::Error::new(error)));
                         worker_in_flight.fetch_sub(1, Ordering::Release);
@@ -1517,11 +1554,11 @@ where
                 let streams = match streams_result {
                     Ok(streams) => streams,
                     Err(error) => {
-                        let message = format!("{error:#}");
-                        for reply_tx in admission_replies {
-                            let _ = reply_tx.send(Err(anyhow::anyhow!(message.clone())));
-                            worker_in_flight.fetch_sub(1, Ordering::Release);
-                        }
+                        reply_stream_construction_error(
+                            &error,
+                            admission_replies,
+                            &worker_in_flight,
+                        );
                         continue;
                     }
                 };
@@ -1582,10 +1619,10 @@ where
                         continue;
                     }
                     let published = request.stream.next_token_id_deferred();
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     let published = published.and_then(|event| {
                         anyhow::ensure!(
-                            !FAIL_NEXT_ADMISSION_FIRST_TOKEN.swap(false, Ordering::SeqCst),
+                            !diagnostic_first_token_failure(),
                             "injected admission first-token failure"
                         );
                         Ok(event)
@@ -1593,13 +1630,16 @@ where
                     match published {
                         Ok(Some(event)) => {
                             let _ = request.event_tx.send(StepEvent {
+                                error: None,
                                 id: request.request_id,
                                 token: event.token,
                                 finish_reason: event.finish_reason,
                             });
                         }
                         Ok(None) => {}
-                        Err(error) => request.admission_failure = Some(format!("{error:#}")),
+                        Err(error) => {
+                            request.admission_failure = Some(GenerationError::from_error(&error))
+                        }
                     }
                 }
                 worker_active.store(active.len() as u64, Ordering::Relaxed);
@@ -1649,7 +1689,7 @@ where
                         Ok(None) => outcomes[index].finished = true,
                         Err(error) => {
                             outcomes[index].finished = true;
-                            outcomes[index].failure = Some(format!("{error:#}"));
+                            outcomes[index].failure = Some(GenerationError::from_error(&error));
                         }
                     }
                     if !publish_whole_windows
@@ -1673,6 +1713,7 @@ where
                     if active[index]
                         .event_tx
                         .send(StepEvent {
+                            error: None,
                             id: active[index].request_id,
                             token: event.token,
                             finish_reason: event.finish_reason,
@@ -1696,7 +1737,7 @@ where
                     Ok(key) => keys[index] = key,
                     Err(error) => {
                         outcomes[index].finished = true;
-                        outcomes[index].failure = Some(format!("{error:#}"));
+                        outcomes[index].failure = Some(GenerationError::from_error(&error));
                     }
                 }
             }
@@ -1713,7 +1754,7 @@ where
                     let mut streams = match tensor_group_streams_mut(&mut active, &positions) {
                         Ok(streams) => streams,
                         Err(error) => {
-                            let error = format!("{error:#}");
+                            let error = GenerationError::from_error(&error);
                             for &index in &positions {
                                 outcomes[index].finished = true;
                                 outcomes[index].failure = Some(error.clone());
@@ -1722,7 +1763,7 @@ where
                         }
                     };
                     if let Err(error) = group.cache.scatter_to_rows(&mut streams) {
-                        let error = format!("{error:#}");
+                        let error = GenerationError::from_error(&error);
                         for &index in &positions {
                             outcomes[index].finished = true;
                             outcomes[index].failure = Some(error.clone());
@@ -1735,7 +1776,7 @@ where
                     let mut streams = match tensor_group_streams_mut(&mut active, &positions) {
                         Ok(streams) => streams,
                         Err(error) => {
-                            let error = format!("{error:#}");
+                            let error = GenerationError::from_error(&error);
                             for &index in &positions {
                                 outcomes[index].finished = true;
                                 outcomes[index].failure = Some(error.clone());
@@ -1744,7 +1785,7 @@ where
                         }
                     };
                     if let Err(error) = group.cache.scatter_to_rows(&mut streams) {
-                        let error = format!("{error:#}");
+                        let error = GenerationError::from_error(&error);
                         for &index in &positions {
                             outcomes[index].finished = true;
                             outcomes[index].failure = Some(error.clone());
@@ -1761,7 +1802,7 @@ where
                     let mut streams = match tensor_group_streams_mut(&mut active, &positions) {
                         Ok(streams) => streams,
                         Err(error) => {
-                            let error = format!("{error:#}");
+                            let error = GenerationError::from_error(&error);
                             for &index in &positions {
                                 outcomes[index].finished = true;
                                 outcomes[index].failure = Some(error.clone());
@@ -1789,7 +1830,7 @@ where
                             worker_tensor_batch_divergent_splits.fetch_add(1, Ordering::Relaxed);
                         }
                         Err(error) => {
-                            let error = format!("{error:#}");
+                            let error = GenerationError::from_error(&error);
                             for &index in &positions {
                                 outcomes[index].finished = true;
                                 outcomes[index].failure = Some(error.clone());
@@ -1800,7 +1841,7 @@ where
                     let mut streams = match tensor_group_streams_mut(&mut active, &positions) {
                         Ok(streams) => streams,
                         Err(error) => {
-                            let error = format!("{error:#}");
+                            let error = GenerationError::from_error(&error);
                             for &index in &positions {
                                 outcomes[index].finished = true;
                                 outcomes[index].failure = Some(error.clone());
@@ -1809,7 +1850,7 @@ where
                         }
                     };
                     if let Err(error) = group.cache.scatter_to_rows(&mut streams) {
-                        let error = format!("{error:#}");
+                        let error = GenerationError::from_error(&error);
                         for &index in &positions {
                             outcomes[index].finished = true;
                             outcomes[index].failure = Some(error.clone());
@@ -1887,7 +1928,7 @@ where
                     if let Err(error) =
                         scatter_ragged_group(&mut active, &mut ragged_group, &worker_ragged_linear)
                     {
-                        let error = format!("{error:#}");
+                        let error = GenerationError::from_error(&error);
                         for &index in &members {
                             outcomes[index].finished = true;
                             outcomes[index].failure = Some(error.clone());
@@ -2030,7 +2071,7 @@ where
                             worker_ragged_linear
                                 .reserved_bytes
                                 .store(0, Ordering::Relaxed);
-                            let error = format!("{error:#}");
+                            let error = GenerationError::from_error(&error);
                             for &index in &selected {
                                 outcomes[index].finished = true;
                                 outcomes[index].failure = Some(error.clone());
@@ -2107,7 +2148,7 @@ where
                         active[indices[0]].stream.fill_deferred_window_b1()
                     };
                     if let Err(error) = result {
-                        let error = format!("{error:#}");
+                        let error = GenerationError::from_error(&error);
                         for &index in indices {
                             outcomes[index].finished = true;
                             outcomes[index].failure = Some(error.clone());
@@ -2133,7 +2174,7 @@ where
                 let mut streams = match tensor_group_streams_mut(&mut active, &positions) {
                     Ok(streams) => streams,
                     Err(error) => {
-                        let error = format!("{error:#}");
+                        let error = GenerationError::from_error(&error);
                         for &index in &positions {
                             outcomes[index].finished = true;
                             outcomes[index].failure = Some(error.clone());
@@ -2142,7 +2183,7 @@ where
                     }
                 };
                 if let Err(error) = group.cache.scatter_to_rows(&mut streams) {
-                    let error = format!("{error:#}");
+                    let error = GenerationError::from_error(&error);
                     for &index in &positions {
                         outcomes[index].finished = true;
                         outcomes[index].failure = Some(error.clone());
@@ -2158,7 +2199,7 @@ where
                 if let Err(error) =
                     scatter_ragged_group(&mut active, &mut ragged_group, &worker_ragged_linear)
                 {
-                    let error = format!("{error:#}");
+                    let error = GenerationError::from_error(&error);
                     for &index in &members {
                         outcomes[index].finished = true;
                         outcomes[index].failure = Some(error.clone());
@@ -2188,7 +2229,7 @@ where
                         completed.stream.prompt_token_ids(),
                         completed.stream.published_token_ids(),
                         outcome.cancelled,
-                        outcome.failure.as_deref(),
+                        outcome.failure.as_ref().map(|error| error.message.as_ref()),
                         serde_json::to_value(&metrics).unwrap_or_default(),
                     );
                 }
@@ -2204,11 +2245,17 @@ where
                     .ragged_to_tree_switches
                     .fetch_add(metrics.ragged_to_tree_switches as u64, Ordering::Relaxed);
                 if let Some(error) = outcome.failure {
+                    let _ = completed.event_tx.send(StepEvent {
+                        id: completed.request_id,
+                        token: 0,
+                        finish_reason: None,
+                        error: Some(error.clone()),
+                    });
                     tracing::error!(
                         target: "ironmlx::dflash2",
                         request_id = completed.request_id.0,
                         batch_width,
-                        error,
+                        error = %error,
                         metrics = %serde_json::to_string(&metrics).unwrap_or_default(),
                         "DFlash2 request failed"
                     );
@@ -2325,6 +2372,39 @@ mod tests {
     }
 
     const WIDTHS_1_TO_8: u64 = 0b1_1111_1110;
+
+    #[test]
+    fn construction_failure_preserves_execution_classification_for_all_admission_replies() {
+        for width in [1, 2] {
+            let error = anyhow::anyhow!("native cache allocation failure")
+                .context("constructing target cache");
+            let mut replies = Vec::new();
+            let mut receivers = Vec::new();
+            for _ in 0..width {
+                let (tx, rx) = oneshot::channel();
+                replies.push(tx);
+                receivers.push(rx);
+            }
+            let in_flight = AtomicUsize::new(width);
+            reply_stream_construction_error(&error, replies, &in_flight);
+            for mut rx in receivers {
+                let error = rx.try_recv().expect("reply").err().expect("failure");
+                println!(
+                    "CONSTRUCTION_TRACE width={width} error={error:#} classified={}",
+                    error.is::<GenerationError>()
+                );
+                assert!(
+                    error.is::<GenerationError>(),
+                    "native execution error must not become an untyped admission string"
+                );
+                assert_eq!(
+                    format!("{error:#}"),
+                    "constructing target cache: native cache allocation failure"
+                );
+            }
+            assert_eq!(in_flight.load(Ordering::Acquire), 0);
+        }
+    }
 
     #[test]
     fn ragged_linear_selection_needs_two_rows_and_never_waits() {

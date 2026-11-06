@@ -50,14 +50,14 @@ No request body. Success is HTTP 200 JSON with `object:"list"` and `data`, an ar
 | `data[].load_policy` | string, optional | Pool preload/lazy/disabled policy. |
 | `data[].state` | string, optional | Pool runtime state, such as unloaded/loading/loaded/draining/failed/missing/disabled. |
 | `data[].context_window` | integer, optional | Effective total context capacity. |
-| `data[].max_output_tokens` | integer, optional | Output ceiling before subtracting input tokens. |
+| `data[].max_output_tokens` | integer, optional | Suggested client output budget; not an output-only hard limit. |
 
 When reliably known, each causal model entry also includes these IronMLX extension fields:
 
 - `context_window`: effective total token capacity, the smaller of the model's context capacity and the deployment's `max_cache_cap` (App **MAX CONTEXT TOKENS**).
-- `max_output_tokens`: output-token ceiling, including reasoning, answer text and tool calls. Causal serving currently has no separate output-only hard cap, so this equals `context_window`. For each request, the output budget must still fit within `context_window - input_tokens`, including chat-template and multimodal input tokens. This is **not** the App's **MAX OUTPUT TOKENS** setting: that setting supplies a default Responses budget only when the request omits it.
+- `max_output_tokens`: suggested client output budget, including reasoning, answer text and tool calls. It uses the model's configured **MAX OUTPUT TOKENS** when present, otherwise 4096, and is capped at half the effective context window (at least one token). It is not an independent output-only hard limit. Explicit request budgets may exceed this suggestion if they fit the remaining context.
 
-For example, a model with a 262144-token context deployed with `max_cache_cap=65536` advertises `context_window:65536` and `max_output_tokens:65536`, even if its default output budget is 256. Clients must subtract input usage before choosing an output budget; the advertised ceiling does not guarantee that amount for a nonempty prompt or guarantee a complete answer. Admission and memory checks still apply.
+For example, a model deployed with `context_window:65536` and no configured output budget advertises `max_output_tokens:4096`; configuring **MAX OUTPUT TOKENS** to 8192 advertises 8192. Chat Completions and Responses use the configured budget when requests omit it, falling back to 256 when no model default exists. Clients must still account for input usage; admission and memory checks apply.
 
 Loaded models use their actual admission capacity. Unloaded causal models use explicit checkpoint metadata and the registered scheduler configuration without loading weights. Missing, invalid or unsupported capacity metadata is omitted, not returned as zero or inferred from generation defaults. Audio and DiffusionGemma currently omit both fields. App DFlash2 discovery reports the loaded target's effective capacity, never the draft model's capacity. These are optional extensions; clients should retain fallbacks when absent.
 

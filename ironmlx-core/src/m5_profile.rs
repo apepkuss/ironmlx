@@ -1298,16 +1298,60 @@ mod tests {
     }
 
     #[test]
-    fn embedded_libraries_match_the_qualified_kernels() {
-        // Same size as the candidate's libraries; the byte identity is
-        // checked against the frozen files by the product verification.
-        assert_eq!(
-            mlx::metal::prefill_shaders::PREFILL_QMM_MTILE_METALLIB.len(),
-            70_104
+    fn embedded_libraries_contain_required_kernels() {
+        // Inspect the compiled function table, not arbitrary bitcode strings.
+        // Sizes vary across Metal toolchains. Frozen-artifact identity and
+        // numerical qualification must use the qualified compiler/SDK/device.
+        fn check_library(bytes: &[u8], expected_names: &[&str]) {
+            assert_eq!(&bytes[..4], b"MTLB");
+            let read_u64 =
+                |offset| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as usize;
+            assert_eq!(read_u64(16), bytes.len(), "metallib length header");
+            for offset in [24, 40, 56, 72] {
+                let start = read_u64(offset);
+                let len = read_u64(offset + 8);
+                assert!(
+                    start <= bytes.len() && len <= bytes.len() - start,
+                    "section out of bounds"
+                );
+            }
+            let start = read_u64(24);
+            let table = &bytes[start..start + read_u64(32)];
+            let mut names = Vec::new();
+            for (offset, tag) in table.windows(4).enumerate() {
+                if tag == b"NAME" {
+                    let len = u16::from_le_bytes(table[offset + 4..offset + 6].try_into().unwrap())
+                        as usize;
+                    let name = &table[offset + 6..offset + 6 + len];
+                    assert_eq!(name.last(), Some(&0));
+                    names.push(std::str::from_utf8(&name[..len - 1]).unwrap());
+                }
+            }
+            names.sort_unstable();
+            let mut expected_names = expected_names.to_vec();
+            expected_names.sort_unstable();
+            assert_eq!(names, expected_names);
+        }
+        check_library(
+            mlx::metal::prefill_shaders::PREFILL_QMM_MTILE_METALLIB,
+            &[
+                "ironmlx_qmm_bm64_aligned",
+                "ironmlx_qmm_bm64_ragged",
+                "ironmlx_qmm_bm128_aligned",
+                "ironmlx_qmm_bm128_ragged",
+            ],
         );
-        assert_eq!(
-            mlx::metal::prefill_shaders::PREFILL_D256_NAX_METALLIB.len(),
-            121_240
+        check_library(
+            mlx::metal::prefill_shaders::PREFILL_D256_NAX_METALLIB,
+            &[
+                "ironmlx_probe_dsplit_bf16",
+                "ironmlx_splitk_d256_pass1_wm1",
+                "ironmlx_splitk_d256_pass2",
+                "ironmlx_splitk_d256_tree_pass1_wm1",
+                "ironmlx_splitk_d256_tree_pass2",
+                "ironmlx_splitk_d128_pass1_wm1",
+                "ironmlx_splitk_d128_pass2",
+            ],
         );
     }
 

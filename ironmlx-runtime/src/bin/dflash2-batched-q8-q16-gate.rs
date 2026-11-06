@@ -197,6 +197,9 @@ async fn run_batch(
             let mut tokens = Vec::with_capacity(max_new_tokens);
             let mut finished = false;
             while let Some(event) = event_rx.recv().await {
+                if let Some(error) = event.error {
+                    return Err(anyhow::Error::new(error));
+                }
                 tokens.push(event.token);
                 if event.finish_reason.is_some() {
                     finished = true;
@@ -289,11 +292,9 @@ async fn main() -> Result<()> {
         "draft checkpoint block_size={checkpoint_block_size} cannot run Q{}",
         args.block_size
     );
-    let static_memory_estimate = StaticMemoryEstimate {
-        text_cold_bytes: target_loader.loaded_tensor_bytes(),
-        speculative_cold_bytes: draft_loader.loaded_tensor_bytes(),
-        ..Default::default()
-    };
+    let mut static_memory_estimate =
+        StaticMemoryEstimate::from_allocated_weights(target_loader.loaded_tensor_bytes(), 0);
+    static_memory_estimate.set_allocated_speculative_weights(draft_loader.loaded_tensor_bytes());
     drop(target_loader);
     drop(draft_loader);
     let max_context = args

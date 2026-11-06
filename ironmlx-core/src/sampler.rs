@@ -1347,7 +1347,7 @@ fn apply_repetition_penalty(logits: &Array, history: &[u32], p: f32) -> Result<A
     // the host because MLX's scatter coverage is not yet strong
     // enough to do this fully on-device. Acceptable for P1 (vocab is
     // O(150k); cost ≪ a forward pass).
-    let v: Vec<f32> = logits.to_vec()?;
+    let v: Vec<f32> = logits.astype(Dtype::Float32)?.to_vec()?;
     let mut mul = vec![1.0_f32; v.len()];
     for &t in history {
         let i = t as usize;
@@ -1366,14 +1366,15 @@ fn apply_freq_presence_penalty(
     freq: f32,
     presence: f32,
 ) -> Result<Array> {
-    let v: Vec<f32> = logits.to_vec()?;
-    let mut counts = vec![0_u32; v.len()];
+    // Only token counts are needed on the host. In particular, do not read
+    // BF16/F16 model logits as F32 when a greedy request enables penalties.
+    let mut counts = vec![0_u32; logits.size()];
     for &t in history {
         if (t as usize) < counts.len() {
             counts[t as usize] += 1;
         }
     }
-    let mut sub = vec![0.0_f32; v.len()];
+    let mut sub = vec![0.0_f32; counts.len()];
     for (i, &c) in counts.iter().enumerate() {
         if c > 0 {
             sub[i] = c as f32 * freq + presence;
@@ -1967,6 +1968,36 @@ mod tests {
             (v[0] - 2.0).abs() < 1e-5,
             "row 0 token 0 unseen → unchanged"
         );
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn greedy_penalties_accept_model_logit_dtypes() {
+        let logits: Array = (&[2.0_f32, 1.5, 0.0][..], &[3_i32][..]).try_into().unwrap();
+        for dtype in [Dtype::Float32, Dtype::Float16, Dtype::Bfloat16] {
+            let logits = logits.astype(dtype).unwrap();
+            let mut key = mlx::random::key(0).unwrap();
+            assert_eq!(
+                Sampler::greedy()
+                    .sample(&logits, &[0, 0], &mut key)
+                    .unwrap(),
+                0
+            );
+            for sampler in [
+                Sampler::greedy().with_repetition_penalty(2.0),
+                Sampler::greedy().with_frequency_penalty(1.0),
+                Sampler::greedy().with_presence_penalty(1.0),
+                Sampler::greedy()
+                    .with_frequency_penalty(1.0)
+                    .with_presence_penalty(1.0),
+            ] {
+                assert_eq!(
+                    sampler.sample(&logits, &[0, 0], &mut key).unwrap(),
+                    1,
+                    "dtype={dtype:?}, sampler={sampler:?}"
+                );
+            }
+        }
     }
 
     #[test]

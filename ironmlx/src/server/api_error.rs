@@ -5,7 +5,7 @@ use axum::{
 };
 use serde::Serialize;
 
-use ironmlx_runtime::core::scheduler::SchedulerError;
+use ironmlx_runtime::core::scheduler::{GenerationError, SchedulerError};
 
 pub(crate) const RETRY_AFTER_SECONDS: u64 = 5;
 
@@ -142,12 +142,19 @@ impl ApiError {
         {
             return Self::invalid_request("dflash2_request_rejected", message);
         }
-        match error.downcast_ref::<SchedulerError>() {
+        let scheduler_error = error.downcast_ref::<SchedulerError>().or_else(|| {
+            error
+                .downcast_ref::<GenerationError>()
+                .and_then(|error| error.scheduler_error.as_ref())
+        });
+        match scheduler_error {
             Some(SchedulerError::QueueFull { .. }) => {
                 Self::service_unavailable("scheduler_queue_full", message)
             }
             Some(error @ SchedulerError::RequestTooLarge { .. }) => {
-                Self::request_token_capacity(error)
+                let mut api_error = Self::request_token_capacity(error);
+                api_error.message = message;
+                api_error
             }
             Some(SchedulerError::MemoryBudgetExceeded { .. }) => {
                 Self::service_unavailable("memory_budget_exceeded", message)
@@ -167,12 +174,13 @@ impl ApiError {
             Some(SchedulerError::StoreBackpressure { .. }) => {
                 Self::service_unavailable("prefix_store_backpressure", message)
             }
+            None if error.is::<GenerationError>() => Self::internal("generation_error", message),
             None => Self::invalid_request("scheduler_rejected", message),
         }
     }
 
     pub(crate) fn generation(error: anyhow::Error) -> Self {
-        if error.downcast_ref::<SchedulerError>().is_some() {
+        if error.is::<SchedulerError>() || error.is::<GenerationError>() {
             Self::scheduler_admission(error)
         } else {
             Self::internal("generation_error", format!("{error:#}"))
@@ -223,28 +231,29 @@ impl ApiError {
         response
     }
 
-    fn openai_response(&self) -> Response {
+    pub(crate) fn openai_payload(&self) -> serde_json::Value {
         let kind = match self.class {
             ApiErrorClass::Authentication => "authentication_error",
             ApiErrorClass::Overloaded | ApiErrorClass::Internal => "server_error",
             _ => "invalid_request_error",
         };
-        (
-            self.status,
-            Json(OpenAiErrorEnvelope {
-                error: OpenAiErrorBody {
-                    message: &self.message,
-                    kind,
-                    param: self.param.as_deref(),
-                    code: self.code,
-                    details: self.token_capacity.as_ref(),
-                },
-            }),
-        )
-            .into_response()
+        serde_json::to_value(OpenAiErrorEnvelope {
+            error: OpenAiErrorBody {
+                message: &self.message,
+                kind,
+                param: self.param.as_deref(),
+                code: self.code,
+                details: self.token_capacity.as_ref(),
+            },
+        })
+        .expect("API error envelope is serializable")
     }
 
-    fn anthropic_response(&self) -> Response {
+    fn openai_response(&self) -> Response {
+        (self.status, Json(self.openai_payload())).into_response()
+    }
+
+    pub(crate) fn anthropic_payload(&self, request_id: &str) -> serde_json::Value {
         let kind = match self.class {
             ApiErrorClass::InvalidRequest => "invalid_request_error",
             ApiErrorClass::Authentication => "authentication_error",
@@ -255,21 +264,29 @@ impl ApiError {
             ApiErrorClass::Overloaded => "overloaded_error",
             ApiErrorClass::Internal => "api_error",
         };
+        serde_json::to_value(AnthropicErrorEnvelope {
+            kind: "error",
+            error: AnthropicErrorBody {
+                kind,
+                message: &self.message,
+                code: self.code,
+                details: self.token_capacity.as_ref(),
+            },
+            request_id,
+        })
+        .expect("API error envelope is serializable")
+    }
+
+    pub(crate) fn code(&self) -> &'static str {
+        self.code
+    }
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
+    fn anthropic_response(&self) -> Response {
         let request_id = format!("req_{}", uuid::Uuid::new_v4().simple());
-        let mut response = (
-            self.status,
-            Json(AnthropicErrorEnvelope {
-                kind: "error",
-                error: AnthropicErrorBody {
-                    kind,
-                    message: &self.message,
-                    code: self.code,
-                    details: self.token_capacity.as_ref(),
-                },
-                request_id: &request_id,
-            }),
-        )
-            .into_response();
+        let mut response = (self.status, Json(self.anthropic_payload(&request_id))).into_response();
         response.headers_mut().insert(
             HeaderName::from_static("request-id"),
             HeaderValue::from_str(&request_id).expect("generated request id is a valid header"),

@@ -10,7 +10,7 @@ public struct ModelParameters: Codable, Equatable, Sendable {
     public var contextSize: String?
     /// Historical name: the runtime KV cache cap, not response output tokens.
     public var maxTokens: String?
-    /// Per-model default when a Responses request omits max_output_tokens.
+    /// Per-model default when Chat Completions or Responses omits its output budget.
     public var maxOutputTokens: String?
     public var temperature: String?
     public var topP: String?

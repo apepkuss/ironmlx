@@ -123,16 +123,11 @@ fn service_unavailable_response(code: &'static str, message: impl Into<String>) 
 }
 
 fn format_stream_error(error: &anyhow::Error) -> Bytes {
-    format_event(
-        "error",
-        &serde_json::json!({
-            "type": "error",
-            "error": {
-                "type": "api_error",
-                "message": format!("{error:#}")
-            }
-        }),
-    )
+    let error = super::api_error::ApiError::generation(anyhow::Error::new(
+        ironmlx_runtime::core::scheduler::GenerationError::from_error(error),
+    ));
+    let request_id = format!("req_{}", uuid::Uuid::new_v4().simple());
+    format_event("error", &error.anthropic_payload(&request_id))
 }
 
 /// Anthropic native image source — base64 only (URL source is out of scope).
@@ -867,9 +862,12 @@ impl MessagesRequest {
             stream_options: None,
             service_tier: None,
             ignore_eos: false,
-            max_tokens: self.max_tokens,
+            max_tokens: Some(self.max_tokens),
+            max_completion_tokens: None,
             temperature: self.temperature,
             top_p: self.top_p,
+            frequency_penalty: None,
+            presence_penalty: None,
             seed: None,
             reasoning_effort: None,
             chat_template_kwargs: self
@@ -983,7 +981,7 @@ where
         }
     };
     let output_schema = output_format.constraint_schema();
-    let max_tokens = req.max_tokens;
+    let max_tokens = req.output_budget();
     let stream = req.stream;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
     if let Err(error) = super::validate_prompt_lookup_sampler(state.prompt_lookup_enabled, sampler)
@@ -1171,7 +1169,7 @@ pub(crate) async fn messages_with_gemma4_drafter_state(
         }
     };
     let output_schema = output_format.constraint_schema();
-    let max_tokens = req.max_tokens;
+    let max_tokens = req.output_budget();
     let stream = req.stream;
     let model_label = req
         .model
@@ -1836,6 +1834,9 @@ where
     let mut finished = false;
     let mut model_finish = "stop";
     while let Some(event) = event_rx.recv().await {
+        if let Some(error) = event.error {
+            return generation_err_to_response(anyhow::Error::new(error));
+        }
         output.completion_tokens += 1;
         performance.record_output_tokens(1);
         let events = if event.finish_reason == Some("stop") {
@@ -1943,6 +1944,12 @@ where
         while let Some(event) =
             super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
         {
+            if let Some(error) = event.error {
+                let _ = tx
+                    .send(Ok(format_stream_error(&anyhow::Error::new(error))))
+                    .await;
+                return;
+            }
             output_tokens += 1;
             performance.record_output_tokens(1);
             let events = if event.finish_reason == Some("stop") {
@@ -2105,6 +2112,12 @@ where
         while let Some(ev) =
             super::api_transport::recv_or_disconnect(&disconnect, &mut event_rx).await
         {
+            if let Some(error) = ev.error {
+                let _ = tx
+                    .send(Ok(format_stream_error(&anyhow::Error::new(error))))
+                    .await;
+                return;
+            }
             let mut events = if ev.finish_reason == Some("stop") {
                 Vec::new()
             } else {
@@ -2220,6 +2233,9 @@ where
     };
     let mut finished = false;
     while let Some(ev) = event_rx.recv().await {
+        if let Some(error) = ev.error {
+            return generation_err_to_response(anyhow::Error::new(error));
+        }
         output.completion_tokens += 1;
         performance.record_output_tokens(1);
         let events = if ev.finish_reason == Some("stop") {
@@ -2555,6 +2571,36 @@ mod tests {
         assert_eq!(body["error"]["type"], "overloaded_error");
         assert_eq!(body["error"]["code"], "cold_materialization_unsafe");
         assert_eq!(body["request_id"], request_id);
+    }
+
+    #[test]
+    fn stream_errors_preserve_overload_classification_and_native_causes() {
+        use ironmlx_runtime::core::scheduler::{GenerationError, SchedulerError};
+        let error = anyhow::Error::new(SchedulerError::ColdMaterializationUnsafe {
+            requested_bytes: 1,
+            current_bytes: 2,
+            target_bytes: 3,
+        })
+        .context("image prefill");
+        let event = format_stream_error(&anyhow::Error::new(GenerationError::from_error(&error)));
+        let wire = std::str::from_utf8(&event).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(
+            wire.lines()
+                .find_map(|line| line.strip_prefix("data: "))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(payload["error"]["type"], "overloaded_error");
+        assert_eq!(payload["error"]["code"], "cold_materialization_unsafe");
+        assert!(payload["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("image prefill:"));
+        let native = anyhow::anyhow!("native failure").context("decode");
+        let event = format_stream_error(&native);
+        assert!(std::str::from_utf8(&event)
+            .unwrap()
+            .contains("decode: native failure"));
     }
 
     mod wire_tests {

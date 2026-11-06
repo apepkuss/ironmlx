@@ -11,6 +11,7 @@ pub(super) fn closed_scheduler_stream(events: Vec<GenerateEvent>) -> AdmitReply 
     let request_id = RequestId(1);
     for event in events {
         tx.send(StepEvent {
+            error: None,
             id: request_id,
             token: event.token,
             finish_reason: event.finish_reason,

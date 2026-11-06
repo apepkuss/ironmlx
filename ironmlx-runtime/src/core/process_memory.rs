@@ -27,17 +27,37 @@ pub enum PressureLevel {
     Emergency,
 }
 
-/// Static, metadata-only estimate of mmap-backed weights that may become part
-/// of the process footprint on first use. These values are derived from the
-/// sanitized loader tensor table and never require a warmup forward.
+/// Component storage sizes. Eagerly allocated buffers are already charged to
+/// current usage; only unallocated components need extra first-use capacity.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StaticMemoryEstimate {
     pub text_cold_bytes: usize,
     pub vision_cold_bytes: usize,
     pub speculative_cold_bytes: usize,
+    pub allocated: MaterializationComponents,
 }
 
 impl StaticMemoryEstimate {
+    /// Call only after the loader has evaluated the component arrays.
+    /// Execution state remains Cold; this records allocation, not warmup.
+    pub fn from_allocated_weights(text_bytes: usize, vision_bytes: usize) -> Self {
+        Self {
+            text_cold_bytes: text_bytes,
+            vision_cold_bytes: vision_bytes,
+            allocated: MaterializationComponents {
+                text: true,
+                vision: true,
+                speculative: false,
+            },
+            ..Self::default()
+        }
+    }
+
+    pub fn set_allocated_speculative_weights(&mut self, bytes: usize) {
+        self.speculative_cold_bytes = bytes;
+        self.allocated.speculative = true;
+    }
+
     pub fn total_cold_bytes(self) -> usize {
         self.text_cold_bytes
             .saturating_add(self.vision_cold_bytes)
@@ -74,7 +94,12 @@ impl MaterializationComponents {
     }
 
     pub fn requested_bytes(self, estimate: StaticMemoryEstimate) -> usize {
-        self.bytes(estimate)
+        Self {
+            text: self.text && !estimate.allocated.text,
+            vision: self.vision && !estimate.allocated.vision,
+            speculative: self.speculative && !estimate.allocated.speculative,
+        }
+        .bytes(estimate)
     }
 }
 
@@ -162,8 +187,8 @@ impl ColdMaterializationTracker {
         owned.mark(&mut states, ComponentMaterializationState::Warming);
         drop(states);
 
-        let bytes = owned.bytes(self.estimate);
-        let reservation = if bytes == 0 {
+        let bytes = owned.requested_bytes(self.estimate);
+        let reservation = if owned == MaterializationComponents::default() {
             None
         } else {
             if refresh_telemetry {
@@ -500,6 +525,9 @@ pub struct MemoryGovernorSnapshot {
     /// of active pages. `None` means host VM telemetry is unavailable.
     pub available_ram_bytes: Option<usize>,
     pub reserved_bytes: usize,
+    /// Pending model-load capacity, excluded from observed pressure to avoid
+    /// counting the same progressively allocated buffers twice.
+    pub model_load_reserved_bytes: usize,
     pub effective_ceiling_bytes: usize,
     pub static_ceiling_bytes: usize,
     pub dynamic_ceiling_bytes: Option<usize>,
@@ -522,6 +550,7 @@ impl Default for MemoryGovernorSnapshot {
             current_usage_bytes: 0,
             available_ram_bytes: None,
             reserved_bytes: 0,
+            model_load_reserved_bytes: 0,
             effective_ceiling_bytes: 0,
             static_ceiling_bytes: 0,
             dynamic_ceiling_bytes: None,
@@ -702,8 +731,14 @@ impl ProcessMemoryGovernor {
             || telemetry.metal_limit_bytes.is_none();
         let soft = ratio_bytes(effective_ceiling, self.config.soft_ratio);
         let hard = ratio_bytes(effective_ceiling, self.config.hard_ratio);
+        let pressure_usage = current.saturating_add(
+            state
+                .snapshot
+                .reserved_bytes
+                .saturating_sub(state.snapshot.model_load_reserved_bytes),
+        );
         let observed = classify_observed_pressure(
-            current.saturating_add(state.snapshot.reserved_bytes),
+            pressure_usage,
             effective_ceiling,
             soft,
             hard,
@@ -722,7 +757,7 @@ impl ProcessMemoryGovernor {
             state.candidate_samples = 0;
             state.recovery_samples = 0;
         } else {
-            let current_with_reservations = current.saturating_add(state.snapshot.reserved_bytes);
+            let current_with_reservations = pressure_usage;
             advance_pressure_state(
                 &mut state,
                 observed,
@@ -765,6 +800,20 @@ impl ProcessMemoryGovernor {
 
     pub fn admission_paused(&self) -> bool {
         self.snapshot().pressure_level != PressureLevel::Normal
+    }
+
+    pub fn reservation_target_bytes(&self) -> usize {
+        ratio_bytes(
+            self.snapshot().effective_ceiling_bytes,
+            self.config.prefill_headroom_ratio,
+        )
+    }
+
+    pub fn try_reserve_model_load(
+        self: &Arc<Self>,
+        bytes: usize,
+    ) -> Result<MemoryReservation, MemoryReservationError> {
+        self.try_reserve_inner(bytes, "model_load", ReservationKind::ModelLoad)
     }
 
     pub fn try_reserve(
@@ -849,6 +898,12 @@ impl ProcessMemoryGovernor {
         }
         state.snapshot.reserved_bytes =
             state.snapshot.reserved_bytes.saturating_add(reserved_bytes);
+        if kind == ReservationKind::ModelLoad {
+            state.snapshot.model_load_reserved_bytes = state
+                .snapshot
+                .model_load_reserved_bytes
+                .saturating_add(reserved_bytes);
+        }
         if kind == ReservationKind::ColdMaterialization {
             state.snapshot.cold_materialization_reservations = state
                 .snapshot
@@ -896,6 +951,12 @@ impl ProcessMemoryGovernor {
             }
         } else {
             state.snapshot.reserved_bytes = state.snapshot.reserved_bytes.saturating_sub(bytes);
+        }
+        if kind == ReservationKind::ModelLoad {
+            state.snapshot.model_load_reserved_bytes = state
+                .snapshot
+                .model_load_reserved_bytes
+                .saturating_sub(bytes);
         }
         if kind == ReservationKind::ColdMaterialization {
             state.snapshot.cold_materialization_reservations = state
@@ -1177,6 +1238,7 @@ pub struct MemoryReservation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReservationKind {
     General,
+    ModelLoad,
     ColdMaterialization,
     Prefill,
 }
@@ -1697,6 +1759,94 @@ mod tests {
     }
 
     #[test]
+    fn evaluated_components_keep_execution_state_and_deferred_capacity_guard() {
+        let governor = Arc::new(ProcessMemoryGovernor::new(config()).unwrap());
+        governor.update(telemetry(gib(15)));
+        let mut estimate = StaticMemoryEstimate::from_allocated_weights(gib(14), gib(1));
+        estimate.set_allocated_speculative_weights(gib(1));
+        estimate.allocated.vision = false;
+        let tracker = ColdMaterializationTracker::new(estimate);
+        let first = tracker
+            .begin_inner(
+                MaterializationComponents::for_request(false, true),
+                &governor,
+                false,
+            )
+            .unwrap();
+        assert_eq!(first.reserved_bytes(), 0);
+        assert_eq!(
+            tracker.state(MaterializationComponent::Text),
+            ComponentMaterializationState::Warming
+        );
+        assert_eq!(
+            tracker.state(MaterializationComponent::Vision),
+            ComponentMaterializationState::Cold
+        );
+        first.commit();
+        assert_eq!(
+            tracker.state(MaterializationComponent::Text),
+            ComponentMaterializationState::Warm
+        );
+        let image = tracker
+            .begin_inner(
+                MaterializationComponents::for_request(true, true),
+                &governor,
+                false,
+            )
+            .unwrap();
+        assert_eq!(image.reserved_bytes(), gib(1));
+        drop(image);
+        assert_eq!(
+            tracker.state(MaterializationComponent::Vision),
+            ComponentMaterializationState::Cold
+        );
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+        let unevaluated = ColdMaterializationTracker::new(StaticMemoryEstimate {
+            text_cold_bytes: gib(14),
+            ..Default::default()
+        });
+        assert!(matches!(
+            unevaluated.begin_inner(MaterializationComponents::text(), &governor, false),
+            Err(MemoryReservationError::InsufficientHeadroom { .. })
+        ));
+        governor.update(telemetry(gib(28)));
+        let evaluated = ColdMaterializationTracker::new(
+            StaticMemoryEstimate::from_allocated_weights(gib(14), 0),
+        );
+        assert!(evaluated
+            .begin_inner(MaterializationComponents::text(), &governor, false)
+            .is_err());
+        assert_eq!(
+            evaluated.state(MaterializationComponent::Text),
+            ComponentMaterializationState::Cold
+        );
+    }
+
+    #[test]
+    fn loading_capacity_remains_reserved_without_inflating_observed_pressure() {
+        let governor = Arc::new(ProcessMemoryGovernor::new(config()).unwrap());
+        let mut available = telemetry(gib(1));
+        available.vm.as_mut().unwrap().free_bytes = gib(16);
+        governor.update(available);
+        let loading = governor.try_reserve_model_load(gib(15)).unwrap();
+        assert_eq!(governor.snapshot().model_load_reserved_bytes, gib(15));
+        // Capacity checks still include the pending allocation.
+        assert!(governor.try_reserve(gib(8), "other_request").is_err());
+        for used in [5, 10, 15] {
+            let sample = governor.update(telemetry(gib(used)));
+            assert_eq!(sample.pressure_level, PressureLevel::Normal);
+        }
+        loading.commit();
+        assert_eq!(governor.snapshot().reserved_bytes, 0);
+        assert_eq!(governor.snapshot().model_load_reserved_bytes, 0);
+        // A real footprint overflow must still trip the governor.
+        assert_eq!(
+            governor.update(telemetry(gib(28))).pressure_level,
+            PressureLevel::Emergency
+        );
+    }
+
+    #[test]
     fn cold_materialization_tracks_components_independently() {
         let governor = Arc::new(ProcessMemoryGovernor::new(config()).unwrap());
         governor.update(telemetry(gib(4)));
@@ -1704,6 +1854,7 @@ mod tests {
             text_cold_bytes: 1_024,
             vision_cold_bytes: 2_048,
             speculative_cold_bytes: 4_096,
+            ..StaticMemoryEstimate::default()
         });
 
         let text = tracker

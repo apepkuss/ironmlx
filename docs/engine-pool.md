@@ -72,6 +72,36 @@ Startup validation:
 - When `max_loaded_models` is reached, EnginePool evicts the least recently used
   loaded `lazy` model that is not currently in use. `preload` models are pinned.
 
+## Memory accounting and execution failures
+
+The governor measures the greater of physical footprint and MLX active memory.
+A loader that has evaluated a component records its storage as allocated;
+first execution still follows Cold → Warming → Warm, but reserves only storage
+not already allocated. Deferred vision loads retain their full first-use
+reservation, and prefill/KV/workspace admission remains enabled.
+
+`reserved_bytes` includes pending loads. Its `model_load_reserved_bytes` subset
+continues to limit admission, while observed pressure excludes that subset to
+avoid counting the same progressively allocated weights twice. Actual measured
+usage still controls pressure and reclamation.
+After cache reclaim, idle-model eviction uses a fresh authoritative sample.
+Once observed usage (including non-load reservations) reaches the existing
+recovery watermark, eviction stops even while the pressure grade cools down.
+Admission hysteresis, recovery thresholds and degraded-telemetry protection
+remain in effect.
+
+An admitted execution failure is a terminal error, not a token. Ordinary,
+MTP and DFlash2 paths preserve the complete cause message and scheduler
+classification through prefill, decode and failed request cleanup. Responses
+and Anthropic SSE use the same error classification as their non-streaming
+counterparts. No success terminal event is emitted after a failure.
+A priority-tail failure terminates active and queued requests before resetting
+scheduler state. DFlash2 cache/prefill construction failures are execution
+errors even when the admission reply has not yet been delivered; request
+validation retains its own classification.
+Chat Completions returns its retryable HTTP 503 code and `Retry-After`; an open
+SSE stream reports the error without a successful finish or `[DONE]`.
+
 ## HTTP APIs
 
 - `GET /v1/models`: lists enabled models and runtime state.

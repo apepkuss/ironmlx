@@ -673,19 +673,38 @@ impl EnginePoolState {
                         tracing::warn!(%error, "memory governor hot-cache shrink failed");
                     }
                 }
+                // Cache reclaim may have resolved the peak. Re-sample before
+                // selecting any newly idle model, and after every eviction.
+                let governor = global_process_memory_governor();
+                let mut snapshot = governor.refresh_process();
                 if snapshot.pressure_level.rank() >= PressureLevel::Hard.rank() {
+                    tracing::info!(
+                        level = ?snapshot.pressure_level,
+                        current_bytes = snapshot.current_usage_bytes,
+                        ceiling_bytes = snapshot.effective_ceiling_bytes,
+                        reserved_bytes = snapshot.reserved_bytes,
+                        model_load_reserved_bytes = snapshot.model_load_reserved_bytes,
+                        recovery_bytes = (snapshot.effective_ceiling_bytes as f64 * governor.config().recovery_ratio) as usize,
+                        sample_sequence = snapshot.sample_sequence,
+                        eviction_needed = idle_eviction_needed(snapshot, governor.config()),
+                        "memory governor post-reclaim eviction decision"
+                    );
+                }
+                while idle_eviction_needed(snapshot, governor.config()) {
                     let evict_all = snapshot.pressure_level == PressureLevel::Emergency;
-                    loop {
-                        match inner.evict_lru_idle_engine("memory-pressure").await {
-                            Ok(true) if evict_all => continue,
-                            Ok(true) | Ok(false) => break,
-                            Err(error) => {
-                                tracing::warn!(%error, "memory governor idle-model eviction failed");
+                    match inner.evict_lru_idle_engine("memory-pressure").await {
+                        Ok(true) => {
+                            snapshot = governor.refresh_process();
+                            if !evict_all {
                                 break;
                             }
                         }
+                        Ok(false) => break,
+                        Err(error) => {
+                            tracing::warn!(%error, "memory governor idle-model eviction failed");
+                            break;
+                        }
                     }
-                    global_process_memory_governor().refresh_process();
                 }
             }
         });
@@ -1492,6 +1511,49 @@ impl EnginePoolState {
     }
 }
 
+/// A controlled telemetry pulse for lifecycle regression, never a real
+/// allocation or a production setting. Subsequent native samples remain real.
+#[cfg(any(test, feature = "test-support"))]
+fn diagnostic_model_load_pressure_pulse() {
+    static FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if std::env::var("IRONMLX_DIAGNOSTIC_MODEL_LOAD_PRESSURE_PULSE").as_deref() != Ok("1")
+        || FIRED.swap(true, Ordering::SeqCst)
+    {
+        return;
+    }
+    let governor = global_process_memory_governor();
+    let before = governor.refresh_process();
+    let mut pulse = crate::core::process_memory::native_memory_telemetry();
+    let peak = before
+        .effective_ceiling_bytes
+        .saturating_add(governor.config().emergency_overage_bytes);
+    pulse.phys_footprint_bytes = Some(peak);
+    pulse.mlx_active_bytes = Some(peak);
+    let injected = governor.update(pulse);
+    tracing::warn!(native_current_bytes=before.current_usage_bytes,injected_current_bytes=injected.current_usage_bytes,ceiling_bytes=injected.effective_ceiling_bytes,level=?injected.pressure_level,"controlled model-load telemetry pulse; no corresponding native allocation");
+}
+
+/// Admission and cache limits retain their hysteresis. Destructive model
+/// reclamation stops once a fresh authoritative sample has already crossed
+/// the same recovery watermark; a cooling-down grade alone is insufficient.
+fn idle_eviction_needed(
+    snapshot: crate::core::process_memory::MemoryGovernorSnapshot,
+    config: crate::core::process_memory::MemoryGovernorConfig,
+) -> bool {
+    if snapshot.pressure_level.rank() < PressureLevel::Hard.rank() {
+        return false;
+    }
+    if snapshot.telemetry_degraded || snapshot.effective_ceiling_bytes == 0 {
+        return true;
+    }
+    let observed = snapshot.current_usage_bytes.saturating_add(
+        snapshot
+            .reserved_bytes
+            .saturating_sub(snapshot.model_load_reserved_bytes),
+    );
+    observed > (snapshot.effective_ceiling_bytes as f64 * config.recovery_ratio) as usize
+}
+
 impl EnginePoolInner {
     async fn ensure_capacity_for(
         &self,
@@ -1510,7 +1572,7 @@ impl EnginePoolInner {
         let governor = global_process_memory_governor();
         let first_snapshot = governor.sample_process();
         let first_reservation = if first_snapshot.pressure_level == PressureLevel::Normal {
-            governor.try_reserve(estimated_weight_bytes, "model_load")
+            governor.try_reserve_model_load(estimated_weight_bytes)
         } else {
             Err(
                 crate::core::process_memory::MemoryReservationError::Pressure {
@@ -1541,7 +1603,7 @@ impl EnginePoolInner {
                         retry_snapshot.pressure_level
                     );
                 }
-                match governor.try_reserve(estimated_weight_bytes, "model_load") {
+                match governor.try_reserve_model_load(estimated_weight_bytes) {
                     Ok(reservation) => Some(reservation),
                     Err(retry_error) => {
                         bail!(
@@ -1705,6 +1767,14 @@ impl EnginePoolInner {
         {
             return Ok(false);
         }
+        tracing::info!(
+            model = %evict_id,
+            target = target_id,
+            active_requests = slot.active_requests.load(Ordering::SeqCst),
+            engine_references = Arc::strong_count(engine),
+            pinned = slot.is_pinned(),
+            "memory eviction candidate rechecked under slot lock"
+        );
         *guard = EngineSlotState::Unloaded {
             reason: EngineUnloadReason::Evicted,
             last_error: None,
@@ -1922,6 +1992,8 @@ impl EngineSlot {
                         self.notify.notify_waiters();
                         return Err(error);
                     }
+                    #[cfg(any(test, feature = "test-support"))]
+                    diagnostic_model_load_pressure_pulse();
                     let engine = Arc::new(engine);
                     if let Some(reservation) = load_reservation {
                         reservation.commit();
@@ -2542,11 +2614,8 @@ async fn load_engine_variant(
     let loader = Loader::open_multimodal(&model.path)
         .with_context(|| format!("Loader::open_multimodal {}", model.path.display()))?;
     let component_bytes = loader.loaded_tensor_component_bytes();
-    let static_memory_estimate = StaticMemoryEstimate {
-        text_cold_bytes: component_bytes.text,
-        vision_cold_bytes: component_bytes.vision,
-        speculative_cold_bytes: 0,
-    };
+    let static_memory_estimate =
+        StaticMemoryEstimate::from_allocated_weights(component_bytes.text, component_bytes.vision);
     let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
     let model_type = loader
         .config_raw_value()
@@ -3032,7 +3101,7 @@ where
 {
     let mtp_loader = Loader::open_mtp(&mtp_config.model_dir)
         .with_context(|| format!("Loader::open_mtp {}", mtp_config.model_dir.display()))?;
-    static_memory_estimate.speculative_cold_bytes = mtp_loader.loaded_tensor_bytes();
+    static_memory_estimate.set_allocated_speculative_weights(mtp_loader.loaded_tensor_bytes());
     let mtp = model_impl
         .load_mtp_head(&mtp_loader)
         .with_context(|| format!("loading MTP head from {}", mtp_config.model_dir.display()))?;
@@ -3085,7 +3154,7 @@ async fn build_gemma4_drafter_causal_state(
             mtp_config.model_dir.display()
         )
     })?;
-    static_memory_estimate.speculative_cold_bytes = drafter_loader.loaded_tensor_bytes();
+    static_memory_estimate.set_allocated_speculative_weights(drafter_loader.loaded_tensor_bytes());
     let drafter = ironmlx_lm::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
         .with_context(|| {
             format!(
@@ -3345,6 +3414,44 @@ mod tests {
     }
 
     #[test]
+    fn recovered_pressure_does_not_evict_but_unrecovered_pressure_does() {
+        use crate::core::process_memory::{
+            HostVmStatistics, MemoryGovernorConfig, MemoryTelemetry, PressureLevel,
+            ProcessMemoryGovernor,
+        };
+        let gib = |x: usize| x * 1024 * 1024 * 1024;
+        let config = MemoryGovernorConfig::default();
+        let governor = ProcessMemoryGovernor::new(config).unwrap();
+        let sample = |used| MemoryTelemetry {
+            total_ram_bytes: gib(32),
+            phys_footprint_bytes: Some(gib(used)),
+            mlx_active_bytes: Some(gib(used)),
+            mlx_cache_bytes: Some(0),
+            metal_limit_bytes: Some(gib(24)),
+            vm: Some(HostVmStatistics {
+                free_bytes: gib(8),
+                inactive_bytes: gib(2),
+                active_bytes: gib(4),
+                wired_bytes: gib(6),
+            }),
+        };
+        let peak = governor.update(sample(28));
+        assert_eq!(peak.pressure_level, PressureLevel::Emergency);
+        assert!(super::idle_eviction_needed(peak, config));
+        let not_recovered = governor.update(sample(21));
+        assert!(
+            super::idle_eviction_needed(not_recovered, config),
+            "hysteresis must still reclaim above recovery watermark"
+        );
+        let recovered = governor.update(sample(14));
+        println!(
+            "RECOVERY_TRACE peak={peak:?} unrecovered={not_recovered:?} recovered={recovered:?}"
+        );
+        assert_eq!(recovered.pressure_level, PressureLevel::Emergency);
+        assert!(!super::idle_eviction_needed(recovered, config), "fresh usage below recovery watermark must not evict an idle model merely because the pressure grade is cooling down");
+    }
+
+    #[test]
     fn audio_load_estimate_covers_auxiliary_weights_and_frontend() {
         let root = write_minimal_model_config("unused_for_audio");
         let derived = root.join("derived");
@@ -3369,6 +3476,76 @@ mod tests {
         config.sampling_defaults.temperature = Some(0.5);
         assert!(validate_engine_model_config(&config).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn idle_eviction_preserves_recovery_hysteresis_reservations_and_fail_closed() {
+        use crate::core::process_memory::{
+            MemoryGovernorConfig, MemoryGovernorSnapshot, PressureLevel,
+        };
+        let config = MemoryGovernorConfig::default();
+        let gib = 1024 * 1024 * 1024;
+        let base = MemoryGovernorSnapshot {
+            pressure_level: PressureLevel::Hard,
+            current_usage_bytes: 14 * gib,
+            effective_ceiling_bytes: 24 * gib,
+            telemetry_degraded: false,
+            ..Default::default()
+        };
+        let watermark = (base.effective_ceiling_bytes as f64 * config.recovery_ratio) as usize;
+        assert!(!super::idle_eviction_needed(base, config));
+        assert!(!super::idle_eviction_needed(
+            MemoryGovernorSnapshot {
+                current_usage_bytes: watermark,
+                ..base
+            },
+            config
+        ));
+        assert!(super::idle_eviction_needed(
+            MemoryGovernorSnapshot {
+                current_usage_bytes: watermark + 1,
+                ..base
+            },
+            config
+        ));
+        assert!(super::idle_eviction_needed(
+            MemoryGovernorSnapshot {
+                reserved_bytes: 8 * gib,
+                ..base
+            },
+            config
+        ));
+        assert!(!super::idle_eviction_needed(
+            MemoryGovernorSnapshot {
+                reserved_bytes: 8 * gib,
+                model_load_reserved_bytes: 8 * gib,
+                ..base
+            },
+            config
+        ));
+        assert!(super::idle_eviction_needed(
+            MemoryGovernorSnapshot {
+                telemetry_degraded: true,
+                ..base
+            },
+            config
+        ));
+        assert!(super::idle_eviction_needed(
+            MemoryGovernorSnapshot {
+                effective_ceiling_bytes: 0,
+                ..base
+            },
+            config
+        ));
+        assert!(!super::idle_eviction_needed(
+            MemoryGovernorSnapshot {
+                pressure_level: PressureLevel::Soft,
+                current_usage_bytes: 23 * gib,
+                ..base
+            },
+            config
+        ));
+        println!("EVICTION_BOUNDARIES recovery={watermark} equality=keep above=evict general_reservation=evict pending_load_subset=keep degraded=fail_closed");
     }
 
     #[test]
