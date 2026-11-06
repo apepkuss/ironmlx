@@ -73,6 +73,8 @@ public struct BackendRecoverySnapshot: Codable, Equatable, Sendable {
         parameterStore: ModelParameterStore
     ) -> BackendRecoverySnapshot {
         let defaultModel = config.defaultModelReference
+        // Only the model the launch runs in DFlash2 mode carries its draft.
+        let dflash2Target = config.configuredDFlash2Target(parameterStore: parameterStore)
         let pinned = Set(config.pinnedModelReferences)
         let models = config.restoredModelReferences.map { model in
             let parameters = parameterStore.parameters(for: model)
@@ -91,7 +93,7 @@ public struct BackendRecoverySnapshot: Codable, Equatable, Sendable {
                 : nil
             let dflash2Runtime = try? ModelDFlash2RuntimeResolver.runtime(
                 for: model,
-                useDFlash2: parameters?.dflash2Enabled,
+                useDFlash2: model == dflash2Target,
                 scanner: scanner,
                 parameterStore: parameterStore
             )

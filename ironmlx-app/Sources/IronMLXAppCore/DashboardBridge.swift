@@ -370,7 +370,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     let healthz = try await client.fetchHealthz()
                     var legacy = LegacyHealthAdapter(statusNow: Date()).legacyStatus(from: healthz)
                     if healthz.dflash2?.enabled == true,
-                       let target = config.defaultModelReference,
+                       let target = AppConfig.normalizedModelReference(healthz.model.name),
                        let draft = self.parameterStore.parameters(for: target)?.dflash2ModelID,
                        !legacy.runtimeModels.isEmpty {
                         legacy.runtimeModels[0].dflash2DraftModel = draft
@@ -2641,9 +2641,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
     private func setDefaultModel(_ modelReference: String) {
         let model = modelReference.trimmingCharacters(in: .whitespacesAndNewlines)
-        // A fixed DFlash2 actor serves only its target, and the app recognizes that
-        // target by its being the default. Moving the default away would strand it:
-        // unload would take the ordinary path, which the actor does not serve.
+        // A fixed DFlash2 actor serves only its target, so no other model can be
+        // registered as the default while it runs.
         if let target = configuredDFlash2Target(in: configStore.load()) {
             if target != model {
                 sendJavaScript("onDefaultModelRejected(\(Self.jsStringLiteral(target)))")
@@ -2795,10 +2794,13 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             )
             return true
         }
-        guard configuredDFlash2Target(in: config) == nil,
-              previousParameters?.dflash2Enabled == true,
-              config.defaultModelReference == model
-        else {
+        // Restart only when this edit turned off the running target.
+        let previousTarget = config.configuredDFlash2Target { reference in
+            reference == model
+                ? previousParameters?.dflash2Enabled == true
+                : parameterStore.parameters(for: reference)?.dflash2Enabled == true
+        }
+        guard previousTarget == model else {
             sendScannedModels()
             return true
         }
@@ -3045,10 +3047,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 return (loaded, pinned, mtpEnabled, dflash2Enabled)
             } catch {
                 IronMLXAppLogger.error("Failed to fetch loaded models: \(error)")
-                if let recovered = await recoverDFlash2ModelState(
-                    config: config,
-                    client: client
-                ) {
+                if let recovered = await recoverDFlash2ModelState(client: client) {
                     return recovered
                 }
             }
@@ -3063,7 +3062,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func recoverDFlash2ModelState(
-        config: AppConfig,
         client: any DashboardModelStatusFetching
     ) async -> (
         references: Set<String>,
@@ -3071,20 +3069,17 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         mtpEnabledModels: Set<String>,
         dflash2EnabledModels: Set<String>
     )? {
-        guard let target = preferredDFlash2Target(in: config) else {
-            return nil
-        }
         do {
             let health = try await client.fetchHealthz()
+            // The running actor names its target; accept it only while that
+            // model's own setting still enables DFlash2.
             guard health.dflash2?.enabled == true,
-                  AppConfig.normalizedModelReference(health.model.name) == target
+                  let target = AppConfig.normalizedModelReference(health.model.name),
+                  parameterStore.parameters(for: target)?.dflash2Enabled == true
             else {
                 return nil
             }
             let currentConfig = configStore.load()
-            guard preferredDFlash2Target(in: currentConfig) == target else {
-                return nil
-            }
             if !currentConfig.restoredModelReferences.contains(target) {
                 guard updateConfig({ $0.recordLoadedModel(target, setDefault: true) }) else {
                     return nil
@@ -3385,10 +3380,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
     private func configuredDFlash2Target(in config: AppConfig) -> String? {
         config.configuredDFlash2Target(parameterStore: parameterStore)
-    }
-
-    private func preferredDFlash2Target(in config: AppConfig) -> String? {
-        config.preferredDFlash2Target(parameterStore: parameterStore)
     }
 
     private func deliverModelOperationResult(jsonString: String, callback: ModelOperationCallback) {

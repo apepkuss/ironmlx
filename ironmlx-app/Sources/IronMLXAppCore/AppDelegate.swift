@@ -65,9 +65,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             loadedModels: Set(config.restoredModelReferences),
             pinnedModels: pinnedModels,
             mtpEnabledModels: [],
-            dflash2EnabledModels: Set(config.restoredModelReferences.filter {
-                parameterStore.parameters(for: $0)?.dflash2Enabled == true
-            })
+            dflash2EnabledModels: Set(
+                [config.configuredDFlash2Target(parameterStore: parameterStore)].compactMap { $0 }
+            )
         )
         let launchPlan = launchPlanner.plan(config: config, localModels: localModels)
         Task {

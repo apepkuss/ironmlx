@@ -168,6 +168,25 @@ func menuBarReflectsConfigurationRecoveryAndForwardsRecoveryAction() throws {
     #expect(recovery.presentationCount == 1)
 }
 
+@Test
+func dflash2TargetComesFromModelSettingsNotTheDefaultModel() throws {
+    let root = try menuTemporaryDirectory()
+    let parameters = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try parameters.recordDFlash2LoadPreference(modelID: "b", enabled: true, dflash2ModelID: "draft-b")
+    try parameters.recordDFlash2LoadPreference(modelID: "c", enabled: true, dflash2ModelID: "draft-c")
+
+    // The default model neither selects nor vetoes the target.
+    #expect(AppConfig(defaultModel: "a", loadedModels: ["a", "b"])
+        .configuredDFlash2Target(parameterStore: parameters) == "b")
+    #expect(AppConfig(defaultModel: "c", loadedModels: ["a"])
+        .configuredDFlash2Target(parameterStore: parameters) == nil)
+    // Several loaded candidates: the earliest in the persisted load order wins.
+    #expect(AppConfig(defaultModel: "b", loadedModels: ["c", "b"])
+        .configuredDFlash2Target(parameterStore: parameters) == "c")
+    #expect(AppConfig(defaultModel: "c", loadedModels: ["b", "c"])
+        .configuredDFlash2Target(parameterStore: parameters) == "b")
+}
+
 @Test @MainActor
 func menuBarBackendListCannotEraseDFlash2StartupIntent() throws {
     let root = try menuTemporaryDirectory()

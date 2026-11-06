@@ -131,6 +131,25 @@ import Testing
         scanner: scanner,
         parameterStore: parameterStore
     ).models.isEmpty)
+    // A default elsewhere neither stops the loaded target from launching the
+    // fixed actor nor shortens its readiness budget.
+    let defaultElsewhere = AppConfig(
+        port: 9068,
+        defaultModel: "mlx-community/Other-4bit",
+        loadedModels: [targetID]
+    )
+    #expect(try BackendProcessManager.launchDFlash2Runtime(
+        config: defaultElsewhere,
+        scanner: scanner,
+        parameterStore: parameterStore
+    )?.draftModelDir == draft.path)
+    let elsewhereSnapshot = BackendRecoverySnapshot.capture(
+        config: defaultElsewhere,
+        scanner: scanner,
+        parameterStore: parameterStore
+    )
+    #expect(elsewhereSnapshot.models.first?.dflash2ModelDir == draft.path)
+    #expect(BackendRecoveryPolicy().readinessTimeout(for: elsewhereSnapshot) == 300)
 
     let loader = FakeRestartModelLoader()
     let coordinator = BackendRestartCoordinator(

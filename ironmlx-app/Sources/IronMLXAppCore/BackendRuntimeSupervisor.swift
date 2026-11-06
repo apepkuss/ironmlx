@@ -24,7 +24,7 @@ public struct BackendRecoveryPolicy: Equatable, Sendable {
     func readinessTimeout(for snapshot: BackendRecoverySnapshot) -> TimeInterval {
         // A fixed DFlash actor loads target/draft weights before opening HTTP.
         // The ordinary daemon opens HTTP before its lazy model loads.
-        snapshot.models.contains { $0.isDefault && $0.dflash2ModelDir != nil }
+        snapshot.models.contains { $0.dflash2ModelDir != nil }
             ? max(readinessTimeout, fixedModelReadinessTimeout) : readinessTimeout
     }
 }

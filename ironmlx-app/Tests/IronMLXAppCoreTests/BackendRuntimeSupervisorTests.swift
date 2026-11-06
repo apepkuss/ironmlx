@@ -858,7 +858,10 @@ private func runtimeTemporaryDirectory() throws -> URL {
         dflash2ModelDir: "/models/draft", promptLookup: nil, samplingDefaults: .empty)
     var fixed = BackendRecoverySnapshot(config: AppConfig(), models: [target])
     #expect(policy.readinessTimeout(for: fixed) == 300)
+    // The default model does not decide which model the fixed actor loads.
     fixed.models[0].isDefault = false
+    #expect(policy.readinessTimeout(for: fixed) == 300)
+    fixed.models[0].dflash2ModelDir = nil
     #expect(policy.readinessTimeout(for: fixed) == 5)
 }
 
