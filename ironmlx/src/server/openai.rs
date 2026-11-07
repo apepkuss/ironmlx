@@ -3371,6 +3371,51 @@ mod tests {
     }
 
     #[test]
+    fn opencode_chat_accepts_a_tool_with_a_schema_dialect_declaration() {
+        let mut request: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/api_contract_sdk/opencode_chat_request.json"
+        ))
+        .unwrap();
+        // Generated from @cortexkit/aft-opencode 0.63.5's published navigation
+        // arguments using its bundled Zod 4.1.8, input mode, Draft 2020-12.
+        // Upstream gitHead: 8c774d6de0f3f72c1074c0679aa1f8dea15f7b81.
+        // Prose descriptions are omitted; all assertion keywords are retained.
+        let parameters: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/api_contract_sdk/aft_opencode_callgraph_schema.json"
+        ))
+        .unwrap();
+        request["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "type":"function",
+                "function": {
+                    "name":"aft_callgraph",
+                    "parameters": parameters
+                }
+            }));
+        let request: ChatRequest = serde_json::from_value(request).unwrap();
+        let prepared = prepare_tool_request(&request, Some(ToolDialect::Qwen35))
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.definitions.len(), 13);
+        let tool = prepared
+            .definitions
+            .iter()
+            .find(|tool| tool.name == "aft_callgraph")
+            .unwrap();
+        assert_eq!(
+            tool.parameters["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+        assert_eq!(
+            tool.parameters["required"],
+            serde_json::json!(["op", "path", "symbol"])
+        );
+        assert_eq!(tool.parameters["properties"]["depth"]["minimum"], 1);
+    }
+
+    #[test]
     fn strict_tool_request_accepts_only_official_strict_schema_shape() {
         let mut valid = tool_request(serde_json::json!({}));
         let function = &mut valid.tools.as_mut().unwrap()[0].function;

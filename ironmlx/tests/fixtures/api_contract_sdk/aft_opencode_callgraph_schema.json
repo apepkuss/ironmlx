@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "op": {
+      "type": "string",
+      "enum": [
+        "call_tree",
+        "callers",
+        "trace_to",
+        "trace_to_symbol",
+        "impact",
+        "trace_data"
+      ]
+    },
+    "path": {
+      "type": "string"
+    },
+    "symbol": {
+      "type": "string"
+    },
+    "depth": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "expression": {
+      "type": "string"
+    },
+    "toSymbol": {
+      "type": "string"
+    },
+    "toPath": {
+      "type": "string"
+    },
+    "includeTests": {
+      "type": "boolean"
+    },
+    "includeUnresolved": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "op",
+    "path",
+    "symbol"
+  ]
+}

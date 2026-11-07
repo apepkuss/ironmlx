@@ -1,0 +1,41 @@
+{
+  "verified_on": "2026-11-07",
+  "base_dev": "fec884756c3427315df7764cf03c34b0abd0f323",
+  "reported_error": "Run failed: unsupported schema for tool `aft_callgraph`: unsupported JSON Schema keyword `$schema`",
+  "plugin": {
+    "name": "@cortexkit/aft-opencode",
+    "version": "0.63.5",
+    "git_head": "8c774d6de0f3f72c1074c0679aa1f8dea15f7b81",
+    "npm_tarball": "https://registry.npmjs.org/@cortexkit/aft-opencode/-/aft-opencode-0.63.5.tgz",
+    "npm_integrity": "sha512-rRvF6ltKESf1SmV6b9vgIPckxDPEfsyr1BCCO3jMzvty0r+0xC1xpeiE3YAFM3xgc4xlbpR/3rWOFvv3CEbDcg==",
+    "bundled_schema_converter": "Zod 4.1.8",
+    "native_schema_target": "draft-2020-12",
+    "emitted_schema_declaration": "https://json-schema.org/draft/2020-12/schema",
+    "source_urls": [
+      "https://github.com/cortexkit/aft/blob/8c774d6de0f3f72c1074c0679aa1f8dea15f7b81/packages/opencode-plugin/src/tools/definitions/v2.ts",
+      "https://github.com/cortexkit/aft/blob/8c774d6de0f3f72c1074c0679aa1f8dea15f7b81/packages/opencode-plugin/src/tools/navigation.ts"
+    ]
+  },
+  "reproduction": "An original-validator regression test reproduced the identical error using a synthetic tool with the reported name. The final regression also uses all nine real AFT 0.63.5 argument definitions, serialized with its pinned converter; prose descriptions were omitted without changing assertions.",
+  "fixture": "ironmlx/tests/fixtures/api_contract_sdk/aft_opencode_callgraph_schema.json",
+  "fixture_sha256": "28e42949ff508877c94c59aa7cd6b490c7ad8022d147498298b57c3dcd3010b5",
+  "fix": "Validate root declarations for standard Draft 7/2019-09/2020-12, then omit the declaration when lowering to the constrained grammar. Preserve the client tool definition and keep unknown assertion keywords rejected.",
+  "boundaries": [
+    "The full plugin was not started and no AFT backend binaries or models were installed.",
+    "No real OpenCode Desktop or remote user session was executed in this check.",
+    "Acceptance of this tool schema does not qualify every tool in the AFT plugin."
+  ],
+  "validation": {
+    "constraint_tests": 55,
+    "chat_tests_all_features": 56,
+    "cargo_fmt": true,
+    "nightly_fmt_check": true,
+    "nightly_clippy_all_features_workspace_deny_warnings": true,
+    "documentation_parity": true,
+    "release_build": true
+  },
+  "sources_sha256": {
+    "ironmlx-lm/src/core/constrained.rs": "ca3eb13cf315a99724605427986f560e19ed263168128fb6f4fc3caf5562d116",
+    "ironmlx/src/server/openai.rs": "f025bed24bf225b89e7600640fa78a53b5b8f907c82a60637890c2cc90b32f7f"
+  }
+}

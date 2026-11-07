@@ -762,6 +762,8 @@ Responses 响应中的有效 tier 为 `default` 或 `flex`。
 
 支持类型：object、array、string、number、integer、boolean、null 和可空类型数组。支持关键字：properties、required、items、enum、const、anyOf、minItems/maxItems、minLength/maxLength、minimum/maximum、exclusiveMinimum/exclusiveMaximum。最大嵌套深度为 8。`oneOf` 要求各分支声明明确且互斥的 JSON 类型（integer 与 number 视为重叠），同层只允许说明性关键字；类型重叠或未声明类型的分支会被拒绝。 字符串 `pattern` 支持以 `^` 锚定、可选 `$` 进行完整值匹配的正则表达式（例如 `^ses` 匹配会话 ID 前缀）（最多 4096 字节，不支持环视和反向引用），生成约束与输出值校验都会执行该约束。
 
+根级 `$schema` 可以使用标准 `http://json-schema.org/…` 或 `https://json-schema.org/…` URI 声明 Draft 7、2019-09 或 2020-12，允许末尾带 `#`。声明会在编译生成约束前校验，不会启用上述子集之外的关键字，也不会获取外部元 Schema。嵌套声明、自定义 dialect 和格式错误的值会被拒绝；`$ref`、`$dynamicRef` 和 `$defs` 仍不支持。
+
 strict:true 要求每层 object 设置 additionalProperties:false，且所有属性列入 required。顶层工具参数对象必须封闭。非 strict 工具可在嵌套对象使用 additionalProperties:true 或受支持的值 Schema。不支持的关键字在生成前返回 400，strict 约束不静默降级。
 
 ### 输出预算

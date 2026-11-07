@@ -1101,6 +1101,7 @@ fn validate_schema_node_with_limits(
         .as_object()
         .ok_or_else(|| anyhow!("schema node must be an object"))?;
     const ALLOWED: &[&str] = &[
+        "$schema",
         "type",
         "properties",
         "required",
@@ -1128,6 +1129,27 @@ fn validate_schema_node_with_limits(
         if !ALLOWED.contains(&key.as_str()) {
             bail!("unsupported JSON Schema keyword `{key}`");
         }
+    }
+    if let Some(declaration) = object.get("$schema") {
+        anyhow::ensure!(depth == 0, "$schema must appear at the schema root");
+        let uri = declaration
+            .as_str()
+            .ok_or_else(|| anyhow!("$schema must be a standard dialect URI string"))?;
+        let uri = uri.strip_suffix('#').unwrap_or(uri);
+        let dialect = uri
+            .strip_prefix("https://")
+            .or_else(|| uri.strip_prefix("http://"));
+        anyhow::ensure!(
+            matches!(
+                dialect,
+                Some(
+                    "json-schema.org/draft-07/schema"
+                        | "json-schema.org/draft/2019-09/schema"
+                        | "json-schema.org/draft/2020-12/schema"
+                )
+            ),
+            "unsupported $schema dialect `{uri}`"
+        );
     }
     if let Some(kind) = object.get("type") {
         validate_type_keyword(kind)?;
@@ -1291,7 +1313,7 @@ fn validate_disjoint_one_of(object: &Map<String, Value>, branches: &[Value]) -> 
     anyhow::ensure!(
         object.keys().all(|key| matches!(
             key.as_str(),
-            "oneOf" | "description" | "title" | "default" | "examples"
+            "oneOf" | "$schema" | "description" | "title" | "default" | "examples"
         )),
         "oneOf supports only annotation siblings"
     );
@@ -1322,6 +1344,9 @@ fn validate_disjoint_one_of(object: &Map<String, Value>, branches: &[Value]) -> 
 /// values in const/enum/default/examples may themselves contain a `oneOf` key.
 fn grammar_schema(schema: &Value) -> Value {
     let mut object = schema.as_object().expect("schema validated").clone();
+    // The public subset is checked before lowering. Do not let a declaration
+    // switch the grammar compiler's dialect or trigger meta-schema resolution.
+    object.remove("$schema");
     if let Some(branches) = object.remove("oneOf") {
         object.insert("anyOf".to_owned(), branches);
     }
@@ -3299,6 +3324,135 @@ mod tests {
         )
         .unwrap();
         assert!(minicpm5_session.is_accepting().unwrap());
+    }
+
+    #[test]
+    fn root_schema_dialect_declarations_preserve_tool_and_output_constraints() {
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        for dialect in [
+            "http://json-schema.org/draft-07/schema#",
+            "https://json-schema.org/draft-07/schema",
+            "https://json-schema.org/draft/2019-09/schema",
+            "https://json-schema.org/draft/2020-12/schema#",
+        ] {
+            // A synthetic call-graph tool, not a captured aft_callgraph definition.
+            let tool = ToolDefinition {
+                name: "aft_callgraph".into(),
+                description: None,
+                strict: Some(true),
+                parameters: serde_json::json!({
+                    "$schema": dialect,
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type":"string", "pattern":"^fn_", "minLength":4},
+                        "depth": {"type":"integer", "minimum":1, "maximum":3}
+                    },
+                    "required": ["symbol", "depth"],
+                    "additionalProperties": false
+                }),
+            };
+            validate_tool_schemas(std::slice::from_ref(&tool)).unwrap();
+            validate_strict_tool_schema(&tool).unwrap();
+            validate_json_output_schema(&tool.parameters, true).unwrap();
+            let valid = serde_json::json!({"symbol":"fn_main", "depth":2});
+            validate_schema_value(&tool.parameters, &valid).unwrap();
+            let plan = tokenizer.compile_json_output(&tool.parameters).unwrap();
+            let mut session = plan.start_session().unwrap();
+            consume_bytes(&mut session, valid.to_string().as_bytes()).unwrap();
+            assert!(session.is_accepting().unwrap());
+            tokenizer
+                .compile_qwen_tools(
+                    std::slice::from_ref(&tool),
+                    &ToolConstraintOptions::default(),
+                )
+                .unwrap();
+            for invalid in [
+                serde_json::json!({"symbol":"other", "depth":2}),
+                serde_json::json!({"symbol":"fn_main", "depth":0}),
+                serde_json::json!({"symbol":"fn_main", "depth":4}),
+                serde_json::json!({"symbol":"fn_main", "depth":2, "extra":true}),
+            ] {
+                assert!(validate_schema_value(&tool.parameters, &invalid).is_err());
+                let mut session = plan.start_session().unwrap();
+                assert!(
+                    consume_bytes(&mut session, invalid.to_string().as_bytes()).is_err()
+                        || !session.is_accepting().unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aft_opencode_callgraph_schema_preserves_real_argument_constraints() {
+        // @cortexkit/aft-opencode 0.63.5, gitHead 8c774d6de0f3f72c1074c0679aa1f8dea15f7b81;
+        // generated from src/tools/navigation.ts with its bundled Zod 4.1.8.
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../ironmlx/tests/fixtures/api_contract_sdk/aft_opencode_callgraph_schema.json"
+        ))
+        .unwrap();
+        let tool = ToolDefinition {
+            name: "aft_callgraph".into(),
+            description: None,
+            parameters: schema.clone(),
+            strict: None,
+        };
+        validate_tool_schemas(std::slice::from_ref(&tool)).unwrap();
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        tokenizer
+            .compile_qwen_tools(
+                std::slice::from_ref(&tool),
+                &ToolConstraintOptions::default(),
+            )
+            .unwrap();
+        let plan = tokenizer.compile_json_output(&schema).unwrap();
+        let valid =
+            serde_json::json!({"op":"callers", "path":"src/main.rs", "symbol":"main", "depth":2});
+        validate_schema_value(&schema, &valid).unwrap();
+        let mut session = plan.start_session().unwrap();
+        consume_bytes(&mut session, valid.to_string().as_bytes()).unwrap();
+        assert!(session.is_accepting().unwrap());
+        for (field, value) in [
+            ("op", serde_json::json!("delete")),
+            ("depth", serde_json::json!(0)),
+            ("depth", serde_json::json!(1.5)),
+            ("includeTests", serde_json::json!("yes")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(validate_schema_value(&schema, &invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn schema_dialect_declarations_reject_invalid_or_unsupported_semantics() {
+        let schema = serde_json::json!({
+            "type":"object", "properties":{}, "additionalProperties":false
+        });
+        for declaration in [
+            Value::Null,
+            serde_json::json!(true),
+            serde_json::json!(7),
+            serde_json::json!(""),
+            serde_json::json!("https://example.com/custom-schema"),
+            serde_json::json!("http://json-schema.org/draft-04/schema#"),
+        ] {
+            let mut invalid = schema.clone();
+            invalid["$schema"] = declaration;
+            assert!(validate_json_output_schema(&invalid, false).is_err());
+        }
+        let mut nested = schema.clone();
+        nested["properties"]["child"] = serde_json::json!({
+            "$schema":"https://json-schema.org/draft/2020-12/schema", "type":"string"
+        });
+        assert!(validate_json_output_schema(&nested, false).is_err());
+        for keyword in ["$ref", "$dynamicRef", "unevaluatedProperties"] {
+            let mut invalid = schema.clone();
+            invalid["$schema"] = serde_json::json!("https://json-schema.org/draft/2020-12/schema");
+            invalid[keyword] = serde_json::json!(false);
+            let error = validate_json_output_schema(&invalid, false).unwrap_err();
+            assert!(format!("{error:#}")
+                .contains(&format!("unsupported JSON Schema keyword `{keyword}`")));
+        }
     }
 
     #[test]
