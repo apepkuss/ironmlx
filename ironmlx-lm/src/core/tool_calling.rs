@@ -182,7 +182,6 @@ impl ToolDialect {
 
 /// Protocol-neutral function tool definition.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct ToolDefinition {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

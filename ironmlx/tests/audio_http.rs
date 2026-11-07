@@ -6,6 +6,7 @@
 //! IRONMLX_AUDIO_HTTP_LLM is a local supported LLM snapshot for coexistence.
 //! Run with MLX_ENABLE_TF32=0 and cargo test -p ironmlx --release --test audio_http
 //! -- --ignored --nocapture --test-threads=1. No downloads or resource conversion.
+//! IRONMLX_AUDIO_HTTP_BINARY can pin an external production Release helper.
 //! Set IRONMLX_AUDIO_HTTP_BUNDLE to an assembled IronMLX.app to exercise its
 //! helper and metallib instead. That mode removes all MLX_/DYLD_ overrides and
 //! runs outside the checkout; the executable supplies its own precision default.
@@ -33,6 +34,9 @@ impl Drop for Server {
 }
 impl Server {
     async fn start() -> Self {
+        Self::start_with_manifest(None).await
+    }
+    async fn start_with_manifest(manifest: Option<&std::path::Path>) -> Self {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -62,13 +66,24 @@ impl Server {
                 metallib.display()
             );
             command
+        } else if let Some(binary) = std::env::var_os("IRONMLX_AUDIO_HTTP_BINARY") {
+            let mut command = std::process::Command::new(binary);
+            command.arg("--mlx-metallib").arg(
+                PathBuf::from(std::env::var_os("MLX_DIR").expect("MLX_DIR must be set"))
+                    .join("lib/mlx.metallib"),
+            );
+            command.env("MLX_ENABLE_TF32", "0");
+            command
         } else {
             let mut command = ironmlx_process::command();
             command.env("MLX_ENABLE_TF32", "0");
             command
         };
+        command.arg("serve");
+        if let Some(manifest) = manifest {
+            command.arg("--model-manifest").arg(manifest);
+        }
         let child = command
-            .arg("serve")
             .arg("--port")
             .arg(port.to_string())
             .arg("--voice-profile-dir")
@@ -77,7 +92,7 @@ impl Server {
             .stderr(std::fs::File::create(root.join("server.log")).unwrap())
             .spawn()
             .unwrap();
-        let server = Self {
+        let mut server = Self {
             child,
             client: reqwest::Client::builder()
                 .no_proxy()
@@ -87,7 +102,13 @@ impl Server {
             base: format!("http://127.0.0.1:{port}"),
             root,
         };
-        for _ in 0..200 {
+        eprintln!("audio HTTP evidence: {}", server.root.display());
+        for _ in 0..600 {
+            assert!(
+                server.child.try_wait().unwrap().is_none(),
+                "server exited during startup: {}",
+                std::fs::read_to_string(server.root.join("server.log")).unwrap_or_default()
+            );
             if server
                 .client
                 .get(format!("{}/health", server.base))
@@ -256,6 +277,23 @@ async fn real_voice_profile_speech_wav_and_pcm() {
     assert_eq!(preview.headers()["x-ironmlx-voice-preview"], "reference");
     assert_eq!(preview.bytes().await.unwrap().as_ref(), reference_bytes);
 
+    let mut audio = fixture["audio"].clone();
+    audio["execution"] = json!({"segment_tokens":12});
+    let registered = server
+        .post(
+            "/admin/api/models/register",
+            &json!({"model":"tts","model_dir":fixture["path"],"audio":audio}),
+        )
+        .await;
+    let status = registered.status();
+    let reply: Value = registered.json().await.unwrap();
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["status"], "registered");
+    assert!(
+        server.models().await.is_empty(),
+        "registration must not load audio weights"
+    );
+
     server
         .load(&fixture, "tts", json!({"segment_tokens":12}))
         .await;
@@ -287,6 +325,7 @@ async fn real_voice_profile_speech_wav_and_pcm() {
     assert_ne!(&pcm[..4], b"RIFF");
 
     server.idle("tts").await;
+    eprintln!("IndexTTS lazy registration, load, voice WAV and PCM passed; WAV={} bytes PCM={} bytes; memory={}", wav.len(), pcm.len(), server.memory().await);
     server.unload("tts").await;
 }
 
@@ -762,4 +801,98 @@ async fn real_speech_unload_defers_until_worker_stops() {
         "active audio unload completed safely after disconnect: {:?}",
         started.elapsed()
     );
+}
+
+/// Exercise the second configuration entry point with actual untagged IndexTTS
+/// resources, while preserving strict registration of language-model configs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires pinned audio resources and reference WAV"]
+async fn real_indextts_manifest_preload_and_registration_validation() {
+    let fixture: Value = serde_json::from_slice(
+        &std::fs::read(std::env::var("IRONMLX_AUDIO_HTTP_MODEL").unwrap()).unwrap(),
+    )
+    .unwrap();
+    let reference = base64::engine::general_purpose::STANDARD
+        .encode(std::fs::read(std::env::var("IRONMLX_AUDIO_HTTP_REFERENCE").unwrap()).unwrap());
+    let config: Value = serde_json::from_slice(
+        &std::fs::read(PathBuf::from(fixture["path"].as_str().unwrap()).join("config.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        config.get("model_type").is_none(),
+        "this regression requires an untagged TTS config"
+    );
+    let manifest_root = tempfile::tempdir().unwrap();
+    let manifest = manifest_root.path().join("models.json");
+    std::fs::write(&manifest, json!({"models":[{"id":"tts-manifest","path":fixture["path"],"audio":fixture["audio"],"load_policy":"preload"}]}).to_string()).unwrap();
+    let server = Server::start_with_manifest(Some(&manifest)).await;
+    let models: Value = server
+        .client
+        .get(format!("{}/v1/models", server.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(models["data"].as_array().unwrap().len(), 1, "{models}");
+    assert_eq!(models["data"][0]["id"], "tts-manifest");
+    assert_eq!(models["data"][0]["state"], "loaded");
+    assert_eq!(models["data"][0]["load_policy"], "preload");
+    let response = server
+        .post(
+            "/v1/audio/speech",
+            &request(
+                "tts-manifest",
+                &reference,
+                "你好，这是模型配置注册测试。",
+                false,
+            ),
+        )
+        .await;
+    headers(&response, false);
+    let wav = response.bytes().await.unwrap();
+    assert!(wav.len() > 44 && wav[44..].iter().any(|b| *b != 0));
+    assert_eq!(&wav[..4], b"RIFF");
+    let health: Value = server
+        .client
+        .get(format!("{}/healthz", server.base))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(health["status"], "healthy", "{health}");
+    eprintln!(
+        "IndexTTS manifest preload and WAV passed; WAV={} bytes; health={health}",
+        wav.len()
+    );
+    let unloaded = server
+        .post("/v1/models/tts-manifest/unload", &json!({}))
+        .await;
+    // A preload model is intentionally protected from manual unload.
+    let status = unloaded.status();
+    let reply = unloaded.text().await.unwrap();
+    assert_eq!(status, 503, "{reply}");
+    assert!(reply.contains("preload policy"), "{reply}");
+    drop(server);
+
+    // Manifest serving has fixed model-control routes, while dynamic
+    // registration belongs to the App daemon. Validate rejections there.
+    let server = Server::start().await;
+    let rejected = server
+        .post(
+            "/admin/api/models/register",
+            &json!({"model":"not-a-language-model","model_dir":fixture["path"]}),
+        )
+        .await;
+    let status = rejected.status();
+    let reply: Value = rejected.json().await.unwrap();
+    assert_eq!(status, 400, "{reply}");
+    assert!(reply.to_string().contains("missing model_type"));
+    let rejected = server.post("/admin/api/models/register", &json!({"model":"bad-audio-overrides","model_dir":fixture["path"],"audio":fixture["audio"],"max_cache_cap":4096})).await;
+    assert_eq!(rejected.status(), 400);
+    eprintln!("Strict language-model type and audio-override registration validation passed");
 }

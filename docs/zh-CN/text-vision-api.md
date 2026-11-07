@@ -12,7 +12,9 @@
 
 IronMLX 提供兼容 OpenAI Responses、Chat Completions 和 Anthropic Messages 的接口，支持的字段与限制以下方说明为准。IronMLX 不执行客户端工具，不提供托管工具、对话存储或后台响应任务。
 
-推理请求中的未知字段或不支持的字段形状返回 400；不支持的能力不会被静默忽略。
+Chat Completions、Responses 和 Messages 会忽略请求顶层及嵌套协议对象中未声明的字段，不进行类型转换、参数别名映射或能力推断。顶层 `enable_thinking` 不会生效；Chat 应使用 `chat_template_kwargs.enable_thinking`。已声明字段仍执行类型、范围、支持的变体和能力契约校验；错误 JSON、非法采样参数、不支持的工具／内容类型和非法 JSON Schema 仍会被拒绝。此策略不改变音频、图像或管理接口。
+
+顶层及嵌套的未知协议字段路径会合并为每请求一条 DEBUG 日志（`ignored unsupported request fields`），不记录字段值。在 App 的「设置 → 日志级别」中选择 DEBUG，重新发送请求，再到「日志 → 运行日志」选择 ironmlx-server 查看，也可读取 `~/.ironmlx/logs/backend.log`。日志页的级别筛选只筛选已有记录，不会开启 DEBUG 记录；默认 INFO 不记录这些诊断。路径使用 JSON Pointer 格式，例如 `/messages/0/content/0/cache_control`；字段名中的 `~` 和 `/` 分别转义为 `~0` 和 `~1`。工具输入、JSON Schema、metadata 和模板 kwargs 等声明为自由内容的字段，其内部键不会被误报为未知协议字段，也不记录字段值。对于解析器接受的重复键，日志按最终生效的后值记录；原有拒绝重复字段的校验保持不变。
 
 固定 CLI 服务在启动时选择模型；App 与 EnginePool 按请求 `model` 或明确的默认模型分派。图片、思考和工具能力取决于模型与原生模板，见[支持的模型](supported-models.md)。[DFlash2 配置](dflash2-server-api.md)说明其服务与采样限制。
 
@@ -45,8 +47,8 @@ IronMLX 提供兼容 OpenAI Responses、Chat Completions 和 Anthropic Messages 
 | `temperature` | number | 否 | 模型采样默认值 | 有限数，范围 [0,2]。 |
 | `top_p` | number | 否 | 模型采样默认值 | 有限数，范围 (0,1]。 |
 | `reasoning` | object | 否 | `effort: none` | effort：none/minimal/low/medium/high/xhigh/max；summary：none/auto。 |
-| `store` | boolean | 否 | `false` | 仅支持 false；不存储响应。 |
-| `background` | boolean | 否 | `false` | 仅支持 false；不提供后台任务。 |
+| `store` | 任意 JSON 值 | 否 | — | 忽略，包括 true；不存储响应。 |
+| `background` | 任意 JSON 值 | 否 | — | 忽略，包括 true；不提供后台任务。 |
 | `include` | array of strings | 否 | `[]` | 仅接受 reasoning.encrypted_content；不生成加密内容。 |
 | `prompt_cache_key` | string | 否 | — | 1–256 字节；仅校验，不提供托管平台缓存语义。 |
 | `client_metadata` | object | 否 | — | 校验对象形状；不提供托管平台语义。 |
@@ -261,9 +263,7 @@ JSON Schema 子集见[通用约束](#json-schema)。
 
 ### 限制
 
-- `store` 只能省略或设为 `false`；不支持 `store:true`。
-- 不支持 `previous_response_id`、conversation、background response 或 response
-  retrieve/delete/cancel API。
+- 请求中的 `store`、`previous_response_id`、`conversation` 和 `background` 会被忽略；响应始终无状态、同步执行，客户端须发送完整历史。不支持 response retrieve/delete/cancel API。
 - 工具支持客户端执行的顶层 `type:"function"`，以及 Codex 使用的客户端
   `type:"namespace"` 函数组。namespace 会编译为有界 dispatcher，并在
   `function_call`/历史回灌时恢复公开的 `namespace`、函数名和参数；IronMLX
@@ -278,7 +278,7 @@ JSON Schema 子集见[通用约束](#json-schema)。
   图片输出或图片形式的 function output；这些能力不会以普通 `output_text` 伪装。
 - sampling 公开字段仅为 `temperature`（有限数且位于 `[0, 2]`）和 `top_p`
   （有限数且位于 `(0, 1]`）。`top_k`、`repetition_penalty` 不是 Responses
-  标准字段，发送后会返回 400；其他未知字段同样不会被静默忽略。
+  标准字段，会与其他未声明字段一起被忽略，不改变现有采样设置。
 
 ## OpenAI Chat Completions
 
@@ -462,8 +462,7 @@ Chat tools 当前边界：
 - 只支持 `type: "function"`。`strict: true` 支持约束解码所覆盖的 JSON Schema
   子集；对象 schema 必须递归设置 `additionalProperties: false`，且所有属性都
   必须列入 `required`。不支持的 schema 关键字会在生成前返回 400。
-- 不支持旧 `functions` / `function_call` 字段；Responses 客户端应使用上文独立的
-  `/v1/responses` typed-item 协议。
+- 旧 `functions` / `function_call` 字段会被忽略；工具调用应使用 `tools`。Responses 客户端应使用上文独立的 `/v1/responses` typed-item 协议。
 - 当前支持经过精确模板契约检测的 Qwen 3.5/3.6/3.8、Gemma 4/Gemma 4 Unified、
   DiffusionGemma、GLM-4 MoE Lite、Llama 3.1/3.2、MiniCPM-V 4.6 和 MiniCPM5
   原生工具 dialect；其他模板收到 `tools` 时会在生成前返回 400。
@@ -472,7 +471,7 @@ Chat tools 当前边界：
 
 ### 限制
 
-仅接受 function 工具与受支持原生模板。拒绝旧 functions/function_call、top_k 与 repetition_penalty。Qwen3.8 reasoning_effort 接受 low/medium/xhigh，原生默认 xhigh；chat_template_kwargs.enable_thinking:false 关闭思考，preserve_thinking:false 不回传历史 reasoning_content。需要独立思考条目/块时使用 Responses/Messages。
+仅接受 function 工具与受支持原生模板。旧 functions/function_call、未声明的 top_k 与 repetition_penalty 会被忽略。Qwen3.8 reasoning_effort 接受 low/medium/xhigh，原生默认 xhigh；chat_template_kwargs.enable_thinking:false 关闭思考，preserve_thinking:false 不回传历史 reasoning_content。需要独立思考条目/块时使用 Responses/Messages。
 
 ## Anthropic Messages
 
@@ -735,7 +734,7 @@ user message 中用同一 ID 提交 `tool_result`：
 
 ### 限制
 
-不支持旧 output_format、repetition_penalty、托管/服务器工具、MCP、computer use、Web Search 或 Code Execution。思考历史必须使用本地生成的签名，不能重放 Claude 托管签名、redacted/omitted/交错 thinking。
+旧 output_format 和未声明的 repetition_penalty 会被忽略。托管/服务器工具、MCP、computer use、Web Search 或 Code Execution 不受支持。思考历史必须使用本地生成的签名，不能重放 Claude 托管签名、redacted/omitted/交错 thinking。
 
 ## 通用约束
 

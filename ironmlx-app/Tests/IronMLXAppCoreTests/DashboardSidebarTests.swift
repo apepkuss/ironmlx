@@ -23,12 +23,22 @@ import WebKit
     }
     for (theme, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
         view.appearance = NSAppearance(named: appearance)
-        try await Task.sleep(for: .milliseconds(100))
-        #expect(try await view.evaluateJavaScript("matchMedia('(prefers-color-scheme: dark)').matches") as? Bool == (theme == "dark"))
+        let expectedDark = theme == "dark"
+        let appearanceDeadline = Date().addingTimeInterval(5)
+        while Date() < appearanceDeadline {
+            if (try? await view.evaluateJavaScript("matchMedia('(prefers-color-scheme: dark)').matches")) as? Bool == expectedDark { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(try await view.evaluateJavaScript("matchMedia('(prefers-color-scheme: dark)').matches") as? Bool == expectedDark)
         let geometry = try await view.evaluateJavaScript("""
         (() => {
           const check = (condition, message) => { if (!condition) throw new Error(message); };
           setLanguage('zh');
+          // WebKit can retain stale computed styles in a previously visited,
+          // display:none panel after appearance changes. Inspect the tooltip
+          // in its rendered page/tab, as a user would encounter it.
+          navigateTo('models');
+          switchToTab('models-scheduler');
           document.documentElement.classList.remove('sidebar-collapsed'); updateSidebarControls();
           const toggle = document.getElementById('sidebar-toggle');
           const tooltip = document.getElementById('sidebar-tooltip');
@@ -40,12 +50,15 @@ import WebKit
             const rect = tooltip.getBoundingClientRect();
             return rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight;
           };
+          const helpRect = helpTooltip.getBoundingClientRect();
+          check(helpRect.width > 0 && helpRect.height > 0, 'explanatory tooltip has rendered layout');
           const dark = matchMedia('(prefers-color-scheme: dark)').matches;
           const compactStyle = getComputedStyle(tooltip);
           const helpStyle = getComputedStyle(helpTooltip);
           check(compactStyle.backgroundColor === (dark ? 'rgba(58, 58, 60, 0.98)' : 'rgba(44, 44, 46, 0.96)'), 'adaptive compact tooltip background');
           check(compactStyle.color === (dark ? 'rgb(245, 245, 247)' : 'rgb(255, 255, 255)'), 'adaptive compact tooltip text');
-          check(helpStyle.backgroundColor === (dark ? 'rgba(44, 44, 46, 0.96)' : 'rgba(255, 255, 255, 0.96)'), 'adaptive explanatory tooltip background');
+          const expectedHelpBackground = dark ? 'rgba(44, 44, 46, 0.96)' : 'rgba(255, 255, 255, 0.96)';
+          check(helpStyle.backgroundColor === expectedHelpBackground, 'adaptive explanatory tooltip background: ' + JSON.stringify({dark, actual:helpStyle.backgroundColor, expected:expectedHelpBackground}));
           check(helpStyle.color === (dark ? 'rgb(209, 209, 214)' : 'rgb(81, 81, 84)'), 'adaptive explanatory tooltip text');
           check(toggle.textContent.trim() === '', 'toggle has no visible text label');
           enter(toggle);

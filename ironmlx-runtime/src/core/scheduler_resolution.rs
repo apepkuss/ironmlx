@@ -577,19 +577,28 @@ pub fn resolve_memory_limit_bytes(
         .map(Some)
 }
 pub fn read_model_type(model_dir: &std::path::Path) -> Result<String> {
+    read_model_type_if_present(model_dir)?
+        .ok_or_else(|| anyhow::anyhow!("config.json missing model_type"))
+}
+
+/// Probe a tagged model family without requiring unrelated model formats (such
+/// as IndexTTS) to declare a language-model discriminator. Strict callers keep
+/// using read_model_type; I/O and malformed JSON errors are never swallowed.
+pub(crate) fn read_model_type_if_present(model_dir: &Path) -> Result<Option<String>> {
     let config_path = model_dir.join("config.json");
     if !config_path.exists() && model_dir.join("model_index.json").exists() {
-        return Ok(ironmlx_image::preflight_model_metadata(model_dir)?.model_type);
+        return Ok(Some(
+            ironmlx_image::preflight_model_metadata(model_dir)?.model_type,
+        ));
     }
     let raw = std::fs::read_to_string(&config_path)
         .with_context(|| format!("reading {}", config_path.display()))?;
     let config: serde_json::Value =
         serde_json::from_str(&raw).with_context(|| format!("parsing {}", config_path.display()))?;
-    config
+    Ok(config
         .get("model_type")
         .and_then(|v| v.as_str())
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow::anyhow!("config.json missing model_type"))
+        .map(str::to_owned))
 }
 
 pub struct EnginePoolSchedulerProfileRequest<'a> {

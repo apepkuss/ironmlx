@@ -13,15 +13,20 @@ use axum::{
 };
 use serde::de::DeserializeOwned;
 use tokio::sync::{mpsc, watch};
-use tokio_stream::{wrappers::ReceiverStream, Stream};
+use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 
 use super::api_error::{ApiError, ApiProtocol};
+use super::request_diagnostics::FieldShape;
 
 pub(crate) trait PublicApiRequest: DeserializeOwned {
     const API_NAME: &'static str;
     const PROTOCOL: ApiProtocol;
 
     fn validate_public_contract(&self) -> Result<(), RequestContractError>;
+
+    fn diagnostic_shape(&self) -> Result<FieldShape, serde_json::Error> {
+        Ok(FieldShape::Opaque)
+    }
 }
 
 pub(crate) struct RequestContractError {
@@ -49,6 +54,27 @@ where
     type Rejection = Response;
 
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let endpoint = request.uri().path().to_owned();
+        // Tee the existing body only at DEBUG. Json<T> still performs the same
+        // extraction, content-type/body-limit checks and DTO deserialization at
+        // every log level, including duplicate-field validation.
+        let captured = tracing::enabled!(tracing::Level::DEBUG)
+            .then(|| std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+        let request = if let Some(buffer) = captured.clone() {
+            let (parts, body) = request.into_parts();
+            let body = Body::from_stream(body.into_data_stream().map(move |chunk| {
+                if let Ok(bytes) = &chunk {
+                    buffer
+                        .lock()
+                        .expect("diagnostic body buffer")
+                        .extend_from_slice(bytes);
+                }
+                chunk
+            }));
+            Request::from_parts(parts, body)
+        } else {
+            request
+        };
         let Json(value) = Json::<T>::from_request(request, state)
             .await
             .map_err(|error| {
@@ -58,6 +84,24 @@ where
                 )
                 .into_response(T::PROTOCOL)
             })?;
+        if let Some(buffer) = captured {
+            let raw = std::mem::take(&mut *buffer.lock().expect("diagnostic body buffer"));
+            match value
+                .diagnostic_shape()
+                .and_then(|shape| shape.ignored_fields(&raw))
+            {
+                Ok(mut fields) => {
+                    fields.sort();
+                    fields.dedup();
+                    if !fields.is_empty() {
+                        tracing::debug!(api = T::API_NAME, %endpoint, fields = ?fields, "ignored unsupported request fields");
+                    }
+                }
+                // A diagnostic failure must never prevent an otherwise valid
+                // inference. Never print errors that could contain payloads.
+                Err(_) => tracing::debug!("unable to inspect request field structure"),
+            }
+        }
         value.validate_public_contract().map_err(|error| {
             ApiError::invalid_request(error.code, error.message).into_response(T::PROTOCOL)
         })?;
@@ -68,6 +112,10 @@ where
 impl PublicApiRequest for super::openai::ChatRequest {
     const API_NAME: &'static str = "Chat Completions";
     const PROTOCOL: ApiProtocol = ApiProtocol::OpenAi;
+
+    fn diagnostic_shape(&self) -> Result<FieldShape, serde_json::Error> {
+        super::openai::ChatRequest::diagnostic_shape(self)
+    }
 
     fn validate_public_contract(&self) -> Result<(), RequestContractError> {
         self.validate_sampling()
@@ -82,6 +130,10 @@ impl PublicApiRequest for super::responses::ResponsesRequest {
     const API_NAME: &'static str = "Responses";
     const PROTOCOL: ApiProtocol = ApiProtocol::OpenAi;
 
+    fn diagnostic_shape(&self) -> Result<FieldShape, serde_json::Error> {
+        super::responses::ResponsesRequest::diagnostic_shape(self)
+    }
+
     fn validate_public_contract(&self) -> Result<(), RequestContractError> {
         self.validate_topology_contract()
             .map_err(|error| RequestContractError::new("invalid_request", error))
@@ -91,6 +143,10 @@ impl PublicApiRequest for super::responses::ResponsesRequest {
 impl PublicApiRequest for super::anthropic::MessagesRequest {
     const API_NAME: &'static str = "Messages";
     const PROTOCOL: ApiProtocol = ApiProtocol::Anthropic;
+
+    fn diagnostic_shape(&self) -> Result<FieldShape, serde_json::Error> {
+        super::anthropic::MessagesRequest::diagnostic_shape(self)
+    }
 
     fn validate_public_contract(&self) -> Result<(), RequestContractError> {
         self.validate_topology_contract()
@@ -214,6 +270,26 @@ mod tests {
 
     use super::*;
 
+    use std::io::{self, Write};
+    use std::sync::Mutex;
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self {
+            self.clone()
+        }
+    }
+
     async fn chat(
         State(dispatches): State<Arc<AtomicUsize>>,
         ApiJson(_request): ApiJson<super::super::openai::ChatRequest>,
@@ -311,7 +387,7 @@ mod tests {
         let responses = request(
             router.clone(),
             "/responses",
-            serde_json::json!({"input": "hello", "store": true}),
+            serde_json::json!({"input": "hello", "max_output_tokens": 0}),
         )
         .await;
         assert_eq!(responses.status(), StatusCode::BAD_REQUEST);
@@ -335,6 +411,316 @@ mod tests {
         assert_eq!(body["error"]["code"], "invalid_request");
         assert_eq!(body["request_id"], request_id);
         assert_eq!(dispatches.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn unknown_fields_do_not_block_any_text_protocol_or_stream_mode() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route("/chat", post(chat))
+            .route("/responses", post(responses))
+            .route("/messages", post(messages))
+            .with_state(dispatches.clone());
+        let bodies = [
+            (
+                "/chat",
+                serde_json::json!({"messages":[{"role":"user","content":[{"type":"text","text":"hi","content_extension":1}],"message_extension":true}],"stream_options":{"include_usage":true,"stream_extension":[]},"response_format":{"type":"text","format_extension":{}},"tools":[{"type":"function","tool_extension":true,"function":{"name":"f","parameters":{"type":"object","properties":{}},"function_extension":1}}]}),
+            ),
+            (
+                "/responses",
+                serde_json::json!({"input":[{"role":"user","content":[{"type":"input_text","text":"hi","content_extension":false}],"message_extension":null}],"reasoning":{"effort":"none","reasoning_extension":[]}}),
+            ),
+            (
+                "/messages",
+                serde_json::json!({"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}],"message_extension":true}],"thinking":{"type":"disabled","thinking_extension":true}}),
+            ),
+        ];
+        for stream in [false, true] {
+            for (path, mut body) in bodies.clone() {
+                body["stream"] = stream.into();
+                body["enable_thinking"] = false.into();
+                body["store"] = true.into();
+                body["functions"] = serde_json::json!({"unimplemented":"ignored"});
+                body["function_call"] = serde_json::json!("auto");
+                for extra in [
+                    Value::Null,
+                    serde_json::json!(true),
+                    serde_json::json!(123),
+                    serde_json::json!([1,{"secret":"unused"}]),
+                    serde_json::json!({"nested":"unused"}),
+                ] {
+                    body["unknown_client_option"] = extra;
+                    let response = request(router.clone(), path, body.clone()).await;
+                    let status = response.status();
+                    let data = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                    assert_eq!(
+                        status,
+                        StatusCode::NO_CONTENT,
+                        "{path}: {}",
+                        String::from_utf8_lossy(&data)
+                    );
+                }
+            }
+        }
+        assert_eq!(dispatches.load(Ordering::Relaxed), 30);
+    }
+
+    #[tokio::test]
+    async fn ignored_fields_are_debug_only_and_never_log_request_values() {
+        use tracing::instrument::WithSubscriber;
+        let cases = [
+            (
+                "/chat",
+                serde_json::json!({"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"secret":"DO_NOT_LOG_VALUE"}}]}]}),
+                "/messages/0/content/0/cache_control",
+            ),
+            (
+                "/responses",
+                serde_json::json!({"input":[{"role":"user","content":[{"type":"input_text","text":"hi","cache_control":{"secret":"DO_NOT_LOG_VALUE"}}]}]}),
+                "/input/0/content/0/cache_control",
+            ),
+            (
+                "/messages",
+                serde_json::json!({"messages":[{"role":"user","content":[{"type":"text","text":"hi","cache_control":{"secret":"DO_NOT_LOG_VALUE"}}]}]}),
+                "/messages/0/content/0/cache_control",
+            ),
+        ];
+        for level in [tracing::Level::INFO, tracing::Level::DEBUG] {
+            for (path, mut body, nested) in cases.clone() {
+                body["enable_thinking"] = false.into();
+                body["client_extension"] = serde_json::json!({"secret":"DO_NOT_LOG_VALUE"});
+                let capture = Capture(Arc::new(Mutex::new(Vec::new())));
+                let subscriber = tracing_subscriber::fmt()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_max_level(level)
+                    .with_writer(capture.clone())
+                    .finish();
+                let router = Router::new()
+                    .route("/chat", post(chat))
+                    .route("/responses", post(responses))
+                    .route("/messages", post(messages))
+                    .with_state(Arc::new(AtomicUsize::new(0)));
+                let response = request(router, path, body)
+                    .with_subscriber(subscriber)
+                    .await;
+                assert_eq!(response.status(), StatusCode::NO_CONTENT);
+                let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+                assert!(!output.contains("DO_NOT_LOG_VALUE"));
+                assert!(!output.contains("unable to inspect"), "{output}");
+                if level == tracing::Level::DEBUG {
+                    assert_eq!(
+                        output.matches("ignored unsupported request fields").count(),
+                        1
+                    );
+                    assert!(
+                        output.contains("/enable_thinking")
+                            && output.contains("/client_extension")
+                            && output.contains(nested)
+                            && output.contains(path),
+                        "{output}"
+                    );
+                } else {
+                    assert!(!output.contains("ignored unsupported request fields"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_deferred_fields_preserve_http_validation_and_debug_paths() {
+        use tracing::instrument::WithSubscriber;
+        let cases = [
+            (
+                "/responses",
+                r#"{"input":"hi","aaa_extension":{"secret":"DO_NOT_LOG_VALUE"},"text":{"format":"DO_NOT_LOG_VALUE","format":{"type":"text","nested_unknown":true}},"zzz_extension":true}"#,
+                "/text/format/nested_unknown",
+                true,
+            ),
+            (
+                "/responses",
+                r#"{"input":[{"role":"user","content":[],"content":[{"type":"input_text","text":"hi","nested_unknown":true}]}],"aaa_extension":true,"zzz_extension":true}"#,
+                "/input/0/content/0/nested_unknown",
+                true,
+            ),
+            (
+                "/chat",
+                r#"{"messages":[],"tool_choice":{"type":"function","function":null,"function":{"name":"f","nested_unknown":true}},"aaa_extension":true,"zzz_extension":true}"#,
+                "/tool_choice/function/nested_unknown",
+                true,
+            ),
+            // Ordinary DTO duplicate fields must retain their original rejection.
+            (
+                "/responses",
+                r#"{"input":"hi","max_output_tokens":8,"max_output_tokens":16,"aaa_extension":true}"#,
+                "",
+                false,
+            ),
+            (
+                "/messages",
+                r#"{"messages":[],"thinking":{"type":"disabled"},"thinking":{"type":"disabled"},"aaa_extension":true}"#,
+                "",
+                false,
+            ),
+        ];
+        for level in [tracing::Level::INFO, tracing::Level::DEBUG] {
+            for (path, body, nested, accepted) in cases {
+                let capture = Capture(Arc::new(Mutex::new(Vec::new())));
+                let subscriber = tracing_subscriber::fmt()
+                    .without_time()
+                    .with_ansi(false)
+                    .with_max_level(level)
+                    .with_writer(capture.clone())
+                    .finish();
+                let router = Router::new()
+                    .route("/chat", post(chat))
+                    .route("/responses", post(responses))
+                    .route("/messages", post(messages))
+                    .with_state(Arc::new(AtomicUsize::new(0)));
+                let response = raw_request(router, path, body)
+                    .with_subscriber(subscriber)
+                    .await;
+                assert_eq!(
+                    response.status(),
+                    if accepted {
+                        StatusCode::NO_CONTENT
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    "{path}: {body}"
+                );
+                let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+                assert!(!output.contains("DO_NOT_LOG_VALUE"));
+                assert!(!output.contains("unable to inspect"), "{output}");
+                if accepted && level == tracing::Level::DEBUG {
+                    assert_eq!(
+                        output.matches("ignored unsupported request fields").count(),
+                        1
+                    );
+                    for field in ["/aaa_extension", nested, "/zzz_extension"] {
+                        assert!(output.contains(field), "{output}");
+                    }
+                } else {
+                    assert!(!output.contains("ignored unsupported request fields"));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn debug_diagnostics_preserve_validation_and_skip_deep_unknown_values() {
+        use tracing::instrument::WithSubscriber;
+        for level in [tracing::Level::INFO, tracing::Level::DEBUG] {
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(level)
+                .with_test_writer()
+                .finish();
+            async {
+                let router = Router::new().route("/chat", post(chat)).with_state(Arc::new(AtomicUsize::new(0)));
+                for body in [
+                    r#"{"messages":[],"max_tokens":1,"max_tokens":2,"extra":true}"#,
+                    r#"{"messages":[{"role":"user","role":"assistant","content":"hi"}],"extra":true}"#,
+                    r#"{"messages":[],"temperature":"wrong","extra":true}"#,
+                    r#"{"messages":[],"max_tokens":0,"extra":true}"#,
+                    r#"{"messages":[],"extra":}"#,
+                ] {
+                    assert_eq!(raw_request(router.clone(), "/chat", body).await.status(), StatusCode::BAD_REQUEST, "{body}");
+                }
+                let repeated = r#"{"messages":[],"extra":1,"extra":2}"#;
+                assert_eq!(raw_request(router.clone(), "/chat", repeated).await.status(), StatusCode::NO_CONTENT);
+                for number in ["1e9999", "999999999999999999999999999999999999999999999"] {
+                    let body = format!(r#"{{"messages":[],"extra":{number}}}"#);
+                    assert_eq!(raw_request(router.clone(), "/chat", body).await.status(), StatusCode::NO_CONTENT);
+                }
+                let private_key = r#"{"messages":[],"extra":{"$serde_json::private::RawValue":{"secret":"ignored"}}}"#;
+                assert_eq!(raw_request(router.clone(), "/chat", private_key).await.status(), StatusCode::NO_CONTENT);
+                let deep = format!(r#"{{"messages":[],"extra":{}0{}}}"#, "[".repeat(200), "]".repeat(200));
+                assert_eq!(raw_request(router, "/chat", deep).await.status(), StatusCode::NO_CONTENT);
+            }.with_subscriber(subscriber).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn debug_diagnostics_preserve_content_type_and_body_limits() {
+        use tracing::instrument::WithSubscriber;
+        for level in [tracing::Level::INFO, tracing::Level::DEBUG] {
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(level)
+                .with_test_writer()
+                .finish();
+            async {
+                let router = Router::new()
+                    .route("/chat", post(chat))
+                    .layer(axum::extract::DefaultBodyLimit::max(64))
+                    .with_state(Arc::new(AtomicUsize::new(0)));
+                for (content_type, body) in [
+                    ("text/plain", r#"{"messages":[]}"#.to_owned()),
+                    (
+                        "application/json",
+                        format!(r#"{{"messages":[],"extra":"{}"}}"#, "x".repeat(128)),
+                    ),
+                ] {
+                    let response = router
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method("POST")
+                                .uri("/chat")
+                                .header("content-type", content_type)
+                                .body(Body::from(body))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                    let data = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                    let error: Value = serde_json::from_slice(&data).unwrap();
+                    assert_eq!(error["error"]["code"], "invalid_json");
+                }
+            }
+            .with_subscriber(subscriber)
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_fields_never_mask_invalid_supported_parameters() {
+        let dispatches = Arc::new(AtomicUsize::new(0));
+        let router = Router::new()
+            .route("/chat", post(chat))
+            .with_state(dispatches.clone());
+        for bad in [
+            serde_json::json!({"temperature": "wrong"}),
+            serde_json::json!({"temperature": 3}),
+            serde_json::json!({"max_completion_tokens":0}),
+            serde_json::json!({"frequency_penalty":3}),
+            serde_json::json!({"response_format":{"type":"not_a_format"}}),
+        ] {
+            let mut body =
+                serde_json::json!({"messages":[],"unknown_client_option":{"nested":"ignored"}});
+            body.as_object_mut()
+                .unwrap()
+                .extend(bad.as_object().unwrap().clone());
+            assert_eq!(
+                request(router.clone(), "/chat", body).await.status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(dispatches.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn ignored_field_observation_never_keeps_values() {
+        let body = serde_json::json!({"messages":[{"role":"user","content":"hi","client_metadata":{"secret":"DO_NOT_LOG_VALUE"}}],"enable_thinking":false,"another_option":[1,2]}).to_string();
+        let request: super::super::openai::ChatRequest = serde_json::from_str(&body).unwrap();
+        let fields = request
+            .diagnostic_shape()
+            .unwrap()
+            .ignored_fields(body.as_bytes())
+            .unwrap();
+        assert!(fields.iter().any(|p| p == "/enable_thinking"));
+        assert!(fields.iter().any(|p| p.contains("client_metadata")));
+        assert!(!format!("{fields:?}").contains("DO_NOT_LOG_VALUE"));
     }
 
     #[tokio::test]

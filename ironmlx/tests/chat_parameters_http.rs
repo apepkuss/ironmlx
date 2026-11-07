@@ -25,6 +25,10 @@ struct Server {
 
 impl Server {
     async fn start(model: Option<&Path>) -> Self {
+        Self::start_with_log_level(model, "INFO").await
+    }
+
+    async fn start_with_log_level(model: Option<&Path>, level: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -39,6 +43,7 @@ impl Server {
         } else {
             ironmlx_process::command()
         };
+        command.env("IRONMLX_LOG_LEVEL", level);
         command
             .args([
                 "serve",
@@ -380,7 +385,6 @@ async fn chat_fixed_serving_budgets_penalties_streams_and_capacity() {
         json!({"frequency_penalty":2.01}),
         json!({"presence_penalty":-2.01}),
         json!({"max_completion_tokens":"8"}),
-        json!({"unexpected":true}),
     ] {
         let mut body = chat_body(None);
         body.as_object_mut()
@@ -423,4 +427,197 @@ async fn chat_fixed_serving_budgets_penalties_streams_and_capacity() {
         );
     }
     println!("chat parameter acceptance passed; health={health}");
+}
+
+/// Real inference rather than merely successful deserialization. Runs against
+/// the selected Release binary, including optional MTP or DFlash2 execution.
+#[tokio::test]
+#[ignore = "requires CHAT_PARAMETERS_MODEL and optional MTP/DFlash2 checkpoints"]
+async fn undeclared_fields_preserve_real_inference_across_protocols() {
+    let model = model_dir();
+    let server = Server::start_with_log_level(Some(&model), "DEBUG").await;
+    let prompt = "Print consecutive integers from 1 to 100, separated by commas.";
+    let endpoints = [
+        (
+            "/v1/chat/completions",
+            json!({"messages":[{"role":"user","content":prompt}],"max_completion_tokens":8,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}),
+        ),
+        (
+            "/v1/responses",
+            json!({"input":prompt,"max_output_tokens":8,"temperature":0,"reasoning":{"effort":"none"}}),
+        ),
+        (
+            "/v1/messages",
+            json!({"messages":[{"role":"user","content":prompt}],"max_tokens":8,"temperature":0,"thinking":{"type":"disabled"}}),
+        ),
+    ];
+    let text_of = |path: &str, response: &Value| -> String {
+        if path.ends_with("completions") {
+            response["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned()
+        } else if path.ends_with("messages") {
+            response["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|p| p["text"].as_str())
+                .collect()
+        } else {
+            response["output"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|p| p["content"].as_array())
+                .flatten()
+                .filter_map(|p| p["text"].as_str())
+                .collect()
+        }
+    };
+    for (path, base) in endpoints {
+        let (status, baseline) = server.post(path, &base).await;
+        assert_eq!(status, 200, "{path}: {baseline}; {}", server.log());
+        let expected = text_of(path, &baseline);
+        assert!(
+            !expected.is_empty(),
+            "{path}: actual generated text required"
+        );
+        let mut body = base.clone();
+        for (name, value) in [
+            ("enable_thinking", json!(true)),
+            ("unknown_null", Value::Null),
+            ("unknown_number", json!(-17)),
+            ("unknown_list", json!([1, 2])),
+            (
+                "unknown_client_option",
+                json!({"secret":"DO_NOT_LOG_REQUEST_VALUE"}),
+            ),
+            ("functions", json!([{"name":"ignored"}])),
+            ("store", json!(true)),
+        ] {
+            body[name] = value;
+        }
+        if let Some(messages) = body["messages"].as_array_mut() {
+            messages[0]["name"] = json!("ignored-client-name");
+            messages[0]["client_extension"] = json!({"flag":true});
+            messages[0]["content"] = json!([{"type":"text","text":prompt,"cache_control":{"secret":"DO_NOT_LOG_REQUEST_VALUE"}}]);
+        } else {
+            body["input"] = json!([{"role":"user","content":[{"type":"input_text","text":prompt,"cache_control":{"secret":"DO_NOT_LOG_REQUEST_VALUE"}}],"client_extension":true}]);
+            body["text"] =
+                json!({"format":{"type":"text","format_extension":true},"text_extension":true});
+        }
+        if path.ends_with("completions") {
+            body["response_format"] = json!({"type":"text","format_extension":true});
+        } else if path.ends_with("messages") {
+            body["thinking"]["thinking_extension"] = json!(true);
+        }
+        let (status, response) = server.post(path, &body).await;
+        assert_eq!(status, 200, "{path}: {response}; {}", server.log());
+        for reply in [&baseline, &response] {
+            let tokens = if path.ends_with("completions") {
+                reply["usage"]["completion_tokens"].as_u64().unwrap()
+            } else {
+                reply["usage"]["output_tokens"].as_u64().unwrap()
+            };
+            assert!((1..=8).contains(&tokens), "{path}: {reply}");
+        }
+        assert_eq!(
+            text_of(path, &response),
+            expected,
+            "ignored fields changed inference at {path}"
+        );
+        // Stream the same extended request, verify text and successful terminal.
+        body["stream"] = json!(true);
+        let response = server
+            .client
+            .post(format!("{}{path}", server.url))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let raw = response.text().await.unwrap();
+        assert_eq!(status.as_u16(), 200, "{path}: {raw}");
+        let mut text = String::new();
+        let mut terminal = false;
+        for line in raw.lines().filter_map(|l| l.strip_prefix("data: ")) {
+            if line == "[DONE]" {
+                terminal = true;
+                continue;
+            }
+            let event: Value = serde_json::from_str(line).unwrap();
+            assert!(event.get("error").is_none(), "{event}");
+            if path.ends_with("completions") {
+                text.push_str(
+                    event["choices"][0]["delta"]["content"]
+                        .as_str()
+                        .unwrap_or(""),
+                );
+            } else if path.ends_with("responses") {
+                if event["type"] == "response.output_text.delta" {
+                    text.push_str(event["delta"].as_str().unwrap());
+                }
+                if event["type"] == "response.completed" || event["type"] == "response.incomplete" {
+                    terminal = true;
+                }
+                assert!(event["type"] != "response.failed", "{event}");
+            } else {
+                if event["type"] == "content_block_delta" {
+                    text.push_str(event["delta"]["text"].as_str().unwrap_or(""));
+                }
+                if event["type"] == "message_stop" {
+                    terminal = true;
+                }
+            }
+        }
+        assert!(terminal, "{path}: missing terminal: {raw}");
+        assert_eq!(text, expected, "{path}: {raw}");
+        println!("unknown-field inference passed: endpoint={path}, text_chars={}, synchronous=200, streaming=200, terminal=true", expected.chars().count());
+        let mut invalid = body;
+        invalid["temperature"] = json!(3);
+        assert_eq!(
+            server.post(path, &invalid).await.0,
+            400,
+            "known invalid parameter must still fail"
+        );
+    }
+    let log = server.log();
+    assert!(
+        log.contains("ignored unsupported request fields") && log.contains("unknown_client_option")
+    );
+    assert!(!log.contains("DO_NOT_LOG_REQUEST_VALUE"));
+    for path in [
+        "/messages/0/content/0/cache_control",
+        "/input/0/content/0/cache_control",
+        "/response_format/format_extension",
+        "/text/format/format_extension",
+        "/text/text_extension",
+        "/thinking/thinking_extension",
+    ] {
+        assert!(log.contains(path), "missing nested diagnostic: {path}");
+    }
+    assert!(!log.contains("unable to inspect request field structure"));
+    let health: Value = server
+        .client
+        .get(format!("{}/healthz", server.url))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for (variable, mode) in [
+        ("CHAT_PARAMETERS_MTP_MODEL", "mtp"),
+        ("CHAT_PARAMETERS_DFLASH2_MODEL", "dflash2"),
+    ] {
+        if std::env::var_os(variable).is_some() {
+            assert_eq!(health[mode]["enabled"], true, "{health}");
+            assert!(
+                health[mode]["drafted_tokens"].as_u64().unwrap() > 0,
+                "{health}"
+            );
+        }
+    }
+    println!("unknown-field inference health={health}");
 }

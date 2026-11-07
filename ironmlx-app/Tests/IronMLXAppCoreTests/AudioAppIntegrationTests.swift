@@ -274,3 +274,56 @@ private func audioTestPort() throws -> UInt16 {
     guard result == 0 else { throw POSIXError(.EINVAL) }
     return UInt16(bigEndian: address.sin_port)
 }
+
+
+/// Use the real App discovery/registration path without writing user settings
+/// or loading speech weights. Native synthesis is covered by audio_http.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["IRONMLX_INDEXTTS_REGISTRATION_HELPER"] != nil))
+@MainActor func indexTtsAppDiscoveryRegistersAndRestoresUntaggedConfig() async throws {
+    let env = ProcessInfo.processInfo.environment
+    let helper = try #require(env["IRONMLX_INDEXTTS_REGISTRATION_HELPER"])
+    let metallib = try #require(env["IRONMLX_INDEXTTS_REGISTRATION_METALLIB"])
+    let root = URL(fileURLWithPath: try #require(env["IRONMLX_INDEXTTS_REGISTRATION_EVIDENCE"]))
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let id = "mlx-community/IndexTTS-2.5-fp16"
+    let scanner = LocalModelScanner()
+    try #require(scanner.model(for: id)?.readiness?.isLoadable == true)
+    let port = try audioTestPort()
+    let store = AppConfigStore(url: root.appendingPathComponent("config.json"))
+    try #require(store.save(AppConfig(port: port, logLevel: "INFO", modelTtlMinutes: 0)))
+    let logs = IronMLXLogStore(rootURL: root.appendingPathComponent("logs"))
+    let manager = BackendProcessManager(logStore: logs, launchPlanProvider: {
+        BackendProcessLaunchPlan(processURL: URL(fileURLWithPath: helper), arguments: [
+            "--mlx-metallib", metallib, "serve", "--host", "127.0.0.1", "--port", String(port),
+            "--voice-profile-dir", root.appendingPathComponent("voices").path
+        ], logLevel: .saved(store.load().logLevel))
+    })
+    let runtime = BackendRuntimeSupervisor(processManager: manager, configStore: store, scanner: scanner,
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("params.json")),
+        incidentStore: BackendIncidentStore(url: root.appendingPathComponent("incidents.json")))
+    let client = BackendAPIClient(host: "127.0.0.1", port: port)
+    var pids: [Int32] = []
+    do {
+        for _ in 0..<2 {
+            try await runtime.ensureRunning()
+            pids.append(try #require(manager.currentProcessIdentifier))
+            let data = try await client.fetchData(path: "/v1/models")
+            let list = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let entries = try #require(list["data"] as? [[String: Any]])
+            let model = try #require(entries.first { $0["id"] as? String == id })
+            try #require(model["state"] as? String == "unloaded")
+            try #require(model["load_attempts"] as? Int == 0)
+            try #require(try await client.fetchLoadedModels().allSatisfy { $0.id != id })
+            await runtime.stopForAppQuit()
+            try #require(!manager.isRunning)
+        }
+        try #require(pids.count == 2 && pids[0] != pids[1])
+        let result: [String: Any] = ["passed": true, "registered_model": id, "process_ids": pids,
+            "registrations": 2, "weights_loaded": false, "helper_stopped": !manager.isRunning]
+        try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+            .write(to: root.appendingPathComponent("result.json"))
+    } catch {
+        await runtime.stopForAppQuit()
+        throw error
+    }
+}

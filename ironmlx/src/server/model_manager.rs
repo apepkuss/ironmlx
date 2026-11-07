@@ -1506,6 +1506,190 @@ mod tests {
     };
     use tower::ServiceExt;
 
+    fn tts_build_request(path: &Path) -> EngineModelBuildRequest<'_> {
+        EngineModelBuildRequest {
+            audio: Some(
+                ironmlx_runtime::core::audio_execution::AudioModelResources {
+                    derived_resources: path.join("derived"),
+                    resource_lock: path.join("sources.json"),
+                    wetext_fsts: path.join("wetext"),
+                    unidic_dir: path.join("unidic"),
+                    execution: Default::default(),
+                },
+            ),
+            decision: None,
+            model_id: "tts-test".to_owned(),
+            model_dir: path,
+            max_cache_cap_override: None,
+            default_max_output_tokens: None,
+            sampling_defaults_override: SamplingDefaults::default(),
+            mtp: None,
+            prompt_lookup: None,
+            pinned: false,
+        }
+    }
+
+    fn tts_manifest(path: &Path) -> ironmlx_runtime::core::engine_pool::EngineModelManifest {
+        serde_json::from_value(
+            serde_json::json!({"id":"tts-test","path":path,"audio":tts_build_request(path).audio}),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn indextts_configs_without_model_type_support_app_and_manifest_registration() {
+        let root = tempfile::tempdir().unwrap();
+        write_config(root.path(), r#"{"version":"2.5","gpt":{}}"#);
+        let args = SchedulerResolutionOptions::from(&serve_args());
+        let load = build_engine_model_config(&args, tts_build_request(root.path()))
+            .expect("App TTS configuration without model_type");
+        assert_eq!(load.config.capabilities, EngineModelCapabilities::audio());
+        assert!(load.config.audio.is_some() && load.config.scheduler_runtime_profile.is_none());
+        for policy in [
+            EngineLoadPolicy::Lazy,
+            EngineLoadPolicy::Preload,
+            EngineLoadPolicy::Disabled,
+        ] {
+            let mut model = tts_manifest(root.path());
+            model.load_policy = policy;
+            let config =
+                ironmlx_runtime::core::model_management::build_engine_model_config_for_pool(
+                    &args,
+                    model,
+                    None,
+                    "test-host",
+                )
+                .expect("manifest TTS configuration without model_type");
+            assert_eq!(config.capabilities, EngineModelCapabilities::audio());
+            assert_eq!(config.load_policy, policy);
+            assert!(config.audio.is_some() && config.scheduler_runtime_profile.is_none());
+        }
+    }
+
+    #[test]
+    fn indextts_dispatch_preserves_language_and_asr_validation() {
+        let root = tempfile::tempdir().unwrap();
+        let args = SchedulerResolutionOptions::from(&serve_args());
+        for (config, expected) in [
+            (r#"{"version":"2.5"}"#, "missing model_type"),
+            (
+                r#"{"model_type":"unknown-model"}"#,
+                "unsupported model_type",
+            ),
+            ("{", "parsing"),
+        ] {
+            write_config(root.path(), config);
+            let mut request = tts_build_request(root.path());
+            request.audio = None;
+            let error = build_engine_model_config(&args, request).err().unwrap();
+            assert!(format!("{error:#}").contains(expected), "{error:#}");
+            let mut model = tts_manifest(root.path());
+            model.audio = None;
+            let error =
+                ironmlx_runtime::core::model_management::build_engine_model_config_for_pool(
+                    &args,
+                    model,
+                    None,
+                    "test-host",
+                )
+                .unwrap_err();
+            assert!(format!("{error:#}").contains(expected), "{error:#}");
+        }
+        for model_type in ["qwen3_asr", "nemotron_diarization"] {
+            write_config(
+                root.path(),
+                &serde_json::json!({"model_type":model_type}).to_string(),
+            );
+            let error = build_engine_model_config(&args, tts_build_request(root.path()))
+                .err()
+                .unwrap();
+            assert!(
+                error.to_string().contains("ASR models do not accept TTS"),
+                "{error}"
+            );
+            let error =
+                ironmlx_runtime::core::model_management::build_engine_model_config_for_pool(
+                    &args,
+                    tts_manifest(root.path()),
+                    None,
+                    "test-host",
+                )
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("ASR models do not accept TTS"),
+                "{error}"
+            );
+        }
+        write_config(root.path(), r#"{"version":"2.5"}"#);
+        let mut request = tts_build_request(root.path());
+        request.default_max_output_tokens = Some(8);
+        assert!(build_engine_model_config(&args, request)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("audio models do not accept causal"));
+        let mut model = tts_manifest(root.path());
+        model.scheduler_profile = Some(root.path().join("profile.json"));
+        assert!(
+            ironmlx_runtime::core::model_management::build_engine_model_config_for_pool(
+                &args,
+                model,
+                None,
+                "test-host"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("audio model does not accept causal")
+        );
+        write_config(root.path(), "{");
+        assert!(format!(
+            "{:#}",
+            build_engine_model_config(&args, tts_build_request(root.path()))
+                .err()
+                .unwrap()
+        )
+        .contains("parsing"));
+    }
+
+    #[tokio::test]
+    async fn indextts_register_endpoint_accepts_untyped_audio_and_keeps_it_lazy() {
+        let root = tempfile::tempdir().unwrap();
+        write_config(root.path(), r#"{"version":"2.5","gpt":{}}"#);
+        let args = serve_args();
+        let manager = ModelManager::new(
+            crate::cli::serve::engine_runtime_config(&args).unwrap(),
+            args.max_loaded_models,
+            SchedulerResolutionOptions::from(&args),
+        )
+        .unwrap();
+        let voices = crate::server::voices::VoiceStore::open(root.path().join("voices")).unwrap();
+        let pool = manager.pool.clone();
+        let body = serde_json::json!({"model":"tts-test","model_dir":root.path(),"audio":tts_build_request(root.path()).audio});
+        let response = app_router(manager, voices)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/models/register")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let data = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["status"], "registered");
+        assert!(pool.is_audio_model(Some("tts-test")).await.unwrap());
+        let registered = pool.model_snapshots().await;
+        assert_eq!(registered.len(), 1);
+        assert_eq!(registered[0].state, EngineRuntimeState::Unloaded);
+        assert_eq!(registered[0].load_attempts, 0);
+    }
+
     #[tokio::test]
     async fn app_daemon_models_route_exposes_registered_models() {
         let model_dir = unique_temp_dir("app-models-route");

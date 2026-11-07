@@ -117,8 +117,7 @@ where
 // Request / Response shapes
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ChatRequest {
     #[serde(default)]
     pub model: Option<String>,
@@ -129,12 +128,6 @@ pub struct ChatRequest {
     pub tool_choice: Option<serde_json::Value>,
     #[serde(default)]
     pub parallel_tool_calls: Option<bool>,
-    /// Deprecated OpenAI function-calling field. It is surfaced only so API-1
-    /// can reject it explicitly instead of silently ignoring it.
-    #[serde(default)]
-    pub function_call: Option<serde_json::Value>,
-    #[serde(default)]
-    pub functions: Option<serde_json::Value>,
     #[serde(default)]
     pub(crate) response_format: Option<ChatResponseFormat>,
     #[serde(default)]
@@ -177,7 +170,7 @@ pub struct ChatRequest {
     pub chat_template_kwargs: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QwenReasoningEffort {
     Low,
@@ -195,16 +188,15 @@ impl QwenReasoningEffort {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ChatResponseFormat {
     Text {},
     JsonObject {},
     JsonSchema { json_schema: ChatJsonSchema },
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub(crate) struct ChatJsonSchema {
     pub(crate) name: String,
     #[serde(default)]
@@ -215,6 +207,18 @@ pub(crate) struct ChatJsonSchema {
 }
 
 impl ChatRequest {
+    pub(crate) fn diagnostic_shape(
+        &self,
+    ) -> Result<super::request_diagnostics::FieldShape, serde_json::Error> {
+        let mut shape = super::request_diagnostics::shape(self)?;
+        if let Some(choice) = self.tool_choice.as_ref().filter(|v| v.is_object()) {
+            if let Ok(choice) = serde_json::from_value::<NamedToolChoice>(choice.clone()) {
+                shape.set("tool_choice", super::request_diagnostics::shape(&choice)?);
+            }
+        }
+        Ok(shape)
+    }
+
     pub(crate) fn output_budget(&self) -> usize {
         self.max_completion_tokens
             .or(self.max_tokens)
@@ -314,7 +318,6 @@ impl ChatRequest {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct OpenAiTool {
     #[serde(rename = "type")]
     pub kind: String,
@@ -379,22 +382,19 @@ impl ToolResponseContext {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
 struct NamedToolChoice {
     #[serde(rename = "type")]
     kind: String,
     function: NamedFunctionChoice,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
 struct NamedFunctionChoice {
     name: String,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 pub struct StreamOptions {
     #[serde(default)]
     pub include_usage: bool,
@@ -621,11 +621,6 @@ pub(crate) fn prepare_tool_request(
     req: &ChatRequest,
     dialect: Option<ToolDialect>,
 ) -> anyhow::Result<Option<PreparedToolRequest>> {
-    if req.function_call.is_some() || req.functions.is_some() {
-        anyhow::bail!(
-            "deprecated `functions` / `function_call` fields are not supported; use `tools`"
-        );
-    }
     let Some(wire_tools) = req.tools.as_ref() else {
         if req
             .messages
@@ -3016,18 +3011,18 @@ mod tests {
     }
 
     #[test]
-    fn chat_request_rejects_unknown_response_format_fields() {
+    fn chat_request_ignores_unknown_response_format_fields() {
         let json_object = serde_json::from_value::<ChatRequest>(serde_json::json!({
             "messages": [{"role": "user", "content": "Return JSON"}],
             "response_format": {"type": "json_object", "extra": true}
         }));
-        assert!(json_object.is_err());
+        assert!(json_object.is_ok());
 
         let text = serde_json::from_value::<ChatRequest>(serde_json::json!({
             "messages": [{"role": "user", "content": "Return text"}],
             "response_format": {"type": "text", "extra": true}
         }));
-        assert!(text.is_err());
+        assert!(text.is_ok());
     }
 
     #[test]
@@ -3333,10 +3328,6 @@ mod tests {
                 "unknown function",
             ),
             (
-                serde_json::json!({"tool_choice": {"type": "function", "function": {"name": "get_weather", "extra": true}}}),
-                "tool_choice object",
-            ),
-            (
                 serde_json::json!({"tool_choice": {"type": "custom", "function": {"name": "get_weather"}}}),
                 "tool_choice.type",
             ),
@@ -3457,7 +3448,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_http_contract_rejects_unknown_and_invalid_sampling_fields_with_400() {
+    async fn chat_http_contract_rejects_invalid_sampling_fields_with_400() {
         use axum::http::Request;
         use axum::routing::post;
         use axum::Router;
@@ -3469,10 +3460,7 @@ mod tests {
 
         let app = Router::new().route("/v1/chat/completions", post(validate));
         for body in [
-            serde_json::json!({"messages": [], "top_k": 16}),
-            serde_json::json!({"messages": [], "repetition_penalty": 1.1}),
             serde_json::json!({"messages": [], "max_completion_tokens": 0}),
-            serde_json::json!({"messages": [{"role": "user", "content": "hi", "name": "alice"}]}),
             serde_json::json!({"messages": [], "temperature": -0.1}),
             serde_json::json!({"messages": [], "top_p": 0.0}),
         ] {
@@ -3800,7 +3788,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_request_rejects_unknown_fields_at_every_public_level() {
+    fn chat_request_ignores_unknown_fields_at_every_public_level() {
         for body in [
             serde_json::json!({
                 "messages": [],
@@ -3830,21 +3818,21 @@ mod tests {
             }),
         ] {
             assert!(
-                serde_json::from_value::<ChatRequest>(body).is_err(),
-                "unknown field must be rejected"
+                serde_json::from_value::<ChatRequest>(body).is_ok(),
+                "unknown field must be ignored"
             );
         }
     }
 
     #[test]
-    fn chat_request_rejects_nonstandard_sampling_fields() {
+    fn chat_request_ignores_nonstandard_sampling_fields() {
         for field in ["top_k", "repetition_penalty"] {
             let mut body = serde_json::json!({"messages": []});
             body.as_object_mut()
                 .unwrap()
                 .insert(field.to_owned(), serde_json::json!(1));
-            let error = serde_json::from_value::<ChatRequest>(body).unwrap_err();
-            assert!(error.to_string().contains(field), "{error}");
+            let request = serde_json::from_value::<ChatRequest>(body).unwrap();
+            request.validate_sampling().unwrap();
         }
     }
 

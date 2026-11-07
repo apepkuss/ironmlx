@@ -12,7 +12,9 @@ Reference for OpenAI Responses, Chat Completions and Anthropic Messages requests
 
 IronMLX provides compatible OpenAI Responses, Chat Completions and Anthropic Messages interfaces. Supported fields and limits are defined below. IronMLX does not execute client tools or provide hosted tools, conversation storage or background response jobs.
 
-Inference requests with unknown fields or unsupported field shapes return 400; unsupported capabilities are not silently ignored.
+Chat Completions, Responses and Messages ignore undeclared fields at the request and nested wire-object levels. Ignored fields are not interpreted, converted or mapped to aliases: a top-level `enable_thinking` has no effect; use `chat_template_kwargs.enable_thinking` for Chat instead. Known fields still enforce their types, ranges, supported variants and capability contracts; malformed JSON, invalid sampling, unsupported tool/content types and invalid JSON Schemas still fail. This policy does not change audio, image or management APIs.
+
+Top-level and nested unknown protocol field paths are combined into one DEBUG diagnostic (`ignored unsupported request fields`) per request; values are never included. In the App, select **Settings → Log Level → DEBUG**, reproduce the request, then open **Logs → Runtime Logs → ironmlx-server** (or `~/.ironmlx/logs/backend.log`). The log-page level selector only filters existing records; it does not enable DEBUG recording. The default INFO level does not record these diagnostics. Paths use JSON Pointer syntax, for example `/messages/0/content/0/cache_control`; `~` and `/` within a field name are escaped as `~0` and `~1`. Values and keys inside declared open payloads (tool input, JSON Schema, metadata and template kwargs) are not reported as unknown protocol fields. For duplicate keys accepted by the request parser, diagnostics inspect the effective last value; existing duplicate-field rejection remains unchanged.
 
 Fixed CLI services select their model at startup. App and EnginePool resolve the request `model` or an unambiguous default. Support for vision, thinking and tools depends on the model and its native template; see [Supported models](supported-models.md). [DFlash2 configuration](dflash2-server-api.md) describes its serving and sampling constraints.
 
@@ -45,8 +47,8 @@ Fixed CLI services select their model at startup. App and EnginePool resolve the
 | `temperature` | number | No | Model sampling default | Finite value in [0,2]. |
 | `top_p` | number | No | Model sampling default | Finite value in (0,1]. |
 | `reasoning` | object | No | `effort: none` | effort: none/minimal/low/medium/high/xhigh/max; summary: none/auto. |
-| `store` | boolean | No | `false` | Only false is supported; no response storage. |
-| `background` | boolean | No | `false` | Only false is supported; no background jobs. |
+| `store` | any JSON value | No | — | Ignored, including true; no response storage. |
+| `background` | any JSON value | No | — | Ignored, including true; no background jobs. |
 | `include` | array of strings | No | `[]` | Only reasoning.encrypted_content is accepted; no encrypted content is generated. |
 | `prompt_cache_key` | string | No | — | 1–256 bytes; validated only, without hosted-platform cache semantics. |
 | `client_metadata` | object | No | — | Validated as an object; no hosted-platform semantics. |
@@ -253,12 +255,12 @@ The JSON Schema subset is defined in [Common constraints](#json-schema).
 
 ### Limits
 
-- `store` is omitted or false; true is rejected. `previous_response_id`, conversations, background execution and response retrieve/delete/cancel APIs are unsupported.
+- `store`, `previous_response_id`, `conversation` and `background` are ignored request fields. Responses remain stateless and synchronous; callers must send full input history. Response retrieve/delete/cancel APIs are unsupported.
 - Client functions and the supported `type:"namespace"` function groups are accepted. Namespaces compile to a bounded dispatcher and restore public namespace/function/argument shapes in output and replay. Named namespace subfunctions cannot be forced through `tool_choice`; use `auto` or `required`.
 - Dynamic parameters outside the Schema subset are allowed only for non-strict namespace subfunctions using a JSON argument envelope; strict mode never downgrades.
 - Hosted Web/File Search, MCP, Code Interpreter and custom/freeform tools are unsupported.
 - No persisted reasoning, independent summary/refusal items, OpenAI file IDs, audio input/output, image output or image function results are provided.
-- Public sampling is finite `temperature` in `[0,2]` and `top_p` in `(0,1]`. `top_k`, `repetition_penalty` and unknown fields are rejected.
+- Public sampling is finite `temperature` in `[0,2]` and `top_p` in `(0,1]`. `top_k`, `repetition_penalty` and other undeclared fields are ignored without changing sampler settings.
 
 ## OpenAI Chat Completions
 
@@ -429,12 +431,12 @@ Tool-call history requires the matching nonempty `tools` array. The client appen
 - `tool_choice` accepts `auto`, `none`, `required` or `{"type":"function","function":{"name":"..."}}`.
 - `parallel_tool_calls` defaults to true; false limits the turn to one call. Llama 3.1/3.2 native custom tools always allow only one call and exclude its built-in-tool dialect.
 - Only function tools and supported native Qwen, Gemma/Unified, DiffusionGemma, GLM, Llama and MiniCPM templates are accepted. Unknown templates fail before generation.
-- Legacy `functions` and `function_call` are unsupported. Strict tool schemas follow the rules above.
+- Legacy `functions` and `function_call` are ignored; use `tools` to request tool calling. Strict tool schemas follow the rules above.
 - Results must refer to preceding unfinished calls; orphaned, duplicate or missing IDs are rejected.
 
 ### Limits
 
-Only function tools and supported native templates are accepted. Legacy functions/function_call, top_k and repetition_penalty are rejected. Qwen3.8 reasoning_effort accepts low/medium/xhigh (native default xhigh); chat_template_kwargs.enable_thinking:false disables thinking and preserve_thinking:false omits historical reasoning_content. Use Responses/Messages for independent reasoning items/blocks.
+Only function tools and supported native templates are accepted. Legacy functions/function_call are ignored; undeclared top_k and repetition_penalty are ignored. Qwen3.8 reasoning_effort accepts low/medium/xhigh (native default xhigh); chat_template_kwargs.enable_thinking:false disables thinking and preserve_thinking:false omits historical reasoning_content. Use Responses/Messages for independent reasoning items/blocks.
 
 ## Anthropic Messages
 
@@ -554,7 +556,7 @@ Request-field fragment; merge into a complete request with its required fields:
 ```
 
 JSON appears in ordinary text blocks. The Schema subset is shared with Responses, and unsupported fields fail before generation. `auto` permits a call or final JSON, `none` permits final JSON, and `any`/named `tool` permit calls only.
-`stop_reason:"max_tokens"` can leave JSON incomplete. Structured Outputs do not allow last-assistant-message prefill. Only `output_config.format` is supported, not obsolete top-level `output_format`.
+`stop_reason:"max_tokens"` can leave JSON incomplete. Structured Outputs do not allow last-assistant-message prefill. Only `output_config.format` controls formatting; obsolete top-level `output_format` is ignored.
 
 Thinking can be combined with Structured Outputs: the thinking section is unconstrained, final text uses the JSON grammar, and tool calls use their parameter grammar. The same constraints apply again after replaying tool results, across synchronous/SSE and supported execution paths.
 
@@ -657,7 +659,7 @@ Request-history fragment; retain the tool definitions in the complete request:
 
 ### Limits
 
-No legacy output_format, repetition_penalty, hosted/server tools, MCP, computer use, Web Search or Code Execution. Thinking history must use the locally generated signature; Claude-hosted signatures and redacted/omitted/interleaved thinking cannot be replayed.
+Legacy output_format and undeclared repetition_penalty are ignored. Hosted/server tools, MCP, computer use, Web Search and Code Execution are unsupported. Thinking history must use the locally generated signature; Claude-hosted signatures and redacted/omitted/interleaved thinking cannot be replayed.
 
 ## Common constraints
 

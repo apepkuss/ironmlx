@@ -10,7 +10,7 @@ use super::runtime_config::SamplingDefaults;
 use super::scheduler_autotune::SchedulerAutotuneRuntimeContext;
 use super::scheduler_profile_store::SchedulerProfileStore;
 use super::scheduler_resolution::{
-    apply_adaptive_mtp_scheduler_defaults, read_model_type,
+    apply_adaptive_mtp_scheduler_defaults, read_model_type, read_model_type_if_present,
     resolve_scheduler_for_model_with_speculative, ResolvedSchedulerRuntime, SchedulerProfileSource,
     SchedulerResolutionOptions,
 };
@@ -200,8 +200,8 @@ pub fn build_engine_model_config(
     } = request;
     if model_dir.join("config.json").is_file()
         && matches!(
-            read_model_type(model_dir)?.as_str(),
-            "qwen3_asr" | "nemotron_diarization"
+            read_model_type_if_present(model_dir)?.as_deref(),
+            Some("qwen3_asr" | "nemotron_diarization")
         )
     {
         if audio.is_some()
@@ -846,8 +846,8 @@ pub fn build_engine_model_config_for_pool(
     if model.load_policy != EngineLoadPolicy::Disabled
         && model.path.join("config.json").is_file()
         && matches!(
-            read_model_type(&model.path)?.as_str(),
-            "qwen3_asr" | "nemotron_diarization"
+            read_model_type_if_present(&model.path)?.as_deref(),
+            Some("qwen3_asr" | "nemotron_diarization")
         )
     {
         if model.audio.is_some()

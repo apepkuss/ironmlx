@@ -96,6 +96,57 @@ func runtimeLogLevelLiveHelperAndStreamingInference() async throws {
         let appLog = try String(contentsOf: logs.url(for: .app), encoding: .utf8)
         try #require(appLog.contains("app_debug_ALL") && appLog.contains("app_trace_ALL") && appLog.contains("app_debug_DEBUG"))
         try #require(!appLog.contains("app_trace_DEBUG") && !appLog.contains("app_debug_WARNING") && !appLog.contains("app_debug_ERROR") && !appLog.contains("app_debug_INFO"))
+        // Exercise the same backend log store read by the App runtime-log
+        // viewer, with a real inference request after changing its live level.
+        for level in [AppLogLevel.info, .debug] {
+            try await control.apply(level)
+            let before = try Data(contentsOf: logs.url(for: .backend)).count
+            var compatibility = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!, timeoutInterval: 120)
+            compatibility.httpMethod = "POST"
+            compatibility.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            compatibility.httpBody = try JSONSerialization.data(withJSONObject: [
+                "model": model, "messages": [["role": "user", "content": [[
+                    "type": "text", "text": "Say hello.",
+                    "cache_control": ["secret": "DO_NOT_LOG_REQUEST_VALUE"]
+                ]]]],
+                "max_completion_tokens": 8, "temperature": 0,
+                "enable_thinking": false,
+                "client_extension": ["secret": "DO_NOT_LOG_REQUEST_VALUE"]
+            ])
+            let (_, reply) = try await URLSession.shared.data(for: compatibility)
+            try #require((reply as? HTTPURLResponse)?.statusCode == 200)
+            let segment = String(decoding: try Data(contentsOf: logs.url(for: .backend)).dropFirst(before), as: UTF8.self)
+            try #require(!segment.contains("DO_NOT_LOG_REQUEST_VALUE"))
+            try #require(segment.contains("ignored unsupported request fields") == (level == .debug))
+            if level == .debug {
+                let visible = logs.tailText(from: .backend)
+                try #require(visible.contains("enable_thinking") && visible.contains("client_extension"))
+                try #require(visible.contains("/messages/0/content/0/cache_control"))
+            }
+            // Preserve raw duplicate keys: JSONSerialization would discard
+            // the overwritten value before it reached the actual API parser.
+            let duplicateBefore = try Data(contentsOf: logs.url(for: .backend)).count
+            var duplicate = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/responses")!, timeoutInterval: 120)
+            duplicate.httpMethod = "POST"
+            duplicate.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            duplicate.httpBody = Data("""
+            {"model":"\(model)","input":"Say hello.","max_output_tokens":8,"temperature":0,"text":{"format":"DO_NOT_LOG_DISCARDED_VALUE","format":{"type":"text","duplicate_format_extension":{"secret":"DO_NOT_LOG_REQUEST_VALUE"}}},"duplicate_request_extension":true}
+            """.utf8)
+            let (duplicateData, duplicateReply) = try await URLSession.shared.data(for: duplicate)
+            try #require((duplicateReply as? HTTPURLResponse)?.statusCode == 200)
+            let duplicateBody = try #require(JSONSerialization.jsonObject(with: duplicateData) as? [String: Any])
+            try #require((duplicateBody["output"] as? [Any])?.isEmpty == false)
+            let duplicateSegment = String(decoding: try Data(contentsOf: logs.url(for: .backend)).dropFirst(duplicateBefore), as: UTF8.self)
+            try #require(!duplicateSegment.contains("DO_NOT_LOG_REQUEST_VALUE") && !duplicateSegment.contains("DO_NOT_LOG_DISCARDED_VALUE"))
+            try #require(!duplicateSegment.contains("unable to inspect request field structure"))
+            try #require(duplicateSegment.contains("ignored unsupported request fields") == (level == .debug))
+            if level == .debug {
+                for path in ["/duplicate_request_extension", "/text/format/duplicate_format_extension"] {
+                    try #require(duplicateSegment.contains(path))
+                    try #require(logs.tailText(from: .backend).contains(path))
+                }
+            }
+        }
         try await control.apply(.debug)
         await runtime.stopForAppQuit()
         try #require(!manager.isRunning)

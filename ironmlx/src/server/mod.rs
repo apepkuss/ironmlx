@@ -39,6 +39,7 @@ pub mod engine;
 pub(crate) mod images;
 pub(crate) mod realtime;
 mod realtime_speakers;
+mod request_diagnostics;
 pub(crate) mod systemone;
 pub(crate) mod transcriptions;
 mod webrtc;

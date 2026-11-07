@@ -131,16 +131,14 @@ fn format_stream_error(error: &anyhow::Error) -> Bytes {
 }
 
 /// Anthropic native image source — base64 only (URL source is out of scope).
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicImageSource {
     Base64 { media_type: String, data: String },
 }
 
 /// Anthropic native content block.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicContentPart {
     Text {
@@ -170,37 +168,34 @@ enum AnthropicContentPart {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum AnthropicToolResultContent {
     Text(String),
     Parts(Vec<AnthropicToolResultPart>),
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicToolResultPart {
     Text { text: String },
     Image { source: AnthropicImageSource },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum AnthropicSystemPrompt {
     Text(String),
     Parts(Vec<AnthropicSystemPart>),
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicSystemPart {
     Text { text: String },
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct AnthropicToolDefinition {
     name: String,
     #[serde(default)]
@@ -210,8 +205,8 @@ pub(crate) struct AnthropicToolDefinition {
     strict: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum AnthropicToolChoice {
     Auto {
         #[serde(default)]
@@ -229,8 +224,7 @@ pub(crate) enum AnthropicToolChoice {
     None,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct AnthropicOutputConfig {
     #[serde(default)]
     format: Option<AnthropicOutputFormat>,
@@ -238,13 +232,13 @@ struct AnthropicOutputConfig {
     effort: Option<AnthropicEffort>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicOutputFormat {
     JsonSchema { schema: serde_json::Value },
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum AnthropicEffort {
     Low,
@@ -254,15 +248,15 @@ enum AnthropicEffort {
     Max,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum AnthropicThinkingDisplay {
     Summarized,
     Omitted,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicThinkingConfig {
     Disabled,
     Enabled {
@@ -339,7 +333,7 @@ fn validate_thinking_display(display: Option<AnthropicThinkingDisplay>) -> anyho
 }
 
 /// Anthropic message content: plain string or an array of content blocks.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 enum AnthropicContent {
     Text(String),
@@ -347,15 +341,13 @@ enum AnthropicContent {
 }
 
 /// Anthropic message (private wire type; not shared with the OpenAI endpoint).
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct AnthropicMessage {
     role: String,
     content: AnthropicContent,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct MessagesRequest {
     #[serde(default)]
     pub model: Option<String>,
@@ -383,6 +375,12 @@ pub struct MessagesRequest {
 }
 
 impl MessagesRequest {
+    pub(crate) fn diagnostic_shape(
+        &self,
+    ) -> Result<super::request_diagnostics::FieldShape, serde_json::Error> {
+        super::request_diagnostics::shape(self)
+    }
+
     fn validate_sampling(&self) -> anyhow::Result<()> {
         if let Some(temperature) = self.temperature {
             anyhow::ensure!(
@@ -855,8 +853,6 @@ impl MessagesRequest {
             tools,
             tool_choice,
             parallel_tool_calls,
-            function_call: None,
-            functions: None,
             response_format,
             stream: self.stream,
             stream_options: None,
@@ -2401,13 +2397,13 @@ mod tests {
     }
 
     #[test]
-    fn messages_request_rejects_nonstandard_repetition_penalty() {
-        let error = serde_json::from_value::<MessagesRequest>(serde_json::json!({
+    fn messages_request_ignores_nonstandard_repetition_penalty() {
+        let request = serde_json::from_value::<MessagesRequest>(serde_json::json!({
             "messages": [],
             "repetition_penalty": 1.1
         }))
-        .unwrap_err();
-        assert!(error.to_string().contains("repetition_penalty"), "{error}");
+        .unwrap();
+        request.validate_sampling().unwrap();
     }
 
     #[test]
@@ -2445,7 +2441,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn messages_http_contract_rejects_unknown_and_invalid_sampling_fields_with_400() {
+    async fn messages_http_contract_rejects_invalid_sampling_fields_with_400() {
         use axum::body::Body;
         use axum::http::Request;
         use axum::routing::post;
@@ -2458,8 +2454,6 @@ mod tests {
 
         let app = Router::new().route("/v1/messages", post(validate));
         for body in [
-            serde_json::json!({"messages": [], "repetition_penalty": 1.1}),
-            serde_json::json!({"messages": [], "unsupported": true}),
             serde_json::json!({"messages": [], "temperature": 1.1}),
             serde_json::json!({"messages": [], "top_p": 0.0}),
             serde_json::json!({"messages": [], "top_k": 0}),
@@ -2909,7 +2903,7 @@ mod tests {
         }
 
         #[test]
-        fn structured_outputs_reject_prefill_deprecated_and_unknown_shapes() {
+        fn structured_outputs_ignore_extensions_but_reject_prefill_and_invalid_formats() {
             let schema = serde_json::json!({
                 "type": "object",
                 "properties": {"answer": {"type": "string"}},
@@ -2943,7 +2937,15 @@ mod tests {
                     }
                 }),
             ] {
-                assert!(serde_json::from_value::<MessagesRequest>(invalid).is_err());
+                let invalid_format = invalid
+                    .get("output_config")
+                    .and_then(|c| c.get("format"))
+                    .and_then(|f| f.get("type"))
+                    .is_some_and(|t| t == "json_object");
+                assert_eq!(
+                    serde_json::from_value::<MessagesRequest>(invalid).is_err(),
+                    invalid_format
+                );
             }
         }
 
@@ -3040,13 +3042,13 @@ mod tests {
         }
 
         #[test]
-        fn rejects_unknown_fields_and_invalid_block_roles() {
+        fn ignores_unknown_fields_but_rejects_invalid_block_roles() {
             assert!(
                 serde_json::from_value::<MessagesRequest>(serde_json::json!({
                     "messages": [],
                     "unsupported": true
                 }))
-                .is_err()
+                .is_ok()
             );
 
             let user_tool_use: MessagesRequest = serde_json::from_value(serde_json::json!({

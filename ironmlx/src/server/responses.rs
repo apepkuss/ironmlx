@@ -76,8 +76,7 @@ async fn next_scheduler_event(
     Ok(Some(event))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ResponsesRequest {
     #[serde(default)]
     pub model: Option<String>,
@@ -94,14 +93,6 @@ pub struct ResponsesRequest {
     pub stream: bool,
     #[serde(default)]
     pub stream_options: Option<serde_json::Value>,
-    #[serde(default)]
-    pub store: Option<bool>,
-    #[serde(default)]
-    pub previous_response_id: Option<String>,
-    #[serde(default)]
-    pub conversation: Option<serde_json::Value>,
-    #[serde(default)]
-    pub background: Option<bool>,
     #[serde(default)]
     pub max_output_tokens: Option<usize>,
     #[serde(default)]
@@ -128,7 +119,7 @@ pub struct ResponsesRequest {
 
 type ResponseTextFormat = StructuredOutputFormat;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ResponsesInput {
     Text(String),
@@ -162,7 +153,7 @@ where
         .collect()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseInputItem {
     Message {
@@ -229,7 +220,6 @@ pub enum ReasoningSummaryMode {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct ReasoningRequest {
     #[serde(default)]
     pub effort: Option<ReasoningEffort>,
@@ -238,26 +228,26 @@ pub struct ReasoningRequest {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReasoningSummaryPart {
     SummaryText { text: String },
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReasoningContentPart {
     ReasoningText { text: String },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ResponseMessageContent {
     Text(String),
     Parts(Vec<ResponseContentPart>),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseContentPart {
     InputText {
@@ -276,14 +266,14 @@ pub enum ResponseContentPart {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum FunctionCallOutput {
     Text(String),
     Parts(Vec<FunctionCallOutputPart>),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FunctionCallOutputPart {
     InputText { text: String },
@@ -291,7 +281,7 @@ pub enum FunctionCallOutputPart {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseTool {
     Function {
         name: String,
@@ -311,7 +301,7 @@ pub enum ResponseTool {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseNamespaceTool {
     Function {
         name: String,
@@ -573,6 +563,43 @@ pub(crate) fn error_response(
 }
 
 impl ResponsesRequest {
+    pub(crate) fn diagnostic_shape(
+        &self,
+    ) -> Result<super::request_diagnostics::FieldShape, serde_json::Error> {
+        // These Value fields are parsed later by normalize_tool_choice and
+        // parse_response_text_format; refine them into their protocol objects.
+        #[derive(Deserialize, Serialize)]
+        struct FunctionChoice {
+            #[serde(rename = "type")]
+            kind: String,
+            name: String,
+            namespace: Option<serde_json::Value>,
+        }
+        #[derive(Deserialize, Serialize)]
+        struct TextConfig {
+            format: Option<ResponseTextFormat>,
+        }
+        let mut shape = super::request_diagnostics::shape(self)?;
+        if let Some(choice) = self.tool_choice.as_ref().filter(|v| v.is_object()) {
+            if let Ok(choice) = serde_json::from_value::<FunctionChoice>(choice.clone()) {
+                shape.set("tool_choice", super::request_diagnostics::shape(&choice)?);
+            }
+        }
+        if let Some(text) = &self.text {
+            if let Ok(text) = serde_json::from_value::<TextConfig>(text.clone()) {
+                shape.set("text", super::request_diagnostics::shape(&text)?);
+            }
+        }
+        if self.stream_options.as_ref().is_some_and(|v| v.is_object()) {
+            // The container is accepted, but none of its options are consumed.
+            shape.set(
+                "stream_options",
+                super::request_diagnostics::FieldShape::Object(Default::default()),
+            );
+        }
+        Ok(shape)
+    }
+
     pub(crate) fn validate_topology_contract(&self) -> anyhow::Result<()> {
         validate_advisory_fields(self)
     }
@@ -600,22 +627,6 @@ fn validate_advisory_fields(req: &ResponsesRequest) -> anyhow::Result<()> {
             "top_p must be finite and in (0, 1]"
         );
     }
-    anyhow::ensure!(
-        req.store != Some(true),
-        "store=true is not supported by the stateless local Responses API; send store=false and the complete input history"
-    );
-    anyhow::ensure!(
-        req.previous_response_id.is_none(),
-        "previous_response_id requires server-side response storage and is not supported"
-    );
-    anyhow::ensure!(
-        req.conversation.is_none(),
-        "conversation state is not supported by the local inference server"
-    );
-    anyhow::ensure!(
-        req.background != Some(true),
-        "background responses are not supported"
-    );
     if let Some(tier) = req.service_tier.as_deref() {
         anyhow::ensure!(
             matches!(tier, "auto" | "default" | "flex"),
@@ -1193,12 +1204,6 @@ fn normalize_tool_choice(choice: Option<serde_json::Value>) -> anyhow::Result<se
         object.get("namespace").is_none(),
         "named tool_choice for namespace children is not supported; use tool_choice=`auto` or `required`"
     );
-    anyhow::ensure!(
-        object
-            .keys()
-            .all(|key| matches!(key.as_str(), "type" | "name" | "namespace")),
-        "function tool_choice contains unsupported fields"
-    );
     Ok(serde_json::json!({
         "type": "function",
         "function": {"name": name}
@@ -1244,8 +1249,6 @@ impl ResponsesRequest {
                 tools: (!tools.is_empty()).then_some(tools),
                 tool_choice,
                 parallel_tool_calls: self.parallel_tool_calls,
-                function_call: None,
-                functions: None,
                 response_format: None,
                 stream: self.stream,
                 stream_options: None,
@@ -2936,14 +2939,16 @@ mod tests {
     }
 
     #[test]
-    fn responses_sampling_contract_rejects_nonstandard_and_invalid_fields() {
+    fn responses_sampling_contract_ignores_nonstandard_but_rejects_invalid_fields() {
         for field in ["top_k", "repetition_penalty"] {
             let mut body = serde_json::json!({"model": "local", "input": "hi"});
             body.as_object_mut()
                 .unwrap()
                 .insert(field.to_owned(), serde_json::json!(1));
-            let error = serde_json::from_value::<ResponsesRequest>(body).unwrap_err();
-            assert!(error.to_string().contains(field), "{error}");
+            serde_json::from_value::<ResponsesRequest>(body)
+                .unwrap()
+                .normalize()
+                .unwrap();
         }
 
         for body in [
@@ -3640,15 +3645,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_stateful_and_hosted_semantics() {
-        let error = request(serde_json::json!({
-            "model":"local",
-            "input":"hello",
-            "store":true
-        }))
-        .normalize()
-        .unwrap_err();
-        assert!(error.to_string().contains("store=true"));
+    fn ignores_unimplemented_state_and_hosted_request_fields() {
+        request(serde_json::json!({
+            "model":"local", "input":"hello", "store":true,
+            "previous_response_id":"resp_unknown", "conversation":{"id":"conv_unknown"}, "background":true
+        })).normalize().unwrap();
     }
 
     #[test]

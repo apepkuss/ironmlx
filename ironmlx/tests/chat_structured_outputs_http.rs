@@ -195,14 +195,19 @@ async fn chat_structured_outputs_real_http_acceptance() {
     assert!(sse.trim_end().ends_with("data: [DONE]"));
 
     let mut unknown_field = base_request();
-    unknown_field["response_format"] = serde_json::json!({"type": "json_object", "extra": true});
+    unknown_field["response_format"]["extra"] = serde_json::json!(true);
     let response = client
         .post(&endpoint)
         .json(&unknown_field)
         .send()
         .await
         .expect("unknown response_format field request");
-    assert_eq!(response.status(), 400);
+    assert_eq!(response.status(), 200);
+    let body: serde_json::Value = response.json().await.expect("structured extension body");
+    let content: serde_json::Value =
+        serde_json::from_str(body["choices"][0]["message"]["content"].as_str().unwrap())
+            .expect("structured extension JSON");
+    assert_eq!(content, serde_json::json!({"city": "Tokyo", "days": 2}));
 
     if let Some(python) = std::env::var_os("CHAT_PARAMETERS_SDK_PYTHON") {
         let output = std::process::Command::new(python)

@@ -7,7 +7,7 @@ use super::chat_format::{ChatMessage, Content, ContentPart};
 /// Responses. Each adapter is responsible for mapping its wire shape into
 /// this representation.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum StructuredOutputFormat {
     #[default]
     Text,
