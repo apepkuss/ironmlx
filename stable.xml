@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes"?><!-- sparkle-sign-warning:
 IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
---><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0"><channel><title>IronMLX stable</title><item><title>IronMLX v0.2.0</title><pubDate>Sun, 01 Nov 2026 13:49:05 +0000</pubDate><sparkle:version>9</sparkle:version><sparkle:shortVersionString>0.2.0</sparkle:shortVersionString><sparkle:minimumSystemVersion>26.4</sparkle:minimumSystemVersion><enclosure url="https://github.com/apepkuss/ironmlx/releases/download/v0.2.0/IronMLX-v0.2.0-update.zip" length="75757530" type="application/octet-stream" sparkle:edSignature="F5+SF07kfo7+obv6mXSBOhDyqwe7xZi0pbidS3jMcLfk6SaSQTOVFaZUnYplQBQbQytJL7VgDgRdQeasG4AODg=="></enclosure></item></channel></rss><!-- sparkle-signatures:
-edSignature: /vGcsy6dohKRl/sSLsWOEqI9kMs1YL1exIqVqVEwbf2sfzVMZCjC2Ddn9PJoZ6nJCiKB1t1ohpBeNewSW8qcDw==
-length: 964
+--><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0"><channel><title>IronMLX stable</title><item><title>IronMLX v0.3.0</title><pubDate>Sat, 07 Nov 2026 00:30:13 +0000</pubDate><sparkle:version>10</sparkle:version><sparkle:shortVersionString>0.3.0</sparkle:shortVersionString><sparkle:minimumSystemVersion>26.4</sparkle:minimumSystemVersion><enclosure url="https://github.com/apepkuss/ironmlx/releases/download/v0.3.0/IronMLX-v0.3.0-update.zip" length="78897700" type="application/octet-stream" sparkle:edSignature="o+bOYyb9HwyEvo45Fz7FIoXvW2PsysxPK8P8eAEm6wCRKhJuwnFeNKfzh4mtJuzCmPCi9iaz+NM9EPjoiKblDA=="></enclosure></item></channel></rss><!-- sparkle-signatures:
+edSignature: Qd+owEqTNvID22aefSSaajblbli8t9V5Cvc8p2+6hxuokIiqjOTaORTPa1ahiUzFGMmBfRvzZ/vbpz18MXtfCA==
+length: 965
 -->
