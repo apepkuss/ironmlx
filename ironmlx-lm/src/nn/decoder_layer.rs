@@ -29,6 +29,43 @@ enum HalfMlp {
     Gpu(Array),
 }
 
+/// The second half of a [`DecoderLayer::forward_pair_on`] layer: its output,
+/// or its residual and the MLP whose ANE channels are still pending. It is
+/// awaited by [`Self::resolve`] before anything reads it.
+pub(crate) enum PairTail<'a> {
+    Ready(Array),
+    Pending {
+        layer: &'a DecoderLayer,
+        residual: Array,
+        mlp: crate::nn::mlp::AneHalf,
+    },
+}
+
+impl PairTail<'_> {
+    /// The half's output; a pending MLP is awaited, and recomputed on the GPU
+    /// if its ANE job failed.
+    pub(crate) fn resolve(self, target: StreamOrDevice) -> Result<Array> {
+        match self {
+            Self::Ready(out) => Ok(out),
+            Self::Pending {
+                layer,
+                residual,
+                mlp,
+            } => Ok(&residual + &layer.mlp.ane_half_finish_on(mlp, target)?),
+        }
+    }
+}
+
+/// One [`DecoderLayer::forward_pair_on`] step.
+pub(crate) struct PairStep<'a> {
+    /// This layer's first-half output.
+    pub(crate) first: Array,
+    /// The previous layer's second-half output, resolved during this step.
+    pub(crate) previous_second: Array,
+    /// This layer's second half, resolved by the next step (or the caller).
+    pub(crate) second: PairTail<'a>,
+}
+
 #[derive(Clone, Copy)]
 struct DecodeLayerTurboProfileEvent {
     stage: &'static str,
@@ -523,92 +560,129 @@ impl DecoderLayer {
     }
 
     /// The half-chunk pipeline's layer (`DENSE_PREFILL_ANE_FFN_PIPELINE`):
-    /// the two consecutive halves `xs[0]`, `xs[1]` of one sequence's chunk
-    /// (`cos` / `sin` each half's), in order through the attention and its
-    /// cache, each MLP handed half to the Neural Engine
-    /// ([`Mlp::ane_half_begin_on`]). Both halves' GPU MLP channels are
-    /// submitted before either awaits the ANE, so the ANE computes half 0
-    /// while the GPU runs half 1's attention and both halves' channels, and
-    /// half 1 while the GPU joins half 0 and starts the next layer. Without
+    /// the two consecutive halves of one sequence's chunk (`cos` / `sin` each
+    /// half's), in order through the attention and its cache, each MLP handed
+    /// half to the Neural Engine ([`Mlp::ane_half_begin_on`]). `first` is the
+    /// previous layer's first-half output and `previous` its second half,
+    /// still pending: it is awaited only after this layer's first half is
+    /// submitted, so the GPU runs that half while the ANE finishes the
+    /// previous one (the first half needs no output of the second). This
+    /// layer's first half is awaited after its second half is submitted;
+    /// its second half is returned pending. Every ANE output is awaited, and
+    /// recomputed on the GPU on failure, before anything reads it. Without
     /// the ANE the halves' MLPs run on the GPU.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn forward_pair_on(
-        &self,
-        xs: [&Array; 2],
+    pub(crate) fn forward_pair_on<'a>(
+        &'a self,
+        first: &Array,
+        previous: PairTail<'_>,
         mrope: &Mrope,
         cos: [&Array; 2],
         sin: [&Array; 2],
         cache: &mut LayerCache,
         target: StreamOrDevice,
         layer_idx: i32,
-    ) -> Result<[Array; 2]> {
-        let mut residual = Vec::with_capacity(2);
-        let mut halves = Vec::with_capacity(2);
-        for half in 0..2 {
-            let x = xs[half];
-            self.preflight_x(x, "DecoderLayer::forward_pair_on")?;
-            let normed_in = self.input_layernorm.forward_on(x, target)?;
-            let attn = match (&self.attn, &mut *cache) {
-                (AttnPath::Full(a), LayerCache::Full(kv)) => a.forward_on(
-                    &normed_in,
-                    mrope,
-                    cos[half],
-                    sin[half],
-                    None,
-                    None,
-                    None,
-                    Some(kv),
-                    target,
-                    layer_idx,
-                )?,
-                (AttnPath::Linear(a), LayerCache::Linear(gdc)) => {
-                    a.forward_on(&normed_in, None, None, Some(gdc), target, layer_idx)?
-                }
-                _ => {
-                    return Err(anyhow!(
-                        "DecoderLayer::forward_pair_on: cache kind does not match the layer"
-                    ));
-                }
-            };
-            let h = x + &attn;
-            let normed_post = self.post_attention_layernorm.forward_on(&h, target)?;
-            // Half 1 follows half 0 onto the ANE only if half 0 went there.
-            let on_ane = half == 0 || matches!(halves[0], HalfMlp::Ane(_));
-            let started = if on_ane {
-                self.mlp.ane_half_begin_on(&normed_post, half, target)?
-            } else {
-                None
-            };
-            // A failed second handoff can recompute that stateless MLP on
-            // GPU while the first pending half finishes safely on ANE.
-            halves.push(match started {
+    ) -> Result<PairStep<'a>> {
+        let (h0, half0) = self.pair_half_on(
+            first, 0, true, mrope, cos[0], sin[0], cache, target, layer_idx,
+        )?;
+        if let HalfMlp::Ane(started) = &half0 {
+            mlx::transforms::async_eval(&[&started.partial])?;
+        }
+        let previous_second = previous.resolve(target)?;
+        // Half 1 follows half 0 onto the ANE only if half 0 went there.
+        let on_ane = matches!(half0, HalfMlp::Ane(_));
+        let (h1, half1) = self.pair_half_on(
+            &previous_second,
+            1,
+            on_ane,
+            mrope,
+            cos[1],
+            sin[1],
+            cache,
+            target,
+            layer_idx,
+        )?;
+        if let HalfMlp::Ane(started) = &half1 {
+            mlx::transforms::async_eval(&[&started.partial])?;
+        }
+        let first = match half0 {
+            HalfMlp::Ane(started) => &h0 + &self.mlp.ane_half_finish_on(started, target)?,
+            HalfMlp::Gpu(normed_post) => &h0 + &self.mlp.forward_on(&normed_post, target)?,
+        };
+        let second = match half1 {
+            HalfMlp::Ane(mlp) => PairTail::Pending {
+                layer: self,
+                residual: h1,
+                mlp,
+            },
+            HalfMlp::Gpu(normed_post) => {
+                PairTail::Ready(&h1 + &self.mlp.forward_on(&normed_post, target)?)
+            }
+        };
+        Ok(PairStep {
+            first,
+            previous_second,
+            second,
+        })
+    }
+
+    /// One half of [`Self::forward_pair_on`]: the attention (with its cache)
+    /// and residual, and the MLP handed to the ANE when `on_ane` and the
+    /// handoff starts; otherwise its input is kept for the GPU.
+    #[allow(clippy::too_many_arguments)]
+    fn pair_half_on(
+        &self,
+        x: &Array,
+        half: usize,
+        on_ane: bool,
+        mrope: &Mrope,
+        cos: &Array,
+        sin: &Array,
+        cache: &mut LayerCache,
+        target: StreamOrDevice,
+        layer_idx: i32,
+    ) -> Result<(Array, HalfMlp)> {
+        self.preflight_x(x, "DecoderLayer::forward_pair_on")?;
+        let normed_in = self.input_layernorm.forward_on(x, target)?;
+        let attn = match (&self.attn, cache) {
+            (AttnPath::Full(a), LayerCache::Full(kv)) => a.forward_on(
+                &normed_in,
+                mrope,
+                cos,
+                sin,
+                None,
+                None,
+                None,
+                Some(kv),
+                target,
+                layer_idx,
+            )?,
+            (AttnPath::Linear(a), LayerCache::Linear(gdc)) => {
+                a.forward_on(&normed_in, None, None, Some(gdc), target, layer_idx)?
+            }
+            _ => {
+                return Err(anyhow!(
+                    "DecoderLayer::forward_pair_on: cache kind does not match the layer"
+                ));
+            }
+        };
+        let h = x + &attn;
+        let normed_post = self.post_attention_layernorm.forward_on(&h, target)?;
+        let started = if on_ane {
+            self.mlp.ane_half_begin_on(&normed_post, half, target)?
+        } else {
+            None
+        };
+        // A failed second handoff can recompute that stateless MLP on
+        // GPU while the first pending half finishes safely on ANE.
+        Ok((
+            h,
+            match started {
                 Some(started) => HalfMlp::Ane(started),
                 None => HalfMlp::Gpu(normed_post),
-            });
-            residual.push(h);
-        }
-        let partials: Vec<&Array> = halves
-            .iter()
-            .filter_map(|half| match half {
-                HalfMlp::Ane(started) => Some(&started.partial),
-                HalfMlp::Gpu(_) => None,
-            })
-            .collect();
-        if !partials.is_empty() {
-            mlx::transforms::async_eval(&partials)?;
-        }
-        let mut outs = Vec::with_capacity(2);
-        for (h, half) in residual.iter().zip(halves) {
-            let mlp_out = match half {
-                HalfMlp::Ane(started) => self.mlp.ane_half_finish_on(started, target)?,
-                HalfMlp::Gpu(normed_post) => self.mlp.forward_on(&normed_post, target)?,
-            };
-            outs.push(h + &mlp_out);
-        }
-        let [a, b]: [Array; 2] = outs
-            .try_into()
-            .map_err(|_| anyhow!("DecoderLayer::forward_pair_on: two halves"))?;
-        Ok([a, b])
+            },
+        ))
     }
 
     /// Production constructor. `kind` selects which attention path to load
