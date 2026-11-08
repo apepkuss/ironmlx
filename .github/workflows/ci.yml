@@ -35,12 +35,17 @@ jobs:
   changes:
     name: Classify changes
     runs-on: macos-26
+    permissions:
+      contents: read
+      actions: read
     outputs:
       docs_changed: ${{ steps.range.outputs.docs_changed }}
       website_changed: ${{ steps.range.outputs.website_changed }}
       code_changed: ${{ steps.range.outputs.code_changed }}
       base_sha: ${{ steps.range.outputs.base_sha }}
       head_sha: ${{ steps.range.outputs.head_sha }}
+      verified_run_id: ${{ steps.verified.outputs.verified_run_id }}
+      verified_run_url: ${{ steps.verified.outputs.verified_run_url }}
     steps:
       - name: Checkout change range
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,6 +55,9 @@ jobs:
 
       - name: Test CI range resolution
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_ci_change_range.py -v
+
+      - name: Test verified source tree lookup
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_find_verified_ci_run.py -v
 
       - name: Resolve change range
         id: range
@@ -68,6 +76,28 @@ jobs:
             head_sha="$GITHUB_SHA"
           fi
           scripts/resolve-ci-change-range.sh "$base_sha" "$head_sha" >> "$GITHUB_OUTPUT"
+
+      # A squash merge or fast-forward often reproduces a tree that already
+      # passed every native job on its branch; that evidence is reused instead
+      # of repeating the same build and tests.
+      - name: Find an earlier passing run of the same source tree
+        id: verified
+        if: steps.range.outputs.code_changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/find-verified-ci-run.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow ci.yml \
+            --tree "$(git rev-parse 'HEAD^{tree}')" \
+            --current-run-id "$GITHUB_RUN_ID" \
+            --required-job "App Bundle and supply chain" \
+            --required-job "Rust lint, release builds, and Swift tests" \
+            --required-job "Rust package tests" \
+            --required-job "Rust workspace and API contract tests" \
+            >> "$GITHUB_OUTPUT"
 
   docs-quality:
     name: Documentation quality
@@ -159,12 +189,14 @@ jobs:
           git diff --exit-code
           test -z "$(git status --porcelain=v1 --untracked-files=normal)"
 
-  release-quality:
-    name: Rust, Swift, MLX, and App Bundle
+  # The native gate runs as four parallel jobs. Each job restores the same
+  # cached MLX build; a cache miss rebuilds it from the pinned source.
+  bundle:
+    name: App Bundle and supply chain
     needs: changes
-    if: needs.changes.outputs.code_changed == 'true'
+    if: needs.changes.outputs.code_changed == 'true' && needs.changes.outputs.verified_run_id == ''
     runs-on: macos-26
-    timeout-minutes: 120
+    timeout-minutes: 90
 
     steps:
       - name: Checkout immutable IronMLX commit
@@ -184,14 +216,12 @@ jobs:
         shell: bash
         run: scripts/verify-conventional-commits.sh "${{ needs.changes.outputs.base_sha }}" "${{ needs.changes.outputs.head_sha }}"
 
-      - name: Install pinned Rust toolchains
+      - name: Install pinned Rust toolchain
         shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install 1.94.0 --profile minimal --component clippy,rustfmt
-          rustup toolchain install "$RUST_NIGHTLY_TOOLCHAIN" --profile minimal --component clippy,rustfmt
           rustc --version --verbose
-          rustc "+$RUST_NIGHTLY_TOOLCHAIN" --version --verbose
 
       - name: Verify product version and publication boundary
         shell: bash
@@ -220,12 +250,30 @@ jobs:
         shell: bash
         run: scripts/verify-sbom.sh
 
-      - name: Install pinned Rust dependency audit tool
+      # Both tools are pinned and built with the pinned toolchain; the cache
+      # only avoids recompiling the same versions on every run.
+      - name: Restore pinned Rust supply-chain tools
+        id: cargo-tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.ironmlx-ci-tools
+          key: cargo-tools-v1-${{ runner.os }}-${{ runner.arch }}-audit-0.22.2-about-0.9.1-${{ hashFiles('rust-toolchain.toml') }}
+
+      - name: Install pinned Rust supply-chain tools
+        if: steps.cargo-tools.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          cargo install --locked --version 0.22.2 cargo-audit
-          test "$(cargo audit --version)" = "cargo-audit-audit 0.22.2"
+          cargo install --locked --root "$HOME/.ironmlx-ci-tools" --version 0.22.2 cargo-audit
+          cargo install --locked --root "$HOME/.ironmlx-ci-tools" --features cli --version 0.9.1 cargo-about
+
+      - name: Verify pinned Rust supply-chain tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$HOME/.ironmlx-ci-tools/bin" >> "$GITHUB_PATH"
+          test "$("$HOME/.ironmlx-ci-tools/bin/cargo-audit" audit --version)" = "cargo-audit-audit 0.22.2"
+          test "$("$HOME/.ironmlx-ci-tools/bin/cargo-about" --version)" = "cargo-about 0.9.1"
 
       - name: Audit Rust dependencies for known vulnerabilities
         shell: bash
@@ -256,29 +304,86 @@ jobs:
         shell: bash
         run: scripts/verify-secrets.sh
 
-      - name: Install pinned license inventory tool
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo install --locked --features cli --version 0.9.1 cargo-about
-          test "$(cargo-about --version)" = "cargo-about 0.9.1"
+      - name: Prepare pinned MLX
+        uses: ./.github/actions/prepare-mlx
 
-      - name: Checkout clean immutable MLX source
-        shell: bash
-        run: scripts/checkout-release-mlx.sh "$RUNNER_TEMP/ironmlx-mlx-source"
-
+      # The bundle script also regenerates and compares the third-party
+      # materials against this MLX source and build.
       - name: Build self-contained Release App Bundle
         shell: bash
         env:
           MLX_SRC: ${{ runner.temp }}/ironmlx-mlx-source
+          IRONMLX_REUSE_MLX_BUILD: "1"
         run: scripts/build-app-bundle.sh
 
-      - name: Verify reproducible third-party materials
+      # Same target directory and compiler environment as build-app-bundle.sh,
+      # so the release artifacts it built are reused and only the remaining
+      # workspace targets are compiled.
+      - name: Build every workspace target in Release
         shell: bash
-        env:
-          MLX_SRC: ${{ runner.temp }}/ironmlx-mlx-source
-          MLX_BUILD_DIR: ${{ github.workspace }}/.build/app-bundle/mlx-build
-        run: scripts/verify-third-party-materials.sh
+        run: |
+          set -euo pipefail
+          remap="-ffile-prefix-map=$HOME=. -fdebug-prefix-map=$HOME=."
+          env \
+            MLX_DIR="$GITHUB_WORKSPACE/.build/app-bundle/mlx-install" \
+            MACOSX_DEPLOYMENT_TARGET=26.4 \
+            CARGO_TARGET_DIR="$GITHUB_WORKSPACE/.build/app-bundle/cargo-target" \
+            CFLAGS="$remap" \
+            CXXFLAGS="$remap" \
+            RUSTFLAGS="--remap-path-prefix=$HOME=." \
+            cargo build --locked --release
+
+      - name: Test stable release failure boundaries
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_stable_release.py -v
+
+      - name: Test public update policy and Sparkle signatures
+        shell: bash
+        run: |
+          test -x .build/app-bundle/swift-build/artifacts/sparkle/Sparkle/bin/sign_update
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_app_updates.py -v
+
+      - name: Re-run static Bundle gate and protect tracked sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/verify-app-bundle.sh dist/IronMLX.app
+          scripts/verify-model-distribution-boundary.sh dist/IronMLX.app
+          git diff --check
+          git diff --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=no)"
+
+  rust-gates:
+    name: Rust lint, release builds, and Swift tests
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true' && needs.changes.outputs.verified_run_id == ''
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout immutable IronMLX commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify checkout identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+
+      - name: Install pinned Rust toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.94.0 --profile minimal --component clippy,rustfmt
+          rustup toolchain install "$RUST_NIGHTLY_TOOLCHAIN" --profile minimal --component clippy,rustfmt
+          rustc --version --verbose
+          rustc "+$RUST_NIGHTLY_TOOLCHAIN" --version --verbose
+
+      - name: Prepare pinned MLX
+        uses: ./.github/actions/prepare-mlx
 
       - name: Run required Rust gates
         shell: bash
@@ -290,62 +395,7 @@ jobs:
           cargo fmt --all -- --check
           cargo "+$RUST_NIGHTLY_TOOLCHAIN" fmt --all -- --check
           cargo "+$RUST_NIGHTLY_TOOLCHAIN" clippy --locked --all-features --workspace -- -D warnings
-          cargo build --locked --release
           cargo build --locked --release -p ironmlx-lm -p ironmlx-runtime --features ironmlx-lm/tools,ironmlx-runtime/tools --bins
-
-      - name: Run public API contract tests
-        shell: bash
-        env:
-          # Scheduler unit tests exercise fixed high-capacity fixtures and must
-          # not inherit the hosted runner's physical-memory tier.
-          IRONMLX_TOTAL_RAM_BYTES: "68719476736"
-          MLX_DIR: ${{ github.workspace }}/.build/app-bundle/mlx-install
-          MLX_METAL_PATH: ${{ github.workspace }}/.build/app-bundle/mlx-install/lib
-        run: |
-          set -euo pipefail
-          test -f "$MLX_DIR/lib/mlx.metallib"
-          metallib_paths=(
-            "$GITHUB_WORKSPACE/mlx-sys/mlx.metallib"
-            "$GITHUB_WORKSPACE/ironmlx/mlx.metallib"
-            "$GITHUB_WORKSPACE/ironmlx-core/mlx.metallib"
-            "$GITHUB_WORKSPACE/ironmlx-audio/mlx.metallib"
-            "$GITHUB_WORKSPACE/ironmlx-image/mlx.metallib"
-            "$GITHUB_WORKSPACE/ironmlx-lm/mlx.metallib"
-            "$GITHUB_WORKSPACE/ironmlx-runtime/mlx.metallib"
-            "$GITHUB_WORKSPACE/mlx/mlx.metallib"
-            "$GITHUB_WORKSPACE/ironmlx-bench-kernel/mlx.metallib"
-            "$GITHUB_WORKSPACE/turboquant/mlx.metallib"
-          )
-          cleanup_metallib() {
-            for path in "${metallib_paths[@]}"; do
-              rm -f "$path"
-            done
-          }
-          trap cleanup_metallib EXIT
-          for path in "${metallib_paths[@]}"; do
-            cp "$MLX_DIR/lib/mlx.metallib" "$path"
-          done
-          cargo test --locked -p ironmlx-core --no-default-features -- --test-threads=1
-          cargo test --locked -p ironmlx-image --no-default-features -- --test-threads=1
-          cargo test --locked -p ironmlx-lm --no-default-features -- --test-threads=1
-          cargo test --locked -p ironmlx-runtime --no-default-features -- --test-threads=1
-          cargo test --locked --all-features --workspace -- --test-threads=1
-          cargo test --locked --all-features \
-            --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" \
-            -p ironmlx --lib server::
-
-      - name: Run pinned official SDK contract tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          contract_venv="$RUNNER_TEMP/ironmlx-api-contract-sdk"
-          python3 -m venv "$contract_venv"
-          "$contract_venv/bin/python" -m pip install \
-            --disable-pip-version-check \
-            --requirement scripts/api-contract-sdk/requirements.txt
-          "$contract_venv/bin/python" \
-            scripts/api-contract-sdk/contract.py \
-            --fixture
 
       - name: Run Swift Release tests
         shell: bash
@@ -366,21 +416,179 @@ jobs:
           IRONMLX_SPEECH_CLIENT="$RUNNER_TEMP/ironmlx-speech-client" \
             python3 -m unittest discover -s scripts/tests -p test_speech_client.py -v
 
-      - name: Test stable release failure boundaries
-        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_stable_release.py -v
-
-      - name: Test public update policy and Sparkle signatures
-        shell: bash
-        run: |
-          test -x .build/app-bundle/swift-build/artifacts/sparkle/Sparkle/bin/sign_update
-          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_app_updates.py -v
-
-      - name: Re-run static Bundle gate and protect tracked sources
+      - name: Protect tracked sources
         shell: bash
         run: |
           set -euo pipefail
-          scripts/verify-app-bundle.sh dist/IronMLX.app
-          scripts/verify-model-distribution-boundary.sh dist/IronMLX.app
           git diff --check
           git diff --exit-code
           test -z "$(git status --porcelain=v1 --untracked-files=no)"
+
+  rust-package-tests:
+    name: Rust package tests
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true' && needs.changes.outputs.verified_run_id == ''
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout immutable IronMLX commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify checkout identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.94.0 --profile minimal --component clippy,rustfmt
+          rustc --version --verbose
+
+      - name: Prepare pinned MLX
+        uses: ./.github/actions/prepare-mlx
+
+      # Each crate also passes on its own, without features that other
+      # workspace members enable through feature unification.
+      - name: Run per-package tests without optional features
+        shell: bash
+        env:
+          # Scheduler unit tests exercise fixed high-capacity fixtures and must
+          # not inherit the hosted runner's physical-memory tier.
+          IRONMLX_TOTAL_RAM_BYTES: "68719476736"
+          MLX_DIR: ${{ github.workspace }}/.build/app-bundle/mlx-install
+          MLX_METAL_PATH: ${{ github.workspace }}/.build/app-bundle/mlx-install/lib
+        run: |
+          set -euo pipefail
+          scripts/run-with-test-metallibs.sh bash -euo pipefail -c '
+            cargo test --locked -p ironmlx-core --no-default-features -- --test-threads=1
+            cargo test --locked -p ironmlx-image --no-default-features -- --test-threads=1
+            cargo test --locked -p ironmlx-lm --no-default-features -- --test-threads=1
+            cargo test --locked -p ironmlx-runtime --no-default-features -- --test-threads=1
+          '
+
+      - name: Protect tracked sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=no)"
+
+  rust-workspace-tests:
+    name: Rust workspace and API contract tests
+    needs: changes
+    if: needs.changes.outputs.code_changed == 'true' && needs.changes.outputs.verified_run_id == ''
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout immutable IronMLX commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify checkout identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=normal)"
+
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.94.0 --profile minimal --component clippy,rustfmt
+          rustc --version --verbose
+
+      - name: Prepare pinned MLX
+        uses: ./.github/actions/prepare-mlx
+
+      - name: Run public API contract tests
+        shell: bash
+        env:
+          # Scheduler unit tests exercise fixed high-capacity fixtures and must
+          # not inherit the hosted runner's physical-memory tier.
+          IRONMLX_TOTAL_RAM_BYTES: "68719476736"
+          MLX_DIR: ${{ github.workspace }}/.build/app-bundle/mlx-install
+          MLX_METAL_PATH: ${{ github.workspace }}/.build/app-bundle/mlx-install/lib
+        run: |
+          set -euo pipefail
+          scripts/run-with-test-metallibs.sh bash -euo pipefail -c '
+            cargo test --locked --all-features --workspace -- --test-threads=1
+            cargo test --locked --all-features \
+              --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" \
+              -p ironmlx --lib server::
+          '
+
+      - name: Run pinned official SDK contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          contract_venv="$RUNNER_TEMP/ironmlx-api-contract-sdk"
+          python3 -m venv "$contract_venv"
+          "$contract_venv/bin/python" -m pip install \
+            --disable-pip-version-check \
+            --requirement scripts/api-contract-sdk/requirements.txt
+          "$contract_venv/bin/python" \
+            scripts/api-contract-sdk/contract.py \
+            --fixture
+
+      - name: Protect tracked sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=no)"
+
+  # Branch protection requires this check name. It passes when the native jobs
+  # passed, when no native input changed, or when the same tree already passed.
+  release-quality:
+    name: Rust, Swift, MLX, and App Bundle
+    needs: [changes, bundle, rust-gates, rust-package-tests, rust-workspace-tests]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every native job
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CODE_CHANGED: ${{ needs.changes.outputs.code_changed }}
+          VERIFIED_RUN_URL: ${{ needs.changes.outputs.verified_run_url }}
+          VERIFIED_RUN_ID: ${{ needs.changes.outputs.verified_run_id }}
+          NATIVE_RESULTS: >-
+            bundle=${{ needs.bundle.result }}
+            rust-gates=${{ needs.rust-gates.result }}
+            rust-package-tests=${{ needs.rust-package-tests.result }}
+            rust-workspace-tests=${{ needs.rust-workspace-tests.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "error: change classification did not succeed: $CHANGES_RESULT" >&2
+            exit 1
+          fi
+          if [[ "$CODE_CHANGED" != "true" ]]; then
+            echo "No native inputs changed; native jobs are not required"
+            exit 0
+          fi
+          if [[ -n "$VERIFIED_RUN_ID" ]]; then
+            echo "This source tree already passed every native job: $VERIFIED_RUN_URL"
+            exit 0
+          fi
+          status=0
+          for entry in $NATIVE_RESULTS; do
+            echo "$entry"
+            [[ "${entry#*=}" == "success" ]] || status=1
+          done
+          exit "$status"

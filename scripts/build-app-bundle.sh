@@ -15,8 +15,8 @@ readonly PACKAGING_DIR="$APP_SOURCE_DIR/Packaging"
 readonly BUILD_ROOT="$REPO_ROOT/.build/app-bundle"
 readonly DIST_DIR="$REPO_ROOT/dist"
 readonly APP_BUNDLE="$DIST_DIR/IronMLX.app"
-readonly DEPLOYMENT_TARGET="26.4"
-readonly ARCHITECTURE="arm64"
+readonly DEPLOYMENT_TARGET="$IRONMLX_MACOS_DEPLOYMENT_TARGET"
+readonly ARCHITECTURE="$IRONMLX_ARCHITECTURE"
 readonly BUILDER_HOME="${HOME:?HOME must be set}"
 readonly C_PATH_REMAP_FLAGS="-ffile-prefix-map=$BUILDER_HOME=. -fdebug-prefix-map=$BUILDER_HOME=."
 readonly RUST_PATH_REMAP_FLAG="--remap-path-prefix=$BUILDER_HOME=."
@@ -69,50 +69,16 @@ if [ -n "$(git -C "$REPO_ROOT" status --porcelain=v1 --untracked-files=normal)" 
   source_tree_state="dirty"
 fi
 
-rm -rf "$BUILD_ROOT"
-mkdir -p "$BUILD_ROOT/mlx-build" "$BUILD_ROOT/mlx-install" "$DIST_DIR"
-
-echo "==> Build MLX $IRONMLX_MLX_COMMIT (Release, arm64, macOS $DEPLOYMENT_TARGET)"
-cmake -S "$MLX_SOURCE" -B "$BUILD_ROOT/mlx-build" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_SHARED_LIBS=OFF \
-  -DMLX_BUILD_METAL=ON \
-  -DMLX_METAL_JIT=OFF \
-  -DMLX_BUILD_TESTS=OFF \
-  -DMLX_BUILD_EXAMPLES=OFF \
-  -DMLX_BUILD_BENCHMARKS=OFF \
-  -DMLX_BUILD_PYTHON_BINDINGS=OFF \
-  -DMLX_METAL_PATH=. \
-  -DCMAKE_C_FLAGS="$C_PATH_REMAP_FLAGS" \
-  -DCMAKE_CXX_FLAGS="$C_PATH_REMAP_FLAGS" \
-  -DCMAKE_OSX_ARCHITECTURES="$ARCHITECTURE" \
-  -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
-  -DCMAKE_INSTALL_PREFIX="$BUILD_ROOT/mlx-install"
-cmake --build "$BUILD_ROOT/mlx-build" --parallel "$JOBS"
-
-# MLX's metallib install rule interprets a relative MLX_METAL_PATH against the
-# source directory even though the custom build command emits it in the binary
-# directory. Install all other CMake components normally, then stage the exact
-# metallib produced by this isolated build. Keeping MLX_METAL_PATH relative is
-# what prevents a builder-specific absolute path from entering libmlx.a.
-cmake --install "$BUILD_ROOT/mlx-build" --component Unspecified
-cmake --install "$BUILD_ROOT/mlx-build" --component headers
-cmake --install "$BUILD_ROOT/mlx-build" --component metal_cpp_source
-
-gguf_library="$BUILD_ROOT/mlx-build/mlx/io/libgguflib.a"
-[ -f "$gguf_library" ] || fail "MLX build did not produce libgguflib.a"
-cp "$gguf_library" "$BUILD_ROOT/mlx-install/lib/libgguflib.a"
-metallib_build="$BUILD_ROOT/mlx-build/mlx/backend/metal/kernels/mlx.metallib"
-[ -f "$metallib_build" ] || fail "MLX build did not produce mlx.metallib"
-cp "$metallib_build" "$BUILD_ROOT/mlx-install/lib/mlx.metallib"
-for artifact in include/mlx/array.h lib/libmlx.a lib/libgguflib.a lib/mlx.metallib; do
-  [ -f "$BUILD_ROOT/mlx-install/$artifact" ] || fail "MLX install is incomplete: $artifact"
-done
-mlx_flags_file="$BUILD_ROOT/mlx-build/CMakeFiles/mlx.dir/flags.make"
-[ -f "$mlx_flags_file" ] || fail "MLX CMake flags file is missing: $mlx_flags_file"
-if grep -Fq 'MLX_METAL_NO_NAX' "$mlx_flags_file"; then
-  fail "MLX was compiled without required NAX Metal kernels"
+# Start from an empty build root. Only the MLX build may survive, and only when
+# build-mlx.sh confirms its stamp under IRONMLX_REUSE_MLX_BUILD=1.
+if [ -d "$BUILD_ROOT" ]; then
+  find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 \
+    ! -name mlx-build ! -name mlx-install ! -name mlx-build.stamp \
+    -exec rm -rf {} +
 fi
+mkdir -p "$BUILD_ROOT" "$DIST_DIR"
+
+"$SCRIPT_DIR/build-mlx.sh" "$MLX_SOURCE" "$BUILD_ROOT"
 
 echo "==> Verify tracked third-party dependency materials"
 MLX_SRC="$MLX_SOURCE" \

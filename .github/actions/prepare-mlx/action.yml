@@ -1,0 +1,44 @@
+name: Prepare pinned MLX
+description: >-
+  Check out the release-pinned MLX source and restore its CI build cache, or
+  build it from scratch on a miss, into .build/app-bundle/mlx-{build,install}.
+runs:
+  using: composite
+  steps:
+    - name: Checkout clean immutable MLX source
+      shell: bash
+      run: scripts/checkout-release-mlx.sh "$RUNNER_TEMP/ironmlx-mlx-source"
+
+    - name: Compute MLX cache key
+      id: key
+      shell: bash
+      run: |
+        set -euo pipefail
+        toolchain="$(
+          {
+            xcrun clang --version | head -n 1
+            xcrun -sdk macosx metal --version 2>&1 | head -n 1
+            xcrun --sdk macosx --show-sdk-build-version
+            cmake --version | head -n 1
+          } | shasum -a 256 | cut -c 1-16
+        )"
+        echo "key=mlx-v1-$RUNNER_OS-$RUNNER_ARCH-$toolchain-${{ hashFiles('scripts/release-config.sh', 'scripts/build-mlx.sh') }}" >> "$GITHUB_OUTPUT"
+
+    - name: Restore MLX build cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        key: ${{ steps.key.outputs.key }}
+        path: |
+          .build/app-bundle/mlx-build
+          .build/app-bundle/mlx-install
+          .build/app-bundle/mlx-build.stamp
+          !.build/app-bundle/mlx-build/**/*.o
+          !.build/app-bundle/mlx-build/**/*.air
+
+    # build-mlx.sh reuses the restored build only when its stamp matches the
+    # exact MLX commit, CMake configuration and toolchain; otherwise it rebuilds.
+    - name: Build or reuse MLX
+      shell: bash
+      env:
+        IRONMLX_REUSE_MLX_BUILD: "1"
+      run: scripts/build-mlx.sh "$RUNNER_TEMP/ironmlx-mlx-source" "$GITHUB_WORKSPACE/.build/app-bundle"

@@ -6,12 +6,13 @@
 
 | 类别 | 入口或文件组 | 保留用途 |
 |---|---|---|
-| MLX 与 App 构建 | `setup-mlx.sh`、`checkout-release-mlx.sh`、`build-app-bundle.sh`、`verify-app-bundle.sh` | 开发安装、固定依赖与 Bundle 构建检查 |
+| MLX 与 App 构建 | `setup-mlx.sh`、`checkout-release-mlx.sh`、`build-mlx.sh`、`build-app-bundle.sh`、`verify-app-bundle.sh` | 开发安装、固定依赖、MLX 与 Bundle 构建检查 |
 | 版本与发布 | `bump-version.sh`、`release-config.sh`、`package-*.sh`、`release-archives.py`、`sign-notarize-app.sh`、`publish-stable-release.py`、`verify-release-identity.py`、`verify-version-consistency.sh` | RC、stable 的版本、打包与发布链路 |
 | 自动更新 | `configure-app-updates.py`、`package-app-update.py`、`publish-update-feed.py`、`update-key-public.swift` | 更新配置、归档签名与 feed 发布 |
 | 更新验收辅助 | `validate-development-auto-update.sh`、`validate-update-installation.py`、`serve-development-appcast.py`、`generate-development-update-key.swift` | 隔离的本地更新与安装测试；部分辅助文件也供 RC/测试调用 |
 | 分发材料 | `generate-third-party-materials.*`、`update-third-party-materials.sh`、`verify-third-party-materials.sh`、`generate-sbom.py`、`verify-sbom.sh`、`verify-distribution-materials.sh`、`release-legal-gate.sh` | Notices、许可证、SBOM 的生成与发布检查 |
 | 仓库检查 | `verify-conventional-commits.sh`、`verify-license-policy.py`、`verify-model-distribution-boundary.sh`、`verify-secrets.sh` | CI 中的提交、许可证、模型排除及凭据检查 |
+| CI 编排 | `resolve-ci-change-range.sh`、`find-verified-ci-run.py`、`run-with-test-metallibs.sh` | 变更分类、同一代码树已通过时跳过原生 job、测试时放置 metallib |
 | SDK 协议 | `api-contract-sdk/` | CI 使用固定版本官方 SDK 验证 HTTP/SSE 协议 |
 | 量化验收 | `quant_validation_matrix.py`、`affine56_prefill.py`、`mxfp_strict_decode.py` | 可配置模型的 HTTP 正确性、prefill/decode 与性能比较 |
 | 推测解码与缓存 | `benchmark_prompt_lookup_matrix.py`、`benchmark_dflash2_tensor_batching_gate.py`、`benchmark_turboquant_prefix_cache_matrix.py` | 输出一致性、生命周期、并发与性能矩阵；历史结果归档到 `reports/benchmarks/` |
