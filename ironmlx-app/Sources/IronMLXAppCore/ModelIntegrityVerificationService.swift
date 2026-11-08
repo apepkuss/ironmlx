@@ -54,8 +54,7 @@ public actor ModelIntegrityVerificationService {
     private var statuses: [String: ModelIntegrityStatus] = [:]
 
     public init(
-        rootURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".ironmlx", isDirectory: true)
+        rootURL: URL = IronMLXDataRoot.url
     ) {
         self.rootURL = rootURL
     }

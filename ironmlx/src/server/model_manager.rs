@@ -886,6 +886,23 @@ impl AdminModelResponse {
     }
 }
 
+/// The `reasoning` field of a model entry: present only when the loaded chat
+/// template has a supported native reasoning channel.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct ReasoningCapabilityInfo {
+    native_efforts: &'static [&'static str],
+}
+
+impl ReasoningCapabilityInfo {
+    pub(crate) fn from_dialect(
+        dialect: Option<ironmlx_lm::core::native_output::NativeOutputDialect>,
+    ) -> Option<Self> {
+        dialect.map(|dialect| Self {
+            native_efforts: dialect.native_efforts(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct LoadedModelInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -928,6 +945,8 @@ struct LoadedModelInfo {
     prompt_lookup_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_lookup: Option<PromptLookupConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ReasoningCapabilityInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -972,6 +991,7 @@ impl From<EngineLoadedModelInfo> for LoadedModelInfo {
             decision: info.decision,
             decision_metrics: info.decision_metrics,
             embedding_metrics: info.embedding_metrics,
+            reasoning: ReasoningCapabilityInfo::from_dialect(info.native_output_dialect),
         }
     }
 }
@@ -1933,6 +1953,49 @@ mod tests {
     }
 
     #[test]
+    fn loaded_models_report_reasoning_capability() {
+        use ironmlx_lm::core::native_output::NativeOutputDialect;
+        let info = |dialect| EngineLoadedModelInfo {
+            decision: None,
+            decision_metrics: None,
+            embedding_metrics: None,
+            id: "m".to_string(),
+            path: "/models/m".to_string(),
+            architecture: "llama".to_string(),
+            capabilities: EngineModelCapabilities::for_architecture(
+                ModelArchitecture::Llama,
+                false,
+            ),
+            runtime_state: EngineRuntimeState::Loaded,
+            scheduler: Some("continuous_batching"),
+            active_requests: 0,
+            queued_requests: 0,
+            queue_capacity: 8,
+            usage: ironmlx_runtime::core::runtime_usage::ModelRuntimeUsageSnapshot::default(),
+            active_kv_offload: None,
+            is_default: true,
+            pinned: false,
+            max_position_embeddings: 4096,
+            mtp_model_dir: None,
+            mtp_draft_tokens: None,
+            prompt_lookup: None,
+            native_output_dialect: dialect,
+        };
+        let json = |dialect| {
+            serde_json::to_value(LoadedModelInfo::from(info(dialect))).expect("serialize")
+        };
+        assert_eq!(
+            json(Some(NativeOutputDialect::Qwen35))["reasoning"]["native_efforts"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            json(Some(NativeOutputDialect::Qwen38))["reasoning"]["native_efforts"],
+            serde_json::json!(["low", "medium", "xhigh"])
+        );
+        assert!(json(None).get("reasoning").is_none());
+    }
+
+    #[test]
     fn loaded_model_info_serializes_optional_runtime_health() {
         let active_config = ironmlx_runtime::core::cache::active_kv::ActiveKvOffloadConfig::enabled(
             "/tmp/model-active-kv",
@@ -1966,6 +2029,7 @@ mod tests {
             mtp_model_dir: None,
             mtp_draft_tokens: None,
             prompt_lookup: None,
+            native_output_dialect: None,
         };
 
         let enabled = serde_json::to_value(LoadedModelInfo::from(info.clone()))

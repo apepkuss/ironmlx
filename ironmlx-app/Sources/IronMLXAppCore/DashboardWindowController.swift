@@ -154,8 +154,6 @@ public final class DashboardWindowController {
     ]
     public static let dashboardWindowCollectionBehavior: NSWindow.CollectionBehavior = [.fullScreenPrimary]
     public static let dashboardWindowTitleVisibility: NSWindow.TitleVisibility = .hidden
-    public static let dashboardVisibleActivationPolicy: NSApplication.ActivationPolicy = .regular
-    public static let dashboardHiddenActivationPolicy: NSApplication.ActivationPolicy = .accessory
 
     private let configStore: AppConfigStore
     private let backend: any BackendRuntimeManaging
@@ -164,19 +162,33 @@ public final class DashboardWindowController {
     private var bridge: DashboardBridge?
     private var windowDelegate: DashboardWindowDelegate?
     private var dashboardUIDelegate: DashboardUIDelegate?
-
-    public init(configStore: AppConfigStore, backend: any BackendRuntimeManaging) {
-        self.configStore = configStore
-        self.backend = backend
+    /// Shared with chat and the no-model window: the App stays in the Dock
+    /// while any of them is open.
+    var activation: AppWindowActivation = .shared
+    private let downloadService: ModelDownloadService?
+    /// Handed to the bridge for the onboarding page; set by the App.
+    weak var chatEntry: (any ChatEntryHandling)? {
+        didSet { bridge?.chatEntry = chatEntry }
     }
 
-    public func show(route: DashboardInitialRoute = .status) {
+    /// `downloadService` is the App-wide instance; without one the bridge creates its own.
+    public init(
+        configStore: AppConfigStore,
+        backend: any BackendRuntimeManaging,
+        downloadService: ModelDownloadService? = nil
+    ) {
+        self.configStore = configStore
+        self.backend = backend
+        self.downloadService = downloadService
+    }
+
+    public func show(route: DashboardInitialRoute = .status, agentGuide: AgentGuideID? = nil) {
         if let window {
             windowDelegate?.cancelPendingHideAfterFullScreenExit()
-            Self.applyVisibleActivationPolicy()
+            activation.shown(.dashboard)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
-            apply(route: route)
+            apply(route: route, agentGuide: agentGuide)
             return
         }
 
@@ -191,7 +203,7 @@ public final class DashboardWindowController {
             WKUserScript(source: bootstrap, injectionTime: .atDocumentStart, forMainFrameOnly: true)
         )
         userContentController.addUserScript(
-            WKUserScript(source: Self.routeScript(for: route), injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+            WKUserScript(source: Self.routeScript(for: route, agentGuide: agentGuide), injectionTime: .atDocumentEnd, forMainFrameOnly: true)
         )
         configuration.userContentController = userContentController
 
@@ -201,8 +213,10 @@ public final class DashboardWindowController {
         let bridge = DashboardBridge(
             webView: webView,
             configStore: configStore,
-            backend: backend
+            backend: backend,
+            downloadService: downloadService ?? ModelDownloadService()
         )
+        bridge.chatEntry = chatEntry
         DashboardBridge.handlerNames.forEach {
             userContentController.add(bridge, name: $0)
         }
@@ -231,8 +245,8 @@ public final class DashboardWindowController {
                 bridge?.cancelDiagnosticExport()
                 window?.orderOut(nil)
             },
-            restoreAccessoryActivation: {
-                Self.applyHiddenActivationPolicy()
+            restoreAccessoryActivation: { [weak self] in
+                self?.activation.hidden(.dashboard)
             }
         )
         window.delegate = windowDelegate
@@ -248,21 +262,13 @@ public final class DashboardWindowController {
         }
         webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
 
-        Self.applyVisibleActivationPolicy()
+        activation.shown(.dashboard)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     public func cancelAllDownloads() {
         bridge?.cancelAllDownloads()
-    }
-
-    private static func applyVisibleActivationPolicy() {
-        NSApp.setActivationPolicy(dashboardVisibleActivationPolicy)
-    }
-
-    private static func applyHiddenActivationPolicy() {
-        NSApp.setActivationPolicy(dashboardHiddenActivationPolicy)
     }
 
     public static func bootstrapScript(config: AppConfig, route: DashboardInitialRoute) throws -> String {
@@ -301,30 +307,59 @@ public final class DashboardWindowController {
         window.__IRONMLX_KV_QUANT__ = \(DashboardBridge.jsStringLiteral(BackendLaunchOptions.normalizedKVQuant(config.kvQuant) ?? "none"));
         window.__IRONMLX_AUTO_HOT_CACHE_BYTES__ = \(automaticHotCacheBytes);
         window.__IRONMLX_COLD_CACHE_CAPACITY__ = \(coldCacheCapacityJSON);
+        window.__IRONMLX_DEFAULT_CACHE_DIR__ = \(DashboardBridge.jsStringLiteral(BackendLaunchOptions.defaultPagedPrefixCacheDirectory));
         window.__IRONMLX_NETWORK_INTERFACES__ = \(networkInterfacesJSON);
         window.__IRONMLX_INITIAL_ROUTE__ = \(DashboardBridge.jsStringLiteral(route.rawValue));
         """
     }
 
-    private func apply(route: DashboardInitialRoute) {
-        webView?.evaluateJavaScript(Self.routeScript(for: route)) { _, error in
+    private func apply(route: DashboardInitialRoute, agentGuide: AgentGuideID?) {
+        webView?.evaluateJavaScript(Self.routeScript(for: route, agentGuide: agentGuide)) { _, error in
             if let error {
                 IronMLXAppLogger.error("Dashboard route script error: \(error)")
             }
         }
     }
 
-    private static func routeScript(for route: DashboardInitialRoute) -> String {
+    /// Late preselection: applies only while the page still shows the guide it
+    /// opened on, so a guide the user already picked is never overridden.
+    static func lateAgentGuideScript(_ guide: AgentGuideID) -> String {
+        let value = DashboardBridge.jsStringLiteral(guide.rawValue)
+        return """
+        (function() {
+          if (typeof selectAgentGuide !== 'function' || typeof currentAgentGuide === 'undefined') return;
+          if (currentAgentGuide !== window.__ironmlxAgentGuideBaseline) return;
+          selectAgentGuide(\(value));
+        })();
+        """
+    }
+
+    /// Selects `guide` in the open Dashboard without ordering the window front.
+    public func preselectAgentGuideIfUntouched(_ guide: AgentGuideID) {
+        webView?.evaluateJavaScript(Self.lateAgentGuideScript(guide)) { _, error in
+            if let error { IronMLXAppLogger.error("Dashboard agent guide script error: \(error)") }
+        }
+    }
+
+    static func routeScript(for route: DashboardInitialRoute, agentGuide: AgentGuideID? = nil) -> String {
         let routeValue = DashboardBridge.jsStringLiteral(route.rawValue)
+        let guideValue = DashboardBridge.jsStringLiteral(agentGuide?.rawValue ?? "")
         return """
         (function() {
           var route = \(routeValue);
+          var agentGuide = \(guideValue);
           function applyInitialRoute() {
             if (route === 'status') {
               return;
             }
             if (route === 'onboarding' && typeof showOnboarding === 'function') {
               showOnboarding();
+              return;
+            }
+            if (route === 'agents') {
+              if (typeof navigateTo === 'function') navigateTo('chat');
+              if (agentGuide && typeof selectAgentGuide === 'function') selectAgentGuide(agentGuide);
+              else if (typeof currentAgentGuide !== 'undefined') window.__ironmlxAgentGuideBaseline = currentAgentGuide;
               return;
             }
             if (typeof navigateTo === 'function') {

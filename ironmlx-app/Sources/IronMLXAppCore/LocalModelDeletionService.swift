@@ -16,7 +16,7 @@ public struct LocalModelDeletionService {
     private let fileManager: FileManager
 
     public init(
-        rootURL: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ironmlx", isDirectory: true),
+        rootURL: URL = IronMLXDataRoot.url,
         configStore: AppConfigStore,
         fileManager: FileManager = .default
     ) {

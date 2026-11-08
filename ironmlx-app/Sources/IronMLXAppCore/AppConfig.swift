@@ -677,9 +677,7 @@ public final class AppConfigStore: @unchecked Sendable {
     private static let v0Keys = v1Keys.union(retiredV0Keys)
 
     public static func defaultConfigURL() -> URL {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home
-            .appendingPathComponent(".ironmlx", isDirectory: true)
+        IronMLXDataRoot.url
             .appendingPathComponent("config", isDirectory: true)
             .appendingPathComponent("app_config.json")
     }

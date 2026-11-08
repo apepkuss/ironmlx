@@ -250,7 +250,7 @@ def bundled_asset_materials(
 
     assets: list[dict[str, Any]] = []
     bundled_paths: set[tuple[str, str | None]] = set()
-    license_files: set[str] = set()
+    license_sources: dict[str, str] = {}
     for asset in manifest["assets"]:
         bundled_path = asset["bundled_path"]
         path_key = (bundled_path, asset.get("embedded_svg_marker"))
@@ -260,9 +260,9 @@ def bundled_asset_materials(
 
         license_file = asset["license_file"]
         validate_output_filename(license_file)
-        if license_file in license_files:
+        # Files from one package (a library and its fonts) share its license.
+        if license_sources.setdefault(license_file, asset["license_source"]) != asset["license_source"]:
             raise ValueError(f"duplicate bundled asset license file: {license_file}")
-        license_files.add(license_file)
 
         source_path = resolve_repository_file(repository_root, bundled_path)
         content = source_path.read_bytes()

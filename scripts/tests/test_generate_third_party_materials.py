@@ -127,6 +127,31 @@ class BundledAssetMaterialsTests(unittest.TestCase):
                 b"MIT fixture\n",
             )
 
+    def test_assets_from_one_package_share_its_license_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest, licenses_dir = self.fixture(root)
+            font = root / "Resources" / "agent.woff2"
+            font.write_bytes(b"font\n")
+            manifest["assets"].append(dict(
+                manifest["assets"][0],
+                bundled_path="Resources/agent.woff2",
+                bundled_sha256=sha256(b"font\n"),
+                component="Agent font",
+            ))
+
+            assets = GENERATOR.bundled_asset_materials(manifest, root, licenses_dir)
+
+            self.assertEqual([asset["license_file"] for asset in assets], ["asset-agent-mit.txt"] * 2)
+            self.assertEqual([path.name for path in licenses_dir.iterdir()], ["asset-agent-mit.txt"])
+
+            other = root / "compliance" / "other-license.txt"
+            other.write_bytes(b"Other\n")
+            manifest["assets"][1]["license_source"] = "compliance/other-license.txt"
+            manifest["assets"][1]["license_sha256"] = sha256(b"Other\n")
+            with self.assertRaisesRegex(ValueError, "duplicate bundled asset license file"):
+                GENERATOR.bundled_asset_materials(manifest, root, licenses_dir)
+
     def test_rejects_bundled_asset_hash_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

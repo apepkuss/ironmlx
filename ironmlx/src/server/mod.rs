@@ -358,9 +358,17 @@ struct DFlash2ModelInfo {
     object: &'static str,
     created: u64,
     owned_by: &'static str,
+    /// Same contract as the `reasoning` field of `/admin/api/models/loaded`,
+    /// which the exclusive DFlash2 server does not serve.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<model_manager::ReasoningCapabilityInfo>,
 }
 
-fn dflash2_model_list(model_id: &str, effective_cap_max: usize) -> DFlash2ModelList {
+fn dflash2_model_list(
+    model_id: &str,
+    effective_cap_max: usize,
+    native_output_dialect: Option<ironmlx_lm::core::native_output::NativeOutputDialect>,
+) -> DFlash2ModelList {
     let capacity = (effective_cap_max > 0).then_some(effective_cap_max);
     DFlash2ModelList {
         object: "list",
@@ -373,6 +381,7 @@ fn dflash2_model_list(model_id: &str, effective_cap_max: usize) -> DFlash2ModelL
             object: "model",
             created: 0,
             owned_by: "ironmlx",
+            reasoning: model_manager::ReasoningCapabilityInfo::from_dialect(native_output_dialect),
         }],
     }
 }
@@ -381,7 +390,11 @@ async fn dflash2_models_handler<M>(State(state): State<AppState<M>>) -> Json<DFl
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
-    Json(dflash2_model_list(&state.model_id, state.effective_cap_max))
+    Json(dflash2_model_list(
+        &state.model_id,
+        state.effective_cap_max,
+        state.tokenizer.native_output_dialect(),
+    ))
 }
 
 async fn serve_inner<M>(
@@ -497,8 +510,25 @@ mod tests {
     use tokio::time::sleep;
 
     #[test]
+    fn dflash2_model_list_reports_reasoning_capability() {
+        use ironmlx_lm::core::native_output::NativeOutputDialect;
+        let json = |dialect| {
+            serde_json::to_value(dflash2_model_list("m", 65536, dialect)).expect("serialize")
+        };
+        assert_eq!(
+            json(Some(NativeOutputDialect::Qwen36))["data"][0]["reasoning"]["native_efforts"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            json(Some(NativeOutputDialect::Qwen38))["data"][0]["reasoning"]["native_efforts"],
+            serde_json::json!(["low", "medium", "xhigh"])
+        );
+        assert!(json(None)["data"][0].get("reasoning").is_none());
+    }
+
+    #[test]
     fn dflash2_model_list_exposes_only_the_public_target_identifier() {
-        let list = dflash2_model_list("mlx-community/Qwen3.8-27B-4bit", 65536);
+        let list = dflash2_model_list("mlx-community/Qwen3.8-27B-4bit", 65536, None);
         let json = serde_json::to_value(list).expect("serialize model list");
 
         assert_eq!(json["object"], "list");
@@ -508,7 +538,7 @@ mod tests {
         assert_eq!(json["data"][0]["owned_by"], "ironmlx");
         assert_eq!(json["data"][0]["context_window"], 65536);
         assert_eq!(json["data"][0]["max_output_tokens"], 4096);
-        let unknown = serde_json::to_value(dflash2_model_list("unknown", 0)).unwrap();
+        let unknown = serde_json::to_value(dflash2_model_list("unknown", 0, None)).unwrap();
         assert!(unknown["data"][0].get("context_window").is_none());
         assert!(unknown["data"][0].get("max_output_tokens").is_none());
     }

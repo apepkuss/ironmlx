@@ -492,9 +492,7 @@ impl ActiveKvOffloadHealth {
 }
 
 pub fn default_active_kv_offload_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironmlx")
+    crate::core::data_root::data_root_or_current_dir()
         .join("cache")
         .join("active_kv_offload")
 }

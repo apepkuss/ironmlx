@@ -154,6 +154,9 @@ pub struct EngineLoadedModelInfo {
     pub mtp_model_dir: Option<String>,
     pub mtp_draft_tokens: Option<usize>,
     pub prompt_lookup: Option<PromptLookupConfig>,
+    /// Native reasoning contract of the loaded chat template; `None` when the
+    /// model exposes no supported native reasoning channel.
+    pub native_output_dialect: Option<ironmlx_lm::core::native_output::NativeOutputDialect>,
 }
 
 struct EnginePoolInner {
@@ -1305,6 +1308,7 @@ impl EnginePoolState {
                     .map(|mtp| mtp.model_dir.to_string_lossy().into_owned()),
                 mtp_draft_tokens: slot.model.mtp.as_ref().and_then(|mtp| mtp.draft_tokens),
                 prompt_lookup: slot.model.prompt_lookup,
+                native_output_dialect: engine.native_output_dialect(),
             });
         }
         models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -2379,6 +2383,29 @@ impl EngineVariant {
                     queue_capacity: stats.queue_capacity,
                 }
             }
+        }
+    }
+
+    fn native_output_dialect(
+        &self,
+    ) -> Option<ironmlx_lm::core::native_output::NativeOutputDialect> {
+        match self {
+            Self::Qwen35(state) => state.tokenizer.native_output_dialect(),
+            Self::Qwen35Moe(state) => state.tokenizer.native_output_dialect(),
+            Self::Qwen36Moe(state) => state.tokenizer.native_output_dialect(),
+            Self::Gemma4(state) => state.tokenizer.native_output_dialect(),
+            Self::Gemma4Drafter(state) => state.base.tokenizer.native_output_dialect(),
+            Self::Glm4MoeLite(state) => state.tokenizer.native_output_dialect(),
+            Self::Llama(state) => state.tokenizer.native_output_dialect(),
+            Self::MiniCpmV46(state) => state.tokenizer.native_output_dialect(),
+            Self::DiffusionGemma(state) => state.tokenizer.native_output_dialect(),
+            Self::QwenImage(_)
+            | Self::Audio(_)
+            | Self::Asr(_)
+            | Self::Alignment(_)
+            | Self::Diarization(_)
+            | Self::Decision(_)
+            | Self::Embedding(_) => None,
         }
     }
 

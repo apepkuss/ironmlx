@@ -2461,6 +2461,30 @@ func componentOptionalMTPDoesNotGateBaseAndCanRepairOldManifest(includeMTP: Bool
     #expect(await restored.downloadStatuses().first?.remainingBytes == 8)
 }
 
+@Test func recoverableBytesCountFinishedFilesAndTheCommittedRustPrefixAfterARestart() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/restarted"
+    let store = ModelDownloadStore(rootURL: root)
+    let staging = try store.prepareStaging(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    let config = Data(#"{"model_type":"llama"}"#.utf8)
+    try config.write(to: staging.appendingPathComponent("config.json"))
+    let weights = Data(repeating: 7, count: 64)
+    let digest = sha256(weights)
+    let identity = ModelPartialIdentity(provider: .huggingFace, repoID: repoID, commitSHA: testCommit,
+        path: "model.safetensors", expectedSize: Int64(weights.count), expectedSHA256: digest, etag: digest)
+    let cache = staging.appendingPathComponent(identity.path).appendingPathExtension("hf-transfer")
+    try ModelDownloadStore.atomicWrite(identity, to: cache.appendingPathComponent("identity.json"))
+    let partial = cache.appendingPathComponent("models--org--restarted/blobs/\(digest).sync.part")
+    try FileManager.default.createDirectory(at: partial.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try (weights + UInt64(40).littleEndianData).write(to: partial)
+    // No task or reminder survives: the App quit while downloading.
+    let service = ModelDownloadService(rootURL: root)
+    #expect(await service.recoverableDownloadBytes(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+        == Int64(config.count) + 40)
+    #expect(await service.recoverableDownloadBytes(provider: .huggingFace, repoID: "org/other", commitSHA: testCommit) == 0)
+}
+
 // Mirror fixtures deliberately provide no official-host responses, so any
 // accidental source switch fails instead of reaching the network.
 private func mirrorHuggingFaceFixtures(_ client: FakeModelDownloadHTTPClient) {
@@ -2545,4 +2569,220 @@ private func mirrorHuggingFaceFixtures(_ client: FakeModelDownloadHTTPClient) {
     #expect(client.streamRequests.last?.range == "bytes=3-")
     #expect(client.dataRequests.allSatisfy { $0.hasPrefix("https://hf-mirror.com/") })
     #expect(await service.downloadStatuses().first?.useHfMirror == true)
+}
+
+// MARK: - Starter downloads pinned by the bundled catalogue
+
+private let pinnedConfig = Data(#"{"model_type":"llama"}"#.utf8)
+private let pinnedTokenizer = Data("{}".utf8)
+private let pinnedWeights = Data("weights".utf8)
+
+/// Serves a tiny repository at `testCommit`, reachable by its pinned revision URL.
+private func configurePinnedRepository(
+    _ client: FakeModelDownloadHTTPClient,
+    repoID: String,
+    servedWeights: Data = pinnedWeights,
+    servedConfig: Data = pinnedConfig
+) {
+    configureHuggingFace(client, repoID: repoID, files: [
+        ("config.json", servedConfig, nil),
+        ("tokenizer.json", pinnedTokenizer, nil),
+        ("model.safetensors", servedWeights, sha256(pinnedWeights)),
+    ])
+    client.dataResponses["https://huggingface.co/api/models/\(repoID)/revision/\(testCommit)?blobs=true"] =
+        client.dataResponses.removeValue(forKey: "https://huggingface.co/api/models/\(repoID)?blobs=true")
+}
+
+private func pinnedFiles(
+    config: Data = pinnedConfig,
+    weights: Data = pinnedWeights,
+    omitting: String? = nil
+) -> [PinnedModelFile] {
+    [
+        PinnedModelFile(path: "config.json", size: Int64(config.count), sha256: sha256(config)),
+        PinnedModelFile(path: "tokenizer.json", size: Int64(pinnedTokenizer.count), sha256: sha256(pinnedTokenizer)),
+        PinnedModelFile(path: "model.safetensors", size: Int64(weights.count), sha256: sha256(weights)),
+    ].filter { $0.path != omitting }
+}
+
+private func expectNotInstalled(root: URL, repoID: String) throws {
+    let repository = try ModelRepositoryLayout.repositoryRoot(rootURL: root, provider: .huggingFace, repoID: repoID)
+    #expect(!FileManager.default.fileExists(atPath: repository.appendingPathComponent("snapshots/\(testCommit)").path))
+    #expect(!FileManager.default.fileExists(atPath: repository.appendingPathComponent("refs/main").path))
+    #expect((try? LocalModelScanner(rootURL: root).verifiedModelPath(for: repoID)) == nil)
+}
+
+@Test(arguments: ["content", "metadata", "file_list"])
+func pinnedHashMismatchFailsBeforeInstall(fault: String) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/pinned-starter"
+    let client = FakeModelDownloadHTTPClient()
+    // "content": the host serves bytes that differ from the pinned weights.
+    // "metadata": the host's API reports a hash that differs from the pin.
+    // "file_list": the host lists a file the catalogue does not pin.
+    configurePinnedRepository(client, repoID: repoID,
+                              servedWeights: fault == "content" ? Data("corrupt".utf8) : pinnedWeights)
+    let pins: [PinnedModelFile] = switch fault {
+    case "metadata": pinnedFiles(weights: Data("Weights".utf8))
+    case "file_list": pinnedFiles(omitting: "tokenizer.json")
+    default: pinnedFiles()
+    }
+    let service = ModelDownloadService(rootURL: root, httpClient: client, metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+
+    let result = await service.downloadHuggingFace(
+        repoID: repoID, token: nil, revision: testCommit, pinnedFiles: pins
+    )
+
+    #expect(!result.success)
+    #expect(result.code == "starter_hash_mismatch")
+    try expectNotInstalled(root: root, repoID: repoID)
+    if fault != "content" {
+        #expect(client.streamRequests.isEmpty, "A pin mismatch in the listing must stop before any transfer")
+    }
+}
+
+@Test(arguments: [false, true])
+func pinnedHashesVerifyNonLFSFiles(matching: Bool) async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/pinned-metadata"
+    let client = FakeModelDownloadHTTPClient()
+    // config.json has no LFS hash, so only the catalogue pin can catch a
+    // host that serves a different (but self-consistent) file.
+    let served = matching ? pinnedConfig : Data(#"{"model_type":"llamb"}"#.utf8)
+    configurePinnedRepository(client, repoID: repoID, servedConfig: served)
+    let service = ModelDownloadService(rootURL: root, httpClient: client, metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+
+    let result = await service.downloadHuggingFace(
+        repoID: repoID, token: nil, revision: testCommit, pinnedFiles: pinnedFiles()
+    )
+
+    if matching {
+        #expect(result.success)
+        let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+        let manifest = try ModelSnapshotVerifier().verify(snapshot: snapshot, expectedProvider: .huggingFace, expectedRepoID: repoID)
+        #expect(manifest.files.first { $0.path == "config.json" }?.sha256 == sha256(pinnedConfig))
+        #expect(client.dataRequests.contains("https://huggingface.co/api/models/\(repoID)/revision/\(testCommit)?blobs=true"))
+    } else {
+        #expect(!result.success)
+        #expect(result.code == "starter_hash_mismatch")
+        #expect(client.streamRequests.isEmpty)
+        try expectNotInstalled(root: root, repoID: repoID)
+    }
+}
+
+@Test func pinnedDownloadReportsByteProgress() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/pinned-progress"
+    let client = FakeModelDownloadHTTPClient()
+    configurePinnedRepository(client, repoID: repoID)
+    let service = ModelDownloadService(rootURL: root, httpClient: client, metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    let recorder = ProgressRecorder()
+    let result = await service.downloadHuggingFace(
+        repoID: repoID, token: nil, revision: testCommit, pinnedFiles: pinnedFiles(),
+        progress: { await recorder.record($0) }
+    )
+    #expect(result.success)
+    let total = Int64(pinnedConfig.count + pinnedTokenizer.count + pinnedWeights.count)
+    let last = try #require(await recorder.values.last)
+    #expect(last.totalBytes == total)
+    #expect(last.bytes == total)
+}
+
+private actor ProgressRecorder {
+    private(set) var values: [ModelDownloadProgress] = []
+    func record(_ value: ModelDownloadProgress) { values.append(value) }
+}
+
+@Test func restartedPausedStarterDownloadStillVerifiesCatalogPins() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/restarted-starter"
+    let client = FakeModelDownloadHTTPClient()
+    // The host serves a self-consistent config.json that differs from the pin.
+    configurePinnedRepository(client, repoID: repoID, servedConfig: Data(#"{"model_type":"llamb"}"#.utf8))
+    var reminder = ModelDownloadRecoveryReminder(provider: .huggingFace, repoID: repoID,
+        queueOrder: 0, previousStatus: "paused", usedCredential: false)
+    reminder.pausedStatus = ModelDownloadStatus(repoID: repoID, provider: "huggingface", status: "paused",
+        progressPct: 40, commitSHA: testCommit)
+    try ModelDownloadQueueReminderStore(rootURL: root).save([reminder])
+    // A fresh service, as after an App restart: no pins in memory, only the catalogue.
+    let service = ModelDownloadService(rootURL: root, httpClient: client, metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client),
+        catalogPinnedFiles: [repoID: [testCommit: pinnedFiles()]], telemetryLogger: { _ in })
+
+    #expect(await service.resumeDownload(provider: .huggingFace, repoID: repoID).success)
+    try await waitForDownloadCondition { await service.downloadStatuses().first?.errorCode != nil }
+    #expect(await service.downloadStatuses().first?.errorCode == "starter_hash_mismatch")
+    #expect(client.streamRequests.isEmpty)
+    try expectNotInstalled(root: root, repoID: repoID)
+}
+
+@Test func catalogPinsApplyOnlyToTheirPinnedCommit() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/catalog-other-commit"
+    let client = FakeModelDownloadHTTPClient()
+    configureTinyHuggingFace(client, repoID: repoID)
+    let service = ModelDownloadService(rootURL: root, httpClient: client, metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client),
+        catalogPinnedFiles: [repoID: [String(repeating: "b", count: 40): pinnedFiles(weights: Data("other".utf8))]],
+        telemetryLogger: { _ in })
+    #expect(await service.downloadHuggingFace(repoID: repoID, token: nil).success)
+}
+
+@Test func pinnedRequestDoesNotPiggybackOnAnActiveDownload() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/busy-starter"
+    let client = FakeModelDownloadHTTPClient()
+    configurePinnedRepository(client, repoID: repoID)
+    client.dataResponses["https://huggingface.co/api/models/\(repoID)?blobs=true"] =
+        client.dataResponses["https://huggingface.co/api/models/\(repoID)/revision/\(testCommit)?blobs=true"]
+    let preflight = BlockingMetadataPreflight()
+    let service = ModelDownloadService(rootURL: root, httpClient: client, metadataPreflight: preflight,
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    // An unpinned Dashboard download of the same repository is running.
+    #expect(await service.startHuggingFaceDownload(repoID: repoID, token: nil).success)
+    try await waitForDownloadCondition { await preflight.totalCalls() == 1 }
+
+    let pinned = await service.downloadHuggingFace(
+        repoID: repoID, token: nil, revision: testCommit, pinnedFiles: pinnedFiles()
+    )
+
+    #expect(!pinned.success)
+    #expect(pinned.code == "starter_download_busy")
+    await preflight.releaseAll()
+    try await waitForDownloadCondition { await service.downloadStatuses().first?.status == "completed" }
+}
+
+@Test func cancellingARestoredStarterDownloadDiscardsIt() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let paused = "org/paused-starter"
+    let interrupted = "org/interrupted-starter"
+    var pausedReminder = ModelDownloadRecoveryReminder(provider: .huggingFace, repoID: paused,
+        queueOrder: 0, previousStatus: "paused", usedCredential: false)
+    pausedReminder.useHfMirror = true
+    pausedReminder.pausedStatus = ModelDownloadStatus(repoID: paused, provider: "huggingface", status: "paused",
+        progressPct: 40, commitSHA: testCommit)
+    var interruptedReminder = ModelDownloadRecoveryReminder(provider: .huggingFace, repoID: interrupted,
+        queueOrder: 1, previousStatus: "downloading", usedCredential: false)
+    interruptedReminder.useHfMirror = true
+    try ModelDownloadQueueReminderStore(rootURL: root).save([pausedReminder, interruptedReminder])
+    let service = ModelDownloadService(rootURL: root, httpClient: FakeModelDownloadHTTPClient(), telemetryLogger: { _ in })
+    #expect(await service.downloadStatuses().map(\.repoID) == [paused])
+
+    // A later one-click start must probe afresh instead of reusing the old host.
+    await service.cancelStarterDownload(repoID: paused)
+    await service.cancelStarterDownload(repoID: interrupted)
+
+    let snapshot = await service.downloadQueueSnapshot()
+    #expect(snapshot.tasks.isEmpty)
+    #expect(snapshot.recoveryReminders.isEmpty)
 }

@@ -55,9 +55,8 @@ pub struct SchedulerProfileStoreRecord {
 
 impl SchedulerProfileStore {
     pub fn open_default() -> Result<Self> {
-        let home = dirs::home_dir().context("locating home directory for ~/.ironmlx")?;
         Ok(Self::from_root(
-            home.join(".ironmlx").join("scheduler-profiles"),
+            crate::core::data_root::data_root()?.join("scheduler-profiles"),
         ))
     }
 

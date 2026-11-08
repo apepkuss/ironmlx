@@ -63,6 +63,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private var settingsSaveInProgress = false
     var hermesService = HermesIntegrationService()
     private var hermesSetupPending = false
+    /// The onboarding page's one-click download and "Start chatting" go through the App.
+    weak var chatEntry: (any ChatEntryHandling)?
     var openCodeService = OpenCodeIntegrationService()
     private var openCodeSetupPending = false
     var ompService = OMPIntegrationService()
@@ -144,10 +146,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         modelImportInspectionTask?.cancel()
         modelImportTask?.cancel()
         notificationCenter.removeObserver(self)
-        let downloadService = downloadService
-        Task {
-            await downloadService.cancelAllDownloads()
-        }
+        // The download service is shared with the starter download flow and
+        // owned by the App, which cancels its downloads at quit.
     }
 
     public func cancelAllDownloads() {
@@ -205,6 +205,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "cancelSchedulerProfileGeneration",
         "refreshSchedulerProfileStatus",
         "saveModelParams",
+        "startStarterDownload",
+        "openChat",
     ]
 
     public func userContentController(
@@ -317,6 +319,18 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             sendSchedulerProfileStatus()
         case "saveModelParams":
             saveModelParams(json: stringBody(body))
+        case "startStarterDownload":
+            guard let chatEntry else {
+                IronMLXAppLogger.error("Starter download requested before the chat entry is ready")
+                return
+            }
+            chatEntry.startStarterDownload()
+        case "openChat":
+            guard let chatEntry else {
+                IronMLXAppLogger.error("Chat requested before the chat entry is ready")
+                return
+            }
+            chatEntry.openChat()
         default:
             break
         }

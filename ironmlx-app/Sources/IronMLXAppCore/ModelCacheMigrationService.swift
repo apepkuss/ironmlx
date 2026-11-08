@@ -51,8 +51,7 @@ public struct ModelCacheMigrationService: Sendable {
     private let token: String?
 
     public init(
-        rootURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".ironmlx", isDirectory: true),
+        rootURL: URL = IronMLXDataRoot.url,
         httpClient: any ModelDownloadHTTPClient = URLSessionModelDownloadHTTPClient(),
         huggingFaceEndpoint: URL = URL(string: "https://huggingface.co")!,
         metadataPreflight: any ModelMetadataPreflighting = IronMLXModelMetadataPreflight(),

@@ -37,8 +37,7 @@ public struct IronMLXLogStore: Sendable {
     }
 
     public static func defaultRootURL() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".ironmlx", isDirectory: true)
+        IronMLXDataRoot.url
             .appendingPathComponent("logs", isDirectory: true)
     }
 

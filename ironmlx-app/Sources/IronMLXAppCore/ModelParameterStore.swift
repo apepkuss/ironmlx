@@ -681,8 +681,7 @@ public final class ModelParameterStore: @unchecked Sendable {
     ]
 
     public static func defaultURL() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".ironmlx", isDirectory: true)
+        IronMLXDataRoot.url
             .appendingPathComponent("model_params.json")
     }
 }

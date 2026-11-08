@@ -64,6 +64,10 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     private var loadedModelRefreshGeneration: UInt64 = 0
     private var loadedModelRefreshTask: Task<Void, Never>?
     private var refreshTimer: Timer?
+    /// Handles "Chat" and supplies the starter download row; set by the App.
+    weak var chatEntry: (any ChatEntryHandling)? {
+        didSet { rebuildMenu() }
+    }
 
     public init(
         configStore: AppConfigStore,
@@ -119,6 +123,37 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
 
     @objc public func openDashboard(_ sender: NSMenuItem) {
         dashboard.show()
+    }
+
+    @objc public func openChat(_ sender: NSMenuItem) {
+        guard let chatEntry else {
+            IronMLXAppLogger.info("Chat entry is not ready; showing the Dashboard")
+            dashboard.show()
+            return
+        }
+        chatEntry.openChat()
+    }
+
+    /// Updates the starter download row in place, so an open menu shows live
+    /// progress; rebuilds the menu only when the row appears, disappears or
+    /// changes what clicking it does.
+    func starterDownloadDidChange() {
+        let snapshot = snapshot()
+        let title = MenuBarMenuBuilder.starterRowTitle(
+            snapshot.starterDownload, modelName: snapshot.starterModelName, language: snapshot.language
+        )
+        let row = statusItem.menu?.item(withTag: MenuBarMenuBuilder.starterRowTag)
+        let opensChat = MenuBarMenuBuilder.starterRowOpensChat(snapshot.starterDownload)
+        if let row, let title, (row.action != nil) == opensChat {
+            row.title = title
+            return
+        }
+        if row == nil, title == nil {
+            return
+        }
+        let menu = MenuBarMenuBuilder.makeMenu(snapshot: snapshot, target: self)
+        menu.delegate = self
+        statusItem.menu = menu
     }
 
     @objc public func startServer(_ sender: NSMenuItem) {
@@ -187,7 +222,9 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             modelNames: modelNames,
             updatesEnabled: updateManager.canCheckForUpdates,
             configurationRecoveryAvailable: configurationRecovery.hasIssues,
-            language: config.language
+            language: config.language,
+            starterDownload: chatEntry?.menuStarterState ?? .idle,
+            starterModelName: chatEntry?.starterModelName
         )
     }
 

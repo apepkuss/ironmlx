@@ -631,7 +631,7 @@ public struct LocalDFlash2Candidate: Codable, Equatable, Sendable {
 public struct LocalModelScanner: Sendable {
     public var rootURL: URL
 
-    public init(rootURL: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ironmlx", isDirectory: true)) {
+    public init(rootURL: URL = IronMLXDataRoot.url) {
         self.rootURL = rootURL
     }
 

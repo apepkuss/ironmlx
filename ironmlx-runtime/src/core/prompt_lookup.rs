@@ -722,11 +722,10 @@ impl PromptLookupQualificationRuntimeConfig {
         baseline: PromptLookupQualificationBaseline,
     ) -> Result<Self> {
         let context_fingerprint = qualification_context_fingerprint(profile, baseline)?;
-        let home = dirs::home_dir()
-            .context("locating home directory for PromptLookup qualification profiles")?;
+        let data_root = crate::core::data_root::data_root()
+            .context("locating the data root for PromptLookup qualification profiles")?;
         Ok(Self {
-            profile_path: home
-                .join(".ironmlx")
+            profile_path: data_root
                 .join("prompt-lookup-qualifications")
                 .join("profiles")
                 .join(format!("{context_fingerprint}.json")),

@@ -10,12 +10,15 @@
 | App 与后端日志 | `~/.ironmlx/logs/` |
 | 模型参数 | `~/.ironmlx/model_params.json` |
 | 后端故障记录 | `~/.ironmlx/incidents/backend-incidents.json` |
+| Chat 会话与附件 | `~/.ironmlx/chats/` |
 | 调度器 profile store | `~/.ironmlx/scheduler-profiles/` |
 | 调度器校准报告 | `~/.ironmlx/reports/scheduler-autotune/` |
 
 用户在 Dashboard 中配置自定义 cache directory 后，缓存会写到该目录而不是默认
 路径。LAN API Key、CA 与 TLS 私钥由 macOS Keychain 管理，service 标识为
 `com.ironmlx.lan-security.v1`。
+
+Chat 只保留最近 20 个会话，且不会进入诊断包。
 
 ## 选择清理范围
 

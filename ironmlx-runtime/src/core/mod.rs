@@ -2,6 +2,7 @@
 
 pub mod cache;
 pub(crate) mod chat_prefix;
+pub mod data_root;
 pub mod dflash2;
 pub mod gemma4_generation;
 pub mod generate;

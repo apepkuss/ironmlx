@@ -772,6 +772,18 @@ public struct BackendEmbeddingMetrics: Codable, Equatable, Sendable {
     }
 }
 
+public struct BackendModelReasoning: Codable, Equatable, Sendable {
+    public var nativeEfforts: [String]
+
+    public init(nativeEfforts: [String]) {
+        self.nativeEfforts = nativeEfforts
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case nativeEfforts = "native_efforts"
+    }
+}
+
 public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public var decision: BackendDecisionSettings?
     public var decisionMetrics: BackendDecisionMetrics?
@@ -797,6 +809,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public var queueCapacity: Int
     public var usage: BackendModelRuntimeUsage
     public var activeKvOffload: HealthzSnapshot.ActiveKvOffloadInfo?
+    public var reasoning: BackendModelReasoning?
 
     public init(
         id: String,
@@ -833,7 +846,8 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         queuedRequests: Int = 0,
         queueCapacity: Int = 0,
         usage: BackendModelRuntimeUsage = BackendModelRuntimeUsage(),
-        activeKvOffload: HealthzSnapshot.ActiveKvOffloadInfo? = nil
+        activeKvOffload: HealthzSnapshot.ActiveKvOffloadInfo? = nil,
+        reasoning: BackendModelReasoning? = nil
     ) {
         self.decision = decision
         self.decisionMetrics = decisionMetrics
@@ -859,6 +873,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         self.queueCapacity = queueCapacity
         self.usage = usage
         self.activeKvOffload = activeKvOffload
+        self.reasoning = reasoning
     }
 
     enum CodingKeys: String, CodingKey {
@@ -894,6 +909,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         case queueCapacity = "queue_capacity"
         case usage
         case activeKvOffload = "active_kv_offload"
+        case reasoning
     }
 
     public init(from decoder: Decoder) throws {
@@ -956,6 +972,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
             HealthzSnapshot.ActiveKvOffloadInfo.self,
             forKey: .activeKvOffload
         )
+        self.reasoning = try container.decodeIfPresent(BackendModelReasoning.self, forKey: .reasoning)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -998,5 +1015,6 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         try container.encode(queueCapacity, forKey: .queueCapacity)
         try container.encode(usage, forKey: .usage)
         try container.encodeIfPresent(activeKvOffload, forKey: .activeKvOffload)
+        try container.encodeIfPresent(reasoning, forKey: .reasoning)
     }
 }

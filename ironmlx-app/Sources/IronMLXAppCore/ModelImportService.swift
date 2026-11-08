@@ -60,8 +60,7 @@ public struct ModelImportService: Sendable {
     private let preflight: any ModelMetadataPreflighting
 
     public init(
-        rootURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".ironmlx", isDirectory: true),
+        rootURL: URL = IronMLXDataRoot.url,
         preflight: any ModelMetadataPreflighting = IronMLXModelMetadataPreflight()
     ) {
         self.rootURL = rootURL

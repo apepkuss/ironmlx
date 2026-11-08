@@ -129,11 +129,13 @@ import Testing
             selectionProfile: "balanced"
         ),
         outputRootURL: outputRoot,
-        timestamp: Date(timeIntervalSince1970: 1_717_171_717)
+        timestamp: Date(timeIntervalSince1970: 1_717_171_717),
+        dataRootURL: URL(fileURLWithPath: "/tmp/ironmlx-data", isDirectory: true)
     )
 
     #expect(plan.processURL.path == "/tmp/ironmlx")
     let expectedPrefix = [
+        "--data-root", "/tmp/ironmlx-data",
         "scheduler-autotune",
         "calibrate",
         "--model", "/tmp/Tiny-4bit/snapshot",

@@ -3797,27 +3797,20 @@
     <div class="onboarding">
       <div class="onboarding-logo">Fe</div>
       <h1 data-i18n="welcome_title">Welcome to IronMLX</h1>
-      <div class="subtitle" data-i18n="welcome_subtitle">Get started in 3 simple steps</div>
+      <div class="subtitle" data-i18n="welcome_subtitle">Two steps to your first chat</div>
       <div class="onboarding-steps">
-        <div class="onboarding-step" onclick="navigateTo('models'); switchToTab('models-download');">
+        <div class="onboarding-step" onclick="window.webkit?.messageHandlers?.startStarterDownload?.postMessage('')">
           <div class="step-num">1</div>
           <div class="step-content">
-            <div class="step-title" data-i18n="step1_title">Download a Model</div>
-            <div class="step-desc" data-i18n="step1_desc">Go to Models &rarr; Model Download, enter a HuggingFace model ID and click Download.</div>
+            <div class="step-title" data-i18n="onboarding_download_title">Download the Recommended Model</div>
+            <div class="step-desc" data-i18n="onboarding_download_desc">One click picks a model that suits this Mac, downloads it and sets it as the default.</div>
           </div>
         </div>
-        <div class="onboarding-step" onclick="navigateTo('models');">
+        <div class="onboarding-step" onclick="window.webkit?.messageHandlers?.openChat?.postMessage('')">
           <div class="step-num">2</div>
           <div class="step-content">
-            <div class="step-title" data-i18n="step2_title">Set Default Model</div>
-            <div class="step-desc" data-i18n="step2_desc">In Models &rarr; Model Manager, select the default model by clicking the radio button.</div>
-          </div>
-        </div>
-        <div class="onboarding-step">
-          <div class="step-num">3</div>
-          <div class="step-content">
-            <div class="step-title" data-i18n="step3_title">Use the App</div>
-            <div class="step-desc" data-i18n="step3_desc">After you choose a default model, IronMLX starts the backend automatically and loads it on launch.</div>
+            <div class="step-title" data-i18n="onboarding_chat_title">Start Chatting</div>
+            <div class="step-desc" data-i18n="onboarding_chat_desc">If the download window stays open, chat opens when the model is ready; if you close it, you'll be notified. You can also choose Chat in the menu bar.</div>
           </div>
         </div>
       </div>
@@ -6612,10 +6605,9 @@
       server_restarted: "Server has been restarted successfully.",
       server_restarted_model_loaded: "Server has been restarted and the default model is loaded.",
       server_restart_model_failed: "Server restarted, but the default model could not be loaded: {detail}",
-      welcome_title: "Welcome to IronMLX", welcome_subtitle: "Get started in 3 simple steps",
-      step1_title: "Download a Model", step1_desc: "Go to Models \u2192 Model Download, enter a HuggingFace model ID and click Download.",
-      step2_title: "Set Default Model", step2_desc: "In Models \u2192 Model Manager, select the default model by clicking the radio button.",
-      step3_title: "Use the App", step3_desc: "After you choose a default model, IronMLX starts the backend automatically and loads it on launch.",
+      welcome_title: "Welcome to IronMLX", welcome_subtitle: "Two steps to your first chat",
+      onboarding_download_title: "Download the Recommended Model", onboarding_download_desc: "One click picks a model that suits this Mac, downloads it and sets it as the default.",
+      onboarding_chat_title: "Start Chatting", onboarding_chat_desc: "If the download window stays open, chat opens when the model is ready; if you close it, you'll be notified. You can also choose Chat in the menu bar.",
       nav_cluster: "Cluster (Experimental)",
       cluster_title: "Cluster (Experimental)",
       cluster_subtitle: "Discover, connect, and manage distributed inference nodes.",
@@ -7331,10 +7323,9 @@
       server_restarted: "服务已重启成功。",
       server_restarted_model_loaded: "服务已重启，默认模型已加载。",
       server_restart_model_failed: "服务已重启，但默认模型加载失败：{detail}",
-      welcome_title: "欢迎使用 IronMLX", welcome_subtitle: "只需 3 步即可开始",
-      step1_title: "下载模型", step1_desc: "前往 模型 \u2192 模型下载，输入 HuggingFace 模型 ID 并点击下载。",
-      step2_title: "设置默认模型", step2_desc: "在 模型 \u2192 模型管理 中，点击单选按钮选择默认模型。",
-      step3_title: "使用应用", step3_desc: "选择默认模型后，IronMLX 会自动启动后端，并在下次启动时加载该模型。",
+      welcome_title: "欢迎使用 IronMLX", welcome_subtitle: "两步开始第一次对话",
+      onboarding_download_title: "下载推荐模型", onboarding_download_desc: "一键选择适合这台 Mac 的模型，下载后自动设为默认模型。",
+      onboarding_chat_title: "开始对话", onboarding_chat_desc: "下载窗口开着时，完成后会直接进入对话；关掉窗口的话，模型准备好后会通知你。之后也可以在菜单栏选择“对话”。",
       nav_cluster: "集群（实验）",
       cluster_title: "集群（实验）",
       cluster_subtitle: "发现、连接和管理分布式推理节点。",
@@ -8053,10 +8044,9 @@
       server_restarted: "服務已重啟成功。",
       server_restarted_model_loaded: "服務已重啟，預設模型已載入。",
       server_restart_model_failed: "服務已重啟，但預設模型載入失敗：{detail}",
-      welcome_title: "歡迎使用 IronMLX", welcome_subtitle: "只需 3 步即可開始",
-      step1_title: "下載模型", step1_desc: "前往 模型 \u2192 模型下載，輸入 HuggingFace 模型 ID 並點擊下載。",
-      step2_title: "設定預設模型", step2_desc: "在 模型 \u2192 模型管理 中，點擊單選按鈕選擇預設模型。",
-      step3_title: "使用應用", step3_desc: "選擇預設模型後，IronMLX 會自動啟動後端，並在下次啟動時載入該模型。",
+      welcome_title: "歡迎使用 IronMLX", welcome_subtitle: "兩步開始第一次對話",
+      onboarding_download_title: "下載推薦模型", onboarding_download_desc: "一鍵選擇適合這台 Mac 的模型，下載後自動設為預設模型。",
+      onboarding_chat_title: "開始對話", onboarding_chat_desc: "下載視窗開著時，完成後會直接進入對話；關掉視窗的話，模型準備好後會通知你。之後也可以在選單列選擇「對話」。",
       nav_cluster: "叢集（實驗）",
       cluster_title: "叢集（實驗）",
       cluster_subtitle: "探索、連線和管理分散式推理節點。",
@@ -8775,10 +8765,9 @@
       server_restarted: "サーバーが正常に再起動されました。",
       server_restarted_model_loaded: "サーバーが再起動され、デフォルトモデルが読み込まれました。",
       server_restart_model_failed: "サーバーは再起動しましたが、デフォルトモデルを読み込めませんでした：{detail}",
-      welcome_title: "IronMLX へようこそ", welcome_subtitle: "3つの簡単なステップで始めましょう",
-      step1_title: "モデルをダウンロード", step1_desc: "モデル \u2192 モデルダウンロードに移動し、HuggingFace モデル ID を入力してダウンロードをクリック。",
-      step2_title: "デフォルトモデルを設定", step2_desc: "モデル \u2192 モデル管理で、ラジオボタンをクリックしてデフォルトモデルを選択。",
-      step3_title: "アプリを使う", step3_desc: "デフォルトモデルを選ぶと、IronMLX がバックエンドを自動起動し、次回起動時にもそのモデルを読み込みます。",
+      welcome_title: "IronMLX へようこそ", welcome_subtitle: "2 ステップで最初のチャットへ",
+      onboarding_download_title: "おすすめモデルをダウンロード", onboarding_download_desc: "この Mac に合うモデルをワンクリックでダウンロードし、デフォルトに設定します。",
+      onboarding_chat_title: "チャットを始める", onboarding_chat_desc: "ダウンロードウインドウを開いたままなら、完了後そのままチャットに進みます。閉じた場合は、準備ができたら通知でお知らせします。メニューバーの「チャット」からも開けます。",
       nav_cluster: "クラスター（実験的）",
       cluster_title: "クラスター（実験的）",
       cluster_subtitle: "分散推理ノードの検出、接続、管理。",
@@ -9497,10 +9486,9 @@
       server_restarted: "서버가 성공적으로 다시 시작되었습니다.",
       server_restarted_model_loaded: "서버가 다시 시작되었고 기본 모델이 로드되었습니다.",
       server_restart_model_failed: "서버는 다시 시작되었지만 기본 모델을 로드하지 못했습니다: {detail}",
-      welcome_title: "IronMLX에 오신 것을 환영합니다", welcome_subtitle: "3단계로 간단하게 시작하세요",
-      step1_title: "모델 다운로드", step1_desc: "모델 \u2192 모델 다운로드로 이동하여 HuggingFace 모델 ID를 입력하고 다운로드를 클릭하세요.",
-      step2_title: "기본 모델 설정", step2_desc: "모델 \u2192 모델 관리에서 라디오 버튼을 클릭하여 기본 모델을 선택하세요.",
-      step3_title: "앱 사용", step3_desc: "기본 모델을 선택하면 IronMLX가 백엔드를 자동으로 시작하고 다음 실행 때 해당 모델을 로드합니다.",
+      welcome_title: "IronMLX에 오신 것을 환영합니다", welcome_subtitle: "두 단계로 첫 대화 시작",
+      onboarding_download_title: "추천 모델 다운로드", onboarding_download_desc: "클릭 한 번으로 이 Mac에 맞는 모델을 내려받아 기본 모델로 설정합니다.",
+      onboarding_chat_title: "대화 시작", onboarding_chat_desc: "다운로드 창을 열어 두면 완료 후 바로 대화로 넘어가고, 창을 닫으면 준비되었을 때 알려 드립니다. 메뉴 막대의 “채팅”에서도 열 수 있습니다.",
       nav_cluster: "클러스터(실험)",
       cluster_title: "클러스터(실험)",
       cluster_subtitle: "분산 추론 노드를 검색, 연결 및 관리합니다.",
@@ -15297,7 +15285,7 @@
     applyColdCacheCapacity(window.__IRONMLX_COLD_CACHE_CAPACITY__);
     setNumberInput('cfg-cold-cache', clampColdCacheLimit(appConfig.cold_cache && appConfig.cold_cache > 0 ? appConfig.cold_cache : 10), 10);
     setCheckboxInput('cfg-cache-enable', appConfig.cache_enable, true);
-    setTextInput('cfg-cache-dir', appConfig.cache_dir, '~/.ironmlx/cache/paged_prefix_cache');
+    setTextInput('cfg-cache-dir', appConfig.cache_dir, window.__IRONMLX_DEFAULT_CACHE_DIR__ || '~/.ironmlx/cache/paged_prefix_cache');
     setCheckboxInput('cfg-active-kv-offload', appConfig.active_kv_offload, false);
     setCheckboxInput('cfg-m5-dflash2-profile', appConfig.m5_dflash2_profile, true);
     setCheckboxInput('cfg-ane', appConfig.ane, true);

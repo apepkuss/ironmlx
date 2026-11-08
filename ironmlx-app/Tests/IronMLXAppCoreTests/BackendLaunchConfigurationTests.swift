@@ -11,10 +11,45 @@ import Testing
     )
 
     #expect(config.arguments == [
+        "--data-root", defaultDataRootPath,
         "serve",
         "--host", "127.0.0.1",
         "--port", "9068",
         "--network-mode", "local",
+    ] + defaultDataPathArguments)
+}
+
+/// The App passes the backend's former implicit defaults explicitly; with the
+/// variable unset they equal `~/.ironmlx/...` exactly.
+private var defaultDataRootPath: String {
+    IronMLXDataRoot.url.path
+}
+
+private var defaultDataPathArguments: [String] {
+    [
+        "--voice-profile-dir", defaultDataRootPath + "/audio/voices",
+        "--active-kv-offload-dir", defaultDataRootPath + "/cache/active_kv_offload",
+    ]
+}
+
+/// Outside tests (no variable, not a test process) the App root is the
+/// backend's own default, and the explicit flags carry the old default values.
+@Test func defaultBackendDataPathsEqualTheBackendDefaults() {
+    let home = URL(fileURLWithPath: "/Users/tester", isDirectory: true)
+    let resolution = IronMLXDataRoot.resolve(environmentValue: nil, home: home, testRoot: nil) { _ in }
+    #expect(resolution.url.path == "/Users/tester/.ironmlx")
+    #expect(resolution.displayPath("cache/paged_prefix_cache") == "~/.ironmlx/cache/paged_prefix_cache")
+
+    let config = BackendLaunchConfiguration(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        host: "127.0.0.1",
+        port: 9068,
+        dataRootURL: resolution.url
+    )
+    #expect(Array(config.arguments.prefix(2)) == ["--data-root", "/Users/tester/.ironmlx"])
+    #expect(config.arguments.suffix(4) == [
+        "--voice-profile-dir", "/Users/tester/.ironmlx/audio/voices",
+        "--active-kv-offload-dir", "/Users/tester/.ironmlx/cache/active_kv_offload",
     ])
 }
 
@@ -95,10 +130,12 @@ private func argumentValue(_ flag: String, in arguments: [String]) -> String? {
     )
 
     #expect(config.arguments == [
+        "--data-root", defaultDataRootPath,
         "serve",
         "--host", "127.0.0.1",
         "--port", "9068",
         "--network-mode", "local",
+    ] + defaultDataPathArguments + [
         "--prefill-chunk-size", "1024",
         "--max-sequences", "4",
         "--admission-deadline-ms", "9",
@@ -121,10 +158,11 @@ private func argumentValue(_ flag: String, in arguments: [String]) -> String? {
     )
 
     #expect(config.arguments == [
+        "--data-root", defaultDataRootPath,
         "serve", "--host", "127.0.0.1", "--port", "9068",
         "--network-mode", "lan", "--lan-host", "192.168.1.24",
         "--security-bootstrap-stdin",
-    ])
+    ] + defaultDataPathArguments)
 }
 
 @Test func backendLaunchOptionsMapDashboardMaxSequencesToBMax() {

@@ -41,6 +41,7 @@ let package = Package(
             resources: [
                 .copy("Resources/indextts25-preparation.json"),
                 .copy("Resources/dashboard2.html"),
+                .copy("Resources/chat"),
                 .copy("Resources/supported-models.json"),
                 .copy("Resources/deepseek-harness-logo-dark.svg"),
                 .copy("Resources/deepseek-harness-logo.svg"),

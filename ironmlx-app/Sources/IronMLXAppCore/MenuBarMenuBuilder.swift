@@ -7,6 +7,9 @@ public struct MenuBarMenuSnapshot: Equatable {
     public var updatesEnabled: Bool
     public var configurationRecoveryAvailable: Bool
     public var language: String
+    /// The one-click starter download, shown as an extra row under "Chat".
+    var starterDownload: StarterDownloadState = .idle
+    var starterModelName: String?
 
     public init(
         state: BackendProcessState,
@@ -20,6 +23,26 @@ public struct MenuBarMenuSnapshot: Equatable {
         self.updatesEnabled = updatesEnabled
         self.configurationRecoveryAvailable = configurationRecoveryAvailable
         self.language = language
+    }
+
+    init(
+        state: BackendProcessState,
+        modelNames: [String],
+        updatesEnabled: Bool,
+        configurationRecoveryAvailable: Bool = false,
+        language: String = "en",
+        starterDownload: StarterDownloadState,
+        starterModelName: String?
+    ) {
+        self.init(
+            state: state,
+            modelNames: modelNames,
+            updatesEnabled: updatesEnabled,
+            configurationRecoveryAvailable: configurationRecoveryAvailable,
+            language: language
+        )
+        self.starterDownload = starterDownload
+        self.starterModelName = starterModelName
     }
 }
 
@@ -63,6 +86,16 @@ public enum MenuBarMenuBuilder {
         addModelRows(snapshot.modelNames, to: menu)
         menu.addItem(.separator())
 
+        menu.addItem(
+            item(
+                localized(.chat, language: snapshot.language),
+                #selector(MenuBarController.openChat(_:)),
+                "",
+                target: target,
+                symbol: "bubble.left.and.bubble.right"
+            )
+        )
+        addStarterRow(snapshot, target: target, to: menu)
         menu.addItem(
             item(
                 localized(.dashboard, language: snapshot.language),
@@ -111,6 +144,102 @@ public enum MenuBarMenuBuilder {
             )
         )
         return menu
+    }
+
+    /// Tag of the starter download row, so its title can change while the menu is open.
+    static let starterRowTag = 0x5354_4152
+
+    private static func addStarterRow(_ snapshot: MenuBarMenuSnapshot, target: AnyObject?, to menu: NSMenu) {
+        guard let title = starterRowTitle(
+            snapshot.starterDownload, modelName: snapshot.starterModelName, language: snapshot.language
+        ) else { return }
+        let row: NSMenuItem
+        if starterRowOpensChat(snapshot.starterDownload) {
+            row = item(title, #selector(MenuBarController.openChat(_:)), "", target: target, symbol: "checkmark.circle")
+        } else {
+            row = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            row.isEnabled = false
+            row.image = symbolImage("arrow.down.circle")
+        }
+        row.tag = starterRowTag
+        menu.addItem(row)
+    }
+
+    /// The ready and failed rows open the chat entry (which shows the retry);
+    /// progress rows are information only.
+    nonisolated static func starterRowOpensChat(_ state: StarterDownloadState) -> Bool {
+        switch state {
+        case .ready, .failed: true
+        case .idle, .probing, .downloading, .paused, .loading: false
+        }
+    }
+
+    nonisolated static func starterRowTitle(
+        _ state: StarterDownloadState, modelName: String?, language: String
+    ) -> String? {
+        let name = modelName ?? ""
+        let lang = normalizedLanguage(language)
+        switch state {
+        case .idle:
+            return nil
+        case let .downloading(_, fraction, _, _, _):
+            let percent = "\(Int((max(0, min(1, fraction)) * 100).rounded(.down)))%"
+            switch lang {
+            case "zh": return "正在下载 \(name) · \(percent)"
+            case "zh-Hant": return "正在下載 \(name) · \(percent)"
+            case "ja": return "\(name) をダウンロード中 · \(percent)"
+            case "ko": return "\(name) 다운로드 중 · \(percent)"
+            default: return "Downloading \(name) · \(percent)"
+            }
+        case .probing:
+            switch lang {
+            case "zh": return "正在准备下载 \(name)"
+            case "zh-Hant": return "正在準備下載 \(name)"
+            case "ja": return "\(name) のダウンロードを準備中"
+            case "ko": return "\(name) 다운로드 준비 중"
+            default: return "Preparing to download \(name)"
+            }
+        case .paused:
+            switch lang {
+            case "zh": return "\(name) 下载已暂停"
+            case "zh-Hant": return "\(name) 下載已暫停"
+            case "ja": return "\(name) のダウンロードは一時停止中"
+            case "ko": return "\(name) 다운로드 일시 정지됨"
+            default: return "\(name) download paused"
+            }
+        case .loading:
+            switch lang {
+            case "zh": return "正在加载 \(name)"
+            case "zh-Hant": return "正在載入 \(name)"
+            case "ja": return "\(name) を読み込み中"
+            case "ko": return "\(name) 불러오는 중"
+            default: return "Loading \(name)"
+            }
+        case .ready:
+            switch lang {
+            case "zh": return "模型已就绪，开始对话"
+            case "zh-Hant": return "模型已就緒，開始對話"
+            case "ja": return "モデルの準備ができました。チャットを始める"
+            case "ko": return "모델이 준비되었습니다. 대화 시작"
+            default: return "Model ready. Start chatting"
+            }
+        case .failed(StarterDownloadCoordinator.modelLoadFailedCode):
+            switch lang {
+            case "zh": return "\(name) 已下载，但没能加载"
+            case "zh-Hant": return "\(name) 已下載，但無法載入"
+            case "ja": return "\(name) はダウンロード済みですが、読み込めませんでした"
+            case "ko": return "\(name)을(를) 내려받았지만 불러오지 못했습니다"
+            default: return "\(name) downloaded but couldn't be loaded"
+            }
+        case .failed:
+            switch lang {
+            case "zh": return "\(name) 下载未完成"
+            case "zh-Hant": return "\(name) 下載未完成"
+            case "ja": return "\(name) のダウンロードが完了しませんでした"
+            case "ko": return "\(name) 다운로드가 완료되지 않았습니다"
+            default: return "\(name) didn't finish downloading"
+            }
+        }
     }
 
     private static func addStatus(_ state: BackendProcessState, language: String, to menu: NSMenu) {
@@ -197,6 +326,8 @@ public enum MenuBarMenuBuilder {
 
     nonisolated private static func localized(_ key: MenuTextKey, language: String) -> String {
         switch (normalizedLanguage(language), key) {
+        case ("zh", .chat):
+            return "对话"
         case ("zh", .dashboard):
             return "仪表盘"
         case ("zh", .stop):
@@ -226,6 +357,8 @@ public enum MenuBarMenuBuilder {
         case ("zh", .statusStopped):
             return "服务器已停止"
 
+        case ("zh-Hant", .chat):
+            return "對話"
         case ("zh-Hant", .dashboard):
             return "儀表板"
         case ("zh-Hant", .stop):
@@ -255,6 +388,8 @@ public enum MenuBarMenuBuilder {
         case ("zh-Hant", .statusStopped):
             return "伺服器已停止"
 
+        case ("ja", .chat):
+            return "チャット"
         case ("ja", .dashboard):
             return "ダッシュボード"
         case ("ja", .stop):
@@ -284,6 +419,8 @@ public enum MenuBarMenuBuilder {
         case ("ja", .statusStopped):
             return "サーバー: 停止中"
 
+        case ("ko", .chat):
+            return "채팅"
         case ("ko", .dashboard):
             return "대시보드"
         case ("ko", .stop):
@@ -335,6 +472,8 @@ public enum MenuBarMenuBuilder {
 
     nonisolated private static func englishText(_ key: MenuTextKey) -> String {
         switch key {
+        case .chat:
+            return "Chat"
         case .dashboard:
             return "Dashboard"
         case .stop:
@@ -408,6 +547,7 @@ public enum MenuBarMenuBuilder {
 }
 
 private enum MenuTextKey {
+    case chat
     case dashboard
     case stop
     case start

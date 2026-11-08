@@ -9,6 +9,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private let parameterStore: ModelParameterStore
     private let launchPlanner: AppLaunchPlanner
     private let configurationRecovery: ConfigurationRecoveryManager
+    /// The single download queue shared by the Dashboard and the starter download.
+    private let downloadService: ModelDownloadService
+    let starterDownloads: StarterDownloadCoordinator
+    /// Set by the chat window; until then "Chat" falls back to the Dashboard.
+    weak var chatPresenter: (any ChatWindowPresenting)?
+    private var chatEntry: ChatEntryController?
+    private var chatWindow: ChatWindowController?
+    private var agentDetectionTask: Task<Void, Never>?
     private var dashboard: DashboardWindowController?
     private var menu: MenuBarController?
     private var updateManager: (any AppUpdateManaging)?
@@ -27,17 +35,30 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             scanner: scanner,
             parameterStore: parameterStore
         )
-        self.configStore = store
-        self.backend = BackendRuntimeSupervisor(
+        let backend = BackendRuntimeSupervisor(
             processManager: processManager,
             configStore: store,
             scanner: scanner,
             parameterStore: parameterStore
         )
+        let downloadService = ModelDownloadService()
+        self.configStore = store
+        self.backend = backend
         self.scanner = scanner
         self.parameterStore = parameterStore
         self.launchPlanner = AppLaunchPlanner()
         self.configurationRecovery = configurationRecovery
+        self.downloadService = downloadService
+        self.starterDownloads = StarterDownloadCoordinator(
+            downloader: downloadService,
+            modelManager: {
+                try await backend.ensureRunning()
+                let config = store.load()
+                let client = BackendAPIClient(host: config.host, port: config.port)
+                try await client.waitUntilReady()
+                return client
+            }
+        )
         super.init()
     }
 
@@ -70,10 +91,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             })
         )
         let launchPlan = launchPlanner.plan(config: config, localModels: localModels)
+        let chatEntry = makeChatEntry()
         Task {
+            // Restore an unfinished starter download before any window shows it.
+            await chatEntry.start()
             do {
                 try await backend.ensureRunning { [weak self] in
-                    self?.showInterface(route: launchPlan.dashboardRoute)
+                    self?.showFirstSurface(launchPlan.firstSurface)
                 }
                 menu?.rebuildMenu()
             } catch {
@@ -95,13 +119,81 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func showInterface(route: DashboardInitialRoute) {
-        if let dashboard {
-            dashboard.show(route: route)
-            return
+    private func makeChatEntry() -> ChatEntryController {
+        let systemCenter = ModelReadyNotifier.systemCenter()
+        let notifier = ModelReadyNotifier(center: systemCenter)
+        systemCenter?.onResponse = { [weak notifier] userInfo in
+            notifier?.handleNotificationResponse(userInfo: userInfo)
+        }
+        let chatEntry = ChatEntryController(
+            configStore: configStore,
+            backend: backend,
+            scanner: scanner,
+            downloadService: downloadService,
+            starterDownloads: starterDownloads,
+            notifier: notifier,
+            presenter: { [weak self] in self?.chatPresenter },
+            showDashboard: { [weak self] route in self?.showInterface(route: route) },
+            activation: .shared
+        )
+        self.chatEntry = chatEntry
+        let chatWindow = ChatWindowController(
+            session: .live(configStore: configStore, parameterStore: parameterStore, scanner: scanner, backend: backend),
+            environment: .live(
+                configStore: configStore,
+                scanner: scanner,
+                openDashboard: { [weak self] route in self?.openDashboardFromChat(route) },
+                startUpgrade: { [weak chatEntry] upgrade, onState in
+                    chatEntry?.startUpgradeDownload(upgrade, onState: onState)
+                }
+            )
+        )
+        self.chatWindow = chatWindow
+        chatPresenter = chatWindow
+        return chatEntry
+    }
+
+    private func showFirstSurface(_ surface: LaunchSurface) {
+        switch surface {
+        case let .dashboard(route):
+            showInterface(route: route)
+        case .noModelWindow:
+            let created = makeInterfaceIfNeeded()
+            chatEntry?.showNoModelWindow()
+            if created { presentConfigurationRecoveryIfNeeded() }
+        }
+    }
+
+    /// The Agent page opens at once; detection then selects an installed agent
+    /// without moving focus, unless the user has already chosen one.
+    private func openDashboardFromChat(_ route: DashboardInitialRoute) {
+        showInterface(route: route)
+        guard route == .agents else { return }
+        agentDetectionTask?.cancel()
+        agentDetectionTask = Task { @MainActor [weak self] in
+            let installed = await AgentInstallationChecker().installed()
+            guard !Task.isCancelled else { return }
+            self?.dashboard?.preselectAgentGuideIfUntouched(AgentPreselector.choose(installed: installed))
+        }
+    }
+
+    private func showInterface(route: DashboardInitialRoute, agentGuide: AgentGuideID? = nil) {
+        let created = makeInterfaceIfNeeded()
+        dashboard?.show(route: route, agentGuide: agentGuide)
+        if created { presentConfigurationRecoveryIfNeeded() }
+    }
+
+    /// Creates the Dashboard controller and the menu bar item once, without
+    /// showing the Dashboard. Returns whether it created them.
+    private func makeInterfaceIfNeeded() -> Bool {
+        if dashboard != nil {
+            return false
         }
 
-        let dashboard = DashboardWindowController(configStore: configStore, backend: backend)
+        let dashboard = DashboardWindowController(
+            configStore: configStore, backend: backend, downloadService: downloadService
+        )
+        dashboard.chatEntry = chatEntry
         let updateManager = SparkleAppUpdateManager.make()
         let menu = MenuBarController(
             configStore: configStore,
@@ -110,19 +202,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             updateManager: updateManager,
             configurationRecovery: configurationRecovery
         )
+        menu.chatEntry = chatEntry
+        chatEntry?.menu = menu
         self.dashboard = dashboard
         self.menu = menu
         self.updateManager = updateManager
+        return true
+    }
 
-        dashboard.show(route: route)
+    private func presentConfigurationRecoveryIfNeeded() {
         if configurationRecovery.hasIssues {
             configurationRecovery.presentRecovery(nil)
-            menu.rebuildMenu()
+            menu?.rebuildMenu()
         }
     }
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        dashboard?.cancelAllDownloads()
+        // Before the backend stops under it: a reply still streaming is
+        // cancelled and what arrived is saved as a stopped turn.
+        saveChatReplyInProgress()
+        cancelAllDownloads()
         guard backend.state != .stopped else {
             return .terminateNow
         }
@@ -139,6 +238,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationWillTerminate(_ notification: Notification) {
         IronMLXAppLogger.info("Application will terminate")
+        saveChatReplyInProgress()
+        cancelAllDownloads()
+    }
+
+    /// Same as closing the chat window; does nothing when no reply streams.
+    private func saveChatReplyInProgress() {
+        chatWindow?.session.windowClosed()
+    }
+
+    /// Downloads may run without the Dashboard ever being opened.
+    private func cancelAllDownloads() {
         dashboard?.cancelAllDownloads()
+        let downloadService = downloadService
+        Task {
+            await downloadService.cancelAllDownloads()
+        }
     }
 }

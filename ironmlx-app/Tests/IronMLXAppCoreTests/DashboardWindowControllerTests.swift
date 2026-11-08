@@ -93,12 +93,6 @@ import WebKit
 }
 
 @MainActor
-@Test func dashboardWindowUsesRegularActivationPolicyWhileVisibleAndAccessoryWhenHidden() {
-    #expect(DashboardWindowController.dashboardVisibleActivationPolicy == .regular)
-    #expect(DashboardWindowController.dashboardHiddenActivationPolicy == .accessory)
-}
-
-@MainActor
 @Test func dashboardThemeAppearanceForcesLightDarkAndRestoresSystemPreference() {
     let view = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 240))
     let window = NSWindow(
@@ -253,4 +247,22 @@ import WebKit
     #expect(script.contains("window.__IRONMLX_COLD_CACHE_CAPACITY__"))
     #expect(script.contains(#""default_gb":10"#))
     #expect(script.contains(#""min_gb":1"#))
+}
+
+@MainActor
+@Test func agentsRouteSelectsGuide() {
+    let script = DashboardWindowController.routeScript(for: .agents, agentGuide: .opencode)
+    #expect(script.contains("navigateTo('chat')"))
+    #expect(script.contains("selectAgentGuide(agentGuide)"))
+    #expect(script.contains(#"var agentGuide = "opencode";"#))
+    let none = DashboardWindowController.routeScript(for: .agents)
+    #expect(none.contains(#"var agentGuide = "";"#))
+}
+
+@MainActor
+@Test func lateAgentGuideOnlyAppliesWhileUntouched() {
+    let late = DashboardWindowController.lateAgentGuideScript(.opencode)
+    #expect(late.contains("currentAgentGuide !== window.__ironmlxAgentGuideBaseline"))
+    #expect(late.contains(#"selectAgentGuide("opencode")"#))
+    #expect(DashboardWindowController.routeScript(for: .agents).contains("__ironmlxAgentGuideBaseline = currentAgentGuide"))
 }

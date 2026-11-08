@@ -106,3 +106,27 @@ import Testing
     let nestedLegacy = try decoder.decode(BackendModelCapabilities.self, from: JSONSerialization.data(withJSONObject: nested))
     #expect(nestedLegacy.supportsAudio == false)
 }
+
+@Test func decodesLoadedModelReasoning() throws {
+    let info = BackendLoadedModelInfo(
+        id: "qwen", model: "qwen", path: "/models/qwen", architecture: "qwen3_5",
+        isDefault: true, maxPositionEmbeddings: 4096,
+        reasoning: BackendModelReasoning(nativeEfforts: ["low", "medium", "xhigh"])
+    )
+    let data = try JSONEncoder().encode(info)
+    var object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    let reasoning = try #require(object["reasoning"] as? [String: Any])
+    #expect(reasoning["native_efforts"] as? [String] == ["low", "medium", "xhigh"])
+    let decoded = try JSONDecoder().decode(BackendLoadedModelInfo.self, from: data)
+    #expect(decoded.reasoning?.nativeEfforts == ["low", "medium", "xhigh"])
+
+    object["reasoning"] = ["native_efforts": [String]()]
+    let empty = try JSONDecoder().decode(
+        BackendLoadedModelInfo.self, from: JSONSerialization.data(withJSONObject: object))
+    #expect(empty.reasoning == BackendModelReasoning(nativeEfforts: []))
+
+    object.removeValue(forKey: "reasoning")
+    let absent = try JSONDecoder().decode(
+        BackendLoadedModelInfo.self, from: JSONSerialization.data(withJSONObject: object))
+    #expect(absent.reasoning == nil)
+}

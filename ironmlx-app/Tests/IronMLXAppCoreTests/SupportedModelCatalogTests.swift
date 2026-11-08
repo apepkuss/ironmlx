@@ -67,6 +67,28 @@ struct SupportedModelCatalogTests {
         #expect(groups["dflash2-qwen36-35b-a3b"]?.map(\.variantLabel) == ["BF16"])
     }
 
+    @Test("starter entries exist and pin every file")
+    func starterEntriesExistAndPinEveryFile() throws {
+        let catalog = try SupportedModelCatalog.bundled()
+        let starter = try #require(catalog.starter)
+        let entries = Dictionary(uniqueKeysWithValues: catalog.entries.map { ($0.id, $0) })
+        #expect(starter.tiers.map(\.minPhysicalMemoryGiB) == [0, 16])
+        let ids = starter.tiers.map(\.entryId) + [starter.upgrade.entryId]
+        #expect(ids == ["qwen35-2b-4bit", "qwen35-4b-affine4", "qwen36-35b-a3b-affine4"])
+        for id in ids {
+            let entry = try #require(entries[id])
+            let files = try #require(starter.files[id])
+            #expect(!files.isEmpty)
+            #expect(Set(files.map(\.path)).count == files.count)
+            for file in files {
+                #expect(file.sha256.count == 64)
+                #expect(file.sha256.allSatisfy { "0123456789abcdef".contains($0) })
+                #expect(file.size >= 0)
+            }
+            #expect(files.reduce(Int64(0)) { $0 + $1.size } == entry.downloadBytes)
+        }
+    }
+
     @Test("memory hints reuse the download resource preflight policy")
     func memoryHintsUsePreflight() throws {
         let catalog = try SupportedModelCatalog.bundled()

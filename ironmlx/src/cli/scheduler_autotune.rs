@@ -104,7 +104,7 @@ pub struct SchedulerAutotuneProfileArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum SchedulerAutotuneProfileAction {
-    /// List persisted scheduler profiles in ~/.ironmlx.
+    /// List persisted scheduler profiles in the data root (~/.ironmlx by default).
     List,
     /// Print one persisted scheduler profile as JSON.
     Show(SchedulerAutotuneProfileShowArgs),
@@ -112,7 +112,7 @@ pub enum SchedulerAutotuneProfileAction {
     Doctor(Box<SchedulerAutotuneProfileDoctorArgs>),
     /// Remove one persisted scheduler profile and its JSON file.
     Remove(SchedulerAutotuneProfileRemoveArgs),
-    /// Import one runtime scheduler profile into ~/.ironmlx for one model path.
+    /// Import one runtime scheduler profile into the data root for one model path.
     Import(SchedulerAutotuneProfileImportArgs),
 }
 
@@ -124,7 +124,7 @@ pub struct SchedulerAutotuneProfileShowArgs {
 
 #[derive(Args, Debug)]
 pub struct SchedulerAutotuneProfileDoctorArgs {
-    /// Local model directory to match against ~/.ironmlx scheduler profiles.
+    /// Local model directory to match against the data root scheduler profiles.
     #[arg(long)]
     pub model: PathBuf,
 

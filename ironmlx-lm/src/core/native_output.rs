@@ -28,6 +28,20 @@ pub enum NativeOutputDialect {
 }
 
 impl NativeOutputDialect {
+    /// Reasoning effort levels the chat template understands natively.
+    /// Empty when the model only supports thinking on/off.
+    pub fn native_efforts(self) -> &'static [&'static str] {
+        match self {
+            Self::Qwen38 => &["low", "medium", "xhigh"],
+            Self::Qwen35
+            | Self::Qwen36
+            | Self::Glm
+            | Self::MiniCpmV46
+            | Self::MiniCpm5
+            | Self::Gemma => &[],
+        }
+    }
+
     /// Detect a native output contract from the model type and exact template
     /// markers. Similar-looking templates are deliberately not enabled.
     pub fn detect(model_type: &str, template: &str) -> Option<Self> {
@@ -380,6 +394,24 @@ fn partial_marker_suffix_len(value: &str, marker: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_efforts_only_for_qwen38() {
+        assert_eq!(
+            NativeOutputDialect::Qwen38.native_efforts(),
+            &["low", "medium", "xhigh"]
+        );
+        for dialect in [
+            NativeOutputDialect::Qwen35,
+            NativeOutputDialect::Qwen36,
+            NativeOutputDialect::Glm,
+            NativeOutputDialect::MiniCpmV46,
+            NativeOutputDialect::MiniCpm5,
+            NativeOutputDialect::Gemma,
+        ] {
+            assert!(dialect.native_efforts().is_empty());
+        }
+    }
 
     #[test]
     fn detects_exact_reasoning_contracts() {

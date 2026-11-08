@@ -95,11 +95,10 @@ impl NeuralExactQualificationRuntimeConfig {
         source: NeuralExactSource,
     ) -> Result<Self> {
         let context_fingerprint = qualification_context_fingerprint(profile, source)?;
-        let home = dirs::home_dir()
-            .context("locating home directory for neural exact qualification profiles")?;
+        let data_root = crate::core::data_root::data_root()
+            .context("locating the data root for neural exact qualification profiles")?;
         Ok(Self {
-            profile_path: home
-                .join(".ironmlx")
+            profile_path: data_root
                 .join("neural-exact-qualifications")
                 .join("profiles")
                 .join(format!("{context_fingerprint}.json")),

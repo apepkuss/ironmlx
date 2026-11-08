@@ -72,59 +72,129 @@ public struct BackendRecoverySnapshot: Codable, Equatable, Sendable {
         scanner: LocalModelScanner,
         parameterStore: ModelParameterStore
     ) -> BackendRecoverySnapshot {
+        let models = config.restoredModelReferences.map { model in
+            BackendRecoveryModel.configured(model, config: config, scanner: scanner, parameterStore: parameterStore)
+        }
+        return BackendRecoverySnapshot(config: config, models: models)
+    }
+}
+
+extension BackendRecoveryModel {
+    /// The App's load parameters for `model` from the config and the model
+    /// parameters: folder, default and pin, cache cap, MTP, DFlash2, prompt
+    /// lookup, sampling defaults, audio resources and decision settings.
+    @MainActor
+    public static func configured(
+        _ model: String,
+        config: AppConfig,
+        scanner: LocalModelScanner,
+        parameterStore: ModelParameterStore
+    ) -> BackendRecoveryModel {
         let defaultModel = config.defaultModelReference
         let pinned = Set(config.pinnedModelReferences)
-        let models = config.restoredModelReferences.map { model in
-            let parameters = parameterStore.parameters(for: model)
-            let capabilities = scanner.model(for: model)?.capabilities
-            let supportsKvCache = capabilities?.supportsKvCache != false
-            let supportsMtp = capabilities?.supportsMtp != false
-            let supportsPromptLookup = capabilities?.supportsPromptLookup != false
-            let mtpRuntime = supportsMtp
-                ? try? ModelMtpRuntimeResolver.runtime(
-                    for: model,
-                    useMtp: parameters?.mtpEnabled,
-                    explicitMtpModelID: parameters?.mtpModelID,
-                    scanner: scanner,
-                    parameterStore: parameterStore
-                )
-                : nil
-            let dflash2Runtime = try? ModelDFlash2RuntimeResolver.runtime(
+        let parameters = parameterStore.parameters(for: model)
+        let capabilities = scanner.model(for: model)?.capabilities
+        let supportsKvCache = capabilities?.supportsKvCache != false
+        let supportsMtp = capabilities?.supportsMtp != false
+        let supportsPromptLookup = capabilities?.supportsPromptLookup != false
+        let mtpRuntime = supportsMtp
+            ? try? ModelMtpRuntimeResolver.runtime(
                 for: model,
-                useDFlash2: parameters?.dflash2Enabled,
+                useMtp: parameters?.mtpEnabled,
+                explicitMtpModelID: parameters?.mtpModelID,
                 scanner: scanner,
                 parameterStore: parameterStore
             )
-            return BackendRecoveryModel(
-                id: model,
-                modelDir: scanner.resolveModelPath(for: model),
-                isDefault: model == defaultModel,
-                pinned: pinned.contains(model),
-                maxCacheCap: supportsKvCache
-                    ? ModelLoadParameters.maxCacheCap(
-                        for: model,
-                        scanner: scanner,
-                        parameterStore: parameterStore,
-                        activeKvOffloadEnabled: config.activeKvOffload == true
-                    )
-                    : nil,
-                mtpModelDir: mtpRuntime?.modelDir,
-                mtpDraftTokens: mtpRuntime?.draftTokens,
-                dflash2ModelDir: dflash2Runtime?.draftModelDir,
-                dflash2BlockSize: dflash2Runtime?.blockSize,
-                dflash2DraftBits: dflash2Runtime?.draftBits,
-                dflash2TensorBatchMaxWidth: dflash2Runtime?.tensorBatchMaxWidth,
-                promptLookup: supportsPromptLookup ? parameters?.promptLookupConfig : nil,
-                samplingDefaults: (parameters?.samplingDefaults ?? .empty)
-                    .filtered(for: capabilities),
-                capabilities: capabilities,
-                audio: try? scanner.audioResources(
+            : nil
+        let dflash2Runtime = try? ModelDFlash2RuntimeResolver.runtime(
+            for: model,
+            useDFlash2: parameters?.dflash2Enabled,
+            scanner: scanner,
+            parameterStore: parameterStore
+        )
+        return BackendRecoveryModel(
+            id: model,
+            modelDir: scanner.resolveModelPath(for: model),
+            isDefault: model == defaultModel,
+            pinned: pinned.contains(model),
+            maxCacheCap: supportsKvCache
+                ? ModelLoadParameters.maxCacheCap(
                     for: model,
-                    execution: parameters?.audioExecution
-                ),
-                decision: parameters?.decision
-            )
-        }
-        return BackendRecoverySnapshot(config: config, models: models)
+                    scanner: scanner,
+                    parameterStore: parameterStore,
+                    activeKvOffloadEnabled: config.activeKvOffload == true
+                )
+                : nil,
+            mtpModelDir: mtpRuntime?.modelDir,
+            mtpDraftTokens: mtpRuntime?.draftTokens,
+            dflash2ModelDir: dflash2Runtime?.draftModelDir,
+            dflash2BlockSize: dflash2Runtime?.blockSize,
+            dflash2DraftBits: dflash2Runtime?.draftBits,
+            dflash2TensorBatchMaxWidth: dflash2Runtime?.tensorBatchMaxWidth,
+            promptLookup: supportsPromptLookup ? parameters?.promptLookupConfig : nil,
+            samplingDefaults: (parameters?.samplingDefaults ?? .empty)
+                .filtered(for: capabilities),
+            capabilities: capabilities,
+            audio: try? scanner.audioResources(
+                for: model,
+                execution: parameters?.audioExecution
+            ),
+            decision: parameters?.decision
+        )
+    }
+
+    /// `loaded` as the backend runs it now, keeping its folder, pin, MTP,
+    /// prompt lookup and decision settings; cache cap, sampling defaults and
+    /// audio resources come from `configured` when known.
+    public static func reloading(
+        _ loaded: BackendLoadedModelInfo,
+        configured: BackendRecoveryModel?
+    ) -> BackendRecoveryModel {
+        BackendRecoveryModel(
+            id: loaded.id,
+            modelDir: loaded.path,
+            isDefault: loaded.isDefault,
+            pinned: loaded.pinned,
+            maxCacheCap: configured?.maxCacheCap,
+            mtpModelDir: loaded.mtpModelDir,
+            mtpDraftTokens: loaded.mtpDraftTokens,
+            promptLookup: loaded.promptLookup,
+            samplingDefaults: configured?.samplingDefaults ?? .empty,
+            capabilities: loaded.capabilities,
+            audio: configured?.audio,
+            decision: loaded.decision
+        )
+    }
+
+    /// Loads this model the way the App restores it after a restart: the
+    /// folder is verified first, and every configured parameter is sent.
+    public func load(
+        using client: any BackendModelLoading,
+        setDefault: Bool,
+        scanner: LocalModelScanner,
+        parameterStore: ModelParameterStore,
+        fullChecksum: Bool
+    ) async throws -> BackendModelAdminResponse {
+        let resolvedModel = try await scanner.verifiedModelPathAsync(
+            for: modelDir ?? id,
+            fullChecksum: fullChecksum
+        )
+        return try await client.loadModel(
+            model: id,
+            modelDir: resolvedModel,
+            setDefault: setDefault,
+            maxCacheCap: maxCacheCap,
+            pinned: pinned,
+            mtpModelDir: mtpModelDir,
+            mtpDraftTokens: mtpDraftTokens,
+            promptLookup: promptLookup,
+            reloadWhenIdle: false,
+            samplingDefaults: samplingDefaults,
+            audio: try scanner.audioResources(
+                for: id,
+                execution: parameterStore.parameters(for: id)?.audioExecution
+            ) ?? audio,
+            decision: decision
+        )
     }
 }

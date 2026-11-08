@@ -54,7 +54,7 @@ pub struct ServeArgs {
     pub model_manifest: Option<PathBuf>,
 
     /// Directory containing persistent voice profiles and managed reference audio.
-    /// Defaults to ~/.ironmlx/audio/voices.
+    /// Defaults to <data-root>/audio/voices (~/.ironmlx/audio/voices).
     #[arg(long = "voice-profile-dir")]
     pub voice_profile_dir: Option<PathBuf>,
 
@@ -287,7 +287,7 @@ pub struct ServeArgs {
     /// to the paged attention kernel when supported. With TurboQuant, runtime
     /// K/V stays quantized while prefix cache entries are persisted as packed
     /// TurboQuant tensors. When passed without a value, defaults to
-    /// ~/.ironmlx/cache/paged_prefix_cache.
+    /// <data-root>/cache/paged_prefix_cache (~/.ironmlx/cache/paged_prefix_cache).
     #[arg(
         long = "paged-prefix-cache-dir",
         num_args = 0..=1,
@@ -323,7 +323,8 @@ pub struct ServeArgs {
     pub active_kv_offload: bool,
 
     /// Directory used by --active-kv-offload for temporary request KV payloads.
-    /// Defaults to ~/.ironmlx/cache/active_kv_offload when offload is enabled.
+    /// Defaults to <data-root>/cache/active_kv_offload (~/.ironmlx/cache/active_kv_offload)
+    /// when offload is enabled.
     #[arg(long = "active-kv-offload-dir")]
     pub active_kv_offload_dir: Option<PathBuf>,
 }
@@ -344,7 +345,7 @@ pub(crate) fn resolve_paged_prefix_cache_config(
     let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
         return Ok(None);
     };
-    let root = expand_home_path(root)?;
+    let root = paged_prefix_cache_root(root, ironmlx_runtime::core::data_root::data_root)?;
     let block_size = args.paged_prefix_cache_block_size;
     if block_size <= 0 {
         bail!("--paged-prefix-cache-block-size must be > 0");
@@ -387,7 +388,7 @@ pub(crate) fn resolve_engine_paged_prefix_cache_settings(
     let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
         return Ok(None);
     };
-    let root = expand_home_path(root)?;
+    let root = paged_prefix_cache_root(root, ironmlx_runtime::core::data_root::data_root)?;
     let block_size = args.paged_prefix_cache_block_size;
     if block_size <= 0 {
         bail!("--paged-prefix-cache-block-size must be > 0");
@@ -454,6 +455,20 @@ pub(crate) fn resolve_active_kv_offload_config(
         None => ironmlx_runtime::core::cache::active_kv::default_active_kv_offload_dir(),
     };
     Ok(ironmlx_runtime::core::cache::active_kv::ActiveKvOffloadConfig::enabled(root))
+}
+
+/// `--paged-prefix-cache-dir` without a value means the cache directory under
+/// the data root; any other value is used as given (with `~` expanded).
+/// The data root is resolved only for that default, so an explicit path still
+/// works when the home directory is unavailable.
+fn paged_prefix_cache_root(
+    path: &Path,
+    data_root: impl FnOnce() -> Result<PathBuf>,
+) -> Result<PathBuf> {
+    if path == Path::new(DEFAULT_PAGED_PREFIX_CACHE_DIR) {
+        return Ok(data_root()?.join("cache").join("paged_prefix_cache"));
+    }
+    expand_home_path(path)
 }
 
 fn expand_home_path(path: &Path) -> Result<PathBuf> {
@@ -1795,6 +1810,8 @@ mod scheduler_profile_tests {
         resolve_serve_mtp_config, single_model_id, KvQuantArg, QwenMoeServeModel,
         ResolvedSchedulerRuntime, SchedulerServeConfig, ServeArgs,
     };
+    use super::{paged_prefix_cache_root, DEFAULT_PAGED_PREFIX_CACHE_DIR};
+    use std::path::Path;
 
     fn profile_config() -> SchedulerAutotuneProfileConfig {
         SchedulerAutotuneProfileConfig {
@@ -2860,6 +2877,36 @@ mod scheduler_profile_tests {
         assert_eq!(cfg.root, prefix_dir);
         std::fs::remove_dir_all(temp_dir).expect("cleanup mtp dir");
         std::fs::remove_dir_all(prefix_dir).ok();
+    }
+
+    #[test]
+    fn serve_paged_prefix_cache_default_follows_the_data_root() {
+        let data_root = || Ok(PathBuf::from("/tmp/ironmlx-data"));
+        assert_eq!(
+            paged_prefix_cache_root(Path::new(DEFAULT_PAGED_PREFIX_CACHE_DIR), data_root)
+                .expect("default root"),
+            PathBuf::from("/tmp/ironmlx-data/cache/paged_prefix_cache")
+        );
+        assert_eq!(
+            paged_prefix_cache_root(Path::new("/tmp/custom-prefix"), data_root)
+                .expect("custom root"),
+            PathBuf::from("/tmp/custom-prefix")
+        );
+    }
+
+    #[test]
+    fn serve_explicit_paged_prefix_cache_dir_does_not_need_the_data_root() {
+        let unavailable =
+            || -> crate::Result<PathBuf> { anyhow::bail!("home directory unavailable") };
+        assert_eq!(
+            paged_prefix_cache_root(Path::new("/tmp/custom-prefix"), unavailable)
+                .expect("explicit absolute path"),
+            PathBuf::from("/tmp/custom-prefix")
+        );
+        assert!(
+            paged_prefix_cache_root(Path::new(DEFAULT_PAGED_PREFIX_CACHE_DIR), unavailable)
+                .is_err()
+        );
     }
 
     #[test]

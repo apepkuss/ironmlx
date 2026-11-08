@@ -164,26 +164,12 @@ public struct BackendRestartCoordinator: Sendable {
 
         for model in recoveryModels {
             do {
-                let resolvedModel = try await scanner.verifiedModelPathAsync(
-                    for: model.modelDir ?? model.id,
-                    fullChecksum: config.verifyModelOnLoad == true
-                )
-                _ = try await client.loadModel(
-                    model: model.id,
-                    modelDir: resolvedModel,
+                _ = try await model.load(
+                    using: client,
                     setDefault: model.id == defaultModelID,
-                    maxCacheCap: model.maxCacheCap,
-                    pinned: model.pinned,
-                    mtpModelDir: model.mtpModelDir,
-                    mtpDraftTokens: model.mtpDraftTokens,
-                    promptLookup: model.promptLookup,
-                    reloadWhenIdle: false,
-                    samplingDefaults: model.samplingDefaults,
-                    audio: try scanner.audioResources(
-                        for: model.id,
-                        execution: parameterStore.parameters(for: model.id)?.audioExecution
-                    ) ?? model.audio,
-                    decision: model.decision
+                    scanner: scanner,
+                    parameterStore: parameterStore,
+                    fullChecksum: config.verifyModelOnLoad == true
                 )
                 loadedModels.append(model.id)
             } catch {

@@ -1,8 +1,34 @@
 import Foundation
 
+/// One repository file pinned by the bundled catalogue, verified regardless of download host.
+public struct PinnedModelFile: Codable, Equatable, Sendable {
+    public let path: String
+    public let size: Int64
+    public let sha256: String
+
+    public init(path: String, size: Int64, sha256: String) {
+        self.path = path
+        self.size = size
+        self.sha256 = sha256
+    }
+}
+
 /// Curated repository variants shipped with this App, not an architecture allowlist.
 struct SupportedModelCatalog: Codable, Sendable {
-    struct Entry: Codable, Sendable {
+    /// Hand-picked beginner models by physical memory; `files` pins each entry's
+    /// complete file list at its `metadataRevision`.
+    struct Starter: Codable, Sendable {
+        struct Tier: Codable, Equatable, Sendable {
+            let minPhysicalMemoryGiB: Int
+            let entryId: String
+        }
+
+        let tiers: [Tier]
+        let upgrade: Tier
+        let files: [String: [PinnedModelFile]]
+    }
+
+    struct Entry: Codable, Equatable, Sendable {
         let id: String
         let modelId: String
         let name: String
@@ -24,6 +50,7 @@ struct SupportedModelCatalog: Codable, Sendable {
 
     let version: Int
     let updatedAt: String
+    let starter: Starter?
     let entries: [Entry]
 
     struct MemoryHints: Encodable {

@@ -10,12 +10,15 @@
 | App and backend logs | `~/.ironmlx/logs/` |
 | Model parameters | `~/.ironmlx/model_params.json` |
 | Backend incidents | `~/.ironmlx/incidents/backend-incidents.json` |
+| Chat sessions and attachments | `~/.ironmlx/chats/` |
 | Scheduler profile store | `~/.ironmlx/scheduler-profiles/` |
 | Scheduler calibration reports | `~/.ironmlx/reports/scheduler-autotune/` |
 
 After a custom cache directory is configured in Dashboard, cache data is written
 there instead of the default path. LAN API keys, CA, and TLS private keys are
 managed by macOS Keychain under service `com.ironmlx.lan-security.v1`.
+
+Chat keeps only the latest 20 conversations. Chats are not included in diagnostic bundles.
 
 ## Choose what to remove
 

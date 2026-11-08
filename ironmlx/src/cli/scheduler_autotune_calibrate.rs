@@ -143,6 +143,8 @@ struct ResolvedRunConfig {
     runtime_context: SchedulerAutotuneRuntimeContext,
     runtime_context_path: PathBuf,
     cache_states: Vec<SchedulerAutotuneCacheState>,
+    /// Forwarded to every candidate serve so it uses the same data root.
+    data_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -427,6 +429,7 @@ fn resolve_run_config_with_context(
         runtime_context_path: output_dir.join(RUNTIME_CONTEXT_FILE),
         runtime_context,
         cache_states,
+        data_root: ironmlx_runtime::core::data_root::configured_data_root().map(Path::to_path_buf),
     })
 }
 
@@ -561,7 +564,7 @@ fn run_with_cancellation(
             Ok(path) => Some(path),
             Err(error) => {
                 eprintln!(
-                    "warning: failed to store runtime scheduler profile in ~/.ironmlx: {error:#}"
+                    "warning: failed to store runtime scheduler profile in the IronMLX data root: {error:#}"
                 );
                 None
             }
@@ -768,7 +771,14 @@ fn build_serve_invocation(
     config: SchedulerAutotuneProfileConfig,
     port: u16,
 ) -> ProcessInvocation {
-    let mut invocation_args = vec![
+    let mut invocation_args = Vec::new();
+    if let Some(root) = &args.data_root {
+        invocation_args.extend([
+            "--data-root".to_string(),
+            root.to_string_lossy().into_owned(),
+        ]);
+    }
+    invocation_args.extend([
         "serve".to_string(),
         "--model".to_string(),
         args.model.to_string_lossy().into_owned(),
@@ -790,7 +800,7 @@ fn build_serve_invocation(
         config.decode_cadence_mid_chunk_cap.to_string(),
         "--kv-quant".to_string(),
         args.runtime.kv_quant.cli_value().to_string(),
-    ];
+    ]);
     if let Some(path) = &args.runtime.mtp_model_dir {
         invocation_args.extend([
             "--mtp-model-dir".to_string(),
@@ -1355,6 +1365,26 @@ mod tests {
             .args
             .contains(&"--decode-cadence-mid-chunk-cap".to_string()));
         assert!(command.args.contains(&"256".to_string()));
+    }
+
+    #[test]
+    fn build_serve_invocation_forwards_the_data_root() {
+        let mut args = sample_resolved_config();
+        let command =
+            build_serve_invocation(Path::new("/tmp/ironmlx"), &args, profile_config(), 19000);
+        assert!(!command.args.contains(&"--data-root".to_string()));
+
+        args.data_root = Some(PathBuf::from("/tmp/ironmlx-data"));
+        let command =
+            build_serve_invocation(Path::new("/tmp/ironmlx"), &args, profile_config(), 19000);
+        assert_eq!(
+            &command.args[..3],
+            &[
+                "--data-root".to_string(),
+                "/tmp/ironmlx-data".to_string(),
+                "serve".to_string()
+            ]
+        );
     }
 
     #[test]

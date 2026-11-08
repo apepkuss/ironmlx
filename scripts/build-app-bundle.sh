@@ -150,6 +150,7 @@ for resource in \
   sidebar-logo@2x.png; do
   cp "$APP_SOURCE_DIR/Sources/IronMLXAppCore/Resources/$resource" "$APP_BUNDLE/Contents/Resources/$resource"
 done
+ditto "$APP_SOURCE_DIR/Sources/IronMLXAppCore/Resources/chat" "$APP_BUNDLE/Contents/Resources/chat"
 cp "$REPO_ROOT/THIRD_PARTY_NOTICES.md" "$APP_BUNDLE/Contents/Resources/Legal/"
 cp "$REPO_ROOT/LICENSE" "$APP_BUNDLE/Contents/Resources/Legal/"
 cp "$REPO_ROOT/NOTICE" "$APP_BUNDLE/Contents/Resources/Legal/"

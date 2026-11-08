@@ -58,3 +58,23 @@ import Testing
     #expect(plan.backendModelReferences == [])
     #expect(plan.dashboardRoute == .modelsManage)
 }
+
+@Test func noLocalModelsLaunchesNoModelWindow() {
+    let empty = AppLaunchPlanner().plan(config: AppConfig(), localModels: [])
+    #expect(empty.firstSurface == .noModelWindow)
+
+    let localModel = LocalModel(
+        id: "mlx-community/Qwen3-0.6B-4bit",
+        repoID: "mlx-community/Qwen3-0.6B-4bit",
+        source: "hf",
+        sizeMB: 512
+    )
+    let downloaded = AppLaunchPlanner().plan(config: AppConfig(), localModels: [localModel])
+    #expect(downloaded.firstSurface == .dashboard(.modelsManage))
+
+    let restored = AppLaunchPlanner().plan(
+        config: AppConfig(defaultModel: localModel.id, loadedModels: [localModel.id]),
+        localModels: [localModel]
+    )
+    #expect(restored.firstSurface == .dashboard(.status))
+}

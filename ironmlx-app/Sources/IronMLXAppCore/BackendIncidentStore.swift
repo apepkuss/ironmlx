@@ -540,8 +540,7 @@ public final class BackendIncidentStore {
     }
 
     public static func defaultURL() -> URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".ironmlx", isDirectory: true)
+        IronMLXDataRoot.url
             .appendingPathComponent("incidents", isDirectory: true)
             .appendingPathComponent("backend-incidents.json")
     }

@@ -129,8 +129,7 @@ public struct ModelVersionManagementService: @unchecked Sendable {
     private let fileManager: FileManager
 
     public init(
-        rootURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".ironmlx", isDirectory: true),
+        rootURL: URL = IronMLXDataRoot.url,
         fileManager: FileManager = .default
     ) {
         self.rootURL = rootURL

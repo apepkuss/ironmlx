@@ -57,6 +57,16 @@ for file in \
   Contents/Frameworks/Sparkle.framework/Versions/B/Sparkle \
   Contents/Resources/mlx.metallib \
   Contents/Resources/dashboard2.html \
+  Contents/Resources/chat/chat.html \
+  Contents/Resources/chat/chat.css \
+  Contents/Resources/chat/chat.js \
+  Contents/Resources/chat/i18n.js \
+  Contents/Resources/chat/vendor/marked.min.js \
+  Contents/Resources/chat/vendor/purify.min.js \
+  Contents/Resources/chat/vendor/highlight.min.js \
+  Contents/Resources/chat/vendor/highlight.css \
+  Contents/Resources/chat/vendor/katex.min.js \
+  Contents/Resources/chat/vendor/katex.min.css \
   Contents/Resources/supported-models.json \
   Contents/Resources/indextts25-preparation.json \
   Contents/Resources/deepseek-harness-logo-dark.svg \
@@ -78,6 +88,13 @@ for file in \
   Contents/Resources/Legal/model-license-boundary.md; do
   require_file "$APP_BUNDLE/$file"
 done
+# Every font the KaTeX stylesheet loads (its first, WOFF2 source) is bundled.
+katex_fonts=0
+while IFS= read -r font; do
+  require_file "$APP_BUNDLE/Contents/Resources/chat/vendor/$font"
+  katex_fonts=$((katex_fonts + 1))
+done < <(grep -oE 'fonts/KaTeX_[A-Za-z0-9-]+\.woff2' "$APP_BUNDLE/Contents/Resources/chat/vendor/katex.min.css" | sort -u)
+[ "$katex_fonts" -eq 20 ] || fail "KaTeX stylesheet must reference 20 bundled fonts, found $katex_fonts"
 [ -d "$APP_BUNDLE/Contents/Resources/Legal/THIRD_PARTY_LICENSES" ] || \
   fail "bundled third-party license directory is missing"
 diff -q \

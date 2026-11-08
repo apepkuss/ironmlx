@@ -194,9 +194,9 @@ struct ValidatedReference {
 
 impl VoiceStore {
     pub(crate) fn default_root() -> crate::Result<PathBuf> {
-        Ok(dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("home directory is unavailable"))?
-            .join(".ironmlx/audio/voices"))
+        Ok(ironmlx_runtime::core::data_root::data_root()?
+            .join("audio")
+            .join("voices"))
     }
 
     pub(crate) fn open(root: PathBuf) -> crate::Result<Self> {

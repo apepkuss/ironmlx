@@ -267,7 +267,8 @@ public struct SchedulerProfileGenerationPlan: Equatable, Sendable {
         metallibURL: URL? = nil,
         request: SchedulerProfileGenerationRequest,
         outputRootURL: URL,
-        timestamp: Date = Date()
+        timestamp: Date = Date(),
+        dataRootURL: URL = IronMLXDataRoot.url
     ) {
         let directoryName = Self.outputDirectoryName(model: request.model, timestamp: timestamp)
         let outputDirectory = outputRootURL.appendingPathComponent(directoryName, isDirectory: true)
@@ -277,6 +278,9 @@ public struct SchedulerProfileGenerationPlan: Equatable, Sendable {
         if let metallibURL {
             arguments += ["--mlx-metallib", metallibURL.path]
         }
+        // The backend stores the runtime profile under the data root and
+        // forwards it to every candidate serve it starts.
+        arguments += ["--data-root", dataRootURL.path]
         arguments += ["scheduler-autotune", "calibrate"]
         arguments += [
             "--model", request.modelPath,
@@ -582,8 +586,7 @@ public final class SchedulerProfileGenerationService: @unchecked Sendable {
     private var cancelRequested = false
 
     public init(
-        outputRootURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".ironmlx", isDirectory: true)
+        outputRootURL: URL = IronMLXDataRoot.url
             .appendingPathComponent("reports", isDirectory: true)
             .appendingPathComponent("scheduler-autotune", isDirectory: true)
     ) {

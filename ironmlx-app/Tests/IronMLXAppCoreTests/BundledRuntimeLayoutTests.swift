@@ -73,9 +73,11 @@ import Testing
         port: 9068
     )
 
-    #expect(config.arguments.prefix(3) == [
+    #expect(config.arguments.prefix(5) == [
         "--mlx-metallib",
         "/Applications/IronMLX.app/Contents/Resources/mlx.metallib",
+        "--data-root",
+        IronMLXDataRoot.url.path,
         "serve",
     ])
 }

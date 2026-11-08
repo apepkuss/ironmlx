@@ -132,4 +132,17 @@ enum IronMLXAppResourceResolver {
         return Bundle.module.url(forResource: name, withExtension: extensionName)
 #endif
     }
+
+    /// A resource inside a copied resource folder, such as `chat/chat.html`.
+    static func url(forResource name: String, withExtension extensionName: String, subdirectory: String) -> URL? {
+#if IRONMLX_APP_BUNDLE
+        let url = BundledRuntimeLayout.expected().bundleURL
+            .appendingPathComponent("Contents/Resources", isDirectory: true)
+            .appendingPathComponent(subdirectory, isDirectory: true)
+            .appendingPathComponent("\(name).\(extensionName)", isDirectory: false)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+#else
+        return Bundle.module.url(forResource: name, withExtension: extensionName, subdirectory: subdirectory)
+#endif
+    }
 }

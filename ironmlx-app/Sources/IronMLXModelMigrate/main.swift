@@ -22,8 +22,7 @@ struct IronMLXModelMigrate {
 
     private static func rootURL(arguments: [String]) throws -> URL {
         guard let index = arguments.firstIndex(of: "--root") else {
-            return FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".ironmlx", isDirectory: true)
+            return IronMLXDataRoot.url
         }
         let valueIndex = arguments.index(after: index)
         guard valueIndex < arguments.endIndex else {

@@ -228,7 +228,7 @@ jobs:
         run: scripts/verify-version-consistency.sh
 
       - name: Test Dashboard recovery notifications
-        run: node --test scripts/tests/test_dashboard_recovery.cjs scripts/tests/test_dashboard_model_parameters.cjs scripts/tests/test_dashboard_log_export.cjs scripts/tests/test_dashboard_download_cleanup.cjs scripts/tests/test_dashboard_supported_models.cjs
+        run: node --test scripts/tests/test_dashboard_recovery.cjs scripts/tests/test_dashboard_model_parameters.cjs scripts/tests/test_dashboard_log_export.cjs scripts/tests/test_dashboard_download_cleanup.cjs scripts/tests/test_dashboard_supported_models.cjs scripts/tests/test_dashboard_onboarding.cjs scripts/tests/test_chat_render.cjs scripts/tests/test_chat_input.cjs scripts/tests/test_chat_history.cjs scripts/tests/test_chat_math.cjs
 
       - name: Test crash recovery helper startup
         shell: bash

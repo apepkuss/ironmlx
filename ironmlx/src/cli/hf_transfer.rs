@@ -1,20 +1,22 @@
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::FileExt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use clap::Args;
-use hf_hub::api::tokio::{ApiBuilder, Progress};
 use hf_hub::{Repo, RepoType};
 use reqwest::header::{
-    HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, ETAG,
-    LOCATION, RANGE, USER_AGENT,
+    HeaderMap, HeaderName, CONTENT_LENGTH, CONTENT_RANGE, ETAG, LOCATION, RANGE,
 };
 use reqwest::redirect::Policy;
+use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -25,8 +27,15 @@ const HF_PARTIAL_EXTENSION: &str = "sync.part";
 const HASH_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROGRESS_MIN_BYTES: u64 = 4 * 1024 * 1024;
 const PROGRESS_MAX_INTERVAL: Duration = Duration::from_millis(200);
+/// hf-mirror.com -> huggingface.co -> CDN is two hops; leave headroom for
+/// one more proxy without following loops.
+const MAX_REDIRECTS: usize = 5;
+const CHUNK_ATTEMPTS: u32 = 4;
+const CHUNK_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct HfTransferArgs {
     /// Hugging Face model repository, in organization/model form.
     #[arg(long)]
@@ -40,7 +49,7 @@ pub struct HfTransferArgs {
     /// Final file location inside the unpublished IronMLX staging snapshot.
     #[arg(long)]
     destination: PathBuf,
-    /// Private cache directory used for this file's resumable hf-hub transfer.
+    /// Private cache directory used for this file's resumable transfer.
     #[arg(long)]
     cache_dir: PathBuf,
     /// Expected file size from the immutable repository manifest.
@@ -52,10 +61,10 @@ pub struct HfTransferArgs {
     /// Hugging Face endpoint.
     #[arg(long, default_value = "https://huggingface.co")]
     endpoint: String,
-    /// Maximum number of concurrent hf-hub Range chunks.
+    /// Maximum number of concurrent Range chunks.
     #[arg(long, default_value_t = 4)]
     parallelism: usize,
-    /// Size of each hf-hub Range chunk.
+    /// Size of each Range chunk.
     #[arg(long, default_value_t = 10_000_000)]
     chunk_size: usize,
 }
@@ -77,6 +86,8 @@ struct RemoteFileIdentity {
     commit_sha: String,
     size: u64,
     etag: String,
+    /// Final location of the redirect chain; Range requests go here first.
+    location: Url,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,26 +134,26 @@ impl Default for JsonProgressState {
     }
 }
 
-impl Progress for JsonProgress {
-    async fn init(&mut self, size: usize, _filename: &str) {
+impl JsonProgress {
+    fn init(&self, size: u64) {
         if let Ok(mut state) = self.state.lock() {
             state.bytes = 0;
-            state.total = size as u64;
+            state.total = size;
             state.last_emitted_bytes = 0;
             state.last_emitted_at = Instant::now();
             state.awaiting_baseline = true;
         }
     }
 
-    async fn update(&mut self, size: usize) {
+    fn update(&self, size: u64) {
         if let Ok(mut state) = self.state.lock() {
-            // hf-hub reports the committed starting offset as its first update,
-            // before reporting newly transferred chunks.
+            // The first update after `init` is the committed starting offset,
+            // before newly transferred bytes are reported.
             let baseline = std::mem::take(&mut state.awaiting_baseline);
             state.bytes = if baseline {
-                (size as u64).min(state.total)
+                size.min(state.total)
             } else {
-                state.bytes.saturating_add(size as u64).min(state.total)
+                state.bytes.saturating_add(size).min(state.total)
             };
             let now = Instant::now();
             if baseline
@@ -164,7 +175,14 @@ impl Progress for JsonProgress {
         }
     }
 
-    async fn finish(&mut self) {
+    /// Withdraws bytes of a failed chunk attempt; the retry reports them again.
+    fn rollback(&self, size: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            state.bytes = state.bytes.saturating_sub(size);
+        }
+    }
+
+    fn finish(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.bytes = state.total;
             if state.last_emitted_bytes != state.total {
@@ -235,10 +253,17 @@ pub fn run(args: HfTransferArgs) -> Result<()> {
 }
 
 async fn run_async(args: HfTransferArgs) -> Result<()> {
-    run_async_with_progress(args, JsonProgress::default()).await
+    let token = std::env::var("HF_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    run_async_with_progress(args, token, JsonProgress::default()).await
 }
 
-async fn run_async_with_progress(args: HfTransferArgs, progress: JsonProgress) -> Result<()> {
+async fn run_async_with_progress(
+    args: HfTransferArgs,
+    token: Option<String>,
+    progress: JsonProgress,
+) -> Result<()> {
     let expected_sha256 = args.expected_sha256.to_ascii_lowercase();
     if args.destination.exists() {
         let actual_size = args.destination.metadata()?.len();
@@ -260,25 +285,17 @@ async fn run_async_with_progress(args: HfTransferArgs, progress: JsonProgress) -
 
     let lock_path = transfer_lock_path(&args.cache_dir)?;
     let _lock = TransferLock::acquire(&lock_path)?;
-    let token = std::env::var("HF_TOKEN")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
 
-    let api = ApiBuilder::new()
-        .with_endpoint(args.endpoint.clone())
-        .with_cache_dir(args.cache_dir.clone())
-        .with_token(token.clone())
-        .with_max_files(args.parallelism)
-        .with_chunk_size(Some(args.chunk_size))
-        .with_progress(false)
-        .with_user_agent("ironmlx", env!("CARGO_PKG_VERSION"))
-        .build()
-        .context("initializing hf-hub client")?;
     let repo = Repo::with_revision(args.repo_id.clone(), RepoType::Model, args.revision.clone());
-    let repo_folder = repo.folder_name();
-    let api_repo = api.repo(repo);
-    let url = api_repo.url(&args.filename);
-    let remote = resolve_remote_identity(&url, token.as_deref()).await?;
+    let url = format!(
+        "{}/{}/resolve/{}/{}",
+        args.endpoint.trim_end_matches('/'),
+        repo.url(),
+        repo.url_revision(),
+        args.filename
+    );
+    let http = Arc::new(RedirectingClient::new(&url, token)?);
+    let remote = resolve_remote_identity(&http).await?;
     if !remote.commit_sha.eq_ignore_ascii_case(&args.revision) {
         bail!(
             "Hugging Face returned commit {} for immutable revision {}",
@@ -307,9 +324,11 @@ async fn run_async_with_progress(args: HfTransferArgs, progress: JsonProgress) -
     };
     prepare_transfer_cache(&args.cache_dir, &identity)?;
 
+    // Keep hf-hub's cache layout: the App reads this partial's committed marker
+    // to show and resume progress across restarts.
     let partial_path = args
         .cache_dir
-        .join(repo_folder)
+        .join(repo.folder_name())
         .join("blobs")
         .join(&remote.etag)
         .with_extension(HF_PARTIAL_EXTENSION);
@@ -323,23 +342,32 @@ async fn run_async_with_progress(args: HfTransferArgs, progress: JsonProgress) -
         hash_committed_prefix(&hash_partial, expected_size, &hash_stop)
     });
 
-    let download_result = api_repo
-        .download_with_progress(&args.filename, progress)
-        .await;
+    let download_result = download_partial(
+        http,
+        remote.location.clone(),
+        &partial_path,
+        RangePlan {
+            length: args.expected_size,
+            chunk_size: args.chunk_size as u64,
+            parallelism: args.parallelism,
+        },
+        progress,
+    )
+    .await;
     stop_hashing.store(true, Ordering::Release);
     let cursor = hash_task
         .await
         .context("joining incremental SHA-256 task")??;
-    let pointer = download_result.context("hf-hub Range download failed")?;
-    let blob = fs::canonicalize(&pointer)
-        .with_context(|| format!("resolving hf-hub blob {}", pointer.display()))?;
-    let actual_size = blob.metadata()?.len();
-    if actual_size != args.expected_size {
+    download_result.context("Hugging Face Range download failed")?;
+    let blob = partial_path;
+    let stored_size = blob.metadata()?.len();
+    let marker_end = args.expected_size + std::mem::size_of::<u64>() as u64;
+    if stored_size != marker_end {
         bail!(
-            "hf-hub downloaded {} bytes for {}, expected {}",
-            actual_size,
+            "partial for {} holds {} bytes, expected {}",
             args.filename,
-            args.expected_size
+            stored_size,
+            marker_end
         );
     }
     let actual_sha256 = finish_sha256(&blob, cursor, args.expected_size)?;
@@ -351,6 +379,13 @@ async fn run_async_with_progress(args: HfTransferArgs, progress: JsonProgress) -
             expected_sha256
         );
     }
+    // Drop the committed marker only once the content is verified.
+    let verified = OpenOptions::new().write(true).open(&blob)?;
+    verified.set_len(args.expected_size)?;
+    verified
+        .sync_all()
+        .with_context(|| format!("syncing verified partial {}", blob.display()))?;
+    drop(verified);
 
     if let Some(parent) = args.destination.parent() {
         fs::create_dir_all(parent)
@@ -426,37 +461,133 @@ fn validate_repository_path(path: &str) -> Result<()> {
     Ok(())
 }
 
-async fn resolve_remote_identity(url: &str, token: Option<&str>) -> Result<RemoteFileIdentity> {
-    let mut headers = HeaderMap::new();
-    headers.insert(USER_AGENT, HeaderValue::from_static("ironmlx/hf-transfer"));
-    if let Some(token) = token {
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {token}"))
-                .context("constructing Hugging Face authorization header")?,
-        );
+/// HTTP client that follows redirects itself: every chain is bounded, Range
+/// headers reach the final location, and the token is sent only to the origin
+/// of the configured endpoint (never to a CDN or another host).
+struct RedirectingClient {
+    client: reqwest::Client,
+    origin: Url,
+    token: Option<String>,
+}
+
+struct RedirectedResponse {
+    response: reqwest::Response,
+    /// URL that produced `response`.
+    url: Url,
+    /// Headers of every redirect answer, in order.
+    redirects: Vec<HeaderMap>,
+}
+
+impl RedirectingClient {
+    fn new(url: &str, token: Option<String>) -> Result<Self> {
+        let origin = Url::parse(url).context("parsing Hugging Face file URL")?;
+        let client = reqwest::Client::builder()
+            .user_agent(concat!("ironmlx/", env!("CARGO_PKG_VERSION")))
+            .redirect(Policy::none())
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
+            .build()
+            .context("creating Hugging Face transfer client")?;
+        Ok(Self {
+            client,
+            origin,
+            token,
+        })
     }
-    let client = reqwest::Client::builder()
-        .default_headers(headers)
-        .redirect(Policy::none())
-        .build()
-        .context("creating Hugging Face identity client")?;
-    let response = client
-        .get(url)
-        .header(RANGE, "bytes=0-0")
-        .send()
+
+    async fn get_range(&self, start: &Url, range: &str) -> Result<RedirectedResponse> {
+        let mut url = start.clone();
+        let mut redirects = Vec::new();
+        loop {
+            let mut request = self.client.get(url.clone()).header(RANGE, range);
+            if let Some(token) = self.token.as_deref() {
+                if same_origin(&url, &self.origin) {
+                    request = request.bearer_auth(token);
+                }
+            }
+            let response = request
+                .send()
+                .await
+                // Signed CDN URLs must not reach logs.
+                .map_err(reqwest::Error::without_url)
+                .with_context(|| format!("requesting {}", display_url(&url)))?;
+            if !is_redirect(response.status()) {
+                return Ok(RedirectedResponse {
+                    response,
+                    url,
+                    redirects,
+                });
+            }
+            if redirects.len() >= MAX_REDIRECTS {
+                bail!(
+                    "too many redirects: more than {MAX_REDIRECTS} following {}",
+                    display_url(start)
+                );
+            }
+            let location = required_header(response.headers(), &LOCATION)?;
+            let next = url
+                .join(&location)
+                .with_context(|| format!("invalid redirect location from {}", display_url(&url)))?;
+            check_redirect_target(&self.origin, &next)?;
+            redirects.push(response.headers().clone());
+            url = next;
+        }
+    }
+}
+
+/// An https endpoint never downgrades to http; plain http is followed only
+/// when the configured endpoint is itself http (a local test server).
+fn check_redirect_target(origin: &Url, next: &Url) -> Result<()> {
+    match next.scheme() {
+        "https" => Ok(()),
+        "http" if origin.scheme() == "http" => Ok(()),
+        "http" => bail!("refusing redirect from https to http {}", display_url(next)),
+        other => bail!("refusing redirect to a {other} URL"),
+    }
+}
+
+fn is_redirect(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::MOVED_PERMANENTLY
+            | StatusCode::FOUND
+            | StatusCode::SEE_OTHER
+            | StatusCode::TEMPORARY_REDIRECT
+            | StatusCode::PERMANENT_REDIRECT
+    )
+}
+
+fn same_origin(lhs: &Url, rhs: &Url) -> bool {
+    lhs.scheme() == rhs.scheme()
+        && lhs.host_str() == rhs.host_str()
+        && lhs.port_or_known_default() == rhs.port_or_known_default()
+}
+
+fn display_url(url: &Url) -> String {
+    format!("{}{}", url.origin().ascii_serialization(), url.path())
+}
+
+async fn resolve_remote_identity(http: &RedirectingClient) -> Result<RemoteFileIdentity> {
+    let reply = http
+        .get_range(&http.origin, "bytes=0-0")
         .await
         .context("requesting immutable Hugging Face file identity")?;
-    if !response.status().is_success() && !response.status().is_redirection() {
-        bail!(
-            "Hugging Face identity request failed with HTTP {}",
-            response.status()
-        );
+    let status = reply.response.status();
+    if !status.is_success() {
+        bail!("Hugging Face identity request failed with HTTP {status}");
     }
-    let headers = response.headers();
+    // A mirror may answer with a bare redirect to huggingface.co; the first
+    // answer that names the commit carries the file identity.
+    let final_headers = reply.response.headers();
     let commit_header = HeaderName::from_static("x-repo-commit");
     let linked_etag_header = HeaderName::from_static("x-linked-etag");
     let linked_size_header = HeaderName::from_static("x-linked-size");
+    let headers = reply
+        .redirects
+        .iter()
+        .chain(std::iter::once(final_headers))
+        .find(|headers| headers.contains_key(&commit_header))
+        .context("Hugging Face response is missing x-repo-commit")?;
     let commit_sha = required_header(headers, &commit_header)?;
     let etag = clean_etag(
         headers
@@ -472,41 +603,260 @@ async fn resolve_remote_identity(url: &str, token: Option<&str>) -> Result<Remot
             .context("Hugging Face returned a non-text linked size")?
             .parse()
             .context("parsing Hugging Face linked size")?
-    } else if let Some(value) = headers.get(CONTENT_RANGE) {
+    } else if let Some(value) = final_headers.get(CONTENT_RANGE) {
         parse_content_range_size(value.to_str()?)?
-    } else if response.status().is_success() {
-        required_header(headers, &CONTENT_LENGTH)?
+    } else {
+        required_header(final_headers, &CONTENT_LENGTH)?
             .parse()
             .context("parsing Hugging Face content length")?
-    } else {
-        let location = required_header(headers, &LOCATION)?;
-        resolve_redirected_size(&location, token).await?
     };
     Ok(RemoteFileIdentity {
         commit_sha,
         size,
         etag,
+        location: reply.url,
     })
 }
 
-async fn resolve_redirected_size(location: &str, token: Option<&str>) -> Result<u64> {
-    let client = reqwest::Client::new();
-    let mut request = client.get(location).header(RANGE, "bytes=0-0");
-    if let Some(token) = token {
-        request = request.bearer_auth(token);
+struct RangePlan {
+    length: u64,
+    chunk_size: u64,
+    parallelism: usize,
+}
+
+/// Shared state of one partial-file transfer.
+struct RangeTransfer {
+    http: Arc<RedirectingClient>,
+    location: Mutex<Url>,
+    file: File,
+    length: u64,
+    chunk_size: u64,
+    /// Start of the next chunk to fetch. Workers take chunks strictly in file
+    /// order, so the committed prefix trails the bytes on disk by at most
+    /// `parallelism` chunks and a restart loses little.
+    next_start: AtomicU64,
+    ledger: Mutex<CommitLedger>,
+    progress: JsonProgress,
+}
+
+struct CommitLedger {
+    committed: u64,
+    finished: BinaryHeap<Reverse<(u64, u64)>>,
+}
+
+/// Downloads the missing tail of the partial file (payload followed by an
+/// 8-byte little-endian committed-prefix marker, as written by hf-hub) and
+/// truncates the marker once every byte is present.
+async fn download_partial(
+    http: Arc<RedirectingClient>,
+    location: Url,
+    partial: &Path,
+    plan: RangePlan,
+    progress: JsonProgress,
+) -> Result<()> {
+    let marker_len = std::mem::size_of::<u64>() as u64;
+    let stored_len = plan
+        .length
+        .checked_add(marker_len)
+        .context("partial size overflow")?;
+    if let Some(parent) = partial.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating transfer directory {}", parent.display()))?;
     }
-    let response = request
-        .send()
-        .await
-        .context("requesting redirected Hugging Face file size")?
-        .error_for_status()
-        .context("redirected Hugging Face file size request failed")?;
-    let value = response
-        .headers()
-        .get(CONTENT_RANGE)
-        .context("redirected Hugging Face response is missing Content-Range")?
-        .to_str()?;
-    parse_content_range_size(value)
+    let committed = match committed_prefix(partial, plan.length)? {
+        Some(committed) => committed,
+        None => {
+            let file = File::create(partial)
+                .with_context(|| format!("creating partial {}", partial.display()))?;
+            file.set_len(stored_len)?;
+            0
+        }
+    };
+    progress.init(plan.length);
+    progress.update(committed);
+
+    if committed < plan.length {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(partial)
+            .with_context(|| format!("opening partial {}", partial.display()))?;
+        let transfer = Arc::new(RangeTransfer {
+            http,
+            location: Mutex::new(location),
+            file,
+            length: plan.length,
+            chunk_size: plan.chunk_size,
+            next_start: AtomicU64::new(committed),
+            ledger: Mutex::new(CommitLedger {
+                committed,
+                finished: BinaryHeap::new(),
+            }),
+            progress: progress.clone(),
+        });
+        let mut workers = tokio::task::JoinSet::new();
+        for _ in 0..plan.parallelism {
+            workers.spawn(Arc::clone(&transfer).run_worker());
+        }
+        // The first failure drops the set, which aborts the other workers.
+        while let Some(joined) = workers.join_next().await {
+            joined.context("joining Range transfer worker")??;
+        }
+        let committed = transfer
+            .ledger
+            .lock()
+            .map_err(|_| anyhow::anyhow!("partial commit ledger poisoned"))?
+            .committed;
+        if committed != plan.length {
+            bail!(
+                "Range transfer committed {committed} of {} bytes",
+                plan.length
+            );
+        }
+    }
+
+    // The marker stays until the caller has verified the SHA-256, so a quit
+    // before the verified file is in place still resumes as complete.
+    progress.finish();
+    Ok(())
+}
+
+impl RangeTransfer {
+    async fn run_worker(self: Arc<Self>) -> Result<()> {
+        loop {
+            let start = self.next_start.fetch_add(self.chunk_size, Ordering::SeqCst);
+            if start >= self.length {
+                return Ok(());
+            }
+            let end = start.saturating_add(self.chunk_size).min(self.length) - 1;
+            let data = self.fetch_with_retries(start, end).await?;
+            let transfer = Arc::clone(&self);
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                transfer.file.write_all_at(&data, start)?;
+                transfer.commit(start, end)
+            })
+            .await
+            .context("joining partial writer")??;
+        }
+    }
+
+    async fn fetch_with_retries(&self, start: u64, end: u64) -> Result<Vec<u8>> {
+        let mut attempt = 0;
+        loop {
+            // A retry resolves the chain again: CDN locations are signed and expire.
+            let from = if attempt == 0 {
+                self.current_location()?
+            } else {
+                self.http.origin.clone()
+            };
+            let mut received = 0;
+            match self.fetch(&from, start, end, &mut received).await {
+                Ok((data, location)) => {
+                    if let Ok(mut current) = self.location.lock() {
+                        *current = location;
+                    }
+                    return Ok(data);
+                }
+                Err(error) => {
+                    self.progress.rollback(received);
+                    attempt += 1;
+                    if attempt >= CHUNK_ATTEMPTS {
+                        return Err(error).with_context(|| {
+                            format!("downloading bytes {start}-{end} after {attempt} attempts")
+                        });
+                    }
+                    tokio::time::sleep(CHUNK_RETRY_BASE_DELAY * 2_u32.pow(attempt - 1)).await;
+                }
+            }
+        }
+    }
+
+    fn current_location(&self) -> Result<Url> {
+        self.location
+            .lock()
+            .map(|location| location.clone())
+            .map_err(|_| anyhow::anyhow!("transfer location lock poisoned"))
+    }
+
+    async fn fetch(
+        &self,
+        from: &Url,
+        start: u64,
+        end: u64,
+        received: &mut u64,
+    ) -> Result<(Vec<u8>, Url)> {
+        let reply = self
+            .http
+            .get_range(from, &format!("bytes={start}-{end}"))
+            .await?;
+        let mut response = reply.response;
+        if response.status() != StatusCode::PARTIAL_CONTENT {
+            bail!(
+                "Hugging Face Range request returned HTTP {}",
+                response.status()
+            );
+        }
+        let content_range = required_header(response.headers(), &CONTENT_RANGE)?;
+        if parse_content_range(&content_range)? != (start, end, self.length) {
+            bail!("Hugging Face returned Content-Range {content_range} for bytes {start}-{end}");
+        }
+        let size = end - start + 1;
+        let mut data = Vec::with_capacity(usize::try_from(size)?);
+        while let Some(piece) = response
+            .chunk()
+            .await
+            .map_err(reqwest::Error::without_url)
+            .context("reading Hugging Face Range body")?
+        {
+            if data.len() as u64 + piece.len() as u64 > size {
+                bail!("Hugging Face sent more than the requested bytes {start}-{end}");
+            }
+            data.extend_from_slice(&piece);
+            *received += piece.len() as u64;
+            self.progress.update(piece.len() as u64);
+        }
+        if data.len() as u64 != size {
+            bail!(
+                "Hugging Face ended bytes {start}-{end} after {} bytes",
+                data.len()
+            );
+        }
+        Ok((data, reply.url))
+    }
+
+    /// Advances the on-disk committed marker over every contiguous finished chunk.
+    fn commit(&self, start: u64, end: u64) -> Result<()> {
+        let mut ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| anyhow::anyhow!("partial commit ledger poisoned"))?;
+        ledger.finished.push(Reverse((start, end)));
+        let before = ledger.committed;
+        while let Some(Reverse((first, last))) = ledger.finished.peek().copied() {
+            if first != ledger.committed {
+                break;
+            }
+            ledger.finished.pop();
+            ledger.committed = last + 1;
+        }
+        if ledger.committed != before {
+            self.file
+                .write_all_at(&ledger.committed.to_le_bytes(), self.length)
+                .context("writing partial committed marker")?;
+        }
+        Ok(())
+    }
+}
+
+fn parse_content_range(value: &str) -> Result<(u64, u64, u64)> {
+    let parsed = value
+        .strip_prefix("bytes ")
+        .and_then(|rest| rest.split_once('/'))
+        .and_then(|(span, total)| {
+            let (start, end) = span.split_once('-')?;
+            Some((start.parse().ok()?, end.parse().ok()?, total.parse().ok()?))
+        });
+    parsed.with_context(|| format!("invalid Hugging Face Content-Range {value}"))
 }
 
 fn required_header(headers: &HeaderMap, name: &HeaderName) -> Result<String> {
@@ -577,6 +927,17 @@ fn repair_invalid_partial(path: &Path, expected_size: u64) -> Result<()> {
     let expected_storage_size = expected_size
         .checked_add(std::mem::size_of::<u64>() as u64)
         .context("partial size overflow")?;
+    if file.metadata()?.len() == expected_size {
+        // Every byte arrived and the marker was dropped, but the process ended
+        // before the file was moved into place. Mark it complete again; the
+        // final SHA-256 check decides whether it is kept.
+        drop(file);
+        let file = OpenOptions::new().write(true).open(path)?;
+        file.set_len(expected_storage_size)?;
+        file.write_all_at(&expected_size.to_le_bytes(), expected_size)?;
+        file.sync_all()?;
+        return Ok(());
+    }
     if file.metadata()?.len() != expected_storage_size {
         drop(file);
         fs::remove_file(path)?;
@@ -640,7 +1001,7 @@ fn committed_prefix(partial: &Path, expected_size: u64) -> Result<Option<u64>> {
         return Ok(Some(expected_size));
     }
     if committed > expected_size {
-        bail!("hf-hub partial contains an invalid committed byte marker");
+        bail!("partial contains an invalid committed byte marker");
     }
     Ok(Some(committed))
 }
@@ -730,6 +1091,7 @@ mod tests {
     use axum::http::{Request, Response, StatusCode};
     use axum::routing::get;
     use axum::Router;
+    use reqwest::header::AUTHORIZATION;
 
     #[derive(Clone)]
     struct TestHubState {
@@ -848,9 +1210,9 @@ mod tests {
 
     #[tokio::test]
     async fn json_progress_uses_first_update_as_absolute_resume_baseline() {
-        let mut progress = JsonProgress::default();
+        let progress = JsonProgress::default();
 
-        progress.init(100, "model.safetensors").await;
+        progress.init(100);
         {
             let state = progress.state.lock().expect("progress state");
             assert!(state.awaiting_baseline);
@@ -858,7 +1220,7 @@ mod tests {
             assert_eq!(state.last_emitted_bytes, 0);
         }
 
-        progress.update(20).await;
+        progress.update(20);
         {
             let state = progress.state.lock().expect("progress state");
             assert!(!state.awaiting_baseline);
@@ -867,7 +1229,7 @@ mod tests {
             assert_eq!(state.first_emitted_bytes, Some(20));
         }
 
-        progress.update(7).await;
+        progress.update(7);
         let state = progress.state.lock().expect("progress state");
         assert_eq!(state.bytes, 27);
         assert_eq!(state.last_emitted_bytes, 20);
@@ -875,10 +1237,10 @@ mod tests {
 
     #[tokio::test]
     async fn json_progress_reports_zero_when_hf_hub_discards_partial() {
-        let mut progress = JsonProgress::default();
+        let progress = JsonProgress::default();
 
-        progress.init(100, "model.safetensors").await;
-        progress.update(0).await;
+        progress.init(100);
+        progress.update(0);
 
         let state = progress.state.lock().expect("progress state");
         assert!(!state.awaiting_baseline);
@@ -963,10 +1325,11 @@ mod tests {
                 parallelism: 4,
                 chunk_size: 256 * 1024,
             },
+            None,
             progress.clone(),
         )
         .await
-        .expect("run hf-hub transfer");
+        .expect("run resumed transfer");
 
         assert_eq!(
             progress
@@ -1039,5 +1402,550 @@ mod tests {
             .and_then(|value| value.split_once('-'))
             .and_then(|(start, _)| start.parse().ok())
             .expect("valid byte range")
+    }
+
+    const TEST_RESOLVE_PATH: &str =
+        "/org/model/resolve/cccccccccccccccccccccccccccccccccccccccc/model.safetensors";
+
+    #[derive(Clone)]
+    enum TestHop {
+        Redirect {
+            status: StatusCode,
+            location: String,
+            identity: bool,
+        },
+        Serve {
+            identity: bool,
+        },
+    }
+
+    #[derive(Clone, Debug)]
+    struct ChainRequest {
+        server: &'static str,
+        path: String,
+        authorization: Option<String>,
+        range: String,
+    }
+
+    #[derive(Clone)]
+    struct ChainState {
+        name: &'static str,
+        hops: Arc<Mutex<std::collections::HashMap<String, TestHop>>>,
+        payload: Arc<Vec<u8>>,
+        commit: String,
+        etag: String,
+        log: Arc<Mutex<Vec<ChainRequest>>>,
+        /// Serving fails with HTTP 500 for data ranges starting at or after this offset.
+        fail_from: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    struct ChainServer {
+        address: std::net::SocketAddr,
+        hops: Arc<Mutex<std::collections::HashMap<String, TestHop>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl ChainServer {
+        fn url(&self, path: &str) -> String {
+            format!("http://{}{path}", self.address)
+        }
+
+        fn route(&self, path: &str, hop: TestHop) {
+            self.hops
+                .lock()
+                .expect("hops lock")
+                .insert(path.to_string(), hop);
+        }
+    }
+
+    struct ChainFixture {
+        payload: Arc<Vec<u8>>,
+        commit: String,
+        sha256: String,
+        log: Arc<Mutex<Vec<ChainRequest>>>,
+        fail_from: Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl ChainFixture {
+        fn new(len: usize) -> Self {
+            let payload = Arc::new((0..len).map(|i| (i % 253) as u8).collect::<Vec<_>>());
+            let sha256 = format!("{:x}", Sha256::digest(payload.as_slice()));
+            Self {
+                payload,
+                commit: "c".repeat(40),
+                sha256,
+                log: Arc::new(Mutex::new(Vec::new())),
+                fail_from: Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+            }
+        }
+
+        async fn server(&self, name: &'static str) -> ChainServer {
+            let hops = Arc::new(Mutex::new(std::collections::HashMap::new()));
+            let state = ChainState {
+                name,
+                hops: Arc::clone(&hops),
+                payload: Arc::clone(&self.payload),
+                commit: self.commit.clone(),
+                etag: self.sha256.clone(),
+                log: Arc::clone(&self.log),
+                fail_from: Arc::clone(&self.fail_from),
+            };
+            let app = Router::new().fallback(chain_handler).with_state(state);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind chain server");
+            let address = listener.local_addr().expect("chain server address");
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app)
+                    .await
+                    .expect("serve chain server");
+            });
+            ChainServer {
+                address,
+                hops,
+                task,
+            }
+        }
+
+        fn args(&self, root: &Path, endpoint: String) -> HfTransferArgs {
+            HfTransferArgs {
+                repo_id: "org/model".to_string(),
+                revision: self.commit.clone(),
+                filename: "model.safetensors".to_string(),
+                destination: root.join("model.safetensors"),
+                cache_dir: root.join("model.safetensors.hf-transfer"),
+                expected_size: self.payload.len() as u64,
+                expected_sha256: self.sha256.clone(),
+                endpoint,
+                parallelism: 4,
+                chunk_size: 64 * 1024,
+            }
+        }
+
+        fn requests(&self) -> Vec<ChainRequest> {
+            self.log.lock().expect("log lock").clone()
+        }
+    }
+
+    async fn chain_handler(
+        State(state): State<ChainState>,
+        request: Request<Body>,
+    ) -> Response<Body> {
+        let path = request.uri().path().to_string();
+        let range = request
+            .headers()
+            .get(RANGE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        state.log.lock().expect("log lock").push(ChainRequest {
+            server: state.name,
+            path: path.clone(),
+            authorization: request
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string),
+            range: range.clone(),
+        });
+        let hop = state.hops.lock().expect("hops lock").get(&path).cloned();
+        match hop {
+            Some(TestHop::Redirect {
+                status,
+                location,
+                identity,
+            }) => {
+                let mut response = Response::builder()
+                    .status(status)
+                    .header(LOCATION, location);
+                if identity {
+                    response = response
+                        .header("x-repo-commit", &state.commit)
+                        .header("x-linked-etag", format!("\"{}\"", state.etag))
+                        .header("x-linked-size", state.payload.len().to_string());
+                }
+                response.body(Body::empty()).expect("redirect response")
+            }
+            Some(TestHop::Serve { identity }) => {
+                let start = range_start(&range);
+                if range != "bytes=0-0"
+                    && start >= state.fail_from.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::empty())
+                        .expect("failure response");
+                }
+                let requested_end = range
+                    .strip_prefix("bytes=")
+                    .and_then(|value| value.split_once('-'))
+                    .and_then(|(_, end)| end.parse::<usize>().ok())
+                    .unwrap_or(start as usize);
+                let start = start as usize;
+                let end = requested_end.min(state.payload.len() - 1);
+                let mut response = Response::builder();
+                if identity {
+                    response = response
+                        .header("x-repo-commit", &state.commit)
+                        .header("x-linked-etag", format!("\"{}\"", state.etag));
+                }
+                response
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header(
+                        CONTENT_RANGE,
+                        format!("bytes {start}-{end}/{}", state.payload.len()),
+                    )
+                    .header(CONTENT_LENGTH, end - start + 1)
+                    .body(Body::from(state.payload[start..=end].to_vec()))
+                    .expect("range response")
+            }
+            None => Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .expect("not found response"),
+        }
+    }
+
+    fn test_root(label: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("ironmlx-hf-{label}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create test root");
+        root
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn follows_mirror_hub_and_cdn_redirect_chain() {
+        let fixture = ChainFixture::new(300 * 1024 + 17);
+        let mirror = fixture.server("mirror").await;
+        let hub = fixture.server("hub").await;
+        let cdn = fixture.server("cdn").await;
+        // hf-mirror.com answers with a bare 308 to huggingface.co, which in
+        // turn redirects (with the file identity headers) to a CDN.
+        mirror.route(
+            TEST_RESOLVE_PATH,
+            TestHop::Redirect {
+                status: StatusCode::PERMANENT_REDIRECT,
+                location: hub.url(TEST_RESOLVE_PATH),
+                identity: false,
+            },
+        );
+        hub.route(
+            TEST_RESOLVE_PATH,
+            TestHop::Redirect {
+                status: StatusCode::FOUND,
+                location: cdn.url("/xet-bridge/blob?Expires=1"),
+                identity: true,
+            },
+        );
+        cdn.route("/xet-bridge/blob", TestHop::Serve { identity: false });
+        let root = test_root("chain");
+        let args = fixture.args(&root, format!("http://{}", mirror.address));
+        let destination = args.destination.clone();
+
+        run_async_with_progress(args, None, JsonProgress::default())
+            .await
+            .expect("transfer through a two-hop redirect chain");
+
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            *fixture.payload
+        );
+        let data_ranges = fixture
+            .requests()
+            .into_iter()
+            .filter(|request| request.range != "bytes=0-0")
+            .collect::<Vec<_>>();
+        assert!(!data_ranges.is_empty());
+        assert!(
+            data_ranges.iter().any(|request| request.server == "cdn"),
+            "data ranges never reached the final location: {data_ranges:?}"
+        );
+        for server in [mirror, hub, cdn] {
+            server.task.abort();
+        }
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn redirect_chain_longer_than_limit_fails_clearly() {
+        let fixture = ChainFixture::new(1024);
+        let mirror = fixture.server("mirror").await;
+        mirror.route(
+            TEST_RESOLVE_PATH,
+            TestHop::Redirect {
+                status: StatusCode::TEMPORARY_REDIRECT,
+                location: "/loop/1".to_string(),
+                identity: false,
+            },
+        );
+        for hop in 1..=20 {
+            mirror.route(
+                &format!("/loop/{hop}"),
+                TestHop::Redirect {
+                    status: StatusCode::TEMPORARY_REDIRECT,
+                    location: format!("/loop/{}", hop + 1),
+                    identity: false,
+                },
+            );
+        }
+        let root = test_root("loop");
+        let args = fixture.args(&root, format!("http://{}", mirror.address));
+
+        let error = run_async_with_progress(args, None, JsonProgress::default())
+            .await
+            .expect_err("an endless redirect chain must fail");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("too many redirects"),
+            "unexpected error: {message}"
+        );
+        assert_eq!(fixture.requests().len(), MAX_REDIRECTS + 1);
+        mirror.task.abort();
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn authorization_is_kept_on_same_origin_hops_and_stripped_across_hosts() {
+        let fixture = ChainFixture::new(200 * 1024 + 3);
+        let hub = fixture.server("hub").await;
+        let cdn = fixture.server("cdn").await;
+        hub.route(
+            TEST_RESOLVE_PATH,
+            TestHop::Redirect {
+                status: StatusCode::TEMPORARY_REDIRECT,
+                location: "/api/resolve-cache/model.safetensors".to_string(),
+                identity: false,
+            },
+        );
+        hub.route(
+            "/api/resolve-cache/model.safetensors",
+            TestHop::Redirect {
+                status: StatusCode::FOUND,
+                location: cdn.url("/blob"),
+                identity: true,
+            },
+        );
+        cdn.route("/blob", TestHop::Serve { identity: false });
+        let root = test_root("auth");
+        let args = fixture.args(&root, format!("http://{}", hub.address));
+        let destination = args.destination.clone();
+
+        run_async_with_progress(args, Some("secret".to_string()), JsonProgress::default())
+            .await
+            .expect("transfer with a token");
+
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            *fixture.payload
+        );
+        let requests = fixture.requests();
+        let hub_requests = requests
+            .iter()
+            .filter(|r| r.server == "hub")
+            .collect::<Vec<_>>();
+        let cdn_requests = requests
+            .iter()
+            .filter(|r| r.server == "cdn")
+            .collect::<Vec<_>>();
+        assert!(hub_requests
+            .iter()
+            .any(|r| r.path.starts_with("/api/resolve-cache")));
+        assert!(!cdn_requests.is_empty());
+        assert!(
+            hub_requests
+                .iter()
+                .all(|r| r.authorization.as_deref() == Some("Bearer secret")),
+            "same-origin hops lost the token: {hub_requests:?}"
+        );
+        assert!(
+            cdn_requests.iter().all(|r| r.authorization.is_none()),
+            "token leaked to another host: {cdn_requests:?}"
+        );
+        for server in [hub, cdn] {
+            server.task.abort();
+        }
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn https_endpoint_never_follows_a_redirect_to_http() {
+        let https = Url::parse("https://hf-mirror.com/a").expect("https url");
+        let http = Url::parse("http://127.0.0.1:8080/a").expect("http url");
+        let error =
+            check_redirect_target(&https, &Url::parse("http://cdn.example/b").expect("url"))
+                .expect_err("https to http is a downgrade");
+        assert!(
+            format!("{error:#}").contains("https"),
+            "unexpected error: {error:#}"
+        );
+        check_redirect_target(&https, &Url::parse("https://cdn.example/b").expect("url"))
+            .expect("https to https");
+        check_redirect_target(&http, &Url::parse("http://127.0.0.1:9090/b").expect("url"))
+            .expect("an http endpoint may redirect to http");
+        check_redirect_target(&http, &Url::parse("https://cdn.example/b").expect("url"))
+            .expect("http to https");
+        assert!(
+            check_redirect_target(&https, &Url::parse("ftp://cdn.example/b").expect("url"))
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn complete_partial_left_by_a_quit_during_finishing_is_verified_not_discarded() {
+        let fixture = ChainFixture::new(5 * 64 * 1024 + 9);
+        let hub = fixture.server("hub").await;
+        hub.route(TEST_RESOLVE_PATH, TestHop::Serve { identity: true });
+        let root = test_root("finish");
+        let args = fixture.args(&root, format!("http://{}", hub.address));
+        let identity = TransferIdentity {
+            version: TRANSFER_IDENTITY_VERSION,
+            provider: "huggingface".to_string(),
+            repo_id: "org/model".to_string(),
+            commit_sha: fixture.commit.clone(),
+            path: "model.safetensors".to_string(),
+            expected_size: args.expected_size,
+            expected_sha256: fixture.sha256.clone(),
+            etag: fixture.sha256.clone(),
+        };
+        prepare_transfer_cache(&args.cache_dir, &identity).expect("prepare cache");
+        let partial = args
+            .cache_dir
+            .join("models--org--model")
+            .join("blobs")
+            .join(&fixture.sha256)
+            .with_extension(HF_PARTIAL_EXTENSION);
+        fs::create_dir_all(partial.parent().expect("blob dir")).expect("create blob dir");
+        // Every byte arrived and the marker was dropped, then the App quit
+        // before the verified file was moved into place.
+        fs::write(&partial, fixture.payload.as_slice()).expect("write finished partial");
+        let destination = args.destination.clone();
+
+        run_async_with_progress(args, None, JsonProgress::default())
+            .await
+            .expect("finish the interrupted transfer");
+
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            *fixture.payload
+        );
+        let data_ranges = fixture
+            .requests()
+            .into_iter()
+            .filter(|request| request.range != "bytes=0-0")
+            .collect::<Vec<_>>();
+        assert!(
+            data_ranges.is_empty(),
+            "complete file was downloaded again: {data_ranges:?}"
+        );
+        hub.task.abort();
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn corrupt_complete_partial_is_discarded_and_downloaded_again() {
+        let fixture = ChainFixture::new(3 * 64 * 1024 + 1);
+        let hub = fixture.server("hub").await;
+        hub.route(TEST_RESOLVE_PATH, TestHop::Serve { identity: true });
+        let root = test_root("finish-corrupt");
+        let args = fixture.args(&root, format!("http://{}", hub.address));
+        let identity = TransferIdentity {
+            version: TRANSFER_IDENTITY_VERSION,
+            provider: "huggingface".to_string(),
+            repo_id: "org/model".to_string(),
+            commit_sha: fixture.commit.clone(),
+            path: "model.safetensors".to_string(),
+            expected_size: args.expected_size,
+            expected_sha256: fixture.sha256.clone(),
+            etag: fixture.sha256.clone(),
+        };
+        prepare_transfer_cache(&args.cache_dir, &identity).expect("prepare cache");
+        let partial = args
+            .cache_dir
+            .join("models--org--model")
+            .join("blobs")
+            .join(&fixture.sha256)
+            .with_extension(HF_PARTIAL_EXTENSION);
+        fs::create_dir_all(partial.parent().expect("blob dir")).expect("create blob dir");
+        fs::write(&partial, vec![0_u8; fixture.payload.len()]).expect("write corrupt partial");
+        let destination = args.destination.clone();
+        let cache_dir = args.cache_dir.clone();
+
+        run_async_with_progress(args.clone(), None, JsonProgress::default())
+            .await
+            .expect_err("a corrupt complete partial fails verification");
+        assert!(!cache_dir.exists(), "corrupt partial must be discarded");
+        run_async_with_progress(args, None, JsonProgress::default())
+            .await
+            .expect("the next attempt downloads again");
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            *fixture.payload
+        );
+        hub.task.abort();
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn restarted_transfer_resumes_every_completed_chunk() {
+        let chunk = 64 * 1024_u64;
+        let fixture = ChainFixture::new(48 * chunk as usize + 101);
+        let hub = fixture.server("hub").await;
+        hub.route(TEST_RESOLVE_PATH, TestHop::Serve { identity: true });
+        let root = test_root("restart");
+        let endpoint = format!("http://{}", hub.address);
+        // The first attempt dies once 20 chunks are on disk (the App quits).
+        let interrupted_at = 20 * chunk;
+        fixture
+            .fail_from
+            .store(interrupted_at, std::sync::atomic::Ordering::SeqCst);
+
+        run_async_with_progress(
+            fixture.args(&root, endpoint.clone()),
+            None,
+            JsonProgress::default(),
+        )
+        .await
+        .expect_err("first attempt is interrupted");
+        let args = fixture.args(&root, endpoint);
+        let partial = args
+            .cache_dir
+            .join("models--org--model")
+            .join("blobs")
+            .join(&fixture.sha256)
+            .with_extension(HF_PARTIAL_EXTENSION);
+        assert_eq!(
+            committed_prefix(&partial, args.expected_size).expect("read marker"),
+            Some(interrupted_at),
+            "the partial file must keep every chunk written before the interruption"
+        );
+
+        fixture.log.lock().expect("log lock").clear();
+        fixture
+            .fail_from
+            .store(u64::MAX, std::sync::atomic::Ordering::SeqCst);
+        let progress = JsonProgress::default();
+        let destination = args.destination.clone();
+        run_async_with_progress(args, None, progress.clone())
+            .await
+            .expect("second attempt resumes");
+
+        assert_eq!(
+            progress.state.lock().expect("progress").first_emitted_bytes,
+            Some(interrupted_at)
+        );
+        let data_starts = fixture
+            .requests()
+            .into_iter()
+            .filter(|request| request.range != "bytes=0-0")
+            .map(|request| range_start(&request.range))
+            .collect::<Vec<_>>();
+        assert_eq!(data_starts.iter().min(), Some(&interrupted_at));
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            *fixture.payload
+        );
+        hub.task.abort();
+        fs::remove_dir_all(root).expect("remove test root");
     }
 }

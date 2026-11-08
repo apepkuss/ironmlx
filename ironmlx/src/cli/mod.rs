@@ -23,7 +23,7 @@ mod transcribe;
 pub(crate) use kv_quant::KvQuantArg;
 
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::Result;
 use backend_instance_lock::BackendInstanceLock;
@@ -38,6 +38,12 @@ pub struct Cli {
     /// Exact MLX Metal library to load before initializing MLX.
     #[arg(long, global = true, value_name = "PATH")]
     mlx_metallib: Option<PathBuf>,
+
+    /// Root of every persistent IronMLX path (scheduler profiles, qualification
+    /// profiles, voices, prefix and offload caches). Defaults to ~/.ironmlx.
+    /// The backend instance lock always stays in ~/.ironmlx.
+    #[arg(long, global = true, value_name = "DIR")]
+    data_root: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Command,
@@ -79,6 +85,11 @@ impl Cli {
             None
         };
 
+        if let Some(root) = self.data_root.as_deref() {
+            let root = normalize_data_root_arg(root, dirs::home_dir().as_deref())?;
+            ironmlx_runtime::core::data_root::configure_data_root(root)?;
+        }
+
         if let Some(path) = self.mlx_metallib {
             let path = path
                 .to_str()
@@ -99,6 +110,24 @@ impl Cli {
             Command::Serve(args) => serve::run(*args),
             Command::ServeSystemone(args) => serve_systemone::run(args),
         }
+    }
+}
+
+/// Expands a leading `~` and requires a non-empty absolute path.
+fn normalize_data_root_arg(path: &Path, home: Option<&Path>) -> Result<PathBuf> {
+    let raw = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("--data-root must be representable as UTF-8"))?;
+    let expanded = if raw == "~" {
+        home.map(Path::to_path_buf)
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        home.map(|home| home.join(rest))
+    } else {
+        Some(PathBuf::from(raw))
+    };
+    match expanded {
+        Some(path) if path.is_absolute() => Ok(path),
+        _ => anyhow::bail!("--data-root must be an absolute path, got {raw:?}"),
     }
 }
 
@@ -123,6 +152,38 @@ mod tests {
             PathBuf::from("/Applications/IronMLX.app/Contents/Resources/mlx.metallib")
         );
         assert!(matches!(cli.command, Command::Info(_)));
+    }
+
+    #[test]
+    fn global_data_root_option_parses_before_and_after_subcommand() {
+        let before = Cli::parse_from(["ironmlx", "--data-root", "/tmp/ironmlx-data", "serve"]);
+        assert_eq!(before.data_root, Some(PathBuf::from("/tmp/ironmlx-data")));
+        assert!(matches!(before.command, Command::Serve(_)));
+
+        let after = Cli::parse_from(["ironmlx", "serve", "--data-root", "/tmp/ironmlx-data"]);
+        assert_eq!(after.data_root, Some(PathBuf::from("/tmp/ironmlx-data")));
+
+        let unset = Cli::parse_from(["ironmlx", "serve"]);
+        assert_eq!(unset.data_root, None);
+    }
+
+    #[test]
+    fn data_root_argument_expands_tilde_and_requires_an_absolute_path() {
+        let home = std::path::Path::new("/Users/tester");
+        assert_eq!(
+            super::normalize_data_root_arg(std::path::Path::new("~/.ironmlx"), Some(home))
+                .expect("tilde path"),
+            PathBuf::from("/Users/tester/.ironmlx")
+        );
+        assert_eq!(
+            super::normalize_data_root_arg(std::path::Path::new("/tmp/root"), Some(home))
+                .expect("absolute path"),
+            PathBuf::from("/tmp/root")
+        );
+        assert!(
+            super::normalize_data_root_arg(std::path::Path::new("relative"), Some(home)).is_err()
+        );
+        assert!(super::normalize_data_root_arg(std::path::Path::new(""), Some(home)).is_err());
     }
 
     #[test]

@@ -256,6 +256,9 @@ public struct HuggingFaceSearchResult: Codable, Equatable, Sendable {
 public struct ModelDownloadProgress: Equatable, Sendable {
     public var percent: Double
     public var filename: String
+    /// Bytes available for the whole snapshot, including verified metadata and resumed parts.
+    public var bytes: Int64? = nil
+    public var totalBytes: Int64? = nil
 }
 
 public struct ModelDownloadCompletion: Codable, Equatable, Sendable {
@@ -396,12 +399,24 @@ private struct ModelDownloadResumePlan {
     var resumedBytesByPath: [String: Int64] = [:]
 }
 
+/// A download fixed to one revision and, optionally, to catalogue file hashes
+/// that are checked independently of what the download host reports.
+private struct PinnedDownloadIdentity: Sendable {
+    var revision: String?
+    var files: [PinnedModelFile]?
+
+    var sha256ByPath: [String: String]? {
+        files.map { Dictionary($0.map { ($0.path, $0.sha256.lowercased()) }, uniquingKeysWith: { first, _ in first }) }
+    }
+}
+
 private struct QueuedModelDownload: Sendable {
     var useHfMirror: Bool
     var downloadOnly: Bool
     var provider: ModelRepositoryProvider
     var repoID: String
     var token: String?
+    var pinned: PinnedDownloadIdentity?
     var progress: @Sendable (ModelDownloadProgress) async -> Void
     var order: Int
     var enqueuedAt: Date
@@ -431,7 +446,7 @@ public enum HuggingFaceMirrorError: LocalizedError {
 public actor ModelDownloadService {
     public static let defaultMaxConcurrentDownloads = 3
 
-    private let rootURL: URL
+    nonisolated let rootURL: URL
     private let httpClient: any ModelDownloadHTTPClient
     private let huggingFaceEndpoint: URL
     private let mirrorResolver: ModelRepositoryResolver
@@ -450,6 +465,13 @@ public actor ModelDownloadService {
     private var pauseRequestedKeys: Set<String> = []
     private var downloadTokens: [String: String] = [:]
     private var resumeRevisions: [String: String] = [:]
+    /// Pins survive pause/resume within this session so a resumed starter
+    /// download is still checked against the catalogue.
+    private var pinnedDownloads: [String: PinnedDownloadIdentity] = [:]
+    /// Catalogue pins by repository ID and commit. They apply to any Hugging
+    /// Face download that resolves to a pinned commit, so a starter model is
+    /// verified even when resumed after a restart or downloaded from the Dashboard.
+    private let catalogPinnedFiles: [String: [String: [PinnedModelFile]]]
     private var checkedUpdateRevisions: [String: String] = [:]
     private var activeTasks: [String: Task<ModelDownloadCompletion, Never>] = [:]
     private var pendingDownloads: [QueuedModelDownload] = []
@@ -467,10 +489,9 @@ public actor ModelDownloadService {
     private var nextQueueOrder = 0
 
     public init(
-        rootURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".ironmlx", isDirectory: true),
+        rootURL: URL = IronMLXDataRoot.url,
         httpClient: any ModelDownloadHTTPClient = URLSessionModelDownloadHTTPClient(),
-        huggingFaceEndpoint: URL = URL(string: "https://huggingface.co")!,
+        huggingFaceEndpoint: URL = HuggingFaceEndpointOverride.official,
         huggingFaceMirrorEndpoint: URL = URL(string: "https://hf-mirror.com")!,
         modelScopeEndpoint: URL = URL(string: "https://modelscope.cn/api/v1/models")!,
         modelScopeGitEndpoint: URL = URL(string: "https://www.modelscope.cn")!,
@@ -479,6 +500,7 @@ public actor ModelDownloadService {
         audioPreparer: (any AudioResourcePreparing)? = nil,
         maxConcurrentDownloads: Int = ModelDownloadService.defaultMaxConcurrentDownloads,
         availableCapacityProvider: (@Sendable (URL) -> Int64?)? = nil,
+        catalogPinnedFiles: [String: [String: [PinnedModelFile]]]? = nil,
         telemetryLogger: @escaping @Sendable (String) -> Void = {
             IronMLXAppLogger.info($0)
         }
@@ -512,6 +534,7 @@ public actor ModelDownloadService {
             Self.systemAvailableCapacity(at: url)
         }
         self.telemetryLogger = telemetryLogger
+        self.catalogPinnedFiles = catalogPinnedFiles ?? Self.bundledCatalogPinnedFiles()
 
         for reminder in reminderStore.load() {
             let key = Self.taskKey(provider: reminder.provider, repoID: reminder.repoID)
@@ -626,11 +649,16 @@ public actor ModelDownloadService {
         }
     }
 
+    /// `revision` fixes the commit to download. `pinnedFiles` must list every
+    /// repository file at that commit; the listing and every downloaded file
+    /// are checked against it whichever host serves them.
     public func downloadHuggingFace(
         repoID: String,
         token: String?,
         useHfMirror: Bool = false,
         mirrorTokenConfirmed: Bool = false,
+        revision: String? = nil,
+        pinnedFiles: [PinnedModelFile]? = nil,
         progress: @escaping @Sendable (ModelDownloadProgress) async -> Void = { _ in }
     ) async -> ModelDownloadCompletion {
         await downloadAndWait(
@@ -639,6 +667,7 @@ public actor ModelDownloadService {
             token: token,
             useHfMirror: useHfMirror,
             mirrorTokenConfirmed: mirrorTokenConfirmed,
+            pinned: Self.pinnedIdentity(revision: revision, files: pinnedFiles),
             progress: progress
         )
     }
@@ -648,6 +677,8 @@ public actor ModelDownloadService {
         token: String?,
         useHfMirror: Bool = false,
         mirrorTokenConfirmed: Bool = false,
+        revision: String? = nil,
+        pinnedFiles: [PinnedModelFile]? = nil,
         progress: @escaping @Sendable (ModelDownloadProgress) async -> Void = { _ in }
     ) -> ModelDownloadStartResponse {
         enqueueDownload(
@@ -656,8 +687,23 @@ public actor ModelDownloadService {
             token: token,
             useHfMirror: useHfMirror,
             mirrorTokenConfirmed: mirrorTokenConfirmed,
+            pinned: Self.pinnedIdentity(revision: revision, files: pinnedFiles),
             progress: progress
         )
+    }
+
+    private static func bundledCatalogPinnedFiles() -> [String: [String: [PinnedModelFile]]] {
+        guard let catalog = try? SupportedModelCatalog.bundled(), let starter = catalog.starter else { return [:] }
+        var pins: [String: [String: [PinnedModelFile]]] = [:]
+        for entry in catalog.entries {
+            guard let files = starter.files[entry.id] else { continue }
+            pins[entry.hfRepo, default: [:]][entry.metadataRevision.lowercased()] = files
+        }
+        return pins
+    }
+
+    private static func pinnedIdentity(revision: String?, files: [PinnedModelFile]?) -> PinnedDownloadIdentity? {
+        revision == nil && files == nil ? nil : PinnedDownloadIdentity(revision: revision?.lowercased(), files: files)
     }
 
     public func startModelScopeDownload(repoID: String) async -> ModelDownloadStartResponse {
@@ -722,6 +768,12 @@ public actor ModelDownloadService {
         return response
     }
 
+    /// Bytes of an unfinished download already on disk (finished files and
+    /// committed partial prefixes), e.g. to show a paused task after a restart.
+    public func recoverableDownloadBytes(provider: ModelRepositoryProvider, repoID: String, commitSHA: String) -> Int64 {
+        (try? store.recoverableStagingBytes(provider: provider, repoID: repoID, commitSHA: commitSHA)) ?? 0
+    }
+
     public func pauseDownload(provider: ModelRepositoryProvider, repoID: String) -> Bool {
         let key = Self.taskKey(provider: provider, repoID: repoID)
         guard let status = statuses[key], Self.isActiveStatus(status.status) else { return false }
@@ -767,7 +819,8 @@ public actor ModelDownloadService {
         return enqueueDownload(provider: provider, repoID: repoID, token: effectiveToken,
                                useHfMirror: status.useHfMirror == true,
                                mirrorTokenConfirmed: mirrorTokenConfirmed || (credential?.isEmpty != false && downloadTokens[key] != nil),
-                               downloadOnly: downloadOnly || status.downloadOnly == true, progress: { _ in })
+                               downloadOnly: downloadOnly || status.downloadOnly == true,
+                               pinned: pinnedDownloads[key], progress: { _ in })
     }
 
     public func deleteDownload(provider: ModelRepositoryProvider, repoID: String) -> ModelDownloadCleanupResult {
@@ -792,6 +845,7 @@ public actor ModelDownloadService {
             recoveryReminders[key] = nil
             downloadTokens[key] = nil
             resumeRevisions[key] = nil
+            pinnedDownloads[key] = nil
             pauseRequestedKeys.remove(key)
             persistReminderState()
             result.clearedCount = 1
@@ -897,6 +951,7 @@ public actor ModelDownloadService {
                 recoveryReminders[key] = nil
                 downloadTokens[key] = nil
                 resumeRevisions[key] = nil
+                pinnedDownloads[key] = nil
                 result.clearedCount += 1
             } catch {
                 result.success = false
@@ -926,6 +981,7 @@ public actor ModelDownloadService {
         token: String?,
         useHfMirror: Bool = false,
         mirrorTokenConfirmed: Bool = false,
+        pinned: PinnedDownloadIdentity? = nil,
         progress: @escaping @Sendable (ModelDownloadProgress) async -> Void
     ) async -> ModelDownloadCompletion {
         let response = enqueueDownload(
@@ -934,6 +990,7 @@ public actor ModelDownloadService {
             token: token,
             useHfMirror: useHfMirror,
             mirrorTokenConfirmed: mirrorTokenConfirmed,
+            pinned: pinned,
             progress: progress
         )
         guard response.success else {
@@ -959,6 +1016,7 @@ public actor ModelDownloadService {
         useHfMirror: Bool = false,
         mirrorTokenConfirmed: Bool = false,
         downloadOnly: Bool = false,
+        pinned requestedPins: PinnedDownloadIdentity? = nil,
         progress: @escaping @Sendable (ModelDownloadProgress) async -> Void
     ) -> ModelDownloadStartResponse {
         let repoID = rawRepoID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -980,7 +1038,27 @@ public actor ModelDownloadService {
                 code: "invalid_repo_id"
             )
         }
+        if let revision = requestedPins?.revision, !ModelSnapshotVerifier.isCommitSHA(revision) {
+            return ModelDownloadStartResponse(
+                success: false,
+                status: "error",
+                repoID: repoID,
+                error: "revision must be a full commit SHA",
+                code: "invalid_revision"
+            )
+        }
         let key = Self.taskKey(provider: provider, repoID: repoID)
+        if requestedPins != nil, activeTasks[key] != nil || preparationStates[key] != nil {
+            // The running task may target another commit without these pins,
+            // and its progress goes to another caller; never adopt its result.
+            return ModelDownloadStartResponse(
+                success: false,
+                status: "error",
+                repoID: repoID,
+                error: "Another download of this model is in progress.",
+                code: "starter_download_busy"
+            )
+        }
         if activeTasks[key] != nil || preparationStates[key] != nil {
             return ModelDownloadStartResponse(
                 success: true,
@@ -1000,6 +1078,9 @@ public actor ModelDownloadService {
         }
         completionResults[key] = nil
         recoveryReminders[key] = nil
+        let pinned = requestedPins
+            ?? (statuses[key]?.status == ModelDownloadPhase.paused.rawValue ? pinnedDownloads[key] : nil)
+        pinnedDownloads[key] = pinned
         let credential = token?.trimmingCharacters(in: .whitespacesAndNewlines)
         if statuses[key]?.status == ModelDownloadPhase.paused.rawValue {
             resumeRevisions[key] = statuses[key]?.commitSHA
@@ -1011,6 +1092,7 @@ public actor ModelDownloadService {
             provider: provider,
             repoID: repoID,
             token: credential?.isEmpty == false ? credential : nil,
+            pinned: pinned,
             progress: progress,
             order: nextQueueOrder,
             enqueuedAt: Date()
@@ -1088,10 +1170,11 @@ public actor ModelDownloadService {
         _ request: QueuedModelDownload
     ) async throws -> DownloadQueuePreflightEstimate {
         try Task.checkCancellation()
-        let repository = try await resolveDownloadRepository(
+        let (repository, _) = try await resolvePinnedDownload(
             provider: request.provider,
             repoID: request.repoID,
-            token: request.token, useHfMirror: request.useHfMirror
+            token: request.token, useHfMirror: request.useHfMirror,
+            pinned: request.pinned
         )
         let staging = try store.stagingSnapshotURL(
             provider: request.provider,
@@ -1290,6 +1373,7 @@ public actor ModelDownloadService {
                     token: request.token,
                     useHfMirror: request.useHfMirror,
                     downloadOnly: request.downloadOnly,
+                    pinned: request.pinned,
                     progress: request.progress
                 )
             }
@@ -1330,6 +1414,7 @@ public actor ModelDownloadService {
         if result.success {
             downloadTokens[key] = nil
             resumeRevisions[key] = nil
+            pinnedDownloads[key] = nil
         }
         persistReminderState()
         let waiters = completionWaiters.removeValue(forKey: key) ?? []
@@ -1506,8 +1591,10 @@ public actor ModelDownloadService {
         token: String?,
         useHfMirror: Bool,
         downloadOnly: Bool,
+        pinned requestedPins: PinnedDownloadIdentity?,
         progress: @escaping @Sendable (ModelDownloadProgress) async -> Void
     ) async -> ModelDownloadCompletion {
+        var pinned = requestedPins
         let key = Self.taskKey(provider: provider, repoID: repoID)
         let telemetry = ModelDownloadTelemetryTracker(
             provider: provider,
@@ -1521,7 +1608,10 @@ public actor ModelDownloadService {
         do {
             let repositoryLock = try store.acquireRepositoryLock(provider: provider, repoID: repoID)
             defer { withExtendedLifetime(repositoryLock) {} }
-            let repository = try await resolveDownloadRepository(provider: provider, repoID: repoID, token: token, useHfMirror: useHfMirror)
+            let (repository, effectivePins) = try await resolvePinnedDownload(
+                provider: provider, repoID: repoID, token: token, useHfMirror: useHfMirror, pinned: requestedPins
+            )
+            pinned = effectivePins
             setStatus(
                 key: key,
                 provider: provider,
@@ -1605,7 +1695,8 @@ public actor ModelDownloadService {
                 repository: repository,
                 token: token,
                 staging: staging,
-                telemetry: telemetry
+                telemetry: telemetry,
+                pinnedSHA256: pinned?.sha256ByPath
             )
             var metadata = metadataResult.files
             var validations = metadataResult.validations
@@ -1619,6 +1710,7 @@ public actor ModelDownloadService {
                 let existing = Set(metadata.map(\.path))
                 let auxiliary = try await acquireMetadata(
                     repository: repository, token: token, staging: staging, telemetry: telemetry,
+                    pinnedSHA256: pinned?.sha256ByPath,
                     selectedFiles: repository.files.filter {
                         ttsProfile.auxiliaryPaths.contains($0.path) && !existing.contains($0.path)
                     }
@@ -1984,18 +2076,21 @@ public actor ModelDownloadService {
             default:
                 phase = .interrupted
             }
-            await telemetry.finish(outcome: phase.rawValue, errorCode: "download_interrupted")
-            persistFailure(&journal, phase: phase, code: "download_interrupted", message: error.localizedDescription)
+            // With catalogue pins the expected hash is the pinned one, so a
+            // mismatch means the host served different content.
+            let code = phase == .corrupt && pinned?.files != nil ? Self.pinnedHashMismatchCode : "download_interrupted"
+            await telemetry.finish(outcome: phase.rawValue, errorCode: code)
+            persistFailure(&journal, phase: phase, code: code, message: error.localizedDescription)
             setFailureStatus(
                 key: key,
                 provider: provider,
                 repoID: repoID,
                 journal: journal,
                 phase: phase,
-                code: "download_interrupted",
+                code: code,
                 message: error.localizedDescription
             )
-            return failure(message: error.localizedDescription, code: "download_interrupted", repoID: repoID)
+            return failure(message: error.localizedDescription, code: code, repoID: repoID)
         } catch {
             let message = error.localizedDescription
             let code: String
@@ -2032,9 +2127,80 @@ public actor ModelDownloadService {
     private func resolveDownloadRepository(
         provider: ModelRepositoryProvider, repoID: String, token: String?, useHfMirror: Bool = false
     ) async throws -> ResolvedModelRepository {
+        try await resolveUnpinnedRepository(
+            provider: provider, repoID: repoID, token: token, useHfMirror: useHfMirror, revision: nil
+        )
+    }
+
+    /// Resolves a download and applies its pins: the caller's, else the
+    /// catalogue's for the resolved commit. Returns the pins that applied.
+    private func resolvePinnedDownload(
+        provider: ModelRepositoryProvider, repoID: String, token: String?, useHfMirror: Bool,
+        pinned requested: PinnedDownloadIdentity?
+    ) async throws -> (ResolvedModelRepository, PinnedDownloadIdentity?) {
+        var repository = try await resolveUnpinnedRepository(
+            provider: provider, repoID: repoID, token: token, useHfMirror: useHfMirror, revision: requested?.revision
+        )
+        if let revision = requested?.revision, repository.commitSHA != revision {
+            throw DownloadFailure(
+                repoID: repoID,
+                code: "remote_identity_changed",
+                message: "Repository \(repoID) resolved to \(repository.commitSHA), expected \(revision)."
+            )
+        }
+        var pinned = requested
+        if pinned?.files == nil, provider == .huggingFace,
+           let files = catalogPinnedFiles[repoID]?[repository.commitSHA] {
+            pinned = PinnedDownloadIdentity(revision: repository.commitSHA, files: files)
+        }
+        if let files = pinned?.files {
+            try Self.applyPinnedFiles(files, to: &repository)
+        }
+        return (repository, pinned)
+    }
+
+    /// The listing must match the catalogue exactly. Hashes the host omits for
+    /// weights are taken from the pins so the transfer verifies against them;
+    /// non-LFS metadata is checked in `acquireMetadata`.
+    private static func applyPinnedFiles(_ pinned: [PinnedModelFile], to repository: inout ResolvedModelRepository) throws {
+        let expected = Dictionary(pinned.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+        let listed = Set(repository.files.map(\.path))
+        guard expected.count == pinned.count, listed == Set(expected.keys) else {
+            let missing = Set(expected.keys).subtracting(listed).sorted()
+            let extra = listed.subtracting(expected.keys).sorted()
+            throw DownloadFailure(
+                repoID: repository.repoID,
+                code: pinnedHashMismatchCode,
+                message: "Repository \(repository.repoID) file list differs from the pinned catalogue "
+                    + "(missing: \(missing.joined(separator: ", ")); unexpected: \(extra.joined(separator: ", "))."
+            )
+        }
+        for index in repository.files.indices {
+            let file = repository.files[index]
+            let pin = expected[file.path]!
+            let pinnedSHA256 = pin.sha256.lowercased()
+            guard file.size == pin.size, file.sha256.map({ $0.lowercased() == pinnedSHA256 }) ?? true else {
+                throw DownloadFailure(
+                    repoID: repository.repoID,
+                    code: pinnedHashMismatchCode,
+                    message: "\(file.path) on the download host differs from the pinned catalogue."
+                )
+            }
+            if file.sha256 == nil, file.isWeight {
+                repository.files[index].sha256 = pinnedSHA256
+            }
+        }
+    }
+
+    static let pinnedHashMismatchCode = "starter_hash_mismatch"
+
+    private func resolveUnpinnedRepository(
+        provider: ModelRepositoryProvider, repoID: String, token: String?, useHfMirror: Bool,
+        revision explicitRevision: String?
+    ) async throws -> ResolvedModelRepository {
         let resolver = useHfMirror ? mirrorResolver : resolver
         let key = Self.taskKey(provider: provider, repoID: repoID)
-        if let revision = resumeRevisions[key] {
+        if let revision = explicitRevision ?? resumeRevisions[key] {
             var repository: ResolvedModelRepository
             switch provider {
             case .huggingFace:
@@ -2091,6 +2257,7 @@ public actor ModelDownloadService {
         token: String?,
         staging: URL,
         telemetry: ModelDownloadTelemetryTracker,
+        pinnedSHA256: [String: String]? = nil,
         selectedFiles: [RemoteModelFile]? = nil
     ) async throws -> (files: [ModelSnapshotFile], validations: [ModelValidatedFile]) {
         let required: [String]
@@ -2209,6 +2376,14 @@ public actor ModelDownloadService {
                 availableBytes: file.size
             )
             let actualSHA256 = Self.sha256(data)
+            if let expected = pinnedSHA256?[file.path], expected != actualSHA256 {
+                try? FileManager.default.removeItem(at: destination)
+                throw DownloadFailure(
+                    repoID: repository.repoID,
+                    code: Self.pinnedHashMismatchCode,
+                    message: "Metadata \(file.path) does not match the pinned catalogue hash."
+                )
+            }
             validations.append(
                 ModelValidatedFile(
                     path: file.path,
@@ -2366,7 +2541,7 @@ public actor ModelDownloadService {
         statuses[key]?.progressPct = percent
         statuses[key]?.currentFile = filename
         statuses[key]?.remainingBytes = max(0, totalBytes - bytes)
-        await callback(ModelDownloadProgress(percent: percent, filename: filename))
+        await callback(ModelDownloadProgress(percent: percent, filename: filename, bytes: bytes, totalBytes: totalBytes))
     }
 
     private func setStatus(

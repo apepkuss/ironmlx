@@ -23,7 +23,7 @@ public enum BackendLaunchValidationError: Error, Equatable, LocalizedError {
 
 public struct BackendLaunchOptions: Equatable {
     public static let bytesPerGigabyte = 1_073_741_824
-    public static let defaultPagedPrefixCacheDirectory = "~/.ironmlx/cache/paged_prefix_cache"
+    public static let defaultPagedPrefixCacheDirectory = IronMLXDataRoot.current.displayPath("cache/paged_prefix_cache")
     public static let automaticHotCacheLimitBytes = 8 * bytesPerGigabyte
     public static let defaultColdCacheLimitGB = 10
     public static let defaultModelTtlMinutes = 30
@@ -198,6 +198,8 @@ public struct BackendLaunchConfiguration: Equatable {
     public var lanHost: String?
     public var securityBootstrapStdin: Bool
     public var dflash2Runtime: ModelDFlash2Runtime?
+    /// Root of every backend data path the App passes explicitly.
+    public var dataRootURL: URL
 
     public init(
         executableURL: URL,
@@ -208,8 +210,10 @@ public struct BackendLaunchConfiguration: Equatable {
         networkMode: String = "local",
         lanHost: String? = nil,
         securityBootstrapStdin: Bool = false,
-        dflash2Runtime: ModelDFlash2Runtime? = nil
+        dflash2Runtime: ModelDFlash2Runtime? = nil,
+        dataRootURL: URL = IronMLXDataRoot.url
     ) {
+        self.dataRootURL = dataRootURL
         self.executableURL = executableURL
         self.metallibURL = metallibURL
         self.host = host
@@ -242,6 +246,10 @@ public struct BackendLaunchConfiguration: Equatable {
         if let metallibURL {
             arguments += ["--mlx-metallib", metallibURL.path]
         }
+        // Every backend path under the data root is explicit, so the backend
+        // never falls back to its own home-directory defaults. With the default
+        // root these values equal the backend defaults.
+        arguments += ["--data-root", dataRootURL.path]
         arguments += [
             "serve",
             "--host", host,
@@ -254,6 +262,12 @@ public struct BackendLaunchConfiguration: Equatable {
                 arguments.append("--security-bootstrap-stdin")
             }
         }
+        arguments += [
+            "--voice-profile-dir",
+            dataRootURL.appendingPathComponent("audio/voices", isDirectory: true).path,
+            "--active-kv-offload-dir",
+            dataRootURL.appendingPathComponent("cache/active_kv_offload", isDirectory: true).path,
+        ]
         if let dflash2Runtime {
             arguments += [
                 "--model", dflash2Runtime.targetModelDir,
