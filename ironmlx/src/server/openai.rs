@@ -663,12 +663,14 @@ pub(crate) fn prepare_tool_request(
         }
         definitions.push(tool.function.clone());
     }
+    let definitions = ironmlx_lm::core::constrained::normalize_tool_schemas(&definitions)?;
     validate_tool_definitions(&definitions)?;
     let constraint_options = resolve_tool_constraint_options(req, &definitions)?;
+    let model_definitions = ironmlx_lm::core::tool_calling::lower_tool_definitions(&definitions)?;
     let model_definitions = if dialect == ToolDialect::Gemma {
-        lower_gemma_tool_definitions(&definitions)?
+        lower_gemma_tool_definitions(&model_definitions)?
     } else {
-        definitions.clone()
+        model_definitions
     };
     let model_wire_tools = wire_tools
         .iter()
@@ -781,6 +783,22 @@ pub(crate) fn compile_output_constraint_with_native(
             },
             (None, None) => Ok(None),
         })?;
+    let plan = match (plan, prepared_tools) {
+        (Some(plan), Some(prepared))
+            if prepared.constraint_options.is_some()
+                && ironmlx_lm::core::tool_calling::tool_schemas_need_envelope(
+                    &prepared.definitions,
+                ) =>
+        {
+            Some(plan.with_tool_schema_validator(
+                prepared.dialect,
+                &prepared.definitions,
+                output_schema,
+                native_output,
+            )?)
+        }
+        (plan, _) => plan,
+    };
     match max_output_tokens {
         Some(total) => tokenizer.apply_reasoning_budget(plan, native_output, total),
         None => Ok(plan),
@@ -921,17 +939,28 @@ pub(crate) fn render_tool_prompt(
     kwargs: &serde_json::Value,
     prepared: &PreparedToolRequest,
 ) -> anyhow::Result<Vec<u32>> {
-    if prepared.dialect != ToolDialect::Gemma {
+    let needs_envelope =
+        ironmlx_lm::core::tool_calling::tool_schemas_need_envelope(&prepared.definitions);
+    if prepared.dialect != ToolDialect::Gemma && !needs_envelope {
         return tokenizer.render_and_encode_tool_prompt(messages, kwargs);
     }
+    let native_definitions =
+        ironmlx_lm::core::tool_calling::lower_tool_definitions(&prepared.definitions)?;
     let mut lowered = messages.to_vec();
     for message in &mut lowered {
         for call in &mut message.tool_calls {
-            call.function.arguments = lower_gemma_tool_arguments(
+            call.function.arguments = ironmlx_lm::core::tool_calling::lower_tool_arguments(
                 &prepared.definitions,
                 &call.function.name,
                 &call.function.arguments,
             )?;
+            if prepared.dialect == ToolDialect::Gemma {
+                call.function.arguments = lower_gemma_tool_arguments(
+                    &native_definitions,
+                    &call.function.name,
+                    &call.function.arguments,
+                )?;
+            }
         }
     }
     tokenizer.render_and_encode_tool_prompt(&lowered, kwargs)
@@ -3359,6 +3388,190 @@ mod tests {
             subagent.parameters["properties"]["sessionID"]["pattern"],
             "^ses"
         );
+    }
+
+    #[test]
+    fn opencode_aft_published_tool_surface_preserves_standard_schemas() {
+        // Captured from actual OpenCode 2.2.5 with the published AFT 0.63.5
+        // package and every AFT tool enabled in a disposable project. Only
+        // function-level prose is omitted; parameter schemas are unchanged.
+        let tools: Vec<OpenAiTool> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/api_contract_sdk/aft_opencode_0635_tools.json"
+        ))
+        .unwrap();
+        assert_eq!(tools.len(), 28);
+        let request: ChatRequest = serde_json::from_value(serde_json::json!({
+            "messages":[{"role":"user","content":"Inspect the local call graph"}],
+            "tools":tools
+        }))
+        .unwrap();
+        let prepared = prepare_tool_request(&request, Some(ToolDialect::Qwen35))
+            .unwrap()
+            .unwrap();
+        let callgraph = prepared
+            .definitions
+            .iter()
+            .find(|tool| tool.name == "aft_callgraph")
+            .unwrap();
+        assert_eq!(
+            callgraph.parameters["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+        // The model-facing projection must still be compilable by the native
+        // compiler. Live App acceptance captures the real tokenizer/grammar.
+        ironmlx_lm::core::tool_calling::lower_tool_definitions(&prepared.definitions).unwrap();
+        for arguments in [
+            serde_json::json!({"op":"delete"}),
+            serde_json::json!({"depth":0}),
+        ] {
+            assert!(ironmlx_lm::core::constrained::validate_schema_value(
+                &callgraph.parameters,
+                &arguments
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn opencode_chat_accepts_a_tool_with_a_schema_dialect_declaration() {
+        let mut request: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/api_contract_sdk/opencode_chat_request.json"
+        ))
+        .unwrap();
+        // Generated from @cortexkit/aft-opencode 0.63.5's published navigation
+        // arguments using its bundled Zod 4.1.8, input mode, Draft 2020-12.
+        // Upstream gitHead: 8c774d6de0f3f72c1074c0679aa1f8dea15f7b81.
+        // Prose descriptions are omitted; all assertion keywords are retained.
+        let parameters: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/api_contract_sdk/aft_opencode_callgraph_schema.json"
+        ))
+        .unwrap();
+        request["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "type":"function",
+                "function": {
+                    "name":"aft_callgraph",
+                    "parameters": parameters
+                }
+            }));
+        let request: ChatRequest = serde_json::from_value(request).unwrap();
+        let prepared = prepare_tool_request(&request, Some(ToolDialect::Qwen35))
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.definitions.len(), 13);
+        let tool = prepared
+            .definitions
+            .iter()
+            .find(|tool| tool.name == "aft_callgraph")
+            .unwrap();
+        assert_eq!(
+            tool.parameters["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+        assert_eq!(
+            tool.parameters["required"],
+            serde_json::json!(["op", "path", "symbol"])
+        );
+        assert_eq!(tool.parameters["properties"]["depth"]["minimum"], 1);
+    }
+
+    #[test]
+    fn opencode_plugin_references_are_normalized_for_prompt_and_output_decoding() {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/api_contract_sdk/opencode_chat_request.json"
+        ))
+        .unwrap();
+        let source = serde_json::json!({
+            "$schema":"https://json-schema.org/draft/2020-12/schema",
+            "$defs":{"count":{"type":"integer","allOf":[{"minimum":1},{"maximum":3}]},
+                "args":{"type":"object","properties":{"count":{"$ref":"#/$defs/count"}},
+                    "required":["count"],"additionalProperties":false}},
+            "$ref":"#/$defs/args"
+        });
+        value["tools"].as_array_mut().unwrap().push(serde_json::json!({
+            "type":"function","function":{"name":"plugin_count","parameters":source,"strict":true}
+        }));
+        let request: ChatRequest = serde_json::from_value(value).unwrap();
+        for dialect in [
+            ToolDialect::Qwen35,
+            ToolDialect::Gemma,
+            ToolDialect::Glm,
+            ToolDialect::Llama,
+            ToolDialect::MiniCpmV46,
+            ToolDialect::MiniCpm5,
+        ] {
+            let prepared = prepare_tool_request(&request, Some(dialect))
+                .unwrap()
+                .unwrap();
+            let tool = prepared.definitions.last().unwrap();
+            assert!(tool.parameters.get("$ref").is_none());
+            assert!(tool.parameters.get("$defs").is_none());
+            assert_eq!(tool.parameters["properties"]["count"]["minimum"], 1);
+            assert_eq!(tool.parameters["properties"]["count"]["maximum"], 3);
+            assert_eq!(
+                prepared.wire_tools.last().unwrap().function.parameters,
+                prepared.model_definitions.last().unwrap().parameters
+            );
+        }
+        assert_eq!(
+            request
+                .tools
+                .as_ref()
+                .unwrap()
+                .last()
+                .unwrap()
+                .function
+                .parameters,
+            source
+        );
+    }
+
+    #[test]
+    fn chat_admission_enforces_api_schema_profiles() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../ironmlx-lm/tests/fixtures/api-schema-profile.json"
+        ))
+        .unwrap();
+        for case in cases.as_array().unwrap() {
+            let schema = &case["schema"];
+            let tool: ChatRequest = serde_json::from_value(serde_json::json!({
+                "messages":[{"role":"user","content":"probe"}],
+                "tools":[{"type":"function","function":{
+                    "name":"probe","parameters":schema,"strict":true
+                }}]
+            }))
+            .unwrap();
+            let result = prepare_tool_request(&tool, Some(ToolDialect::Qwen35));
+            assert_eq!(
+                result.is_ok(),
+                case["strict_accepted"].as_bool().unwrap(),
+                "tool {}: {result:?}",
+                case["name"]
+            );
+            for strict in [false, true] {
+                let output: ChatRequest = serde_json::from_value(serde_json::json!({
+                    "messages":[{"role":"user","content":"probe"}],
+                    "response_format":{"type":"json_schema","json_schema":{
+                        "name":"probe","schema":schema,"strict":strict
+                    }}
+                }))
+                .unwrap();
+                let result = output.structured_output_format();
+                let expected = &case[if strict {
+                    "strict_accepted"
+                } else {
+                    "output_accepted"
+                }];
+                assert_eq!(
+                    result.is_ok(),
+                    expected.as_bool().unwrap(),
+                    "output {} strict={strict}: {result:?}",
+                    case["name"]
+                );
+            }
+        }
     }
 
     #[test]

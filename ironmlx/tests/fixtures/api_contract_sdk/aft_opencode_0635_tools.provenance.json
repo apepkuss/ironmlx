@@ -1,0 +1,14 @@
+{
+  "captured_on": "2026-11-07",
+  "opencode": "2.2.5",
+  "aft": "0.63.5",
+  "aft_git_head": "8c774d6de0f3f72c1074c0679aa1f8dea15f7b81",
+  "npm_integrity": "sha512-rRvF6ltKESf1SmV6b9vgIPckxDPEfsyr1BCCO3jMzvty0r+0xC1xpeiE3YAFM3xgc4xlbpR/3rWOFvv3CEbDcg==",
+  "fixture_sha256": "6dae3657ca628ddc2c0608840bdcc6b398fd76cdffa4a559f329572868ea7421",
+  "tool_count": 28,
+  "transformation": "Only function-level description prose omitted; names, strict flags and complete parameter schemas unchanged. Includes host tools and all AFT tools (disabled_tools=[]).",
+  "licenses": [
+    "aft-LICENSE.txt",
+    "opencode-LICENSE.txt"
+  ]
+}

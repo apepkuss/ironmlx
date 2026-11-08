@@ -1,0 +1,55 @@
+{
+  "verified_on": "2026-11-07",
+  "scope": "Common prerequisite fix while clarifying the final conformance acceptance gate. Not full Draft 2020-12 support.",
+  "changes": [
+    "Compare JSON numbers by canonical decimal value instead of serde_json storage variants.",
+    "Apply mathematical number equality recursively through arrays and objects for const/enum.",
+    "Recognize floating spellings with zero fractional part as integer values.",
+    "Preserve distinction between boolean/number and between integers above the exact f64 range.",
+    "Use the same numeric equality when comparing identical normalized constraints."
+  ],
+  "regression_fixture": "ironmlx-lm/tests/fixtures/json-schema-test-suite/draft2020-12-numbers.json",
+  "official_regressions": {
+    "groups": 9,
+    "instances": 39,
+    "passed": 39
+  },
+  "full_scan_after_fix": {
+    "core": {
+      "instances": 1300,
+      "admitted_instances": 179,
+      "validator_mismatches": 0,
+      "unsupported_instances": 1121
+    },
+    "optional": {
+      "instances": 1074,
+      "admitted_instances": 41,
+      "validator_mismatches": 2,
+      "unsupported_instances": 1033
+    }
+  },
+  "verification": {
+    "lm_core_all_features_passed": 310,
+    "server_all_features_passed": 273,
+    "server_existing_ignored": 14,
+    "cargo_fmt": true,
+    "nightly_fmt_check": true,
+    "nightly_clippy_all_features_workspace_deny_warnings": true,
+    "release_build": true
+  },
+  "upstream_opencode": {
+    "version": "2.2.5",
+    "core_schema_tool_tests": 98,
+    "ai_schema_tool_tests": 59,
+    "files": 10,
+    "all_selected_tests_passed": true,
+    "qualification": "These upstream tests execute OpenCode, not IronMLX. Their pass does not qualify IronMLX provider compatibility. No claim that all unrelated OpenCode repository tests were run."
+  },
+  "sources_sha256": {
+    "ironmlx-lm/src/core/json_schema.rs": "50bc3151368477e488824954cf75529a026f31dbfa80a8dff261578b2b3464ed",
+    "ironmlx-lm/src/core/constrained.rs": "090e9ecde094443d8f39cac2c0dd46cfa4d285810bfa4d9f9976987964d33666",
+    "ironmlx-lm/tests/fixtures/json-schema-test-suite/draft2020-12-numbers.json": "67f16943bef7846a1ca93d1b5a08871f652f3a6ed49e1502439289a1a1bd7189"
+  },
+  "boundary": "No commit, push, merge or real App/model execution in this prerequisite fix.",
+  "superseded_by": "docs/validation/json-schema-full-acceptance.json"
+}

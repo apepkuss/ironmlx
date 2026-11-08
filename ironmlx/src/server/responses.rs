@@ -6,7 +6,7 @@
 //! not inference responsibilities and are rejected explicitly.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -318,13 +318,7 @@ pub enum ResponseNamespaceTool {
 #[derive(Debug, Clone)]
 struct NamespaceDispatcher {
     namespace: String,
-    children: HashMap<String, NamespaceArgumentEncoding>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum NamespaceArgumentEncoding {
-    Structured,
-    JsonString,
+    children: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -338,7 +332,7 @@ impl ToolAliases {
         &mut self,
         internal: String,
         namespace: String,
-        children: HashMap<String, NamespaceArgumentEncoding>,
+        children: HashSet<String>,
     ) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.namespace_by_internal
@@ -375,22 +369,13 @@ impl ToolAliases {
             .namespace_by_internal
             .get(internal)
             .expect("namespace maps are consistent");
-        let encoding = dispatcher
-            .children
-            .get(name)
-            .ok_or_else(|| anyhow::anyhow!("unknown namespace tool `{namespace}.{name}`"))?;
+        anyhow::ensure!(
+            dispatcher.children.contains(name),
+            "unknown namespace tool `{namespace}.{name}`"
+        );
         let arguments = serde_json::from_str::<serde_json::Value>(arguments)
             .map_err(|error| anyhow::anyhow!("function_call arguments must be JSON: {error}"))?;
-        let envelope = match encoding {
-            NamespaceArgumentEncoding::Structured => serde_json::json!({
-                "name": name,
-                "arguments": arguments,
-            }),
-            NamespaceArgumentEncoding::JsonString => serde_json::json!({
-                "name": name,
-                "arguments_json": serde_json::to_string(&arguments)?,
-            }),
-        };
+        let envelope = serde_json::json!({"name":name,"arguments":arguments});
         Ok((
             internal.clone(),
             serde_json::to_string(&envelope).expect("namespace function call serializes"),
@@ -409,29 +394,15 @@ impl ToolAliases {
             .get("name")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("namespace dispatcher is missing its child name"))?;
-        let encoding = dispatcher.children.get(name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "namespace dispatcher selected unknown tool `{}.{name}`",
-                dispatcher.namespace
-            )
-        })?;
-        let child_arguments = match encoding {
-            NamespaceArgumentEncoding::Structured => arguments
-                .get("arguments")
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("namespace dispatcher is missing arguments"))?,
-            NamespaceArgumentEncoding::JsonString => {
-                let encoded = arguments
-                    .get("arguments_json")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("namespace dispatcher is missing JSON arguments")
-                    })?;
-                serde_json::from_str(encoded).map_err(|error| {
-                    anyhow::anyhow!("namespace dispatcher produced invalid JSON arguments: {error}")
-                })?
-            }
-        };
+        anyhow::ensure!(
+            dispatcher.children.contains(name),
+            "namespace dispatcher selected unknown tool `{}.{name}`",
+            dispatcher.namespace
+        );
+        let child_arguments = arguments
+            .get("arguments")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("namespace dispatcher is missing arguments"))?;
         Ok((
             Some(dispatcher.namespace.clone()),
             ToolCall {
@@ -905,7 +876,7 @@ fn namespace_alias(namespace_index: usize, name: &str) -> String {
 }
 
 /// Make JSON Schema's implicit open-object default explicit for nested dynamic
-/// values before handing Responses tools to the bounded decoder.
+/// values before handing Responses tools to the shared decoder.
 ///
 /// The public tool root remains unchanged: IronMLX still requires an object
 /// schema with declared `properties`. Nested `{ "type": "object" }` values,
@@ -993,7 +964,7 @@ fn flatten_response_tools(
                 ironmlx_lm::core::tool_calling::validate_function_name(namespace)?;
                 anyhow::ensure!(!tools.is_empty(), "namespace `{namespace}` has no tools");
                 let alias = namespace_alias(namespace_index, namespace);
-                let mut children = HashMap::new();
+                let mut children = HashSet::new();
                 let mut branches = Vec::with_capacity(tools.len());
                 for tool in tools {
                     match tool {
@@ -1005,37 +976,45 @@ fn flatten_response_tools(
                             defer_loading: _,
                         } => {
                             ironmlx_lm::core::tool_calling::validate_function_name(name)?;
-                            let normalized_parameters = normalize_response_tool_schema(parameters);
+                            let mut normalized_parameters =
+                                normalize_response_tool_schema(parameters);
                             let definition = ToolDefinition {
                                 name: name.clone(),
                                 description: description.clone(),
                                 parameters: normalized_parameters.clone(),
                                 strict: *strict,
                             };
-                            let mut encoding =
-                                match ironmlx_lm::core::constrained::validate_tool_schemas(
+                            ironmlx_lm::core::constrained::validate_tool_schemas(
+                                std::slice::from_ref(&definition),
+                            )?;
+                            if *strict == Some(true) {
+                                ironmlx_lm::core::constrained::validate_strict_tool_schema(
+                                    &definition,
+                                )?;
+                            }
+                            normalized_parameters =
+                                ironmlx_lm::core::constrained::normalize_tool_schemas(
                                     std::slice::from_ref(&definition),
-                                ) {
-                                    Ok(()) => {
-                                        if *strict == Some(true) {
-                                            ironmlx_lm::core::constrained::validate_strict_tool_schema(
-                                            &definition,
-                                        )?;
-                                        }
-                                        NamespaceArgumentEncoding::Structured
-                                    }
-                                    Err(_) if *strict != Some(true) => {
-                                        NamespaceArgumentEncoding::JsonString
-                                    }
-                                    Err(error) => {
-                                        return Err(anyhow::anyhow!(
-                                        "unsupported strict schema for namespace tool `{namespace}.{name}`: {error:#}"
-                                    ));
-                                    }
-                                };
-                            let structured_branch = serde_json::json!({
+                                )?
+                                .remove(0)
+                                .parameters;
+                            // Lowered schemas no longer have document-local references.
+                            // Other children remain embedded resources so their references
+                            // and dialect declarations keep the original scope.
+                            let needs_resource =
+                                ironmlx_lm::core::tool_calling::tool_schemas_need_envelope(
+                                    std::slice::from_ref(&definition),
+                                );
+                            let root = normalized_parameters
+                                .as_object_mut()
+                                .expect("validated schema");
+                            if needs_resource {
+                                root.entry("$id").or_insert_with(|| serde_json::json!(format!("https://ironmlx.invalid/namespaces/{namespace_index}/{namespace}/{name}")));
+                            } else {
+                                root.remove("$schema");
+                            }
+                            let mut structured_branch = serde_json::json!({
                                 "type":"object",
-                                "description": description,
                                 "properties": {
                                     "name": {"type":"string", "const":name},
                                     "arguments": normalized_parameters,
@@ -1043,64 +1022,21 @@ fn flatten_response_tools(
                                 "required":["name", "arguments"],
                                 "additionalProperties":false,
                             });
-                            if matches!(encoding, NamespaceArgumentEncoding::Structured) {
-                                let wrapped = ToolDefinition {
-                                    name: alias.clone(),
-                                    description: None,
-                                    parameters: serde_json::json!({
-                                        "type":"object",
-                                        "properties":{},
-                                        "anyOf":[structured_branch.clone()],
-                                    }),
-                                    strict: Some(false),
-                                };
-                                if let Err(error) =
-                                    ironmlx_lm::core::constrained::validate_tool_schemas(
-                                        std::slice::from_ref(&wrapped),
-                                    )
-                                {
-                                    if *strict == Some(true) {
-                                        return Err(anyhow::anyhow!(
-                                            "namespace wrapper cannot preserve strict schema for `{namespace}.{name}`: {error:#}"
-                                        ));
-                                    }
-                                    encoding = NamespaceArgumentEncoding::JsonString;
-                                }
+                            if let Some(description) = description {
+                                structured_branch["description"] = serde_json::json!(description);
                             }
                             anyhow::ensure!(
-                                children.insert(name.clone(), encoding).is_none(),
+                                children.insert(name.clone()),
                                 "duplicate namespace tool `{namespace}.{name}`"
                             );
-                            match encoding {
-                                NamespaceArgumentEncoding::Structured => {
-                                    branches.push(structured_branch);
-                                }
-                                NamespaceArgumentEncoding::JsonString => {
-                                    let schema = serde_json::to_string(parameters)?;
-                                    branches.push(serde_json::json!({
-                                        "type":"object",
-                                        "description": description,
-                                        "properties": {
-                                            "name": {"type":"string", "const":name},
-                                            "arguments_json": {
-                                                "type":"string",
-                                                "description": format!(
-                                                    "JSON-encoded arguments for `{namespace}.{name}` matching this dynamic schema: {schema}"
-                                                ),
-                                            },
-                                        },
-                                        "required":["name", "arguments_json"],
-                                        "additionalProperties":false,
-                                    }));
-                                }
-                            }
+                            branches.push(structured_branch);
                         }
                     }
                 }
-                let mut dispatcher_description = format!(
+                let dispatcher_description = format!(
                     "Dispatch one function in namespace `{namespace}`. {namespace_description}"
                 );
-                let mut dispatcher_parameters = serde_json::json!({
+                let dispatcher_parameters = serde_json::json!({
                     "type":"object",
                     "properties":{},
                     "anyOf":branches,
@@ -1111,61 +1047,9 @@ fn flatten_response_tools(
                     parameters: dispatcher_parameters.clone(),
                     strict: Some(false),
                 };
-                if let Err(error) = ironmlx_lm::core::constrained::validate_tool_schemas(
-                    std::slice::from_ref(&aggregate),
-                ) {
-                    let mut names = Vec::with_capacity(tools.len());
-                    let mut catalog = Vec::with_capacity(tools.len());
-                    for tool in tools {
-                        match tool {
-                            ResponseNamespaceTool::Function {
-                                name,
-                                description,
-                                parameters,
-                                strict,
-                                defer_loading: _,
-                            } => {
-                                anyhow::ensure!(
-                                    *strict != Some(true),
-                                    "namespace `{namespace}` is too complex for one dispatcher and cannot collapse strict tool `{name}`: {error:#}"
-                                );
-                                children
-                                    .insert(name.clone(), NamespaceArgumentEncoding::JsonString);
-                                names.push(name.clone());
-                                catalog.push(format!(
-                                    "`{name}`: {}; JSON schema: {}",
-                                    description.as_deref().unwrap_or("No description."),
-                                    serde_json::to_string(parameters)?
-                                ));
-                            }
-                        }
-                    }
-                    dispatcher_description.push_str(
-                        " Select `name` from the enum and put the selected function's JSON object arguments in `arguments_json`. Available functions: ",
-                    );
-                    dispatcher_description.push_str(&catalog.join("\n"));
-                    dispatcher_parameters = serde_json::json!({
-                        "type":"object",
-                        "properties":{
-                            "name":{"type":"string","enum":names},
-                            "arguments_json":{
-                                "type":"string",
-                                "description":"JSON-encoded object arguments for the selected namespace function."
-                            }
-                        },
-                        "required":["name","arguments_json"],
-                        "additionalProperties":false,
-                    });
-                    let collapsed = ToolDefinition {
-                        name: alias.clone(),
-                        description: None,
-                        parameters: dispatcher_parameters.clone(),
-                        strict: Some(false),
-                    };
-                    ironmlx_lm::core::constrained::validate_tool_schemas(std::slice::from_ref(
-                        &collapsed,
-                    ))?;
-                }
+                ironmlx_lm::core::constrained::validate_tool_schemas(std::slice::from_ref(
+                    &aggregate,
+                ))?;
                 aliases.insert_namespace(alias.clone(), namespace.clone(), children)?;
                 flattened.push(openai::OpenAiTool {
                     kind: "function".to_owned(),
@@ -3009,7 +2893,49 @@ mod tests {
     }
 
     #[test]
-    fn accepts_hermes_responses_dynamic_tool_bridge_without_changing_chat() {
+    fn namespace_child_references_resolve_before_dispatcher_changes_schema_scope() {
+        let normalized = request(serde_json::json!({
+            "model":"local","input":"Count once", "tools":[{
+                "type":"namespace","name":"plugin","description":"Plugin tools","tools":[{
+                    "type":"function","name":"count","description":"Count once","strict":true,"parameters":{
+                        "$schema":"https://json-schema.org/draft/2020-12/schema",
+                        "$defs":{"args":{"type":"object","properties":{"count":{
+                            "type":"integer","allOf":[{"minimum":1},{"maximum":3}]}},
+                            "required":["count"],"additionalProperties":false}},
+                        "$ref":"#/$defs/args"
+                    }
+                }]
+            }]
+        }))
+        .normalize()
+        .unwrap();
+        let prepared = openai::prepare_tool_request(
+            &normalized.chat,
+            Some(ironmlx_lm::core::tool_calling::ToolDialect::Qwen35),
+        )
+        .unwrap()
+        .unwrap();
+        let schema = &prepared.definitions[0].parameters;
+        let branch = &schema["anyOf"][0]["properties"]["arguments"];
+        assert!(branch.get("$schema").is_none());
+        assert!(branch.get("$id").is_none());
+        assert!(branch.get("$defs").is_none());
+        assert_eq!(branch["properties"]["count"]["minimum"], 1);
+        assert_eq!(branch["properties"]["count"]["maximum"], 3);
+        ironmlx_lm::core::constrained::validate_schema_value(
+            schema,
+            &serde_json::json!({"name":"count","arguments":{"count":2}}),
+        )
+        .unwrap();
+        assert!(ironmlx_lm::core::constrained::validate_schema_value(
+            schema,
+            &serde_json::json!({"name":"count","arguments":{"count":0}})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn accepts_hermes_dynamic_tools_in_responses_and_chat() {
         let normalized = request(serde_json::json!({
             "model": "local",
             "instructions": "Be concise.",
@@ -3071,16 +2997,15 @@ mod tests {
             }]
         }))
         .expect("valid Chat request shape");
-        let error = openai::prepare_tool_request(
+        let prepared = openai::prepare_tool_request(
             &chat,
             Some(ironmlx_lm::core::tool_calling::ToolDialect::Qwen35),
         )
-        .expect_err("Chat schema behavior remains unchanged");
-        assert!(
-            format!("{error:#}")
-                .contains("object schemas require properties or open additionalProperties"),
-            "{error:#}"
-        );
+        .expect("valid dynamic schema is accepted by Chat")
+        .expect("prepared tools");
+        assert!(prepared.model_definitions[0].parameters["properties"]
+            .get("arguments_json")
+            .is_some());
     }
 
     #[test]
@@ -3525,7 +3450,7 @@ mod tests {
     }
 
     #[test]
-    fn wraps_dynamic_non_strict_namespace_arguments_as_json() {
+    fn preserves_dynamic_namespace_arguments() {
         let normalized = request(serde_json::json!({
             "model":"local",
             "input":[
@@ -3576,10 +3501,7 @@ mod tests {
         .expect("dispatcher arguments are JSON");
         assert_eq!(envelope["name"], "execute");
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(
-                envelope["arguments_json"].as_str().expect("JSON envelope")
-            )
-            .expect("child arguments decode"),
+            envelope["arguments"],
             serde_json::json!({"args":{"cell":"A1","value":7}})
         );
 
@@ -3590,7 +3512,7 @@ mod tests {
                 name: internal,
                 arguments: serde_json::json!({
                     "name":"execute",
-                    "arguments_json":"{\"args\":{\"cell\":\"B2\"}}"
+                    "arguments":{"args":{"cell":"B2"}}
                 }),
             },
             &normalized.tool_aliases,
@@ -3603,7 +3525,45 @@ mod tests {
     }
 
     #[test]
-    fn collapses_large_non_strict_namespace_to_one_bounded_dispatcher() {
+    fn namespace_preserves_child_reference_scope_and_rejects_invalid_schemas() {
+        let schema = serde_json::json!({
+            "$schema":"https://json-schema.org/draft/2020-12/schema",
+            "$defs":{"value":{"type":"integer","minimum":1}},
+            "type":"object",
+            "properties":{"value":{"$ref":"#/$defs/value"}},
+            "required":["value"],
+            "if":{"properties":{"value":{"minimum":5}}},
+            "then":{"properties":{"value":{"maximum":10}}}
+        });
+        let namespace = |parameters| ResponseTool::Namespace {
+            name: "numbers".into(),
+            description: String::new(),
+            tools: vec![ResponseNamespaceTool::Function {
+                name: "check".into(),
+                description: None,
+                parameters,
+                strict: Some(false),
+                defer_loading: None,
+            }],
+        };
+        let (tools, _) =
+            flatten_response_tools(&[namespace(schema)]).expect("preserve child document");
+        let validator =
+            ironmlx_lm::core::json_schema::SchemaValidator::compile(&tools[0].function.parameters)
+                .unwrap();
+        assert!(validator.is_valid(&serde_json::json!({"name":"check","arguments":{"value":7}})));
+        for value in [0, 11] {
+            assert!(!validator
+                .is_valid(&serde_json::json!({"name":"check","arguments":{"value":value}})));
+        }
+        assert!(flatten_response_tools(&[namespace(serde_json::json!({
+            "type":"object","properties":{"value":{"minLength":-1}}
+        }))])
+        .is_err());
+    }
+
+    #[test]
+    fn preserves_all_schemas_in_large_namespace_dispatcher() {
         let children = (0..100)
             .map(|index| ResponseNamespaceTool::Function {
                 name: format!("tool_{index}"),
@@ -3625,11 +3585,10 @@ mod tests {
         }])
         .expect("large namespace collapses");
         assert_eq!(flattened.len(), 1);
-        assert!(flattened[0].function.parameters.get("anyOf").is_none());
         assert_eq!(
-            flattened[0].function.parameters["properties"]["name"]["enum"]
+            flattened[0].function.parameters["anyOf"]
                 .as_array()
-                .expect("name enum")
+                .expect("branches")
                 .len(),
             100
         );
@@ -3638,10 +3597,14 @@ mod tests {
             .values()
             .next()
             .expect("namespace dispatcher");
-        assert!(dispatcher
-            .children
-            .values()
-            .all(|encoding| matches!(encoding, NamespaceArgumentEncoding::JsonString)));
+        assert_eq!(dispatcher.children.len(), 100);
+        let projected = ironmlx_lm::core::tool_calling::lower_tool_definitions(&[flattened[0]
+            .function
+            .clone()])
+        .expect("model projection");
+        assert!(projected[0].parameters["properties"]
+            .get("arguments_json")
+            .is_some());
     }
 
     #[test]
@@ -3931,7 +3894,7 @@ mod tests {
         let format_error = request(serde_json::json!({
             "model":"local",
             "input":"hello",
-            "text":{"format":{"type":"json_schema","name":"answer","schema":{}}},
+            "text":{"format":{"type":"json_schema","name":"answer","schema":{"type":"array"}}},
             "store":false
         }))
         .normalize()
@@ -3995,7 +3958,53 @@ mod tests {
     }
 
     #[test]
-    fn strict_structured_format_rejects_non_strict_or_unsupported_schemas() {
+    fn responses_admission_enforces_api_schema_profiles() {
+        let cases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../ironmlx-lm/tests/fixtures/api-schema-profile.json"
+        ))
+        .unwrap();
+        for case in cases.as_array().unwrap() {
+            let schema = &case["schema"];
+            let tool = request(serde_json::json!({
+                "model":"local","input":"probe","store":false,
+                "tools":[{"type":"function","name":"probe","parameters":schema,"strict":true}]
+            }))
+            .normalize();
+            let result = tool.and_then(|normalized| {
+                crate::server::openai::prepare_tool_request(
+                    &normalized.chat,
+                    Some(ironmlx_lm::core::tool_calling::ToolDialect::Qwen35),
+                )
+            });
+            assert_eq!(
+                result.is_ok(),
+                case["strict_accepted"].as_bool().unwrap(),
+                "tool {}: {result:?}",
+                case["name"]
+            );
+            for strict in [false, true] {
+                let result = request(serde_json::json!({
+                    "model":"local","input":"probe","store":false,
+                    "text":{"format":{"type":"json_schema","name":"probe","schema":schema,"strict":strict}}
+                })).normalize();
+                let expected = &case[if strict {
+                    "strict_accepted"
+                } else {
+                    "output_accepted"
+                }];
+                assert_eq!(
+                    result.is_ok(),
+                    expected.as_bool().unwrap(),
+                    "output {} strict={strict}: {:?}",
+                    case["name"],
+                    result.err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn strict_structured_format_rejects_non_strict_or_invalid_schemas() {
         let missing_required = request(serde_json::json!({
             "model":"local",
             "input":"hello",
@@ -4026,7 +4035,7 @@ mod tests {
                 "name":"answer",
                 "schema":{
                     "type":"object",
-                    "properties":{"answer":{"type":"string","format":"email"}},
+                    "properties":{"answer":{"type":"string","minLength":-1}},
                     "required":["answer"],
                     "additionalProperties":false
                 }
@@ -4035,7 +4044,26 @@ mod tests {
         }))
         .normalize()
         .unwrap_err();
-        assert!(format!("{unsupported:#}").contains("unsupported JSON Schema keyword `format`"));
+        assert!(format!("{unsupported:#}").contains("invalid JSON Schema"));
+    }
+
+    #[test]
+    fn format_is_an_annotation_in_default_draft2020_validation() {
+        let schema = serde_json::json!({"type":"object", "properties":{
+            "answer":{"type":"string","format":"email"}
+        },"required":["answer"],"additionalProperties":false});
+        let normalized = request(serde_json::json!({
+            "model":"local","input":"hello","text":{"format":{
+                "type":"json_schema","name":"answer","schema":schema,"strict":true
+            }}
+        }))
+        .normalize()
+        .expect("format annotation is legal");
+        ironmlx_lm::core::constrained::validate_schema_value(
+            &normalized.output_schema().unwrap(),
+            &serde_json::json!({"answer":"not an email"}),
+        )
+        .expect("default core vocabulary does not assert formats");
     }
 
     #[test]

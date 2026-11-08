@@ -191,6 +191,54 @@ pub struct ToolDefinition {
     pub strict: Option<bool>,
 }
 
+const SCHEMA_ARGUMENTS_JSON: &str = "arguments_json";
+
+pub fn tool_schemas_need_envelope(tools: &[ToolDefinition]) -> bool {
+    tools
+        .iter()
+        .any(|tool| !crate::core::constrained::native_tool_schema_supported(&tool.parameters))
+}
+
+/// Preserve arbitrary standard schemas through a model-facing JSON argument
+/// envelope. External APIs and emitted calls retain the original argument shape.
+pub fn lower_tool_definitions(tools: &[ToolDefinition]) -> anyhow::Result<Vec<ToolDefinition>> {
+    tools.iter().map(|tool| {
+        if crate::core::constrained::native_tool_schema_supported(&tool.parameters) {
+            let mut native = tool.clone();
+            native.parameters = crate::core::constrained::normalize_json_schema(&tool.parameters)?;
+            return Ok(native);
+        }
+        crate::core::json_schema::validator(&tool.parameters)?;
+        Ok(ToolDefinition {
+            name:tool.name.clone(), description:tool.description.clone(), strict:Some(true),
+            parameters:serde_json::json!({
+                "type":"object","properties":{
+                    (SCHEMA_ARGUMENTS_JSON):{"type":"string","description":format!(
+                        "JSON-encoded object containing the complete arguments for this tool. It must satisfy this JSON Schema: {}", tool.parameters)}
+                },"required":[SCHEMA_ARGUMENTS_JSON],"additionalProperties":false
+            })
+        })
+    }).collect()
+}
+
+pub fn lower_tool_arguments(
+    tools: &[ToolDefinition],
+    name: &str,
+    arguments: &Value,
+) -> anyhow::Result<Value> {
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == name)
+        .ok_or_else(|| anyhow!("unknown tool `{name}`"))?;
+    validate_schema_value(&tool.parameters, arguments)?;
+    if crate::core::constrained::native_tool_schema_supported(&tool.parameters) {
+        return Ok(arguments.clone());
+    }
+    Ok(
+        serde_json::json!({(SCHEMA_ARGUMENTS_JSON):serde_json::to_string(arguments)?.replace('<', "\\u003c")}),
+    )
+}
+
 const GEMMA_DYNAMIC_ENTRIES_PROPERTY: &str = "__ironmlx_dynamic_entries";
 const GEMMA_DYNAMIC_KEY_PROPERTY: &str = "key";
 const GEMMA_DYNAMIC_VALUE_PROPERTY: &str = "value";
@@ -206,7 +254,8 @@ const GEMMA_DYNAMIC_JSON_VALUE_PROPERTY: &str = "json_value";
 pub fn lower_gemma_tool_definitions(
     tools: &[ToolDefinition],
 ) -> anyhow::Result<Vec<ToolDefinition>> {
-    tools
+    let normalized = crate::core::constrained::normalize_tool_schemas(tools)?;
+    normalized
         .iter()
         .map(|tool| {
             Ok(ToolDefinition {
@@ -672,6 +721,7 @@ impl From<ToolCall> for TemplateToolCall {
 
 /// Dialect-dispatched incremental parser used by protocol adapters.
 pub enum ToolCallParser {
+    SchemaEnvelope(SchemaEnvelopeParser),
     Qwen(QwenToolCallParser),
     Gemma(GemmaToolCallParser),
     Glm(GlmToolCallParser),
@@ -696,6 +746,18 @@ impl ToolCallParser {
         output_schema: Option<Value>,
     ) -> anyhow::Result<Self> {
         let response_id = response_id.into();
+        if tool_schemas_need_envelope(tools) {
+            let projected = lower_tool_definitions(tools)?;
+            return Ok(Self::SchemaEnvelope(SchemaEnvelopeParser {
+                inner: Box::new(Self::new_with_output_schema(
+                    dialect,
+                    response_id,
+                    &projected,
+                    output_schema,
+                )?),
+                definitions: tools.to_vec(),
+            }));
+        }
         match dialect {
             ToolDialect::Qwen35 => Ok(Self::Qwen(QwenToolCallParser::new(response_id, tools)?)),
             ToolDialect::Gemma => Ok(Self::Gemma(GemmaToolCallParser::new(response_id, tools)?)),
@@ -718,6 +780,7 @@ impl ToolCallParser {
 
     pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         match self {
+            Self::SchemaEnvelope(parser) => parser.push(delta),
             Self::Qwen(parser) => parser.push(delta),
             Self::Gemma(parser) => parser.push(delta),
             Self::Glm(parser) => parser.push(delta),
@@ -729,6 +792,7 @@ impl ToolCallParser {
 
     pub fn finish(self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool)> {
         match self {
+            Self::SchemaEnvelope(parser) => parser.finish(),
             Self::Qwen(parser) => parser.finish(),
             Self::Gemma(parser) => parser.finish(),
             Self::Glm(parser) => parser.finish(),
@@ -736,6 +800,60 @@ impl ToolCallParser {
             Self::MiniCpmV46(parser) => parser.finish(),
             Self::MiniCpm5(parser) => parser.finish(),
         }
+    }
+}
+
+pub struct SchemaEnvelopeParser {
+    inner: Box<ToolCallParser>,
+    definitions: Vec<ToolDefinition>,
+}
+
+impl SchemaEnvelopeParser {
+    fn restore(
+        definitions: &[ToolDefinition],
+        events: Vec<GeneratedOutputEvent>,
+    ) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
+        events
+            .into_iter()
+            .map(|event| {
+                let GeneratedOutputEvent::ToolCall(mut call) = event else {
+                    return Ok(event);
+                };
+                let tool = definitions
+                    .iter()
+                    .find(|tool| tool.name == call.name)
+                    .ok_or_else(|| anyhow!("unknown tool `{}`", call.name))?;
+                if !crate::core::constrained::native_tool_schema_supported(&tool.parameters) {
+                    let encoded = call
+                        .arguments
+                        .get(SCHEMA_ARGUMENTS_JSON)
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            anyhow!("tool `{}` requires JSON-encoded arguments", call.name)
+                        })?;
+                    let arguments: Value =
+                        serde_json::from_str(encoded).context("invalid JSON tool arguments")?;
+                    anyhow::ensure!(arguments.is_object(), "tool arguments must be an object");
+                    validate_schema_value(&tool.parameters, &arguments).with_context(|| {
+                        format!(
+                            "tool `{}` arguments do not match its complete schema",
+                            call.name
+                        )
+                    })?;
+                    call.arguments = arguments;
+                }
+                Ok(GeneratedOutputEvent::ToolCall(call))
+            })
+            .collect()
+    }
+
+    fn push(&mut self, delta: &str) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
+        Self::restore(&self.definitions, self.inner.push(delta)?)
+    }
+
+    fn finish(self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool)> {
+        let (events, called) = self.inner.finish()?;
+        Ok((Self::restore(&self.definitions, events)?, called))
     }
 }
 
@@ -772,6 +890,8 @@ pub struct QwenToolCallParser {
 
 impl QwenToolCallParser {
     pub fn new(response_id: impl Into<String>, tools: &[ToolDefinition]) -> anyhow::Result<Self> {
+        let normalized = crate::core::constrained::normalize_tool_schemas(tools)?;
+        let tools = normalized.as_slice();
         validate_tool_definitions(tools)?;
         let definitions = tools
             .iter()
@@ -1035,6 +1155,8 @@ pub struct MiniCpm5ToolCallParser {
 
 impl MiniCpm5ToolCallParser {
     pub fn new(response_id: impl Into<String>, tools: &[ToolDefinition]) -> anyhow::Result<Self> {
+        let normalized = crate::core::constrained::normalize_tool_schemas(tools)?;
+        let tools = normalized.as_slice();
         validate_tool_definitions(tools)?;
         let definitions = tools
             .iter()
@@ -1387,6 +1509,8 @@ impl LlamaToolCallParser {
         tools: &[ToolDefinition],
         output_schema: Option<Value>,
     ) -> anyhow::Result<Self> {
+        let normalized = crate::core::constrained::normalize_tool_schemas(tools)?;
+        let tools = normalized.as_slice();
         validate_tool_definitions(tools)?;
         let definitions = tools
             .iter()
@@ -1529,6 +1653,8 @@ pub struct GlmToolCallParser {
 
 impl GlmToolCallParser {
     pub fn new(response_id: impl Into<String>, tools: &[ToolDefinition]) -> anyhow::Result<Self> {
+        let normalized = crate::core::constrained::normalize_tool_schemas(tools)?;
+        let tools = normalized.as_slice();
         validate_tool_definitions(tools)?;
         let definitions = tools
             .iter()
@@ -1798,6 +1924,8 @@ pub struct GemmaToolCallParser {
 
 impl GemmaToolCallParser {
     pub fn new(response_id: impl Into<String>, tools: &[ToolDefinition]) -> anyhow::Result<Self> {
+        let normalized = crate::core::constrained::normalize_tool_schemas(tools)?;
+        let tools = normalized.as_slice();
         validate_tool_definitions(tools)?;
         let original_definitions = tools
             .iter()
@@ -3106,8 +3234,8 @@ mod tests {
 
         validate_tool_definitions(std::slice::from_ref(&tool)).unwrap();
         let lowered = lower_gemma_tool_definitions(std::slice::from_ref(&tool)).unwrap();
-        let public_error = validate_tool_definitions(&lowered).unwrap_err();
-        assert!(format!("{public_error:#}").contains("schema nesting exceeds 8 levels"));
+        validate_tool_definitions(&lowered).unwrap();
+        assert!(tool_schemas_need_envelope(&lowered));
         GemmaToolCallParser::new("deep", &[tool]).unwrap();
     }
 
@@ -3167,6 +3295,9 @@ mod tests {
         }))
         .unwrap();
         let error = validate_tool_definitions(&[nested]).unwrap_err();
-        assert!(error.to_string().contains("$.options"), "{error:#}");
+        assert!(
+            error.to_string().contains("$.properties.options"),
+            "{error:#}"
+        );
     }
 }

@@ -38,6 +38,7 @@ development dependencies excluded, build dependencies retained.
 | aes | 0.8.4 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-f7e8ab639afef155.txt` | https://github.com/RustCrypto/block-ciphers |
 | ahash | 0.8.12 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-0444c6991eead682.txt` | https://github.com/tkaitchuck/ahash |
 | aho-corasick | 1.1.4 | Unlicense OR MIT | `THIRD_PARTY_LICENSES/rust-license-0f96a83840e146e4.txt` | https://github.com/BurntSushi/aho-corasick |
+| allocator-api2 | 0.2.21 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/zakarumych/allocator-api2 |
 | anstream | 1.0.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6efb0476a1cc0850.txt` | https://github.com/rust-cli/anstyle.git |
 | anstyle | 1.0.14 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6efb0476a1cc0850.txt` | https://github.com/rust-cli/anstyle.git |
 | anstyle-parse | 1.0.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6efb0476a1cc0850.txt` | https://github.com/rust-cli/anstyle.git |
@@ -72,6 +73,7 @@ development dependencies excluded, build dependencies retained.
 | bstr | 1.13.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6b7374c39a57e57f.txt` | https://github.com/BurntSushi/bstr |
 | bytecheck | 0.8.3 | MIT | `THIRD_PARTY_LICENSES/rust-license-744ba853c063f56a.txt` | https://github.com/rkyv/bytecheck |
 | bytecheck_derive | 0.8.3 | MIT | `THIRD_PARTY_LICENSES/rust-license-fd8fd6dd623c97a3.txt` | https://github.com/rkyv/bytecheck |
+| bytecount | 0.6.9 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-a5dea80c1f383cb5.txt` | https://github.com/llogiq/bytecount |
 | bytemuck | 1.25.2 | Zlib OR Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-9df9ba60a11af705.txt` | https://github.com/Lokathor/bytemuck |
 | bytemuck_derive | 1.11.0 | Zlib OR Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-9df9ba60a11af705.txt` | https://github.com/Lokathor/bytemuck |
 | byteorder | 1.5.0 | Unlicense OR MIT | `THIRD_PARTY_LICENSES/rust-license-0f96a83840e146e4.txt` | https://github.com/BurntSushi/byteorder |
@@ -124,20 +126,24 @@ development dependencies excluded, build dependencies retained.
 | displaydoc | 0.2.7 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/yaahc/displaydoc |
 | earshot | 1.2.2 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-b05785f9f18e6716.txt` | https://github.com/pykeio/earshot |
 | either | 1.17.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-7576269ea71f767b.txt` | https://github.com/rayon-rs/either |
+| email_address | 0.2.9 | MIT | `THIRD_PARTY_LICENSES/rust-license-39712155836e5c10.txt` | https://github.com/johnstonskj/rust-email_address.git |
 | encoding_rs | 0.8.35 | (Apache-2.0 OR MIT) AND BSD-3-Clause | `THIRD_PARTY_LICENSES/rust-license-3fa4ca83dcc92378.txt`<br>`THIRD_PARTY_LICENSES/rust-license-838118388fe5c2e7.txt` | https://github.com/hsivonen/encoding_rs |
 | equivalent | 1.0.2 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-7365cc8878a1d7ce.txt` | https://github.com/indexmap-rs/equivalent |
 | esaxx-rs | 0.1.10 | Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-50e6751797c50ded.txt` | https://github.com/Narsil/esaxx-rs |
 | event-listener | 5.4.2 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/smol-rs/event-listener |
 | event-listener-strategy | 0.5.4 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/smol-rs/event-listener-strategy |
 | fancy-regex | 0.17.0 | MIT | `THIRD_PARTY_LICENSES/rust-license-3bc70e239e912727.txt` | https://github.com/fancy-regex/fancy-regex |
+| fancy-regex | 0.19.2 | MIT | `THIRD_PARTY_LICENSES/rust-license-3bc70e239e912727.txt` | https://github.com/fancy-regex/fancy-regex |
 | fastrand | 2.5.0 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/smol-rs/fastrand |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-c77a4cf9da729987.txt` | https://github.com/image-rs/fdeflate |
 | find-msvc-tools | 0.1.9 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-378f5840b258e277.txt` | https://github.com/rust-lang/cc-rs |
 | flate2 | 1.1.9 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-025436edff4cfcdd.txt` | https://github.com/rust-lang/flate2-rs |
 | fluent-uri | 0.3.2 | MIT | `THIRD_PARTY_LICENSES/rust-license-e699bec719875d8e.txt` | https://github.com/yescallop/fluent-uri-rs |
+| fluent-uri | 0.4.1 | MIT | `THIRD_PARTY_LICENSES/rust-license-e699bec719875d8e.txt` | https://github.com/yescallop/fluent-uri-rs |
 | fnv | 1.0.7 | Apache-2.0  OR  MIT | `THIRD_PARTY_LICENSES/rust-license-65fdb6c76cd61612.txt` | https://github.com/servo/rust-fnv |
 | foldhash | 0.2.0 | Zlib | `THIRD_PARTY_LICENSES/rust-license-1d4c38d56650edc2.txt` | https://github.com/orlp/foldhash |
 | form_urlencoded | 1.2.2 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-20c7855c364d57ea.txt` | https://github.com/servo/rust-url |
+| fraction | 0.17.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/dnsl48/fraction.git |
 | fs-err | 3.3.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/andrewhickman/fs-err |
 | futures | 0.3.33 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6652c868f35dfe5e.txt` | https://github.com/rust-lang/futures-rs |
 | futures-channel | 0.3.33 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6652c868f35dfe5e.txt` | https://github.com/rust-lang/futures-rs |
@@ -191,6 +197,9 @@ development dependencies excluded, build dependencies retained.
 | itertools | 0.14.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-7576269ea71f767b.txt` | https://github.com/rust-itertools/itertools |
 | itoa | 1.0.18 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/dtolnay/itoa |
 | jobserver | 0.1.35 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-378f5840b258e277.txt` | https://github.com/rust-lang/jobserver-rs |
+| jsonschema | 0.60.2 | MIT | `THIRD_PARTY_LICENSES/rust-license-117829c3ca21efb1.txt` | https://github.com/Stranger6667/jsonschema |
+| jsonschema-regex | 0.60.2 | MIT | `THIRD_PARTY_LICENSES/rust-license-b05785f9f18e6716.txt` | https://github.com/Stranger6667/jsonschema |
+| jsonschema-value | 0.60.2 | MIT | `THIRD_PARTY_LICENSES/rust-license-b05785f9f18e6716.txt` | https://github.com/Stranger6667/jsonschema |
 | lazy_static | 1.5.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-0621878e61f0d0fd.txt` | https://github.com/rust-lang-nursery/lazy-static.rs |
 | libc | 0.2.189 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-123a331b5dbf04c3.txt` | https://github.com/rust-lang/libc |
 | link-cplusplus | 1.0.12 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/dtolnay/link-cplusplus |
@@ -207,6 +216,7 @@ development dependencies excluded, build dependencies retained.
 | memchr | 2.8.3 | Unlicense OR MIT | `THIRD_PARTY_LICENSES/rust-license-0f96a83840e146e4.txt` | https://github.com/BurntSushi/memchr |
 | memo-map | 0.3.3 | Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-143368af9701a24e.txt` | https://github.com/mitsuhiko/memo-map |
 | memoffset | 0.9.1 | MIT | `THIRD_PARTY_LICENSES/rust-license-eb69eece7d469c69.txt` | https://github.com/Gilnaa/memoffset |
+| micromap | 0.3.0 | MIT | `THIRD_PARTY_LICENSES/rust-license-9387c2d197e2370a.txt` | https://github.com/yegor256/micromap |
 | mime | 0.3.17 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-8b87502eddb2d7fa.txt` | https://github.com/hyperium/mime |
 | mime_guess | 2.0.5 | MIT | `THIRD_PARTY_LICENSES/rust-license-14373973f98d640e.txt` | https://github.com/abonander/mime_guess |
 | minijinja | 2.21.0 | Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-143368af9701a24e.txt` | https://github.com/mitsuhiko/minijinja |
@@ -222,9 +232,14 @@ development dependencies excluded, build dependencies retained.
 | nix | 0.31.3 | MIT | `THIRD_PARTY_LICENSES/rust-license-66e3ee1fa7f909ad.txt` | https://github.com/nix-rust/nix |
 | nom | 7.1.3 | MIT | `THIRD_PARTY_LICENSES/rust-license-4dbda04344456f09.txt` | https://github.com/Geal/nom |
 | nu-ansi-term | 0.50.3 | MIT | `THIRD_PARTY_LICENSES/rust-license-cfdb7491dfa8800a.txt` | https://github.com/nushell/nu-ansi-term |
+| num | 0.4.3 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/rust-num/num |
 | num-bigint | 0.4.8 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/rust-num/num-bigint |
+| num-cmp | 0.1.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-b05785f9f18e6716.txt` | https://github.com/lifthrasiir/num-cmp |
+| num-complex | 0.4.6 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/rust-num/num-complex |
 | num-conv | 0.2.2 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-e2e245f2b566d0bf.txt` | https://github.com/jhpratt/num-conv |
 | num-integer | 0.1.47 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/rust-num/num-integer |
+| num-iter | 0.1.46 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/rust-num/num-iter |
+| num-rational | 0.4.2 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/rust-num/num-rational |
 | num-traits | 0.2.19 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/rust-num/num-traits |
 | num_cpus | 1.17.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-1626f2c950cee975.txt` | https://github.com/seanmonstar/num_cpus |
 | number_prefix | 0.4.0 | MIT | `THIRD_PARTY_LICENSES/rust-license-b05785f9f18e6716.txt` | https://github.com/ogham/rust-number-prefix |
@@ -236,6 +251,7 @@ development dependencies excluded, build dependencies retained.
 | opus | 0.4.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6b3b465fa6907534.txt` | https://github.com/SpaceManiac/opus-rs |
 | opusic-sys | 0.7.5 | BSD-3-Clause | `THIRD_PARTY_LICENSES/rust-license-868478b984f4fdaf.txt` | https://github.com/DoumanAsh/opusic-sys |
 | ordered-float | 5.5.0 | MIT | `THIRD_PARTY_LICENSES/rust-license-f7715d38a3fa1b4a.txt` | https://github.com/reem/rust-ordered-float |
+| outref | 0.5.2 | MIT | `THIRD_PARTY_LICENSES/rust-license-21e65a2d9564db9e.txt` | https://github.com/Nugine/outref |
 | parking | 2.2.1 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/smol-rs/parking |
 | parking_lot | 0.12.5 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-c9a75f18b9ab2927.txt` | https://github.com/Amanieu/parking_lot |
 | parking_lot_core | 0.9.12 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-c9a75f18b9ab2927.txt` | https://github.com/Amanieu/parking_lot |
@@ -275,6 +291,7 @@ development dependencies excluded, build dependencies retained.
 | ref-cast | 1.0.26 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/dtolnay/ref-cast |
 | ref-cast-impl | 1.0.26 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/dtolnay/ref-cast |
 | referencing | 0.29.1 | MIT | `THIRD_PARTY_LICENSES/rust-license-a573f030c2ae7eab.txt` | https://github.com/Stranger6667/jsonschema |
+| referencing | 0.60.2 | MIT | `THIRD_PARTY_LICENSES/rust-license-117829c3ca21efb1.txt` | https://github.com/Stranger6667/jsonschema |
 | regex | 1.13.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/rust-lang/regex |
 | regex-automata | 0.4.16 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/rust-lang/regex |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/rust-lang/regex |
@@ -381,6 +398,7 @@ development dependencies excluded, build dependencies retained.
 | tungstenite | 0.24.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-7fea0ee51a4ca5d5.txt` | https://github.com/snapview/tungstenite-rs |
 | typenum | 1.20.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-a825bd853ab71619.txt` | https://github.com/paholg/typenum |
 | unicase | 2.9.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-2d01890414494742.txt` | https://github.com/seanmonstar/unicase |
+| unicode-general-category | 1.1.0 | Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-a8ad31b1c3f40dca.txt` | https://github.com/yeslogic/unicode-general-category |
 | unicode-ident | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt`<br>`THIRD_PARTY_LICENSES/rust-license-f7db81051789b729.txt` | https://github.com/dtolnay/unicode-ident |
 | unicode-normalization-alignments | 0.1.12 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-7b63ecd5f1902af1.txt` | https://github.com/n1t0/unicode-normalization |
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-7b63ecd5f1902af1.txt` | https://github.com/unicode-rs/unicode-segmentation |
@@ -392,7 +410,9 @@ development dependencies excluded, build dependencies retained.
 | utf8_iter | 1.0.4 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-3fa4ca83dcc92378.txt` | https://github.com/hsivonen/utf8_iter |
 | utf8parse | 0.2.2 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-e4c9b06fa850cb9b.txt` | https://github.com/alacritty/vte |
 | uuid | 1.24.0 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-436bc5a105d8e57d.txt` | https://github.com/uuid-rs/uuid |
+| uuid-simd | 0.8.0 | MIT | `THIRD_PARTY_LICENSES/rust-license-b05785f9f18e6716.txt` | https://github.com/Nugine/simd |
 | version_check | 0.9.5 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-b7e650f3fce5c532.txt` | https://github.com/SergioBenitez/version_check |
+| vsimd | 0.8.0 | MIT | `THIRD_PARTY_LICENSES/rust-license-b05785f9f18e6716.txt` | https://github.com/Nugine/simd |
 | want | 0.3.1 | MIT | `THIRD_PARTY_LICENSES/rust-license-96d741569b18c610.txt` | https://github.com/seanmonstar/want |
 | webpki-roots | 1.0.10 | CDLA-Permissive-2.0 | `THIRD_PARTY_LICENSES/rust-license-e271993808fec50a.txt` | https://github.com/rustls/webpki-roots |
 | webrtc | 0.21.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-56cc6c08157f4faf.txt` | https://github.com/webrtc-rs/webrtc |

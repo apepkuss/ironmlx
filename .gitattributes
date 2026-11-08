@@ -1,0 +1,2 @@
+# Preserve the byte-identical upstream fixtures, including their trailing spaces.
+ironmlx-lm/tests/fixtures/json-schema-test-suite/draft2020-12/** whitespace=-blank-at-eol

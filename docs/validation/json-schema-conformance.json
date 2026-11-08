@@ -1,0 +1,857 @@
+{
+  "verified_on": "2026-11-07",
+  "tested_git_head": "10694a50953ee4a2cdd1ef7c029487906b7b5bff",
+  "tested_state": "Includes the uncommitted normalization follow-up recorded in json-schema-normalization.json. Production sources were unchanged during this assessment; source hashes verified.",
+  "suite": {
+    "repository": "https://github.com/json-schema-org/JSON-Schema-Test-Suite",
+    "commit": "245a45abc90190c0bff04d97e6d2b541b4bb9f12",
+    "download": "https://codeload.github.com/json-schema-org/JSON-Schema-Test-Suite/tar.gz/245a45abc90190c0bff04d97e6d2b541b4bb9f12",
+    "draft": "2020-12",
+    "json_files": 80,
+    "load_errors": [],
+    "input_manifest_sha256": "77cba92045a21b466ad74fa117272c1eef662d4e9c7dd3eff9325845d7fe22cd"
+  },
+  "method": "Unmodified official schemas/instances. Unsupported schemas are distinct from passing cases. Accepted schemas are wrapped as one required tool argument for JSON/Qwen token-mask probes; root dialect declarations are removed only from that nested wrapper. Byte vocabulary; no model execution. Qwen string-only schemas use native raw strings; non-string instances under those schemas are not representable and are explicitly excluded from native probes. Other values use JSON serialization. Native parser round-trip values are recorded. Grammar results test the representative serialization, not every semantically equivalent JSON spelling.",
+  "probe_limits": "Core and optional files reported separately by path; no remote schemas are fetched; output probes capped at 32768 bytes per serialized instance. JSON/Qwen compile failures and runtime errors are recorded separately. This is an assessment, not a success gate.",
+  "summary": {
+    "core": {
+      "files": 46,
+      "groups": 385,
+      "instances": 1300,
+      "accepted_groups": 48,
+      "accepted_instances": 179,
+      "unsupported_groups": 337,
+      "unsupported_instances": 1121,
+      "layers": {
+        "validator": {
+          "evaluated_instances": 179,
+          "matches_expected": 170,
+          "differs_from_expected": 9,
+          "runtime_errors": 0
+        },
+        "json_grammar": {
+          "evaluated_instances": 179,
+          "matches_expected": 169,
+          "differs_from_expected": 10,
+          "runtime_errors": 0
+        },
+        "qwen_grammar": {
+          "evaluated_instances": 167,
+          "matches_expected": 157,
+          "differs_from_expected": 10,
+          "runtime_errors": 0
+        },
+        "qwen_parser": {
+          "evaluated_instances": 167,
+          "matches_expected": 158,
+          "differs_from_expected": 9,
+          "runtime_errors": 0
+        }
+      },
+      "compile_errors": 0,
+      "first_rejection_reasons": [
+        {
+          "reason": "unsupported JSON Schema keyword `$id`",
+          "groups": 49
+        },
+        {
+          "reason": "schema node requires type, anyOf, oneOf, enum, or const",
+          "groups": 44
+        },
+        {
+          "reason": "schema node must be an object",
+          "groups": 28
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `prefixItems`",
+          "groups": 24
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `contains`",
+          "groups": 19
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `format`",
+          "groups": 19
+        },
+        {
+          "reason": "$ref supports only local root $defs pointers",
+          "groups": 17
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `if`",
+          "groups": 15
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `unevaluatedProperties`",
+          "groups": 15
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `patternProperties`",
+          "groups": 10
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `not`",
+          "groups": 10
+        },
+        {
+          "reason": "schema intersection across object property scopes is unsupported",
+          "groups": 8
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `propertyNames`",
+          "groups": 8
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `unevaluatedItems`",
+          "groups": 8
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `dependentSchemas`",
+          "groups": 7
+        },
+        {
+          "reason": "schema intersection has conflicting `unevaluatedProperties` constraints",
+          "groups": 7
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `multipleOf`",
+          "groups": 6
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `dependentRequired`",
+          "groups": 4
+        },
+        {
+          "reason": "array schemas require items",
+          "groups": 4
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `contentMediaType`",
+          "groups": 3
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `maxProperties`",
+          "groups": 3
+        },
+        {
+          "reason": "required requires properties",
+          "groups": 3
+        },
+        {
+          "reason": "schema intersection has conflicting `prefixItems` constraints",
+          "groups": 3
+        },
+        {
+          "reason": "top-level additionalProperties must be false",
+          "groups": 2
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `then`",
+          "groups": 2
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `minProperties`",
+          "groups": 2
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `uniqueItems`",
+          "groups": 2
+        },
+        {
+          "reason": "schema intersection with union assertions is unsupported",
+          "groups": 1
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `$anchor`",
+          "groups": 1
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `contentEncoding`",
+          "groups": 1
+        },
+        {
+          "reason": "enum must not be empty",
+          "groups": 1
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `else`",
+          "groups": 1
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `maxContains`",
+          "groups": 1
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `minContains`",
+          "groups": 1
+        },
+        {
+          "reason": "oneOf branches require explicit, disjoint types",
+          "groups": 1
+        },
+        {
+          "reason": "invalid parameter name",
+          "groups": 1
+        },
+        {
+          "reason": "$ref supports only local root $defs pointers; external, anchor and resource references are unsupported",
+          "groups": 1
+        },
+        {
+          "reason": "$defs must appear at the schema root",
+          "groups": 1
+        },
+        {
+          "reason": "object schemas require properties or open additionalProperties",
+          "groups": 1
+        },
+        {
+          "reason": "schema intersection has conflicting `unevaluatedItems` constraints",
+          "groups": 1
+        },
+        {
+          "reason": "schema intersection has conflicting `contains` constraints",
+          "groups": 1
+        },
+        {
+          "reason": "unsupported $schema dialect `http",
+          "groups": 1
+        }
+      ],
+      "native_unrepresentable_instances": 7,
+      "native_roundtrip_changed_instance": 5
+    },
+    "optional": {
+      "files": 34,
+      "groups": 79,
+      "instances": 1074,
+      "accepted_groups": 11,
+      "accepted_instances": 41,
+      "unsupported_groups": 68,
+      "unsupported_instances": 1033,
+      "layers": {
+        "validator": {
+          "evaluated_instances": 41,
+          "matches_expected": 37,
+          "differs_from_expected": 4,
+          "runtime_errors": 0
+        },
+        "json_grammar": {
+          "evaluated_instances": 41,
+          "matches_expected": 37,
+          "differs_from_expected": 4,
+          "runtime_errors": 0
+        },
+        "qwen_grammar": {
+          "evaluated_instances": 40,
+          "matches_expected": 36,
+          "differs_from_expected": 4,
+          "runtime_errors": 0
+        },
+        "qwen_parser": {
+          "evaluated_instances": 40,
+          "matches_expected": 35,
+          "differs_from_expected": 5,
+          "runtime_errors": 0
+        }
+      },
+      "compile_errors": 0,
+      "first_rejection_reasons": [
+        {
+          "reason": "unsupported JSON Schema keyword `format`",
+          "groups": 28
+        },
+        {
+          "reason": "schema node requires type, anyOf, oneOf, enum, or const",
+          "groups": 11
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `dependencies`",
+          "groups": 7
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `patternProperties`",
+          "groups": 6
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `$id`",
+          "groups": 5
+        },
+        {
+          "reason": "$ref supports only local root $defs pointers; external, anchor and resource references are unsupported",
+          "groups": 5
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `multipleOf`",
+          "groups": 2
+        },
+        {
+          "reason": "unsupported string pattern",
+          "groups": 2
+        },
+        {
+          "reason": "unsupported JSON Schema keyword `$anchor`",
+          "groups": 1
+        },
+        {
+          "reason": "$ref supports only local root $defs pointers",
+          "groups": 1
+        }
+      ],
+      "native_unrepresentable_instances": 1,
+      "native_roundtrip_changed_instance": 0
+    }
+  },
+  "interpretation": [
+    "All 46 core files and all 34 optional files were enumerated. Schema rejections are unsupported coverage, not passing official tests.",
+    "Coverage ratios are not OpenCode plugin compatibility rates: the official suite deliberately isolates vocabulary behavior and includes schemas outside the product subset.",
+    "Validator mismatches are semantic defects within admitted schemas. Core defects occur in const/enum numeric equality (including nested values) and the mathematical integer predicate.",
+    "Grammar mismatches describe one representative JSON/native spelling. A generator may legitimately require canonical numeric spelling or property order; these counts are not additional validator conformance failures.",
+    "A concrete closed-loop defect exists: const -2.0 permits generation of -2, but the final validator and Qwen parser reject -2. The grammar accepts an output its own final validation rejects.",
+    "Native raw-string schemas cannot encode non-string source instances. Mixed string unions may interpret raw numeric/object text as a string; five such changed round trips are excluded from native semantic comparisons.",
+    "The optional ECMA regex tests expose BOM whitespace differences. Optional bignum tests also exceed the current numerical representation contract; they are kept separate from core results.",
+    "Native optional newline failure tests only the selected spelling, not all permitted padding/encodings. No full native-transport impossibility claim is made."
+  ],
+  "validator_counterexamples": [
+    {
+      "file": "const.json",
+      "group_index": 10,
+      "group": "const with 0 does not match other zero-like types",
+      "test_index": 2,
+      "test": "float zero is valid",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "const": 0
+      },
+      "instance": 0.0,
+      "expected": true,
+      "validator": {
+        "accepted": false
+      },
+      "json_grammar": {
+        "accepted": false
+      },
+      "qwen_parser": {
+        "accepted": false
+      }
+    },
+    {
+      "file": "const.json",
+      "group_index": 11,
+      "group": "const with 1 does not match true",
+      "test_index": 2,
+      "test": "float one is valid",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "const": 1
+      },
+      "instance": 1.0,
+      "expected": true,
+      "validator": {
+        "accepted": false
+      },
+      "json_grammar": {
+        "accepted": false
+      },
+      "qwen_parser": {
+        "accepted": false
+      }
+    },
+    {
+      "file": "const.json",
+      "group_index": 12,
+      "group": "const with -2.0 matches integer and float types",
+      "test_index": 0,
+      "test": "integer -2 is valid",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "const": -2.0
+      },
+      "instance": -2,
+      "expected": true,
+      "validator": {
+        "accepted": false
+      },
+      "json_grammar": {
+        "accepted": true
+      },
+      "qwen_parser": {
+        "accepted": false
+      }
+    },
+    {
+      "file": "const.json",
+      "group_index": 13,
+      "group": "float and integers are equal up to 64-bit representation limits",
+      "test_index": 2,
+      "test": "float is valid",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "const": 9007199254740992
+      },
+      "instance": 9007199254740992.0,
+      "expected": true,
+      "validator": {
+        "accepted": false
+      },
+      "json_grammar": {
+        "accepted": false
+      },
+      "qwen_parser": {
+        "accepted": false
+      }
+    },
+    {
+      "file": "enum.json",
+      "group_index": 9,
+      "group": "enum with 0 does not match false",
+      "test_index": 2,
+      "test": "float zero is valid",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "enum": [
+          0
+        ]
+      },
+      "instance": 0.0,
+      "expected": true,
+      "validator": {
+        "accepted": false
+      },
+      "json_grammar": {
+        "accepted": false
+      },
+      "qwen_parser": {
+        "accepted": false
+      }
+    },
+    {
+      "file": "enum.json",
+      "group_index": 10,
+      "group": "enum with [0] does not match [false]",
+      "test_index": 2,
+      "test": "[0.0] is valid",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "enum": [
+          [
+            0
+          ]
+        ]
+      },
+      "instance": [
+        0.0
+      ],
+      "expected": true,
+      "validator": {
+        "accepted": false
+      },
+      "json_grammar": {
+        "accepted": false
+      },
+      "qwen_parser": {
+        "accepted": false
+      }
+    },
+    {
+      "file": "enum.json",
+      "group_index": 11,
+      "group": "enum with 1 does not match true",
+      "test_index": 2,
+      "test": "float one is valid",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "enum": [
+          1
+        ]
+      },
+      "instance": 1.0,
+      "expected": true,
+      "validator": {
+        "accepted": false
+      },
+      "json_grammar": {
+        "accepted": false
+      },
+      "qwen_parser": {
+        "accepted": false
+      }
+    },
+    {
+      "file": "enum.json",
+      "group_index": 12,
+      "group": "enum with [1] does not match [true]",
+      "test_index": 2,
+      "test": "[1.0] is valid",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "enum": [
+          [
+            1
+          ]
+        ]
+      },
+      "instance": [
+        1.0
+      ],
+      "expected": true,
+      "validator": {
+        "accepted": false
+      },
+      "json_grammar": {
+        "accepted": false
+      },
+      "qwen_parser": {
+        "accepted": false
+      }
+    },
+    {
+      "file": "optional/bignum.json",
+      "group_index": 0,
+      "group": "integer",
+      "test_index": 0,
+      "test": "a bignum is an integer",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "integer"
+      },
+      "instance": 1.2345678910111214e+52,
+      "expected": true,
+      "validator": {
+        "accepted": false
+      },
+      "json_grammar": {
+        "accepted": false
+      },
+      "qwen_parser": {
+        "accepted": false
+      }
+    },
+    {
+      "file": "optional/bignum.json",
+      "group_index": 0,
+      "group": "integer",
+      "test_index": 1,
+      "test": "a negative bignum is an integer",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "integer"
+      },
+      "instance": -1.2345678910111214e+52,
+      "expected": true,
+      "validator": {
+        "accepted": false
+      },
+      "json_grammar": {
+        "accepted": false
+      },
+      "qwen_parser": {
+        "accepted": false
+      }
+    },
+    {
+      "file": "optional/ecmascript-regex.json",
+      "group_index": 8,
+      "group": "ECMA 262 \\s matches whitespace",
+      "test_index": 5,
+      "test": "zero-width whitespace matches",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "string",
+        "pattern": "^\\s$"
+      },
+      "instance": "﻿",
+      "expected": true,
+      "validator": {
+        "accepted": false
+      },
+      "json_grammar": {
+        "accepted": false
+      },
+      "qwen_parser": {
+        "accepted": false
+      }
+    },
+    {
+      "file": "optional/ecmascript-regex.json",
+      "group_index": 9,
+      "group": "ECMA 262 \\S matches everything but whitespace",
+      "test_index": 5,
+      "test": "zero-width whitespace does not match",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "string",
+        "pattern": "^\\S$"
+      },
+      "instance": "﻿",
+      "expected": false,
+      "validator": {
+        "accepted": true
+      },
+      "json_grammar": {
+        "accepted": true
+      },
+      "qwen_parser": {
+        "accepted": true
+      }
+    },
+    {
+      "file": "type.json",
+      "group_index": 0,
+      "group": "integer type matches integers",
+      "test_index": 1,
+      "test": "a float with zero fractional part is an integer",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "integer"
+      },
+      "instance": 1.0,
+      "expected": true,
+      "validator": {
+        "accepted": false
+      },
+      "json_grammar": {
+        "accepted": false
+      },
+      "qwen_parser": {
+        "accepted": false
+      }
+    }
+  ],
+  "known_inventory": [
+    {
+      "source": "ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json",
+      "name": "edit",
+      "validation": {
+        "Ok": "accepted"
+      },
+      "json_compile": {
+        "Ok": "compiled"
+      },
+      "qwen_compile": {
+        "Ok": "compiled"
+      },
+      "boundary": "Schema admission and grammar compilation only; no model/plugin tool execution."
+    },
+    {
+      "source": "ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json",
+      "name": "glob",
+      "validation": {
+        "Ok": "accepted"
+      },
+      "json_compile": {
+        "Ok": "compiled"
+      },
+      "qwen_compile": {
+        "Ok": "compiled"
+      },
+      "boundary": "Schema admission and grammar compilation only; no model/plugin tool execution."
+    },
+    {
+      "source": "ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json",
+      "name": "grep",
+      "validation": {
+        "Ok": "accepted"
+      },
+      "json_compile": {
+        "Ok": "compiled"
+      },
+      "qwen_compile": {
+        "Ok": "compiled"
+      },
+      "boundary": "Schema admission and grammar compilation only; no model/plugin tool execution."
+    },
+    {
+      "source": "ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json",
+      "name": "question",
+      "validation": {
+        "Ok": "accepted"
+      },
+      "json_compile": {
+        "Ok": "compiled"
+      },
+      "qwen_compile": {
+        "Ok": "compiled"
+      },
+      "boundary": "Schema admission and grammar compilation only; no model/plugin tool execution."
+    },
+    {
+      "source": "ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json",
+      "name": "read",
+      "validation": {
+        "Ok": "accepted"
+      },
+      "json_compile": {
+        "Ok": "compiled"
+      },
+      "qwen_compile": {
+        "Ok": "compiled"
+      },
+      "boundary": "Schema admission and grammar compilation only; no model/plugin tool execution."
+    },
+    {
+      "source": "ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json",
+      "name": "shell",
+      "validation": {
+        "Ok": "accepted"
+      },
+      "json_compile": {
+        "Ok": "compiled"
+      },
+      "qwen_compile": {
+        "Ok": "compiled"
+      },
+      "boundary": "Schema admission and grammar compilation only; no model/plugin tool execution."
+    },
+    {
+      "source": "ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json",
+      "name": "skill",
+      "validation": {
+        "Ok": "accepted"
+      },
+      "json_compile": {
+        "Ok": "compiled"
+      },
+      "qwen_compile": {
+        "Ok": "compiled"
+      },
+      "boundary": "Schema admission and grammar compilation only; no model/plugin tool execution."
+    },
+    {
+      "source": "ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json",
+      "name": "subagent",
+      "validation": {
+        "Ok": "accepted"
+      },
+      "json_compile": {
+        "Ok": "compiled"
+      },
+      "qwen_compile": {
+        "Ok": "compiled"
+      },
+      "boundary": "Schema admission and grammar compilation only; no model/plugin tool execution."
+    },
+    {
+      "source": "ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json",
+      "name": "webfetch",
+      "validation": {
+        "Ok": "accepted"
+      },
+      "json_compile": {
+        "Ok": "compiled"
+      },
+      "qwen_compile": {
+        "Ok": "compiled"
+      },
+      "boundary": "Schema admission and grammar compilation only; no model/plugin tool execution."
+    },
+    {
+      "source": "ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json",
+      "name": "websearch",
+      "validation": {
+        "Ok": "accepted"
+      },
+      "json_compile": {
+        "Ok": "compiled"
+      },
+      "qwen_compile": {
+        "Ok": "compiled"
+      },
+      "boundary": "Schema admission and grammar compilation only; no model/plugin tool execution."
+    },
+    {
+      "source": "ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json",
+      "name": "write",
+      "validation": {
+        "Ok": "accepted"
+      },
+      "json_compile": {
+        "Ok": "compiled"
+      },
+      "qwen_compile": {
+        "Ok": "compiled"
+      },
+      "boundary": "Schema admission and grammar compilation only; no model/plugin tool execution."
+    },
+    {
+      "source": "ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json",
+      "name": "execute",
+      "validation": {
+        "Ok": "accepted"
+      },
+      "json_compile": {
+        "Ok": "compiled"
+      },
+      "qwen_compile": {
+        "Ok": "compiled"
+      },
+      "boundary": "Schema admission and grammar compilation only; no model/plugin tool execution."
+    },
+    {
+      "source": "ironmlx/tests/fixtures/api_contract_sdk/aft_opencode_callgraph_schema.json",
+      "name": "aft_callgraph",
+      "validation": {
+        "Ok": "accepted"
+      },
+      "json_compile": {
+        "Ok": "compiled"
+      },
+      "qwen_compile": {
+        "Ok": "compiled"
+      },
+      "boundary": "Schema admission and grammar compilation only; no model/plugin tool execution."
+    }
+  ],
+  "assessment": {
+    "sufficient_for_general_opencode_plugin_schema_compatibility": false,
+    "known_fixture_schema_admission_and_compilation": "All 12 captured OpenCode 2.2.5 default tools and the AFT 0.63.5 callgraph schema passed validation, JSON grammar compilation and Qwen tool grammar compilation.",
+    "not_claimed": [
+      "All AFT plugin tools inventoried",
+      "Real OpenCode Desktop/App model execution",
+      "Full Draft 2020-12 conformance"
+    ],
+    "priorities": [
+      {
+        "priority": "first",
+        "work": "Correct recursive JSON number equality and integer semantics; ensure values permitted by the grammar pass the same emitted-value validator. Add the nine official core counterexamples as gates."
+      },
+      {
+        "priority": "next",
+        "work": "Inventory all schemas emitted by AFT 0.63.5 and representative OpenCode plugins. Prioritize common unsupported forms such as format annotations, unconstrained/boolean child schemas, local reference shapes and object composition based on that evidence."
+      },
+      {
+        "priority": "then",
+        "work": "Re-run the full core suite and separately tracked optional families, followed by real App/OpenCode Desktop tool/reasoning/history acceptance using the complete plugin schema inventory."
+      }
+    ]
+  },
+  "reproduce": {
+    "runner": "ironmlx-lm/examples/json_schema_conformance.rs",
+    "command": "cargo run -p ironmlx-lm --example json_schema_conformance -- SUITE/tests/draft2020-12 REPORT.json ironmlx/tests/fixtures/api_contract_sdk/opencode_chat_request.json ironmlx/tests/fixtures/api_contract_sdk/aft_opencode_callgraph_schema.json",
+    "local_suite": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/schema-conformance/upstream/tests/draft2020-12",
+    "local_results": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/schema-conformance/results.json",
+    "local_log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/schema-conformance/run.log",
+    "results_sha256": "74167e18fddaeb6f6379e553596d6e75926db36ab20fe64ef216b957072ec9af"
+  },
+  "sources_sha256": {
+    "ironmlx-lm/src/core/json_schema.rs": "6303bc53201e72011821b62916488d4e2794872a707b74e12c11b348f0a64ab9",
+    "ironmlx-lm/src/core/constrained.rs": "c6e3534e06ea8eb356554f7c4146c3f979f8ea55dc80a94f12d0c07576b3af69",
+    "ironmlx-lm/src/core/tool_calling.rs": "33215229c5c0dfca4e34b92bc2b979dd258645c00e38f3d5dfda0c0e946b8482",
+    "ironmlx/src/server/openai.rs": "31adcdbae0c1212c627caeae86cafaf56a4bfbcf2ce95a96228ed4d4439a263e",
+    "ironmlx/src/server/responses.rs": "e2129862b1b98d9d77743408588f1ef5ad2a08cd9d48a3bc4859e9a39afbc989",
+    "ironmlx/src/server/structured_output.rs": "57ec026414d05dd09294f89f70646fe882764ea852ce5d52182be33118eb0a89",
+    "ironmlx-lm/tests/fixtures/json-schema-test-suite/draft2020-12-compatibility.json": "084a72bb025bb349d34c4c8428d0384188ccfd31f989ad857b3688e1465d65ea",
+    "ironmlx-lm/examples/json_schema_conformance.rs": "7f8bd10821a62d023cd2d411cccbe387d82f0b022389b5b33deaeffde4453fcf"
+  },
+  "verification": {
+    "cargo_fmt": true,
+    "nightly_fmt_check": true,
+    "nightly_clippy_workspace_deny_warnings": true,
+    "nightly_clippy_probe_example_deny_warnings": true,
+    "release_build": true
+  },
+  "numeric_semantics_followup": "docs/validation/json-schema-numeric-semantics.json",
+  "record_scope": "Historical pre-numeric-fix evidence; see numeric_semantics_followup for the subsequent source state and test results.",
+  "superseded_by": "docs/validation/json-schema-full-acceptance.json"
+}

@@ -1,0 +1,170 @@
+{
+  "repository": "https://github.com/json-schema-org/JSON-Schema-Test-Suite",
+  "commit": "245a45abc90190c0bff04d97e6d2b541b4bb9f12",
+  "dialect": "draft2020-12",
+  "selection": "Unmodified groups whose normalized schemas fit the bounded IronMLX subset. This is not full dialect conformance.",
+  "groups": [
+    {
+      "file": "ref.json",
+      "index": 4,
+      "group": {
+        "description": "nested refs",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "$defs": {
+            "a": {
+              "type": "integer"
+            },
+            "b": {
+              "$ref": "#/$defs/a"
+            },
+            "c": {
+              "$ref": "#/$defs/b"
+            }
+          },
+          "$ref": "#/$defs/c"
+        },
+        "tests": [
+          {
+            "description": "nested ref valid",
+            "data": 5,
+            "valid": true
+          },
+          {
+            "description": "nested ref invalid",
+            "data": "a",
+            "valid": false
+          }
+        ]
+      }
+    },
+    {
+      "file": "ref.json",
+      "index": 14,
+      "group": {
+        "description": "naive replacement of $ref with its destination is not correct",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "$defs": {
+            "a_string": {
+              "type": "string"
+            }
+          },
+          "enum": [
+            {
+              "$ref": "#/$defs/a_string"
+            }
+          ]
+        },
+        "tests": [
+          {
+            "description": "do not evaluate the $ref inside the enum, matching any string",
+            "data": "this is a string",
+            "valid": false
+          },
+          {
+            "description": "do not evaluate the $ref inside the enum, definition exact match",
+            "data": {
+              "type": "string"
+            },
+            "valid": false
+          },
+          {
+            "description": "match the enum exactly",
+            "data": {
+              "$ref": "#/$defs/a_string"
+            },
+            "valid": true
+          }
+        ]
+      }
+    },
+    {
+      "file": "allOf.json",
+      "index": 8,
+      "group": {
+        "description": "allOf with the first empty schema",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "allOf": [
+            {},
+            {
+              "type": "number"
+            }
+          ]
+        },
+        "tests": [
+          {
+            "description": "number is valid",
+            "data": 1,
+            "valid": true
+          },
+          {
+            "description": "string is invalid",
+            "data": "foo",
+            "valid": false
+          }
+        ]
+      }
+    },
+    {
+      "file": "allOf.json",
+      "index": 9,
+      "group": {
+        "description": "allOf with the last empty schema",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "allOf": [
+            {
+              "type": "number"
+            },
+            {}
+          ]
+        },
+        "tests": [
+          {
+            "description": "number is valid",
+            "data": 1,
+            "valid": true
+          },
+          {
+            "description": "string is invalid",
+            "data": "foo",
+            "valid": false
+          }
+        ]
+      }
+    },
+    {
+      "file": "allOf.json",
+      "index": 10,
+      "group": {
+        "description": "nested allOf, to check validation semantics",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "allOf": [
+            {
+              "allOf": [
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          ]
+        },
+        "tests": [
+          {
+            "description": "null is valid",
+            "data": null,
+            "valid": true
+          },
+          {
+            "description": "anything non-null is invalid",
+            "data": 123,
+            "valid": false
+          }
+        ]
+      }
+    }
+  ]
+}

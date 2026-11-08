@@ -119,7 +119,34 @@ opencode .
 JSON Schema、模型模板和输入类型限制仍以
 [Chat API](text-vision-api.md#openai-chat-completions) 为准。
 
+OpenCode 2.2.5 会将 Standard Schema / Zod 插件输入转换为 JSON Schema Draft
+2020-12。IronMLX 校验完整核心语义，包括引用、交集、条件分支和排他联合。
+复杂工具 Schema 在模型侧使用内部参数包装，OpenCode 收到原始参数对象。
+固定版本的 1,300 个官方核心实例已作为持续验证门槛，可选格式断言在显式开启
+断言的模式下单独验证。这不代表每个插件运行时均已验收；资源与生成边界见
+[JSON Schema](text-vision-api.md#json-schema)。
+
 ## 已记录的验证
+
+2026-11-07，固定版本的 JSON Schema Draft 2020-12 官方核心测试全部
+1,300 个实例通过，没有不支持的用例。真实 Dashboard 生成 Provider 配置，
+OpenCode 2.2.5 CLI 与 Desktop 使用该配置连接 App 管理的 Qwen3.8-27B 4bit。
+本地验收工具覆盖引用、条件分支、`multipleOf`、tuple 数组、去重和
+unevaluated 属性。模型调用到达本地执行器时已还原为原始参数对象；文件中的
+随机标记出现在最终回答和后续历史回放中。Desktop 界面已确认工具调用完成，
+以及 Low 思考档的后续回放；独立 CLI 传输检查覆盖 None、Low、Medium、Xhigh。
+此项不代表 AFT 完整插件运行时或可选格式断言已验收，详见
+[Schema 验收记录](../validation/json-schema-full-acceptance.json)。
+
+后续补测已在显式格式断言模式下通过全部 1,074 个官方 optional 实例，包括
+国际化域名和邮箱；默认注释行为单独验证。OpenCode 2.2.5 还在隔离项目中加载了
+官方 AFT 0.63.5 npm 包及原生程序。启用全部 AFT 工具后，实际发布的 28 个工具
+Schema（含宿主工具）均被接受；真实 `aft_callgraph`、`aft_outline` 及历史回放
+返回了本地仓库中随机命名的函数。此项覆盖用户报告的插件集成，未覆盖语义向量、
+远程集成和 AFT 每项业务操作，详见
+[真实 AFT 记录](../validation/opencode-aft-real-acceptance.json) 和
+[optional 测试记录](../validation/json-schema-optional-acceptance.json)。
+
 
 2026-11-06，分支构建的真实 macOS App 已通过连续验收：在 Dashboard 点击一键配置，
 正式版 OpenCode 2.2.5 CLI 原样读取生成的文件，直接连接该 App 管理的本地

@@ -1,0 +1,77 @@
+{
+  "verified_on": "2026-11-07",
+  "base_commit": "10694a50953ee4a2cdd1ef7c029487906b7b5bff",
+  "compatibility_baseline": {
+    "dialect": "JSON Schema Draft 2020-12",
+    "opencode": "2.2.5",
+    "runtime_source": "https://github.com/anomalyco/opencode/blob/v2.2.5/packages/core/src/tool/runtime.ts#L154-L157",
+    "grammar_compiler": "llguidance 1.7.6"
+  },
+  "changes": [
+    "Normalize acyclic local root $defs references before root/strict validation, native grammar construction, prompt projection and emitted-value validation.",
+    "Decode URI fragment percent encoding and JSON Pointer escapes. Reject missing, external, recursive, resource-scoped and Draft 7 references.",
+    "Preserve reducible allOf and $ref-sibling intersections; reject conflicting keys, object property scope merges and union/assertion intersections.",
+    "Validate $comment/deprecated/readOnly/writeOnly annotations. Do not interpret literal values as schemas.",
+    "Apply both source/expanded depth and node budgets, plus a bounded normalization visit count.",
+    "Resolve namespace child references in the child document before embedding into a Responses dispatcher.",
+    "Filter native string constants against all conjuncts so enum/const/length intersections match emitted-value checks."
+  ],
+  "official_suite": {
+    "repository": "https://github.com/json-schema-org/JSON-Schema-Test-Suite",
+    "commit": "245a45abc90190c0bff04d97e6d2b541b4bb9f12",
+    "fixture": "ironmlx-lm/tests/fixtures/json-schema-test-suite/draft2020-12-compatibility.json",
+    "selected_unmodified_groups": 5,
+    "instance_cases": 11,
+    "selection_boundary": "Only groups fitting the normalized bounded subset. Not a complete official suite or full dialect conformance."
+  },
+  "regressions": [
+    "All six native tool dialects accept valid referenced numeric arguments and reject values outside either allOf bound in both grammar and parser.",
+    "Structured output token constraints and value validation agree on positive/negative bounds, types, required and additional properties.",
+    "Native string terminals preserve enum, const and length intersections.",
+    "Escaped pointers, chained references, schema-looking literal data, strict rules, resource/recursive references, malformed annotations and expansion budgets.",
+    "OpenCode captured request plus synthetic referenced plugin tool prepares consistent model/wire schemas without mutating client request.",
+    "Responses namespace resolves root references before changing schema scope."
+  ],
+  "remaining_limits": [
+    "No full Draft 2020-12 conformance claim. Only the documented schema subset is accepted.",
+    "Only acyclic direct references to root $defs entries. No nested $defs, arbitrary document pointers, external/file references, $id, anchors, $dynamicRef or $vocabulary.",
+    "No general allOf, overlapping oneOf, boolean schemas, conditionals or unevaluatedProperties.",
+    "No fresh real App/OpenCode Desktop/AFT full-plugin or model-backed end-to-end acceptance in this change.",
+    "No CI monitoring, merge or push performed for this follow-up."
+  ],
+  "validation": {
+    "lm_core_all_features": {
+      "passed": 309,
+      "ignored": 0
+    },
+    "server_all_features": {
+      "passed": 273,
+      "ignored": 14,
+      "ignored_boundary": "Existing tests requiring separately provisioned models/backends; these were not treated as passes."
+    },
+    "official_suite_instances": 11,
+    "website_tests": 14,
+    "documentation_parity": true,
+    "generated_bilingual_pages_links_and_search": true,
+    "cargo_fmt": true,
+    "nightly_fmt_check": true,
+    "nightly_clippy_all_features_workspace_deny_warnings": true,
+    "release_build": true
+  },
+  "sources_sha256": {
+    "ironmlx-lm/src/core/json_schema.rs": "6303bc53201e72011821b62916488d4e2794872a707b74e12c11b348f0a64ab9",
+    "ironmlx-lm/src/core/constrained.rs": "c6e3534e06ea8eb356554f7c4146c3f979f8ea55dc80a94f12d0c07576b3af69",
+    "ironmlx-lm/src/core/tool_calling.rs": "33215229c5c0dfca4e34b92bc2b979dd258645c00e38f3d5dfda0c0e946b8482",
+    "ironmlx/src/server/openai.rs": "31adcdbae0c1212c627caeae86cafaf56a4bfbcf2ce95a96228ed4d4439a263e",
+    "ironmlx/src/server/responses.rs": "e2129862b1b98d9d77743408588f1ef5ad2a08cd9d48a3bc4859e9a39afbc989",
+    "ironmlx/src/server/structured_output.rs": "57ec026414d05dd09294f89f70646fe882764ea852ce5d52182be33118eb0a89",
+    "ironmlx-lm/tests/fixtures/json-schema-test-suite/draft2020-12-compatibility.json": "084a72bb025bb349d34c4c8428d0384188ccfd31f989ad857b3688e1465d65ea"
+  },
+  "conformance_assessment": {
+    "report": "docs/validation/json-schema-conformance.json",
+    "finding": "Full official core scan found nine semantic validator mismatches within admitted schemas. The earlier 11 selected instances are insufficient for a readiness claim."
+  },
+  "numeric_semantics_followup": "docs/validation/json-schema-numeric-semantics.json",
+  "record_scope": "Historical pre-numeric-fix evidence; see numeric_semantics_followup for the subsequent source state and test results.",
+  "superseded_by": "docs/validation/json-schema-full-acceptance.json"
+}

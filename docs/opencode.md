@@ -135,7 +135,42 @@ OpenCode 2.2.5 does not classify IronMLX's capacity error as a context-overflow
 signal for automatic recovery. JSON Schema, model-template, and modality
 limits remain those of the [Chat API](text-vision-api.md#openai-chat-completions).
 
+OpenCode 2.2.5 converts Standard Schema/Zod plugin inputs to JSON Schema Draft
+2020-12. IronMLX validates the complete core semantics, including references,
+intersections, conditionals and exclusive unions. Complex tool schemas use an
+internal model-facing argument envelope; OpenCode receives the original argument
+object. The pinned 1,300-instance official core suite is a continuous validation
+gate. Optional format assertions are tested separately with explicit opt-in;
+this does not qualify every plugin runtime;
+see [JSON Schema](text-vision-api.md#json-schema) for resource and generation
+boundaries.
+
 ## Recorded verification
+
+On 2026-11-07, the pinned JSON Schema Draft 2020-12 core suite passed all
+1,300 instances, with no unsupported cases. The real Dashboard generated the
+provider configuration, and OpenCode 2.2.5 CLI and Desktop used it with an
+App-managed Qwen3.8-27B 4bit model. A local acceptance tool exercised references,
+conditionals, `multipleOf`, tuple arrays, uniqueness and unevaluated properties.
+The model call reached the local executor as the original argument object; its
+random file marker appeared in the final answer and subsequent history replay.
+Desktop visibly completed the tool call and a Low reasoning follow-up. Separate
+CLI transport checks cover None, Low, Medium and Xhigh. This is not a full AFT
+plugin-runtime or optional-format qualification. See the
+[Schema acceptance record](validation/json-schema-full-acceptance.json).
+
+A follow-up passed all 1,074 official optional instances with explicit format
+assertions, including internationalized hostnames and email addresses. Default
+annotation behavior is checked separately. The official AFT 0.63.5 npm package
+and native binary were also loaded by OpenCode 2.2.5 in an isolated project.
+All 28 advertised tool schemas (including host tools, with all AFT tools enabled)
+were accepted; real `aft_callgraph`, `aft_outline` and history replay returned
+randomly named functions from the local repository. This covers the reported
+plugin integration; semantic embeddings, remote integrations and every AFT
+business operation are outside this regression. See the
+[real AFT record](validation/opencode-aft-real-acceptance.json) and
+[optional suite record](validation/json-schema-optional-acceptance.json).
+
 
 On 2026-11-06, continuous acceptance passed with the branch's real macOS App:
 Dashboard's one-click button wrote the configuration, and the official OpenCode

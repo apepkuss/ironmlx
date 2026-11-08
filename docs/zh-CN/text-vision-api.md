@@ -259,19 +259,19 @@ JSON。IronMLX 在 token 采样前应用 grammar mask，并在生成结束后再
 该联合约束适用于当前全部工具 dialect、普通生成、Scheduler、推测解码和
 DiffusionGemma canvas 解码路径。
 
-JSON Schema 子集见[通用约束](#json-schema)。
+JSON Schema 契约见[通用约束](#json-schema)。
 
 ### 限制
 
 - 请求中的 `store`、`previous_response_id`、`conversation` 和 `background` 会被忽略；响应始终无状态、同步执行，客户端须发送完整历史。不支持 response retrieve/delete/cancel API。
 - 工具支持客户端执行的顶层 `type:"function"`，以及 Codex 使用的客户端
-  `type:"namespace"` 函数组。namespace 会编译为有界 dispatcher，并在
+  `type:"namespace"` 函数组。namespace 会编译为 dispatcher，并在
   `function_call`/历史回灌时恢复公开的 `namespace`、函数名和参数；IronMLX
   仍不执行工具。
 - 不支持托管 Web/File Search、托管 MCP、Code Interpreter 或 custom/freeform
   工具。namespace 子函数的指定 `tool_choice` 暂不支持；应使用 `auto` 或
-  `required`。超出约束 Schema 子集的动态参数只允许用于 `strict:false` 的
-  namespace 子函数，并使用 JSON 参数信封；`strict:true` 不会降级。
+  `required`。namespace dispatcher 保留子 Schema 及其引用作用域，无效 Schema
+  在生成前失败；`strict:true` 不会降级。
 - 支持无状态明文 reasoning typed item 及历史回灌；不持久化 reasoning，也不生成
   `encrypted_content`。
 - 不支持 reasoning summary、refusal typed item、OpenAI file ID、音频输入/输出、
@@ -409,8 +409,8 @@ Structured Outputs：
 
 JSON mode 使用 `{"response_format":{"type":"json_object"}}`。Chat 的
 `json_schema` 定义位于 `response_format.json_schema`；不要使用 Responses API
-扁平的 `text.format` 形状。支持的 Schema 子集与上文 Responses Structured
-Outputs 相同，不支持的 schema 或字段形状会在生成前返回 400。
+扁平的 `text.format` 形状。支持的 Schema 契约与上文 Responses Structured
+Outputs 相同，无效 Schema、缺失引用资源或已识别字段的无效形状会在生成前返回 400。
 
 `response_format` 可与 function tools 同时使用：`tool_choice:"auto"` 允许工具调用
 或符合 Schema 的 JSON 最终回答；`none` 只允许 JSON 最终回答；`required` 或指定
@@ -459,9 +459,9 @@ Chat tools 当前边界：
   `{"type":"function","function":{"name":"..."}}` 指定函数。
 - `parallel_tool_calls` 默认为 `true`；设为 `false` 时约束当前 assistant turn
   最多生成一个调用。Llama 3.1/3.2 原生协议始终只支持单调用。
-- 只支持 `type: "function"`。`strict: true` 支持约束解码所覆盖的 JSON Schema
-  子集；对象 schema 必须递归设置 `additionalProperties: false`，且所有属性都
-  必须列入 `required`。不支持的 schema 关键字会在生成前返回 400。
+- 只支持 `type: "function"`。`strict: true` 在标准 JSON Schema 校验之外，要求
+  对象 schema 递归设置 `additionalProperties: false`，且所有属性都必须列入
+  `required`。无效 Schema 或缺失引用资源会在生成前返回 400。
 - 旧 `functions` / `function_call` 字段会被忽略；工具调用应使用 `tools`。Responses 客户端应使用上文独立的 `/v1/responses` typed-item 协议。
 - 当前支持经过精确模板契约检测的 Qwen 3.5/3.6/3.8、Gemma 4/Gemma 4 Unified、
   DiffusionGemma、GLM-4 MoE Lite、Llama 3.1/3.2、MiniCPM-V 4.6 和 MiniCPM5
@@ -590,12 +590,12 @@ Messages 通过 Anthropic 当前正式协议 `output_config.format` 支持受 JS
 符合 Schema 的 JSON 位于普通 `text` content block 中；同步与 SSE 使用相同的
 token 级约束。`output_config.format` 可与客户端 tools 同时使用：`auto` 允许工具
 调用或结构化最终回答，`none` 只允许结构化最终回答，`any` 和指定 `tool` 只允许
-工具调用。Schema 子集与本文件前述 Structured Outputs 约束一致，不支持的类型、
-关键字或字段形状会在生成前返回 400。
+工具调用。Schema 契约与本文件前述 Structured Outputs 约束一致，无效 Schema、
+缺失引用资源或已识别字段的无效形状会在生成前返回 400。
 
 若达到 token 上限，响应以 `stop_reason: "max_tokens"` 结束，此时 JSON 可能不完整。
 Structured Outputs 不允许以最后一条 assistant message 进行 prefill。仅支持正式的
-`output_config.format`；已废弃的顶层 `output_format` 不在兼容范围内。
+`output_config.format`；已废弃的顶层 `output_format` 会被忽略。
 `output_config.format` 可以与已启用的 `thinking` 同时使用。IronMLX 对原生输出
 section 进行组合约束：thinking section 保持自由生成，最终 text section 才启用
 JSON Schema grammar。该语义同样覆盖同步、SSE、Scheduler、MTP/辅助 drafter 和
@@ -727,8 +727,8 @@ user message 中用同一 ID 提交 `tool_result`：
 - SSE 使用原生 `message_start` / `content_block_*` / `message_delta` /
   `message_stop` 生命周期。工具块以 `tool_use` 开始，参数通过一个或多个
   `input_json_delta.partial_json` 增量发送，客户端应拼接后再解析 JSON。
-- `input_schema` 与 `strict` 使用上文 Structured Outputs 所述的受支持 Schema 子集；
-  不支持的类型、关键字或模型模板会在生成前明确返回 400，不会静默降级为文本。
+- `input_schema` 与 `strict` 使用上文 Structured Outputs 所述的受支持 Schema 契约；
+  无效 Schema、缺失引用资源或不支持的模型模板会在生成前明确返回 400，不会静默降级为文本。
 - 支持范围是客户端定义的函数工具。Anthropic 托管工具、服务器工具、MCP、
   computer use、Web Search、Code Execution 等不属于本地推理服务能力。
 
@@ -759,9 +759,22 @@ Responses 响应中的有效 tier 为 `default` 或 `flex`。
 
 ### JSON Schema
 
-支持类型：object、array、string、number、integer、boolean、null 和可空类型数组。支持关键字：properties、required、items、enum、const、anyOf、minItems/maxItems、minLength/maxLength、minimum/maximum、exclusiveMinimum/exclusiveMaximum。最大嵌套深度为 8。`oneOf` 要求各分支声明明确且互斥的 JSON 类型（integer 与 number 视为重叠），同层只允许说明性关键字；类型重叠或未声明类型的分支会被拒绝。 字符串 `pattern` 支持以 `^` 锚定、可选 `$` 进行完整值匹配的正则表达式（例如 `^ses` 匹配会话 ID 前缀）（最多 4096 字节，不支持环视和反向引用），生成约束与输出值校验都会执行该约束。
+Schema 校验采用 OpenCode 2.2.5 使用的 Draft 2020-12 语义。固定版本的官方核心测试集包含 46 个文件、385 组、1,300 个实例，生产校验器和生成完成边界都必须全部通过；不支持的 Schema 按失败处理。另设 optional 门槛覆盖全部 1,074 个实例：164 个非格式实例按版本默认语义验证，910 个格式实例显式开启格式断言，并独立检查默认注释行为。
 
-strict:true 要求每层 object 设置 additionalProperties:false，且所有属性列入 required。顶层工具参数对象必须封闭。非 strict 工具可在嵌套对象使用 additionalProperties:true 或受支持的值 Schema。不支持的关键字在生成前返回 400，strict 约束不静默降级。
+| 范围 | 行为 |
+| --- | --- |
+| 断言 | 包括 `allOf` / `anyOf` / 排他 `oneOf`、`not`、条件分支、`multipleOf`、`uniqueItems`、`contains`、`prefixItems`、依赖与 unevaluated 关键字，以及标准数字相等语义（`1` 等于 `1.0`）。 |
+| 引用与版本 | 支持文档内和嵌入资源、`$defs`、`$id`、锚点、递归和动态引用，以及标准版本声明。Draft 7 的引用相邻关键字保留该版本语义。资源缺失或 Schema 无效时在生成前失败。 |
+| 资源获取 | 不任意访问 HTTP 或文件系统。独立校验器接受显式资源目录；官方远程引用 fixture 离线提供。API 工具定义需要在 Schema 文档内包含引用的资源。 |
+| 注释 | 描述、注释、示例和默认值不约束结果。Draft 2020-12 的 `format` 默认作为注释。显式断言模式也会校验国际化域名和邮箱；低层校验器可选择该模式，此次不新增 HTTP 请求开关。 |
+| 原生生成 | 简单 Schema 保留已有原生 grammar。复杂工具 Schema 在模型侧使用 JSON 参数字符串，并在描述中提供完整原始 Schema；IronMLX 在发出调用前还原原始参数对象，客户端和历史回放保留公开参数结构。 |
+| 完成校验 | 复杂 JSON 使用 JSON 语法 grammar 加完整语义校验器。在完成边界阻止不合法 JSON 或工具参数，并在发出结果时复验。回退不会丢弃断言；不可满足的 Schema 或模型生成的无效前缀可能导致生成停止，无法返回成功结果。 |
+
+原生 grammar 归约仍有深度、大小和表达式限制，这些限制用于选择生成表示，不再决定合法原始 Schema 是否被接受。`const`、`enum`、`default`、`examples` 中的对象是值，不按 Schema 遍历；客户端原始请求对象不会被修改。
+
+工具参数与结构化最终回答采用面向对象的 API 契约。结构化输出的 Schema 必须直接或通过引用、组合声明仅允许对象的根类型；可空根类型和未声明类型的 `{}` 根会被拒绝，成功的最终回答还会再次检查是否为对象。`strict:true` 额外要求对象 Schema 设置 `additionalProperties:false`，且所有声明属性列入 `required`，包括引用的定义。严格模式下，每个值 Schema 必须声明类型、有限的 `const`/`enum`，或通过引用、组合明确其结构；数组元素也必须有明确约束。附加约束片段不必重复外层类型。普通非严格参数仍保留标准 `{}` 语义，严格校验不会静默降级。通过完成校验不代表所有模型都容易生成任意合法 Schema；执行工具或消费结构化输出前，仍需检查截断和错误状态。
+
+API 契约回归证据见[契约验收记录](../validation/json-schema-api-contract-acceptance.json)。
 
 ### 输出预算
 

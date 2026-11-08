@@ -1,0 +1,759 @@
+[
+  {
+    "name": "empty root",
+    "schema": {},
+    "output_accepted": false,
+    "strict_accepted": false
+  },
+  {
+    "name": "implicit object root",
+    "schema": {
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output_accepted": false,
+    "strict_accepted": false
+  },
+  {
+    "name": "nullable root",
+    "schema": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "const": null,
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output_accepted": false,
+    "strict_accepted": false
+  },
+  {
+    "name": "scalar root",
+    "schema": {
+      "type": "string"
+    },
+    "output_accepted": false,
+    "strict_accepted": false
+  },
+  {
+    "name": "array root",
+    "schema": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "output_accepted": false,
+    "strict_accepted": false
+  },
+  {
+    "name": "closed object",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "object singleton type array",
+    "schema": {
+      "type": [
+        "object"
+      ],
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "empty nested value",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {}
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "boolean nested value",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": true
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "untyped string constraint",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "minLength": 1
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "open nested object",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "closed nested object",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "object",
+          "properties": {
+            "payload": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "payload"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "unconstrained array elements",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "empty array elements",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "array",
+          "items": {}
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "boolean array elements",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "array",
+          "items": true
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "open union arm",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {}
+          ]
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "nullable scalar",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "typed union",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            }
+          ]
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "untyped conjunction",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "allOf": [
+            {},
+            {
+              "description": "open"
+            }
+          ]
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "typed conjunction",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "integer",
+          "allOf": [
+            {
+              "minimum": 1
+            },
+            {
+              "maximum": 3
+            }
+          ]
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "finite object literal",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "const": {
+            "fixed": {
+              "nested": 1
+            }
+          }
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "closed tuple",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "string"
+            }
+          ],
+          "items": false
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "open tuple tail",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "open reference in annotation",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "$ref": "#/default"
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false,
+      "default": {}
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "closed reference in annotation",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "$ref": "#/default"
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false,
+      "default": {
+        "type": "object",
+        "properties": {
+          "payload": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "payload"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "open reference resource",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "$ref": "#/$defs/child"
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false,
+      "$defs": {
+        "child": {
+          "$id": "child",
+          "description": "open"
+        }
+      }
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "closed reference resource",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "payload": {
+          "$ref": "#/$defs/child"
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false,
+      "$id": "https://example.invalid/root",
+      "$defs": {
+        "child": {
+          "type": "object",
+          "properties": {
+            "payload": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "payload"
+          ],
+          "additionalProperties": false,
+          "$id": "child"
+        }
+      }
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "root reference to closed resource",
+    "schema": {
+      "$id": "https://example.invalid/root",
+      "$defs": {
+        "child": {
+          "type": "object",
+          "properties": {
+            "payload": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "payload"
+          ],
+          "additionalProperties": false,
+          "$id": "child"
+        }
+      },
+      "$ref": "child"
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "root reference to empty resource",
+    "schema": {
+      "$defs": {
+        "child": {
+          "$id": "https://example.invalid/child"
+        }
+      },
+      "$ref": "https://example.invalid/child"
+    },
+    "output_accepted": false,
+    "strict_accepted": false
+  },
+  {
+    "name": "recursive closed object",
+    "schema": {
+      "$defs": {
+        "node": {
+          "type": "object",
+          "properties": {
+            "payload": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/node"
+                }
+              ]
+            }
+          },
+          "required": [
+            "payload"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "$ref": "#/$defs/node"
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "object root union",
+    "schema": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "payload": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "payload": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "payload"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "nullable root union",
+    "schema": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "payload": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "payload"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "output_accepted": false,
+    "strict_accepted": false
+  },
+  {
+    "name": "draft7 ignores nullable ref sibling",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "node": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      },
+      "$ref": "#/definitions/node",
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "draft7 ignores object ref sibling",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "definitions": {
+        "node": {
+          "type": "null"
+        }
+      },
+      "$ref": "#/definitions/node",
+      "type": "object"
+    },
+    "output_accepted": false,
+    "strict_accepted": false
+  },
+  {
+    "name": "draft7 dynamicRef annotation",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "$dynamicRef": "https://example.invalid/not-a-resource",
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  },
+  {
+    "name": "finite scalar cannot hide referenced root union",
+    "schema": {
+      "const": null,
+      "$defs": {
+        "n": {
+          "type": "null"
+        }
+      },
+      "anyOf": [
+        {
+          "$ref": "#/$defs/n"
+        }
+      ]
+    },
+    "output_accepted": false,
+    "strict_accepted": false
+  },
+  {
+    "name": "legacy additionalItems without items",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "array",
+          "additionalItems": false
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "legacy open tuple tail",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "array",
+          "items": [
+            {
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": false
+  },
+  {
+    "name": "legacy closed tuple tail",
+    "schema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "payload": {
+          "type": "array",
+          "items": [
+            {
+              "type": "string"
+            }
+          ],
+          "additionalItems": false
+        }
+      },
+      "required": [
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "output_accepted": true,
+    "strict_accepted": true
+  }
+]

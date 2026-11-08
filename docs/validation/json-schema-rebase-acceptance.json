@@ -1,0 +1,291 @@
+{
+  "schema_version": 1,
+  "verified_on": "2026-11-08",
+  "verified_at": "2026-11-08T10:28:50.638423+09:00",
+  "status": "passed_for_dev_rebase_scope",
+  "git": {
+    "branch": "fix/tool-schema-dialect-declaration",
+    "base": "98d0a4e33358ba5a924222495c02286b62d46d14",
+    "validated_code_commit": "ace085f89713d1b23a9b50bedce2d83363780e5a",
+    "before_rebase_commit": "a36195ac09e6e36f569912860a5971f1342fb785",
+    "backup_ref": "refs/backup/tool-schema-before-dev-rebase",
+    "remote_dev_verified": true,
+    "push_performed": false,
+    "commit_message_policy": "Each feature commit has one Conventional Commit title and no body/trailers."
+  },
+  "conflicts": {
+    "files": [
+      "docs/text-vision-api.md",
+      "docs/zh-CN/text-vision-api.md"
+    ],
+    "resolution": "Retain dev ignored-unknown-field protocol semantics and diagnostic behavior; retain full JSON Schema validation, strict API profiles, resource-scoped namespace dispatch and object-only final answers."
+  },
+  "fixture_integrity": {
+    "official_core": 1300,
+    "official_optional": 1074,
+    "manifest_gate": "Both official semantic/completion-guard gates re-run on rebased source, including unchanged fixture hashes.",
+    "whitespace": "Four original upstream trailing spaces are preserved byte-for-byte. A narrow .gitattributes rule disables only blank-at-eol checks inside the pinned official suite directory. Entire feature diff whitespace check passes."
+  },
+  "regressions": {
+    "lm_core": {
+      "passed": 316,
+      "failed": 0,
+      "ignored": 0
+    },
+    "server": {
+      "passed": 295,
+      "failed": 0,
+      "ignored": 14,
+      "boundary": "Existing resource/checkpoint-dependent tests; not counted as passes."
+    }
+  },
+  "app": {
+    "recorded_at": 1794101330.67484,
+    "bundle": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/dist/IronMLX.app",
+    "sha256": {
+      "Contents/MacOS/IronMLX": "685a58d9dd5e6e55acb75ffb6a184d5ee39fc21ec2e4c45d5ada5ce8e3fca4a3",
+      "Contents/Helpers/ironmlx": "e51b5c94d062f8d92c78fa4d2a1b8277951eab5d7580b795df49eb05f9873f81",
+      "Contents/Helpers/iron-bench": "73debd4c6a3b8c8acf607cd8bafc7960d9825267938f29f63dd4e135f975bf0e",
+      "Contents/Resources/mlx.metallib": "264855558092d158ec6b2e72c225b532708310b2ae4494f37ec880f6438735c1",
+      "Contents/Resources/Legal/SBOM.cdx.json": "f9078d2cff60a2ac63df547559608a8b02b065607f504cbf579eaac6c570d2d9"
+    },
+    "source_sha256": {
+      ".gitattributes": "35cf2e1bbb8b34dff90130f341568f442cae6c21ca8ebc28a193a32d2d870717",
+      "Cargo.lock": "e92651dc926438f6e98284d3235c0ada974f12cf5bf5a3f663a4e3140a0aefb5",
+      "ironmlx-lm/Cargo.toml": "f1cf3480f44a92a6afe9263fcb277d689526910c6c97ac45c1e8dbd89b53769a",
+      "ironmlx-lm/src/core/constrained.rs": "564ccef492c151519605588f0c0bb9921e0e2443d938cb384f2a1796ebb8fc0f",
+      "ironmlx-lm/src/core/json_schema.rs": "56e354ff057fb1db7fa7014674ddc759e2ac69fd29d3c4514ddc318050c40da5",
+      "ironmlx-lm/src/core/mod.rs": "505ce2f586651f55a15a5e50689624346efc16d2a5cb31a1aa2fd412ea0c2fc9",
+      "ironmlx-lm/src/core/semantic_constraint.rs": "3e08c9bfc5f6aeca4ae657dbb35a8f89f1f8246872c3e2b78327d62752ca2866",
+      "ironmlx-lm/src/core/tool_calling.rs": "cca121639296b79855903458295d3a9ad2bb78fa167a626b1ab94d3a7a6b9151",
+      "ironmlx-lm/tests/fixtures/api-schema-profile.json": "51e196ecc0eb3c48383bf4089b5ca7858fbcb61b3fb0787f89c6302f14129c52",
+      "ironmlx-runtime/src/core/model_management.rs": "760bdc429e6bafa45cd6e0c4032d7e12fa7a51ca564a1350fcd6de379c752cd4",
+      "ironmlx-runtime/src/core/scheduler_resolution.rs": "fd96b1d8402d85d80880cf29a1301e2b7c259efb23dddcdf82cfca47aa5c068e",
+      "ironmlx/Cargo.toml": "c06f46b2078cafca8734e7836903745419294aad52ea442d598969b71b2ae252",
+      "ironmlx/src/server/anthropic.rs": "77fa5f9ee047aa4f876c75d67e474e633245ce709ef8bb126cf84ffa65108a99",
+      "ironmlx/src/server/api_transport.rs": "4e1b215026ee7c6bddd2f278cef76fd2a1cc9a5b61018ddfd43ed0d1019aab0c",
+      "ironmlx/src/server/chat_format.rs": "53c813f51c399a4c379a06a45f4fa982046f8ccdcbc5299fb24fef6268e0bf7f",
+      "ironmlx/src/server/mod.rs": "dd85f6bd328c659077e2fd172872593d9bab5bbbb81bc8237010fd254157d123",
+      "ironmlx/src/server/model_manager.rs": "ac3aae0286842d84ba603a97bba13710604bc7a40a163256c68d655190908672",
+      "ironmlx/src/server/openai.rs": "8d3609b4032d6dd6210c450ed6a685a48eb1038850d006b5c9207b85f2e62d76",
+      "ironmlx/src/server/request_diagnostics.rs": "716da5630d647ea4a003e365459219cd0fc329ae94c4f3d581789ab0b603205d",
+      "ironmlx/src/server/responses.rs": "6a708903e74b26d4fc96920fe780a5c590504244bf48eaba62cd5aeb582b4c7b",
+      "ironmlx/src/server/structured_output.rs": "bf8e06a6ea67bc7e25e997dcafac2d68c3d8331ce80f788724c7867418e1977a",
+      "ironmlx/tests/audio_http.rs": "c4363058c89b0802a7ee2669e56ca36aa49c73452bf7d94fa70000e45a8faaba",
+      "ironmlx/tests/chat_parameters_http.rs": "f0657fe618f912d7fc3cffec8573c8b36285c3c8b5adebc8fd25d86e44548339",
+      "ironmlx/tests/chat_structured_outputs_http.rs": "528bed1b69d1ebe20410b6c71ea5be066af9ca7e8769d8014582bbd6b3d6eb5b"
+    },
+    "helper_switch": {
+      "method": "Atomic signed Release helper replacement and controlled SIGTERM with zero active/queued requests; existing real App supervisor restarts its child.",
+      "before_pid": 12838,
+      "app_pid": 79547,
+      "before_sha256": "3988ae0902c6ffb5f9f0ec5260a19a063fbf4a74e57f05d8b111eec2907057c3",
+      "after_pid": 54338,
+      "recovered": true,
+      "recovery_seconds": 2.219896078109741,
+      "after_sha256": "e51b5c94d062f8d92c78fa4d2a1b8277951eab5d7580b795df49eb05f9873f81"
+    }
+  },
+  "http": {
+    "verified_at": 1794101128.5259929,
+    "model": "mlx-community/Qwen3.8-27B-4bit",
+    "cases": 39,
+    "requests": 152,
+    "rejections": 145,
+    "valid_completions": 7,
+    "all_passed": true,
+    "helper_sha256": "e51b5c94d062f8d92c78fa4d2a1b8277951eab5d7580b795df49eb05f9873f81"
+  },
+  "aft": {
+    "package": "@cortexkit/aft-opencode",
+    "version": "0.63.5",
+    "opencode_version": "2.2.5",
+    "client": "Official Desktop-bundled CLI --standalone, direct real App backend",
+    "provider_config_sha256": "5e919ca4750a18671bd5c313766bc01ff4e7bc1b9429b37828991014786c87c1",
+    "unchanged_tool_parameter_schemas": 28,
+    "tools_compared_against": "ironmlx/tests/fixtures/api_contract_sdk/aft_opencode_0635_tools.json",
+    "expected_graph": {
+      "entry": "runCheckout",
+      "callees": [
+        "confirmOrder",
+        "paymentStage_1abad302bd",
+        "ledgerStage_9b9ff0db99"
+      ]
+    },
+    "cases": {
+      "callgraph": {
+        "case": "callgraph",
+        "exit_code": 0,
+        "elapsed_seconds": 9.209642887115479,
+        "provider_config_sha256": "5e919ca4750a18671bd5c313766bc01ff4e7bc1b9429b37828991014786c87c1",
+        "session": "ses_e473bee60ffeiwahQkpOX1oRal",
+        "passed": true,
+        "text": "The call tree for `runCheckout` (src/order.ts:1) contains three functions:\n\n1. `confirmOrder` (src/order.ts:2)\n2. `paymentStage_1abad302bd` (src/order.ts:3)\n3. `ledgerStage_9b9ff0db99` (src/order.ts:4)\n\n(Note: the tool reported a pending call-graph update — the tree may reflect calls from before a recent edit.)",
+        "tools": [
+          {
+            "name": "aft_callgraph",
+            "status": "completed",
+            "input": {
+              "op": "call_tree",
+              "path": "src/order.ts",
+              "symbol": "runCheckout",
+              "depth": 4
+            },
+            "output": "runCheckout [src/order.ts:1]\n  ↳ confirmOrder [src/order.ts:2]\n    ↳ paymentStage_1abad302bd [src/order.ts:3]\n      ↳ ledgerStage_9b9ff0db99 [src/order.ts:4]\n\nCall graph update pending for this checkout: this answer may show calls from before those edits. Retry shortly for the updated graph."
+          }
+        ]
+      },
+      "chain_replay": {
+        "case": "chain_replay",
+        "exit_code": 0,
+        "elapsed_seconds": 2.8596999645233154,
+        "provider_config_sha256": "5e919ca4750a18671bd5c313766bc01ff4e7bc1b9429b37828991014786c87c1",
+        "session": "ses_e473bee60ffeiwahQkpOX1oRal",
+        "passed": true,
+        "text": "1. `runCheckout` (root)\n2. `confirmOrder`\n3. `paymentStage_1abad302bd`\n4. `ledgerStage_9b9ff0db99`",
+        "tools": []
+      }
+    },
+    "transport_request_count": 4,
+    "transport_response_count": 4,
+    "all_observed_http_statuses": 200,
+    "stdin": "subprocess.DEVNULL for both runner and actual OpenCode CLI",
+    "pending_update_advisory": "AFT still reports a pending call-graph update; the unchanged fixture source and returned random symbol chain match."
+  },
+  "checks": {
+    "core": {
+      "status": "passed",
+      "command": "cargo test --locked -p ironmlx-lm --lib core::",
+      "log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/core.log",
+      "sha256": "e621873400932ef1b9c32be39371797b6d3e9cf636422afd470feb003b802048"
+    },
+    "server": {
+      "status": "passed",
+      "command": "cargo test --locked -p ironmlx --lib server::",
+      "log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/server.log",
+      "sha256": "c24a3b9ef47857b6a8d3208d385c7942ae7e1dd3b913a7eeb7dff93be36b936d"
+    },
+    "clippy": {
+      "status": "passed",
+      "command": "cargo +nightly clippy --locked --all-features --workspace -- -D warnings",
+      "log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/clippy.log",
+      "sha256": "9e40e6d114dbb91d7dc4cafd01ddae677ca35bebf4604306c0b3da21c21981c8"
+    },
+    "release": {
+      "status": "passed",
+      "command": "cargo build --release",
+      "log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/release.log",
+      "sha256": "1b3abc9b19b974951c883b07fd3a5c05ae55e856dc5d0a1defe1b8196f62ea76"
+    },
+    "app-release": {
+      "status": "passed",
+      "command": "canonical path-remapped Release helper build",
+      "log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/app-release.log",
+      "sha256": "a642b9bed1061fdbec363e32ba5ef54e1cd40693db03a43714f31bedcbd401ca"
+    },
+    "app-verify": {
+      "status": "passed",
+      "command": "scripts/verify-app-bundle.sh dist/IronMLX.app",
+      "log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/app-verify.log",
+      "sha256": "e27d0eee6ebb701c45754cb3f1687f829e04db4faa1649faf4f370f9af1719d0"
+    },
+    "third-party": {
+      "status": "passed",
+      "command": "scripts/verify-third-party-materials.sh with the pinned MLX source",
+      "log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/third-party.log",
+      "sha256": "92f5aa417dd372e2c1e5f348938a6d0003105c12e62efd83517a1a0060593746"
+    },
+    "sbom": {
+      "status": "passed",
+      "command": "scripts/verify-sbom.sh",
+      "log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/sbom.log",
+      "sha256": "288d9d2f45a20df7d99feeb2c8aaea3bfd631ede05da93d621f11d623cfc093f"
+    },
+    "license": {
+      "status": "passed",
+      "command": "python3 scripts/verify-license-policy.py",
+      "log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/license.log",
+      "sha256": "739c51dedd235051154371b8747f96feaadd4e66a5c5dca286b54137e0b51305"
+    },
+    "docs-parity": {
+      "status": "passed",
+      "command": "python3 scripts/verify-documentation-parity.py",
+      "log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/docs-parity.log",
+      "sha256": "74abc08406ed3bc3e5ed639fde9ae4a7ccc11a453e4a0d18e6631ebbc849a1ac"
+    },
+    "website-tests": {
+      "status": "passed",
+      "command": "python3 -m unittest discover -s scripts/tests -p test_website_docs.py",
+      "log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/website-tests.log",
+      "sha256": "bac8232540fcadc6865d8c0cce1a6b3b34b90e5e31a1afe66bcd0b928ace72a7"
+    },
+    "website-build": {
+      "status": "passed",
+      "command": "python3 scripts/build-website-docs.py",
+      "log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/website-build.log",
+      "sha256": "040f80a589e486c99bdf0a9296d152b1ef99c9d9e012dad8df1fdb0d995f6f1a"
+    },
+    "versions": {
+      "status": "passed",
+      "command": "scripts/verify-version-consistency.sh",
+      "log": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/versions.log",
+      "sha256": "7017dec49fbc8caff03a6dc39cd904401bccc71e197bda2be86d9aa38dc49e98"
+    },
+    "fmt": {
+      "status": "passed",
+      "commands": [
+        "cargo fmt",
+        "cargo +nightly fmt --all -- --check"
+      ]
+    }
+  },
+  "non_acceptance_observations": [
+    {
+      "case": "first probe immediately after controlled helper restart",
+      "result": "404 model_not_found before the App completed sequential model registration",
+      "evidence": "live/startup-before-model-registration.json",
+      "handling": "Not counted as pass; harness waits for target model in /v1/models before the formal 152-request matrix."
+    },
+    {
+      "case": "first AFT runner inherited stdin",
+      "result": "Harness script text was appended to the prompt; tool and replay completed but this session is excluded from acceptance",
+      "evidence": "live/aft-inherited-stdin",
+      "handling": "Runner and CLI now receive DEVNULL stdin. Fresh clean session reran the actual tool and full-chain replay; transport bodies verified to contain no inherited script."
+    }
+  ],
+  "boundaries": [
+    "No Git push or merge performed; local dev worktree was not changed.",
+    "No CI polling.",
+    "Local ad-hoc signed App and one cached Qwen3.8-27B-4bit model; no distribution signing/notarization, broad model or performance qualification.",
+    "This follow-up uses the previously generated Dashboard provider configuration unchanged, with actual AFT callgraph and tool-free replay; no new native Dashboard/Desktop mouse acceptance."
+  ],
+  "evidence_root": "/Users/xin/workspace/fix-tool-schema-dialect-declaration/.build/rebase-schema-validation/live",
+  "evidence_sha256": {
+    "summary.json": "b4a80b616a94fef9ef2d05d7347b963c4ca3418e20bddff08f3de4dab1614f83",
+    "startup-before-model-registration.json": "23f4bc42b5ec5d0d45a99f4da5fcd1a3da62ccb3d30d4ff9314a00ad8ff9f548",
+    "helper-switch.json": "1e60aa13e2db0bcb76952e7c184238a537b03bc3a87d428a91ab7cd2588bdd56",
+    "requests.json": "35fc208406088429d1f9c9df63853359ed336f444c453d09dcc2ec73b2691911",
+    "final-app-identity.json": "13b71f67445d3e08f642d1fd477e4e3126e6a09f2ef680d51b0f04ee9512883c",
+    "aft-inherited-stdin/transport.jsonl": "671994e8e83bb147917253a35a47b9523ba75fee5730fafc22606fe2d6b5b334",
+    "aft-inherited-stdin/session.txt": "7335f1fa106a0a15df4dbf39b712307b845313f1f03bf286acdb6ab5ea8451d6",
+    "aft-inherited-stdin/chain_replay.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "aft-inherited-stdin/callgraph-status.json": "52db797d0f34784973fc9d9ff4cd018596ba99323b1a2a9a6285d343fde1a876",
+    "aft-inherited-stdin/callgraph.jsonl": "cb54905364420d0ea75872f6a2b00ba402747fb32601cebcc3affed08f5c0de0",
+    "aft-inherited-stdin/expected-graph.json": "82db9f6398ea813d7dbccfbbad8e78d800c55002d4f39901c9bb34b2e2b5a09b",
+    "aft-inherited-stdin/callgraph.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "aft-inherited-stdin/chain_replay-status.json": "bd967a2876041de5f90cb94e5f6407ac009c93f1b1097e97ea3a3a6fc9308a08",
+    "aft-inherited-stdin/executions.jsonl": "3755cf8815726607414a14b3d851aba325d7f919dca53d94fbcc3957ca2a673b",
+    "aft-inherited-stdin/chain_replay.jsonl": "4974ba607caf4431e76607b0727c1bf7c358e71bff0b08fbe9657bd9c4ca3cdf",
+    "aft/transport.jsonl": "5f04a979bd53d8b7fda6a684767bc4d7f8fefced0fe34ddc2935c865b6eec991",
+    "aft/session.txt": "4563c5e18d353ff83f4a2721d6223506eb0f3875423b6bf56ae8f1d8a766b5b3",
+    "aft/chain_replay.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "aft/callgraph-status.json": "aae78109408506f497ef4a6ca01a9cd2a0be4aae4f397484e0d798e92b0a9ed1",
+    "aft/callgraph.jsonl": "78f78528d2eeacdc158c21192a855b8aa4e122f7a6b4051bdff4f744146fa5a6",
+    "aft/expected-graph.json": "82db9f6398ea813d7dbccfbbad8e78d800c55002d4f39901c9bb34b2e2b5a09b",
+    "aft/callgraph.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "aft/chain_replay-status.json": "238c4d3ea31676064cac77b7da0c6a6fe9c290e26ce08515508f89bf9afe2c2b",
+    "aft/executions.jsonl": "15f29a17c00542f36c6f02026718c5e47264f62ae42b613574130678f6b0b2dd",
+    "aft/chain_replay.jsonl": "eeb2cd768ded4d2894b893380b605f36d15810415e5d730ced90d3339e670268"
+  },
+  "source_identity_policy": "The validation-record commit changes only documentation. Source and artifact fingerprints are checked again after that commit."
+}

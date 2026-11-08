@@ -251,13 +251,13 @@ The resulting JSON remains text in a message's `output_text`; clients parse it. 
 
 With tools and an output format together, `none` permits only final JSON, `required` or a named function permits only calls, and `auto` permits calls or Schema-conforming final JSON. The combined constraint applies across supported tool dialects and ordinary, scheduled, speculative and DiffusionGemma generation.
 
-The JSON Schema subset is defined in [Common constraints](#json-schema).
+The JSON Schema contract is defined in [Common constraints](#json-schema).
 
 ### Limits
 
 - `store`, `previous_response_id`, `conversation` and `background` are ignored request fields. Responses remain stateless and synchronous; callers must send full input history. Response retrieve/delete/cancel APIs are unsupported.
-- Client functions and the supported `type:"namespace"` function groups are accepted. Namespaces compile to a bounded dispatcher and restore public namespace/function/argument shapes in output and replay. Named namespace subfunctions cannot be forced through `tool_choice`; use `auto` or `required`.
-- Dynamic parameters outside the Schema subset are allowed only for non-strict namespace subfunctions using a JSON argument envelope; strict mode never downgrades.
+- Client functions and the supported `type:"namespace"` function groups are accepted. Namespaces compile to a dispatcher and restore public namespace/function/argument shapes in output and replay. Named namespace subfunctions cannot be forced through `tool_choice`; use `auto` or `required`.
+- Namespace dispatchers preserve each child Schema and reference scope. Malformed child schemas fail before generation; strict mode never downgrades.
 - Hosted Web/File Search, MCP, Code Interpreter and custom/freeform tools are unsupported.
 - No persisted reasoning, independent summary/refusal items, OpenAI file IDs, audio input/output, image output or image function results are provided.
 - Public sampling is finite `temperature` in `[0,2]` and `top_p` in `(0,1]`. `top_k`, `repetition_penalty` and other undeclared fields are ignored without changing sampler settings.
@@ -392,7 +392,7 @@ Request-field fragment; merge into a complete request with its required fields:
 }
 ```
 
-The Schema subset and tool/output choice rules match Responses. Synchronous, SSE, Scheduler, MTP/drafter and DiffusionGemma share constraints. `finish_reason:"length"` can leave JSON incomplete; treat it as truncated output.
+The Schema contract and tool/output choice rules match Responses. Synchronous, SSE, Scheduler, MTP/drafter and DiffusionGemma share constraints. `finish_reason:"length"` can leave JSON incomplete; treat it as truncated output.
 
 ### Function tools
 
@@ -555,7 +555,7 @@ Request-field fragment; merge into a complete request with its required fields:
 }
 ```
 
-JSON appears in ordinary text blocks. The Schema subset is shared with Responses, and unsupported fields fail before generation. `auto` permits a call or final JSON, `none` permits final JSON, and `any`/named `tool` permit calls only.
+JSON appears in ordinary text blocks. The Schema contract is shared with Responses, and invalid schemas or missing reference resources fail before generation. `auto` permits a call or final JSON, `none` permits final JSON, and `any`/named `tool` permit calls only.
 `stop_reason:"max_tokens"` can leave JSON incomplete. Structured Outputs do not allow last-assistant-message prefill. Only `output_config.format` controls formatting; obsolete top-level `output_format` is ignored.
 
 Thinking can be combined with Structured Outputs: the thinking section is unconstrained, final text uses the JSON grammar, and tool calls use their parameter grammar. The same constraints apply again after replaying tool results, across synchronous/SSE and supported execution paths.
@@ -685,9 +685,22 @@ Replace <Base64> with actual image data and include the block alongside text in 
 
 ### JSON Schema
 
-Supported types: object, array, string, number, integer, boolean, null and nullable type arrays. Supported keywords: properties, required, items, enum, const, anyOf, minItems/maxItems, minLength/maxLength, minimum/maximum and exclusiveMinimum/exclusiveMaximum. Maximum nesting depth is 8. `oneOf` is supported when every branch declares explicit, mutually disjoint JSON types (integer and number overlap). Only annotation siblings are allowed; overlapping or untyped branches are rejected. String `pattern` supports regular expressions anchored with `^`, with optional `$` for whole-value matching (for example, `^ses` matches a session-ID prefix) (up to 4096 bytes, without lookaround or backreferences); decoding and emitted-value validation both enforce the constraint.
+Schema validation uses the Draft 2020-12 semantics consumed by OpenCode 2.2.5. The pinned official core suite contains 46 files, 385 groups and 1,300 instances; all must pass both the production validator and generation-completion guards. Unsupported schemas count as failures. A separate optional gate covers all 1,074 instances: 164 non-format instances under dialect defaults and 910 format instances with explicit format assertions. The default annotation behavior is checked independently.
 
-strict:true requires additionalProperties:false and every property in required at each object level. Top-level tool parameter objects must be closed. Non-strict tools can use nested additionalProperties:true or a supported value schema. Unsupported keywords return 400 before generation; strict constraints do not silently downgrade.
+| Area | Behavior |
+| --- | --- |
+| Assertions | Includes `allOf`/`anyOf`/exclusive `oneOf`, `not`, conditionals, `multipleOf`, `uniqueItems`, `contains`, `prefixItems`, dependent and unevaluated keywords, and standard numeric equality (`1` equals `1.0`). |
+| References and dialects | Supports document-local and embedded resources, `$defs`, `$id`, anchors, recursive and dynamic references, and standard dialect declarations. Draft 7 reference siblings retain their older semantics. Missing resources or invalid schemas fail before generation. |
+| Resource retrieval | No arbitrary HTTP or filesystem fetching. The standalone validator accepts an explicit resource catalogue; official remote-reference fixtures are supplied offline. API tool definitions must include their referenced resources in the schema document. |
+| Annotations | Descriptions, comments, examples and defaults do not constrain values. Draft 2020-12 `format` is an annotation by default. The explicit assertion profile also validates internationalized hostnames and email addresses. The low-level validator can opt in to that profile; this adds no HTTP request option. |
+| Native generation | Simple schemas retain the existing native grammar. Complex tool schemas use a model-facing JSON argument string with the complete original schema in its description. IronMLX restores the original argument object before emitting a call; clients and replay retain their public argument shape. |
+| Completion validation | Complex JSON uses a JSON syntax grammar plus the complete semantic validator. Invalid completed JSON or tool arguments are blocked at completion, and emitted values are validated again. The fallback does not erase assertions; an unsatisfiable schema or an invalid generated prefix can stop generation without a successful result. |
+
+Native grammar lowering still has depth, size and expression limits; these select the generation representation and no longer define which valid source schemas are accepted. Literal objects in `const`, `enum`, `default` and `examples` are values, not schemas. Original client request objects are not mutated.
+
+Tool arguments and structured final answers use object-oriented API contracts. Structured-output schemas must declare an object-only root, directly or through references/composition; nullable roots and untyped `{}` roots are rejected, and successful final answers are checked again to be objects. `strict:true` additionally requires `additionalProperties:false` and every declared property in `required` for object schemas, including referenced definitions. Strict value schemas must declare a type, finite `const`/`enum`, or a reference/composition establishing such a shape; array elements must also have a constrained shape. Constraint fragments need not repeat their enclosing type. Ordinary non-strict parameters retain standard `{}` semantics. Strict validation never silently falls back to a weaker profile. Successful completion does not guarantee that every valid schema is easy for every model to generate; check truncation and error status before executing tools or consuming structured output.
+
+API profile regression evidence is recorded in [the contract acceptance report](validation/json-schema-api-contract-acceptance.json).
 
 ### Output budgets
 

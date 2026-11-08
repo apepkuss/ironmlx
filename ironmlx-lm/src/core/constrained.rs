@@ -12,8 +12,11 @@ use serde_json::{Map, Value};
 
 use mlx::Array;
 
+use crate::core::json_schema::SchemaValidator;
+use crate::core::native_output::NativeOutputDecoderConfig;
 use crate::core::native_output::NativeOutputDialect;
 use crate::core::reasoning_budget::{ReasoningBudget, ReasoningBudgetPlan, ReasoningBudgetSession};
+use crate::core::semantic_constraint::{SemanticContract, SemanticState};
 use crate::core::tool_calling::ToolDialect;
 use crate::core::tool_calling::{ToolDefinition, GEMMA_STRING_DELIMITER};
 use crate::Result;
@@ -90,6 +93,7 @@ impl ConstraintTokenizer {
                 eos_token_ids: Arc::clone(&self.eos_token_ids),
                 require_accepting_state_at_length: false,
                 budget_plan: Some(budget),
+                semantic: None,
             })
         }
     }
@@ -231,7 +235,9 @@ impl ConstraintTokenizer {
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: requires_accepting_state_at_length(options),
             budget_plan: None,
+            semantic: None,
         })
+        .and_then(|plan| plan.guard_tool_schemas(ToolDialect::Qwen35, tools, output_schema, None))
     }
 
     pub fn compile_gemma_tools(
@@ -271,7 +277,9 @@ impl ConstraintTokenizer {
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: requires_accepting_state_at_length(options),
             budget_plan: None,
+            semantic: None,
         })
+        .and_then(|plan| plan.guard_tool_schemas(ToolDialect::Gemma, tools, output_schema, None))
     }
 
     pub fn compile_glm_tools(
@@ -311,7 +319,9 @@ impl ConstraintTokenizer {
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: requires_accepting_state_at_length(options),
             budget_plan: None,
+            semantic: None,
         })
+        .and_then(|plan| plan.guard_tool_schemas(ToolDialect::Glm, tools, output_schema, None))
     }
 
     pub fn compile_llama_tools(
@@ -351,7 +361,9 @@ impl ConstraintTokenizer {
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: requires_accepting_state_at_length(options),
             budget_plan: None,
+            semantic: None,
         })
+        .and_then(|plan| plan.guard_tool_schemas(ToolDialect::Llama, tools, output_schema, None))
     }
 
     pub fn compile_minicpm5_tools(
@@ -391,33 +403,38 @@ impl ConstraintTokenizer {
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: requires_accepting_state_at_length(options),
             budget_plan: None,
+            semantic: None,
         })
+        .and_then(|plan| plan.guard_tool_schemas(ToolDialect::MiniCpm5, tools, output_schema, None))
     }
 
     /// Compile a standalone JSON output constraint for Responses structured
-    /// output. The schema is validated by IronMLX before llguidance sees it so
-    /// request-time and post-generation validation use the same subset.
+    /// output. Native lowering is optional; the complete semantic validator
+    /// remains attached to the generation plan.
     pub fn compile_json_output(&self, schema: &Value) -> Result<ConstraintPlan> {
-        validate_constraint_output_schema(schema)?;
-        let grammar = TopLevelGrammar::from_json_schema(grammar_schema(schema));
+        let validator = crate::core::json_schema::validator(schema)?;
+        let projected = decoding_json_schema(schema)?;
+        let grammar = TopLevelGrammar::from_json_schema(projected.clone());
         let matcher = Matcher::new(self.factory.create_parser(grammar.clone()));
         if matcher.is_error() {
             bail!(
                 "compile constrained JSON output: {}",
                 matcher
                     .get_error()
-                    .unwrap_or_else(|| "unknown parser error".to_string())
+                    .unwrap_or_else(|| "unknown parser error".into())
             );
         }
         Ok(ConstraintPlan {
             factory: Arc::clone(&self.factory),
             grammar,
-            grammar_source: Arc::from(serde_json::to_string(&grammar_schema(schema))?),
+            grammar_source: Arc::from(serde_json::to_string(&projected)?),
             vocab_size: self.vocab_size,
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: false,
             budget_plan: None,
-        })
+            semantic: None,
+        }
+        .with_json_schema_validator(validator, None))
     }
 
     /// Compile one grammar whose native reasoning section remains
@@ -433,7 +450,15 @@ impl ConstraintTokenizer {
     ) -> Result<ConstraintPlan> {
         validate_constraint_output_schema(schema)?;
         let grammar_source = build_json_output_grammar(schema)?;
-        self.compile_reasoning_wrapped_lark(grammar_source, reasoning_dialect, false)
+        Ok(self
+            .compile_reasoning_wrapped_lark(grammar_source, reasoning_dialect, false)?
+            .with_json_schema_validator(
+                crate::core::json_schema::validator(schema)?,
+                Some(NativeOutputDecoderConfig {
+                    dialect: reasoning_dialect,
+                    reasoning_enabled: true,
+                }),
+            ))
     }
 
     /// Compile the `tool_choice=auto` grammar used when a request enables
@@ -463,6 +488,15 @@ impl ConstraintTokenizer {
             grammar_source,
             reasoning_dialect,
             requires_accepting_state_at_length(options),
+        )?
+        .guard_tool_schemas(
+            tool_dialect,
+            tools,
+            output_schema,
+            Some(NativeOutputDecoderConfig {
+                dialect: reasoning_dialect,
+                reasoning_enabled: true,
+            }),
         )
     }
 
@@ -491,6 +525,7 @@ impl ConstraintTokenizer {
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length,
             budget_plan: None,
+            semantic: None,
         })
     }
 }
@@ -505,6 +540,7 @@ pub struct ConstraintPlan {
     eos_token_ids: Arc<[u32]>,
     require_accepting_state_at_length: bool,
     budget_plan: Option<Arc<ReasoningBudgetPlan>>,
+    semantic: Option<Arc<SemanticContract>>,
 }
 
 impl fmt::Debug for ConstraintPlan {
@@ -517,6 +553,53 @@ impl fmt::Debug for ConstraintPlan {
 }
 
 impl ConstraintPlan {
+    fn guard_tool_schemas(
+        self,
+        dialect: ToolDialect,
+        definitions: &[ToolDefinition],
+        output: Option<&Value>,
+        native: Option<NativeOutputDecoderConfig>,
+    ) -> Result<Self> {
+        if crate::core::tool_calling::tool_schemas_need_envelope(definitions) || output.is_some() {
+            self.with_tool_schema_validator(dialect, definitions, output, native)
+        } else {
+            Ok(self)
+        }
+    }
+
+    pub fn with_json_schema_validator(
+        mut self,
+        validator: SchemaValidator,
+        native: Option<NativeOutputDecoderConfig>,
+    ) -> Self {
+        self.semantic = Some(Arc::new(SemanticContract::json(validator, native)));
+        self
+    }
+
+    pub fn with_tool_schema_validator(
+        mut self,
+        dialect: ToolDialect,
+        definitions: &[ToolDefinition],
+        output: Option<&Value>,
+        native: Option<NativeOutputDecoderConfig>,
+    ) -> Result<Self> {
+        let output = output
+            .map(|schema| {
+                Ok::<_, anyhow::Error>((
+                    schema.clone(),
+                    crate::core::json_schema::validator(schema)?,
+                ))
+            })
+            .transpose()?;
+        self.semantic = Some(Arc::new(SemanticContract::tools(
+            dialect,
+            definitions.to_vec(),
+            output,
+            native,
+        )));
+        Ok(self)
+    }
+
     pub fn start_session(&self) -> Result<ConstraintSession> {
         let matcher = Matcher::new(self.factory.create_parser(self.grammar.clone()));
         if matcher.is_error() {
@@ -536,6 +619,10 @@ impl ConstraintPlan {
                 .transpose()?,
             vocab_size: self.vocab_size,
             committed_tokens: 0,
+            semantic: self
+                .semantic
+                .as_ref()
+                .map(|contract| SemanticState::new(Arc::clone(contract))),
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: self.require_accepting_state_at_length,
         })
@@ -553,6 +640,7 @@ pub struct ConstraintSession {
     budget_matcher: Option<ReasoningBudgetSession>,
     vocab_size: usize,
     committed_tokens: usize,
+    semantic: Option<SemanticState>,
     eos_token_ids: Arc<[u32]>,
     require_accepting_state_at_length: bool,
 }
@@ -564,6 +652,7 @@ impl Clone for ConstraintSession {
             budget_matcher: self.budget_matcher.clone(),
             vocab_size: self.vocab_size,
             committed_tokens: self.committed_tokens,
+            semantic: self.semantic.clone(),
             eos_token_ids: Arc::clone(&self.eos_token_ids),
             require_accepting_state_at_length: self.require_accepting_state_at_length,
         }
@@ -609,6 +698,22 @@ impl ConstraintSession {
                     .context("compute reasoning budget mask")?,
             );
         }
+        if let Some(semantic) = &self.semantic {
+            let env = self.matcher.tok_env()?;
+            let trie = env.tok_trie();
+            let semantic = semantic.prepared();
+            let mut rejected = Vec::new();
+            mask.iter_set_entries(|token| {
+                let bytes = trie.token(token as u32);
+                let bytes = bytes.strip_prefix(&[0xFF]).unwrap_or(bytes);
+                if semantic.rejects(bytes, self.eos_token_ids.contains(&(token as u32))) {
+                    rejected.push(token);
+                }
+            });
+            for token in rejected {
+                mask.set(token, false);
+            }
+        }
         anyhow::ensure!(
             mask.num_set() > 0,
             "constrained decoding reached a state with no valid next token"
@@ -650,6 +755,18 @@ impl ConstraintSession {
             );
             return Ok(());
         }
+        let token_bytes = if let Some(semantic) = &self.semantic {
+            let env = self.matcher.tok_env()?;
+            let bytes = env.tok_trie().token(token);
+            let bytes = bytes.strip_prefix(&[0xFF]).unwrap_or(bytes).to_vec();
+            anyhow::ensure!(
+                !semantic.rejects(&bytes, false),
+                "token would complete an output that violates its JSON Schema"
+            );
+            Some(bytes)
+        } else {
+            None
+        };
         self.matcher
             .consume_token(token)
             .with_context(|| format!("commit constrained token {token}"))?;
@@ -658,11 +775,21 @@ impl ConstraintSession {
                 .commit_token(token)
                 .context("commit reasoning budget token")?;
         }
+        if let (Some(semantic), Some(bytes)) = (&mut self.semantic, token_bytes) {
+            semantic.push(&bytes);
+        }
         self.committed_tokens = self.committed_tokens.saturating_add(1);
         Ok(())
     }
 
     pub fn is_accepting(&mut self) -> Result<bool> {
+        if self
+            .semantic
+            .as_ref()
+            .is_some_and(|semantic| !semantic.accepting())
+        {
+            return Ok(false);
+        }
         if let Some(budget) = &mut self.budget_matcher {
             if !budget
                 .is_accepting()
@@ -759,6 +886,9 @@ impl ConstraintSession {
             budget
                 .rollback(tokens)
                 .context("roll back reasoning budget")?;
+        }
+        if let Some(semantic) = &mut self.semantic {
+            semantic.rollback(tokens);
         }
         self.committed_tokens -= tokens;
         Ok(())
@@ -937,6 +1067,63 @@ pub fn apply_diffusion_token_masks(logits: &Array, masks: &[SimpleVob]) -> Resul
     mlx::ops::binary::add(logits, &additive).map_err(anyhow::Error::from)
 }
 
+/// Validate complete semantics, then optionally lower document-local definitions
+/// and reducible intersections to the faster native grammar representation.
+pub fn normalize_json_schema(schema: &Value) -> Result<Value> {
+    crate::core::json_schema::validator(schema)?;
+    if let Ok(normalized) =
+        crate::core::json_schema::normalize(schema, MAX_SCHEMA_DEPTH, MAX_SCHEMA_NODES)
+    {
+        if validate_schema_node(&normalized, 0, &mut 0).is_ok() {
+            return Ok(normalized);
+        }
+    }
+    Ok(schema.clone())
+}
+
+pub(crate) fn native_tool_schema_supported(schema: &Value) -> bool {
+    let Ok(normalized) =
+        crate::core::json_schema::normalize(schema, MAX_SCHEMA_DEPTH, MAX_SCHEMA_NODES)
+    else {
+        return false;
+    };
+    normalized.get("type").and_then(Value::as_str) == Some("object")
+        && normalized
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_some_and(|properties| properties.len() <= MAX_TOP_LEVEL_PARAMETERS)
+        && validate_schema_node(&normalized, 0, &mut 0).is_ok()
+}
+
+pub fn normalize_tool_schemas(tools: &[ToolDefinition]) -> Result<Vec<ToolDefinition>> {
+    normalize_tool_schemas_with_limits(tools, MAX_SCHEMA_DEPTH, MAX_SCHEMA_NODES)
+}
+
+fn normalize_tool_schemas_with_limits(
+    tools: &[ToolDefinition],
+    max_depth: usize,
+    max_nodes: usize,
+) -> Result<Vec<ToolDefinition>> {
+    tools
+        .iter()
+        .map(|tool| {
+            let mut tool = tool.clone();
+            crate::core::json_schema::validator(&tool.parameters)
+                .with_context(|| format!("invalid schema for tool `{}`", tool.name))?;
+            if let Ok(normalized) =
+                crate::core::json_schema::normalize(&tool.parameters, max_depth, max_nodes)
+            {
+                if validate_schema_node_with_limits(&normalized, 0, &mut 0, max_depth, max_nodes)
+                    .is_ok()
+                {
+                    tool.parameters = normalized;
+                }
+            }
+            Ok(tool)
+        })
+        .collect()
+}
+
 pub fn validate_tool_schemas(tools: &[ToolDefinition]) -> Result<()> {
     validate_tool_schemas_with_limits(tools, MAX_SCHEMA_DEPTH, MAX_SCHEMA_NODES)
 }
@@ -960,124 +1147,42 @@ fn validate_tool_schemas_with_limits(
     max_depth: usize,
     max_nodes: usize,
 ) -> Result<()> {
-    for tool in tools {
+    let normalized = normalize_tool_schemas_with_limits(tools, max_depth, max_nodes)?;
+    for tool in &normalized {
         let root = tool
             .parameters
             .as_object()
             .ok_or_else(|| anyhow!("parameters must be a JSON object schema"))?;
-        if root.get("type").and_then(Value::as_str) != Some("object") {
-            bail!("parameters.type must be `object`");
-        }
-        let properties = root
-            .get("properties")
-            .and_then(Value::as_object)
-            .ok_or_else(|| anyhow!("parameters.properties must be an object"))?;
-        if properties.len() > MAX_TOP_LEVEL_PARAMETERS {
-            bail!(
-                "tool `{}` has {} parameters; constrained decoding supports at most {MAX_TOP_LEVEL_PARAMETERS}",
-                tool.name,
-                properties.len()
+        if let Some(kind) = root.get("type") {
+            anyhow::ensure!(
+                type_contains(Some(kind), "object"),
+                "parameters.type must include `object`"
             );
         }
-        let mut nodes = 0_usize;
-        validate_schema_node_with_limits(&tool.parameters, 0, &mut nodes, max_depth, max_nodes)
-            .with_context(|| format!("unsupported schema for tool `{}`", tool.name))?;
     }
     Ok(())
 }
 
-/// Validate one Responses `json_schema` output contract against IronMLX's
-/// bounded constrained-decoding subset. OpenAI structured outputs require a
-/// root object; strict mode additionally applies the same recursive object
-/// rules as strict function tools.
+/// Validate one object-oriented structured-output contract. Strict mode adds
+/// the recursive object-closure rules used by strict function tools.
 pub fn validate_json_output_schema(schema: &Value, strict: bool) -> Result<()> {
-    let root = schema
-        .as_object()
-        .ok_or_else(|| anyhow!("structured output schema must be a JSON object"))?;
-    anyhow::ensure!(
-        root.get("type").and_then(Value::as_str) == Some("object"),
-        "structured output schema root type must be `object`"
-    );
-    anyhow::ensure!(
-        root.get("properties").is_some(),
-        "structured output schema root must declare properties"
-    );
-    let mut nodes = 0_usize;
-    validate_schema_node(schema, 0, &mut nodes).context("unsupported structured output schema")?;
-    if strict {
-        validate_strict_schema_node(schema, "$structured_output")?;
-    }
-    Ok(())
+    let normalized = normalize_json_schema(schema)?;
+    crate::core::json_schema::validate_api_profile(&normalized, strict, "$structured_output")
 }
 
 fn validate_constraint_output_schema(schema: &Value) -> Result<()> {
-    if schema.as_object().is_some_and(|object| {
-        object.len() == 1 && object.get("type") == Some(&Value::String("object".to_owned()))
-    }) {
-        return Ok(());
-    }
-    validate_json_output_schema(schema, false)
+    crate::core::json_schema::validator(schema).map(|_| ())
 }
 
 /// Validate the additional JSON Schema rules required by OpenAI strict mode.
 pub fn validate_strict_tool_schema(tool: &ToolDefinition) -> Result<()> {
-    validate_strict_schema_node(&tool.parameters, "$").map_err(|error| {
+    let schema = normalize_json_schema(&tool.parameters)?;
+    crate::core::json_schema::validate_api_profile(&schema, true, "$").map_err(|error| {
         anyhow!(
             "strict schema for tool `{}` is invalid: {error:#}",
             tool.name
         )
     })
-}
-
-fn validate_strict_schema_node(schema: &Value, path: &str) -> Result<()> {
-    let object = schema
-        .as_object()
-        .ok_or_else(|| anyhow!("schema node at `{path}` must be an object"))?;
-    if type_contains(object.get("type"), "object") || object.contains_key("properties") {
-        anyhow::ensure!(
-            object.get("additionalProperties") == Some(&Value::Bool(false)),
-            "object at `{path}` must set additionalProperties=false"
-        );
-        let properties = object
-            .get("properties")
-            .and_then(Value::as_object)
-            .ok_or_else(|| anyhow!("object at `{path}` must declare properties"))?;
-        let required = object
-            .get("required")
-            .and_then(Value::as_array)
-            .map(|values| {
-                values
-                    .iter()
-                    .map(|value| value.as_str().expect("schema validated"))
-                    .collect::<HashSet<_>>()
-            })
-            .unwrap_or_default();
-        for name in properties.keys() {
-            anyhow::ensure!(
-                required.contains(name.as_str()),
-                "property `{path}.{name}` must be listed in required"
-            );
-        }
-    }
-    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
-        for (name, child) in properties {
-            validate_strict_schema_node(child, &format!("{path}.{name}"))?;
-        }
-    }
-    if let Some(items) = object.get("items") {
-        validate_strict_schema_node(items, &format!("{path}[]"))?;
-    }
-    if let Some(branches) = schema_union_branches(object) {
-        for (index, branch) in branches.iter().enumerate() {
-            let keyword = if object.contains_key("oneOf") {
-                "oneOf"
-            } else {
-                "anyOf"
-            };
-            validate_strict_schema_node(branch, &format!("{path}.{keyword}[{index}]"))?;
-        }
-    }
-    Ok(())
 }
 
 fn validate_schema_node(schema: &Value, depth: usize, nodes: &mut usize) -> Result<()> {
@@ -1101,6 +1206,11 @@ fn validate_schema_node_with_limits(
         .as_object()
         .ok_or_else(|| anyhow!("schema node must be an object"))?;
     const ALLOWED: &[&str] = &[
+        "$schema",
+        "$comment",
+        "deprecated",
+        "readOnly",
+        "writeOnly",
         "type",
         "properties",
         "required",
@@ -1128,6 +1238,27 @@ fn validate_schema_node_with_limits(
         if !ALLOWED.contains(&key.as_str()) {
             bail!("unsupported JSON Schema keyword `{key}`");
         }
+    }
+    if let Some(declaration) = object.get("$schema") {
+        anyhow::ensure!(depth == 0, "$schema must appear at the schema root");
+        let uri = declaration
+            .as_str()
+            .ok_or_else(|| anyhow!("$schema must be a standard dialect URI string"))?;
+        let uri = uri.strip_suffix('#').unwrap_or(uri);
+        let dialect = uri
+            .strip_prefix("https://")
+            .or_else(|| uri.strip_prefix("http://"));
+        anyhow::ensure!(
+            matches!(
+                dialect,
+                Some(
+                    "json-schema.org/draft-07/schema"
+                        | "json-schema.org/draft/2019-09/schema"
+                        | "json-schema.org/draft/2020-12/schema"
+                )
+            ),
+            "unsupported $schema dialect `{uri}`"
+        );
     }
     if let Some(kind) = object.get("type") {
         validate_type_keyword(kind)?;
@@ -1291,7 +1422,16 @@ fn validate_disjoint_one_of(object: &Map<String, Value>, branches: &[Value]) -> 
     anyhow::ensure!(
         object.keys().all(|key| matches!(
             key.as_str(),
-            "oneOf" | "description" | "title" | "default" | "examples"
+            "oneOf"
+                | "$schema"
+                | "$comment"
+                | "deprecated"
+                | "readOnly"
+                | "writeOnly"
+                | "description"
+                | "title"
+                | "default"
+                | "examples"
         )),
         "oneOf supports only annotation siblings"
     );
@@ -1322,6 +1462,11 @@ fn validate_disjoint_one_of(object: &Map<String, Value>, branches: &[Value]) -> 
 /// values in const/enum/default/examples may themselves contain a `oneOf` key.
 fn grammar_schema(schema: &Value) -> Value {
     let mut object = schema.as_object().expect("schema validated").clone();
+    // The native-lowering subset is checked before lowering. Do not let a declaration
+    // switch the grammar compiler's dialect or trigger meta-schema resolution.
+    for key in ["$schema", "$comment", "deprecated", "readOnly", "writeOnly"] {
+        object.remove(key);
+    }
     if let Some(branches) = object.remove("oneOf") {
         object.insert("anyOf".to_owned(), branches);
     }
@@ -1484,10 +1629,22 @@ fn type_contains(kind: Option<&Value>, expected: &str) -> bool {
     }
 }
 
+fn decoding_json_schema(schema: &Value) -> Result<Value> {
+    crate::core::json_schema::validator(schema)?;
+    if let Ok(normalized) =
+        crate::core::json_schema::normalize(schema, MAX_SCHEMA_DEPTH, MAX_SCHEMA_NODES)
+    {
+        if validate_schema_node(&normalized, 0, &mut 0).is_ok() {
+            return Ok(grammar_schema(&normalized));
+        }
+    }
+    Ok(serde_json::json!({}))
+}
+
 fn build_json_output_grammar(schema: &Value) -> Result<String> {
     Ok(format!(
         "start: structured_output\nstructured_output: %json {}\nws: WS?\nWS: /[ \\t\\r\\n]+/\n",
-        serde_json::to_string(&grammar_schema(schema))?
+        serde_json::to_string(&decoding_json_schema(schema)?)?
     ))
 }
 
@@ -1524,6 +1681,8 @@ fn build_qwen_tool_grammar(
     options: &ToolConstraintOptions,
     output_schema: Option<&Value>,
 ) -> Result<String> {
+    let normalized = crate::core::tool_calling::lower_tool_definitions(tools)?;
+    let tools = normalized.as_slice();
     let selected_indexes = match &options.choice {
         ToolChoiceConstraint::Function(name) => vec![tools
             .iter()
@@ -1648,6 +1807,21 @@ fn build_gemma_tool_grammar(
     options: &ToolConstraintOptions,
     output_schema: Option<&Value>,
 ) -> Result<String> {
+    let normalized = if tools.iter().all(|tool| {
+        validate_schema_node_with_limits(
+            &tool.parameters,
+            0,
+            &mut 0,
+            MAX_SCHEMA_DEPTH.saturating_mul(3).saturating_add(2),
+            MAX_SCHEMA_NODES.saturating_mul(4),
+        )
+        .is_ok()
+    }) {
+        tools.to_vec()
+    } else {
+        crate::core::tool_calling::lower_tool_definitions(tools)?
+    };
+    let tools = normalized.as_slice();
     let selected_indexes = selected_tool_indexes(tools, options)?;
     let allows_multiple = options.allow_parallel_calls
         && !matches!(&options.choice, ToolChoiceConstraint::Function(_));
@@ -1720,6 +1894,8 @@ fn build_glm_tool_grammar(
     options: &ToolConstraintOptions,
     output_schema: Option<&Value>,
 ) -> Result<String> {
+    let normalized = crate::core::tool_calling::lower_tool_definitions(tools)?;
+    let tools = normalized.as_slice();
     let selected_indexes = selected_tool_indexes(tools, options)?;
     let allows_multiple = options.allow_parallel_calls
         && !matches!(&options.choice, ToolChoiceConstraint::Function(_));
@@ -1835,6 +2011,8 @@ fn build_llama_tool_grammar(
     options: &ToolConstraintOptions,
     output_schema: Option<&Value>,
 ) -> Result<String> {
+    let normalized = crate::core::tool_calling::lower_tool_definitions(tools)?;
+    let tools = normalized.as_slice();
     let selected_indexes = selected_tool_indexes(tools, options)?;
     let mut grammar = String::new();
     match (&options.choice, output_schema) {
@@ -1886,6 +2064,8 @@ fn build_minicpm5_tool_grammar(
     options: &ToolConstraintOptions,
     output_schema: Option<&Value>,
 ) -> Result<String> {
+    let normalized = crate::core::tool_calling::lower_tool_definitions(tools)?;
+    let tools = normalized.as_slice();
     let selected_indexes = selected_tool_indexes(tools, options)?;
     let allows_multiple = options.allow_parallel_calls
         && !matches!(&options.choice, ToolChoiceConstraint::Function(_));
@@ -2019,7 +2199,7 @@ fn append_structured_output_rule(
     if let Some(schema) = output_schema {
         grammar.push_str(&format!(
             "structured_output: %json {}\n",
-            serde_json::to_string(&grammar_schema(schema))?
+            serde_json::to_string(&decoding_json_schema(schema)?)?
         ));
     }
     Ok(())
@@ -2511,6 +2691,22 @@ pub fn schema_accepts_string(schema: &Value) -> bool {
 }
 
 fn raw_string_constants(schema: &Value) -> Result<Option<Vec<String>>> {
+    let Some(mut values) = raw_string_constant_candidates(schema)? else {
+        return Ok(None);
+    };
+    // Native string terminals must honor every conjunct just like the JSON
+    // compiler, including bounds/const introduced by reference or allOf lowering.
+    values.retain(|text| {
+        validate_normalized_schema_value(schema, &Value::String(text.clone())).is_ok()
+    });
+    anyhow::ensure!(
+        !values.is_empty(),
+        "string constants cannot satisfy all schema constraints"
+    );
+    Ok(Some(values))
+}
+
+fn raw_string_constant_candidates(schema: &Value) -> Result<Option<Vec<String>>> {
     let object = schema.as_object().expect("schema validated");
     if let Some(any_of) = schema_union_branches(object) {
         let mut result = Vec::new();
@@ -2550,143 +2746,13 @@ fn lark_literal(value: &str) -> Result<String> {
     serde_json::to_string(value).context("escape Lark string literal")
 }
 
-/// Validate a generated value against IronMLX's supported JSON Schema subset.
+/// Validate a generated value using the complete standard semantics.
 pub fn validate_schema_value(schema: &Value, value: &Value) -> Result<()> {
-    let object = schema
-        .as_object()
-        .expect("schema validated before generation");
-    if let Some(branches) = schema_union_branches(object) {
-        let matches = branches
-            .iter()
-            .filter(|branch| validate_schema_value(branch, value).is_ok())
-            .count();
-        if object.contains_key("oneOf") {
-            anyhow::ensure!(matches == 1, "value must match exactly one oneOf branch");
-        } else {
-            anyhow::ensure!(matches > 0, "value does not match any anyOf branch");
-        }
-    }
-    if let Some(expected) = object.get("const") {
-        anyhow::ensure!(value == expected, "value does not match const");
-    }
-    if let Some(values) = object.get("enum").and_then(Value::as_array) {
-        anyhow::ensure!(values.contains(value), "value is not in enum");
-    }
-    if let Some(kind) = object.get("type") {
-        let matches = match kind {
-            Value::String(kind) => value_matches_type(value, kind),
-            Value::Array(kinds) => kinds
-                .iter()
-                .filter_map(Value::as_str)
-                .any(|kind| value_matches_type(value, kind)),
-            _ => false,
-        };
-        anyhow::ensure!(matches, "value does not match schema type");
-    }
-    if type_contains(object.get("type"), "object") {
-        let value_object = value
-            .as_object()
-            .ok_or_else(|| anyhow!("expected object value"))?;
-        let empty_properties = Map::new();
-        let properties = object
-            .get("properties")
-            .and_then(Value::as_object)
-            .unwrap_or(&empty_properties);
-        if let Some(required) = object.get("required").and_then(Value::as_array) {
-            for name in required {
-                let name = name.as_str().expect("schema validated");
-                anyhow::ensure!(value_object.contains_key(name), "missing required `{name}`");
-            }
-        }
-        let additional = object.get("additionalProperties");
-        for (name, child) in value_object {
-            if let Some(child_schema) = properties.get(name) {
-                validate_schema_value(child_schema, child)
-                    .with_context(|| format!("property `{name}`"))?;
-                continue;
-            }
-            match additional {
-                Some(Value::Bool(false)) => bail!("undeclared property `{name}`"),
-                Some(schema @ Value::Object(_)) => validate_schema_value(schema, child)
-                    .with_context(|| format!("additional property `{name}`"))?,
-                Some(Value::Bool(true)) | None => {}
-                Some(_) => unreachable!("schema validated before generation"),
-            }
-        }
-    }
-    if let Some(items) = object.get("items") {
-        let array = value
-            .as_array()
-            .ok_or_else(|| anyhow!("expected array value"))?;
-        validate_collection_length(object, array.len(), "minItems", "maxItems")?;
-        for (index, item) in array.iter().enumerate() {
-            validate_schema_value(items, item).with_context(|| format!("item {index}"))?;
-        }
-    }
-    if let Some(text) = value.as_str() {
-        validate_collection_length(object, text.chars().count(), "minLength", "maxLength")?;
-        if let Some(pattern) = object.get("pattern") {
-            anyhow::ensure!(
-                compile_string_pattern(pattern)?.is_match(text),
-                "string does not match pattern"
-            );
-        }
-    }
-    if value.is_number() {
-        validate_numeric_value(object, value)?;
-    }
-    Ok(())
+    crate::core::json_schema::validator(schema)?.validate(value)
 }
 
-fn validate_collection_length(
-    schema: &Map<String, Value>,
-    actual: usize,
-    minimum_name: &str,
-    maximum_name: &str,
-) -> Result<()> {
-    if let Some(minimum) = schema.get(minimum_name).and_then(Value::as_u64) {
-        anyhow::ensure!(
-            actual as u64 >= minimum,
-            "value is shorter than {minimum_name}"
-        );
-    }
-    if let Some(maximum) = schema.get(maximum_name).and_then(Value::as_u64) {
-        anyhow::ensure!(
-            actual as u64 <= maximum,
-            "value is longer than {maximum_name}"
-        );
-    }
-    Ok(())
-}
-
-fn validate_numeric_value(schema: &Map<String, Value>, value: &Value) -> Result<()> {
-    let actual = value.as_f64().expect("numeric value");
-    if let Some(minimum) = schema.get("minimum").and_then(Value::as_f64) {
-        anyhow::ensure!(actual >= minimum, "value is below minimum");
-    }
-    if let Some(maximum) = schema.get("maximum").and_then(Value::as_f64) {
-        anyhow::ensure!(actual <= maximum, "value is above maximum");
-    }
-    if let Some(minimum) = schema.get("exclusiveMinimum").and_then(Value::as_f64) {
-        anyhow::ensure!(actual > minimum, "value is at or below exclusiveMinimum");
-    }
-    if let Some(maximum) = schema.get("exclusiveMaximum").and_then(Value::as_f64) {
-        anyhow::ensure!(actual < maximum, "value is at or above exclusiveMaximum");
-    }
-    Ok(())
-}
-
-fn value_matches_type(value: &Value, kind: &str) -> bool {
-    match kind {
-        "string" => value.is_string(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
-        "number" => value.is_number(),
-        "boolean" => value.is_boolean(),
-        "object" => value.is_object(),
-        "array" => value.is_array(),
-        "null" => value.is_null(),
-        _ => false,
-    }
+fn validate_normalized_schema_value(schema: &Value, value: &Value) -> Result<()> {
+    validate_schema_value(schema, value)
 }
 
 pub fn schema_uses_raw_string(schema: &Value) -> bool {
@@ -3302,6 +3368,623 @@ mod tests {
     }
 
     #[test]
+    fn root_schema_dialect_declarations_preserve_tool_and_output_constraints() {
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        for dialect in [
+            "http://json-schema.org/draft-07/schema#",
+            "https://json-schema.org/draft-07/schema",
+            "https://json-schema.org/draft/2019-09/schema",
+            "https://json-schema.org/draft/2020-12/schema#",
+        ] {
+            // A synthetic call-graph tool, not a captured aft_callgraph definition.
+            let tool = ToolDefinition {
+                name: "aft_callgraph".into(),
+                description: None,
+                strict: Some(true),
+                parameters: serde_json::json!({
+                    "$schema": dialect,
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type":"string", "pattern":"^fn_", "minLength":4},
+                        "depth": {"type":"integer", "minimum":1, "maximum":3}
+                    },
+                    "required": ["symbol", "depth"],
+                    "additionalProperties": false
+                }),
+            };
+            validate_tool_schemas(std::slice::from_ref(&tool)).unwrap();
+            validate_strict_tool_schema(&tool).unwrap();
+            validate_json_output_schema(&tool.parameters, true).unwrap();
+            let valid = serde_json::json!({"symbol":"fn_main", "depth":2});
+            validate_schema_value(&tool.parameters, &valid).unwrap();
+            let plan = tokenizer.compile_json_output(&tool.parameters).unwrap();
+            let mut session = plan.start_session().unwrap();
+            consume_bytes(&mut session, valid.to_string().as_bytes()).unwrap();
+            assert!(session.is_accepting().unwrap());
+            tokenizer
+                .compile_qwen_tools(
+                    std::slice::from_ref(&tool),
+                    &ToolConstraintOptions::default(),
+                )
+                .unwrap();
+            for invalid in [
+                serde_json::json!({"symbol":"other", "depth":2}),
+                serde_json::json!({"symbol":"fn_main", "depth":0}),
+                serde_json::json!({"symbol":"fn_main", "depth":4}),
+                serde_json::json!({"symbol":"fn_main", "depth":2, "extra":true}),
+            ] {
+                assert!(validate_schema_value(&tool.parameters, &invalid).is_err());
+                let mut session = plan.start_session().unwrap();
+                assert!(
+                    consume_bytes(&mut session, invalid.to_string().as_bytes()).is_err()
+                        || !session.is_accepting().unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aft_opencode_callgraph_schema_preserves_real_argument_constraints() {
+        // @cortexkit/aft-opencode 0.63.5, gitHead 8c774d6de0f3f72c1074c0679aa1f8dea15f7b81;
+        // generated from src/tools/navigation.ts with its bundled Zod 4.1.8.
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../ironmlx/tests/fixtures/api_contract_sdk/aft_opencode_callgraph_schema.json"
+        ))
+        .unwrap();
+        let tool = ToolDefinition {
+            name: "aft_callgraph".into(),
+            description: None,
+            parameters: schema.clone(),
+            strict: None,
+        };
+        validate_tool_schemas(std::slice::from_ref(&tool)).unwrap();
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        tokenizer
+            .compile_qwen_tools(
+                std::slice::from_ref(&tool),
+                &ToolConstraintOptions::default(),
+            )
+            .unwrap();
+        let plan = tokenizer.compile_json_output(&schema).unwrap();
+        let valid =
+            serde_json::json!({"op":"callers", "path":"src/main.rs", "symbol":"main", "depth":2});
+        validate_schema_value(&schema, &valid).unwrap();
+        let mut session = plan.start_session().unwrap();
+        consume_bytes(&mut session, valid.to_string().as_bytes()).unwrap();
+        assert!(session.is_accepting().unwrap());
+        for (field, value) in [
+            ("op", serde_json::json!("delete")),
+            ("depth", serde_json::json!(0)),
+            ("depth", serde_json::json!(1.5)),
+            ("includeTests", serde_json::json!("yes")),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(validate_schema_value(&schema, &invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn strict_mode_checks_objects_behind_complex_local_references() {
+        let schema = serde_json::json!({
+            "$defs":{"child":{"type":"object","properties":{"value":{"type":"string"}}}},
+            "type":"object","properties":{"child":{"$ref":"#/$defs/child"}},
+            "required":["child"],"additionalProperties":false,
+            "if":{"required":["child"]},"then":{"required":["child"]}
+        });
+        validate_json_output_schema(&schema, false).unwrap();
+        let error = validate_json_output_schema(&schema, true).unwrap_err();
+        assert!(error.to_string().contains("additionalProperties=false"));
+    }
+
+    #[test]
+    fn schema_dialect_declarations_reject_invalid_or_unsupported_semantics() {
+        let schema = serde_json::json!({
+            "type":"object", "properties":{}, "additionalProperties":false
+        });
+        for declaration in [
+            Value::Null,
+            serde_json::json!(true),
+            serde_json::json!(7),
+            serde_json::json!(""),
+            serde_json::json!("https://example.com/custom-schema"),
+        ] {
+            let mut invalid = schema.clone();
+            invalid["$schema"] = declaration.clone();
+            assert!(
+                validate_json_output_schema(&invalid, false).is_err(),
+                "{declaration}"
+            );
+        }
+        let mut nested = schema.clone();
+        nested["properties"]["child"] = serde_json::json!({
+            "$schema":"https://json-schema.org/draft/2020-12/schema", "type":"string"
+        });
+        assert!(validate_json_output_schema(&nested, false).is_ok());
+        let mut invalid = schema.clone();
+        invalid["$dynamicRef"] = serde_json::json!(false);
+        assert!(validate_json_output_schema(&invalid, false).is_err());
+        let mut supported = schema.clone();
+        supported["unevaluatedProperties"] = serde_json::json!(false);
+        validate_json_output_schema(&supported, false).unwrap();
+    }
+
+    fn referenced_count_schema() -> Value {
+        serde_json::json!({
+            "$schema":"https://json-schema.org/draft/2020-12/schema",
+            "$defs": {
+                "count": {"type":"integer", "allOf":[{"minimum":1},{"maximum":3}]},
+                "input": {"type":"object", "properties":{"count":{"$ref":"#/$defs/count"}},
+                    "required":["count"], "additionalProperties":false}
+            },
+            "$ref":"#/$defs/input",
+            "$comment":"Shared arguments from a plugin converter"
+        })
+    }
+
+    #[test]
+    fn draft2020_reference_and_intersection_constraints_survive_decoding_and_validation() {
+        let schema = referenced_count_schema();
+        validate_json_output_schema(&schema, true).unwrap();
+        let normalized = normalize_json_schema(&schema).unwrap();
+        assert_eq!(normalized["properties"]["count"]["minimum"], 1);
+        assert_eq!(normalized["properties"]["count"]["maximum"], 3);
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let plan = tokenizer.compile_json_output(&schema).unwrap();
+        for (text, valid) in [
+            (r#"{"count":2}"#, true),
+            (r#"{"count":0}"#, false),
+            (r#"{"count":4}"#, false),
+            (r#"{"count":"2"}"#, false),
+            (r#"{}"#, false),
+            (r#"{"count":2,"extra":1}"#, false),
+        ] {
+            let value: Value = serde_json::from_str(text).unwrap();
+            assert_eq!(
+                validate_schema_value(&schema, &value).is_ok(),
+                valid,
+                "{text}"
+            );
+            let mut session = plan.start_session().unwrap();
+            let accepted = consume_bytes(&mut session, text.as_bytes()).is_ok()
+                && session.is_accepting().unwrap();
+            assert_eq!(accepted, valid, "{text}");
+        }
+    }
+
+    #[test]
+    fn draft2020_local_references_work_in_every_native_tool_dialect() {
+        use crate::core::tool_calling::ToolCallParser;
+        let tool = ToolDefinition {
+            name: "count".into(),
+            description: None,
+            parameters: referenced_count_schema(),
+            strict: Some(true),
+        };
+        let tools = std::slice::from_ref(&tool);
+        validate_tool_schemas(tools).unwrap();
+        validate_strict_tool_schema(&tool).unwrap();
+        let options = ToolConstraintOptions {
+            choice: ToolChoiceConstraint::Required,
+            allow_parallel_calls: false,
+        };
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        for dialect in [
+            ToolDialect::Qwen35,
+            ToolDialect::Glm,
+            ToolDialect::Llama,
+            ToolDialect::MiniCpmV46,
+            ToolDialect::MiniCpm5,
+            ToolDialect::Gemma,
+        ] {
+            let make_output = |count| {
+                match dialect {
+                ToolDialect::Qwen35 | ToolDialect::MiniCpmV46 => format!("<tool_call><function=count><parameter=count>{count}</parameter></function></tool_call>"),
+                ToolDialect::Glm => format!("<tool_call>count<arg_key>count</arg_key><arg_value>{count}</arg_value></tool_call>"),
+                ToolDialect::Llama => format!("{{\"name\":\"count\",\"parameters\":{{\"count\":{count}}}}}"),
+                ToolDialect::MiniCpm5 => format!("<function name=\"count\"><param name=\"count\">{count}</param></function>"),
+                ToolDialect::Gemma => format!("<|tool_call>call:count{{count:{count}}}<tool_call|>"),
+            }
+            };
+            let plan = match dialect {
+                ToolDialect::Qwen35 | ToolDialect::MiniCpmV46 => {
+                    tokenizer.compile_qwen_tools(tools, &options)
+                }
+                ToolDialect::Glm => tokenizer.compile_glm_tools(tools, &options),
+                ToolDialect::Llama => tokenizer.compile_llama_tools(tools, &options),
+                ToolDialect::MiniCpm5 => tokenizer.compile_minicpm5_tools(tools, &options),
+                ToolDialect::Gemma => ConstraintTokenizer::byte_level_gemma()
+                    .unwrap()
+                    .compile_gemma_tools(tools, &options),
+            }
+            .unwrap();
+            for (count, valid) in [(2, true), (0, false), (4, false)] {
+                let text = make_output(count);
+                let mut session = plan.start_session().unwrap();
+                let tokens = if dialect == ToolDialect::Gemma {
+                    gemma_tokens(&text)
+                } else {
+                    text.bytes().map(u32::from).collect()
+                };
+                let accepted =
+                    session.commit_tokens(&tokens).is_ok() && session.is_accepting().unwrap();
+                assert_eq!(accepted, valid, "{dialect:?}: {text}");
+                let mut parser = ToolCallParser::new(dialect, "schema-test", tools).unwrap();
+                let parsed = parser.push(&text).and_then(|_| parser.finish());
+                assert_eq!(parsed.is_ok(), valid, "parser {dialect:?}: {text}");
+            }
+        }
+    }
+
+    #[test]
+    fn draft2020_string_intersections_preserve_enum_length_and_const_during_native_decoding() {
+        let tool = ToolDefinition {
+            name: "label".into(),
+            description: None,
+            strict: None,
+            parameters: serde_json::json!({
+                "$defs":{"text":{"type":"string","enum":["a","bb","cc","ddd"],
+                    "allOf":[{"minLength":2},{"maxLength":2},{"const":"bb"}]}},
+                "type":"object","properties":{"text":{"$ref":"#/$defs/text"}},
+                "required":["text"],"additionalProperties":false
+            }),
+        };
+        let options = ToolConstraintOptions {
+            choice: ToolChoiceConstraint::Required,
+            allow_parallel_calls: false,
+        };
+        let tools = std::slice::from_ref(&tool);
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let plans = [
+            tokenizer.compile_qwen_tools(tools, &options).unwrap(),
+            tokenizer.compile_glm_tools(tools, &options).unwrap(),
+            tokenizer.compile_minicpm5_tools(tools, &options).unwrap(),
+        ];
+        for text in ["a", "bb", "cc", "ddd"] {
+            let outputs = [format!("<tool_call><function=label><parameter=text>{text}</parameter></function></tool_call>"),
+                format!("<tool_call>label<arg_key>text</arg_key><arg_value>{text}</arg_value></tool_call>"),
+                format!("<function name=\"label\"><param name=\"text\">{text}</param></function>")];
+            for (plan, output) in plans.iter().zip(outputs) {
+                let mut session = plan.start_session().unwrap();
+                let accepted = consume_bytes(&mut session, output.as_bytes()).is_ok()
+                    && session.is_accepting().unwrap();
+                assert_eq!(accepted, text == "bb", "{output}");
+            }
+        }
+    }
+
+    #[test]
+    fn draft2020_annotations_are_validated_without_becoming_constraints() {
+        let schema = serde_json::json!({"type":"object","properties":{"label":{
+            "type":"string","deprecated":true,"readOnly":false,"writeOnly":true,"$comment":"metadata"
+        }},"additionalProperties":false});
+        validate_json_output_schema(&schema, false).unwrap();
+        validate_schema_value(&schema, &serde_json::json!({"label":"any"})).unwrap();
+        for (key, value) in [
+            ("$comment", serde_json::json!(false)),
+            ("deprecated", serde_json::json!("true")),
+            ("readOnly", serde_json::json!(0)),
+            ("writeOnly", serde_json::json!({})),
+        ] {
+            let mut invalid = schema.clone();
+            invalid["properties"]["label"][key] = value;
+            assert!(validate_json_output_schema(&invalid, false).is_err());
+        }
+    }
+
+    #[test]
+    fn draft2020_selected_official_suite_groups_preserve_instance_semantics() {
+        for source in [
+            include_str!(
+                "../../tests/fixtures/json-schema-test-suite/draft2020-12-compatibility.json"
+            ),
+            include_str!("../../tests/fixtures/json-schema-test-suite/draft2020-12-numbers.json"),
+        ] {
+            let fixture: Value = serde_json::from_str(source).unwrap();
+            for entry in fixture["groups"].as_array().unwrap() {
+                let group = &entry["group"];
+                let schema = normalize_json_schema(&group["schema"]).unwrap();
+                for test in group["tests"].as_array().unwrap() {
+                    assert_eq!(
+                        validate_schema_value(&schema, &test["data"]).is_ok(),
+                        test["valid"].as_bool().unwrap(),
+                        "{} / {}",
+                        group["description"],
+                        test["description"]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn draft2020_numbers_preserve_nested_equality_and_decoder_validation_agreement() {
+        let schema = serde_json::json!({"type":"object","properties":{
+            "count":{"type":"integer","const":-2.0},
+            "nested":{"enum":[{"a":[1,0]}]}
+        },"required":["count","nested"],"additionalProperties":false});
+        let value = serde_json::json!({"count":-2,"nested":{"a":[1.0,-0.0]}});
+        validate_json_output_schema(&schema, true).unwrap();
+        validate_schema_value(&schema, &value).unwrap();
+        let plan = ConstraintTokenizer::byte_level()
+            .unwrap()
+            .compile_json_output(&schema)
+            .unwrap();
+        let mut session = plan.start_session().unwrap();
+        consume_bytes(&mut session, br#"{"count":-2,"nested":{"a":[1,0]}}"#).unwrap();
+        assert!(session.is_accepting().unwrap());
+        validate_schema_value(
+            &schema,
+            &serde_json::from_str::<Value>(r#"{"count":-2,"nested":{"a":[1,0]}}"#).unwrap(),
+        )
+        .unwrap();
+        for (schema, data, valid) in [
+            (
+                serde_json::json!({"const":9007199254740993_u64}),
+                serde_json::json!(9007199254740992.0),
+                false,
+            ),
+            (
+                serde_json::json!({"const":18446744073709551615_u64}),
+                serde_json::json!(18446744073709551616.0),
+                false,
+            ),
+            (
+                serde_json::json!({"type":"integer"}),
+                serde_json::json!(1e20),
+                true,
+            ),
+            (
+                serde_json::json!({"type":"integer"}),
+                serde_json::json!(-0.0),
+                true,
+            ),
+            (
+                serde_json::json!({"type":"integer"}),
+                serde_json::json!(1.01),
+                false,
+            ),
+            (
+                serde_json::json!({"const":0}),
+                serde_json::json!(false),
+                false,
+            ),
+        ] {
+            assert_eq!(
+                validate_schema_value(&schema, &data).is_ok(),
+                valid,
+                "{schema}: {data}"
+            );
+        }
+    }
+
+    #[test]
+    fn draft2020_pointer_escaping_and_literal_data_are_not_confused_with_schema_nodes() {
+        let schema = serde_json::json!({
+            "$defs": {"a/b~c%\"": {"type":"string", "enum":["yes"]}},
+            "type":"object", "properties":{
+                "$ref":{"$ref":"#/$defs/a~1b~0c%25%22"},
+                "literal":{"const":{"$ref":"unchanged", "allOf":[false], "$defs":{"x":1}}}
+            }, "required":["$ref","literal"], "additionalProperties":false
+        });
+        let value = serde_json::json!({"$ref":"yes", "literal":{"$ref":"unchanged", "allOf":[false], "$defs":{"x":1}}});
+        validate_json_output_schema(&schema, true).unwrap();
+        validate_schema_value(&schema, &value).unwrap();
+        let mut invalid = value.clone();
+        invalid["$ref"] = serde_json::json!("no");
+        assert!(validate_schema_value(&schema, &invalid).is_err());
+    }
+
+    #[test]
+    fn draft2020_unsupported_reference_and_intersection_semantics_are_rejected() {
+        for schema in [
+            serde_json::json!({"$ref":false}),
+            serde_json::json!({"$defs":{"a":{"type":"string"}},"$ref":"%23/$defs/a"}),
+            serde_json::json!({"$defs":{"a":{"type":"string"}},"$ref":"#/$defs/a%ZZ"}),
+            serde_json::json!({"$ref":"https://example.invalid/schema"}),
+            serde_json::json!({"$ref":"file:///private/schema.json"}),
+            serde_json::json!({"$ref":"#anchor"}),
+            serde_json::json!({"$defs":{"a":{"$ref":"#/$defs/b"},"b":{"$ref":"#/$defs/a"}},"$ref":"#/$defs/a"}),
+            serde_json::json!({"$defs":{"a":{"type":"string"}},"$ref":"#/$defs/missing"}),
+            serde_json::json!({"$defs":{"a":{"type":"string"}},"$ref":"#/$defs/a~2"}),
+            serde_json::json!({"$schema":"http://json-schema.org/draft-07/schema#","$defs":{"a":{"type":"string"}},"$ref":"#/$defs/a","minLength":2}),
+            serde_json::json!({"type":"object","allOf":[{"properties":{"a":{"type":"string"}},"additionalProperties":false},{"properties":{"b":{"type":"string"}}}]}),
+            serde_json::json!({"type":"integer","allOf":[{"minimum":1},{"minimum":2}]}),
+            serde_json::json!({"$defs":{"a":{"anyOf":[{"type":"string"},{"type":"integer"}]}},"$ref":"#/$defs/a","type":"string"}),
+            serde_json::json!({"type":"object","properties":{},"$defs":{"unused":{"$id":"https://example.invalid/"}}}),
+        ] {
+            assert!(
+                crate::core::json_schema::normalize(&schema, MAX_SCHEMA_DEPTH, MAX_SCHEMA_NODES)
+                    .is_err(),
+                "{schema}"
+            );
+        }
+        let mut schema = referenced_count_schema();
+        schema["$defs"]["input"]["required"] = serde_json::json!([]);
+        let tool = ToolDefinition {
+            name: "count".into(),
+            description: None,
+            parameters: schema,
+            strict: Some(true),
+        };
+        assert!(validate_strict_tool_schema(&tool).is_err());
+    }
+
+    #[test]
+    fn draft2020_reference_expansion_enforces_depth_and_node_budgets() {
+        // Each source node is small, but repeated references expand exponentially.
+        let mut defs = Map::new();
+        defs.insert("leaf".into(), serde_json::json!({"type":"string"}));
+        let mut previous = "leaf".to_owned();
+        for level in 0..8 {
+            let name = format!("branch{level}");
+            defs.insert(
+                name.clone(),
+                serde_json::json!({"type":"object","properties":{
+                "a":{"$ref":format!("#/$defs/{previous}")},
+                "b":{"$ref":format!("#/$defs/{previous}")}
+            },"additionalProperties":false}),
+            );
+            previous = name;
+        }
+        let schema = serde_json::json!({"$defs":defs,"$ref":format!("#/$defs/{previous}")});
+        let lowered =
+            crate::core::json_schema::normalize(&schema, MAX_SCHEMA_DEPTH, MAX_SCHEMA_NODES)
+                .unwrap();
+        assert!(validate_schema_node(&lowered, 0, &mut 0).is_err());
+        assert!(!native_tool_schema_supported(&schema));
+        assert!(normalize_json_schema(&schema).is_ok());
+        let mut deep = serde_json::json!({"type":"string"});
+        for _ in 0..10 {
+            deep = serde_json::json!({"type":"array","items":deep});
+        }
+        assert!(
+            crate::core::json_schema::normalize(&deep, MAX_SCHEMA_DEPTH, MAX_SCHEMA_NODES).is_err()
+        );
+    }
+
+    #[test]
+    fn full_standard_schemas_guard_native_envelopes_and_restore_original_arguments() {
+        use crate::core::tool_calling::{lower_tool_arguments, ToolCallParser};
+        use crate::core::GeneratedOutputEvent;
+        let tool = ToolDefinition {
+            name: "edit".into(),
+            description: None,
+            strict: None,
+            parameters: serde_json::json!({
+                "type":"object","properties":{
+                    "mode":{"enum":["read","write"]},"path":{"type":"string","pattern":"[.]rs$"},
+                    "range":{"type":"array","prefixItems":[{"type":"integer","minimum":1},{"type":"integer","minimum":1}],"items":false,"minItems":2,"uniqueItems":true},
+                    "note":{"type":"string"}
+                },"required":["mode","path"],"additionalProperties":false,
+                "if":{"properties":{"mode":{"const":"write"}},"required":["mode"]},
+                "then":{"required":["range"]},"else":{"not":{"required":["range"]}}
+            }),
+        };
+        let tools = std::slice::from_ref(&tool);
+        validate_tool_schemas(tools).unwrap();
+        assert!(crate::core::tool_calling::tool_schemas_need_envelope(tools));
+        let options = ToolConstraintOptions {
+            choice: ToolChoiceConstraint::Required,
+            allow_parallel_calls: false,
+        };
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let cases = [
+            (
+                serde_json::json!({"mode":"read","path":"lib.rs","note":"</parameter>"}),
+                true,
+            ),
+            (
+                serde_json::json!({"mode":"write","path":"lib.rs","range":[1,2]}),
+                true,
+            ),
+            (serde_json::json!({"mode":"write","path":"lib.rs"}), false),
+            (
+                serde_json::json!({"mode":"read","path":"lib.rs","range":[1,2]}),
+                false,
+            ),
+            (serde_json::json!({"mode":"read","path":"lib.txt"}), false),
+            (
+                serde_json::json!({"mode":"write","path":"lib.rs","range":[1,1]}),
+                false,
+            ),
+            (
+                serde_json::json!({"mode":"write","path":"lib.rs","range":[1,2,3]}),
+                false,
+            ),
+        ];
+        for dialect in [
+            ToolDialect::Qwen35,
+            ToolDialect::Glm,
+            ToolDialect::Llama,
+            ToolDialect::MiniCpmV46,
+            ToolDialect::MiniCpm5,
+            ToolDialect::Gemma,
+        ] {
+            let plan = match dialect {
+                ToolDialect::Qwen35 | ToolDialect::MiniCpmV46 => {
+                    tokenizer.compile_qwen_tools(tools, &options)
+                }
+                ToolDialect::Glm => tokenizer.compile_glm_tools(tools, &options),
+                ToolDialect::Llama => tokenizer.compile_llama_tools(tools, &options),
+                ToolDialect::MiniCpm5 => tokenizer.compile_minicpm5_tools(tools, &options),
+                ToolDialect::Gemma => ConstraintTokenizer::byte_level_gemma()
+                    .unwrap()
+                    .compile_gemma_tools(tools, &options),
+            }
+            .unwrap();
+            for (arguments, valid) in &cases {
+                let encoded = serde_json::to_string(arguments)
+                    .unwrap()
+                    .replace('<', "\\u003c");
+                let output = match dialect {
+                    ToolDialect::Qwen35|ToolDialect::MiniCpmV46 => format!("<tool_call><function=edit><parameter=arguments_json>{encoded}</parameter></function></tool_call>"),
+                    ToolDialect::Glm => format!("<tool_call>edit<arg_key>arguments_json</arg_key><arg_value>{encoded}</arg_value></tool_call>"),
+                    ToolDialect::Llama => serde_json::json!({"name":"edit","parameters":{"arguments_json":encoded}}).to_string(),
+                    ToolDialect::MiniCpm5 => format!("<function name=\"edit\"><param name=\"arguments_json\">{encoded}</param></function>"),
+                    ToolDialect::Gemma => format!("<|tool_call>call:edit{{arguments_json:<|\"|>{encoded}<|\"|>}}<tool_call|>"),
+                };
+                let tokens = if dialect == ToolDialect::Gemma {
+                    gemma_tokens(&output)
+                } else {
+                    output.bytes().map(u32::from).collect()
+                };
+                let mut session = plan.start_session().unwrap();
+                let prefix = session.validate_tokens(&tokens);
+                if *valid {
+                    assert!(prefix.is_ok(), "{dialect:?}: {arguments}: {prefix:?}");
+                }
+                let accepted = prefix.is_ok_and(|prefix| prefix == tokens.len())
+                    && session.commit_tokens(&tokens).is_ok()
+                    && session.is_accepting().unwrap();
+                assert_eq!(accepted, *valid, "guard {dialect:?}: {arguments}");
+                let mut parser = ToolCallParser::new(dialect, "full-schema", tools).unwrap();
+                let events = parser.push(&output).and_then(|mut events| {
+                    events.extend(parser.finish()?.0);
+                    Ok(events)
+                });
+                assert_eq!(events.is_ok(), *valid, "parser {dialect:?}: {arguments}");
+                if *valid {
+                    let events = events.unwrap();
+                    let call = events
+                        .iter()
+                        .find_map(|event| match event {
+                            GeneratedOutputEvent::ToolCall(call) => Some(call),
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert_eq!(call.arguments, *arguments);
+                    let replay = lower_tool_arguments(tools, "edit", &call.arguments).unwrap();
+                    assert_eq!(
+                        serde_json::from_str::<Value>(replay["arguments_json"].as_str().unwrap())
+                            .unwrap(),
+                        *arguments
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_schema_semantic_guard_survives_fork_rollback_and_reasoning() {
+        let schema = serde_json::json!({"type":"object","properties":{"values":{"type":"array","items":{"type":"integer"},"uniqueItems":true}},"required":["values"],"additionalProperties":false});
+        let tokenizer = ConstraintTokenizer::byte_level().unwrap();
+        let plan = tokenizer
+            .compile_json_output_with_reasoning(&schema, NativeOutputDialect::Qwen35)
+            .unwrap();
+        let mut session = plan.start_session().unwrap();
+        consume_bytes(&mut session, b"think</think>{\"values\":[1,").unwrap();
+        let mut fork = session.fork();
+        consume_bytes(&mut fork, b"1]").unwrap();
+        assert!(!fork.compute_mask().unwrap().is_allowed(b'}' as u32));
+        consume_bytes(&mut session, b"2]}").unwrap();
+        assert!(session.is_accepting().unwrap());
+        session.rollback(3).unwrap();
+        consume_bytes(&mut session, b"3]}").unwrap();
+        assert!(session.is_accepting().unwrap());
+    }
+
+    #[test]
     fn schema_validation_is_recursive_and_rejects_unknown_keywords() {
         let schema = serde_json::json!({
             "type": "object",
@@ -3552,7 +4235,10 @@ mod tests {
             }
         }))
         .unwrap();
-        assert!(validate_tool_schemas(&[open_root]).is_err());
+        assert!(validate_tool_schemas(std::slice::from_ref(&open_root)).is_ok());
+        assert!(crate::core::tool_calling::tool_schemas_need_envelope(&[
+            open_root
+        ]));
     }
 
     #[test]
@@ -3661,7 +4347,6 @@ mod tests {
     #[test]
     fn one_of_rejects_overlapping_or_ambiguous_branches() {
         for union in [
-            serde_json::json!({"oneOf": []}),
             serde_json::json!({"oneOf": [{"type":"string"},{"type":"string"}]}),
             serde_json::json!({"oneOf": [{"type":"number"},{"type":"integer"}]}),
             serde_json::json!({"oneOf": [{"type":["string","null"]},{"type":"null"}]}),
@@ -3670,8 +4355,12 @@ mod tests {
         ] {
             let mut tool = dsh_schedule_tool();
             tool.parameters["properties"]["at"] = union;
-            assert!(validate_tool_schemas(&[tool]).is_err());
+            validate_tool_schemas(std::slice::from_ref(&tool)).unwrap();
+            assert!(crate::core::tool_calling::tool_schemas_need_envelope(&[
+                tool
+            ]));
         }
+        assert!(normalize_json_schema(&serde_json::json!({"oneOf":[]})).is_err());
         // Runtime validation remains exclusive even if called defensively with
         // an overlapping schema that request validation would reject.
         assert!(validate_schema_value(
@@ -3810,6 +4499,44 @@ mod tests {
             )))
             .unwrap();
         assert!(session.is_accepting().unwrap());
+    }
+
+    #[test]
+    fn api_schema_profiles_preserve_object_roots_and_strict_value_shapes() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/api-schema-profile.json"))
+                .unwrap();
+        for case in cases.as_array().unwrap() {
+            let schema = &case["schema"];
+            // API policy must never redefine validity in the generic validator.
+            crate::core::json_schema::validator(schema).unwrap();
+            let output = validate_json_output_schema(schema, false);
+            assert_eq!(
+                output.is_ok(),
+                case["output_accepted"].as_bool().unwrap(),
+                "{}: {output:?}",
+                case["name"]
+            );
+            let tool = ToolDefinition {
+                name: "profile_probe".into(),
+                description: None,
+                parameters: schema.clone(),
+                strict: Some(true),
+            };
+            let tool_result = validate_strict_tool_schema(&tool);
+            let output_result = validate_json_output_schema(schema, true);
+            for result in [tool_result, output_result] {
+                assert_eq!(
+                    result.is_ok(),
+                    case["strict_accepted"].as_bool().unwrap(),
+                    "{}: {result:?}",
+                    case["name"]
+                );
+            }
+        }
+        validate_schema_value(&serde_json::json!({}), &serde_json::json!({"undeclared":1}))
+            .unwrap();
+        validate_schema_value(&serde_json::json!({}), &Value::Null).unwrap();
     }
 
     #[test]

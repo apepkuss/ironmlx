@@ -98,6 +98,10 @@ impl StructuredOutputFormat {
                 Ok(())
             }
             Self::JsonSchema { schema, .. } => {
+                anyhow::ensure!(
+                    value.is_object(),
+                    "json_schema output must be a JSON object"
+                );
                 ironmlx_lm::core::constrained::validate_schema_value(schema, &value)
                     .context("structured output does not match requested schema")
             }
@@ -205,6 +209,51 @@ mod tests {
             .validate_completion("{\"answer\":\"", false, "max_tokens")
             .unwrap();
         format.validate_completion("", true, "tool_calls").unwrap();
+    }
+
+    #[test]
+    fn json_schema_final_output_requires_an_object_even_if_contract_check_is_bypassed() {
+        for schema in [
+            serde_json::json!({}),
+            serde_json::json!({"type":["object","null"]}),
+        ] {
+            let format = StructuredOutputFormat::JsonSchema {
+                name: "answer".into(),
+                description: None,
+                strict: None,
+                schema,
+            };
+            for text in ["null", "[]", "1", "true", "\"text\""] {
+                assert!(
+                    format.validate_completion(text, false, "stop").is_err(),
+                    "{text}"
+                );
+            }
+            format.validate_completion("{}", false, "stop").unwrap();
+            // Truncation and tool-only turns retain their existing semantics.
+            format.validate_completion("null", false, "length").unwrap();
+            format.validate_completion("", true, "tool_calls").unwrap();
+        }
+    }
+
+    #[test]
+    fn validates_referenced_structured_output_without_dropping_intersections() {
+        let format = StructuredOutputFormat::JsonSchema {
+            name: "answer".into(),
+            description: None,
+            strict: Some(true),
+            schema: serde_json::json!({
+                "$defs":{"answer":{"type":"object","properties":{"count":{
+                    "type":"integer","allOf":[{"minimum":1},{"maximum":3}]}},
+                    "required":["count"],"additionalProperties":false}},
+                "$ref":"#/$defs/answer"
+            }),
+        };
+        format.validate_contract("response_format").unwrap();
+        format.validate_output(r#"{"count":2}"#).unwrap();
+        for text in [r#"{"count":0}"#, r#"{"count":4}"#, r#"{"count":"2"}"#, "{}"] {
+            assert!(format.validate_output(text).is_err(), "{text}");
+        }
     }
 
     #[test]

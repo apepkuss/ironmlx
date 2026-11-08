@@ -1,0 +1,344 @@
+{
+  "repository": "https://github.com/json-schema-org/JSON-Schema-Test-Suite",
+  "commit": "245a45abc90190c0bff04d97e6d2b541b4bb9f12",
+  "dialect": "draft2020-12",
+  "selection": "Unmodified groups containing every semantic counterexample discovered in admitted core schemas; run every instance in each selected group.",
+  "groups": [
+    {
+      "file": "const.json",
+      "index": 10,
+      "group": {
+        "description": "const with 0 does not match other zero-like types",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "const": 0
+        },
+        "tests": [
+          {
+            "description": "false is invalid",
+            "data": false,
+            "valid": false
+          },
+          {
+            "description": "integer zero is valid",
+            "data": 0,
+            "valid": true
+          },
+          {
+            "description": "float zero is valid",
+            "data": 0.0,
+            "valid": true
+          },
+          {
+            "description": "empty object is invalid",
+            "data": {},
+            "valid": false
+          },
+          {
+            "description": "empty array is invalid",
+            "data": [],
+            "valid": false
+          },
+          {
+            "description": "empty string is invalid",
+            "data": "",
+            "valid": false
+          }
+        ]
+      }
+    },
+    {
+      "file": "const.json",
+      "index": 11,
+      "group": {
+        "description": "const with 1 does not match true",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "const": 1
+        },
+        "tests": [
+          {
+            "description": "true is invalid",
+            "data": true,
+            "valid": false
+          },
+          {
+            "description": "integer one is valid",
+            "data": 1,
+            "valid": true
+          },
+          {
+            "description": "float one is valid",
+            "data": 1.0,
+            "valid": true
+          }
+        ]
+      }
+    },
+    {
+      "file": "const.json",
+      "index": 12,
+      "group": {
+        "description": "const with -2.0 matches integer and float types",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "const": -2.0
+        },
+        "tests": [
+          {
+            "description": "integer -2 is valid",
+            "data": -2,
+            "valid": true
+          },
+          {
+            "description": "integer 2 is invalid",
+            "data": 2,
+            "valid": false
+          },
+          {
+            "description": "float -2.0 is valid",
+            "data": -2.0,
+            "valid": true
+          },
+          {
+            "description": "float 2.0 is invalid",
+            "data": 2.0,
+            "valid": false
+          },
+          {
+            "description": "float -2.00001 is invalid",
+            "data": -2.00001,
+            "valid": false
+          }
+        ]
+      }
+    },
+    {
+      "file": "const.json",
+      "index": 13,
+      "group": {
+        "description": "float and integers are equal up to 64-bit representation limits",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "const": 9007199254740992
+        },
+        "tests": [
+          {
+            "description": "integer is valid",
+            "data": 9007199254740992,
+            "valid": true
+          },
+          {
+            "description": "integer minus one is invalid",
+            "data": 9007199254740991,
+            "valid": false
+          },
+          {
+            "description": "float is valid",
+            "data": 9007199254740992.0,
+            "valid": true
+          },
+          {
+            "description": "float minus one is invalid",
+            "data": 9007199254740991.0,
+            "valid": false
+          }
+        ]
+      }
+    },
+    {
+      "file": "enum.json",
+      "index": 9,
+      "group": {
+        "description": "enum with 0 does not match false",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "enum": [
+            0
+          ]
+        },
+        "tests": [
+          {
+            "description": "false is invalid",
+            "data": false,
+            "valid": false
+          },
+          {
+            "description": "integer zero is valid",
+            "data": 0,
+            "valid": true
+          },
+          {
+            "description": "float zero is valid",
+            "data": 0.0,
+            "valid": true
+          }
+        ]
+      }
+    },
+    {
+      "file": "enum.json",
+      "index": 10,
+      "group": {
+        "description": "enum with [0] does not match [false]",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "enum": [
+            [
+              0
+            ]
+          ]
+        },
+        "tests": [
+          {
+            "description": "[false] is invalid",
+            "data": [
+              false
+            ],
+            "valid": false
+          },
+          {
+            "description": "[0] is valid",
+            "data": [
+              0
+            ],
+            "valid": true
+          },
+          {
+            "description": "[0.0] is valid",
+            "data": [
+              0.0
+            ],
+            "valid": true
+          }
+        ]
+      }
+    },
+    {
+      "file": "enum.json",
+      "index": 11,
+      "group": {
+        "description": "enum with 1 does not match true",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "enum": [
+            1
+          ]
+        },
+        "tests": [
+          {
+            "description": "true is invalid",
+            "data": true,
+            "valid": false
+          },
+          {
+            "description": "integer one is valid",
+            "data": 1,
+            "valid": true
+          },
+          {
+            "description": "float one is valid",
+            "data": 1.0,
+            "valid": true
+          }
+        ]
+      }
+    },
+    {
+      "file": "enum.json",
+      "index": 12,
+      "group": {
+        "description": "enum with [1] does not match [true]",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "enum": [
+            [
+              1
+            ]
+          ]
+        },
+        "tests": [
+          {
+            "description": "[true] is invalid",
+            "data": [
+              true
+            ],
+            "valid": false
+          },
+          {
+            "description": "[1] is valid",
+            "data": [
+              1
+            ],
+            "valid": true
+          },
+          {
+            "description": "[1.0] is valid",
+            "data": [
+              1.0
+            ],
+            "valid": true
+          }
+        ]
+      }
+    },
+    {
+      "file": "type.json",
+      "index": 0,
+      "group": {
+        "description": "integer type matches integers",
+        "schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "integer"
+        },
+        "tests": [
+          {
+            "description": "an integer is an integer",
+            "data": 1,
+            "valid": true
+          },
+          {
+            "description": "a float with zero fractional part is an integer",
+            "data": 1.0,
+            "valid": true
+          },
+          {
+            "description": "a float is not an integer",
+            "data": 1.1,
+            "valid": false
+          },
+          {
+            "description": "a string is not an integer",
+            "data": "foo",
+            "valid": false
+          },
+          {
+            "description": "a string is still not an integer, even if it looks like one",
+            "data": "1",
+            "valid": false
+          },
+          {
+            "description": "an object is not an integer",
+            "data": {},
+            "valid": false
+          },
+          {
+            "description": "an array is not an integer",
+            "data": [],
+            "valid": false
+          },
+          {
+            "description": "a boolean is not an integer",
+            "data": true,
+            "valid": false
+          },
+          {
+            "description": "null is not an integer",
+            "data": null,
+            "valid": false
+          }
+        ]
+      }
+    }
+  ]
+}

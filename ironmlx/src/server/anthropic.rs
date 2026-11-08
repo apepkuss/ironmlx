@@ -2962,6 +2962,46 @@ mod tests {
         }
 
         #[test]
+        fn messages_admission_enforces_api_schema_profiles() {
+            let cases: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../ironmlx-lm/tests/fixtures/api-schema-profile.json"
+            ))
+            .unwrap();
+            for case in cases.as_array().unwrap() {
+                let schema = &case["schema"];
+                let tool = serde_json::from_value::<MessagesRequest>(serde_json::json!({
+                    "messages":[{"role":"user","content":"probe"}],
+                    "tools":[{"name":"probe","input_schema":schema,"strict":true}]
+                }))
+                .unwrap()
+                .into_chat_request()
+                .unwrap();
+                let result =
+                    crate::server::openai::prepare_tool_request(&tool, Some(ToolDialect::Qwen35));
+                assert_eq!(
+                    result.is_ok(),
+                    case["strict_accepted"].as_bool().unwrap(),
+                    "tool {}: {result:?}",
+                    case["name"]
+                );
+                let output = serde_json::from_value::<MessagesRequest>(serde_json::json!({
+                    "messages":[{"role":"user","content":"probe"}],
+                    "output_config":{"format":{"type":"json_schema","schema":schema}}
+                }))
+                .unwrap()
+                .into_chat_request()
+                .unwrap();
+                let result = output.structured_output_format();
+                assert_eq!(
+                    result.is_ok(),
+                    case["output_accepted"].as_bool().unwrap(),
+                    "output {}: {result:?}",
+                    case["name"]
+                );
+            }
+        }
+
+        #[test]
         fn normalizes_anthropic_tools_system_and_forced_choice() {
             let chat = request_with_choice(serde_json::json!({
                 "type": "tool",
