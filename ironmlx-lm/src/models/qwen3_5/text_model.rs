@@ -468,12 +468,19 @@ impl Qwen35TextModel {
                 };
                 let cos = [rows(&cos, 0, half)?, rows(&cos, half, dims[1])?];
                 let sin = [rows(&sin, 0, half)?, rows(&sin, half, dims[1])?];
-                let mut xs = [rows(&x, 0, half)?, rows(&x, half, dims[1])?];
+                // Each layer's second half is resolved by the next layer's
+                // step (after that layer's first half is submitted), so a
+                // captured layer is concatenated one step later.
+                let mut first = rows(&x, 0, half)?;
+                let mut second =
+                    crate::nn::decoder_layer::PairTail::Ready(rows(&x, half, dims[1])?);
+                let mut capture_pending = false;
                 for (index, (layer, layer_cache)) in
                     self.layers.iter().zip(cache.iter_mut()).enumerate()
                 {
-                    xs = layer.forward_pair_on(
-                        [&xs[0], &xs[1]],
+                    let step = layer.forward_pair_on(
+                        &first,
+                        second,
                         &self.mrope,
                         [&cos[0], &cos[1]],
                         [&sin[0], &sin[1]],
@@ -481,16 +488,30 @@ impl Qwen35TextModel {
                         target,
                         index as i32,
                     )?;
-                    if target_layer_ids.get(next_capture) == Some(&index) {
+                    if capture_pending {
                         captured.push(mlx::ops::shape::concatenate_on(
-                            &[&xs[0], &xs[1]],
+                            &[&first, &step.previous_second],
                             1,
                             target,
                         )?);
+                        capture_pending = false;
+                    }
+                    first = step.first;
+                    second = step.second;
+                    if target_layer_ids.get(next_capture) == Some(&index) {
+                        capture_pending = true;
                         next_capture += 1;
                     }
                 }
-                x = mlx::ops::shape::concatenate_on(&[&xs[0], &xs[1]], 1, target)?;
+                let last = second.resolve(target)?;
+                if capture_pending {
+                    captured.push(mlx::ops::shape::concatenate_on(
+                        &[&first, &last],
+                        1,
+                        target,
+                    )?);
+                }
+                x = mlx::ops::shape::concatenate_on(&[&first, &last], 1, target)?;
             }
             Some(cache) => {
                 for (index, (layer, layer_cache)) in
