@@ -7,6 +7,7 @@ public struct ModelDownloadRecoveryReminder: Codable, Equatable, Sendable {
     public var previousStatus: String
     public var usedCredential: Bool
     public var enqueuedAt: Date
+    public var useHfMirror: Bool? = nil
     public var pausedStatus: ModelDownloadStatus? = nil
 
     public init(
@@ -32,6 +33,7 @@ public struct ModelDownloadRecoveryReminder: Codable, Equatable, Sendable {
         case previousStatus = "previous_status"
         case usedCredential = "used_credential"
         case enqueuedAt = "enqueued_at"
+        case useHfMirror = "use_hf_mirror"
         case pausedStatus = "paused_status"
     }
 }

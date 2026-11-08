@@ -48,6 +48,7 @@ function page(lang = 'zh-Hans') {
     + slice('  function localizeErrorResult(', '  // Called from Rust after unload completes')
     + slice('  const ACTIVE_DOWNLOAD_PHASES', '  function renderDownloadRecovery(')
     + slice('  function onDownloadComplete(', '  // ── HuggingFace Search')
+    + slice('  let approvedHuggingFaceMirrorToken =', '  function startDownload(')
     + slice('  function performDownloadTaskAction(', '  async function deleteDownloadTask(')
     + slice('  function onDownloadTaskActionResult(', '  let downloadCleanupPending')
     + slice('  function modelReadiness(', '  function updateModelIntegrityRow(')

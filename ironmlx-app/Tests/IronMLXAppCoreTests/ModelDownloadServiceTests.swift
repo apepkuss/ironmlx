@@ -2460,3 +2460,89 @@ func componentOptionalMTPDoesNotGateBaseAndCanRepairOldManifest(includeMTP: Bool
     let restored = ModelDownloadService(rootURL: root)
     #expect(await restored.downloadStatuses().first?.remainingBytes == 8)
 }
+
+// Mirror fixtures deliberately provide no official-host responses, so any
+// accidental source switch fails instead of reaching the network.
+private func mirrorHuggingFaceFixtures(_ client: FakeModelDownloadHTTPClient) {
+    client.dataResponses = Dictionary(uniqueKeysWithValues: client.dataResponses.map {
+        ($0.key.replacingOccurrences(of: "https://huggingface.co", with: "https://hf-mirror.com"), $0.value)
+    })
+    client.streamResponses = Dictionary(uniqueKeysWithValues: client.streamResponses.map {
+        ($0.key.replacingOccurrences(of: "https://huggingface.co", with: "https://hf-mirror.com"), $0.value)
+    })
+}
+
+@Test func huggingFaceMirrorSearchAndDownloadKeepCanonicalModelIdentity() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    let repoID = "org/mirror-model"
+    configureTinyHuggingFace(client, repoID: repoID)
+    client.dataResponses["https://huggingface.co/api/models?search=mirror&sort=downloads&direction=-1&limit=20&filter=mlx&full=true"] =
+        .success(Data("[{\"id\":\"org/mirror-model\"}]".utf8))
+    mirrorHuggingFaceFixtures(client)
+    let service = ModelDownloadService(rootURL: root, httpClient: client, metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    let results = try await service.searchHuggingFace(query: "mirror", sort: "downloads", token: nil, useHfMirror: true)
+    #expect(results.first?.sha == testCommit)
+    let result = await service.downloadHuggingFace(repoID: repoID, token: nil, useHfMirror: true)
+    #expect(result.success)
+    #expect(client.dataRequests.allSatisfy { $0.hasPrefix("https://hf-mirror.com/") })
+    #expect(client.streamRequests.count == 1)
+    #expect(client.streamRequests.allSatisfy { $0.url.hasPrefix("https://hf-mirror.com/") })
+    let snapshot = try ModelDownloadStore(rootURL: root).snapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    #expect(try Data(contentsOf: snapshot.appendingPathComponent("model.safetensors")) == Data("weights".utf8))
+    #expect(await service.downloadStatuses().first?.useHfMirror == true)
+}
+
+@Test func huggingFaceMirrorRequiresTokenConsentBeforeAnyRequest() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let client = FakeModelDownloadHTTPClient()
+    let service = ModelDownloadService(rootURL: root, httpClient: client)
+    await #expect(throws: HuggingFaceMirrorError.self) {
+        try await service.searchHuggingFace(query: "model", sort: "downloads", token: "hf_secret", useHfMirror: true)
+    }
+    let response = await service.startHuggingFaceDownload(repoID: "org/model", token: "hf_secret", useHfMirror: true)
+    #expect(!response.success)
+    #expect(response.code == "mirror_token_consent_required")
+    #expect(client.dataRequests.isEmpty)
+    #expect(client.streamRequests.isEmpty)
+    client.dataResponses["https://hf-mirror.com/api/models?search=model&sort=downloads&direction=-1&limit=20&filter=mlx&full=true"] = .success(Data("[]".utf8))
+    _ = try await service.searchHuggingFace(query: "model", sort: "downloads", token: "hf_secret", useHfMirror: true, mirrorTokenConfirmed: true)
+    #expect(client.dataAuthorizationHeaders == ["Bearer hf_secret"])
+}
+
+@Test func huggingFaceMirrorPausedTaskRestoresSourceAndResumesAfterRestart() async throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repoID = "org/paused-mirror"
+    let client = FakeModelDownloadHTTPClient()
+    configureTinyHuggingFace(client, repoID: repoID)
+    client.dataResponses["https://huggingface.co/api/models/\(repoID)/revision/\(testCommit)?blobs=true"] =
+        client.dataResponses["https://huggingface.co/api/models/\(repoID)?blobs=true"]
+    mirrorHuggingFaceFixtures(client)
+    let staging = try ModelDownloadStore(rootURL: root).stagingSnapshotURL(provider: .huggingFace, repoID: repoID, commitSHA: testCommit)
+    try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+    let partial = staging.appendingPathComponent("model.safetensors.partial")
+    try Data("wei".utf8).write(to: partial)
+    try ModelDownloadStore.atomicWrite(ModelPartialIdentity(provider: .huggingFace, repoID: repoID,
+        commitSHA: testCommit, path: "model.safetensors", expectedSize: 7,
+        expectedSHA256: sha256(Data("weights".utf8)), etag: nil), to: partial.appendingPathExtension("meta.json"))
+    var reminder = ModelDownloadRecoveryReminder(provider: .huggingFace, repoID: repoID,
+        queueOrder: 0, previousStatus: "paused", usedCredential: false)
+    reminder.useHfMirror = true
+    reminder.pausedStatus = ModelDownloadStatus(repoID: repoID, provider: "huggingface", status: "paused",
+        progressPct: 40, commitSHA: testCommit, useHfMirror: true)
+    try ModelDownloadQueueReminderStore(rootURL: root).save([reminder])
+    client.streamResponses["https://hf-mirror.com/\(repoID)/resolve/\(testCommit)/model.safetensors"] =
+        StreamFixture(data: Data("ghts".utf8), statusCode: 206, headers: ["Content-Range": "bytes 3-6/7"])
+    let service = ModelDownloadService(rootURL: root, httpClient: client, metadataPreflight: AcceptingMetadataPreflight(),
+        fileDownloader: ResumableFileDownloader(httpClient: client), telemetryLogger: { _ in })
+    #expect(await service.downloadStatuses().first?.useHfMirror == true)
+    #expect(await service.resumeDownload(provider: .huggingFace, repoID: repoID).success)
+    try await waitForDownloadCondition { await service.downloadStatuses().first?.status == "completed" }
+    #expect(client.streamRequests.last?.range == "bytes=3-")
+    #expect(client.dataRequests.allSatisfy { $0.hasPrefix("https://hf-mirror.com/") })
+    #expect(await service.downloadStatuses().first?.useHfMirror == true)
+}

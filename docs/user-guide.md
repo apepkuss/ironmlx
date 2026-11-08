@@ -40,6 +40,8 @@ In **Models → Model Download → Supported models**, browse by type, select a 
 
 The catalogue downloads public repositories without an HF token. ModelScope buttons stay hidden until repository availability and mirror contents are verified. Use the separate HuggingFace / ModelScope tabs for other repositories or credentials.
 
+In the **HuggingFace** tab, **Download via hf-mirror** is off by default. Enable it to search repositories and download models through `https://hf-mirror.com`. Hover over or focus the `?` icon for help. New HF downloads use the selected source; queued and paused tasks retain their source, including after restarting the App. Failures do not switch sources automatically. Sending an HF token to the third-party mirror requires confirmation. Proxy routing still follows your network configuration.
+
 Installed variants show **Downloaded · Check for updates**. Checking only compares repository revisions; **Download update** queues the checked revision after you choose it. IndexTTS keeps the revision pinned by its verified resource profile.
 
 In **Download tasks**, **Pause** retains downloaded data and remains paused after restarting the App. **Resume** uses the recorded snapshot and retained files. Credential-protected tasks may require the token again; tokens are not saved to disk. **Delete** removes unfinished tasks and partial files after confirmation. **Clear** on a completed task keeps the installed model.

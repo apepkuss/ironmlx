@@ -810,7 +810,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 case "/admin/api/models/download/resume":
                     let result = await downloadService.resumeDownload(
                         provider: provider, repoID: repoID, token: payload.body["token"]?.stringValue,
-                        downloadOnly: payload.body["download_only"]?.boolValue == true
+                        downloadOnly: payload.body["download_only"]?.boolValue == true,
+                        mirrorTokenConfirmed: payload.body["mirror_token_confirmed"]?.boolValue == true
                     )
                     json = (try? Self.jsonString(result)) ?? #"{"success":false}"#
                 default:
@@ -1270,6 +1271,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             let result = await downloadService.downloadHuggingFace(
                 repoID: payload.repoID,
                 token: payload.token,
+                useHfMirror: payload.useHfMirror == true,
+                mirrorTokenConfirmed: payload.mirrorTokenConfirmed == true,
                 progress: { [weak self] progress in
                     await MainActor.run {
                         self?.sendJavaScript(
@@ -1306,7 +1309,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 var results = try await downloadService.searchHuggingFace(
                     query: payload.query,
                     sort: payload.sort,
-                    token: payload.token
+                    token: payload.token,
+                    useHfMirror: payload.useHfMirror == true,
+                    mirrorTokenConfirmed: payload.mirrorTokenConfirmed == true
                 )
                 try Task.checkCancellation()
                 guard let self else {
@@ -3868,10 +3873,14 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private struct HuggingFaceDownloadPayload: Decodable {
         var repoID: String
         var token: String?
+        var useHfMirror: Bool?
+        var mirrorTokenConfirmed: Bool?
 
         enum CodingKeys: String, CodingKey {
             case repoID = "repo_id"
             case token
+            case useHfMirror = "use_hf_mirror"
+            case mirrorTokenConfirmed = "mirror_token_confirmed"
         }
     }
 
@@ -3879,12 +3888,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         var query: String
         var sort: String
         var token: String?
+        var useHfMirror: Bool?
+        var mirrorTokenConfirmed: Bool?
         var requestID: Int
 
         enum CodingKeys: String, CodingKey {
             case query
             case sort
             case token
+            case useHfMirror = "use_hf_mirror"
+            case mirrorTokenConfirmed = "mirror_token_confirmed"
             case requestID = "request_id"
         }
     }

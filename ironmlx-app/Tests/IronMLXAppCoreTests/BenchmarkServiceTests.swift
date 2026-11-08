@@ -744,7 +744,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(
         dashboardHTML(
             html,
-            contains: #"hf_token_help_body: "通常无需填写。下载私有模型、已在 Hugging Face 接受许可的受限模型，或 Hugging Face 要求身份验证时，请输入访问令牌。令牌仅用于 Hugging Face 请求。""#
+            contains: #"hf_token_help_body: "通常无需填写。下载私有模型、已在 Hugging Face 接受许可的受限模型，或 Hugging Face 要求身份验证时，请输入访问令牌。令牌会发送至所选的 Hugging Face 访问入口；使用 hf-mirror 时需确认。""#
         )
     )
     #expect(dashboardHTML(html, contains: #"data-i18n="sort_by""#))
