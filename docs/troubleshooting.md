@@ -9,6 +9,7 @@
 | App will not start | Confirm Apple Silicon and macOS 26.4 or later. Record the macOS alert and App version. For a source build, use [the build checks](building-from-source.md). |
 | Download interrupted | Retry the same model in Dashboard. Do not move unfinished `.partial` files manually. |
 | Model refuses to load | Read the Dashboard error. Check [model loading](#model-loading), free disk space, available memory and download integrity. |
+| A request says the model will not be loaded again automatically | The model's last load failed, and requests do not retry it. Fix the cause in the message, such as memory or model settings, then load the model again in Dashboard. |
 | API connection fails | Use the endpoint and port shown in Dashboard. Local mode accepts connections only from this Mac. See [API quick start](developer-guide.md#api-quick-start). |
 | LAN returns 401 | Copy the current API key again and send it as a Bearer token. |
 | LAN certificate error | Install or specify the exported CA and use the IP shown in the App. Follow [LAN setup](security-boundary.md). |

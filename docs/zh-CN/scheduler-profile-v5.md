@@ -20,6 +20,12 @@ Scheduler Profile 用于显式离线校准。它不在请求热路径中自动�
 - 不按模型名回退，不读取旧 schema 默认值，也不跨上下文复用测量结果。
 - 显式 CLI scheduler 参数仍可在 profile 加载后覆盖对应值。
 
+## App 中的显示
+
+App 在**状态**页的模型卡片和**模型参数设置**中，以一行**调度配置**被动显示已加载模型当前使用的调度配置：**专用 profile**、**默认**，或在本机已有该模型的 profile 但只对应其他运行设置时显示**默认（与当前设置不匹配）**。该值来自 [`GET /admin/api/models/loaded`](service-api.md#已加载模型的调度配置) 的 `scheduler_profile`。
+
+只有当模型的 profile 在其他硬件上生成（`scheduler_profile_hardware_mismatch`），或因文件损坏、已失效而无法使用（`scheduler_profile_unusable`）时，加载才会显示提示。两种情况下模型都使用默认调度配置；请在**模型 → 调度配置**中重新生成 profile。
+
 ## Runtime Context
 
 以下因素会参与上下文指纹，因此任一因素变化都需要重新校准：

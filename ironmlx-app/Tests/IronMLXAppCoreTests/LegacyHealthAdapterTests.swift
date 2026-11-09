@@ -195,6 +195,8 @@ import Testing
     #expect(dflash2Model.id == "mlx-community/Qwen3.8-27B-4bit")
     #expect(dflash2Model.dflash2?.latestGenerationTPS == 49.2)
     #expect(dflash2Model.scheduler == "dflash2")
+    // The exclusive DFlash2 server never applies a scheduler profile.
+    #expect(dflash2Model.schedulerProfile == "default")
     #expect(dflash2Model.usage.cumulativeTokens == 1_024)
     #expect(dflash2Model.usage.prefixCache?.hitTokens == 512)
     #expect(dflash2Model.usage.performance.completedRequests == 2)
@@ -370,4 +372,34 @@ import Testing
     #expect(profile.mode == "auto")
     #expect(profile.status == "active")
     #expect(profile.architecture == "applegpu_g17s")
+}
+
+@Test func loadedModelSchedulerProfileDecodesAndToleratesOlderBackends() throws {
+    let current = #"""
+    {"id":"m","model":"m","path":"/models/m","architecture":"llama","default":true,
+     "max_position_embeddings":4096,"runtime_kind":"causal","supports_streaming":true,
+     "supports_vision":false,"supports_mtp":false,"supports_prompt_lookup":true,
+     "supports_speculative_decoding":false,"supports_kv_cache":true,
+     "supported_sampling_parameters":["max_tokens"],"runtime_state":"loaded",
+     "active_requests":0,"queued_requests":0,"queue_capacity":8,
+     "usage":{"cumulative_tokens":0,"input_tokens":0,"output_tokens":0,
+              "performance":{"window_seconds":60,"completed_requests":0}},
+     "scheduler_profile":"profile"}
+    """#
+    let decoded = try JSONDecoder().decode(BackendLoadedModelInfo.self, from: Data(current.utf8))
+    #expect(decoded.schedulerProfile == "profile")
+    let encoded = try #require(String(data: JSONEncoder().encode(decoded), encoding: .utf8))
+    #expect(encoded.contains(#""scheduler_profile":"profile""#))
+
+    for value in ["default", "default_settings_mismatch", "a_future_value"] {
+        let other = current.replacingOccurrences(of: #""profile"}"#, with: "\"\(value)\"}")
+        let model = try JSONDecoder().decode(BackendLoadedModelInfo.self, from: Data(other.utf8))
+        #expect(model.schedulerProfile == value)
+    }
+
+    let older = current.replacingOccurrences(of: #""scheduler_profile":"profile""#, with: #""unknown_field":1"#)
+    let olderDecoded = try JSONDecoder().decode(BackendLoadedModelInfo.self, from: Data(older.utf8))
+    #expect(olderDecoded.schedulerProfile == nil)
+    let olderEncoded = try #require(String(data: JSONEncoder().encode(olderDecoded), encoding: .utf8))
+    #expect(!olderEncoded.contains("scheduler_profile"))
 }

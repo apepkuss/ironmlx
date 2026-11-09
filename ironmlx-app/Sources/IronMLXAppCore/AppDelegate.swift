@@ -9,6 +9,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private let parameterStore: ModelParameterStore
     private let launchPlanner: AppLaunchPlanner
     private let configurationRecovery: ConfigurationRecoveryManager
+    /// Every model load the App starts, and the backend's own, for the Dashboard.
+    private let loadActivity: ModelLoadActivityCenter
     /// The single download queue shared by the Dashboard and the starter download.
     private let downloadService: ModelDownloadService
     let starterDownloads: StarterDownloadCoordinator
@@ -16,7 +18,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var chatPresenter: (any ChatWindowPresenting)?
     private var chatEntry: ChatEntryController?
     private var chatWindow: ChatWindowController?
-    private var agentDetectionTask: Task<Void, Never>?
     private var dashboard: DashboardWindowController?
     private var menu: MenuBarController?
     private var updateManager: (any AppUpdateManaging)?
@@ -30,6 +31,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             appConfigStore: store,
             modelParameterStore: parameterStore
         )
+        let loadActivity = ModelLoadActivityCenter(configStore: store)
         let processManager = BackendProcessManager(
             configStore: store,
             scanner: scanner,
@@ -39,7 +41,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             processManager: processManager,
             configStore: store,
             scanner: scanner,
-            parameterStore: parameterStore
+            parameterStore: parameterStore,
+            loadActivity: loadActivity
         )
         let downloadService = ModelDownloadService()
         self.configStore = store
@@ -48,6 +51,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         self.parameterStore = parameterStore
         self.launchPlanner = AppLaunchPlanner()
         self.configurationRecovery = configurationRecovery
+        self.loadActivity = loadActivity
         self.downloadService = downloadService
         self.starterDownloads = StarterDownloadCoordinator(
             downloader: downloadService,
@@ -56,7 +60,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 let config = store.load()
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 try await client.waitUntilReady()
-                return client
+                return LoadTrackingModelManager(base: client, loadActivity: loadActivity, origin: .starter)
             }
         )
         super.init()
@@ -138,11 +142,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         self.chatEntry = chatEntry
         let chatWindow = ChatWindowController(
-            session: .live(configStore: configStore, parameterStore: parameterStore, scanner: scanner, backend: backend),
+            session: .live(
+                configStore: configStore, parameterStore: parameterStore, scanner: scanner, backend: backend,
+                loadActivity: loadActivity
+            ),
             environment: .live(
                 configStore: configStore,
                 scanner: scanner,
-                openDashboard: { [weak self] route in self?.openDashboardFromChat(route) },
+                openDashboard: { [weak self] route, guide in self?.showInterface(route: route, agentGuide: guide) },
                 startUpgrade: { [weak chatEntry] upgrade, onState in
                     chatEntry?.startUpgradeDownload(upgrade, onState: onState)
                 }
@@ -164,19 +171,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// The Agent page opens at once; detection then selects an installed agent
-    /// without moving focus, unless the user has already chosen one.
-    private func openDashboardFromChat(_ route: DashboardInitialRoute) {
-        showInterface(route: route)
-        guard route == .agents else { return }
-        agentDetectionTask?.cancel()
-        agentDetectionTask = Task { @MainActor [weak self] in
-            let installed = await AgentInstallationChecker().installed()
-            guard !Task.isCancelled else { return }
-            self?.dashboard?.preselectAgentGuideIfUntouched(AgentPreselector.choose(installed: installed))
-        }
-    }
-
     private func showInterface(route: DashboardInitialRoute, agentGuide: AgentGuideID? = nil) {
         let created = makeInterfaceIfNeeded()
         dashboard?.show(route: route, agentGuide: agentGuide)
@@ -191,7 +185,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let dashboard = DashboardWindowController(
-            configStore: configStore, backend: backend, downloadService: downloadService
+            configStore: configStore, backend: backend, downloadService: downloadService,
+            loadActivity: loadActivity
         )
         dashboard.chatEntry = chatEntry
         let updateManager = SparkleAppUpdateManager.make()

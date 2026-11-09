@@ -32,6 +32,8 @@ public struct SchedulerProfileGenerationRequest: Codable, Equatable, Sendable {
     public var memoryLimitTotalGB: Int?
     public var memoryLimitModelGB: Int?
     public var maxCacheCap: Int
+    /// PromptLookup the model loads with; part of the profile's runtime context.
+    public var promptLookup: BackendPromptLookupConfig?
 
     public init(
         model: String,
@@ -47,7 +49,8 @@ public struct SchedulerProfileGenerationRequest: Codable, Equatable, Sendable {
         activeKvOffload: Bool = false,
         memoryLimitTotalGB: Int? = nil,
         memoryLimitModelGB: Int? = nil,
-        maxCacheCap: Int = 32768
+        maxCacheCap: Int = 32768,
+        promptLookup: BackendPromptLookupConfig? = nil
     ) {
         self.model = model
         self.modelPath = modelPath
@@ -63,6 +66,7 @@ public struct SchedulerProfileGenerationRequest: Codable, Equatable, Sendable {
         self.memoryLimitTotalGB = memoryLimitTotalGB
         self.memoryLimitModelGB = memoryLimitModelGB
         self.maxCacheCap = max(maxCacheCap, 1)
+        self.promptLookup = promptLookup
     }
 
     private static func normalizedSelectionProfile(_ value: String) -> String {
@@ -303,6 +307,19 @@ public struct SchedulerProfileGenerationPlan: Equatable, Sendable {
         if let mtpDraftTokens = request.mtpDraftTokens {
             arguments += ["--mtp-draft-tokens", String(mtpDraftTokens)]
         }
+        if let promptLookup = request.promptLookup {
+            arguments.append("--prompt-lookup")
+            if promptLookup.crossRequest {
+                arguments.append("--prompt-lookup-cross-request")
+            }
+            arguments += [
+                "--prompt-lookup-min-ngram", String(promptLookup.minNgram),
+                "--prompt-lookup-max-ngram", String(promptLookup.maxNgram),
+                "--prompt-lookup-max-draft-tokens", String(promptLookup.maxDraftTokens),
+                "--prompt-lookup-history-window-tokens", String(promptLookup.historyWindowTokens),
+                "--prompt-lookup-max-index-entries", String(promptLookup.maxIndexEntries),
+            ]
+        }
         if let pagedPrefixCacheDir = request.pagedPrefixCacheDir {
             arguments += ["--paged-prefix-cache-dir", pagedPrefixCacheDir]
         }
@@ -368,6 +385,8 @@ public struct SchedulerProfileGenerationStatus: Codable, Equatable, Sendable {
     public var estimatedRemainingSeconds: TimeInterval?
     public var currentStage: String?
     public var currentJob: String?
+    /// Why generation could not start, when the Dashboard has its own text for it.
+    public var code: String? = nil
 
     public static let idle = SchedulerProfileGenerationStatus(
         state: "idle",
@@ -447,7 +466,8 @@ public struct SchedulerProfileGenerationStatus: Codable, Equatable, Sendable {
         logTail: String? = nil,
         startedAt: TimeInterval? = nil,
         outputDirectory: String? = nil,
-        finishedAt: Date = Date()
+        finishedAt: Date = Date(),
+        code: String? = nil
     ) -> SchedulerProfileGenerationStatus {
         SchedulerProfileGenerationStatus(
             state: "failed",
@@ -460,7 +480,8 @@ public struct SchedulerProfileGenerationStatus: Codable, Equatable, Sendable {
             finishedAt: finishedAt.timeIntervalSince1970,
             outputDirectory: outputDirectory,
             logTail: logTail,
-            error: error
+            error: error,
+            code: code
         )
     }
 
@@ -485,6 +506,7 @@ public struct SchedulerProfileGenerationStatus: Codable, Equatable, Sendable {
         case estimatedRemainingSeconds = "estimated_remaining_seconds"
         case currentStage = "current_stage"
         case currentJob = "current_job"
+        case code
     }
 
     private static func value(after key: String, in text: String) -> String? {

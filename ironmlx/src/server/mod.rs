@@ -52,6 +52,7 @@ pub(crate) mod responses;
 #[cfg(test)]
 mod scheduler_disconnect_tests;
 pub mod security;
+pub mod startup_status;
 pub(crate) mod structured_output;
 mod subtitles;
 pub mod vision;
@@ -282,13 +283,16 @@ pub async fn serve_with_gemma4_drafter(
     security::serve_router(app, network_config, "ironmlx Gemma4 drafter server").await
 }
 
+/// Build the DFlash2 engine (including its startup warmup) and the full
+/// DFlash2 router. `/admin/api/models/loads` is served from `load_registry`,
+/// the registry that tracked the startup load.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn serve_with_dflash2<M>(
+pub(crate) async fn build_dflash2_router<M>(
+    load_registry: std::sync::Arc<ironmlx_runtime::core::load_registry::LoadRegistry>,
     model: M,
     draft: ironmlx_lm::models::DFlash2DraftModel,
     tokenizer: Tokenizer,
     model_id: String,
-    network_config: security::ServerNetworkConfig,
     prefill_chunk_size: usize,
     b_max: usize,
     admission_deadline_ms: u64,
@@ -302,7 +306,7 @@ pub(crate) async fn serve_with_dflash2<M>(
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     static_memory_estimate: ironmlx_runtime::core::process_memory::StaticMemoryEstimate,
     vision_input: ironmlx_lm::core::vision_input::VisionInputConfig,
-) -> Result<()>
+) -> Result<Router>
 where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
 {
@@ -326,10 +330,25 @@ where
         vision_input,
     )
     .await?;
-    let app = Router::new()
+    Ok(dflash2_router(state, load_registry))
+}
+
+/// Routes of the exclusive DFlash2 server.
+pub(crate) fn dflash2_router<M>(
+    state: AppState<M>,
+    load_registry: std::sync::Arc<ironmlx_runtime::core::load_registry::LoadRegistry>,
+) -> Router
+where
+    M: Model + DenseVlMethods + Send + 'static,
+{
+    Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(healthz_handler))
         .route("/v1/models", get(dflash2_models_handler::<M>))
+        .route(
+            "/admin/api/models/loads",
+            get(startup_status::registry_loads_handler).with_state(load_registry),
+        )
         .route(
             "/admin/api/prompt-lookup/clear",
             post(clear_prompt_lookup_handler),
@@ -337,9 +356,7 @@ where
         .route("/v1/chat/completions", post(openai::chat_completions))
         .route("/v1/responses", post(responses::responses))
         .route("/v1/messages", post(anthropic::messages))
-        .with_state(state);
-
-    security::serve_router(app, network_config, "ironmlx DFlash2 server").await
+        .with_state(state)
 }
 
 #[derive(Debug, Serialize, PartialEq)]

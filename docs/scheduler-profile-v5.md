@@ -18,6 +18,12 @@ Calibration builds a runtime context, compares candidates, checks health, scores
 - Automatic loading requires matching normalized model path, hardware label, schema and runtime fingerprint. It does not fall back by model name, reuse old-schema defaults or share measurements across contexts.
 - Explicit CLI scheduler settings can override profile values after loading.
 
+## App display
+
+The App shows the scheduler configuration of a loaded model as a passive **Scheduling** line on its model card on the **Status** page and in **Model Param Settings**: **Dedicated profile**, **Default**, or **Default (doesn't match current settings)** when this Mac has profiles for the model but only for other runtime settings. The value comes from `scheduler_profile` in [`GET /admin/api/models/loaded`](service-api.md#loaded-model-scheduler-configuration).
+
+A load shows a notice only when the model's profile was generated on other hardware (`scheduler_profile_hardware_mismatch`) or cannot be used because it is damaged or no longer valid (`scheduler_profile_unusable`). In both cases the model runs with the default configuration; regenerate the profile in **Models → Scheduling**.
+
 ## Runtime context
 
 Changes to these fingerprint inputs require recalibration:

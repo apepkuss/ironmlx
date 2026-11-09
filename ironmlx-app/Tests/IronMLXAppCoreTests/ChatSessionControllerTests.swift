@@ -112,12 +112,16 @@ private actor FakeModelManager: BackendModelManaging {
     /// Models whose load fails (as when memory runs out), with the admin error code.
     private var failingLoads: Set<String> = []
     private var failureCode = "memory_budget_exceeded"
+    /// Fail as a load tracked through the backend registry does (the App's
+    /// asynchronous loads), instead of with an admin error response.
+    private var failAsTrackedLoad = false
 
     init(loaded: [BackendLoadedModelInfo]) { self.loaded = loaded }
 
-    func failLoads(of models: Set<String>, code: String = "memory_budget_exceeded") {
+    func failLoads(of models: Set<String>, code: String = "memory_budget_exceeded", tracked: Bool = false) {
         failingLoads = models
         failureCode = code
+        failAsTrackedLoad = tracked
     }
     var loadedModels: [BackendLoadedModelInfo] { loaded }
 
@@ -136,6 +140,9 @@ private actor FakeModelManager: BackendModelManaging {
     ) async throws -> BackendModelAdminResponse {
         log.append("load:\(model):\(modelDir):\(setDefault)")
         if failingLoads.contains(model) {
+            if failAsTrackedLoad {
+                throw ModelLoadFailedError(message: "not enough memory", code: failureCode)
+            }
             return BackendModelAdminResponse(success: false, status: "error", code: failureCode,
                                              model: model, loadedModels: loaded, warningCode: nil, warning: nil,
                                              error: "not enough memory")
@@ -873,6 +880,25 @@ struct ChatSessionControllerTests {
             Issue.record("unexpected errors: \(harness.errors)")
             return
         }
+    }
+
+    @Test func failedTrackedSwitchForMemoryWithAPinnedDefaultSuggestsUnpinning() async throws {
+        let target = "mlx-community/Qwen3.6-35B-A3B-4bit"
+        let harness = Harness(loaded: [chatModel(starterModel, pinned: true)])
+        await harness.open()
+        let before = harness.controller.modelState
+        await harness.manager.failLoads(of: [target], code: "max_loaded_models_reached", tracked: true)
+
+        await #expect(throws: (any Error).self) { try await harness.controller.switchModel(to: target) }
+
+        #expect(harness.controller.modelState == before)
+        guard case .switchBlockedByPinnedModel(modelID: target, pinnedModelID: starterModel, _) = harness.errors.last else {
+            Issue.record("unexpected errors: \(harness.errors)")
+            return
+        }
+        #expect(ChatSessionController.adminErrorCode(
+            ModelLoadFailedError(message: "x", code: "gpu_memory_insufficient")
+        ) == "gpu_memory_insufficient")
     }
 
     @Test func memoryAdmissionCodesComeFromEitherAdminErrorShape() {

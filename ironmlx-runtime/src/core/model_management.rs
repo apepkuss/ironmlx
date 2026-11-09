@@ -1,9 +1,10 @@
 //! Native dynamic model loading, capability validation and deferred reload ownership.
 use super::audio_execution::AudioModelResources;
 use super::engine_pool::{
-    EngineLoadPolicy, EngineLoadedModelInfo, EngineModelCapabilities, EngineModelConfig,
-    EnginePoolState,
+    engine_model_config_fingerprint, EngineLoadOptions, EngineLoadPolicy, EngineLoadedModelInfo,
+    EngineModelCapabilities, EngineModelConfig, EnginePoolState,
 };
+use super::load_registry::{LoadKind, LoadTriggerKind};
 use super::model_validation::validate_mtp_pair;
 use super::prompt_lookup::PromptLookupConfig;
 use super::runtime_config::SamplingDefaults;
@@ -11,12 +12,12 @@ use super::scheduler_autotune::SchedulerAutotuneRuntimeContext;
 use super::scheduler_profile_store::SchedulerProfileStore;
 use super::scheduler_resolution::{
     apply_adaptive_mtp_scheduler_defaults, read_model_type, read_model_type_if_present,
-    resolve_scheduler_for_model_with_speculative, ResolvedSchedulerRuntime, SchedulerProfileSource,
-    SchedulerResolutionOptions,
+    resolve_scheduler_for_model_with_speculative, ResolvedSchedulerRuntime, SchedulerProfileKind,
+    SchedulerProfileOutcome, SchedulerResolutionOptions,
 };
 use super::scheduler_resolution::{
-    default_scheduler_runtime_profile, resolve_engine_pool_scheduler_profile,
-    EnginePoolSchedulerProfileRequest, DEFAULT_MAX_CACHE_CAP,
+    default_scheduler_runtime_profile, resolve_scheduler_for_model_with_store,
+    SchedulerProfileRequest, DEFAULT_MAX_CACHE_CAP,
 };
 use crate::Result;
 use anyhow::bail;
@@ -70,6 +71,9 @@ pub struct ModelManagementOutcome {
     pub model: Option<String>,
     pub loaded_models: Vec<EngineLoadedModelInfo>,
     pub warning: Option<ModelLoadWarning>,
+    /// Registry id of the load this request ran or joined; absent when no
+    /// load took place.
+    pub load_id: Option<String>,
 }
 impl ModelManagementOutcome {
     fn new(
@@ -83,13 +87,44 @@ impl ModelManagementOutcome {
             model,
             loaded_models,
             warning,
+            load_id: None,
         }
     }
-}
-pub const DEFAULT_PROFILE_WARNING_CODE: &str = "default_scheduler_profile_used";
 
-pub const DEFAULT_PROFILE_WARNING: &str =
-    "No matching scheduler profile was found for this model. The model is running with the default scheduler configuration. Generate a dedicated profile with scheduler-autotune for better model-specific scheduling.";
+    fn with_load_id(mut self, load_id: Option<String>) -> Self {
+        self.load_id = load_id;
+        self
+    }
+}
+pub const SCHEDULER_PROFILE_HARDWARE_MISMATCH_WARNING_CODE: &str =
+    "scheduler_profile_hardware_mismatch";
+
+pub const SCHEDULER_PROFILE_HARDWARE_MISMATCH_WARNING: &str =
+    "This model's scheduler profile was generated on other hardware, so the default scheduler configuration is used. Regenerate it on this machine for scheduling suited to it.";
+
+pub const SCHEDULER_PROFILE_UNUSABLE_WARNING_CODE: &str = "scheduler_profile_unusable";
+
+pub const SCHEDULER_PROFILE_UNUSABLE_WARNING: &str =
+    "This model's scheduler profile cannot be used (the file is damaged or no longer valid), so the default scheduler configuration is used. Regenerate it with scheduler-autotune.";
+
+/// The load warning for a scheduler profile outcome. A profile made for other
+/// runtime settings is expected after a settings change and is only shown
+/// passively; other hardware and broken profiles are worth telling the user.
+pub fn scheduler_profile_warning(outcome: SchedulerProfileOutcome) -> Option<ModelLoadWarning> {
+    match outcome {
+        SchedulerProfileOutcome::DefaultHardwareMismatch => Some(ModelLoadWarning::new(
+            SCHEDULER_PROFILE_HARDWARE_MISMATCH_WARNING_CODE,
+            SCHEDULER_PROFILE_HARDWARE_MISMATCH_WARNING,
+        )),
+        SchedulerProfileOutcome::DefaultProfileUnusable => Some(ModelLoadWarning::new(
+            SCHEDULER_PROFILE_UNUSABLE_WARNING_CODE,
+            SCHEDULER_PROFILE_UNUSABLE_WARNING,
+        )),
+        SchedulerProfileOutcome::DefaultWithoutProfile
+        | SchedulerProfileOutcome::DefaultSettingsMismatch
+        | SchedulerProfileOutcome::Profile(_) => None,
+    }
+}
 
 pub const MODEL_RELOAD_DEFERRED_WARNING_CODE: &str = "model_reload_deferred";
 
@@ -117,6 +152,17 @@ pub const DIFFUSION_GEMMA_SAMPLING_UNSUPPORTED_CODE: &str =
 
 pub const DIFFUSION_GEMMA_SAMPLING_UNSUPPORTED_MESSAGE: &str =
     "DiffusionGemma supports max_tokens, temperature, and seed. Remove top_p, top_k, and repetition_penalty overrides and try again.";
+
+pub const MODEL_TASK_MISMATCH_CODE: &str = "model_task_mismatch";
+
+/// Every code a [`ModelCapabilityError`] carries.
+pub const MODEL_CAPABILITY_CODES: [&str; 5] = [
+    MODEL_TASK_MISMATCH_CODE,
+    DIFFUSION_GEMMA_MTP_UNSUPPORTED_CODE,
+    DIFFUSION_GEMMA_PROMPT_LOOKUP_UNSUPPORTED_CODE,
+    DIFFUSION_GEMMA_KV_CACHE_UNSUPPORTED_CODE,
+    DIFFUSION_GEMMA_SAMPLING_UNSUPPORTED_CODE,
+];
 
 #[derive(Debug)]
 pub struct ModelCapabilityError {
@@ -146,6 +192,7 @@ struct PendingModelReload {
     pinned: bool,
     set_default: bool,
     defer_when_busy: bool,
+    load_id: Option<String>,
 }
 
 pub struct EngineModelLoad {
@@ -167,6 +214,25 @@ pub struct ModelLoadRequest {
     pub set_default: bool,
     pub reload_when_idle: bool,
     pub defer_when_busy: bool,
+    /// Load registry id chosen by the client; generated when absent.
+    pub load_id: Option<String>,
+}
+
+impl ModelLoadRequest {
+    fn engine_model_build_request(&self) -> EngineModelBuildRequest<'_> {
+        EngineModelBuildRequest {
+            audio: self.audio.clone(),
+            decision: self.decision,
+            model_id: self.model_reference.clone(),
+            model_dir: &self.model_dir,
+            max_cache_cap_override: self.max_cache_cap_override,
+            default_max_output_tokens: self.default_max_output_tokens,
+            sampling_defaults_override: self.sampling_defaults,
+            mtp: self.mtp.clone(),
+            prompt_lookup: self.prompt_lookup,
+            pinned: self.pinned,
+        }
+    }
 }
 
 pub struct EngineModelBuildRequest<'a> {
@@ -243,7 +309,7 @@ pub fn build_engine_model_config(
             || sampling_defaults_override != SamplingDefaults::default()
         {
             return Err(ModelCapabilityError {
-                code: "model_task_mismatch",
+                code: MODEL_TASK_MISMATCH_CODE,
                 message: "Embedding models do not accept audio, decision or generation settings.",
             }
             .into());
@@ -305,6 +371,7 @@ pub fn build_engine_model_config(
                 default: false,
                 pinned,
                 scheduler_runtime_profile: None,
+                scheduler_profile_kind: None,
                 mtp: None,
                 prompt_lookup: None,
                 sampling_defaults: SamplingDefaults::default(),
@@ -334,6 +401,7 @@ pub fn build_engine_model_config(
                 default: false,
                 pinned,
                 scheduler_runtime_profile: None,
+                scheduler_profile_kind: None,
                 mtp: None,
                 prompt_lookup: None,
                 sampling_defaults: SamplingDefaults::default(),
@@ -362,6 +430,7 @@ pub fn build_engine_model_config(
                 default: false,
                 pinned,
                 scheduler_runtime_profile: None,
+                scheduler_profile_kind: None,
                 mtp: None,
                 prompt_lookup: None,
                 sampling_defaults: sampling_defaults_override,
@@ -384,13 +453,7 @@ pub fn build_engine_model_config(
     );
     let sampling_defaults = read_generation_sampling_defaults(model_dir)?
         .merge_with_override(sampling_defaults_override);
-    let warning = match resolved.profile_source {
-        None if args.scheduler_profile.is_none() => Some(ModelLoadWarning::new(
-            DEFAULT_PROFILE_WARNING_CODE,
-            DEFAULT_PROFILE_WARNING,
-        )),
-        Some(SchedulerProfileSource::Explicit | SchedulerProfileSource::Store) | None => None,
-    };
+    let warning = scheduler_profile_warning(resolved.profile_outcome);
     if let Some(settings) = mtp.as_ref() {
         let validation = validate_mtp_pair(model_dir, &settings.model_dir, settings.draft_tokens)?;
         if !validation.compatible {
@@ -417,6 +480,7 @@ pub fn build_engine_model_config(
             load_policy: EngineLoadPolicy::Lazy,
             default: false,
             pinned,
+            scheduler_profile_kind: Some(resolved.profile_outcome.kind()),
             scheduler_runtime_profile: Some(resolved.scheduler_runtime_profile),
             mtp,
             prompt_lookup,
@@ -551,6 +615,14 @@ impl ModelLoadWarning {
             message: message.into(),
         }
     }
+
+    /// The registry form, reported with the load's result.
+    pub fn to_load_warning(&self) -> crate::core::load_registry::LoadWarning {
+        crate::core::load_registry::LoadWarning {
+            code: self.code.to_string(),
+            message: self.message.clone(),
+        }
+    }
 }
 
 fn ensure_gpu_memory_headroom() -> std::result::Result<(), ModelManagementError> {
@@ -564,11 +636,52 @@ fn ensure_gpu_memory_headroom() -> std::result::Result<(), ModelManagementError>
 }
 
 impl ModelManagement {
+    /// Identity of the configuration `request` loads, as the load registry
+    /// records it; `None` when the request cannot be built into one.
+    pub fn load_config_fingerprint(&self, request: &ModelLoadRequest) -> Option<String> {
+        build_engine_model_config(
+            &self.scheduler_options,
+            request.engine_model_build_request(),
+        )
+        .ok()
+        .map(|load| engine_model_config_fingerprint(&load.config))
+    }
+
     pub async fn load_model(
         &self,
         request: ModelLoadRequest,
     ) -> std::result::Result<ModelManagementOutcome, ModelManagementError> {
         let parsed = request;
+        // A load of this model is already running (possibly a reload, whose
+        // new slot is not loaded yet): join it when it loads the same
+        // configuration, otherwise refuse instead of replacing it.
+        if let Some(active) = self
+            .pool
+            .load_registry()
+            .in_progress_for(&parsed.model_reference)
+        {
+            let load = build_engine_model_config(
+                &self.scheduler_options,
+                parsed.engine_model_build_request(),
+            )
+            .map_err(ModelManagementError::Load)?;
+            let finished = self
+                .pool
+                .join_in_progress_load(&active, &engine_model_config_fingerprint(&load.config))
+                .await
+                .map_err(ModelManagementError::Load)?;
+            return Ok(ModelManagementOutcome::new(
+                if finished.kind == LoadKind::Reload {
+                    ModelManagementStatus::Reloaded
+                } else {
+                    ModelManagementStatus::Loaded
+                },
+                Some(parsed.model_reference),
+                self.pool.loaded_model_infos().await,
+                load.warning,
+            )
+            .with_load_id(Some(finished.load_id)));
+        }
         let reload = PendingModelReload {
             audio: parsed.audio.clone(),
             decision: parsed.decision,
@@ -582,6 +695,7 @@ impl ModelManagement {
             pinned: parsed.pinned,
             set_default: parsed.set_default,
             defer_when_busy: parsed.defer_when_busy,
+            load_id: parsed.load_id.clone(),
         };
 
         let already_loaded = self.pool.is_model_loaded(&parsed.model_reference).await;
@@ -620,24 +734,19 @@ impl ModelManagement {
         }
 
         ensure_gpu_memory_headroom()?;
-        let load = build_engine_model_config(
-            &self.scheduler_options,
-            EngineModelBuildRequest {
-                audio: parsed.audio,
-                decision: parsed.decision,
-                model_id: parsed.model_reference.clone(),
-                model_dir: &parsed.model_dir,
-                max_cache_cap_override: parsed.max_cache_cap_override,
-                default_max_output_tokens: parsed.default_max_output_tokens,
-                sampling_defaults_override: parsed.sampling_defaults,
-                mtp: parsed.mtp,
-                prompt_lookup: parsed.prompt_lookup,
-                pinned: parsed.pinned,
-            },
-        )
-        .map_err(ModelManagementError::Load)?;
+        let load =
+            build_engine_model_config(&self.scheduler_options, parsed.engine_model_build_request())
+                .map_err(ModelManagementError::Load)?;
         self.pool
-            .reload_dynamic_model(load.config, parsed.set_default)
+            .reload_dynamic_model_with(
+                load.config,
+                parsed.set_default,
+                EngineLoadOptions {
+                    load_id: parsed.load_id.clone(),
+                    trigger: LoadTriggerKind::Admin,
+                    warning: load.warning.as_ref().map(ModelLoadWarning::to_load_warning),
+                },
+            )
             .await
             .map_err(ModelManagementError::Load)?;
         let loaded_models = self.pool.loaded_model_infos().await;
@@ -646,7 +755,8 @@ impl ModelManagement {
             Some(parsed.model_reference),
             loaded_models,
             load.warning,
-        ))
+        )
+        .with_load_id(parsed.load_id))
     }
 
     pub async fn register_model(
@@ -655,22 +765,9 @@ impl ModelManagement {
         pinned: Option<bool>,
     ) -> std::result::Result<ModelManagementOutcome, ModelManagementError> {
         let parsed = request;
-        let load = build_engine_model_config(
-            &self.scheduler_options,
-            EngineModelBuildRequest {
-                audio: parsed.audio,
-                decision: parsed.decision,
-                model_id: parsed.model_reference.clone(),
-                model_dir: &parsed.model_dir,
-                max_cache_cap_override: parsed.max_cache_cap_override,
-                default_max_output_tokens: parsed.default_max_output_tokens,
-                sampling_defaults_override: parsed.sampling_defaults,
-                mtp: parsed.mtp,
-                prompt_lookup: parsed.prompt_lookup,
-                pinned: parsed.pinned,
-            },
-        )
-        .map_err(ModelManagementError::Load)?;
+        let load =
+            build_engine_model_config(&self.scheduler_options, parsed.engine_model_build_request())
+                .map_err(ModelManagementError::Load)?;
         self.pool
             .register_dynamic_model(load.config, parsed.set_default, pinned)
             .await
@@ -730,7 +827,15 @@ impl ModelManagement {
         )
         .map_err(ModelManagementError::Load)?;
         self.pool
-            .reload_dynamic_model(load.config, reload.set_default)
+            .reload_dynamic_model_with(
+                load.config,
+                reload.set_default,
+                EngineLoadOptions {
+                    load_id: reload.load_id.clone(),
+                    trigger: LoadTriggerKind::Admin,
+                    warning: load.warning.as_ref().map(ModelLoadWarning::to_load_warning),
+                },
+            )
             .await
             .map_err(ModelManagementError::Load)?;
         let loaded_models = self.pool.loaded_model_infos().await;
@@ -739,7 +844,8 @@ impl ModelManagement {
             Some(reload.model_reference),
             loaded_models,
             load.warning,
-        ))
+        )
+        .with_load_id(reload.load_id))
     }
 
     async fn schedule_reload_when_idle(&self, reload: PendingModelReload) {
@@ -799,7 +905,18 @@ impl ModelManagement {
                 match load {
                     Ok(load) => {
                         if let Err(error) = pool
-                            .reload_dynamic_model(load.config, reload.set_default)
+                            .reload_dynamic_model_with(
+                                load.config,
+                                reload.set_default,
+                                EngineLoadOptions {
+                                    load_id: reload.load_id,
+                                    trigger: LoadTriggerKind::DeferredReload,
+                                    warning: load
+                                        .warning
+                                        .as_ref()
+                                        .map(ModelLoadWarning::to_load_warning),
+                                },
+                            )
                             .await
                         {
                             tracing::error!(
@@ -829,6 +946,7 @@ fn decision_model_config(id: String, path: PathBuf, pinned: bool) -> EngineModel
         load_policy: EngineLoadPolicy::Lazy,
         default: false,
         scheduler_runtime_profile: None,
+        scheduler_profile_kind: None,
         mtp: None,
         prompt_lookup: None,
         sampling_defaults: SamplingDefaults::default(),
@@ -938,6 +1056,7 @@ pub fn build_engine_model_config_for_pool(
             default: model.default,
             pinned: false,
             scheduler_runtime_profile: None,
+            scheduler_profile_kind: None,
             mtp: None,
             prompt_lookup: None,
             sampling_defaults: SamplingDefaults::default(),
@@ -969,6 +1088,7 @@ pub fn build_engine_model_config_for_pool(
             scheduler_runtime_profile: Some(default_scheduler_runtime_profile(
                 SchedulerAutotuneRuntimeContext::local_default(DEFAULT_MAX_CACHE_CAP),
             )),
+            scheduler_profile_kind: Some(SchedulerProfileKind::Default),
             mtp,
             prompt_lookup,
             sampling_defaults: crate::core::runtime_config::SamplingDefaults::default(),
@@ -1009,6 +1129,7 @@ pub fn build_engine_model_config_for_pool(
             default: model.default,
             pinned: false,
             scheduler_runtime_profile: None,
+            scheduler_profile_kind: None,
             mtp: None,
             prompt_lookup: None,
             sampling_defaults: crate::core::runtime_config::SamplingDefaults::default(),
@@ -1059,6 +1180,7 @@ pub fn build_engine_model_config_for_pool(
             default: model.default,
             pinned: false,
             scheduler_runtime_profile: None,
+            scheduler_profile_kind: None,
             mtp: None,
             prompt_lookup: None,
             sampling_defaults: crate::core::runtime_config::SamplingDefaults::default(),
@@ -1066,16 +1188,17 @@ pub fn build_engine_model_config_for_pool(
             capabilities,
         });
     }
-    let mut resolved = resolve_engine_pool_scheduler_profile(
+    let mut resolved = resolve_scheduler_for_model_with_store(
         args,
         &model.path,
-        EnginePoolSchedulerProfileRequest {
+        SchedulerProfileRequest {
             manifest_profile: model.scheduler_profile.as_deref(),
             store: scheduler_profile_store,
             hardware_label,
             mtp_model_dir: mtp.as_ref().map(|settings| settings.model_dir.as_path()),
             mtp_draft_tokens: mtp.as_ref().and_then(|settings| settings.draft_tokens),
             prompt_lookup,
+            max_cache_cap_override: None,
         },
     )?;
     if apply_adaptive_mtp_scheduler_defaults(args, architecture, mtp.is_some(), &mut resolved) {
@@ -1093,6 +1216,7 @@ pub fn build_engine_model_config_for_pool(
         load_policy: model.load_policy,
         default: model.default,
         pinned: false,
+        scheduler_profile_kind: Some(resolved.profile_outcome.kind()),
         scheduler_runtime_profile: Some(resolved.scheduler_runtime_profile),
         mtp,
         prompt_lookup,
@@ -1100,4 +1224,33 @@ pub fn build_engine_model_config_for_pool(
         default_max_output_tokens: None,
         capabilities,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::scheduler_resolution::SchedulerProfileSource;
+
+    #[test]
+    fn only_other_hardware_and_broken_profiles_warn_after_a_load() {
+        for quiet in [
+            SchedulerProfileOutcome::DefaultWithoutProfile,
+            SchedulerProfileOutcome::DefaultSettingsMismatch,
+            SchedulerProfileOutcome::Profile(SchedulerProfileSource::Store),
+            SchedulerProfileOutcome::Profile(SchedulerProfileSource::Explicit),
+        ] {
+            assert!(scheduler_profile_warning(quiet).is_none(), "{quiet:?}");
+        }
+        let hardware = scheduler_profile_warning(SchedulerProfileOutcome::DefaultHardwareMismatch)
+            .expect("other hardware warns");
+        assert_eq!(hardware.code, "scheduler_profile_hardware_mismatch");
+        assert_eq!(
+            hardware.message,
+            SCHEDULER_PROFILE_HARDWARE_MISMATCH_WARNING
+        );
+        let unusable = scheduler_profile_warning(SchedulerProfileOutcome::DefaultProfileUnusable)
+            .expect("a broken profile warns");
+        assert_eq!(unusable.code, "scheduler_profile_unusable");
+        assert_eq!(unusable.message, SCHEDULER_PROFILE_UNUSABLE_WARNING);
+    }
 }

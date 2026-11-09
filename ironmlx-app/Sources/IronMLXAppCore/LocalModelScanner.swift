@@ -630,6 +630,10 @@ public struct LocalDFlash2Candidate: Codable, Equatable, Sendable {
 
 public struct LocalModelScanner: Sendable {
     public var rootURL: URL
+    /// Called at the start of every scan of the whole model store.
+    var onFullScan: (@Sendable () -> Void)?
+    /// Called at the start of every `audioResources(for:execution:)`.
+    var onAudioResourceCheck: (@Sendable () -> Void)?
 
     public init(rootURL: URL = IronMLXDataRoot.url) {
         self.rootURL = rootURL
@@ -639,7 +643,8 @@ public struct LocalModelScanner: Sendable {
         for reference: String,
         execution: BackendAudioExecutionSettings? = nil
     ) throws -> BackendAudioResources? {
-        guard let model = model(for: reference), model.type == "tts" else { return nil }
+        onAudioResourceCheck?()
+        guard let model = scannedModelWithoutPairing(for: reference), model.type == "tts" else { return nil }
         guard model.readiness?.isLoadable == true else {
             throw AudioResourceError.invalid(model.readiness?.message ?? "model is not ready")
         }
@@ -685,28 +690,17 @@ public struct LocalModelScanner: Sendable {
         mtpEnabledModels: Set<String>,
         dflash2EnabledModels: Set<String> = []
     ) -> [LocalModel] {
+        onFullScan?()
         var artifacts: [LocalModelArtifact] = []
-        artifacts += scanCacheDirectory(
-            ModelRepositoryLayout.providerRoot(rootURL: rootURL, provider: .huggingFace),
-            provider: .huggingFace,
-            source: "hf",
-            loadedModels: loadedModels,
-            pinnedModels: pinnedModels
-        )
-        artifacts += scanCacheDirectory(
-            ModelRepositoryLayout.providerRoot(rootURL: rootURL, provider: .modelScope),
-            provider: .modelScope,
-            source: "ms",
-            loadedModels: loadedModels,
-            pinnedModels: pinnedModels
-        )
-        artifacts += scanCacheDirectory(
-            ModelRepositoryLayout.providerRoot(rootURL: rootURL, provider: .standalone),
-            provider: .standalone,
-            source: "standalone",
-            loadedModels: loadedModels,
-            pinnedModels: pinnedModels
-        )
+        for (provider, source) in Self.scannedProviders {
+            artifacts += scanCacheDirectory(
+                ModelRepositoryLayout.providerRoot(rootURL: rootURL, provider: provider),
+                provider: provider,
+                source: source,
+                loadedModels: loadedModels,
+                pinnedModels: pinnedModels
+            )
+        }
 
         let mtpArtifacts = artifacts.filter {
             $0.kind == .mtp && $0.model.readiness?.isLoadable != false
@@ -806,6 +800,38 @@ public struct LocalModelScanner: Sendable {
             }
         }
         return nil
+    }
+
+    /// Every file `resolveModelPath(for:)` and `verifiedModelPath(for:)` can
+    /// read for `reference`: the direct path, and each provider's ref and
+    /// referenced snapshot. Each ref is stamped before it is read.
+    func registrationFileStamps(for reference: String) -> [LocalModelFileStamp] {
+        let direct = URL(fileURLWithPath: NSString(string: reference).expandingTildeInPath)
+        var stamps = LocalModelFileStamp.tree(at: direct)
+        for provider in ModelRepositoryProvider.allCases {
+            guard let repository = try? ModelRepositoryLayout.repositoryRoot(
+                rootURL: rootURL,
+                provider: provider,
+                repoID: reference
+            ) else {
+                continue
+            }
+            stamps.append(LocalModelFileStamp(
+                path: repository
+                    .appendingPathComponent("refs", isDirectory: true)
+                    .appendingPathComponent(provider.mutableRevision)
+                    .path
+            ))
+            if let snapshot = referencedSnapshot(provider: provider, repoID: reference) {
+                stamps += LocalModelFileStamp.tree(at: snapshot)
+            }
+        }
+        return stamps
+    }
+
+    /// The speech resources `audioResources(for:)` checks for TTS models.
+    func audioResourceFileStamps() -> [LocalModelFileStamp] {
+        LocalModelFileStamp.tree(at: rootURL.appendingPathComponent("audio/indextts25", isDirectory: true))
     }
 
     public func verifiedModelPath(
@@ -1000,12 +1026,45 @@ public struct LocalModelScanner: Sendable {
         scan(loadedModels: []).first(where: { $0.id == reference })
     }
 
+    /// The model `scan` lists as `reference`, built from that model's own
+    /// repository only: every field is the same except `mtp` and `dflash2`,
+    /// which pair it with the other models and are left `nil`. Providers are
+    /// searched in scan order, so a repository present under two providers
+    /// resolves to the one the scan lists first.
+    func scannedModelWithoutPairing(
+        for reference: String,
+        loadedModels: Set<String> = [],
+        pinnedModels: Set<String> = []
+    ) -> LocalModel? {
+        for (provider, source) in Self.scannedProviders {
+            let base = scanCacheDirectory(
+                ModelRepositoryLayout.providerRoot(rootURL: rootURL, provider: provider),
+                provider: provider,
+                source: source,
+                loadedModels: loadedModels,
+                pinnedModels: pinnedModels,
+                only: reference
+            ).first { $0.kind == .base }
+            if let base {
+                return base.model
+            }
+        }
+        return nil
+    }
+
+    private static let scannedProviders: [(ModelRepositoryProvider, String)] = [
+        (.huggingFace, "hf"),
+        (.modelScope, "ms"),
+        (.standalone, "standalone"),
+    ]
+
     private func scanCacheDirectory(
         _ cacheURL: URL,
         provider: ModelRepositoryProvider,
         source: String,
         loadedModels: Set<String>,
-        pinnedModels: Set<String>
+        pinnedModels: Set<String>,
+        only reference: String? = nil
     ) -> [LocalModelArtifact] {
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: cacheURL,
@@ -1028,6 +1087,9 @@ public struct LocalModelScanner: Sendable {
                     return nil
                 }
                 id = String(name[..<separator.lowerBound]) + "/" + String(name[separator.upperBound...])
+            }
+            if let reference, id != reference {
+                return nil
             }
             guard let referenced = referencedSnapshot(provider: provider, repoID: id),
                   let inspection = inspectSnapshot(

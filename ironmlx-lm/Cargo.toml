@@ -26,6 +26,7 @@ regex = "1"
 regex-syntax = "0.8"
 jsonschema = { version = "=0.60.2", default-features = false, features = ["conformance", "idna"] }
 anyhow = "1"
+thiserror.workspace = true
 smallvec = "1"
 minijinja = { version = "2", default-features = false, features = ["adjacent_loop_items", "builtins", "loader", "macros", "serde"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }

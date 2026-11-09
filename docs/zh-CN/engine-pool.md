@@ -51,7 +51,7 @@
 ## 加载与卸载
 
 preload 在启动时加载，失败会阻止启动；lazy 在首次请求或控制 API 调用时加载；disabled 不参与路由。
-lazy 加载失败后保持 failed，普通请求直接失败，需通过 load API 显式重试。
+lazy 加载失败后保持 failed；推理请求不会再加载该模型，而是直接返回这次失败的错误（见[错误契约](text-vision-api.md#错误契约)），需通过 load API 显式重试。
 达到加载上限时，优先卸载最久未使用且不在处理请求的 lazy 模型；preload 模型固定保留。
 
 ## 内存记账与执行错误
@@ -71,7 +71,9 @@ lazy 加载失败后保持 failed，普通请求直接失败，需通过 load AP
 | `POST /v1/models/:model_id/load` | 显式加载 lazy 模型或重试失败加载 |
 | `POST /v1/models/:model_id/unload` | 卸载未使用且非 preload 的模型 |
 
-状态包括 unloaded、loading、loaded、failed、disabled，分别对应未加载、加载中、已加载、失败和禁用。
+状态包括 unloaded、loading、loaded、failed、disabled，分别对应未加载、加载中、已加载、失败和禁用。failed 状态下推理请求不会重试加载，而是返回该次失败的分类错误；需调用 load 接口重试。
+
+load 接口的加载失败与请求触发的加载使用相同的错误码和 HTTP status：MTP 与模型能力类错误返回 400，内存与容量类错误返回 503 并带 `Retry-After: 5`，无法归类的失败返回 503 `engine_unavailable`。
 
 ## 示例
 

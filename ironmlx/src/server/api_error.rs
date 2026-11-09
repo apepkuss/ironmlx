@@ -5,9 +5,24 @@ use axum::{
 };
 use serde::Serialize;
 
+use ironmlx_runtime::core::load_error::{classify_load_error, LoadErrorKind};
 use ironmlx_runtime::core::scheduler::{GenerationError, SchedulerError};
 
 pub(crate) const RETRY_AFTER_SECONDS: u64 = 5;
+
+/// Appended when a request's load left the model failed: requests do not
+/// load a failed model again, so retrying the request cannot help.
+pub(crate) const RELOAD_REQUIRED_MESSAGE: &str = "This model will not be loaded again automatically; load it again from the Dashboard or the load API after resolving this.";
+
+/// HTTP status for a failed model load, shared by the admin load API and
+/// inference requests that load a model lazily.
+pub(crate) fn load_error_status(kind: LoadErrorKind) -> StatusCode {
+    match kind {
+        LoadErrorKind::Invalid => StatusCode::BAD_REQUEST,
+        LoadErrorKind::Conflict => StatusCode::CONFLICT,
+        LoadErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ApiProtocol {
@@ -208,7 +223,25 @@ impl ApiError {
                 _ => Self::invalid_request("engine_pool_invalid_configuration", message),
             };
         }
-        Self::service_unavailable("engine_unavailable", message)
+        // A lazy load the request started or joined: answer like the admin
+        // load API does for the same failure.
+        let classified = classify_load_error(&error);
+        let mut api_error = match classified.code {
+            Some(code) => {
+                Self::from_status(load_error_status(classified.kind), code, classified.message)
+            }
+            None => Self::service_unavailable("engine_unavailable", message),
+        };
+        // Requests never load a failed model again, so retrying cannot help
+        // until someone loads it from the admin or load API.
+        if error
+            .downcast_ref::<ironmlx_runtime::core::load_error::RequestLoadFailed>()
+            .is_some_and(|request| request.slot_failed)
+        {
+            api_error.message = format!("{} {RELOAD_REQUIRED_MESSAGE}", api_error.message);
+            api_error.retry_after_seconds = None;
+        }
+        api_error
     }
 
     pub(crate) fn into_response(self, protocol: ApiProtocol) -> Response {
@@ -444,5 +477,180 @@ mod tests {
         let body = json(anthropic).await;
         assert_eq!(body["error"]["type"], "overloaded_error");
         assert_eq!(body["error"]["code"], "engine_unavailable");
+    }
+
+    #[tokio::test]
+    async fn cancelled_lazy_load_is_a_conflict_without_retry_after() {
+        use ironmlx_runtime::core::load_error::{LOAD_CANCELLED_CODE, LOAD_CANCELLED_MESSAGE};
+        let cancelled = || {
+            anyhow::Error::from(ironmlx_runtime::core::load_registry::LoadCancelled)
+                .context("loading engine model `alpha`")
+        };
+
+        let openai = ApiError::engine_resolution(cancelled()).into_response(ApiProtocol::OpenAi);
+        assert_eq!(openai.status(), StatusCode::CONFLICT);
+        assert!(openai.headers().get(header::RETRY_AFTER).is_none());
+        let body = json(openai).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], LOAD_CANCELLED_CODE);
+        assert_eq!(body["error"]["message"], LOAD_CANCELLED_MESSAGE);
+
+        let anthropic =
+            ApiError::engine_resolution(cancelled()).into_response(ApiProtocol::Anthropic);
+        assert_eq!(anthropic.status(), StatusCode::CONFLICT);
+        assert!(anthropic.headers().get(header::RETRY_AFTER).is_none());
+        let body = json(anthropic).await;
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "conflict_error");
+        assert_eq!(body["error"]["code"], LOAD_CANCELLED_CODE);
+    }
+
+    #[tokio::test]
+    async fn misconfigured_lazy_load_is_a_bad_request_with_its_code() {
+        use ironmlx_runtime::core::load_error::MTP_INCOMPATIBLE_MESSAGE;
+        use ironmlx_runtime::core::model_management::{
+            ModelCapabilityError, DIFFUSION_GEMMA_MTP_UNSUPPORTED_CODE,
+            DIFFUSION_GEMMA_MTP_UNSUPPORTED_MESSAGE,
+        };
+        use ironmlx_runtime::core::model_validation::MTP_INCOMPATIBLE_CODE;
+
+        let capability = anyhow::Error::from(ModelCapabilityError {
+            code: DIFFUSION_GEMMA_MTP_UNSUPPORTED_CODE,
+            message: DIFFUSION_GEMMA_MTP_UNSUPPORTED_MESSAGE,
+        })
+        .context("loading engine model `alpha`");
+        let response = ApiError::engine_resolution(capability).into_response(ApiProtocol::OpenAi);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        let body = json(response).await;
+        assert_eq!(body["error"]["code"], DIFFUSION_GEMMA_MTP_UNSUPPORTED_CODE);
+        assert_eq!(
+            body["error"]["message"],
+            DIFFUSION_GEMMA_MTP_UNSUPPORTED_MESSAGE
+        );
+
+        let mtp = anyhow::anyhow!("{MTP_INCOMPATIBLE_CODE}: MTP head shape mismatch")
+            .context("loading engine model `alpha`");
+        let response = ApiError::engine_resolution(mtp).into_response(ApiProtocol::Anthropic);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = json(response).await;
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["code"], MTP_INCOMPATIBLE_CODE);
+        assert_eq!(body["error"]["message"], MTP_INCOMPATIBLE_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn resource_refused_lazy_load_stays_503_with_its_code() {
+        use ironmlx_runtime::core::load_error::{
+            MAX_LOADED_MODELS_REACHED_CODE, MAX_LOADED_MODELS_REACHED_MESSAGE,
+        };
+        let full = anyhow::anyhow!("engine pool capacity reached: 1 loaded, 1 pinned")
+            .context("loading engine model `beta`");
+        let response = ApiError::engine_resolution(full).into_response(ApiProtocol::OpenAi);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "5");
+        let body = json(response).await;
+        assert_eq!(body["error"]["type"], "server_error");
+        assert_eq!(body["error"]["code"], MAX_LOADED_MODELS_REACHED_CODE);
+        assert_eq!(body["error"]["message"], MAX_LOADED_MODELS_REACHED_MESSAGE);
+    }
+
+    /// `error` as a request's lazy load ends with it: classified before the
+    /// model id is added.
+    fn request_load_failed(
+        model_id: &str,
+        error: anyhow::Error,
+        slot_failed: bool,
+    ) -> anyhow::Error {
+        let classified = classify_load_error(&error);
+        error.context(ironmlx_runtime::core::load_error::RequestLoadFailed {
+            model_id: model_id.to_owned(),
+            classified,
+            slot_failed,
+        })
+    }
+
+    #[tokio::test]
+    async fn load_failure_that_left_the_model_failed_asks_for_a_reload() {
+        use ironmlx_runtime::core::load_error::{
+            GPU_MEMORY_INSUFFICIENT_CODE, GPU_MEMORY_INSUFFICIENT_MESSAGE,
+        };
+        use ironmlx_runtime::core::model_management::{
+            ModelCapabilityError, DIFFUSION_GEMMA_MTP_UNSUPPORTED_CODE,
+            DIFFUSION_GEMMA_MTP_UNSUPPORTED_MESSAGE,
+        };
+        let oom = || anyhow::anyhow!("Metal OOM: command buffer failed");
+
+        for protocol in [ApiProtocol::OpenAi, ApiProtocol::Anthropic] {
+            let response = ApiError::engine_resolution(request_load_failed("alpha", oom(), true))
+                .into_response(protocol);
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(response.headers().get(header::RETRY_AFTER).is_none());
+            let body = json(response).await;
+            assert_eq!(body["error"]["code"], GPU_MEMORY_INSUFFICIENT_CODE);
+            assert_eq!(
+                body["error"]["message"],
+                format!("{GPU_MEMORY_INSUFFICIENT_MESSAGE} {RELOAD_REQUIRED_MESSAGE}")
+            );
+        }
+
+        let capability = anyhow::Error::from(ModelCapabilityError {
+            code: DIFFUSION_GEMMA_MTP_UNSUPPORTED_CODE,
+            message: DIFFUSION_GEMMA_MTP_UNSUPPORTED_MESSAGE,
+        });
+        let response = ApiError::engine_resolution(request_load_failed("alpha", capability, true))
+            .into_response(ApiProtocol::OpenAi);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = json(response).await;
+        assert_eq!(
+            body["error"]["message"],
+            format!("{DIFFUSION_GEMMA_MTP_UNSUPPORTED_MESSAGE} {RELOAD_REQUIRED_MESSAGE}")
+        );
+
+        // A refusal that left the model unloaded is retried by the next
+        // request, so the answer keeps Retry-After and its message.
+        let response = ApiError::engine_resolution(request_load_failed("alpha", oom(), false))
+            .into_response(ApiProtocol::OpenAi);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "5");
+        let body = json(response).await;
+        assert_eq!(body["error"]["message"], GPU_MEMORY_INSUFFICIENT_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn request_load_failure_is_classified_without_the_model_id() {
+        let error = request_load_failed(
+            "foo-oom",
+            anyhow::anyhow!("unsupported tensor layout"),
+            false,
+        );
+        let response = ApiError::engine_resolution(error).into_response(ApiProtocol::OpenAi);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "5");
+        let body = json(response).await;
+        assert_eq!(body["error"]["code"], "engine_unavailable");
+        assert_eq!(
+            body["error"]["message"],
+            "loading engine model `foo-oom`: unsupported tensor layout"
+        );
+    }
+
+    #[tokio::test]
+    async fn unclassified_failure_that_left_the_model_failed_asks_for_a_reload() {
+        for protocol in [ApiProtocol::OpenAi, ApiProtocol::Anthropic] {
+            let error =
+                request_load_failed("alpha", anyhow::anyhow!("unsupported tensor layout"), true);
+            let response = ApiError::engine_resolution(error).into_response(protocol);
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(response.headers().get(header::RETRY_AFTER).is_none());
+            let body = json(response).await;
+            assert_eq!(body["error"]["code"], "engine_unavailable");
+            assert_eq!(
+                body["error"]["message"],
+                format!(
+                    "loading engine model `alpha`: unsupported tensor layout {RELOAD_REQUIRED_MESSAGE}"
+                )
+            );
+        }
     }
 }

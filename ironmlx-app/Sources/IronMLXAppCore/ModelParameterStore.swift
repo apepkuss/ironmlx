@@ -710,6 +710,42 @@ private enum ModelParameterMigrationRecordedError: LocalizedError {
 
 public enum ModelLoadParameters {
     public static let conservativeLongContextCap = 32_768
+    /// The backend's KV cap when neither the load nor the launch sets one.
+    public static let backendDefaultMaxCacheCap = 32_768
+
+    /// The KV cap a load runs with: the cap the load sends (`maxCacheCap`),
+    /// else the launch `--max-cache-cap`, else the backend default. Scheduler
+    /// profile calibration uses it so the profile matches that load.
+    public static func calibrationMaxCacheCap(
+        loadCap: Int?,
+        launchOptions: BackendLaunchOptions
+    ) -> Int {
+        if let loadCap {
+            return loadCap
+        }
+        if let launchCap = launchOptions.maxCacheCap, launchCap > 0 {
+            return launchCap
+        }
+        return backendDefaultMaxCacheCap
+    }
+
+    /// PromptLookup a model loads with: the explicit choice when given, else
+    /// the saved preference. Scheduler profile calibration uses the same
+    /// value, so the profile it writes matches the load's runtime context.
+    public static func promptLookupConfig(
+        saved: ModelParameters?,
+        usePromptLookup: Bool? = nil,
+        crossRequest: Bool? = nil,
+        supportsPromptLookup: Bool = true
+    ) -> BackendPromptLookupConfig? {
+        guard supportsPromptLookup,
+              usePromptLookup ?? saved?.promptLookupEnabled ?? false else {
+            return nil
+        }
+        return BackendPromptLookupConfig(
+            crossRequest: crossRequest ?? saved?.promptLookupCrossRequest ?? false
+        )
+    }
 
     public static func maxCacheCap(
         for modelReference: String,

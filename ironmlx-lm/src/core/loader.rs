@@ -9,7 +9,24 @@ use anyhow::{anyhow, Context};
 use mlx::{Array, Dtype};
 use serde::{Deserialize, Serialize};
 
+use super::load_observer::{LoadObserver, WeightComponent};
 use crate::Result;
+
+/// Default number of weight bytes per evaluation chunk while a loader
+/// materializes its tensors. Each finished chunk is a progress report and a
+/// cancellation point.
+pub const WEIGHT_EVAL_CHUNK_BYTES: u64 = 1 << 30;
+
+/// Measurement-only override of [`WEIGHT_EVAL_CHUNK_BYTES`]; `0` evaluates all
+/// weights in one call.
+const WEIGHT_EVAL_CHUNK_BYTES_ENV: &str = "IRONMLX_WEIGHT_EVAL_CHUNK_BYTES";
+
+fn weight_eval_chunk_bytes() -> u64 {
+    std::env::var(WEIGHT_EVAL_CHUNK_BYTES_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(WEIGHT_EVAL_CHUNK_BYTES)
+}
 
 /// Storage bytes retained by the runtime after loader sanitization, split by
 /// the component that first touches the corresponding mmap-backed tensors.
@@ -319,6 +336,15 @@ enum SanitizeMode {
     },
 }
 
+impl SanitizeMode {
+    fn weight_component(self) -> WeightComponent {
+        match self {
+            Self::Mtp | Self::Gemma4Drafter | Self::DFlash2Draft => WeightComponent::Draft,
+            Self::Text { .. } | Self::VisionOnly | Self::Embedding { .. } => WeightComponent::Main,
+        }
+    }
+}
+
 impl WeightSource for Loader {
     fn tensor(&self, key: &str) -> Result<&Array> {
         Loader::tensor(self, key)
@@ -345,11 +371,19 @@ impl Loader {
     /// `vision_tower.*` keys are **dropped** during sanitize — use
     /// [`Loader::open_multimodal`] when the vision encoder weights are needed.
     pub fn open(model_dir: &Path) -> Result<Self> {
+        Self::open_with(model_dir, &LoadObserver::noop())
+    }
+
+    /// [`Loader::open`] reporting weight progress to `observer`, and stopping
+    /// with [`LoadCancelled`](super::load_observer::LoadCancelled) once it is
+    /// cancelled.
+    pub fn open_with(model_dir: &Path, observer: &LoadObserver) -> Result<Self> {
         Self::open_impl(
             model_dir,
             SanitizeMode::Text {
                 keep_vision_tower: false,
             },
+            observer,
         )
     }
 
@@ -357,11 +391,18 @@ impl Loader {
     /// VisionTower can load its weights from the same Loader instance.
     /// Used for multimodal (VL) inference paths.
     pub fn open_multimodal(model_dir: &Path) -> Result<Self> {
+        Self::open_multimodal_with(model_dir, &LoadObserver::noop())
+    }
+
+    /// [`Loader::open_multimodal`] observed by `observer` (see
+    /// [`Loader::open_with`]).
+    pub fn open_multimodal_with(model_dir: &Path, observer: &LoadObserver) -> Result<Self> {
         Self::open_impl(
             model_dir,
             SanitizeMode::Text {
                 keep_vision_tower: true,
             },
+            observer,
         )
     }
 
@@ -371,7 +412,7 @@ impl Loader {
     /// path that left the encoder out (see [`Loader::drop_vision_tower`]) can
     /// load it on first use without materializing the model again.
     pub fn open_vision(model_dir: &Path) -> Result<Self> {
-        Self::open_impl(model_dir, SanitizeMode::VisionOnly)
+        Self::open_impl(model_dir, SanitizeMode::VisionOnly, &LoadObserver::noop())
     }
 
     /// Open a standalone Qwen MTP draft-head checkpoint.
@@ -379,7 +420,12 @@ impl Loader {
     /// These repositories are not full language models: their weights live at
     /// root paths such as `fc.weight`, `layers.0.*`, and `norm.weight`.
     pub fn open_mtp(model_dir: &Path) -> Result<Self> {
-        Self::open_impl(model_dir, SanitizeMode::Mtp)
+        Self::open_mtp_with(model_dir, &LoadObserver::noop())
+    }
+
+    /// [`Loader::open_mtp`] observed by `observer` as [`WeightComponent::Draft`].
+    pub fn open_mtp_with(model_dir: &Path, observer: &LoadObserver) -> Result<Self> {
+        Self::open_impl(model_dir, SanitizeMode::Mtp, observer)
     }
 
     /// Open a standalone Gemma4 assistant/drafter checkpoint.
@@ -389,7 +435,13 @@ impl Loader {
     /// `pre_projection.*`, `post_projection.*`, `masked_embedding.*`, and a
     /// small `model.*` drafter backbone.
     pub fn open_gemma4_drafter(model_dir: &Path) -> Result<Self> {
-        Self::open_impl(model_dir, SanitizeMode::Gemma4Drafter)
+        Self::open_gemma4_drafter_with(model_dir, &LoadObserver::noop())
+    }
+
+    /// [`Loader::open_gemma4_drafter`] observed by `observer` as
+    /// [`WeightComponent::Draft`].
+    pub fn open_gemma4_drafter_with(model_dir: &Path, observer: &LoadObserver) -> Result<Self> {
+        Self::open_impl(model_dir, SanitizeMode::Gemma4Drafter, observer)
     }
 
     /// Open a standalone DFlash2 draft checkpoint.
@@ -398,7 +450,13 @@ impl Loader {
     /// token embeddings and an LM head and instead borrow both from the target
     /// model. Their root tensor names must therefore be preserved verbatim.
     pub fn open_dflash2(model_dir: &Path) -> Result<Self> {
-        Self::open_impl(model_dir, SanitizeMode::DFlash2Draft)
+        Self::open_dflash2_with(model_dir, &LoadObserver::noop())
+    }
+
+    /// [`Loader::open_dflash2`] observed by `observer` as
+    /// [`WeightComponent::Draft`].
+    pub fn open_dflash2_with(model_dir: &Path, observer: &LoadObserver) -> Result<Self> {
+        Self::open_impl(model_dir, SanitizeMode::DFlash2Draft, observer)
     }
 
     /// Load only the text encoder, preserving converted norm weights.
@@ -409,6 +467,7 @@ impl Loader {
                 keep_vision_tower: false,
                 keep_audio_tower: false,
             },
+            &LoadObserver::noop(),
         )
     }
 
@@ -420,6 +479,7 @@ impl Loader {
                 keep_vision_tower: true,
                 keep_audio_tower: false,
             },
+            &LoadObserver::noop(),
         )
     }
 
@@ -431,10 +491,31 @@ impl Loader {
                 keep_vision_tower: true,
                 keep_audio_tower: true,
             },
+            &LoadObserver::noop(),
         )
     }
 
-    fn open_impl(model_dir: &Path, sanitize_mode: SanitizeMode) -> Result<Self> {
+    fn open_impl(
+        model_dir: &Path,
+        sanitize_mode: SanitizeMode,
+        observer: &LoadObserver,
+    ) -> Result<Self> {
+        Self::open_impl_with_chunk(
+            model_dir,
+            sanitize_mode,
+            observer,
+            weight_eval_chunk_bytes(),
+        )
+    }
+
+    /// Open with an explicit eval chunk size (`0`: one eval of every tensor).
+    fn open_impl_with_chunk(
+        model_dir: &Path,
+        sanitize_mode: SanitizeMode,
+        observer: &LoadObserver,
+        chunk_bytes: u64,
+    ) -> Result<Self> {
+        observer.check_cancelled()?;
         let config_path = model_dir.join("config.json");
         let config_raw: serde_json::Value = serde_json::from_reader(
             std::fs::File::open(&config_path)
@@ -494,6 +575,7 @@ impl Loader {
             SanitizeMode::VisionOnly => tensors.retain(|key, _| is_vision_tensor_key(key)),
         }
         validate_quantized_storage_manifest(&tensors, quant, &quant_overrides)?;
+        observer.check_cancelled()?;
 
         // Eagerly evaluate all tensors on the loading thread so that no lazy
         // stream-tagged computation remains in the weight arrays.  This
@@ -507,10 +589,16 @@ impl Loader {
         //
         // After eval() all tensors are plain data buffers — subsequent threads
         // can read them without any stream dependency.
-        {
-            let refs: Vec<&Array> = tensors.values().collect();
-            mlx::transforms::eval(&refs).context("Loader::open: eager eval of weights")?;
-        }
+        //
+        // Chunked evaluation submits and waits on every chunk from this same
+        // loading thread and stream: chunk k+1 is queued before waiting on
+        // chunk k, and a cancelled or failed load drains the queued chunk
+        // before returning.
+        observer.begin_weights(
+            sanitize_mode.weight_component(),
+            tensor_storage_bytes(&tensors) as u64,
+        );
+        eval_weights_in_chunks(&tensors, observer, chunk_bytes)?;
 
         Ok(Self {
             weights: WeightMap::new(tensors, quant, quant_overrides),
@@ -817,10 +905,91 @@ impl Loader {
     }
 }
 
+fn tensor_bytes(tensor: &Array) -> usize {
+    tensor.size().saturating_mul(tensor.dtype().byte_size())
+}
+
 fn tensor_storage_bytes(tensors: &HashMap<String, Array>) -> usize {
     tensors.values().fold(0usize, |total, tensor| {
-        total.saturating_add(tensor.size().saturating_mul(tensor.dtype().byte_size()))
+        total.saturating_add(tensor_bytes(tensor))
     })
+}
+
+/// Evaluate `tensors` in key order, at least `chunk_bytes` per chunk (`0`: one
+/// chunk). Each finished chunk is reported to `observer`, after which the load
+/// stops with `LoadCancelled` if it was cancelled.
+///
+/// Pipelined: chunk k+1 is queued with `async_eval` before waiting on chunk k,
+/// so MLX always has a chunk queued (waiting on each chunk alone measured 2-7%
+/// slower than one eval of every tensor). On cancellation or any error the
+/// queued chunk is drained before returning, so no MLX work started here
+/// outlives the call.
+fn eval_weights_in_chunks(
+    tensors: &HashMap<String, Array>,
+    observer: &LoadObserver,
+    chunk_bytes: u64,
+) -> Result<()> {
+    let mut in_flight = None;
+    let result = submit_weight_chunks(tensors, observer, chunk_bytes, &mut in_flight);
+    if result.is_err() {
+        if let Some(queued) = in_flight {
+            // The returned error stays the cancellation or original failure.
+            let _ = mlx::transforms::eval(&queued.tensors);
+        }
+    }
+    result
+}
+
+fn submit_weight_chunks<'a>(
+    tensors: &'a HashMap<String, Array>,
+    observer: &LoadObserver,
+    chunk_bytes: u64,
+    in_flight: &mut Option<WeightChunk<'a>>,
+) -> Result<()> {
+    let mut keys: Vec<&String> = tensors.keys().collect();
+    keys.sort_unstable();
+    let mut chunk = WeightChunk::default();
+    for key in keys {
+        let tensor = &tensors[key];
+        chunk.tensors.push(tensor);
+        chunk.bytes = chunk.bytes.saturating_add(tensor_bytes(tensor) as u64);
+        if chunk_bytes != 0 && chunk.bytes >= chunk_bytes {
+            submit_weight_chunk(std::mem::take(&mut chunk), in_flight, observer)?;
+        }
+    }
+    if !chunk.tensors.is_empty() {
+        submit_weight_chunk(chunk, in_flight, observer)?;
+    }
+    match in_flight.take() {
+        Some(last) => finish_weight_chunk(last, observer),
+        None => Ok(()),
+    }
+}
+
+#[derive(Default)]
+struct WeightChunk<'a> {
+    tensors: Vec<&'a Array>,
+    bytes: u64,
+}
+
+/// Queue `chunk` on this thread's stream, then wait for the chunk queued
+/// before it. `in_flight` always holds the chunk still queued in MLX.
+fn submit_weight_chunk<'a>(
+    chunk: WeightChunk<'a>,
+    in_flight: &mut Option<WeightChunk<'a>>,
+    observer: &LoadObserver,
+) -> Result<()> {
+    mlx::transforms::async_eval(&chunk.tensors).context("Loader::open: eager eval of weights")?;
+    match in_flight.replace(chunk) {
+        Some(previous) => finish_weight_chunk(previous, observer),
+        None => Ok(()),
+    }
+}
+
+fn finish_weight_chunk(chunk: WeightChunk<'_>, observer: &LoadObserver) -> Result<()> {
+    mlx::transforms::eval(&chunk.tensors).context("Loader::open: eager eval of weights")?;
+    observer.add_weight_bytes(chunk.bytes);
+    observer.check_cancelled()
 }
 
 fn tensor_component_storage_bytes(tensors: &HashMap<String, Array>) -> LoadedTensorComponentBytes {
@@ -2790,5 +2959,136 @@ mod tests {
             !w.contains_key("vision_tower.foo.weight"),
             "vision_tower key must be dropped"
         );
+    }
+
+    mod load_observer_tests {
+        use super::super::*;
+        use crate::core::load_observer::{LoadCancelled, LoadObserver, WeightComponent};
+        use serde_json::json;
+        use serial_test::serial;
+        use std::collections::HashMap;
+
+        const TENSOR_COUNT: usize = 4;
+        const TENSOR_ELEMENTS: i32 = 16;
+        const TENSOR_BYTES: u64 = TENSOR_ELEMENTS as u64 * 4;
+
+        struct Fixture(std::path::PathBuf);
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        fn fixture() -> Fixture {
+            let dir = std::env::temp_dir()
+                .join(format!("ironmlx-load-observer-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("config.json"),
+                json!({ "model_type": "llama" }).to_string(),
+            )
+            .unwrap();
+            let mut tensors = HashMap::new();
+            for layer in 0..TENSOR_COUNT {
+                let values = vec![layer as f32; TENSOR_ELEMENTS as usize];
+                let tensor: Array = (&values[..], (TENSOR_ELEMENTS,)).try_into().unwrap();
+                tensors.insert(format!("model.layers.{layer}.mlp.weight"), tensor);
+            }
+            mlx::io::save_safetensors(
+                dir.join("model.safetensors").to_str().unwrap(),
+                &tensors,
+                &HashMap::new(),
+            )
+            .unwrap();
+            Fixture(dir)
+        }
+
+        fn text_mode() -> SanitizeMode {
+            SanitizeMode::Text {
+                keep_vision_tower: true,
+            }
+        }
+
+        fn is_load_cancelled(error: &anyhow::Error) -> bool {
+            error.downcast_ref::<LoadCancelled>().is_some()
+        }
+
+        #[test]
+        #[serial(mlx_metal)]
+        fn chunked_eval_reports_monotonic_progress_to_total() {
+            let fixture = fixture();
+            let observer = LoadObserver::new();
+            let loader =
+                Loader::open_impl_with_chunk(&fixture.0, text_mode(), &observer, TENSOR_BYTES)
+                    .unwrap();
+
+            let progress = observer.progress_log();
+            assert_eq!(progress.len(), TENSOR_COUNT, "{progress:?}");
+            assert!(
+                progress.windows(2).all(|pair| pair[0] <= pair[1]),
+                "{progress:?}"
+            );
+            let snapshot = observer.snapshot();
+            assert_eq!(snapshot.component, Some(WeightComponent::Main));
+            assert_eq!(snapshot.bytes_done, snapshot.bytes_total);
+            assert_eq!(progress.last().copied(), Some(snapshot.bytes_total));
+            assert_eq!(snapshot.bytes_total, loader.loaded_tensor_bytes() as u64);
+            assert!(!snapshot.cancelled);
+        }
+
+        #[test]
+        #[serial(mlx_metal)]
+        fn cancel_before_open_returns_load_cancelled() {
+            let fixture = fixture();
+            let observer = LoadObserver::new();
+            observer.cancel();
+
+            let error = match Loader::open_with(&fixture.0, &observer) {
+                Ok(_) => panic!("a cancelled observer must stop the load"),
+                Err(error) => error,
+            };
+            assert!(is_load_cancelled(&error), "{error:#}");
+            assert!(observer.progress_log().is_empty());
+        }
+
+        #[test]
+        #[serial(mlx_metal)]
+        fn cancel_between_chunks_stops_early() {
+            let fixture = fixture();
+            let observer = LoadObserver::new();
+            observer.cancel_after_first_progress();
+
+            let error = match Loader::open_impl_with_chunk(
+                &fixture.0,
+                text_mode(),
+                &observer,
+                TENSOR_BYTES,
+            ) {
+                Ok(_) => panic!("cancelling after the first chunk must stop the load"),
+                Err(error) => error,
+            };
+            assert!(is_load_cancelled(&error), "{error:#}");
+            let snapshot = observer.snapshot();
+            assert!(snapshot.cancelled);
+            assert_eq!(snapshot.bytes_done, TENSOR_BYTES);
+            assert!(snapshot.bytes_done < snapshot.bytes_total, "{snapshot:?}");
+            // Chunk 2 was already queued when chunk 1 finished; draining it on
+            // cancellation must not report it as progress.
+            assert_eq!(observer.progress_log(), vec![TENSOR_BYTES]);
+        }
+
+        #[test]
+        #[serial(mlx_metal)]
+        fn chunk_size_zero_evaluates_once() {
+            let fixture = fixture();
+            let observer = LoadObserver::new();
+            let loader =
+                Loader::open_impl_with_chunk(&fixture.0, text_mode(), &observer, 0).unwrap();
+
+            let total = loader.loaded_tensor_bytes() as u64;
+            assert_eq!(total, TENSOR_BYTES * TENSOR_COUNT as u64);
+            assert_eq!(observer.progress_log(), vec![total]);
+        }
     }
 }

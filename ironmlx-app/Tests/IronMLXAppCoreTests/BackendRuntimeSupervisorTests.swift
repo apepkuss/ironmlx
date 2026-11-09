@@ -720,6 +720,91 @@ func crashRecoveryUsesOnlyLastConfirmedModelsAndTheirRuntimeParameters() async t
     await supervisor.stop(intent: .userStop)
 }
 
+@Test @MainActor
+func cancelledRestoreIsNotRestoredAgain() async throws {
+    let root = try runtimeTemporaryDirectory()
+    let kept = "org/kept"
+    let cancelled = "org/cancelled"
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(defaultModel: kept, loadedModels: [kept, cancelled]))
+    let restorer = CancellingModelRestorer(cancelled: cancelled)
+    let processManager = BackendProcessManager(
+        configStore: configStore,
+        terminator: BackendProcessTerminator(sleep: { _ in }),
+        logStore: IronMLXLogStore(rootURL: root.appendingPathComponent("logs")),
+        launchPlanProvider: {
+            BackendProcessLaunchPlan(
+                processURL: URL(fileURLWithPath: "/bin/sleep"),
+                arguments: ["30"]
+            )
+        }
+    )
+    let supervisor = BackendRuntimeSupervisor(
+        processManager: processManager,
+        configStore: configStore,
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: ModelParameterStore(url: root.appendingPathComponent("model_params.json")),
+        restartCoordinator: restorer,
+        incidentStore: BackendIncidentStore(url: root.appendingPathComponent("incidents.json")),
+        // Its loaded-models notification must not reach other tests' Dashboards.
+        notificationCenter: NotificationCenter(),
+        policy: BackendRecoveryPolicy(
+            maximumAutomaticRecoveryAttempts: 1,
+            automaticRecoveryDelay: 0,
+            stableWindow: 60,
+            readinessTimeout: 1
+        ),
+        readinessWaiter: { _, _ in }
+    )
+
+    try await supervisor.ensureRunning()
+
+    // The next App launch reads the config.
+    #expect(configStore.load().restoredModelReferences == [kept])
+    // An automatic recovery restores from the confirmed snapshot.
+    let crashedPID = try #require(processManager.currentProcessIdentifier)
+    #expect(Darwin.kill(pid_t(crashedPID), SIGKILL) == 0)
+    try await waitForCancellingRestorerCount(restorer, count: 2)
+    let recovery = try #require(await restorer.snapshots.last)
+    #expect(recovery.models.map(\.id) == [kept])
+
+    await supervisor.stop(intent: .userStop)
+}
+
+private actor CancellingModelRestorer: BackendModelRestoring {
+    let cancelled: String
+    private(set) var snapshots: [BackendRecoverySnapshot] = []
+
+    init(cancelled: String) {
+        self.cancelled = cancelled
+    }
+
+    func restore(_ snapshot: BackendRecoverySnapshot) async -> BackendRestartResult {
+        snapshots.append(snapshot)
+        let ids = snapshot.models.map(\.id)
+        let loaded = ids.filter { $0 != cancelled }
+        var result = BackendRestartResult(
+            success: true,
+            status: loaded.isEmpty ? "restarted" : "models_loaded",
+            port: snapshot.config.port,
+            model: loaded.first,
+            modelLoaded: !loaded.isEmpty,
+            loadedModels: loaded
+        )
+        result.cancelledModels = ids.filter { $0 == cancelled }
+        return result
+    }
+}
+
+@MainActor
+private func waitForCancellingRestorerCount(_ restorer: CancellingModelRestorer, count: Int) async throws {
+    for _ in 0..<500 {
+        if await restorer.snapshots.count >= count { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    Issue.record("restorer was called \(await restorer.snapshots.count) times, expected \(count)")
+}
+
 private struct RuntimeHarness {
     let supervisor: BackendRuntimeSupervisor
     let processManager: BackendProcessManager

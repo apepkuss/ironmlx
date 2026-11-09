@@ -47,6 +47,10 @@ pub struct SchedulerResolutionOptions {
     pub active_kv_offload: bool,
     pub memory_limit_total_gb: Option<usize>,
     pub memory_limit_model_gb: Option<usize>,
+    /// Scheduler profile store searched by admin dynamic loads (the data
+    /// root's store when absent). Manifest models at startup use the store
+    /// that `serve` opens itself.
+    pub scheduler_profile_store_root: Option<PathBuf>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchedulerServeConfig {
@@ -84,11 +88,62 @@ pub enum SchedulerProfileSource {
     Store,
 }
 
+/// The scheduler configuration a model runs with, and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerProfileOutcome {
+    /// A dedicated profile is applied.
+    Profile(SchedulerProfileSource),
+    /// The default configuration: no profile exists for this model.
+    DefaultWithoutProfile,
+    /// The default configuration: this machine has profiles for this model,
+    /// but only for other runtime settings.
+    DefaultSettingsMismatch,
+    /// The default configuration: this model's profiles were all made on
+    /// other hardware.
+    DefaultHardwareMismatch,
+    /// The default configuration: the profile for this model, hardware and
+    /// settings is unreadable or failed its health check.
+    DefaultProfileUnusable,
+}
+
+impl SchedulerProfileOutcome {
+    pub fn source(self) -> Option<SchedulerProfileSource> {
+        match self {
+            Self::Profile(source) => Some(source),
+            Self::DefaultWithoutProfile
+            | Self::DefaultSettingsMismatch
+            | Self::DefaultHardwareMismatch
+            | Self::DefaultProfileUnusable => None,
+        }
+    }
+
+    pub fn kind(self) -> SchedulerProfileKind {
+        match self {
+            Self::Profile(_) => SchedulerProfileKind::Profile,
+            Self::DefaultSettingsMismatch => SchedulerProfileKind::DefaultSettingsMismatch,
+            Self::DefaultWithoutProfile
+            | Self::DefaultHardwareMismatch
+            | Self::DefaultProfileUnusable => SchedulerProfileKind::Default,
+        }
+    }
+}
+
+/// Which scheduler configuration a loaded model runs with, as clients see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SchedulerProfileKind {
+    Default,
+    /// The default configuration because this machine's profiles for the
+    /// model were made for other runtime settings.
+    DefaultSettingsMismatch,
+    Profile,
+}
+
 #[derive(Debug)]
 pub struct ResolvedSchedulerRuntime {
     pub scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     pub scheduler_config: SchedulerServeConfig,
-    pub profile_source: Option<SchedulerProfileSource>,
+    pub profile_outcome: SchedulerProfileOutcome,
 }
 
 pub(crate) fn default_scheduler_profile_config() -> SchedulerAutotuneProfileConfig {
@@ -146,7 +201,7 @@ pub fn apply_adaptive_mtp_scheduler_defaults(
     resolved: &mut ResolvedSchedulerRuntime,
 ) -> bool {
     let explicit_scheduler_profile = args.scheduler_profile.is_some()
-        || resolved.profile_source == Some(SchedulerProfileSource::Explicit);
+        || resolved.profile_outcome.source() == Some(SchedulerProfileSource::Explicit);
     let Some(target) = adaptive_mtp_physical_b_max(architecture, mtp_enabled) else {
         return false;
     };
@@ -433,16 +488,11 @@ pub fn resolve_scheduler_for_model_with_speculative(
     prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
     max_cache_cap_override: Option<usize>,
 ) -> Result<ResolvedSchedulerRuntime> {
-    let runtime_context = scheduler_runtime_context_for_model(
-        args,
-        model_dir,
-        mtp_model_dir,
-        mtp_draft_tokens,
-        prompt_lookup,
-        max_cache_cap_override,
-    )?;
-    let runtime_context_fingerprint = runtime_context.fingerprint();
-    let scheduler_profile_store = if args.scheduler_profile.is_none() {
+    let scheduler_profile_store = if args.scheduler_profile.is_some() {
+        None
+    } else if let Some(root) = args.scheduler_profile_store_root.as_ref() {
+        Some(SchedulerProfileStore::from_root(root))
+    } else {
         match SchedulerProfileStore::open_default() {
             Ok(store) => Some(store),
             Err(error) => {
@@ -453,16 +503,39 @@ pub fn resolve_scheduler_for_model_with_speculative(
                 None
             }
         }
-    } else {
-        None
     };
-    let scheduler_profile_hardware_label = detect_scheduler_profile_hardware_label();
-    let mut scheduler_profile_load = load_scheduler_profile_for_model(
+    let hardware_label = detect_scheduler_profile_hardware_label();
+    resolve_scheduler_for_model_with_store(
         args,
         model_dir,
-        scheduler_profile_store.as_ref(),
-        &scheduler_profile_hardware_label,
-        &runtime_context_fingerprint,
+        SchedulerProfileRequest {
+            manifest_profile: None,
+            store: scheduler_profile_store.as_ref(),
+            hardware_label: &hardware_label,
+            mtp_model_dir,
+            mtp_draft_tokens,
+            prompt_lookup,
+            max_cache_cap_override,
+        },
+    )
+}
+
+/// Picks the profile for `model_dir`: the explicit one, else a healthy store
+/// profile matching this hardware and runtime context. Without one, tells
+/// apart a model that has no profile from one whose profile is unusable.
+fn select_scheduler_profile(
+    explicit_profile: Option<&Path>,
+    model_dir: &Path,
+    store: Option<&SchedulerProfileStore>,
+    hardware_label: &str,
+    runtime_context: &SchedulerAutotuneRuntimeContext,
+) -> Result<(Option<SchedulerProfileLoad>, SchedulerProfileOutcome)> {
+    let mut scheduler_profile_load = load_scheduler_profile_for_model_with_explicit(
+        explicit_profile,
+        model_dir,
+        store,
+        hardware_label,
+        &runtime_context.fingerprint(),
     )?;
     let scheduler_profile_model_name = scheduler_profile_model_name(model_dir)?;
     let mut discard_auto_profile = false;
@@ -470,8 +543,8 @@ pub fn resolve_scheduler_for_model_with_speculative(
         match check_loaded_scheduler_profile_health(
             &load.profile,
             &scheduler_profile_model_name,
-            &scheduler_profile_hardware_label,
-            &runtime_context,
+            hardware_label,
+            runtime_context,
             unix_time_ms(),
         ) {
             Ok(report) => log_scheduler_profile_health(&load.path, &report),
@@ -480,7 +553,7 @@ pub fn resolve_scheduler_for_model_with_speculative(
                     "ironmlx serve: scheduler profile ignored path={} model_name={} hardware_label={} error={:#}; using CLI/default scheduler config",
                     load.path.display(),
                     scheduler_profile_model_name,
-                    scheduler_profile_hardware_label,
+                    hardware_label,
                     error
                 );
                 discard_auto_profile = true;
@@ -491,64 +564,53 @@ pub fn resolve_scheduler_for_model_with_speculative(
     if discard_auto_profile {
         scheduler_profile_load = None;
     }
-    let scheduler_runtime_profile = resolve_scheduler_runtime_profile(
-        args,
-        scheduler_profile_load.as_ref().map(|load| &load.profile),
-        &runtime_context,
-    )?;
-    if scheduler_profile_load.is_none() && args.scheduler_profile.is_none() {
-        match scheduler_profile_store.as_ref() {
-            Some(store) => tracing::info!(
-                "ironmlx serve: no matching scheduler profile found store={} model={} hardware_label={}; using CLI/default scheduler config",
+    let outcome = match scheduler_profile_load.as_ref() {
+        Some(load) if load.auto_loaded => {
+            SchedulerProfileOutcome::Profile(SchedulerProfileSource::Store)
+        }
+        Some(_) => SchedulerProfileOutcome::Profile(SchedulerProfileSource::Explicit),
+        None if discard_auto_profile => SchedulerProfileOutcome::DefaultProfileUnusable,
+        None => default_scheduler_profile_outcome(
+            store,
+            model_dir,
+            hardware_label,
+            &runtime_context.fingerprint(),
+        ),
+    };
+    Ok((scheduler_profile_load, outcome))
+}
+
+fn default_scheduler_profile_outcome(
+    store: Option<&SchedulerProfileStore>,
+    model_dir: &Path,
+    hardware_label: &str,
+    runtime_context_fingerprint: &str,
+) -> SchedulerProfileOutcome {
+    let Some(store) = store else {
+        return SchedulerProfileOutcome::DefaultWithoutProfile;
+    };
+    match store.profile_presence_for_model(model_dir, hardware_label, runtime_context_fingerprint) {
+        // The exact profile is listed but was not loaded: unreadable, or an
+        // older schema.
+        Ok(presence) if presence.current_settings => {
+            SchedulerProfileOutcome::DefaultProfileUnusable
+        }
+        // This machine has a profile; the user changed runtime settings.
+        Ok(presence) if presence.other_settings => SchedulerProfileOutcome::DefaultSettingsMismatch,
+        Ok(presence) if presence.other_hardware => SchedulerProfileOutcome::DefaultHardwareMismatch,
+        Ok(_) => SchedulerProfileOutcome::DefaultWithoutProfile,
+        // An unreadable store index cannot say whether this model has a
+        // profile, and regenerating one would not repair it.
+        Err(error) => {
+            tracing::warn!(
+                "ironmlx serve: scheduler profile store unreadable path={} model={} error={:#}",
                 store.root().display(),
                 model_dir.display(),
-                scheduler_profile_hardware_label
-            ),
-            None => tracing::info!(
-                "ironmlx serve: no scheduler profile store available model={} hardware_label={}; using CLI/default scheduler config",
-                model_dir.display(),
-                scheduler_profile_hardware_label
-            ),
+                error
+            );
+            SchedulerProfileOutcome::DefaultWithoutProfile
         }
     }
-    let scheduler_config = SchedulerServeConfig {
-        prefill_chunk_size: scheduler_runtime_profile.config.prefill_chunk_size,
-        b_max: scheduler_runtime_profile.config.b_max,
-        admission_deadline_ms: scheduler_runtime_profile.config.admission_deadline_ms,
-        admission_queue_max: scheduler_runtime_profile.config.admission_queue_max,
-        max_cache_cap: scheduler_runtime_profile.config.max_cache_cap,
-        decode_cadence_mid_chunk_cap: scheduler_runtime_profile
-            .config
-            .decode_cadence_mid_chunk_cap,
-    };
-    if let Some(load) = &scheduler_profile_load {
-        let source = if load.auto_loaded {
-            "store"
-        } else {
-            "explicit"
-        };
-        tracing::info!(
-            "ironmlx serve: scheduler profile applied source={} path={} model_name={} hardware_label={} rules={}",
-            source,
-            load.path.display(),
-            load.profile.model_name,
-            load.profile.hardware_label,
-            scheduler_runtime_profile.rules.len()
-        );
-    }
-    let profile_source = scheduler_profile_load.as_ref().map(|load| {
-        if load.auto_loaded {
-            SchedulerProfileSource::Store
-        } else {
-            SchedulerProfileSource::Explicit
-        }
-    });
-
-    Ok(ResolvedSchedulerRuntime {
-        scheduler_runtime_profile,
-        scheduler_config,
-        profile_source,
-    })
 }
 pub fn resolve_ssd_prefix_cache_max_bytes(
     args: &SchedulerResolutionOptions,
@@ -601,27 +663,30 @@ pub(crate) fn read_model_type_if_present(model_dir: &Path) -> Result<Option<Stri
         .map(str::to_owned))
 }
 
-pub struct EnginePoolSchedulerProfileRequest<'a> {
+pub struct SchedulerProfileRequest<'a> {
+    /// Profile named for this model; it takes precedence over the store.
     pub manifest_profile: Option<&'a Path>,
     pub store: Option<&'a SchedulerProfileStore>,
     pub hardware_label: &'a str,
     pub mtp_model_dir: Option<&'a Path>,
     pub mtp_draft_tokens: Option<usize>,
     pub prompt_lookup: Option<crate::core::prompt_lookup::PromptLookupConfig>,
+    pub max_cache_cap_override: Option<usize>,
 }
 
-pub fn resolve_engine_pool_scheduler_profile(
+pub fn resolve_scheduler_for_model_with_store(
     args: &SchedulerResolutionOptions,
     model_dir: &Path,
-    request: EnginePoolSchedulerProfileRequest<'_>,
+    request: SchedulerProfileRequest<'_>,
 ) -> Result<ResolvedSchedulerRuntime> {
-    let EnginePoolSchedulerProfileRequest {
+    let SchedulerProfileRequest {
         manifest_profile,
         store,
         hardware_label,
         mtp_model_dir,
         mtp_draft_tokens,
         prompt_lookup,
+        max_cache_cap_override,
     } = request;
     let runtime_context = scheduler_runtime_context_for_model(
         args,
@@ -629,49 +694,43 @@ pub fn resolve_engine_pool_scheduler_profile(
         mtp_model_dir,
         mtp_draft_tokens,
         prompt_lookup,
-        None,
+        max_cache_cap_override,
     )?;
-    let runtime_context_fingerprint = runtime_context.fingerprint();
     let explicit_profile = manifest_profile.or(args.scheduler_profile.as_deref());
-    let mut scheduler_profile_load = load_scheduler_profile_for_model_with_explicit(
+    let (scheduler_profile_load, profile_outcome) = select_scheduler_profile(
         explicit_profile,
         model_dir,
         store,
         hardware_label,
-        &runtime_context_fingerprint,
+        &runtime_context,
     )?;
-    let scheduler_profile_model_name = scheduler_profile_model_name(model_dir)?;
-    let mut discard_auto_profile = false;
-    if let Some(load) = scheduler_profile_load.as_ref() {
-        match check_loaded_scheduler_profile_health(
-            &load.profile,
-            &scheduler_profile_model_name,
-            hardware_label,
-            &runtime_context,
-            unix_time_ms(),
-        ) {
-            Ok(report) => log_scheduler_profile_health(&load.path, &report),
-            Err(error) if load.auto_loaded => {
-                tracing::warn!(
-                    "ironmlx serve: scheduler profile ignored path={} model_name={} hardware_label={} error={:#}; using CLI/default scheduler config",
-                    load.path.display(),
-                    scheduler_profile_model_name,
-                    hardware_label,
-                    error
-                );
-                discard_auto_profile = true;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    if discard_auto_profile {
-        scheduler_profile_load = None;
-    }
     let scheduler_runtime_profile = resolve_scheduler_runtime_profile(
         args,
         scheduler_profile_load.as_ref().map(|load| &load.profile),
         &runtime_context,
     )?;
+    match (&scheduler_profile_load, store) {
+        (Some(load), _) => tracing::info!(
+            "ironmlx serve: scheduler profile applied source={} path={} model_name={} hardware_label={} rules={}",
+            if load.auto_loaded { "store" } else { "explicit" },
+            load.path.display(),
+            load.profile.model_name,
+            load.profile.hardware_label,
+            scheduler_runtime_profile.rules.len()
+        ),
+        (None, Some(store)) => tracing::info!(
+            "ironmlx serve: no usable scheduler profile store={} model={} hardware_label={} outcome={:?}; using CLI/default scheduler config",
+            store.root().display(),
+            model_dir.display(),
+            hardware_label,
+            profile_outcome
+        ),
+        (None, None) => tracing::info!(
+            "ironmlx serve: no scheduler profile store available model={} hardware_label={}; using CLI/default scheduler config",
+            model_dir.display(),
+            hardware_label
+        ),
+    }
     let scheduler_config = SchedulerServeConfig {
         prefill_chunk_size: scheduler_runtime_profile.config.prefill_chunk_size,
         b_max: scheduler_runtime_profile.config.b_max,
@@ -682,16 +741,302 @@ pub fn resolve_engine_pool_scheduler_profile(
             .config
             .decode_cadence_mid_chunk_cap,
     };
-    let profile_source = scheduler_profile_load.as_ref().map(|load| {
-        if load.auto_loaded {
-            SchedulerProfileSource::Store
-        } else {
-            SchedulerProfileSource::Explicit
-        }
-    });
     Ok(ResolvedSchedulerRuntime {
         scheduler_runtime_profile,
         scheduler_config,
-        profile_source,
+        profile_outcome,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata;
+
+    const HOST: &str = "test-host";
+
+    struct Setup {
+        root: PathBuf,
+        model_dir: PathBuf,
+        store: SchedulerProfileStore,
+        args: SchedulerResolutionOptions,
+    }
+
+    impl Drop for Setup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn options() -> SchedulerResolutionOptions {
+        SchedulerResolutionOptions {
+            prefill_chunk_size: None,
+            b_max: None,
+            admission_deadline_ms: None,
+            admission_queue_max: None,
+            max_cache_cap: None,
+            decode_cadence_mid_chunk_cap: None,
+            scheduler_profile: None,
+            kv_quantization: SchedulerKvQuantization::None,
+            paged_prefix_cache_dir: None,
+            paged_prefix_cache_block_size: 0,
+            paged_prefix_cache_max_pages: None,
+            prefix_lru_cache_max_bytes: None,
+            ssd_prefix_cache_max_gb: None,
+            active_kv_offload: false,
+            memory_limit_total_gb: None,
+            memory_limit_model_gb: None,
+            scheduler_profile_store_root: None,
+        }
+    }
+
+    fn setup() -> Setup {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-scheduler-resolution-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let model_dir = root.join("models").join("Qwen-Test-4bit");
+        std::fs::create_dir_all(&model_dir).expect("create model dir");
+        std::fs::write(model_dir.join("config.json"), r#"{"model_type":"qwen3_5"}"#)
+            .expect("write config");
+        std::fs::write(model_dir.join("model.safetensors"), vec![0_u8; 1024])
+            .expect("write weights");
+        let store = SchedulerProfileStore::from_root(root.join("store"));
+        Setup {
+            root,
+            model_dir,
+            store,
+            args: options(),
+        }
+    }
+
+    impl Setup {
+        /// A profile for this model that matches `HOST` and the default
+        /// runtime context.
+        fn matching_profile(&self) -> SchedulerAutotuneRuntimeProfile {
+            let runtime_context = scheduler_runtime_context_for_model(
+                &self.args,
+                &self.model_dir,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("runtime context");
+            SchedulerAutotuneRuntimeProfile {
+                schema_version: SCHEDULER_AUTOTUNE_SCHEMA_VERSION,
+                model_name: scheduler_profile_model_name(&self.model_dir).unwrap(),
+                hardware_label: HOST.to_string(),
+                runtime_context,
+                config: SchedulerAutotuneProfileConfig {
+                    b_max: 3,
+                    ..default_scheduler_profile_config()
+                },
+                rules: Vec::new(),
+                metadata: SchedulerAutotuneRuntimeProfileMetadata::synthetic(unix_time_ms()),
+            }
+        }
+
+        fn persist(&self, profile: &SchedulerAutotuneRuntimeProfile) -> PathBuf {
+            self.store
+                .persist_profile(&self.model_dir, profile)
+                .expect("persist profile")
+        }
+
+        fn resolve_on(&self, hardware_label: &str) -> ResolvedSchedulerRuntime {
+            resolve_scheduler_for_model_with_store(
+                &self.args,
+                &self.model_dir,
+                SchedulerProfileRequest {
+                    manifest_profile: None,
+                    store: Some(&self.store),
+                    hardware_label,
+                    mtp_model_dir: None,
+                    mtp_draft_tokens: None,
+                    prompt_lookup: None,
+                    max_cache_cap_override: None,
+                },
+            )
+            .expect("resolve scheduler")
+        }
+
+        fn resolve(&self) -> ResolvedSchedulerRuntime {
+            self.resolve_on(HOST)
+        }
+    }
+
+    #[test]
+    fn a_model_without_any_profile_runs_on_the_default_configuration() {
+        let setup = setup();
+        let resolved = setup.resolve();
+        assert_eq!(
+            resolved.profile_outcome,
+            SchedulerProfileOutcome::DefaultWithoutProfile
+        );
+        assert_eq!(resolved.scheduler_config, SchedulerServeConfig::default());
+        assert_eq!(
+            resolved.profile_outcome.kind(),
+            SchedulerProfileKind::Default
+        );
+    }
+
+    #[test]
+    fn a_profile_of_another_model_does_not_count_as_this_models_profile() {
+        let setup = setup();
+        let other = setup.root.join("models").join("Other-4bit");
+        std::fs::create_dir_all(&other).expect("create other model dir");
+        setup
+            .store
+            .persist_profile(&other, &setup.matching_profile())
+            .expect("persist other profile");
+        assert_eq!(
+            setup.resolve().profile_outcome,
+            SchedulerProfileOutcome::DefaultWithoutProfile
+        );
+    }
+
+    #[test]
+    fn a_matching_store_profile_is_applied() {
+        let setup = setup();
+        setup.persist(&setup.matching_profile());
+        let resolved = setup.resolve();
+        assert_eq!(
+            resolved.profile_outcome,
+            SchedulerProfileOutcome::Profile(SchedulerProfileSource::Store)
+        );
+        assert_eq!(resolved.scheduler_config.b_max, 3);
+        assert_eq!(
+            resolved.profile_outcome.kind(),
+            SchedulerProfileKind::Profile
+        );
+    }
+
+    #[test]
+    fn an_explicit_profile_is_applied() {
+        let mut setup = setup();
+        let path = setup.root.join("explicit.json");
+        std::fs::write(
+            &path,
+            serde_json::to_string(&setup.matching_profile()).unwrap(),
+        )
+        .expect("write explicit profile");
+        setup.args.scheduler_profile = Some(path);
+        let resolved = setup.resolve();
+        assert_eq!(
+            resolved.profile_outcome,
+            SchedulerProfileOutcome::Profile(SchedulerProfileSource::Explicit)
+        );
+        assert_eq!(resolved.scheduler_config.b_max, 3);
+    }
+
+    #[test]
+    fn profiles_made_only_on_other_hardware_are_a_hardware_mismatch() {
+        let setup = setup();
+        setup.persist(&setup.matching_profile());
+        let resolved = setup.resolve_on("another-host");
+        assert_eq!(
+            resolved.profile_outcome,
+            SchedulerProfileOutcome::DefaultHardwareMismatch
+        );
+        assert_eq!(resolved.scheduler_config, SchedulerServeConfig::default());
+        assert_eq!(
+            resolved.profile_outcome.kind(),
+            SchedulerProfileKind::Default
+        );
+    }
+
+    #[test]
+    fn profiles_for_other_runtime_settings_are_a_settings_mismatch() {
+        let setup = setup();
+        let mut profile = setup.matching_profile();
+        profile.runtime_context.logical_kv_cap_tokens += 1;
+        setup.persist(&profile);
+        let resolved = setup.resolve();
+        assert_eq!(
+            resolved.profile_outcome,
+            SchedulerProfileOutcome::DefaultSettingsMismatch
+        );
+        assert_eq!(resolved.scheduler_config, SchedulerServeConfig::default());
+        assert_eq!(
+            resolved.profile_outcome.kind(),
+            SchedulerProfileKind::DefaultSettingsMismatch
+        );
+    }
+
+    #[test]
+    fn a_settings_mismatch_on_this_machine_wins_over_other_hardware() {
+        let setup = setup();
+        let mut elsewhere = setup.matching_profile();
+        elsewhere.hardware_label = "another-host".to_string();
+        setup.persist(&elsewhere);
+        let mut other_settings = setup.matching_profile();
+        other_settings.runtime_context.logical_kv_cap_tokens += 1;
+        setup.persist(&other_settings);
+        assert_eq!(
+            setup.resolve().profile_outcome,
+            SchedulerProfileOutcome::DefaultSettingsMismatch
+        );
+    }
+
+    #[test]
+    fn an_unreadable_profile_is_unusable() {
+        let setup = setup();
+        let path = setup.persist(&setup.matching_profile());
+        std::fs::write(&path, "not json").expect("corrupt profile");
+        assert_eq!(
+            setup.resolve().profile_outcome,
+            SchedulerProfileOutcome::DefaultProfileUnusable
+        );
+    }
+
+    #[test]
+    fn a_profile_failing_its_health_check_is_unusable() {
+        let setup = setup();
+        let path = setup.persist(&setup.matching_profile());
+        // The index still lists the profile for this host, but its content
+        // was made elsewhere.
+        let mut content = setup.matching_profile();
+        content.hardware_label = "another-host".to_string();
+        std::fs::write(&path, serde_json::to_string(&content).unwrap()).expect("rewrite profile");
+        assert_eq!(
+            setup.resolve().profile_outcome,
+            SchedulerProfileOutcome::DefaultProfileUnusable
+        );
+    }
+
+    #[test]
+    fn a_broken_profile_wins_over_other_settings() {
+        let setup = setup();
+        let mut other_settings = setup.matching_profile();
+        other_settings.runtime_context.logical_kv_cap_tokens += 1;
+        setup.persist(&other_settings);
+        let path = setup.persist(&setup.matching_profile());
+        std::fs::write(&path, "not json").expect("corrupt profile");
+        assert_eq!(
+            setup.resolve().profile_outcome,
+            SchedulerProfileOutcome::DefaultProfileUnusable
+        );
+    }
+
+    #[test]
+    fn the_admin_load_path_searches_the_configured_store() {
+        let mut setup = setup();
+        let mut profile = setup.matching_profile();
+        profile.hardware_label = "another-host".to_string();
+        setup.persist(&profile);
+        setup.args.scheduler_profile_store_root = Some(setup.store.root().to_path_buf());
+        let resolved = resolve_scheduler_for_model_with_speculative(
+            &setup.args,
+            &setup.model_dir,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("resolve scheduler");
+        assert_eq!(
+            resolved.profile_outcome,
+            SchedulerProfileOutcome::DefaultHardwareMismatch
+        );
+    }
 }

@@ -419,3 +419,79 @@ private func containsFlagValue(_ arguments: [String], flag: String, value: Strin
     }
     Issue.record("calibration did not reach cancelled state")
 }
+
+@Test func calibrationRunsWithTheModelsPromptLookupLikeItsLoad() {
+    // The load sends the saved PromptLookup preference; the profile must be
+    // calibrated for the same runtime context or it never matches.
+    let saved = ModelParameters(modelID: "m", promptLookupEnabled: true, promptLookupCrossRequest: true)
+    let config = ModelLoadParameters.promptLookupConfig(saved: saved)
+    #expect(config == .crossRequest)
+    #expect(ModelLoadParameters.promptLookupConfig(saved: ModelParameters(modelID: "m")) == nil)
+    #expect(ModelLoadParameters.promptLookupConfig(saved: saved, usePromptLookup: false) == nil)
+    #expect(ModelLoadParameters.promptLookupConfig(saved: saved, crossRequest: false) == .requestLocal)
+    #expect(ModelLoadParameters.promptLookupConfig(saved: saved, supportsPromptLookup: false) == nil)
+
+    let plan = SchedulerProfileGenerationPlan(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        ironBenchURL: nil,
+        request: SchedulerProfileGenerationRequest(
+            model: "mlx-community/Tiny-4bit",
+            modelPath: "/tmp/Tiny-4bit/snapshot",
+            promptLookup: config
+        ),
+        outputRootURL: URL(fileURLWithPath: "/tmp/out"),
+        dataRootURL: URL(fileURLWithPath: "/tmp/data")
+    )
+    let arguments = plan.arguments
+    #expect(arguments.contains("--prompt-lookup"))
+    #expect(arguments.contains("--prompt-lookup-cross-request"))
+    for (flag, value) in [
+        ("--prompt-lookup-min-ngram", "2"),
+        ("--prompt-lookup-max-ngram", "4"),
+        ("--prompt-lookup-max-draft-tokens", "4"),
+        ("--prompt-lookup-history-window-tokens", "32768"),
+        ("--prompt-lookup-max-index-entries", "65536"),
+    ] {
+        let index = arguments.firstIndex(of: flag)
+        #expect(index.map { arguments[$0 + 1] } == value, "\(flag)")
+    }
+
+    let withoutPromptLookup = SchedulerProfileGenerationPlan(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        ironBenchURL: nil,
+        request: SchedulerProfileGenerationRequest(
+            model: "mlx-community/Tiny-4bit",
+            modelPath: "/tmp/Tiny-4bit/snapshot"
+        ),
+        outputRootURL: URL(fileURLWithPath: "/tmp/out"),
+        dataRootURL: URL(fileURLWithPath: "/tmp/data")
+    )
+    #expect(!withoutPromptLookup.arguments.contains { $0.hasPrefix("--prompt-lookup") })
+}
+
+@Test func calibrationUsesTheContextCapALoadOfTheModelRunsWith() {
+    // No known context window and no saved cap: the load sends no cap, so the
+    // backend runs with the launch --max-cache-cap or its own default.
+    let loadCap = ModelLoadParameters.effectiveMaxCacheCap(
+        savedMaxCacheCap: nil,
+        contextWindow: nil,
+        activeKvOffloadEnabled: false
+    )
+    #expect(loadCap == nil)
+
+    var config = AppConfig()
+    config.maxCacheCap = 65_536
+    let launch = BackendLaunchOptions(config: config)
+    #expect(ModelLoadParameters.calibrationMaxCacheCap(loadCap: loadCap, launchOptions: launch) == 65_536)
+
+    let defaultLaunch = BackendLaunchOptions(config: AppConfig())
+    #expect(defaultLaunch.maxCacheCap == nil)
+    #expect(
+        ModelLoadParameters.calibrationMaxCacheCap(loadCap: loadCap, launchOptions: defaultLaunch)
+            == ModelLoadParameters.backendDefaultMaxCacheCap
+    )
+    #expect(ModelLoadParameters.backendDefaultMaxCacheCap == 32_768)
+
+    // A cap the load sends wins over the launch value, as in the backend.
+    #expect(ModelLoadParameters.calibrationMaxCacheCap(loadCap: 8_192, launchOptions: launch) == 8_192)
+}

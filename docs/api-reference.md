@@ -53,7 +53,9 @@ Availability depends on the serving mode and configured compatible models. This 
 | `GET` | `/admin/api/log-level` | Read the log level | Loopback only | [Service and management API](service-api.md#log-level-management-loopback-only) |
 | `POST` | `/admin/api/log-level` | Update the log level | Loopback only | [Service and management API](service-api.md#log-level-management-loopback-only) |
 | `POST` | `/admin/api/models/register` | Register local model resources | App model-management daemon | [Audio resource registration example](audio-speech-api.md#register-local-resources) |
-| `POST` | `/admin/api/models/load` | Load a local model | App model-management daemon | [Audio resource registration example](audio-speech-api.md#register-local-resources) |
+| `POST` | `/admin/api/models/load` | Load a local model; optional `load_id` and `async` | App model-management daemon | [Model loads](service-api.md#model-loads-app) |
+| `GET` | `/admin/api/models/loads` | Load progress | App / DFlash2 | [Model loads](service-api.md#model-loads-app) |
+| `POST` | `/admin/api/models/loads/{load_id}/cancel` | Cancel a load | App model-management daemon | [Model loads](service-api.md#model-loads-app) |
 
 For LAN authentication, see [Service and management API](service-api.md#service-address-authentication-and-conventions). Standalone System One authentication and discovery shapes are defined in its [CLI section](laya-systemone-api.md#optional-standalone-cli).
 

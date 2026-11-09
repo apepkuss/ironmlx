@@ -3,6 +3,7 @@
 
 use crate::core::prompt_lookup::PromptLookupConfig;
 use crate::core::scheduler_autotune::SchedulerAutotuneRuntimeProfile;
+use crate::core::scheduler_resolution::SchedulerProfileKind;
 use anyhow::{bail, Context, Result};
 use ironmlx_lm::models::ModelArchitecture;
 use serde::{Deserialize, Serialize};
@@ -410,6 +411,9 @@ pub struct EngineModelConfig {
     pub default: bool,
     pub pinned: bool,
     pub scheduler_runtime_profile: Option<SchedulerAutotuneRuntimeProfile>,
+    /// Whether `scheduler_runtime_profile` is the default configuration or a
+    /// dedicated profile; absent for runtimes without a causal scheduler.
+    pub scheduler_profile_kind: Option<SchedulerProfileKind>,
     pub mtp: Option<EngineMtpSettings>,
     pub prompt_lookup: Option<PromptLookupConfig>,
     pub sampling_defaults: SamplingDefaults,

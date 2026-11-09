@@ -77,6 +77,9 @@
     --tooltip-surface-shadow: 0 12px 28px rgba(0, 0, 0, 0.16);
     --sidebar-w: 200px;
     --radius: 10px;
+    --load-track: #ececf0;
+    --load-veil: rgba(0, 0, 0, 0.22);
+    --load-accent-soft: rgba(0, 122, 255, 0.1);
   }
 
   @media (prefers-color-scheme: dark) {
@@ -107,6 +110,9 @@
       --tooltip-surface-border: rgba(255, 255, 255, 0.13);
       --tooltip-compact-shadow: 0 5px 18px rgba(0, 0, 0, 0.48);
       --tooltip-surface-shadow: 0 14px 32px rgba(0, 0, 0, 0.46);
+      --load-track: #3a3b4c;
+      --load-veil: rgba(0, 0, 0, 0.42);
+      --load-accent-soft: rgba(10, 132, 255, 0.18);
     }
   }
 
@@ -281,6 +287,7 @@
     backdrop-filter: blur(18px) saturate(1.15);
     pointer-events: none;
   }
+  .model-table-tooltip { white-space: pre-line; }
   .sidebar-tooltip[hidden],
   .model-table-tooltip[hidden] { display: none; }
 
@@ -2434,6 +2441,18 @@
     padding-top: 16px;
   }
 
+  .model-params-scheduler-profile {
+    margin-top: 4px;
+    color: var(--text-secondary);
+    font-size: 11px;
+  }
+
+  .model-params-scheduler-profile strong {
+    margin-left: 4px;
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+
   .model-params-modal .field-label-with-help {
     margin-bottom: 4px;
   }
@@ -3729,6 +3748,134 @@
   @media (prefers-reduced-motion: reduce) {
     .download-task-progress-bar { transition: none; }
   }
+  /* ── Model load progress ── */
+  .model-load-bar { position: relative; height: 5px; border-radius: 3px; background: var(--load-track); overflow: hidden; }
+  .model-load-bar > i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--accent); transition: width 0.3s ease; }
+  .model-load-bar.is-muted > i { background: var(--text-tertiary); }
+  .model-load-bar.is-indeterminate > i { width: 34%; animation: model-load-slide 1.4s ease-in-out infinite; }
+  @keyframes model-load-slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(310%); } }
+  /* Load states wrap rather than truncate in the narrow status column. */
+  #model-table .model-status-cell.is-load-state { padding-left: 4px; padding-right: 4px; white-space: normal; overflow-wrap: anywhere; line-height: 1.4; }
+  .model-status-text.is-failed { color: var(--settings-error-text); font-weight: 500; }
+  .model-status-text.is-quiet { color: var(--text-secondary); }
+  /* Shrinks with a narrow status cell: the bar gives way, the percentage stays whole. */
+  .model-load-rowprogress {
+    display: flex; align-items: center; gap: 6px; min-width: 0; max-width: min(128px, 100%); margin: 5px auto 0;
+    font-size: 11px; color: var(--text-secondary); font-variant-numeric: tabular-nums;
+  }
+  .model-load-rowprogress .model-load-bar { flex: 1; min-width: 0; height: 4px; }
+  .model-load-rowprogress > span { flex: none; }
+  .action-btn.action-cancel-load { padding: 2px 10px; border: 1px solid var(--border); background: var(--card-bg); color: var(--text); }
+  .action-btn.action-cancel-load:hover:not(:disabled) { background: var(--bg); }
+
+  .model-load-overlay {
+    position: fixed; top: 0; right: 0; bottom: 0; left: var(--sidebar-w); z-index: 90;
+    display: flex; justify-content: center; align-items: flex-start;
+    padding: 58px 16px 16px; overflow-y: auto; background: var(--load-veil);
+  }
+  .sidebar-collapsed .model-load-overlay { left: 64px; }
+  .model-load-overlay[hidden] { display: none; }
+  .model-load-panel {
+    position: relative; width: 440px; max-width: 100%; padding: 20px 22px 18px;
+    border-radius: 12px; background: var(--card-bg); color: var(--text);
+    box-shadow: 0 14px 44px rgba(0, 0, 0, 0.24), 0 0 0 0.5px var(--border);
+  }
+  .model-load-close {
+    position: absolute; top: 14px; right: 14px; width: 26px; height: 26px; padding: 0;
+    display: grid; place-items: center; border: 0; border-radius: 6px;
+    background: transparent; color: var(--text-secondary); cursor: pointer;
+  }
+  .model-load-close:hover { background: var(--border); color: var(--text); }
+  .model-load-close:focus-visible, .model-load-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .model-load-pre { margin-bottom: 3px; padding-right: 28px; font-size: 11px; color: var(--text-tertiary); }
+  .model-load-title { margin: 0; padding-right: 28px; font-size: 17px; font-weight: 700; line-height: 1.35; overflow-wrap: anywhere; }
+  .model-load-variant {
+    display: inline-block; margin-left: 6px; padding: 2px 6px; border-radius: 5px; vertical-align: 2px;
+    background: var(--load-accent-soft); color: var(--accent); font-size: 11px; font-weight: 600; white-space: nowrap;
+  }
+  .model-load-progress { margin: 18px 0 6px; }
+  .model-load-progress .model-load-bar { height: 7px; border-radius: 4px; }
+  .model-load-numbers {
+    display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; margin-top: 7px;
+    font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums;
+  }
+  .model-load-numbers b { color: var(--text); font-weight: 600; }
+  .model-load-steps { list-style: none; margin: 16px 0 0; padding: 12px 0 0; border-top: 0.5px solid var(--border); }
+  .model-load-panel.is-failed .model-load-steps { margin-top: 10px; padding-top: 0; border-top: 0; }
+  .model-load-step { display: flex; align-items: center; gap: 10px; padding: 4px 0; font-size: 12.5px; color: var(--text-tertiary); }
+  .model-load-step-mark {
+    flex: none; display: grid; place-items: center; width: 16px; height: 16px; box-sizing: border-box;
+    border: 1.5px solid var(--border); border-radius: 50%; color: #fff; font-size: 10px; font-weight: 700;
+  }
+  .model-load-step.is-done { color: var(--text-secondary); }
+  .model-load-step.is-done .model-load-step-mark { border-color: var(--green); background: var(--green); }
+  .model-load-step.is-current { color: var(--text); font-weight: 600; }
+  .model-load-step.is-current .model-load-step-mark { border: 2px solid var(--load-track); border-top-color: var(--accent); animation: spin 0.9s linear infinite; }
+  .model-load-step.is-failed { color: var(--settings-error-text); font-weight: 600; }
+  .model-load-step.is-failed .model-load-step-mark { border-color: var(--destructive); background: var(--destructive); }
+  .model-load-step-label { min-width: 0; overflow-wrap: anywhere; }
+  .model-load-step-time { margin-left: auto; font-weight: 400; color: var(--text-tertiary); font-variant-numeric: tabular-nums; }
+  .model-load-note { margin-top: 12px; font-size: 11.5px; line-height: 1.6; color: var(--text-secondary); }
+  .model-load-error {
+    margin-top: 14px; padding: 9px 11px; border: 0.5px solid var(--settings-error-border); border-radius: 8px;
+    background: var(--settings-error-bg); color: var(--settings-error-text); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere;
+  }
+  .model-load-error-detail {
+    margin-top: 6px; font-size: 11px; line-height: 1.5; color: var(--text-tertiary); overflow-wrap: anywhere;
+    max-height: 8em; overflow-y: auto;
+  }
+  .model-load-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  .model-load-actions button { padding: 7px 16px; font-family: inherit; font-size: 13px; }
+  .model-load-actions .is-leading { margin-right: auto; }
+  .model-load-actions .model-load-cancel { color: var(--destructive); }
+  .model-load-actions button:disabled { opacity: 0.45; cursor: default; }
+
+  .model-load-indicator {
+    display: block; width: 100%; margin: auto 0 8px; padding: 9px 10px 10px;
+    border: 0.5px solid var(--border); border-radius: 10px; background: var(--card-bg);
+    color: var(--text); font: inherit; text-align: left; cursor: pointer;
+  }
+  .model-load-indicator[hidden] { display: none !important; }
+  .model-load-indicator:not([hidden]) ~ .sidebar-toggle { margin-top: 0; }
+  .model-load-indicator:hover { background: var(--bg); }
+  .model-load-indicator:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .model-load-indicator-body { display: block; min-width: 0; }
+  .model-load-indicator-title { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; }
+  .model-load-indicator-title > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .model-load-spinner {
+    flex: none; width: 11px; height: 11px; box-sizing: border-box; border-radius: 50%;
+    border: 2px solid var(--load-track); border-top-color: var(--accent); animation: spin 0.9s linear infinite;
+  }
+  .model-load-indicator.is-queued .model-load-spinner { border-top-color: var(--text-tertiary); }
+  .model-load-indicator-detail { display: flex; margin: 3px 0 7px; font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
+  .model-load-indicator-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .model-load-indicator-meta { flex: none; }
+  .model-load-indicator.is-failed .model-load-indicator-detail,
+  .model-load-indicator.is-queued .model-load-indicator-detail { margin-bottom: 0; }
+  .model-load-indicator.is-failed { border-color: var(--settings-error-border); }
+  .model-load-indicator.is-failed .model-load-indicator-title { color: var(--settings-error-text); }
+  .model-load-ring { display: none; }
+  .sidebar-collapsed .model-load-indicator { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; align-self: center; }
+  .sidebar-collapsed .model-load-indicator-body { display: none; }
+  .sidebar-collapsed .model-load-ring {
+    display: block; width: 24px; height: 24px; border-radius: 50%;
+    background: conic-gradient(var(--accent) calc(var(--model-load-pct, 0) * 1%), var(--load-track) 0);
+    -webkit-mask: radial-gradient(circle, transparent 7.5px, #000 8px);
+    mask: radial-gradient(circle, transparent 7.5px, #000 8px);
+  }
+  .sidebar-collapsed .model-load-ring.is-muted { background: conic-gradient(var(--text-tertiary) calc(var(--model-load-pct, 0) * 1%), var(--load-track) 0); }
+  .sidebar-collapsed .model-load-ring.is-indeterminate { background: conic-gradient(var(--accent) 25%, var(--load-track) 0); animation: spin 0.9s linear infinite; }
+  .sidebar-collapsed .model-load-ring.is-indeterminate.is-muted { background: conic-gradient(var(--text-tertiary) 25%, var(--load-track) 0); }
+  .sidebar-collapsed .model-load-ring.is-failed {
+    display: grid; place-items: center; width: 20px; height: 20px;
+    background: var(--destructive); color: #fff; font-size: 12px; font-weight: 700;
+    -webkit-mask: none; mask: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .model-load-bar > i { transition: none; }
+    .model-load-bar.is-indeterminate > i { width: 100%; opacity: 0.35; animation: none; }
+    .model-load-spinner, .model-load-step.is-current .model-load-step-mark, .sidebar-collapsed .model-load-ring.is-indeterminate { animation: none; }
+  }
 </style>
 </head>
 <body>
@@ -3766,6 +3913,7 @@
   <div class="nav-item" data-page="cluster" hidden>
     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="4" r="2.5" stroke="currentColor" stroke-width="1.3"/><circle cx="4" cy="14" r="2.5" stroke="currentColor" stroke-width="1.3"/><circle cx="14" cy="14" r="2.5" stroke="currentColor" stroke-width="1.3"/><line x1="9" y1="6.5" x2="4" y2="11.5" stroke="currentColor" stroke-width="1.2"/><line x1="9" y1="6.5" x2="14" y2="11.5" stroke="currentColor" stroke-width="1.2"/></svg></span> <span data-i18n="nav_cluster">Cluster (Experimental)</span>
   </div>
+  <button class="model-load-indicator" id="model-load-indicator" type="button" hidden onclick="openModelLoadPanel(this.dataset.model)"></button>
   <button class="sidebar-toggle" id="sidebar-toggle" type="button" onclick="toggleSidebar()" aria-controls="dashboard-sidebar" aria-expanded="true" aria-label="Collapse sidebar">
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="2"/><path d="M7.5 3.5v13"/></svg>
   </button>
@@ -3773,6 +3921,9 @@
 
 <div class="sidebar-tooltip" id="sidebar-tooltip" role="tooltip" hidden></div>
 <div class="model-table-tooltip" id="model-table-tooltip" role="tooltip" hidden></div>
+<div class="model-load-overlay" id="model-load-overlay" hidden onclick="if (event.target === this) closeModelLoadPanel()">
+  <div class="model-load-panel" id="model-load-panel" role="dialog" aria-labelledby="model-load-title"></div>
+</div>
 
 <!-- Content -->
 <div class="content page-scroll-managed">
@@ -5708,6 +5859,7 @@
     <div class="modal-header">
       <div class="modal-pre" data-i18n="model_param_settings">Model Param Settings</div>
       <h2 id="modal-model-name"></h2>
+      <div class="model-params-scheduler-profile" id="modal-scheduler-profile" hidden></div>
     </div>
     <div class="modal-body" style="display:block;">
       <div class="modal-row model-params-setting-row model-params-identity-row">
@@ -6280,6 +6432,8 @@
       incident_step_restart: "Automatic backend restart started", incident_step_readiness: "Backend readiness check passed", incident_step_restore: "Confirmed model restore started", incident_step_stable: "Stability observation window started", incident_step_stopped: "Automatic recovery stopped",
       incident_clear_title: "Clear all incident records?", incident_clear_confirm: "This permanently deletes all incident records and cannot be undone. Runtime logs are not affected.", incident_cleared: "All incident records cleared.", incident_clear_failed: "Could not clear incident history.", incident_exported: "Incident information exported.", incident_export_failed: "Incident export failed.", incident_load_failed: "Could not load incident history.",
       runtime_models: "Model Runtime Status",
+      scheduler_config_label: "Scheduling", scheduler_config_default: "Default", scheduler_config_default_settings_mismatch: "Default (doesn't match current settings)",
+      scheduler_config_profile: "Dedicated profile",
       runtime_empty_title: "No models are currently running",
       runtime_empty_description: "Load a model to see request queues and cumulative usage here.",
       runtime_requests: "Requests",
@@ -6451,6 +6605,9 @@
       err_memory_pressure: "GPU memory is too high to load a new model right now. Unload an existing model or free memory and retry.",
       err_gpu_memory_insufficient: "Not enough available GPU memory to safely load this model. Unload one or more unused loaded models to free GPU memory, then try again.",
       err_max_loaded_models_reached: "Maximum concurrent loaded models reached. Unload an unused loaded model before loading another model.",
+      err_load_result_unknown: "The backend no longer reports this model load, so its result is unknown. Check whether the model is loaded, then try again if needed.",
+      err_load_failed: "The model failed to load for a reason that could not be identified. Check the logs for details.",
+      err_model_task_mismatch: "This model's type does not support this kind of task or these load settings.",
       err_model_reload_busy: "The model is processing requests. Wait for it to become idle before switching versions.",
       err_model_memory_limit_exceeded: "Model memory limit reached. Unload one or more loaded models, raise Memory Limit (Model Only), or set it to Auto, then try again.",
       err_total_memory_limit_exceeded: "Total memory limit reached. Unload one or more loaded models, raise Memory Limit (Total), or set it to Auto, then try again.",
@@ -6487,7 +6644,8 @@
       err_dflash2_draft_not_found: "No compatible local DFlash2 draft is available. Download a matching draft and retry.",
       err_dflash2_acceleration_conflict: "DFlash2 cannot be enabled together with MTP or repeated-text acceleration.",
       integrity_error_toast: "Model integrity verification could not be completed. See the App log for technical details.",
-      warn_default_scheduler_profile_used: "No matching scheduler profile was found for this model. The model is running with the default scheduler configuration. Generate a dedicated profile with Scheduler Profile for better model-specific scheduling.",
+      warn_scheduler_profile_hardware_mismatch: "This model's scheduler profile was generated on different hardware, so the default scheduler configuration is used this time. Regenerate it on this Mac to get scheduling suited to this machine.",
+      warn_scheduler_profile_unusable: "This model's scheduler profile can't be used (the file is damaged or no longer valid), so the default scheduler configuration is used this time. Regenerate it in Models → Scheduling.",
       warn_model_reload_deferred: "The model is processing requests. New parameters will be applied automatically after the model becomes idle.",
       err_benchmark_oom: "Insufficient GPU memory for {batch_size}x batch (pp{pp}). Estimated need: {need_mb}MB, available: {avail_mb}MB. Try reducing batch size or prompt length.",
       err_benchmark_active_requests: "Benchmark cannot start while requests are running or queued. Active: {active_requests}, queued: {queued_requests}.",
@@ -6530,6 +6688,7 @@
       batch_test: "Continuous Batch Test", batch_note: "Batch test runs each batch size against every selected prompt size (tg128).",
       run_benchmark: "Run Benchmark",
       scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "What this profile does", scheduler_profile_help_body: "Generates a scheduler profile for the selected model on this Mac so ironmlx can choose better runtime scheduling parameters.", scheduler_profile_help_flow: "Flow: select a model, choose a strategy and calibration level, then generate the profile. Use it before benchmark runs or after changing models or hardware.", scheduler_profile_help_levels: "Levels: Quick Validation runs up to 16 jobs in about 8–15 minutes for a basic check; Standard Calibration runs up to 48 jobs in about 40–60 minutes and is recommended for routine use; Full Calibration runs up to 96 jobs in about 2–2.5 hours for the widest coverage.", scheduler_profile_strategy: "Selection Strategy", scheduler_profile_agent_long_prompt: "Agent Long Prompt", scheduler_profile_balanced: "Balanced", scheduler_profile_level: "Calibration Level", scheduler_profile_level_quick: "Quick Validation", scheduler_profile_level_standard: "Standard Calibration", scheduler_profile_level_full: "Full Calibration", scheduler_profile_level_quick_hint: "Up to 16 jobs · estimated 8–15 minutes", scheduler_profile_level_standard_hint: "Up to 48 jobs · estimated 40–60 minutes", scheduler_profile_level_full_hint: "Up to 96 jobs · estimated 2–2.5 hours", scheduler_profile_preview_select_model: "Select a model to estimate jobs and calibration time.", scheduler_profile_preview_loading: "Calculating job count and estimated time...", scheduler_profile_preview_summary: "Estimated {jobs} jobs · about {min}–{max}", scheduler_profile_preview_failed: "Unable to estimate: {detail}", generate_profile: "Generate Profile", stop_calibration: "Stop Calibration",
+      scheduler_profile_model_busy: "The model is in use by another operation. Try again shortly.",
       profile_idle: "No profile generation running.", profile_running: "Generating scheduler profile for {name}...", profile_running_hint: "This can take several minutes. You can watch the log below while the calibration is running.", profile_cancelling: "Stopping calibration...", profile_cancelled: "Calibration stopped. Incomplete output was removed; diagnostic logs were retained.", profile_progress_summary: "Completed {completed} / {total} · Elapsed {elapsed} · Remaining {remaining}", profile_eta_calculating: "calculating", profile_succeeded: "Scheduler profile generated for {name}.", profile_result_title: "Generated files", profile_failed: "Scheduler profile generation failed: {detail}", profile_runtime_path: "Runtime profile", profile_store_path: "Stored profile", profile_report_path: "Detailed report",
       metrics_ref: "Metrics Reference",
       ttft_label: "(Time to First Token)", ttft_desc: "Latency before the model starts responding. Measures prompt processing (prefill) speed. Lower is better.",
@@ -6655,7 +6814,53 @@
       cluster_backend: "Communication Backend", cluster_backend_desc: "Transport used for inter-node communication. Auto picks jaccl when Thunderbolt Bridge is available, otherwise ring (TCP).",
       cluster_backend_auto: "Auto (default)", cluster_backend_jaccl: "Thunderbolt (jaccl)", cluster_backend_ring: "Ethernet (ring)",
       cluster_parallel_mode: "Parallel Mode", cluster_parallel_mode_desc: "How the model is sharded across nodes. Auto picks TP / PP / Hybrid based on topology and head divisibility.",
-      cluster_pm_auto: "Auto (default)", cluster_pm_tp: "Tensor Parallel", cluster_pm_pp: "Pipeline Parallel"
+      cluster_pm_auto: "Auto (default)", cluster_pm_tp: "Tensor Parallel", cluster_pm_pp: "Pipeline Parallel",
+      model_load_pre_loading: "Loading model",
+      model_load_pre_reloading: "Reloading model",
+      model_load_pre_queued: "Waiting to load",
+      model_load_pre_failed: "Load failed",
+      model_load_elapsed: "{time} elapsed",
+      model_load_remaining: "about {time} left",
+      model_load_cancel: "Cancel Load",
+      model_load_background: "Continue in Background",
+      model_load_cancelling: "Cancelling…",
+      model_load_stopping: "stopping",
+      model_load_view_logs: "View Logs",
+      model_load_ok: "OK",
+      model_load_close: "Close",
+      model_load_stage_verifying_files: "Verify model files",
+      model_load_stage_verifying_files_dflash2: "Verify target and draft models",
+      model_load_stage_waiting_for_backend: "Wait for the backend",
+      model_load_stage_syncing_models: "Sync local models",
+      model_load_stage_restart_backend: "Restart the backend",
+      model_load_stage_queued: "Wait in queue",
+      model_load_stage_preparing_memory: "Prepare memory",
+      model_load_stage_reading_weights: "Read weights",
+      model_load_stage_reading_weights_dflash2: "Read target model weights",
+      model_load_stage_building_model: "Build model",
+      model_load_stage_reading_draft_weights: "Read MTP draft weights",
+      model_load_stage_reading_draft_weights_dflash2: "Read draft model weights",
+      model_load_stage_starting_engine: "Start inference",
+      model_load_stage_warming_up: "Warm up",
+      model_load_row_loading: "Loading",
+      model_load_row_reloading: "Reloading",
+      model_load_row_queued: "Queued",
+      model_load_row_failed: "Load failed",
+      model_load_indicator_loading: "Loading · {pct}%",
+      model_load_indicator_loading_indeterminate: "Loading",
+      model_load_indicator_reloading: "Reloading · {pct}%",
+      model_load_indicator_reloading_indeterminate: "Reloading",
+      model_load_indicator_many: "Loading {count} models",
+      model_load_indicator_more_queued: "{count} more queued",
+      model_load_indicator_more: "{count} more",
+      model_load_indicator_label: "Show load progress",
+      model_load_note_dflash2_restore: "Cancelling restores the previous configuration and restarts the backend; models that were loaded before load again.",
+      model_load_note_dflash2_startup: "Cancelling restarts the backend in normal mode without loading models. Your DFlash2 setting is kept, so you can load it again later.",
+      model_load_note_reload: "Cancelling keeps the version that is loaded now.",
+      model_load_toast_cancelled: "Cancelled loading {model}. Its memory has been released.",
+      model_load_toast_reload_cancelled: "Cancelled reloading {model}. The previous version stays in use.",
+      model_load_toast_dflash2_restored: "Cancelled loading {model} with DFlash2. The previous configuration is restored and the models loaded before are loading again.",
+      model_load_toast_dflash2_startup: "Cancelled loading {model} with DFlash2. The backend started in normal mode with no model loaded; your DFlash2 setting is kept."
     },
     "zh-Hans": {
       dsh_manual_configuration: "手动配置",
@@ -6998,6 +7203,8 @@
       incident_step_restart: "开始自动重启后端", incident_step_readiness: "后端健康检查通过", incident_step_restore: "开始恢复已确认模型", incident_step_stable: "开始稳定性观察窗口", incident_step_stopped: "停止自动恢复",
       incident_clear_title: "清除全部故障记录？", incident_clear_confirm: "此操作将永久删除所有故障历史记录，删除后无法恢复。运行日志不会受到影响。", incident_cleared: "全部故障记录已清除。", incident_clear_failed: "无法清除故障历史。", incident_exported: "故障信息已导出。", incident_export_failed: "故障信息导出失败。", incident_load_failed: "无法加载故障历史。",
       runtime_models: "模型运行状态",
+      scheduler_config_label: "调度配置", scheduler_config_default: "默认", scheduler_config_default_settings_mismatch: "默认（与当前设置不匹配）",
+      scheduler_config_profile: "专用 profile",
       runtime_empty_title: "暂无运行中的模型",
       runtime_empty_description: "加载模型后，此处将显示各模型的请求队列与累计统计。",
       runtime_requests: "请求",
@@ -7169,6 +7376,9 @@
       err_memory_pressure: "GPU 显存压力过高，暂时无法加载新模型。请先卸载已加载的模型或释放显存后重试。",
       err_gpu_memory_insufficient: "当前可用 GPU 内存不足，无法安全加载该模型。请先卸载暂不使用的已加载模型，释放显存后再重试。",
       err_max_loaded_models_reached: "已达到最大同时加载模型数，无法加载新模型。请先卸载暂不使用的已加载模型，再重试。",
+      err_load_result_unknown: "后端已不再报告这次模型加载，结果未知。请确认模型是否已加载，必要时重试。",
+      err_load_failed: "模型加载失败，原因未能识别。请查看日志了解详情。",
+      err_model_task_mismatch: "该模型的类型不支持这类任务或加载设置。",
       err_model_reload_busy: "模型正在处理请求，请等待模型空闲后再切换版本。",
       err_model_memory_limit_exceeded: "已达到模型内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（仅模型）」/切换为自动后重试。",
       err_total_memory_limit_exceeded: "已达到总内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（总量）」/切换为自动后重试。",
@@ -7205,7 +7415,8 @@
       err_dflash2_draft_not_found: "本地不存在兼容的 DFlash2 Draft。请下载匹配的 Draft 后重试。",
       err_dflash2_acceleration_conflict: "DFlash2 不能与 MTP 或重复文本加速同时启用。",
       integrity_error_toast: "模型完整性验证未能完成。技术详情请查看 App 日志。",
-      warn_default_scheduler_profile_used: "未找到该模型匹配的 scheduler profile，已使用默认调度配置运行。建议通过 Scheduler Profile 为该模型生成专用 profile，以获得更合适的模型调度参数。",
+      warn_scheduler_profile_hardware_mismatch: "该模型的 scheduler profile 是在其他硬件上生成的，本次使用默认调度配置。在本机重新生成即可获得适合本机的调度。",
+      warn_scheduler_profile_unusable: "该模型的 scheduler profile 无法使用（文件损坏或已失效），本次使用默认调度配置。请在「模型 → 调度配置」中重新生成。",
       warn_model_reload_deferred: "模型正在处理请求，新参数将在该模型空闲后自动重新加载。",
       err_benchmark_oom: "GPU 显存不足以跑 {batch_size}x batch (pp{pp})。预估需要 {need_mb}MB，可用 {avail_mb}MB。请减小批大小或 prompt 长度。",
       err_benchmark_active_requests: "当前仍有推理请求正在执行或排队，无法启动基准测试。活跃：{active_requests}，排队：{queued_requests}。",
@@ -7248,6 +7459,7 @@
       batch_test: "连续批处理测试", batch_note: "每种批大小都会对所勾选的每个 prompt 规模各跑一次（tg128）。",
       run_benchmark: "运行基准测试",
       scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "Profile 的作用", scheduler_profile_help_body: "为当前 Mac 上选定的模型生成调度 profile，帮助 ironmlx 选择更合适的运行时调度参数。", scheduler_profile_help_flow: "流程：选择模型、选择策略和校准级别，然后生成 profile。建议在 benchmark 前、切换模型或更换硬件环境后使用。", scheduler_profile_help_levels: "级别：快速验证最多运行 16 jobs，预计 8–15 分钟，用于基本确认；标准校准最多运行 48 jobs，预计 40–60 分钟，推荐日常使用；完整校准最多运行 96 jobs，预计 2–2.5 小时，提供最广覆盖。", scheduler_profile_strategy: "选择策略", scheduler_profile_agent_long_prompt: "Agent 长提示词", scheduler_profile_balanced: "均衡", scheduler_profile_level: "校准级别", scheduler_profile_level_quick: "快速验证", scheduler_profile_level_standard: "标准校准", scheduler_profile_level_full: "完整校准", scheduler_profile_level_quick_hint: "最多 16 jobs · 预计 8–15 分钟", scheduler_profile_level_standard_hint: "最多 48 jobs · 预计 40–60 分钟", scheduler_profile_level_full_hint: "最多 96 jobs · 预计 2–2.5 小时", scheduler_profile_preview_select_model: "选择模型后显示预计 jobs 和校准时间。", scheduler_profile_preview_loading: "正在计算 jobs 和预计时间...", scheduler_profile_preview_summary: "预计 {jobs} jobs · 约 {min}–{max}", scheduler_profile_preview_failed: "无法估算：{detail}", generate_profile: "生成 Profile", stop_calibration: "停止校准",
+      scheduler_profile_model_busy: "该模型正被其他操作使用，请稍后再试。",
       profile_idle: "当前没有正在生成的 profile。", profile_running: "正在为 {name} 生成 scheduler profile...", profile_running_hint: "生成可能需要几分钟。校准运行期间，可以通过下方日志了解进展。", profile_cancelling: "正在停止校准...", profile_cancelled: "校准已停止，未完成的输出已清理，诊断日志已保留。", profile_progress_summary: "已完成 {completed} / {total} · 已用 {elapsed} · 剩余 {remaining}", profile_eta_calculating: "计算中", profile_succeeded: "{name} 的 scheduler profile 已生成。", profile_result_title: "生成结果", profile_failed: "Scheduler profile 生成失败：{detail}", profile_runtime_path: "Runtime profile", profile_store_path: "已存储 profile", profile_report_path: "详细报告",
       metrics_ref: "指标参考",
       ttft_label: "（首 Token 时间）", ttft_desc: "模型开始响应前的延迟。衡量提示词处理（预填充）速度。越低越好。",
@@ -7373,7 +7585,53 @@
       cluster_backend: "通信后端", cluster_backend_desc: "节点间通信使用的传输方式。自动：若 Thunderbolt Bridge 可用则使用 jaccl，否则使用 ring（TCP）。",
       cluster_backend_auto: "自动（默认）", cluster_backend_jaccl: "雷电（jaccl）", cluster_backend_ring: "以太网（ring）",
       cluster_parallel_mode: "并行模式", cluster_parallel_mode_desc: "模型在节点间的切分方式。自动：根据拓扑结构与注意力头可分性选择 TP / PP / Hybrid。",
-      cluster_pm_auto: "自动（默认）", cluster_pm_tp: "张量并行 (TP)", cluster_pm_pp: "流水线并行 (PP)"
+      cluster_pm_auto: "自动（默认）", cluster_pm_tp: "张量并行 (TP)", cluster_pm_pp: "流水线并行 (PP)",
+      model_load_pre_loading: "正在加载模型",
+      model_load_pre_reloading: "正在重新加载模型",
+      model_load_pre_queued: "等待加载",
+      model_load_pre_failed: "加载失败",
+      model_load_elapsed: "已用 {time}",
+      model_load_remaining: "约剩 {time}",
+      model_load_cancel: "取消加载",
+      model_load_background: "后台继续",
+      model_load_cancelling: "正在取消…",
+      model_load_stopping: "正在停止",
+      model_load_view_logs: "查看日志",
+      model_load_ok: "好",
+      model_load_close: "关闭",
+      model_load_stage_verifying_files: "校验模型文件",
+      model_load_stage_verifying_files_dflash2: "校验目标模型与草稿模型",
+      model_load_stage_waiting_for_backend: "等待后端就绪",
+      model_load_stage_syncing_models: "同步本地模型",
+      model_load_stage_restart_backend: "重启后端",
+      model_load_stage_queued: "排队等候",
+      model_load_stage_preparing_memory: "准备内存",
+      model_load_stage_reading_weights: "读取权重",
+      model_load_stage_reading_weights_dflash2: "读取目标模型权重",
+      model_load_stage_building_model: "构建模型",
+      model_load_stage_reading_draft_weights: "读取 MTP 草稿权重",
+      model_load_stage_reading_draft_weights_dflash2: "读取草稿模型权重",
+      model_load_stage_starting_engine: "启动推理",
+      model_load_stage_warming_up: "预热",
+      model_load_row_loading: "加载中",
+      model_load_row_reloading: "重新加载中",
+      model_load_row_queued: "排队中",
+      model_load_row_failed: "加载失败",
+      model_load_indicator_loading: "正在加载 · {pct}%",
+      model_load_indicator_loading_indeterminate: "正在加载",
+      model_load_indicator_reloading: "正在重新加载 · {pct}%",
+      model_load_indicator_reloading_indeterminate: "正在重新加载",
+      model_load_indicator_many: "正在加载 {count} 个模型",
+      model_load_indicator_more_queued: "另 {count} 个排队",
+      model_load_indicator_more: "另 {count} 个",
+      model_load_indicator_label: "查看加载进度",
+      model_load_note_dflash2_restore: "取消会恢复之前的配置并重启后端，原来已加载的模型会重新加载。",
+      model_load_note_dflash2_startup: "取消后会以普通模式重启后端，不加载模型；DFlash2 设置会保留，之后可以再次加载。",
+      model_load_note_reload: "取消后继续使用当前已加载的版本。",
+      model_load_toast_cancelled: "已取消加载 {model}，占用的内存已释放",
+      model_load_toast_reload_cancelled: "已取消重新加载 {model}，继续使用原版本",
+      model_load_toast_dflash2_restored: "已取消以 DFlash2 加载 {model}，已恢复之前的配置，原来的模型正在重新加载",
+      model_load_toast_dflash2_startup: "已取消以 DFlash2 加载 {model}，后端已以普通模式启动，未加载模型；DFlash2 设置已保留"
     },
     "zh-Hant": {
       dsh_manual_configuration: "手動設定",
@@ -7716,6 +7974,8 @@
       incident_step_restart: "開始自動重新啟動後端", incident_step_readiness: "後端健康檢查通過", incident_step_restore: "開始恢復已確認模型", incident_step_stable: "開始穩定性觀察視窗", incident_step_stopped: "停止自動恢復",
       incident_clear_title: "清除全部故障記錄？", incident_clear_confirm: "此操作將永久刪除所有故障歷史記錄，刪除後無法復原。執行日誌不會受到影響。", incident_cleared: "全部故障記錄已清除。", incident_clear_failed: "無法清除故障歷史。", incident_exported: "故障資訊已匯出。", incident_export_failed: "故障資訊匯出失敗。", incident_load_failed: "無法載入故障歷史。",
       runtime_models: "模型執行狀態",
+      scheduler_config_label: "調度設定", scheduler_config_default: "預設", scheduler_config_default_settings_mismatch: "預設（與目前設定不相符）",
+      scheduler_config_profile: "專用 profile",
       runtime_empty_title: "目前沒有執行中的模型",
       runtime_empty_description: "載入模型後，此處將顯示各模型的請求佇列與累計統計。",
       runtime_requests: "請求",
@@ -7895,6 +8155,9 @@
       err_memory_pressure: "GPU 顯存壓力過高，暫時無法載入新模型。請先卸載已載入的模型或釋出顯存後重試。",
       err_gpu_memory_insufficient: "目前可用 GPU 記憶體不足，無法安全載入此模型。請先卸載暫不使用的已載入模型，釋放顯示記憶體後再重試。",
       err_max_loaded_models_reached: "已達到最大同時載入模型數，無法載入新模型。請先卸載暫不使用的已載入模型，再重試。",
+      err_load_result_unknown: "後端已不再回報這次模型載入，結果未知。請確認模型是否已載入，必要時重試。",
+      err_load_failed: "模型載入失敗，原因未能識別。請查看日誌了解詳情。",
+      err_model_task_mismatch: "此模型的類型不支援這類任務或載入設定。",
       err_model_reload_busy: "模型正在處理請求，請等待模型閒置後再切換版本。",
       err_model_memory_limit_exceeded: "已達到模型記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（僅模型）」/切換為自動後重試。",
       err_total_memory_limit_exceeded: "已達到總記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（總量）」/切換為自動後重試。",
@@ -7931,7 +8194,8 @@
       err_dflash2_draft_not_found: "本機沒有相容的 DFlash2 Draft。請下載相符的 Draft 後再試。",
       err_dflash2_acceleration_conflict: "DFlash2 無法與 MTP 或重複文字加速同時啟用。",
       integrity_error_toast: "模型完整性驗證未能完成。技術詳情請查看 App 日誌。",
-      warn_default_scheduler_profile_used: "未找到此模型匹配的 scheduler profile，已使用預設調度設定執行。建議透過 Scheduler Profile 為此模型產生專用 profile，以取得更合適的模型調度參數。",
+      warn_scheduler_profile_hardware_mismatch: "此模型的 scheduler profile 是在其他硬體上產生的，本次使用預設調度設定。在本機重新產生即可取得適合本機的調度。",
+      warn_scheduler_profile_unusable: "此模型的 scheduler profile 無法使用（檔案損壞或已失效），本次使用預設調度設定。請在「模型 → 調度設定」中重新產生。",
       warn_model_reload_deferred: "模型正在處理請求，新參數將在該模型閒置後自動重新載入。",
       err_benchmark_oom: "GPU 記憶體不足以執行 {batch_size}x batch (pp{pp})。預估需要 {need_mb}MB，可用 {avail_mb}MB。請減少批次大小或 prompt 長度。",
       bench_server_unavailable: "伺服器不可用，可能正在重新啟動，請稍後再試。",
@@ -7969,6 +8233,7 @@
       batch_test: "連續批次處理測試", batch_note: "每種批次大小都會對所勾選的每個 prompt 規模各跑一次（tg128）。",
       run_benchmark: "執行基準測試",
       scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "Profile 的作用", scheduler_profile_help_body: "為目前 Mac 上選定的模型產生調度 profile，協助 ironmlx 選擇更合適的執行階段調度參數。", scheduler_profile_help_flow: "流程：選擇模型、選擇策略和校準級別，然後產生 profile。建議在 benchmark 前、切換模型或更換硬體環境後使用。", scheduler_profile_help_levels: "級別：快速驗證最多執行 16 jobs，預計 8–15 分鐘，用於基本確認；標準校準最多執行 48 jobs，預計 40–60 分鐘，建議日常使用；完整校準最多執行 96 jobs，預計 2–2.5 小時，提供最廣覆蓋。", scheduler_profile_strategy: "選擇策略", scheduler_profile_agent_long_prompt: "Agent 長提示詞", scheduler_profile_balanced: "均衡", scheduler_profile_level: "校準級別", scheduler_profile_level_quick: "快速驗證", scheduler_profile_level_standard: "標準校準", scheduler_profile_level_full: "完整校準", scheduler_profile_level_quick_hint: "最多 16 jobs · 預計 8–15 分鐘", scheduler_profile_level_standard_hint: "最多 48 jobs · 預計 40–60 分鐘", scheduler_profile_level_full_hint: "最多 96 jobs · 預計 2–2.5 小時", scheduler_profile_preview_select_model: "選擇模型後顯示預計 jobs 和校準時間。", scheduler_profile_preview_loading: "正在計算 jobs 和預計時間...", scheduler_profile_preview_summary: "預計 {jobs} jobs · 約 {min}–{max}", scheduler_profile_preview_failed: "無法估算：{detail}", generate_profile: "生成 Profile", stop_calibration: "停止校準",
+      scheduler_profile_model_busy: "該模型正被其他操作使用，請稍後再試。",
       profile_idle: "目前沒有正在生成的 profile。", profile_running: "正在為 {name} 生成 scheduler profile...", profile_running_hint: "生成可能需要幾分鐘。校準執行期間，可以透過下方日誌了解進展。", profile_cancelling: "正在停止校準...", profile_cancelled: "校準已停止，未完成的輸出已清理，診斷日誌已保留。", profile_progress_summary: "已完成 {completed} / {total} · 已用 {elapsed} · 剩餘 {remaining}", profile_eta_calculating: "計算中", profile_succeeded: "{name} 的 scheduler profile 已生成。", profile_result_title: "生成結果", profile_failed: "Scheduler profile 生成失敗：{detail}", profile_runtime_path: "Runtime profile", profile_store_path: "已儲存 profile", profile_report_path: "詳細報告",
       metrics_ref: "指標參考",
       ttft_label: "（首 Token 時間）", ttft_desc: "模型開始回應前的延遲。衡量提示詞處理（預填充）速度。越低越好。",
@@ -8094,7 +8359,53 @@
       cluster_backend: "通訊後端", cluster_backend_desc: "節點間通訊使用的傳輸方式。自動：若 Thunderbolt Bridge 可用則使用 jaccl，否則使用 ring（TCP）。",
       cluster_backend_auto: "自動（預設）", cluster_backend_jaccl: "雷電（jaccl）", cluster_backend_ring: "乙太網路（ring）",
       cluster_parallel_mode: "平行模式", cluster_parallel_mode_desc: "模型在節點間的切分方式。自動：根據拓撲結構與注意力頭可分性選擇 TP / PP / Hybrid。",
-      cluster_pm_auto: "自動（預設）", cluster_pm_tp: "張量平行 (TP)", cluster_pm_pp: "管線平行 (PP)"
+      cluster_pm_auto: "自動（預設）", cluster_pm_tp: "張量平行 (TP)", cluster_pm_pp: "管線平行 (PP)",
+      model_load_pre_loading: "正在載入模型",
+      model_load_pre_reloading: "正在重新載入模型",
+      model_load_pre_queued: "等待載入",
+      model_load_pre_failed: "載入失敗",
+      model_load_elapsed: "已用 {time}",
+      model_load_remaining: "約剩 {time}",
+      model_load_cancel: "取消載入",
+      model_load_background: "在背景繼續",
+      model_load_cancelling: "正在取消…",
+      model_load_stopping: "正在停止",
+      model_load_view_logs: "檢視日誌",
+      model_load_ok: "好",
+      model_load_close: "關閉",
+      model_load_stage_verifying_files: "驗證模型檔案",
+      model_load_stage_verifying_files_dflash2: "驗證目標模型與草稿模型",
+      model_load_stage_waiting_for_backend: "等待後端就緒",
+      model_load_stage_syncing_models: "同步本機模型",
+      model_load_stage_restart_backend: "重新啟動後端",
+      model_load_stage_queued: "排隊等候",
+      model_load_stage_preparing_memory: "準備記憶體",
+      model_load_stage_reading_weights: "讀取權重",
+      model_load_stage_reading_weights_dflash2: "讀取目標模型權重",
+      model_load_stage_building_model: "建構模型",
+      model_load_stage_reading_draft_weights: "讀取 MTP 草稿權重",
+      model_load_stage_reading_draft_weights_dflash2: "讀取草稿模型權重",
+      model_load_stage_starting_engine: "啟動推論",
+      model_load_stage_warming_up: "預熱",
+      model_load_row_loading: "載入中",
+      model_load_row_reloading: "重新載入中",
+      model_load_row_queued: "排隊中",
+      model_load_row_failed: "載入失敗",
+      model_load_indicator_loading: "正在載入 · {pct}%",
+      model_load_indicator_loading_indeterminate: "正在載入",
+      model_load_indicator_reloading: "正在重新載入 · {pct}%",
+      model_load_indicator_reloading_indeterminate: "正在重新載入",
+      model_load_indicator_many: "正在載入 {count} 個模型",
+      model_load_indicator_more_queued: "另 {count} 個排隊",
+      model_load_indicator_more: "另 {count} 個",
+      model_load_indicator_label: "查看載入進度",
+      model_load_note_dflash2_restore: "取消會恢復先前的設定並重新啟動後端，原本已載入的模型會重新載入。",
+      model_load_note_dflash2_startup: "取消後會以一般模式重新啟動後端，不載入模型；DFlash2 設定會保留，之後可以再次載入。",
+      model_load_note_reload: "取消後會繼續使用目前已載入的版本。",
+      model_load_toast_cancelled: "已取消載入 {model}，佔用的記憶體已釋放",
+      model_load_toast_reload_cancelled: "已取消重新載入 {model}，繼續使用原版本",
+      model_load_toast_dflash2_restored: "已取消以 DFlash2 載入 {model}，已恢復先前的設定，原本的模型正在重新載入",
+      model_load_toast_dflash2_startup: "已取消以 DFlash2 載入 {model}，後端已以一般模式啟動，未載入模型；DFlash2 設定已保留"
     },
     ja: {
       dsh_manual_configuration: "手動設定",
@@ -8437,6 +8748,8 @@
       incident_step_restart: "バックエンドの自動再起動を開始", incident_step_readiness: "バックエンドの正常性確認に成功", incident_step_restore: "確認済みモデルの復元を開始", incident_step_stable: "安定性監視を開始", incident_step_stopped: "自動復旧を停止",
       incident_clear_title: "すべての障害記録を消去しますか？", incident_clear_confirm: "この操作により、すべての障害履歴が完全に削除され、元に戻すことはできません。実行ログには影響しません。", incident_cleared: "すべての障害記録を消去しました。", incident_clear_failed: "障害履歴を消去できませんでした。", incident_exported: "障害情報をエクスポートしました。", incident_export_failed: "障害情報のエクスポートに失敗しました。", incident_load_failed: "障害履歴を読み込めませんでした。",
       runtime_models: "モデル実行状況",
+      scheduler_config_label: "スケジューラ設定", scheduler_config_default: "デフォルト", scheduler_config_default_settings_mismatch: "デフォルト（現在の設定と一致しません）",
+      scheduler_config_profile: "専用 profile",
       runtime_empty_title: "実行中のモデルはありません",
       runtime_empty_description: "モデルを読み込むと、各モデルのリクエストキューと累計統計がここに表示されます。",
       runtime_requests: "リクエスト",
@@ -8616,6 +8929,9 @@
       err_memory_pressure: "GPU メモリが逼迫しているため、新しいモデルを読み込めません。既存のモデルを解放するなどしてから再度お試しください。",
       err_gpu_memory_insufficient: "利用可能な GPU メモリが不足しているため、このモデルを安全に読み込めません。使用していない読み込み済みモデルをアンロードして GPU メモリを解放してから再試行してください。",
       err_max_loaded_models_reached: "最大同時ロードモデル数に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルを手動でアンロードしてから再試行してください。",
+      err_load_result_unknown: "バックエンドがこのモデル読み込みを報告しなくなったため、結果が不明です。モデルが読み込まれているか確認し、必要に応じて再試行してください。",
+      err_load_failed: "モデルの読み込みに失敗しましたが、原因を特定できませんでした。詳細はログを確認してください。",
+      err_model_task_mismatch: "このモデルの種類は、この種類のタスクまたは読み込み設定に対応していません。",
       err_model_reload_busy: "モデルはリクエストを処理中です。アイドル状態になってからバージョンを切り替えてください。",
       err_model_memory_limit_exceeded: "モデルメモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Model Only)」を上げる/Auto にしてから再試行してください。",
       err_total_memory_limit_exceeded: "総メモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Total)」を上げる/Auto にしてから再試行してください。",
@@ -8652,7 +8968,8 @@
       err_dflash2_draft_not_found: "互換性のある DFlash2 Draft がローカルにありません。対応する Draft をダウンロードしてから再試行してください。",
       err_dflash2_acceleration_conflict: "DFlash2 は MTP または繰り返しテキスト高速化と同時に有効化できません。",
       integrity_error_toast: "モデルの整合性検証を完了できませんでした。技術的な詳細は App ログを確認してください。",
-      warn_default_scheduler_profile_used: "このモデルに一致する scheduler profile が見つかりませんでした。デフォルトのスケジューラ設定で実行しています。モデルに合わせたスケジューリングのため、Scheduler Profile で専用 profile を生成してください。",
+      warn_scheduler_profile_hardware_mismatch: "このモデルの scheduler profile は別のハードウェアで生成されたため、今回はデフォルトのスケジューラ設定を使用します。この Mac で再生成すると、このマシンに合ったスケジューリングになります。",
+      warn_scheduler_profile_unusable: "このモデルの scheduler profile は使用できません（ファイルが破損しているか、無効になっています）。今回はデフォルトのスケジューラ設定を使用します。「モデル → スケジューラ設定」で再生成してください。",
       warn_model_reload_deferred: "モデルはリクエストを処理中です。新しいパラメータはモデルがアイドル状態になった後に自動で適用されます。",
       err_benchmark_oom: "{batch_size}x batch (pp{pp}) を実行するための GPU メモリが不足しています。必要：約 {need_mb}MB、利用可能：{avail_mb}MB。バッチサイズまたは prompt 長を減らしてください。",
       bench_server_unavailable: "サーバーが利用できません。再起動中の可能性があります。しばらくしてから再試行してください。",
@@ -8690,6 +9007,7 @@
       batch_test: "連続バッチテスト", batch_note: "各バッチサイズは選択されたすべての prompt サイズに対してそれぞれ実行されます（tg128）。",
       run_benchmark: "ベンチマーク実行",
       scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "Profile の役割", scheduler_profile_help_body: "この Mac 上で選択したモデル向けの scheduler profile を生成し、ironmlx がより適切な実行時スケジューリングパラメータを選べるようにします。", scheduler_profile_help_flow: "手順: モデル、戦略、校準レベルを選択してから profile を生成します。ベンチマーク前、モデル変更後、またはハードウェア環境を変えた後に使用します。", scheduler_profile_help_levels: "レベル: クイック検証は最大 16 jobs、約 8–15 分で基本確認向けです。標準校準は最大 48 jobs、約 40–60 分で通常利用に推奨します。完全校準は最大 96 jobs、約 2–2.5 時間で最も広い範囲を検証します。", scheduler_profile_strategy: "選択戦略", scheduler_profile_agent_long_prompt: "Agent Long Prompt", scheduler_profile_balanced: "Balanced", scheduler_profile_level: "校準レベル", scheduler_profile_level_quick: "クイック検証", scheduler_profile_level_standard: "標準校準", scheduler_profile_level_full: "完全校準", scheduler_profile_level_quick_hint: "最大 16 jobs · 約 8–15 分", scheduler_profile_level_standard_hint: "最大 48 jobs · 約 40–60 分", scheduler_profile_level_full_hint: "最大 96 jobs · 約 2–2.5 時間", scheduler_profile_preview_select_model: "モデルを選択すると jobs 数と校準時間の目安を表示します。", scheduler_profile_preview_loading: "jobs 数と所要時間を計算しています...", scheduler_profile_preview_summary: "推定 {jobs} jobs · 約 {min}–{max}", scheduler_profile_preview_failed: "推定できません：{detail}", generate_profile: "Profile を生成", stop_calibration: "校準を停止",
+      scheduler_profile_model_busy: "このモデルは別の操作で使用中です。しばらくしてから再試行してください。",
       profile_idle: "実行中の profile 生成はありません。", profile_running: "{name} の scheduler profile を生成中...", profile_running_hint: "生成には数分かかる場合があります。実行中は下のログで進行状況を確認できます。", profile_cancelling: "校準を停止しています...", profile_cancelled: "校準を停止しました。未完了の出力を削除し、診断ログを保持しました。", profile_progress_summary: "完了 {completed} / {total} · 経過 {elapsed} · 残り {remaining}", profile_eta_calculating: "計算中", profile_succeeded: "{name} の scheduler profile を生成しました。", profile_result_title: "生成結果", profile_failed: "Scheduler profile 生成に失敗しました: {detail}", profile_runtime_path: "Runtime profile", profile_store_path: "Stored profile", profile_report_path: "Detailed report",
       metrics_ref: "指標リファレンス",
       ttft_label: "（最初のトークンまでの時間）", ttft_desc: "モデルが応答を開始するまでの遅延。プロンプト処理（プリフィル）速度を測定。低いほど良い。",
@@ -8815,7 +9133,53 @@
       cluster_backend: "通信バックエンド", cluster_backend_desc: "ノード間通信に使用するトランスポート。自動：Thunderbolt Bridge が利用可能なら jaccl、そうでなければ ring（TCP）を選択。",
       cluster_backend_auto: "自動（既定）", cluster_backend_jaccl: "Thunderbolt（jaccl）", cluster_backend_ring: "イーサネット（ring）",
       cluster_parallel_mode: "並列モード", cluster_parallel_mode_desc: "モデルをノード間でどのように分割するか。自動：トポロジとヘッド分割可能性に基づき TP / PP / Hybrid を選択。",
-      cluster_pm_auto: "自動（既定）", cluster_pm_tp: "テンソル並列 (TP)", cluster_pm_pp: "パイプライン並列 (PP)"
+      cluster_pm_auto: "自動（既定）", cluster_pm_tp: "テンソル並列 (TP)", cluster_pm_pp: "パイプライン並列 (PP)",
+      model_load_pre_loading: "モデルをロード中",
+      model_load_pre_reloading: "モデルを再ロード中",
+      model_load_pre_queued: "ロード待ち",
+      model_load_pre_failed: "ロードに失敗しました",
+      model_load_elapsed: "経過 {time}",
+      model_load_remaining: "残り約 {time}",
+      model_load_cancel: "ロードを中止",
+      model_load_background: "バックグラウンドで続行",
+      model_load_cancelling: "中止しています…",
+      model_load_stopping: "停止中",
+      model_load_view_logs: "ログを表示",
+      model_load_ok: "OK",
+      model_load_close: "閉じる",
+      model_load_stage_verifying_files: "モデルファイルを検証",
+      model_load_stage_verifying_files_dflash2: "ターゲットモデルとドラフトモデルを検証",
+      model_load_stage_waiting_for_backend: "バックエンドの準備を待機",
+      model_load_stage_syncing_models: "ローカルモデルを同期",
+      model_load_stage_restart_backend: "バックエンドを再起動",
+      model_load_stage_queued: "順番待ち",
+      model_load_stage_preparing_memory: "メモリを準備",
+      model_load_stage_reading_weights: "重みを読み込み",
+      model_load_stage_reading_weights_dflash2: "ターゲットモデルの重みを読み込み",
+      model_load_stage_building_model: "モデルを構築",
+      model_load_stage_reading_draft_weights: "MTP ドラフトの重みを読み込み",
+      model_load_stage_reading_draft_weights_dflash2: "ドラフトモデルの重みを読み込み",
+      model_load_stage_starting_engine: "推論を開始",
+      model_load_stage_warming_up: "ウォームアップ",
+      model_load_row_loading: "ロード中",
+      model_load_row_reloading: "再ロード中",
+      model_load_row_queued: "順番待ち",
+      model_load_row_failed: "ロード失敗",
+      model_load_indicator_loading: "ロード中 · {pct}%",
+      model_load_indicator_loading_indeterminate: "ロード中",
+      model_load_indicator_reloading: "再ロード中 · {pct}%",
+      model_load_indicator_reloading_indeterminate: "再ロード中",
+      model_load_indicator_many: "{count} 個のモデルをロード中",
+      model_load_indicator_more_queued: "ほか {count} 件が順番待ち",
+      model_load_indicator_more: "ほか {count} 件",
+      model_load_indicator_label: "ロードの進行状況を表示",
+      model_load_note_dflash2_restore: "中止すると以前の設定に戻してバックエンドを再起動し、それまでロードしていたモデルを再びロードします。",
+      model_load_note_dflash2_startup: "中止するとバックエンドを通常モードで再起動し、モデルはロードしません。DFlash2 の設定は残るので、後でもう一度ロードできます。",
+      model_load_note_reload: "中止すると、現在ロードされているバージョンをそのまま使います。",
+      model_load_toast_cancelled: "{model} のロードを中止し、使用していたメモリを解放しました",
+      model_load_toast_reload_cancelled: "{model} の再ロードを中止しました。元のバージョンを引き続き使います",
+      model_load_toast_dflash2_restored: "{model} の DFlash2 ロードを中止しました。以前の設定に戻し、元のモデルを再ロードしています",
+      model_load_toast_dflash2_startup: "{model} の DFlash2 ロードを中止しました。バックエンドは通常モードで起動し、モデルはロードされていません。DFlash2 の設定は残っています"
     },
     ko: {
       dsh_manual_configuration: "수동 설정",
@@ -9158,6 +9522,8 @@
       incident_step_restart: "백엔드 자동 재시작 시작", incident_step_readiness: "백엔드 상태 확인 통과", incident_step_restore: "확인된 모델 복원 시작", incident_step_stable: "안정성 관찰 시작", incident_step_stopped: "자동 복구 중지",
       incident_clear_title: "모든 장애 기록을 지우시겠습니까?", incident_clear_confirm: "이 작업은 모든 장애 기록을 영구적으로 삭제하며 되돌릴 수 없습니다. 실행 로그에는 영향을 주지 않습니다.", incident_cleared: "모든 장애 기록을 지웠습니다.", incident_clear_failed: "장애 기록을 지울 수 없습니다.", incident_exported: "장애 정보를 내보냈습니다.", incident_export_failed: "장애 정보 내보내기에 실패했습니다.", incident_load_failed: "장애 기록을 불러올 수 없습니다.",
       runtime_models: "모델 실행 상태",
+      scheduler_config_label: "스케줄러 설정", scheduler_config_default: "기본", scheduler_config_default_settings_mismatch: "기본(현재 설정과 맞지 않음)",
+      scheduler_config_profile: "전용 profile",
       runtime_empty_title: "실행 중인 모델이 없습니다",
       runtime_empty_description: "모델을 로드하면 각 모델의 요청 대기열과 누적 통계가 여기에 표시됩니다.",
       runtime_requests: "요청",
@@ -9337,6 +9703,9 @@
       err_memory_pressure: "GPU 메모리 사용량이 높아 새 모델을 로드할 수 없습니다. 기존 모델을 언로드하거나 메모리를 확보한 후 다시 시도해 주세요.",
       err_gpu_memory_insufficient: "사용 가능한 GPU 메모리가 부족하여 이 모델을 안전하게 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하여 GPU 메모리를 확보한 뒤 다시 시도하세요.",
       err_max_loaded_models_reached: "최대 동시 로드 모델 수에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 먼저 언로드한 뒤 다시 시도하세요.",
+      err_load_result_unknown: "백엔드가 더 이상 이 모델 로드를 보고하지 않아 결과를 알 수 없습니다. 모델이 로드되었는지 확인하고 필요하면 다시 시도하세요.",
+      err_load_failed: "모델 로드에 실패했지만 원인을 확인할 수 없습니다. 자세한 내용은 로그를 확인하세요.",
+      err_model_task_mismatch: "이 모델 유형은 이런 작업이나 로드 설정을 지원하지 않습니다.",
       err_model_reload_busy: "모델이 요청을 처리 중입니다. 유휴 상태가 된 후 버전을 전환하세요.",
       err_model_memory_limit_exceeded: "모델 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Model Only)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
       err_total_memory_limit_exceeded: "총 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Total)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
@@ -9373,7 +9742,8 @@
       err_dflash2_draft_not_found: "호환되는 DFlash2 Draft를 로컬에서 사용할 수 없습니다. 일치하는 Draft를 다운로드한 뒤 시도하십시오.",
       err_dflash2_acceleration_conflict: "DFlash2는 MTP 또는 반복 텍스트 가속과 동시에 활성화할 수 없습니다.",
       integrity_error_toast: "모델 무결성 검증을 완료하지 못했습니다. 기술 세부 정보는 App 로그를 확인하십시오.",
-      warn_default_scheduler_profile_used: "이 모델에 맞는 scheduler profile을 찾지 못했습니다. 기본 스케줄러 설정으로 실행 중입니다. 모델에 맞는 스케줄링을 위해 Scheduler Profile에서 전용 profile을 생성하세요.",
+      warn_scheduler_profile_hardware_mismatch: "이 모델의 scheduler profile은 다른 하드웨어에서 생성되어 이번에는 기본 스케줄러 설정을 사용합니다. 이 Mac에서 다시 생성하면 이 기기에 맞는 스케줄링을 사용할 수 있습니다.",
+      warn_scheduler_profile_unusable: "이 모델의 scheduler profile을 사용할 수 없어(파일 손상 또는 만료) 이번에는 기본 스케줄러 설정을 사용합니다. '모델 → 스케줄러 설정'에서 다시 생성하세요.",
       warn_model_reload_deferred: "모델이 요청을 처리 중입니다. 새 파라미터는 모델이 유휴 상태가 된 뒤 자동으로 적용됩니다.",
       err_benchmark_oom: "{batch_size}x batch (pp{pp})를 실행하기에 GPU 메모리가 부족합니다. 예상: {need_mb}MB, 가용: {avail_mb}MB. 배치 크기 또는 prompt 길이를 줄여 주세요.",
       bench_server_unavailable: "서버를 사용할 수 없습니다. 재시작 중일 수 있습니다. 잠시 후 다시 시도하세요.",
@@ -9411,6 +9781,7 @@
       batch_test: "연속 배치 테스트", batch_note: "각 배치 크기는 선택된 모든 prompt 크기에 대해 한 번씩 실행됩니다 (tg128).",
       run_benchmark: "벤치마크 실행",
       scheduler_profile: "Scheduler Profile", scheduler_profile_help_title: "Profile 역할", scheduler_profile_help_body: "이 Mac에서 선택한 모델의 scheduler profile을 생성하여 ironmlx가 더 적절한 런타임 스케줄링 파라미터를 선택하도록 돕습니다.", scheduler_profile_help_flow: "흐름: 모델, 전략, 보정 수준을 선택한 뒤 profile을 생성합니다. 벤치마크 전, 모델 변경 후 또는 하드웨어 환경 변경 후 사용하세요.", scheduler_profile_help_levels: "수준: 빠른 검증은 최대 16 jobs, 약 8–15분으로 기본 확인에 적합합니다. 표준 보정은 최대 48 jobs, 약 40–60분으로 일반적인 사용에 권장됩니다. 전체 보정은 최대 96 jobs, 약 2–2.5시간으로 가장 넓은 범위를 검증합니다.", scheduler_profile_strategy: "선택 전략", scheduler_profile_agent_long_prompt: "Agent Long Prompt", scheduler_profile_balanced: "Balanced", scheduler_profile_level: "보정 수준", scheduler_profile_level_quick: "빠른 검증", scheduler_profile_level_standard: "표준 보정", scheduler_profile_level_full: "전체 보정", scheduler_profile_level_quick_hint: "최대 16 jobs · 예상 8–15분", scheduler_profile_level_standard_hint: "최대 48 jobs · 예상 40–60분", scheduler_profile_level_full_hint: "최대 96 jobs · 예상 2–2.5시간", scheduler_profile_preview_select_model: "모델을 선택하면 예상 jobs 수와 보정 시간을 표시합니다.", scheduler_profile_preview_loading: "jobs 수와 예상 시간을 계산하는 중...", scheduler_profile_preview_summary: "예상 {jobs} jobs · 약 {min}–{max}", scheduler_profile_preview_failed: "예상할 수 없음: {detail}", generate_profile: "Profile 생성", stop_calibration: "보정 중지",
+      scheduler_profile_model_busy: "이 모델은 다른 작업에서 사용 중입니다. 잠시 후 다시 시도하세요.",
       profile_idle: "실행 중인 profile 생성이 없습니다.", profile_running: "{name} scheduler profile 생성 중...", profile_running_hint: "생성에는 몇 분이 걸릴 수 있습니다. 실행 중에는 아래 로그로 진행 상황을 확인할 수 있습니다.", profile_cancelling: "보정을 중지하는 중...", profile_cancelled: "보정을 중지했습니다. 완료되지 않은 출력은 삭제하고 진단 로그는 유지했습니다.", profile_progress_summary: "완료 {completed} / {total} · 경과 {elapsed} · 남음 {remaining}", profile_eta_calculating: "계산 중", profile_succeeded: "{name} scheduler profile을 생성했습니다.", profile_result_title: "생성 결과", profile_failed: "Scheduler profile 생성 실패: {detail}", profile_runtime_path: "Runtime profile", profile_store_path: "Stored profile", profile_report_path: "Detailed report",
       metrics_ref: "지표 참조",
       ttft_label: "(첫 토큰까지 시간)", ttft_desc: "모델이 응답을 시작하기 전 지연. 프롬프트 처리(프리필) 속도 측정. 낮을수록 좋음.",
@@ -9536,7 +9907,53 @@
       cluster_backend: "통신 백엔드", cluster_backend_desc: "노드 간 통신에 사용하는 전송 방식. 자동: Thunderbolt Bridge 사용 가능 시 jaccl, 그렇지 않으면 ring(TCP).",
       cluster_backend_auto: "자동 (기본)", cluster_backend_jaccl: "Thunderbolt (jaccl)", cluster_backend_ring: "이더넷 (ring)",
       cluster_parallel_mode: "병렬 모드", cluster_parallel_mode_desc: "모델을 노드 간에 분할하는 방식. 자동: 토폴로지와 헤드 분할 가능성에 따라 TP / PP / Hybrid 선택.",
-      cluster_pm_auto: "자동 (기본)", cluster_pm_tp: "텐서 병렬 (TP)", cluster_pm_pp: "파이프라인 병렬 (PP)"
+      cluster_pm_auto: "자동 (기본)", cluster_pm_tp: "텐서 병렬 (TP)", cluster_pm_pp: "파이프라인 병렬 (PP)",
+      model_load_pre_loading: "모델 로드 중",
+      model_load_pre_reloading: "모델 다시 로드 중",
+      model_load_pre_queued: "로드 대기 중",
+      model_load_pre_failed: "로드 실패",
+      model_load_elapsed: "경과 {time}",
+      model_load_remaining: "약 {time} 남음",
+      model_load_cancel: "로드 취소",
+      model_load_background: "백그라운드에서 계속",
+      model_load_cancelling: "취소하는 중…",
+      model_load_stopping: "중지하는 중",
+      model_load_view_logs: "로그 보기",
+      model_load_ok: "확인",
+      model_load_close: "닫기",
+      model_load_stage_verifying_files: "모델 파일 확인",
+      model_load_stage_verifying_files_dflash2: "대상 모델과 드래프트 모델 확인",
+      model_load_stage_waiting_for_backend: "백엔드 준비 대기",
+      model_load_stage_syncing_models: "로컬 모델 동기화",
+      model_load_stage_restart_backend: "백엔드 다시 시작",
+      model_load_stage_queued: "대기열에서 대기",
+      model_load_stage_preparing_memory: "메모리 준비",
+      model_load_stage_reading_weights: "가중치 읽기",
+      model_load_stage_reading_weights_dflash2: "대상 모델 가중치 읽기",
+      model_load_stage_building_model: "모델 구성",
+      model_load_stage_reading_draft_weights: "MTP 드래프트 가중치 읽기",
+      model_load_stage_reading_draft_weights_dflash2: "드래프트 모델 가중치 읽기",
+      model_load_stage_starting_engine: "추론 시작",
+      model_load_stage_warming_up: "워밍업",
+      model_load_row_loading: "로드 중",
+      model_load_row_reloading: "다시 로드 중",
+      model_load_row_queued: "대기 중",
+      model_load_row_failed: "로드 실패",
+      model_load_indicator_loading: "로드 중 · {pct}%",
+      model_load_indicator_loading_indeterminate: "로드 중",
+      model_load_indicator_reloading: "다시 로드 중 · {pct}%",
+      model_load_indicator_reloading_indeterminate: "다시 로드 중",
+      model_load_indicator_many: "모델 {count}개 로드 중",
+      model_load_indicator_more_queued: "{count}개 더 대기 중",
+      model_load_indicator_more: "{count}개 더",
+      model_load_indicator_label: "로드 진행 상황 보기",
+      model_load_note_dflash2_restore: "취소하면 이전 설정으로 되돌리고 백엔드를 다시 시작하며, 이전에 로드된 모델을 다시 로드합니다.",
+      model_load_note_dflash2_startup: "취소하면 백엔드를 일반 모드로 다시 시작하고 모델은 로드하지 않습니다. DFlash2 설정은 유지되므로 나중에 다시 로드할 수 있습니다.",
+      model_load_note_reload: "취소하면 현재 로드된 버전을 계속 사용합니다.",
+      model_load_toast_cancelled: "{model} 로드를 취소하고 사용하던 메모리를 해제했습니다",
+      model_load_toast_reload_cancelled: "{model} 다시 로드를 취소했습니다. 기존 버전을 계속 사용합니다",
+      model_load_toast_dflash2_restored: "{model}의 DFlash2 로드를 취소했습니다. 이전 설정으로 되돌리고 기존 모델을 다시 로드하고 있습니다",
+      model_load_toast_dflash2_startup: "{model}의 DFlash2 로드를 취소했습니다. 백엔드는 모델 없이 일반 모드로 시작했으며 DFlash2 설정은 유지됩니다"
     }
   };
 
@@ -9613,10 +10030,13 @@
     // Re-render model list to update action buttons text
     syncModelList();
     renderRuntimeModels(window.__RUNTIME_MODELS__ || []);
+    refreshOpenParamsSchedulerProfile();
     renderVoiceProfiles({ data: voiceProfiles });
     if (incidentSummaries.length) renderIncidentHistory({ incidents: incidentSummaries });
     if (typeof renderDownloadQueue === 'function') renderDownloadQueue(downloadQueueSnapshot);
     renderSupportedModels();
+    renderModelLoadIndicator(modelLoadActivities);
+    if (modelLoadPanelModel) renderModelLoadPanel(modelLoadActivityFor(modelLoadPanelModel));
   }
 
   function selectInterfaceLanguage(value) {
@@ -9987,6 +10407,7 @@
       return;
     }
     if (page !== 'models') clearCompletedHuggingFaceSearchState();
+    closeModelLoadPanel();
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     const navItem = document.querySelector('.nav-item[data-page="' + page + '"]');
@@ -10411,7 +10832,9 @@
     }
     if (result.success) {
       clearServerBanner();
-      if (result.warning) {
+      // Older backends report every default-configuration load this way;
+      // that case is shown passively now.
+      if (result.warning && result.warning_code !== 'default_scheduler_profile_used') {
         showToast(localizeWarningResult(result), 'info');
       }
       // Single source of truth: re-render from backend state
@@ -10436,7 +10859,10 @@
       });
       return; // async continuation handles both branches above
     } else if (result.error) {
-      showToast(localizeErrorResult(result), 'warn');
+      const panelActivity = modelLoadPanelModel ? modelLoadActivityFor(modelLoadPanelModel) : null;
+      if (!MODEL_LOAD_CANCEL_TOASTS[result.code] && !(panelActivity && panelActivity.state === 'failed')) {
+        showToast(localizeErrorResult(result, 'err_load_failed'), 'warn');
+      }
       // Re-render to reset button from "Loading..." back to correct state
       syncModelList();
     }
@@ -10549,6 +10975,655 @@
     window.__INIT_DONE__ = true;
     // Re-render model list — loaded status comes from backend
     syncModelList();
+  }
+
+  // ── Model load progress ──
+  // Load state comes only from `onModelLoadsChanged` (the App's
+  // ModelLoadActivityCenter), so the panel, the sidebar indicator and the
+  // model rows survive page switches and list re-renders. The load buttons
+  // only give instant feedback until the first update arrives.
+  const MODEL_LOAD_TERMINAL_STATES = ['loaded', 'failed', 'cancelled'];
+  const MODEL_LOAD_WEIGHT_STAGES = ['reading_weights', 'reading_draft_weights'];
+  // Display steps in load order. DFlash2's stop and restart of the backend
+  // are one step.
+  const MODEL_LOAD_STEP_ORDER = ['verifying_files', 'waiting_for_backend', 'syncing_models', 'restart_backend', 'queued',
+    'preparing_memory', 'reading_weights', 'building_model', 'reading_draft_weights', 'starting_engine', 'warming_up'];
+  // Steps a load of each variant always goes through; other steps show once reached.
+  const MODEL_LOAD_PLANNED_STEPS = {
+    plain: ['preparing_memory', 'reading_weights', 'building_model', 'starting_engine'],
+    mtp: ['preparing_memory', 'reading_weights', 'building_model', 'reading_draft_weights', 'starting_engine'],
+    dflash2: ['verifying_files', 'restart_backend', 'reading_weights', 'building_model', 'reading_draft_weights', 'warming_up'],
+  };
+  // Waits that only deserve a step while they last or when they took a while.
+  const MODEL_LOAD_BRIEF_STEPS = ['waiting_for_backend', 'syncing_models', 'queued'];
+  const MODEL_LOAD_STEP_LABELS = {
+    verifying_files: 'model_load_stage_verifying_files',
+    waiting_for_backend: 'model_load_stage_waiting_for_backend',
+    syncing_models: 'model_load_stage_syncing_models',
+    restart_backend: 'model_load_stage_restart_backend',
+    queued: 'model_load_stage_queued',
+    preparing_memory: 'model_load_stage_preparing_memory',
+    reading_weights: 'model_load_stage_reading_weights',
+    building_model: 'model_load_stage_building_model',
+    reading_draft_weights: 'model_load_stage_reading_draft_weights',
+    starting_engine: 'model_load_stage_starting_engine',
+    warming_up: 'model_load_stage_warming_up',
+  };
+  const MODEL_LOAD_DFLASH2_STEP_LABELS = {
+    verifying_files: 'model_load_stage_verifying_files_dflash2',
+    reading_weights: 'model_load_stage_reading_weights_dflash2',
+    reading_draft_weights: 'model_load_stage_reading_draft_weights_dflash2',
+  };
+  const MODEL_LOAD_CANCEL_TOASTS = {
+    load_cancelled: 'model_load_toast_cancelled',
+    reload_cancelled: 'model_load_toast_reload_cancelled',
+    dflash2_cancelled_restored: 'model_load_toast_dflash2_restored',
+    dflash2_startup_cancelled: 'model_load_toast_dflash2_startup',
+  };
+  const MODEL_LOAD_CHECK_ICON = '<svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden="true"><path d="M2 5.2l2 2L8 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const MODEL_LOAD_CLOSE_ICON = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+  let modelLoadActivities = [];
+  let modelLoadPanelModel = '';
+  let modelLoadPanelTimer = null;
+  // The activity each model row shows a load state for.
+  let modelLoadRowActivities = {};
+  // Rows that just left their load state, by model: their unload button
+  // stays disabled for a moment, so a click aimed at the "Cancel" that was
+  // in the same place does not unload. Each entry is the timer that ends it.
+  const modelLoadRowSettling = {};
+  const MODEL_LOAD_ROW_SETTLE_MS = 1000;
+  const modelLoadPercentFloor = {};
+  const modelLoadLastState = {};
+  const modelLoadAutoOpened = {};
+  const modelLoadCancelRequested = {};
+  const modelLoadAcknowledged = new Set();
+
+  function onModelLoadsChanged(json) {
+    let payload = null;
+    try {
+      payload = typeof json === 'string' ? JSON.parse(json) : json;
+    } catch (e) {
+      console.error('onModelLoadsChanged: JSON.parse failed', e);
+      return;
+    }
+    modelLoadActivities = (payload && Array.isArray(payload.loads) ? payload.loads : [])
+      .filter(activity => activity && activity.model
+        && !(activity.state === 'failed' && modelLoadAcknowledged.has(modelLoadKey(activity))));
+    let autoOpen = '';
+    const present = new Set();
+    modelLoadActivities.forEach(activity => {
+      const key = modelLoadKey(activity);
+      const before = modelLoadLastState[activity.model];
+      present.add(activity.model);
+      if (activity.state === 'cancelled' && before && before.key === key
+        && !MODEL_LOAD_TERMINAL_STATES.includes(before.state)) {
+        showModelLoadCancelToast(activity);
+      }
+      modelLoadLastState[activity.model] = { key, state: activity.state };
+      if (modelLoadCancelRequested[activity.model] !== key
+        || (activity.state !== 'loading' && activity.state !== 'queued')) {
+        delete modelLoadCancelRequested[activity.model];
+      }
+      if (activity.autoOpenPanel && !MODEL_LOAD_TERMINAL_STATES.includes(activity.state)
+        && !modelLoadAutoOpened[key]) {
+        modelLoadAutoOpened[key] = true;
+        autoOpen = activity.model;
+      }
+    });
+    Object.keys(modelLoadLastState).forEach(model => {
+      if (!present.has(model)) {
+        delete modelLoadLastState[model];
+        delete modelLoadCancelRequested[model];
+      }
+    });
+    if (modelLoadPanelModel) {
+      const shown = modelLoadActivityFor(modelLoadPanelModel);
+      if (!shown || shown.state === 'loaded' || shown.state === 'cancelled') {
+        closeModelLoadPanel();
+      }
+    }
+    if (autoOpen) {
+      openModelLoadPanel(autoOpen);
+    } else if (modelLoadPanelModel) {
+      renderModelLoadPanel(modelLoadActivityFor(modelLoadPanelModel));
+    }
+    renderModelLoadViews();
+  }
+
+  // Re-renders the indicator and the visible model rows. A row whose load
+  // ended shows the model's own state at once; a fresh scan then confirms
+  // it from the backend.
+  function renderModelLoadViews() {
+    renderModelLoadIndicator(modelLoadActivities);
+    const shown = {};
+    modelLoadActivities.forEach(activity => {
+      if (modelLoadRowState(activity.model)) shown[activity.model] = activity;
+    });
+    const ended = Object.keys(modelLoadRowActivities).filter(model => !shown[model]);
+    ended.forEach(model => restoreModelLoadRow(model,
+      modelLoadActivityFor(model) || modelLoadRowActivities[model]));
+    modelLoadRowActivities = shown;
+    refreshModelLoadRows();
+    if (ended.length) syncModelList();
+  }
+
+  // Whether the model is loaded after `activity`, the last load its row
+  // showed: a reload keeps a version loaded whatever its result, a new load
+  // only when it succeeded, and a load no longer listed mid-way leaves the
+  // last scan's answer.
+  function modelLoadEndsLoaded(activity, scanned) {
+    if (activity.state === 'loaded' || activity.kind === 'reload') return true;
+    if (MODEL_LOAD_TERMINAL_STATES.includes(activity.state)) return false;
+    return !!(scanned && scanned.loaded);
+  }
+
+  // Rewrites the model's row from its scanned state, as left by `activity`.
+  function restoreModelLoadRow(modelId, activity) {
+    if (modelLoadRowSettling[modelId]) clearTimeout(modelLoadRowSettling[modelId]);
+    modelLoadRowSettling[modelId] = setTimeout(function() { settleModelLoadRow(modelId); },
+      MODEL_LOAD_ROW_SETTLE_MS);
+    const scanned = window.__LOCAL_MODELS__ && window.__LOCAL_MODELS__[modelId];
+    if (!scanned) return;
+    scanned.loaded = modelLoadEndsLoaded(activity, scanned);
+    document.querySelectorAll('#tab-models-manage tbody tr').forEach(row => {
+      if (row.dataset.modelId === modelId) row.innerHTML = modelRowHTML(scanned);
+    });
+  }
+
+  // Ends a row's settle period: enables the unload button of whatever row
+  // shows the model now (a rescan may have replaced it, or removed it).
+  function settleModelLoadRow(modelId) {
+    delete modelLoadRowSettling[modelId];
+    document.querySelectorAll('#tab-models-manage tbody tr').forEach(row => {
+      if (row.dataset.modelId !== modelId) return;
+      const unload = row.querySelector('.action-unload');
+      if (!unload) return;
+      unload.disabled = false;
+      unload.removeAttribute('disabled');
+    });
+  }
+
+  function modelLoadKey(activity) {
+    return activity.model + '|' + activity.startedAt;
+  }
+
+  function modelLoadActivityFor(modelId) {
+    return modelLoadActivities.find(activity => activity.model === modelId) || null;
+  }
+
+  function modelLoadState(activity) {
+    if (modelLoadCancelRequested[activity.model] === modelLoadKey(activity)) return 'cancelling';
+    return activity.state;
+  }
+
+  function modelLoadDisplayName(modelId) {
+    const local = window.__LOCAL_MODELS__ && window.__LOCAL_MODELS__[modelId];
+    return String((local && local.display_name) || modelId).split('/').pop();
+  }
+
+  // Whole percent of weights read; never lower than already shown for this
+  // load (a late exact draft size can grow the total). Null when the backend
+  // has not reported sizes yet.
+  function modelLoadPercent(activity) {
+    const total = Number(activity.bytesTotal) || 0;
+    if (total <= 0) return null;
+    const read = Math.floor(Math.min(1, Math.max(0, (Number(activity.bytesDone) || 0) / total)) * 100);
+    const key = modelLoadKey(activity);
+    const shown = Math.max(modelLoadPercentFloor[key] || 0, read);
+    modelLoadPercentFloor[key] = shown;
+    return shown;
+  }
+
+  function formatLoadDuration(ms) {
+    const seconds = Math.floor(Math.max(0, Number(ms) || 0) / 1000);
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const rest = String(seconds % 60).padStart(2, '0');
+    return hours ? hours + ':' + String(minutes).padStart(2, '0') + ':' + rest : minutes + ':' + rest;
+  }
+
+  function formatLoadBytes(bytes) {
+    const value = Math.max(0, Number(bytes) || 0);
+    if (value >= 1024 ** 3) return (value / 1024 ** 3).toFixed(1) + ' GB';
+    return Math.round(value / 1024 ** 2) + ' MB';
+  }
+
+  // Elapsed time, plus the time left while weights are read: only after at
+  // least 10% of the bytes and 3 seconds in the current stage, from the read
+  // rate over all weight-reading stages so far.
+  function formatLoadEta(activity, nowMs) {
+    const elapsedMs = Math.max(0, nowMs - (Number(activity.startedAt) || nowMs));
+    const completed = Array.isArray(activity.completedStages) ? activity.completedStages : [];
+    const completedMs = completed.reduce((sum, stage) => sum + (Number(stage.elapsedMs) || 0), 0);
+    const stageMs = Math.max(0, elapsedMs - completedMs);
+    const done = Number(activity.bytesDone) || 0;
+    const total = Number(activity.bytesTotal) || 0;
+    let remaining = '';
+    if (activity.state === 'loading' && MODEL_LOAD_WEIGHT_STAGES.includes(activity.stage)
+      && total > 0 && done < total && done / total >= 0.1 && stageMs >= 3000) {
+      const readingMs = stageMs + completed
+        .filter(stage => MODEL_LOAD_WEIGHT_STAGES.includes(stage.stage))
+        .reduce((sum, stage) => sum + (Number(stage.elapsedMs) || 0), 0);
+      remaining = formatLoadDuration(Math.ceil((total - done) * readingMs / done / 1000) * 1000);
+    }
+    const elapsed = formatLoadDuration(elapsedMs);
+    const text = t('model_load_elapsed').replace('{time}', elapsed)
+      + (remaining ? ' · ' + t('model_load_remaining').replace('{time}', remaining) : '');
+    return { elapsed, remaining, text };
+  }
+
+  function modelLoadStep(stage) {
+    return stage === 'stopping_backend' || stage === 'restarting_backend' ? 'restart_backend' : stage;
+  }
+
+  function modelLoadStepLabel(step, variant) {
+    const key = (variant === 'dflash2' && MODEL_LOAD_DFLASH2_STEP_LABELS[step]) || MODEL_LOAD_STEP_LABELS[step];
+    return key ? t(key) : step;
+  }
+
+  // The steps to list: finished ones with their time, the current one, and
+  // the planned ones still ahead. A failure lists only what happened.
+  function modelLoadSteps(activity, nowMs) {
+    const done = {};
+    let completedTotal = 0;
+    let lastDone = -1;
+    (Array.isArray(activity.completedStages) ? activity.completedStages : []).forEach(entry => {
+      const step = modelLoadStep(entry.stage);
+      const ms = Number(entry.elapsedMs) || 0;
+      done[step] = (done[step] || 0) + ms;
+      completedTotal += ms;
+      lastDone = Math.max(lastDone, MODEL_LOAD_STEP_ORDER.indexOf(step));
+    });
+    const state = modelLoadState(activity);
+    const current = state === 'loaded' ? '' : modelLoadStep(activity.stage || '');
+    const currentIndex = current ? MODEL_LOAD_STEP_ORDER.indexOf(current) : -1;
+    const reached = Math.max(currentIndex, lastDone);
+    const planned = MODEL_LOAD_PLANNED_STEPS[activity.variant] || MODEL_LOAD_PLANNED_STEPS.plain;
+    const steps = [];
+    MODEL_LOAD_STEP_ORDER.forEach((step, index) => {
+      const label = modelLoadStepLabel(step, activity.variant);
+      if (step === current) {
+        const ms = Math.max(0, nowMs - (Number(activity.startedAt) || nowMs) - completedTotal) + (done[step] || 0);
+        steps.push({ step, label, status: state === 'failed' ? 'failed' : 'current',
+          time: state === 'loading' || state === 'queued' ? formatLoadDuration(ms) : '' });
+      } else if (step in done) {
+        if (MODEL_LOAD_BRIEF_STEPS.includes(step) && done[step] < 1000) return;
+        steps.push({ step, label, status: 'done', time: formatLoadDuration(done[step]) });
+      } else if (state !== 'failed' && planned.includes(step) && index > reached) {
+        steps.push({ step, label, status: 'pending', time: '' });
+      }
+    });
+    return steps;
+  }
+
+  // The panel is split into parts, each rewritten only when its own markup
+  // changes; the values that move every tick (bar width, amount, times) are
+  // written in place, so buttons and spinners stay the same nodes and clicks
+  // are not lost between a mousedown and a mouseup.
+  const MODEL_LOAD_PANEL_PARTS = ['head', 'progress', 'steps', 'extra', 'actions'];
+
+  function modelLoadPanelParts(activity, nowMs) {
+    const state = modelLoadState(activity);
+    const failed = state === 'failed';
+    const cancelling = state === 'cancelling';
+    const reload = activity.kind === 'reload';
+    const pre = failed ? t('model_load_pre_failed')
+      : state === 'queued' ? t('model_load_pre_queued')
+      : reload ? t('model_load_pre_reloading') : t('model_load_pre_loading');
+    const variant = activity.variant === 'mtp' ? t('action_load_mtp')
+      : activity.variant === 'dflash2' ? t('action_load_dflash2') : '';
+    const parts = { failed, percent: null, amount: '', eta: '', stepTimes: [], progress: '', extra: '' };
+    parts.head = '<button class="model-load-close" type="button" data-load-action="close" onclick="closeModelLoadPanel()"'
+      + ' aria-label="' + escapeAttr(t('model_load_close')) + '">' + MODEL_LOAD_CLOSE_ICON + '</button>'
+      + '<div class="model-load-pre">' + escapeAttr(pre) + '</div>'
+      + '<h3 class="model-load-title" id="model-load-title" title="' + escapeAttr(activity.model) + '">'
+      + escapeAttr(modelLoadDisplayName(activity.model))
+      + (variant ? '<span class="model-load-variant">' + escapeAttr(variant) + '</span>' : '') + '</h3>';
+    if (!failed) {
+      parts.percent = state === 'queued' ? null : modelLoadPercent(activity);
+      parts.amount = parts.percent === null ? ''
+        : '<b>' + formatLoadBytes(activity.bytesDone) + '</b> / ' + formatLoadBytes(activity.bytesTotal) + ' · ' + parts.percent + '%';
+      parts.eta = formatLoadEta(activity, nowMs).text;
+      parts.progress = '<div class="model-load-progress">'
+        + '<div class="model-load-bar' + (parts.percent === null ? ' is-indeterminate' : '') + (cancelling ? ' is-muted' : '') + '">'
+        + '<i class="model-load-fill"></i></div>'
+        + '<div class="model-load-numbers"><span class="model-load-amount"></span><span class="model-load-eta"></span></div></div>';
+    }
+    const steps = modelLoadSteps(activity, nowMs);
+    parts.stepTimes = steps.map(step => step.time);
+    parts.steps = '<ul class="model-load-steps">' + steps.map(step => {
+      const label = step.status === 'current' && cancelling
+        ? step.label + ' · ' + t('model_load_stopping') : step.label;
+      return '<li class="model-load-step is-' + step.status + '">'
+        + '<span class="model-load-step-mark">' + (step.status === 'done' ? MODEL_LOAD_CHECK_ICON : step.status === 'failed' ? '!' : '') + '</span>'
+        + '<span class="model-load-step-label">' + escapeAttr(label) + '</span>'
+        + '<span class="model-load-step-time"></span></li>';
+    }).join('') + '</ul>';
+    if (failed) {
+      const detail = modelLoadFailureDetail(activity);
+      parts.extra = '<div class="model-load-error">' + escapeAttr(modelLoadFailureText(activity)) + '</div>'
+        + (detail ? '<div class="model-load-error-detail">' + escapeAttr(detail) + '</div>' : '');
+      parts.actions = '<div class="model-load-actions">'
+        + '<button class="btn-secondary is-leading" type="button" data-load-action="logs" onclick="viewModelLoadLogs()">' + escapeAttr(t('model_load_view_logs')) + '</button>'
+        + '<button class="btn-primary" type="button" data-load-action="ok" onclick="closeModelLoadPanel()">' + escapeAttr(t('model_load_ok')) + '</button></div>';
+    } else {
+      const note = activity.variant === 'dflash2'
+        ? (activity.origin === 'dashboard' ? t('model_load_note_dflash2_restore') : t('model_load_note_dflash2_startup'))
+        : reload ? t('model_load_note_reload') : '';
+      if (note) parts.extra = '<div class="model-load-note">' + escapeAttr(note) + '</div>';
+      const canCancel = !cancelling && activity.cancellable;
+      parts.actions = '<div class="model-load-actions">'
+        + '<button class="btn-secondary model-load-cancel is-leading" type="button" data-load-action="cancel"'
+        + ' data-model="' + escapeAttr(activity.model) + '" onclick="cancelModelLoadFromUI(this.dataset.model)"'
+        + (canCancel ? '' : ' disabled') + '>' + escapeAttr(cancelling ? t('model_load_cancelling') : t('model_load_cancel')) + '</button>'
+        + '<button class="btn-primary" type="button" data-load-action="background" onclick="closeModelLoadPanel()"'
+        + (cancelling ? ' disabled' : '') + '>' + escapeAttr(t('model_load_background')) + '</button></div>';
+    }
+    return parts;
+  }
+
+  // Updates the panel for `activity` (or empties it) and returns the panel's
+  // markup with the current values filled in.
+  function renderModelLoadPanel(activity) {
+    const panel = document.getElementById('model-load-panel');
+    if (!activity) {
+      if (panel) {
+        panel.innerHTML = '';
+        panel.__loadParts = null;
+      }
+      return '';
+    }
+    const parts = modelLoadPanelParts(activity, Date.now());
+    if (panel) {
+      if (!panel.__loadParts) {
+        panel.innerHTML = MODEL_LOAD_PANEL_PARTS.map(name => '<div data-part="' + name + '"></div>').join('');
+        panel.__loadParts = {};
+      }
+      panel.classList.toggle('is-failed', parts.failed);
+      MODEL_LOAD_PANEL_PARTS.forEach(name => {
+        if (panel.__loadParts[name] === parts[name]) return;
+        panel.__loadParts[name] = parts[name];
+        panel.querySelector('[data-part="' + name + '"]').innerHTML = parts[name];
+      });
+      const fill = panel.querySelector('.model-load-fill');
+      if (fill) fill.style.width = parts.percent === null ? '' : parts.percent + '%';
+      const amount = panel.querySelector('.model-load-amount');
+      if (amount && amount.__loadSource !== parts.amount) {
+        amount.__loadSource = parts.amount;
+        amount.innerHTML = parts.amount;
+      }
+      const eta = panel.querySelector('.model-load-eta');
+      if (eta && eta.textContent !== parts.eta) eta.textContent = parts.eta;
+      panel.querySelectorAll('.model-load-step-time').forEach((time, index) => {
+        const text = parts.stepTimes[index] || '';
+        if (time.textContent !== text) time.textContent = text;
+      });
+    }
+    let times = 0;
+    return parts.head
+      + parts.progress
+        .replace('<i class="model-load-fill"></i>', '<i class="model-load-fill"'
+          + (parts.percent === null ? '' : ' style="width:' + parts.percent + '%"') + '></i>')
+        .replace('<span class="model-load-amount"></span>', '<span class="model-load-amount">' + parts.amount + '</span>')
+        .replace('<span class="model-load-eta"></span>', '<span class="model-load-eta">' + escapeAttr(parts.eta) + '</span>')
+      + parts.steps.replace(/<span class="model-load-step-time"><\/span>/g,
+        () => '<span class="model-load-step-time">' + (parts.stepTimes[times++] || '') + '</span>')
+      + parts.extra + parts.actions;
+  }
+
+  function modelLoadBarHTML(percent, muted, extraClass) {
+    return '<div class="model-load-bar' + (extraClass ? ' ' + extraClass : '')
+      + (percent === null ? ' is-indeterminate' : '') + (muted ? ' is-muted' : '') + '">'
+      + '<i class="model-load-fill"' + (percent === null ? '' : ' style="width:' + percent + '%"') + '></i></div>';
+  }
+
+  // Whether the Dashboard has its own message for a failure's reason. Other
+  // failures show a generic message, with the backend's text as detail.
+  function modelLoadFailureRecognized(activity) {
+    const code = activity.code === 'load_failed' ? '' : String(activity.code || '');
+    return modelLoadFailureExplained(activity) || code.indexOf('diffusion_gemma_') === 0;
+  }
+
+  // Whether that message already says everything the backend's text does.
+  function modelLoadFailureExplained(activity) {
+    const dict = I18N[currentLang] || I18N.en;
+    const code = activity.code === 'load_failed' ? '' : String(activity.code || '');
+    return !!(code && dict['err_' + code])
+      || /^memory budget exceeded\b/i.test(String(activity.message || '').trim());
+  }
+
+  function modelLoadFailureText(activity) {
+    const dict = I18N[currentLang] || I18N.en;
+    if (modelLoadFailureRecognized(activity)) {
+      return localizeErrorResult({ code: activity.code, error: String(activity.message || '').trim(), model_id: activity.model });
+    }
+    return dict.err_load_failed;
+  }
+
+  // The backend's own text, unless the Dashboard's message covers it.
+  function modelLoadFailureDetail(activity) {
+    return modelLoadFailureExplained(activity) ? '' : String(activity.message || '').trim();
+  }
+
+  function renderModelLoadIndicator(activities) {
+    const active = activities.filter(activity => !MODEL_LOAD_TERMINAL_STATES.includes(activity.state));
+    const failed = activities.filter(activity => activity.state === 'failed');
+    const primary = active.find(activity => activity.state !== 'queued') || active[0] || failed[0] || null;
+    const indicator = document.getElementById('model-load-indicator');
+    if (!primary) {
+      if (indicator) {
+        indicator.hidden = true;
+        indicator.innerHTML = '';
+        indicator.__loadSource = '';
+      }
+      return '';
+    }
+    const state = modelLoadState(primary);
+    const name = modelLoadDisplayName(primary.model);
+    const reload = primary.kind === 'reload';
+    const percent = state === 'loading' || state === 'cancelling' ? modelLoadPercent(primary) : null;
+    let title;
+    let meta = '';
+    if (state === 'failed') {
+      title = t('model_load_pre_failed');
+    } else if (active.length > 1) {
+      const others = active.length - 1;
+      const queuedOthers = active.filter(activity => activity !== primary && activity.state === 'queued').length;
+      title = t('model_load_indicator_many').replace('{count}', active.length);
+      meta = (percent === null ? '' : '\u00a0' + percent + '%') + '\u00a0·\u00a0'
+        + t(queuedOthers === others ? 'model_load_indicator_more_queued' : 'model_load_indicator_more').replace('{count}', others);
+    } else if (state === 'cancelling') {
+      title = t('model_load_cancelling');
+    } else if (state === 'queued') {
+      title = t('model_load_row_queued');
+    } else if (percent === null) {
+      title = t(reload ? 'model_load_indicator_reloading_indeterminate' : 'model_load_indicator_loading_indeterminate');
+    } else {
+      title = t(reload ? 'model_load_indicator_reloading' : 'model_load_indicator_loading').replace('{pct}', percent);
+    }
+    const showBar = state === 'loading' || state === 'cancelling';
+    // Structure only; the texts, bar width and ring value are written in
+    // place so the spinner keeps turning across updates.
+    const structure = '<span class="model-load-indicator-body">'
+      + '<span class="model-load-indicator-title">' + (state === 'failed' ? '' : '<span class="model-load-spinner" aria-hidden="true"></span>')
+      + '<span class="model-load-indicator-text"></span></span>'
+      + '<span class="model-load-indicator-detail"><span class="model-load-indicator-name"></span>'
+      + (meta ? '<span class="model-load-indicator-meta"></span>' : '') + '</span>'
+      + (showBar ? modelLoadBarHTML(percent, state === 'cancelling', '').replace(/ style="[^"]*"/, '') : '')
+      + '</span>'
+      + '<span class="model-load-ring' + (state === 'failed' ? ' is-failed' : percent === null ? ' is-indeterminate' : '')
+      + (state === 'cancelling' || state === 'queued' ? ' is-muted' : '') + '" aria-hidden="true">'
+      + (state === 'failed' ? '!' : '') + '</span>';
+    if (indicator) {
+      indicator.hidden = false;
+      indicator.dataset.model = primary.model;
+      indicator.classList.toggle('is-failed', state === 'failed');
+      indicator.classList.toggle('is-queued', state === 'queued');
+      indicator.setAttribute('aria-label', title + ' · ' + name + meta.replace(/\u00a0/g, ' '));
+      if (indicator.__loadSource !== structure) {
+        indicator.__loadSource = structure;
+        indicator.innerHTML = structure;
+      }
+      const write = (selector, text) => {
+        const target = indicator.querySelector(selector);
+        if (target && target.textContent !== text) target.textContent = text;
+      };
+      write('.model-load-indicator-text', title);
+      write('.model-load-indicator-name', name);
+      write('.model-load-indicator-meta', meta);
+      const fill = indicator.querySelector('.model-load-fill');
+      if (fill) fill.style.width = percent === null ? '' : percent + '%';
+      const ring = indicator.querySelector('.model-load-ring');
+      if (ring && ring.style.setProperty) ring.style.setProperty('--model-load-pct', percent === null ? '0' : String(percent));
+    }
+    return structure
+      .replace('<span class="model-load-indicator-text"></span>', '<span class="model-load-indicator-text">' + escapeAttr(title) + '</span>')
+      .replace('<span class="model-load-indicator-name"></span>', '<span class="model-load-indicator-name">' + escapeAttr(name) + '</span>')
+      .replace('<span class="model-load-indicator-meta"></span>', '<span class="model-load-indicator-meta">' + escapeAttr(meta) + '</span>');
+  }
+
+  // What a model row shows while a load is listed, or null to show the row
+  // from the scanned (backend) state.
+  function modelLoadRowState(modelId) {
+    const activity = modelLoadActivityFor(modelId);
+    if (!activity) return null;
+    const state = modelLoadState(activity);
+    if (state === 'loaded' || state === 'cancelled') return null;
+    if (state === 'failed') {
+      const detail = modelLoadFailureDetail(activity);
+      const title = modelLoadFailureText(activity) + (detail ? '\n' + detail : '');
+      return { state, kind: activity.kind, percent: null, title, actionHTML: '',
+        html: '<span class="model-status-text is-failed">' + escapeAttr(t('model_load_row_failed')) + '</span>' };
+    }
+    const reload = activity.kind === 'reload';
+    const percent = state === 'queued' ? null : modelLoadPercent(activity);
+    const text = state === 'queued' ? t('model_load_row_queued')
+      : state === 'cancelling' ? t('model_load_cancelling')
+      : t(reload ? 'model_load_row_reloading' : 'model_load_row_loading');
+    const stage = activity.stage ? modelLoadStepLabel(modelLoadStep(activity.stage), activity.variant) : '';
+    const canCancel = state !== 'cancelling' && activity.cancellable;
+    return {
+      state, kind: activity.kind, percent,
+      title: stage ? text + ' · ' + stage : text,
+      html: '<span class="model-status-text' + (state === 'loading' ? '' : ' is-quiet') + '">' + escapeAttr(text) + '</span>'
+        + (state === 'queued' ? '' : '<div class="model-load-rowprogress">' + modelLoadBarHTML(percent, state === 'cancelling', '')
+        + (percent === null ? '' : '<span>' + percent + '%</span>') + '</div>'),
+      actionHTML: '<button class="action-btn action-cancel-load" type="button" data-model="' + escapeAttr(modelId) + '"'
+        + ' onclick="cancelModelLoadFromUI(this.dataset.model)"' + (canCancel ? '' : ' disabled') + '>'
+        + escapeAttr(t('cancel')) + '</button>',
+    };
+  }
+
+  // Updates rendered model rows in place between list scans.
+  function refreshModelLoadRows() {
+    document.querySelectorAll('#tab-models-manage tbody tr').forEach(row => {
+      const state = modelLoadRowState(row.dataset.modelId);
+      if (!state) return;
+      const cell = row.querySelector('.model-status-cell');
+      if (cell) {
+        cell.classList.add('is-load-state');
+        if (cell.__loadSource !== state.html) {
+          cell.__loadSource = state.html;
+          cell.innerHTML = state.html;
+        }
+        cell.dataset.statusTooltip = state.title || '';
+        cell.tabIndex = state.title ? 0 : -1;
+      }
+      const action = row.querySelector('.model-action-cell');
+      if (action && state.actionHTML && action.__loadSource !== state.actionHTML) {
+        action.__loadSource = state.actionHTML;
+        action.innerHTML = state.actionHTML;
+      }
+    });
+  }
+
+  function openModelLoadPanel(modelId) {
+    const activity = modelLoadActivityFor(modelId);
+    if (!activity) return;
+    modelLoadPanelModel = modelId;
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.openModelLoadPanel) {
+      window.webkit.messageHandlers.openModelLoadPanel.postMessage(modelId);
+    }
+    renderModelLoadPanel(activity);
+    const overlay = document.getElementById('model-load-overlay');
+    if (overlay) overlay.hidden = false;
+    if (modelLoadPanelTimer === null) {
+      modelLoadPanelTimer = setInterval(function() {
+        if (modelLoadPanelModel) renderModelLoadPanel(modelLoadActivityFor(modelLoadPanelModel));
+      }, 1000);
+    }
+  }
+
+  // Closing never cancels the load; closing a failure acknowledges it.
+  function closeModelLoadPanel() {
+    if (!modelLoadPanelModel) return;
+    const model = modelLoadPanelModel;
+    modelLoadPanelModel = '';
+    if (modelLoadPanelTimer !== null) {
+      clearInterval(modelLoadPanelTimer);
+      modelLoadPanelTimer = null;
+    }
+    const overlay = document.getElementById('model-load-overlay');
+    if (overlay) overlay.hidden = true;
+    renderModelLoadPanel(null);
+    const activity = modelLoadActivityFor(model);
+    if (activity && activity.state === 'failed') {
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.acknowledgeModelLoadFailure) {
+        window.webkit.messageHandlers.acknowledgeModelLoadFailure.postMessage(model);
+      }
+      modelLoadAcknowledged.add(modelLoadKey(activity));
+      modelLoadActivities = modelLoadActivities.filter(entry => entry !== activity);
+      renderModelLoadViews();
+    }
+  }
+
+  // A cancel control left from a load that already ended does nothing; the
+  // views below catch up with the result.
+  function cancelModelLoadFromUI(modelId) {
+    const activity = modelLoadActivityFor(modelId);
+    if (activity && !MODEL_LOAD_TERMINAL_STATES.includes(activity.state)) {
+      if (activity.state === 'loading' || activity.state === 'queued') {
+        modelLoadCancelRequested[modelId] = modelLoadKey(activity);
+      }
+      if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.cancelModelLoad) {
+        window.webkit.messageHandlers.cancelModelLoad.postMessage(modelId);
+      }
+    }
+    if (modelLoadPanelModel) renderModelLoadPanel(modelLoadActivityFor(modelLoadPanelModel));
+    renderModelLoadViews();
+  }
+
+  function viewModelLoadLogs() {
+    closeModelLoadPanel();
+    navigateTo('logs');
+  }
+
+  function showModelLoadCancelToast(activity) {
+    const key = MODEL_LOAD_CANCEL_TOASTS[activity.code]
+      || (activity.kind === 'reload' ? 'model_load_toast_reload_cancelled' : 'model_load_toast_cancelled');
+    showToast(t(key).replace('{model}', modelLoadDisplayName(activity.model)), 'info');
+  }
+
+  document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape' && modelLoadPanelModel) closeModelLoadPanel();
+  });
+  (function bindModelLoadIndicatorTooltip() {
+    const indicator = document.getElementById('model-load-indicator');
+    if (!indicator || !indicator.addEventListener) return;
+    const show = function() {
+      const collapsed = document.documentElement.classList.contains('sidebar-collapsed');
+      indicator.dataset.sidebarTooltip = collapsed ? (indicator.getAttribute('aria-label') || '') : '';
+      showSidebarTooltip(indicator);
+    };
+    indicator.addEventListener('mouseenter', show);
+    indicator.addEventListener('focus', show);
+    indicator.addEventListener('mouseleave', hideSidebarTooltip);
+    indicator.addEventListener('blur', hideSidebarTooltip);
+    indicator.addEventListener('click', hideSidebarTooltip);
+  })();
+  // Ask the App for the loads already running (an empty body opens nothing).
+  if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.openModelLoadPanel) {
+    window.webkit.messageHandlers.openModelLoadPanel.postMessage('');
   }
 
   window.__CURRENT_PARAM_MODEL__ = '';
@@ -10859,11 +11934,36 @@
     renderMtpParams(local, saved);
     renderDFlash2Params(local, saved);
     renderPromptLookupParams(saved);
+    renderParamsSchedulerProfile(name);
     document.getElementById('modal-params-unsaved-hint').hidden = true;
     document.getElementById('model-params-modal').classList.add('open');
     document.querySelector('#model-params-modal .model-params-modal').scrollTop = 0;
     applyI18n(currentLang);
     window.__PARAMS_MODAL_OPENED_STATE__ = paramsModalFormState();
+  }
+
+  // The scheduler configuration line of the parameter dialog, read from the
+  // runtime status of the loaded model; hidden when the model is not loaded.
+  function renderParamsSchedulerProfile(modelId) {
+    const line = document.getElementById('modal-scheduler-profile');
+    if (!line) return;
+    const dict = I18N[currentLang] || I18N.en;
+    const runtime = (window.__RUNTIME_MODELS__ || [])
+      .find(item => item && (item.id || item.model) === modelId);
+    const text = schedulerProfileText(runtime, dict);
+    line.hidden = !text;
+    line.innerHTML = text
+      ? escapeAttr(dict.scheduler_config_label || 'Scheduling') + '<strong>' + escapeAttr(text) + '</strong>'
+      : '';
+  }
+
+  // Keeps the line of an open parameter dialog current with backend state
+  // and the interface language.
+  function refreshOpenParamsSchedulerProfile() {
+    const modal = document.getElementById('model-params-modal');
+    if (modal && modal.classList.contains('open')) {
+      renderParamsSchedulerProfile(window.__CURRENT_PARAM_MODEL__);
+    }
   }
 
   function renderDFlash2Params(local, saved) {
@@ -11169,7 +12269,7 @@
         showToast(localizeWarningResult(result), 'info');
       }
       syncModelList();
-    } else if (result.error) {
+    } else if (result.error && !MODEL_LOAD_CANCEL_TOASTS[result.code]) {
       showToast(localizeErrorResult(result), 'warn');
     }
   }
@@ -12324,7 +13424,7 @@
     const list = document.getElementById('model-version-list');
     if (list) list.style.pointerEvents = '';
     if (!result.success) {
-      showToast(localizeErrorResult(result), 'warn');
+      if (!MODEL_LOAD_CANCEL_TOASTS[result.code]) showToast(localizeErrorResult(result), 'warn');
       return;
     }
     const deleted = result.deleted_commit_shas && result.deleted_commit_shas.length;
@@ -13518,9 +14618,10 @@
       + escapeAttr(label) + '</span>';
   }
 
-  function renderModelLoadActions(model, escapedSq, escaped, actionClass, actionText, isLoaded) {
+  function renderModelLoadActions(model, escapedSq, escaped, actionClass, actionText, isLoaded, settling) {
     if (isLoaded) {
-      return '<button class="action-btn ' + actionClass + '" onclick="toggleModelLoad(\'' + escapedSq + '\', this)" data-model="' + escaped + '">' + actionText + '</button>';
+      return '<button class="action-btn ' + actionClass + '" onclick="toggleModelLoad(\'' + escapedSq + '\', this)" data-model="' + escaped + '"'
+        + (settling ? ' disabled' : '') + '>' + actionText + '</button>';
     }
     if (model.type === 'tts' && modelReadiness(model).reason_code === 'audio_resources_missing') {
       const dict = I18N[currentLang] || I18N.en;
@@ -13549,7 +14650,6 @@
 
   // Called from Rust with local model scan results
   function onLocalModelsScanned(jsonStr) {
-    const dict = I18N[currentLang] || I18N.en;
     let models = [];
     try { models = JSON.parse(jsonStr); } catch(e) { return; }
     closeModelMoreActions();
@@ -13573,7 +14673,6 @@
     window.__LOCAL_MODELS__ = {};
     models.forEach(m => { if (m && m.id) window.__LOCAL_MODELS__[m.id] = m; });
     refreshSupportedModelActions();
-    const defaultModel = window.__DEFAULT_MODEL__ || '';
     const tbody = document.querySelector('#tab-models-manage tbody');
     const empty = document.getElementById('model-import-empty');
     if (empty) empty.style.display = models.length ? 'none' : '';
@@ -13584,46 +14683,55 @@
     if (tbody && models.length > 0) {
       tbody.innerHTML = '';
       models.filter(m => (m.type || 'llm') !== 'mtp').forEach(m => {
-        const displayName = m.display_name || m.id;
-        const isDefault = (m.id === defaultModel);
-        const isLoaded = m.loaded;
-        const dflash2Active = !!(m.dflash2 && m.dflash2.enabled);
-        const readiness = modelReadiness(m);
-        const escaped = m.id.replace(/"/g, '&quot;');
-        const escapedSq = m.id.replace(/'/g, "\\'");
-        const status = modelStatusPresentation(m, isLoaded);
-        const actionClass = isLoaded ? 'action-unload' : 'action-load';
-        const actionText = isLoaded ? (dict.action_unload || 'Unload') : (dict.action_load || 'Load');
         const tr = document.createElement('tr');
         tr.dataset.modelId = m.id;
         tr.classList.toggle("tts-model-row", m.type === "tts");
-        const msIcon = '<svg height="14" viewBox="0 0 24 24" width="14" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;opacity:0.7;" aria-hidden="true"><path d="M0 7.967h2.667v2.667H0zM8 10.633h2.667V13.3H8z" fill="#36CED0"></path><path d="M0 10.633h2.667V13.3H0zM2.667 13.3h2.666v2.667H8v2.666H2.667V13.3zM2.667 5.3H8v2.667H5.333v2.666H2.667V5.3zM10.667 13.3h2.667v2.667h-2.667z" fill="#624AFF"></path><path d="M24 7.967h-2.667v2.667H24zM16 10.633h-2.667V13.3H16z" fill="#36CED0"></path><path d="M24 10.633h-2.667V13.3H24zM21.333 13.3h-2.666v2.667H16v2.666h5.333V13.3zM21.333 5.3H16v2.667h2.667v2.666h2.666V5.3z" fill="#624AFF"></path></svg>';
-        const hfIcon = '<svg height="14" width="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;opacity:0.8;" aria-hidden="true"><path d="M2.25 11.535c0-3.407 1.847-6.554 4.844-8.258a9.822 9.822 0 019.687 0c2.997 1.704 4.844 4.851 4.844 8.258 0 5.266-4.337 9.535-9.687 9.535S2.25 16.8 2.25 11.535z" fill="#FF9D0B"/><path d="M11.938 20.086c4.797 0 8.687-3.829 8.687-8.551 0-4.722-3.89-8.55-8.687-8.55-4.798 0-8.688 3.828-8.688 8.55 0 4.722 3.89 8.55 8.688 8.55z" fill="#FFD21E"/><path d="M14.76 9.21c.32.108.445.753.767.585.447-.233.707-.708.659-1.204a1.235 1.235 0 00-.879-1.059 1.262 1.262 0 00-1.33.394c-.322.384-.377.92-.14 1.36.153.283.638-.177.925-.079zm-5.887 0c-.32.108-.448.753-.768.585a1.226 1.226 0 01-.658-1.204c.048-.495.395-.913.878-1.059a1.262 1.262 0 011.33.394c.322.384.377.92.14 1.36-.152.283-.64-.177-.925-.079z" fill="#3A3B45"/></svg>';
-        const localIcon = '<svg height="14" width="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
-          + '<path d="M2.5 6.25A2.25 2.25 0 0 1 4.75 4h4.1L11 6.5h8.25a2.25 2.25 0 0 1 2.25 2.25v9.5a2.25 2.25 0 0 1-2.25 2.25H4.75a2.25 2.25 0 0 1-2.25-2.25v-12Z" fill="#849AB2"/>'
-          + '<path d="M2.5 9h19v9.25a2.25 2.25 0 0 1-2.25 2.25H4.75a2.25 2.25 0 0 1-2.25-2.25V9Z" fill="#B3C4D6"/></svg>';
-        var sourceIcon = m.source === 'standalone' ? localIcon : (m.source === 'ms' ? msIcon : hfIcon);
-        const sourceTooltip = m.source === 'standalone'
-          ? (dict.model_import_source_badge || 'Imported model')
-          : (m.source === 'ms' ? 'ModelScope' : 'HuggingFace');
-        tr.innerHTML = '<td><div class="model-name"><span class="model-source-icon"' + modelColumnTooltipAttributes(sourceTooltip) + '>' + sourceIcon + '</span><span class="model-name-text"' + modelColumnTooltipAttributes(m.id) + '>' + escapeHTML(displayName) + '</span>' + renderMtpBadge(m) + renderDFlash2Badge(m)
-          + (isLoaded ? ' <button class="icon-btn pin-btn' + (m.pinned ? ' pinned' : '') + '" onclick="event.stopPropagation();togglePin(\'' + escapedSq + '\', this)" data-model="' + escaped + '"' + (dflash2Active ? ' data-dflash2="1"' : '') + modelColumnTooltipAttributes(pinTooltip(m.pinned, dflash2Active)) + ' style="vertical-align:middle;padding:0 2px;font-size:13px;opacity:' + (m.pinned ? '1' : '0.4') + '">&#x1F4CC;</button>' : '')
-          + '</div></td>'
-          + '<td>' + renderModelType(m) + '</td>'
-          + '<td>' + renderQuantBadge(m) + '</td>'
-          + '<td>' + formatSize(m.size_mb) + '</td>'
-          + '<td class="model-status-cell" data-status-tooltip="' + escapeAttr(status.title) + '"' + (status.title ? ' tabindex="0"' : '')
-          + ' onmouseenter="showModelStatusTooltip(this)" onmouseleave="hideModelTableTooltip()"'
-          + ' onfocus="showModelStatusTooltip(this)" onblur="hideModelTableTooltip()"><span class="status-dot ' + status.dot + '"></span> <span class="model-status-text">' + status.text + '</span></td>'
-          + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' ' + (!isModelLoadable(m) || ['embedding', 'asr', 'alignment', 'diarization'].includes(m.type) ? 'disabled ' : '') + 'style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
-          + '<td><button class="icon-btn" title="' + escapeAttr(dict.model_param_settings) + '" aria-label="' + escapeAttr(dict.model_param_settings) + '" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
-          + '<td>' + renderModelLoadActions(m, escapedSq, escaped, actionClass, actionText, isLoaded) + '</td>'
-          + '<td>' + renderModelMoreActions(m, escapedSq) + '</td>';
+        tr.innerHTML = modelRowHTML(m);
         tbody.appendChild(tr);
       });
     }
     renderProfileModelOptions(models);
     syncBenchmarkModels();
+  }
+
+  // The cells of one model row: its scanned state, or the load listed for it.
+  function modelRowHTML(m) {
+    const dict = I18N[currentLang] || I18N.en;
+    const defaultModel = window.__DEFAULT_MODEL__ || '';
+    const displayName = m.display_name || m.id;
+    const isDefault = (m.id === defaultModel);
+    const isLoaded = m.loaded;
+    const dflash2Active = !!(m.dflash2 && m.dflash2.enabled);
+    const readiness = modelReadiness(m);
+    const escaped = m.id.replace(/"/g, '&quot;');
+    const escapedSq = m.id.replace(/'/g, "\\'");
+    const loadRow = modelLoadRowState(m.id);
+    const status = loadRow || modelStatusPresentation(m, isLoaded);
+    const actionClass = isLoaded ? 'action-unload' : 'action-load';
+    const actionText = isLoaded ? (dict.action_unload || 'Unload') : (dict.action_load || 'Load');
+    const msIcon = '<svg height="14" viewBox="0 0 24 24" width="14" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;opacity:0.7;" aria-hidden="true"><path d="M0 7.967h2.667v2.667H0zM8 10.633h2.667V13.3H8z" fill="#36CED0"></path><path d="M0 10.633h2.667V13.3H0zM2.667 13.3h2.666v2.667H8v2.666H2.667V13.3zM2.667 5.3H8v2.667H5.333v2.666H2.667V5.3zM10.667 13.3h2.667v2.667h-2.667z" fill="#624AFF"></path><path d="M24 7.967h-2.667v2.667H24zM16 10.633h-2.667V13.3H16z" fill="#36CED0"></path><path d="M24 10.633h-2.667V13.3H24zM21.333 13.3h-2.666v2.667H16v2.666h5.333V13.3zM21.333 5.3H16v2.667h2.667v2.666h2.666V5.3z" fill="#624AFF"></path></svg>';
+    const hfIcon = '<svg height="14" width="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;opacity:0.8;" aria-hidden="true"><path d="M2.25 11.535c0-3.407 1.847-6.554 4.844-8.258a9.822 9.822 0 019.687 0c2.997 1.704 4.844 4.851 4.844 8.258 0 5.266-4.337 9.535-9.687 9.535S2.25 16.8 2.25 11.535z" fill="#FF9D0B"/><path d="M11.938 20.086c4.797 0 8.687-3.829 8.687-8.551 0-4.722-3.89-8.55-8.687-8.55-4.798 0-8.688 3.828-8.688 8.55 0 4.722 3.89 8.55 8.688 8.55z" fill="#FFD21E"/><path d="M14.76 9.21c.32.108.445.753.767.585.447-.233.707-.708.659-1.204a1.235 1.235 0 00-.879-1.059 1.262 1.262 0 00-1.33.394c-.322.384-.377.92-.14 1.36.153.283.638-.177.925-.079zm-5.887 0c-.32.108-.448.753-.768.585a1.226 1.226 0 01-.658-1.204c.048-.495.395-.913.878-1.059a1.262 1.262 0 011.33.394c.322.384.377.92.14 1.36-.152.283-.64-.177-.925-.079z" fill="#3A3B45"/></svg>';
+    const localIcon = '<svg height="14" width="14" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">'
+      + '<path d="M2.5 6.25A2.25 2.25 0 0 1 4.75 4h4.1L11 6.5h8.25a2.25 2.25 0 0 1 2.25 2.25v9.5a2.25 2.25 0 0 1-2.25 2.25H4.75a2.25 2.25 0 0 1-2.25-2.25v-12Z" fill="#849AB2"/>'
+      + '<path d="M2.5 9h19v9.25a2.25 2.25 0 0 1-2.25 2.25H4.75a2.25 2.25 0 0 1-2.25-2.25V9Z" fill="#B3C4D6"/></svg>';
+    var sourceIcon = m.source === 'standalone' ? localIcon : (m.source === 'ms' ? msIcon : hfIcon);
+    const sourceTooltip = m.source === 'standalone'
+      ? (dict.model_import_source_badge || 'Imported model')
+      : (m.source === 'ms' ? 'ModelScope' : 'HuggingFace');
+    return '<td><div class="model-name"><span class="model-source-icon"' + modelColumnTooltipAttributes(sourceTooltip) + '>' + sourceIcon + '</span><span class="model-name-text"' + modelColumnTooltipAttributes(m.id) + '>' + escapeHTML(displayName) + '</span>' + renderMtpBadge(m) + renderDFlash2Badge(m)
+      + (isLoaded ? ' <button class="icon-btn pin-btn' + (m.pinned ? ' pinned' : '') + '" onclick="event.stopPropagation();togglePin(\'' + escapedSq + '\', this)" data-model="' + escaped + '"' + (dflash2Active ? ' data-dflash2="1"' : '') + modelColumnTooltipAttributes(pinTooltip(m.pinned, dflash2Active)) + ' style="vertical-align:middle;padding:0 2px;font-size:13px;opacity:' + (m.pinned ? '1' : '0.4') + '">&#x1F4CC;</button>' : '')
+      + '</div></td>'
+      + '<td>' + renderModelType(m) + '</td>'
+      + '<td>' + renderQuantBadge(m) + '</td>'
+      + '<td>' + formatSize(m.size_mb) + '</td>'
+      + '<td class="model-status-cell' + (loadRow ? ' is-load-state' : '') + '" data-status-tooltip="' + escapeAttr(status.title) + '"' + (status.title ? ' tabindex="0"' : '')
+      + ' onmouseenter="showModelStatusTooltip(this)" onmouseleave="hideModelTableTooltip()"'
+      + ' onfocus="showModelStatusTooltip(this)" onblur="hideModelTableTooltip()">'
+      + (loadRow ? loadRow.html : '<span class="status-dot ' + status.dot + '"></span> <span class="model-status-text">' + status.text + '</span>') + '</td>'
+      + '<td><input type="radio" name="default-model" value="' + escaped + '" ' + (isDefault ? 'checked' : '') + ' ' + (!isModelLoadable(m) || ['embedding', 'asr', 'alignment', 'diarization'].includes(m.type) ? 'disabled ' : '') + 'style="accent-color:var(--accent);" onchange="setDefaultModel(this.value)"></td>'
+      + '<td><button class="icon-btn" title="' + escapeAttr(dict.model_param_settings) + '" aria-label="' + escapeAttr(dict.model_param_settings) + '" onclick="openParamsModal(\'' + escapedSq + '\')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 1.5l1 2a4.5 4.5 0 0 1 1.5.9l2-.5.8 1.4-1.1 1.6a4.3 4.3 0 0 1 0 1.8l1.1 1.6-.8 1.4-2-.5a4.5 4.5 0 0 1-1.5.9l-1 2-1-2a4.5 4.5 0 0 1-1.5-.9l-2 .5-.8-1.4 1.1-1.6a4.3 4.3 0 0 1 0-1.8L2.2 5.8l.8-1.4 2 .5A4.5 4.5 0 0 1 6.5 4l1-2Z" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.1"/></svg></button></td>'
+      + '<td class="model-action-cell">' + (loadRow && loadRow.actionHTML ? loadRow.actionHTML : renderModelLoadActions(m, escapedSq, escaped, actionClass, actionText, isLoaded, !!modelLoadRowSettling[m.id])) + '</td>'
+      + '<td>' + renderModelMoreActions(m, escapedSq) + '</td>';
   }
 
   let benchLocalModels = []; // [{repo_id, loaded}]
@@ -13634,7 +14742,8 @@
     if (!profileSelect) return;
     const current = profileSelect.value;
     profileSelect.innerHTML = '<option value="">' + (dict.select_model || 'Select a model...') + '</option>';
-    models.filter(m => !['block_diffusion', 'decision', 'embedding', 'asr', 'alignment', 'diarization'].includes(m.capabilities?.runtime_kind)).forEach(m => {
+    models.filter(m => isModelLoadable(m)
+      && !['block_diffusion', 'decision', 'embedding', 'asr', 'alignment', 'diarization'].includes(m.capabilities?.runtime_kind)).forEach(m => {
       const opt = document.createElement('option');
       opt.value = m.id;
       opt.textContent = m.id;
@@ -13681,6 +14790,8 @@
   let schedulerProfilePollTimer = null;
   let schedulerProfilePreview = null;
   let schedulerProfilePreviewToken = 0;
+  // The last preview failure logged per model; a repeat is not logged again.
+  let schedulerProfilePreviewFailures = {};
 
   function runBenchmark() {
     if (benchRunning) return;
@@ -14018,7 +15129,19 @@
     }
     if (preview.request_token !== schedulerProfilePreviewToken) return;
     schedulerProfilePreview = preview;
+    logSchedulerProfilePreviewOutcome(schedulerProfileSelectionPayload().model, preview);
     renderSchedulerProfilePreview();
+  }
+
+  function logSchedulerProfilePreviewOutcome(model, preview) {
+    if (!model) return;
+    if (preview.success || !preview.error) {
+      delete schedulerProfilePreviewFailures[model];
+      return;
+    }
+    if (schedulerProfilePreviewFailures[model] === preview.error) return;
+    schedulerProfilePreviewFailures[model] = preview.error;
+    console.warn('Scheduler profile preview failed for ' + model + ':', preview.error);
   }
 
   function renderSchedulerProfilePreview() {
@@ -14040,7 +15163,6 @@
       return;
     }
     if (schedulerProfilePreview && schedulerProfilePreview.error) {
-      console.error('Scheduler profile preview failed:', schedulerProfilePreview.error);
       hint.textContent = (dict.scheduler_profile_preview_failed || 'Unable to estimate: {detail}')
         .replace('{detail}', dict.unknown_error || 'Unknown error');
       return;
@@ -14075,6 +15197,11 @@
     }
   }
 
+  function schedulerProfileFailureDetail(status, dict) {
+    if (status && status.code === 'model_busy') return dict.scheduler_profile_model_busy;
+    return dict.unknown_error || 'Unknown error';
+  }
+
   function onSchedulerProfileStatus(jsonStr) {
     let status = {};
     try { status = JSON.parse(jsonStr); } catch(e) { status = { state: 'failed', success: false, error: jsonStr || 'Invalid status payload.' }; }
@@ -14090,7 +15217,7 @@
         showToast((I18N[currentLang] || I18N.en).profile_succeeded.replace('{name}', status.model || ''), 'success');
       } else if (status.state === 'failed') {
         if (status.error) console.error('Scheduler profile generation failed:', status.error);
-        const detail = (I18N[currentLang] || I18N.en).unknown_error || 'Unknown error';
+        const detail = schedulerProfileFailureDetail(status, I18N[currentLang] || I18N.en);
         showToast((I18N[currentLang] || I18N.en).profile_failed.replace('{detail}', detail), 'warn');
       }
     }
@@ -14181,7 +15308,7 @@
     } else {
       if (status.error) console.error('Scheduler profile generation failed:', status.error);
       statusEl.textContent = (dict.profile_failed || 'Scheduler profile generation failed: {detail}')
-        .replace('{detail}', dict.unknown_error || 'Unknown error');
+        .replace('{detail}', schedulerProfileFailureDetail(status, dict));
     }
     if (!isActive) {
       if (generateBtn) generateBtn.style.display = '';
@@ -16144,6 +17271,12 @@
           + escapeAttr(dict.runtime_cumulative_tokens || 'Cumulative tokens')
           + '<strong>' + Number(usage.cumulative_tokens || 0).toLocaleString(numberLocale) + '</strong></span>'
       ];
+      const schedulerProfile = schedulerProfileText(model, dict);
+      if (schedulerProfile) {
+        usageItems.push('<span class="runtime-usage-item">'
+          + escapeAttr(dict.scheduler_config_label || 'Scheduling')
+          + '<strong>' + escapeAttr(schedulerProfile) + '</strong></span>');
+      }
       if (usage.prefix_cache) {
         const hitTokens = Number(usage.prefix_cache.hit_tokens);
         const eligibleTokens = Number(usage.prefix_cache.eligible_tokens);
@@ -16391,6 +17524,18 @@
     }).join('');
   }
 
+  // Localized name of the scheduler configuration a loaded model runs with;
+  // empty when the backend does not report a known one.
+  function schedulerProfileText(model, dict) {
+    const value = model && model.scheduler_profile;
+    if (value === 'default') return dict.scheduler_config_default || 'Default';
+    if (value === 'default_settings_mismatch') {
+      return dict.scheduler_config_default_settings_mismatch || "Default (doesn't match current settings)";
+    }
+    if (value === 'profile') return dict.scheduler_config_profile || 'Dedicated profile';
+    return '';
+  }
+
   // Called from Rust with API response
   function onApiFetchResult(path, jsonStr) {
     const dict = I18N[currentLang] || I18N.en;
@@ -16500,6 +17645,7 @@
         const data = JSON.parse(jsonStr);
         const runtimeModels = Array.isArray(data.runtime_models) ? data.runtime_models : [];
         renderRuntimeModels(runtimeModels);
+        refreshOpenParamsSchedulerProfile();
         settingsBackendRunning = true;
         updateSettingsSaveBar();
         updateServerStatusVisual(dict.running || 'Running', 'var(--green)');

@@ -39,7 +39,8 @@ public actor BenchmarkExclusiveSessionCoordinator {
         targetModel: String,
         targetModelPath: String,
         validateModelPath: BenchmarkModelPathValidator? = nil,
-        audioResources: (@Sendable (String) throws -> BackendAudioResources?)? = nil
+        audioResources: (@Sendable (String) throws -> BackendAudioResources?)? = nil,
+        loadActivity: ModelLoadActivityCenter? = nil
     ) async throws -> BenchmarkExclusivePrepareResult {
         guard session == nil else {
             throw BenchmarkExclusiveSessionError.alreadyRunning
@@ -80,14 +81,16 @@ public actor BenchmarkExclusiveSessionCoordinator {
         do {
             for model in nonTargetModels {
                 _ = try await client.unloadModel(model: model.id, modelDir: model.path)
+                loadActivity?.forgetRegistration(of: model.id)
                 unloaded.append(model.id)
             }
 
-            _ = try await client.loadModel(
+            _ = try await Self.loadModel(
+                client: client,
+                loadActivity: loadActivity,
                 model: targetModel,
                 modelDir: validatedTargetPath,
                 setDefault: true,
-                maxCacheCap: nil,
                 pinned: targetWasPinned,
                 promptLookup: targetPromptLookup,
                 audio: try audioResources?(targetModel),
@@ -104,11 +107,50 @@ public actor BenchmarkExclusiveSessionCoordinator {
             _ = try? await restoreFromSession(
                 snapshot,
                 client: client,
-                validateModelPath: validateModelPath
+                validateModelPath: validateModelPath,
+                loadActivity: loadActivity
             )
             session = nil
             throw error
         }
+    }
+
+    /// Through the center when the App passes one, so the load shows its
+    /// progress and does not depend on one long HTTP request.
+    private static func loadModel(
+        client: BackendModelManaging,
+        loadActivity: ModelLoadActivityCenter?,
+        model: String,
+        modelDir: String,
+        setDefault: Bool,
+        pinned: Bool,
+        promptLookup: BackendPromptLookupConfig?,
+        audio: BackendAudioResources?,
+        decision: BackendDecisionSettings?
+    ) async throws -> BackendModelAdminResponse {
+        guard let loadActivity else {
+            return try await client.loadModel(
+                model: model,
+                modelDir: modelDir,
+                setDefault: setDefault,
+                maxCacheCap: nil,
+                pinned: pinned,
+                promptLookup: promptLookup,
+                audio: audio,
+                decision: decision
+            )
+        }
+        return try await LoadTrackingModelManager(base: client, loadActivity: loadActivity, origin: .benchmark)
+            .loadModel(
+                model: model,
+                modelDir: modelDir,
+                setDefault: setDefault,
+                maxCacheCap: nil,
+                pinned: pinned,
+                promptLookup: promptLookup,
+                audio: audio,
+                decision: decision
+            )
     }
 
     public func canRunBenchmark(targetModel: String) -> Bool {
@@ -117,7 +159,8 @@ public actor BenchmarkExclusiveSessionCoordinator {
 
     public func restore(
         client: BackendModelManaging,
-        validateModelPath: BenchmarkModelPathValidator? = nil
+        validateModelPath: BenchmarkModelPathValidator? = nil,
+        loadActivity: ModelLoadActivityCenter? = nil
     ) async throws -> BenchmarkExclusiveRestoreResult {
         guard let activeSession = session else {
             return BenchmarkExclusiveRestoreResult(
@@ -134,7 +177,8 @@ public actor BenchmarkExclusiveSessionCoordinator {
         let result = try await restoreFromSession(
             activeSession,
             client: client,
-            validateModelPath: validateModelPath
+            validateModelPath: validateModelPath,
+            loadActivity: loadActivity
         )
         return result
     }
@@ -142,7 +186,8 @@ public actor BenchmarkExclusiveSessionCoordinator {
     private func restoreFromSession(
         _ activeSession: BenchmarkExclusiveSession,
         client: BackendModelManaging,
-        validateModelPath: BenchmarkModelPathValidator?
+        validateModelPath: BenchmarkModelPathValidator?,
+        loadActivity: ModelLoadActivityCenter?
     ) async throws -> BenchmarkExclusiveRestoreResult {
         let snapshotByID = Dictionary(uniqueKeysWithValues: activeSession.loadedModels.map { ($0.id, $0) })
         var currentByID = Dictionary(uniqueKeysWithValues: (try await client.fetchLoadedModels()).map { ($0.id, $0) })
@@ -153,6 +198,7 @@ public actor BenchmarkExclusiveSessionCoordinator {
         for model in currentByID.values.sorted(by: { $0.id < $1.id }) where snapshotByID[model.id] == nil && !model.pinned {
             do {
                 _ = try await client.unloadModel(model: model.id, modelDir: model.path)
+                loadActivity?.forgetRegistration(of: model.id)
                 unloaded.append(model.id)
                 currentByID.removeValue(forKey: model.id)
             } catch {
@@ -163,11 +209,12 @@ public actor BenchmarkExclusiveSessionCoordinator {
         for model in activeSession.loadedModels.sorted(by: { $0.id < $1.id }) where currentByID[model.id] == nil {
             do {
                 let modelPath = try await validateModelPath?(model.id, model.path) ?? model.path
-                _ = try await client.loadModel(
+                _ = try await Self.loadModel(
+                    client: client,
+                    loadActivity: loadActivity,
                     model: model.id,
                     modelDir: modelPath,
                     setDefault: false,
-                    maxCacheCap: nil,
                     pinned: model.pinned,
                     promptLookup: model.promptLookup,
                     audio: model.audio,

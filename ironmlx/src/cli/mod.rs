@@ -95,6 +95,7 @@ impl Cli {
                 .to_str()
                 .ok_or_else(|| anyhow::anyhow!("--mlx-metallib must be representable as UTF-8"))?;
             mlx::metal::set_metallib_path(path)?;
+            let _ = CONFIGURED_MLX_METALLIB.set(PathBuf::from(path));
         }
 
         match self.command {
@@ -111,6 +112,14 @@ impl Cli {
             Command::ServeSystemone(args) => serve_systemone::run(args),
         }
     }
+}
+
+static CONFIGURED_MLX_METALLIB: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// The `--mlx-metallib` path applied to this process, for forwarding to
+/// child ironmlx processes.
+pub(crate) fn configured_mlx_metallib() -> Option<&'static Path> {
+    CONFIGURED_MLX_METALLIB.get().map(PathBuf::as_path)
 }
 
 /// Expands a leading `~` and requires a non-empty absolute path.

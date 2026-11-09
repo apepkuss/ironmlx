@@ -260,6 +260,35 @@ import Testing
     #expect(result.failures.first?.action == .unloadOtherModels)
 }
 
+@Test @MainActor func restoreReportsUserCancelledModelsSeparately() async throws {
+    let (root, _) = try restartModelRoot(repoID: "mlx-community/Tiny-4bit")
+    let loader = FakeRestartModelLoader(
+        loadError: ModelLoadCancelledError(code: ModelLoadCancelledError.loadCancelledCode)
+    )
+    let scanner = LocalModelScanner(rootURL: root)
+    let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    let coordinator = BackendRestartCoordinator(
+        scanner: scanner,
+        parameterStore: parameterStore,
+        clientFactory: { _, _ in loader }
+    )
+
+    let result = await coordinator.restore(BackendRecoverySnapshot.capture(
+        config: AppConfig(
+            port: 9068,
+            defaultModel: "mlx-community/Tiny-4bit",
+            loadedModels: ["mlx-community/Tiny-4bit"]
+        ),
+        scanner: scanner,
+        parameterStore: parameterStore
+    ))
+
+    #expect(result.success)
+    #expect(result.loadedModels.isEmpty)
+    #expect(result.failedModels.isEmpty)
+    #expect(result.cancelledModels == ["mlx-community/Tiny-4bit"])
+}
+
 @Test func recoveryFailureClassifierMapsMemoryErrorsToUsefulActions() {
     let gpuFailure = BackendRecoveryFailureClassifier.failure(
         model: "mlx-community/Tiny-4bit",
@@ -284,6 +313,25 @@ import Testing
     #expect(!kvFailure.retryable)
     #expect(kvFailure.action == .reviewRuntimeSettings)
     #expect(kvFailure.reason == .memoryInsufficient)
+}
+
+@Test func recoveryFailureClassifierReadsTrackedLoadFailures() {
+    // App restores load through the backend registry, which reports the
+    // failure code instead of an admin error body.
+    let failure = BackendRecoveryFailureClassifier.failure(
+        model: "mlx-community/Tiny-4bit",
+        stage: .loading,
+        error: ModelLoadFailedError(
+            message: "Maximum concurrent loaded models reached.",
+            code: "max_loaded_models_reached"
+        )
+    )
+
+    #expect(failure.code == "max_loaded_models_reached")
+    #expect(failure.message == "Maximum concurrent loaded models reached.")
+    #expect(failure.action == .unloadOtherModels)
+    #expect(!failure.retryable)
+    #expect(failure.reason == .modelLimitReached)
 }
 
 @Test func recoveryFailureClassifierExposesStableUserFacingReasonCategories() {

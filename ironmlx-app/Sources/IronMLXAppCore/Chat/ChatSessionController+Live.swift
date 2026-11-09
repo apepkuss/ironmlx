@@ -4,6 +4,8 @@ import Foundation
 /// changed port is followed while the chat window stays open.
 struct ConfiguredBackendModelManager: BackendModelManaging {
     let configStore: AppConfigStore
+    /// Loads go through the App's load tracking when set.
+    var loadActivity: ModelLoadActivityCenter?
 
     private var client: BackendAPIClient {
         let config = configStore.load()
@@ -24,14 +26,21 @@ struct ConfiguredBackendModelManager: BackendModelManaging {
         audio: BackendAudioResources?,
         decision: BackendDecisionSettings?
     ) async throws -> BackendModelAdminResponse {
-        try await client.loadModel(
+        let manager: any BackendModelManaging = if let loadActivity {
+            LoadTrackingModelManager(base: client, loadActivity: loadActivity, origin: .chat)
+        } else {
+            client
+        }
+        return try await manager.loadModel(
             model: model, modelDir: modelDir, setDefault: setDefault, maxCacheCap: maxCacheCap,
             pinned: pinned, promptLookup: promptLookup, audio: audio, decision: decision
         )
     }
 
     func unloadModel(model: String, modelDir: String?) async throws -> BackendModelAdminResponse {
-        try await client.unloadModel(model: model, modelDir: modelDir)
+        let response = try await client.unloadModel(model: model, modelDir: modelDir)
+        loadActivity?.forgetRegistration(of: model)
+        return response
     }
 
     func setDefaultModel(_ model: String) async throws -> BackendModelAdminResponse {
@@ -61,6 +70,7 @@ struct ConfiguredChatModelLoader: ChatModelLoading {
     let configStore: AppConfigStore
     let scanner: LocalModelScanner
     let parameterStore: ModelParameterStore
+    var loadActivity: ModelLoadActivityCenter?
 
     func configuredModel(_ modelID: String) async throws -> BackendRecoveryModel {
         let config = configStore.load()
@@ -79,7 +89,9 @@ struct ConfiguredChatModelLoader: ChatModelLoading {
             setDefault: setDefault,
             scanner: scanner,
             parameterStore: parameterStore,
-            fullChecksum: config.verifyModelOnLoad == true
+            fullChecksum: config.verifyModelOnLoad == true,
+            loadActivity: loadActivity,
+            origin: .chat
         )
     }
 }
@@ -155,14 +167,16 @@ extension ChatSessionController {
         configStore: AppConfigStore,
         parameterStore: ModelParameterStore,
         scanner: LocalModelScanner,
-        backend: any BackendRuntimeManaging
+        backend: any BackendRuntimeManaging,
+        loadActivity: ModelLoadActivityCenter? = nil
     ) -> ChatSessionController {
         let controller = ChatSessionController(
             store: ChatStore(),
-            modelManager: ConfiguredBackendModelManager(configStore: configStore),
+            modelManager: ConfiguredBackendModelManager(configStore: configStore, loadActivity: loadActivity),
             transport: URLSessionResponsesTransport(configStore: configStore),
             loader: ConfiguredChatModelLoader(
-                configStore: configStore, scanner: scanner, parameterStore: parameterStore
+                configStore: configStore, scanner: scanner, parameterStore: parameterStore,
+                loadActivity: loadActivity
             ),
             dflash2: ConfiguredChatDFlash2Policy(configStore: configStore, parameterStore: parameterStore),
             // Joins a launch in progress, which returns after model restore.

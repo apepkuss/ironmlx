@@ -306,7 +306,10 @@ public struct LegacyHealthAdapter {
                     activeRequests: snapshot.scheduler.bActive,
                     queuedRequests: snapshot.scheduler.bQueued,
                     queueCapacity: snapshot.scheduler.queueMax,
-                    usage: dflash2.runtimeUsage
+                    usage: dflash2.runtimeUsage,
+                    // The exclusive DFlash2 server resolves no scheduler
+                    // profile; it always runs the default configuration.
+                    schedulerProfile: "default"
                 ),
             ]
         }

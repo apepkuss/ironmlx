@@ -53,6 +53,7 @@ libc.workspace = true
 once_cell = "1"
 uuid = { version = "1", features = ["v4"] }
 subtle = "2"
+tower = { version = "0.5", default-features = false }
 
 [features]
 default = []
@@ -66,6 +67,7 @@ tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 ironmlx-lm = { path = "../ironmlx-lm", features = ["test-support"] }
 ironmlx-core = { path = "../ironmlx-core", features = ["test-support"] }
 approx = "0.5"
+rcgen = "0.14"
 tokio-stream.workspace = true
 # Serializes tests that share global MLX/Metal state (default stream / command
 # encoder / first-compile of cached `OnceLock` custom `MetalKernel`s). Without

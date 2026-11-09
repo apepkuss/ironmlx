@@ -232,6 +232,78 @@ public struct BackendAPIClient: Sendable {
         return try JSONDecoder().decode(BackendModelAdminResponse.self, from: data)
     }
 
+    /// `GET /admin/api/models/loads`, served by the full server and by a
+    /// DFlash2 launch while it loads. A short timeout keeps polls from piling up.
+    public func fetchModelLoads() async throws -> [BackendLoadActivity] {
+        guard let url = URL(string: "http://\(host):\(port)/admin/api/models/loads") else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw BackendAPIError.serverResponse(
+                statusCode: http.statusCode,
+                body: String(data: data, encoding: .utf8)
+            )
+        }
+        return try JSONDecoder().decode(BackendLoadActivityList.self, from: data).loads
+    }
+
+    /// `POST /admin/api/models/loads/{load_id}/cancel`.
+    public func cancelModelLoad(loadID: String) async throws -> BackendLoadCancelResult {
+        guard let escaped = loadID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "http://\(host):\(port)/admin/api/models/loads/\(escaped)/cancel")
+        else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 10
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let code = (try? JSONDecoder().decode(BackendLoadErrorCode.self, from: data))?.code
+        switch (status, code) {
+        case (200..<300, _):
+            return .cancelling
+        case (404, _):
+            return .notFound
+        case (409, "load_finishing"):
+            return .finishing
+        case (409, _):
+            return .finished
+        default:
+            throw BackendAPIError.serverResponse(statusCode: status, body: String(data: data, encoding: .utf8))
+        }
+    }
+
+    /// `POST /admin/api/models/load` with `async: true` and the request's
+    /// `load_id`. Errors carry the response body (`load_in_progress` names
+    /// the other load's id).
+    public func startModelLoad(_ request: BackendLoadModelRequest) async throws -> BackendModelLoadStart {
+        guard let url = URL(string: "http://\(host):\(port)/admin/api/models/load") else {
+            throw URLError(.badURL)
+        }
+        var body = request
+        body.async = true
+        var urlRequest = URLRequest(url: url)
+        urlRequest.httpMethod = "POST"
+        urlRequest.timeoutInterval = 60
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.httpBody = try JSONEncoder().encode(body)
+        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        switch status {
+        case 202:
+            let accepted = try JSONDecoder().decode(BackendLoadAccepted.self, from: data)
+            return .accepted(loadID: accepted.loadID, state: accepted.state)
+        case 200..<300:
+            return .completed(try JSONDecoder().decode(BackendModelAdminResponse.self, from: data))
+        default:
+            throw BackendAPIError.serverResponse(statusCode: status, body: String(data: data, encoding: .utf8))
+        }
+    }
+
     public func registerModel(
         model: String,
         modelDir: String,
@@ -315,6 +387,22 @@ public struct BackendAPIClient: Sendable {
 
 extension BackendAPIClient: BackendModelManaging {}
 
+extension BackendAPIClient: BackendModelLoadTracking {}
+
+private struct BackendLoadAccepted: Decodable {
+    var loadID: String
+    var state: ModelLoadState
+
+    enum CodingKeys: String, CodingKey {
+        case loadID = "load_id"
+        case state
+    }
+}
+
+private struct BackendLoadErrorCode: Decodable {
+    var code: String?
+}
+
 public enum BackendAPIError: LocalizedError {
     case serverResponse(statusCode: Int, body: String?)
 
@@ -347,6 +435,10 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
     public var topP: Double?
     public var topK: Int?
     public var repetitionPenalty: Double?
+    /// Registry id the App chooses, so it can watch and cancel the load.
+    public var loadID: String?
+    /// `true` returns `202` once the load is registered instead of waiting for it.
+    public var async: Bool?
 
     enum CodingKeys: String, CodingKey {
         case audio
@@ -366,6 +458,8 @@ public struct BackendLoadModelRequest: Codable, Equatable, Sendable {
         case topP = "top_p"
         case topK = "top_k"
         case repetitionPenalty = "repetition_penalty"
+        case loadID = "load_id"
+        case async
     }
 
     public init(
@@ -810,6 +904,9 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
     public var usage: BackendModelRuntimeUsage
     public var activeKvOffload: HealthzSnapshot.ActiveKvOffloadInfo?
     public var reasoning: BackendModelReasoning?
+    /// `default` or `profile`: the scheduler configuration in effect. Absent
+    /// from older backends and for runtimes without a causal scheduler.
+    public var schedulerProfile: String?
 
     public init(
         id: String,
@@ -847,7 +944,8 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         queueCapacity: Int = 0,
         usage: BackendModelRuntimeUsage = BackendModelRuntimeUsage(),
         activeKvOffload: HealthzSnapshot.ActiveKvOffloadInfo? = nil,
-        reasoning: BackendModelReasoning? = nil
+        reasoning: BackendModelReasoning? = nil,
+        schedulerProfile: String? = nil
     ) {
         self.decision = decision
         self.decisionMetrics = decisionMetrics
@@ -874,6 +972,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         self.usage = usage
         self.activeKvOffload = activeKvOffload
         self.reasoning = reasoning
+        self.schedulerProfile = schedulerProfile
     }
 
     enum CodingKeys: String, CodingKey {
@@ -910,6 +1009,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         case usage
         case activeKvOffload = "active_kv_offload"
         case reasoning
+        case schedulerProfile = "scheduler_profile"
     }
 
     public init(from decoder: Decoder) throws {
@@ -973,6 +1073,7 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
             forKey: .activeKvOffload
         )
         self.reasoning = try container.decodeIfPresent(BackendModelReasoning.self, forKey: .reasoning)
+        self.schedulerProfile = try container.decodeIfPresent(String.self, forKey: .schedulerProfile)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -1016,5 +1117,6 @@ public struct BackendLoadedModelInfo: Codable, Equatable, Sendable {
         try container.encode(usage, forKey: .usage)
         try container.encodeIfPresent(activeKvOffload, forKey: .activeKvOffload)
         try container.encodeIfPresent(reasoning, forKey: .reasoning)
+        try container.encodeIfPresent(schedulerProfile, forKey: .schedulerProfile)
     }
 }

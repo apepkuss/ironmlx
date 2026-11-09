@@ -170,6 +170,10 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
     private var startupLaunchID: UUID?
     private var startupReadiness: Task<Void, Error>?
     private var startupExit: BackendProcessTermination?
+    /// Shows a DFlash2 launch's load and lets the user cancel it.
+    private let loadActivity: ModelLoadActivityCenter?
+    /// The DFlash2 launch whose startup load the user cancelled.
+    private var cancelledDFlash2LaunchID: UUID?
 
     public init(
         processManager: BackendProcessManager,
@@ -189,7 +193,8 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
         readinessWaiter: @escaping ReadinessWaiter = { config, timeout in
             try await BackendAPIClient(host: config.host, port: config.port)
                 .waitUntilReady(timeout: timeout)
-        }
+        },
+        loadActivity: ModelLoadActivityCenter? = nil
     ) {
         self.processManager = processManager
         self.configStore = configStore
@@ -197,8 +202,10 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
         self.parameterStore = parameterStore
         self.restartCoordinator = restartCoordinator ?? BackendRestartCoordinator(
             scanner: scanner,
-            parameterStore: parameterStore
+            parameterStore: parameterStore,
+            loadActivity: loadActivity
         )
+        self.loadActivity = loadActivity
         self.incidentStore = incidentStore
         self.notificationCenter = notificationCenter
         self.policy = policy
@@ -378,14 +385,39 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
         defer {
             resumeLaunchCompletionWaiters(for: launchID)
         }
+        let dflash2Ticket = trackDFlash2Startup(snapshot: snapshot, launchID: launchID)
         do {
             try await waitUntilLaunchIsReady(launchID, config: snapshot.config)
+            if let dflash2Ticket {
+                loadActivity?.finish(dflash2Ticket, .loaded)
+            }
         } catch {
             if processManager.currentLaunchID == launchID, processManager.isRunning {
                 await processManager.stop(
                     intent: isAutomaticRecovery
                         ? .recoveryFailureCleanup
                         : .startupFailureCleanup
+                )
+            }
+            if let dflash2Ticket, cancelledDFlash2LaunchID == launchID {
+                cancelledDFlash2LaunchID = nil
+                return try await restartWithoutModels(
+                    afterCancelling: dflash2Ticket,
+                    launchState: launchState,
+                    incidentID: incidentID,
+                    isAutomaticRecovery: isAutomaticRecovery,
+                    onProcessReady: onProcessReady
+                )
+            }
+            if let dflash2Ticket {
+                loadActivity?.finish(
+                    dflash2Ticket,
+                    error is CancellationError || Task.isCancelled
+                        ? .dismissed
+                        : .failed(
+                            message: error.localizedDescription,
+                            code: BackendRuntimeFailureCode.backendReadinessFailed.rawValue
+                        )
                 )
             }
             if launchFailure(for: launchID) == .instanceAlreadyRunning {
@@ -429,12 +461,98 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
         appendRecoveryStep(.readinessCheckPassed, incidentID: incidentID)
         onProcessReady?()
         appendRecoveryStep(.modelRestoreStarted, incidentID: incidentID)
-        let result = await restartCoordinator.restore(snapshot)
+        let result = await restartCoordinator.restore(snapshot, launchID: launchID)
+        forgetCancelledRestores(result.cancelledModels)
         guard processManager.currentLaunchID == launchID, processManager.isRunning else {
             throw CancellationError()
         }
         applyRecoveryResult(result, incidentID: incidentID, launchID: launchID)
         return result
+    }
+
+    /// The user cancelled restoring these models: neither the next App launch
+    /// nor an automatic recovery loads them again. Their parameters stay.
+    private func forgetCancelledRestores(_ models: [String]) {
+        guard !models.isEmpty else { return }
+        let saved = configStore.update { config in
+            for model in models {
+                config.recordUnloadedModel(model)
+            }
+        }
+        if !saved {
+            IronMLXAppLogger.error("Could not record the cancelled restore of \(models)")
+        }
+        let cancelled = Set(models)
+        confirmedSnapshot.models.removeAll { cancelled.contains($0.id) }
+        for model in models {
+            confirmedSnapshot.config.recordUnloadedModel(model)
+        }
+        notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
+    }
+
+    /// A launch that restores a DFlash2 model loads it before it answers
+    /// health; the load shows as a restore unless a Dashboard switch already
+    /// tracks it (that switch cancels through its own task).
+    private func trackDFlash2Startup(
+        snapshot: BackendRecoverySnapshot,
+        launchID: UUID
+    ) -> ModelLoadTicket? {
+        guard let loadActivity,
+              let target = snapshot.models.first(where: { $0.dflash2ModelDir != nil }),
+              !loadActivity.hasActiveLoad(model: target.id)
+        else {
+            return nil
+        }
+        let ticket = loadActivity.begin(model: target.id, variant: .dflash2, origin: .restore)
+        loadActivity.enterAppStage(ticket, .restartingBackend)
+        loadActivity.setCancelHandler(ticket) { [weak self] in
+            self?.cancelDFlash2Startup(launchID: launchID)
+        }
+        return ticket
+    }
+
+    private func cancelDFlash2Startup(launchID: UUID) {
+        // Once the launch is healthy the model is loaded; nothing to cancel.
+        guard startupLaunchID == launchID else {
+            return
+        }
+        cancelledDFlash2LaunchID = launchID
+        startupReadiness?.cancel()
+    }
+
+    /// The user cancelled restoring a DFlash2 model: the backend starts in
+    /// ordinary mode with no models. The model's DFlash2 preference stays, so
+    /// a later manual load uses DFlash2 again; the config no longer lists it
+    /// as loaded or default, which would relaunch DFlash2.
+    private func restartWithoutModels(
+        afterCancelling ticket: ModelLoadTicket,
+        launchState: BackendProcessState,
+        incidentID: UUID?,
+        isAutomaticRecovery: Bool,
+        onProcessReady: (@MainActor @Sendable () -> Void)?
+    ) async throws -> BackendRestartResult {
+        let target = ticket.model
+        let saved = configStore.update { config in
+            config.recordUnloadedModel(target)
+            if config.defaultModelReference == target {
+                config.defaultModel = nil
+            }
+        }
+        if !saved {
+            IronMLXAppLogger.error("Could not record the cancelled DFlash2 restore of \(target)")
+        }
+        refreshConfirmedSnapshot()
+        loadActivity?.finish(ticket, .cancelled(code: ModelLoadCancelledError.dflash2StartupCode))
+        notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: self)
+        var snapshot = currentSnapshot()
+        snapshot.models = []
+        return try await launchAndRestore(
+            snapshot: snapshot,
+            launchState: launchState,
+            incidentID: incidentID,
+            isAutomaticRecovery: isAutomaticRecovery,
+            onProcessReady: onProcessReady
+        )
     }
 
     private func applyRecoveryResult(

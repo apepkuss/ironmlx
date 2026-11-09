@@ -49,6 +49,8 @@ pub mod runtime_health;
 pub mod model_validation;
 
 pub mod engine_pool;
+pub mod load_error;
+pub mod load_registry;
 
 pub mod input_preparation;
 pub mod single_request;

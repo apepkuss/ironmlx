@@ -47,25 +47,26 @@ public enum ModelMtpRuntimeResolver {
         }.value
     }
 
+    /// `mtpCandidates` are the model's compatible drafts from a scan the
+    /// caller already made; `nil` scans for them when they are needed.
     public static func runtime(
         for modelID: String,
         useMtp: Bool?,
         explicitMtpModelID: String? = nil,
+        mtpCandidates: [LocalMtpCandidate]? = nil,
         scanner: LocalModelScanner,
         parameterStore: ModelParameterStore,
         fullChecksum: Bool = false
     ) throws -> ModelMtpRuntime? {
-        let parameters = parameterStore.parameters(for: modelID)
-        let shouldUseMtp = useMtp ?? (parameters?.mtpEnabled == true)
-        guard shouldUseMtp else {
+        guard let selected = try selectedMtpModelID(
+            for: modelID,
+            useMtp: useMtp,
+            explicitMtpModelID: explicitMtpModelID,
+            mtpCandidates: mtpCandidates,
+            scanner: scanner,
+            parameterStore: parameterStore
+        ) else {
             return nil
-        }
-
-        let selected = normalized(explicitMtpModelID)
-            ?? normalized(parameters?.mtpModelID)
-            ?? scanner.mtpCandidates(for: modelID).first?.id
-        guard let selected else {
-            throw ModelMtpRuntimeError.noCompatibleMtp(model: modelID)
         }
         guard let modelDir = try? scanner.verifiedModelPath(
             for: selected,
@@ -76,8 +77,57 @@ public enum ModelMtpRuntimeResolver {
         return ModelMtpRuntime(
             modelID: selected,
             modelDir: modelDir,
-            draftTokens: parameters?.mtpDraftTokensValue
+            draftTokens: parameterStore.parameters(for: modelID)?.mtpDraftTokensValue
         )
+    }
+
+    /// The MTP runtime the saved parameters select, read without verifying the
+    /// draft snapshot under its repository lock. `nil` when MTP is off or the
+    /// draft model does not resolve.
+    static func unverifiedRuntime(
+        for modelID: String,
+        scanner: LocalModelScanner,
+        parameterStore: ModelParameterStore
+    ) -> ModelMtpRuntime? {
+        guard let selected = try? selectedMtpModelID(
+            for: modelID,
+            useMtp: nil,
+            explicitMtpModelID: nil,
+            scanner: scanner,
+            parameterStore: parameterStore
+        ),
+            let modelDir = scanner.resolveModelPath(for: selected)
+        else {
+            return nil
+        }
+        return ModelMtpRuntime(
+            modelID: selected,
+            modelDir: modelDir,
+            draftTokens: parameterStore.parameters(for: modelID)?.mtpDraftTokensValue
+        )
+    }
+
+    /// The draft model a load uses: the explicit choice, the saved one, or the
+    /// first compatible candidate. `nil` when MTP is off.
+    private static func selectedMtpModelID(
+        for modelID: String,
+        useMtp: Bool?,
+        explicitMtpModelID: String?,
+        mtpCandidates: [LocalMtpCandidate]? = nil,
+        scanner: LocalModelScanner,
+        parameterStore: ModelParameterStore
+    ) throws -> String? {
+        let parameters = parameterStore.parameters(for: modelID)
+        guard useMtp ?? (parameters?.mtpEnabled == true) else {
+            return nil
+        }
+        guard let selected = normalized(explicitMtpModelID)
+            ?? normalized(parameters?.mtpModelID)
+            ?? (mtpCandidates ?? scanner.mtpCandidates(for: modelID)).first?.id
+        else {
+            throw ModelMtpRuntimeError.noCompatibleMtp(model: modelID)
+        }
+        return selected
     }
 
     private static func normalized(_ value: String?) -> String? {

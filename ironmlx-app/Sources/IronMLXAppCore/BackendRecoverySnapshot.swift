@@ -168,33 +168,70 @@ extension BackendRecoveryModel {
 
     /// Loads this model the way the App restores it after a restart: the
     /// folder is verified first, and every configured parameter is sent.
+    /// With `loadActivity` the load is tracked (verification included) and
+    /// runs asynchronously in the backend; `client` then only serves as the
+    /// fallback when no center is given.
     public func load(
         using client: any BackendModelLoading,
         setDefault: Bool,
         scanner: LocalModelScanner,
         parameterStore: ModelParameterStore,
-        fullChecksum: Bool
+        fullChecksum: Bool,
+        loadActivity: ModelLoadActivityCenter? = nil,
+        origin: ModelLoadOrigin = .restore
     ) async throws -> BackendModelAdminResponse {
-        let resolvedModel = try await scanner.verifiedModelPathAsync(
-            for: modelDir ?? id,
-            fullChecksum: fullChecksum
-        )
-        return try await client.loadModel(
+        guard let loadActivity else {
+            let resolvedModel = try await scanner.verifiedModelPathAsync(
+                for: modelDir ?? id,
+                fullChecksum: fullChecksum
+            )
+            return try await client.loadModel(
+                model: id,
+                modelDir: resolvedModel,
+                setDefault: setDefault,
+                maxCacheCap: maxCacheCap,
+                pinned: pinned,
+                mtpModelDir: mtpModelDir,
+                mtpDraftTokens: mtpDraftTokens,
+                promptLookup: promptLookup,
+                reloadWhenIdle: false,
+                samplingDefaults: samplingDefaults,
+                audio: try scanner.audioResources(
+                    for: id,
+                    execution: parameterStore.parameters(for: id)?.audioExecution
+                ) ?? audio,
+                decision: decision
+            )
+        }
+        let model = self
+        return try await loadActivity.track(
             model: id,
-            modelDir: resolvedModel,
-            setDefault: setDefault,
-            maxCacheCap: maxCacheCap,
-            pinned: pinned,
-            mtpModelDir: mtpModelDir,
-            mtpDraftTokens: mtpDraftTokens,
-            promptLookup: promptLookup,
-            reloadWhenIdle: false,
-            samplingDefaults: samplingDefaults,
-            audio: try scanner.audioResources(
-                for: id,
-                execution: parameterStore.parameters(for: id)?.audioExecution
-            ) ?? audio,
-            decision: decision
-        )
+            variant: mtpModelDir == nil ? .plain : .mtp,
+            origin: origin
+        ) { ticket in
+            loadActivity.enterAppStage(ticket, .verifyingFiles)
+            let resolvedModel = try await scanner.verifiedModelPathAsync(
+                for: model.modelDir ?? model.id,
+                fullChecksum: fullChecksum
+            )
+            let request = BackendLoadModelRequest(
+                model: model.id,
+                modelDir: resolvedModel,
+                setDefault: setDefault,
+                maxCacheCap: model.maxCacheCap,
+                pinned: model.pinned,
+                mtpModelDir: model.mtpModelDir,
+                mtpDraftTokens: model.mtpDraftTokens,
+                promptLookup: model.promptLookup,
+                reloadWhenIdle: false,
+                samplingDefaults: model.samplingDefaults,
+                audio: try scanner.audioResources(
+                    for: model.id,
+                    execution: parameterStore.parameters(for: model.id)?.audioExecution
+                ) ?? model.audio,
+                decision: model.decision
+            )
+            return try await loadActivity.loadThroughBackend(ticket, request: request)
+        }
     }
 }

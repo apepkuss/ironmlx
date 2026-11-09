@@ -2,6 +2,7 @@
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
@@ -14,6 +15,11 @@ use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
 use ironmlx_lm::core::vision::DenseVlMethods;
 use ironmlx_lm::models::dflash2::DFlash2Target;
 use ironmlx_runtime::core::cache::prefix_store::DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE;
+use ironmlx_runtime::core::engine_pool::LoadStageTimer;
+use ironmlx_runtime::core::load_registry::{
+    LoadBegin, LoadHandle, LoadKind, LoadObserver, LoadRegistry, LoadStage, LoadTracker,
+    LoadTriggerKind, LoadVariant, WeightComponent,
+};
 use ironmlx_runtime::core::process_memory::StaticMemoryEstimate;
 use {
     crate::server, ironmlx_lm::core::loader::Loader, ironmlx_lm::core::model::Model,
@@ -869,6 +875,7 @@ fn single_model_id(args: &ServeArgs) -> Result<String> {
         .context("--model is required when --model-manifest is not set")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve_with_model<M>(
     model: M,
     tokenizer: Tokenizer,
@@ -877,10 +884,12 @@ fn serve_with_model<M>(
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     vision_input: Option<ironmlx_lm::core::vision_input::VisionInputConfig>,
     static_memory_estimate: StaticMemoryEstimate,
+    mut load_timer: LoadStageTimer,
 ) -> Result<()>
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    load_timer.finish("model_build");
     log_scheduler_mode(scheduler_config);
 
     let model_id = single_model_id(args)?;
@@ -968,11 +977,13 @@ fn serve_with_mtp_model<M>(
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     vision_input: Option<ironmlx_lm::core::vision_input::VisionInputConfig>,
     mut static_memory_estimate: StaticMemoryEstimate,
+    mut load_timer: LoadStageTimer,
 ) -> Result<()>
 where
     M: Model + DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
+    load_timer.finish("model_build");
     log_scheduler_mode(scheduler_config);
 
     let mtp_loader = Loader::open_mtp(&mtp_config.model_dir)
@@ -981,6 +992,7 @@ where
         .load_mtp_head(&mtp_loader)
         .with_context(|| format!("loading MTP head from {}", mtp_config.model_dir.display()))?;
     static_memory_estimate.set_allocated_speculative_weights(mtp_loader.loaded_tensor_bytes());
+    load_timer.finish("draft_weights");
 
     let model_id = single_model_id(args)?;
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
@@ -1024,16 +1036,205 @@ where
     ))
 }
 
-/// The image input a DFlash2 target serves: the one its checkpoint configures
-/// (DFlash2 targets are causal models, so it is always resolved).
-fn dflash2_vision_input(
-    vision_input: Option<ironmlx_lm::core::vision_input::VisionInputConfig>,
-) -> Result<ironmlx_lm::core::vision_input::VisionInputConfig> {
-    vision_input.context("DFlash2 target has no resolved image input configuration")
+/// The DFlash2 server during its startup load. Its listeners are bound and
+/// serve the startup status routes (`/healthz` 503, `/admin/api/models/loads`)
+/// while the main thread reads the weights and warms up; the full router is
+/// installed on the same listeners once the load finishes.
+struct DFlash2Startup {
+    runtime: tokio::runtime::Runtime,
+    router: server::startup_status::SwitchableRouter,
+    registry: Arc<LoadRegistry>,
+    load: LoadTracker,
+    serve_task: tokio::task::JoinHandle<Result<()>>,
+}
+
+impl DFlash2Startup {
+    fn start(args: &ServeArgs, model_dir: &Path) -> Result<(Self, LoadHandle)> {
+        let draft_dir = args
+            .dflash2_model_dir
+            .as_ref()
+            .context("DFlash2 server started without --dflash2-model-dir")?;
+        let listeners = server::security::BoundListeners::bind(&args.resolved_network_config()?)?;
+        let runtime = serve_runtime()?;
+        let registry = LoadRegistry::new();
+        let router = server::startup_status::SwitchableRouter::starting(registry.clone());
+        let serve_task = runtime.spawn(server::security::serve_bound(
+            listeners,
+            router.clone(),
+            "ironmlx DFlash2 server",
+        ));
+        let handle = registry.begin(LoadBegin {
+            load_id: None,
+            model: single_model_id(args)?,
+            variant: LoadVariant::Dflash2,
+            kind: LoadKind::Load,
+            trigger: LoadTriggerKind::Startup,
+            config_fingerprint: format!("{}\n{}", model_dir.display(), draft_dir.display()),
+            warning: None,
+        });
+        let load = handle.tracker();
+        // Directory estimates until each loader reports its exact size.
+        for (component, dir) in [
+            (WeightComponent::Main, model_dir),
+            (WeightComponent::Draft, draft_dir.as_path()),
+        ] {
+            if let Ok(bytes) =
+                ironmlx_runtime::core::engine_pool::estimated_weight_bytes_for_roots([dir])
+            {
+                load.set_component_estimate(component, bytes as u64);
+            }
+        }
+        Ok((
+            Self {
+                runtime,
+                router,
+                registry,
+                load,
+                serve_task,
+            },
+            handle,
+        ))
+    }
+
+    fn observer(&self) -> Arc<LoadObserver> {
+        self.load.observer()
+    }
+
+    /// Report `stage`, after checking the server is still up: it only stops
+    /// before activation when serving failed (for example invalid LAN TLS
+    /// material), and then the load is pointless.
+    fn enter_stage(&mut self, stage: LoadStage) -> Result<()> {
+        if self.serve_task.is_finished() {
+            let error = match self.runtime.block_on(&mut self.serve_task) {
+                Ok(Ok(())) => anyhow::anyhow!("DFlash2 server stopped during startup"),
+                Ok(Err(error)) => error,
+                Err(error) => anyhow::Error::new(error).context("DFlash2 server task"),
+            };
+            return Err(error);
+        }
+        self.load.enter_stage(stage);
+        Ok(())
+    }
+
+    /// Record the load as finished, switch the listeners to `router` and
+    /// serve until the server stops.
+    fn serve(self, load: LoadHandle, router: axum::Router) -> Result<()> {
+        load.finish_loaded();
+        self.router.activate(router);
+        tracing::info!("ironmlx DFlash2 server ready");
+        self.runtime
+            .block_on(self.serve_task)
+            .context("DFlash2 server task")?
+    }
+}
+
+/// Serve `--model` with `--dflash2-model-dir`: bind and report progress
+/// first, then load the target and draft on this thread.
+fn run_dflash2(
+    args: &ServeArgs,
+    model_dir: &Path,
+    architecture: ironmlx_lm::models::ModelArchitecture,
+    family: DFlash2TargetFamily,
+    resolved_scheduler: ResolvedSchedulerRuntime,
+    load_timer: LoadStageTimer,
+) -> Result<()> {
+    let (mut startup, load) = DFlash2Startup::start(args, model_dir)?;
+    match load_dflash2_router(
+        args,
+        model_dir,
+        architecture,
+        family,
+        resolved_scheduler,
+        load_timer,
+        &mut startup,
+    ) {
+        Ok(router) => startup.serve(load, router),
+        Err(error) => {
+            load.finish_failed(&error);
+            Err(error)
+        }
+    }
+}
+
+fn load_dflash2_router(
+    args: &ServeArgs,
+    model_dir: &Path,
+    architecture: ironmlx_lm::models::ModelArchitecture,
+    family: DFlash2TargetFamily,
+    resolved_scheduler: ResolvedSchedulerRuntime,
+    mut load_timer: LoadStageTimer,
+    startup: &mut DFlash2Startup,
+) -> Result<axum::Router> {
+    let ResolvedSchedulerRuntime {
+        scheduler_runtime_profile,
+        scheduler_config,
+        ..
+    } = resolved_scheduler;
+    startup.enter_stage(LoadStage::ReadingWeights)?;
+    let observer = startup.observer();
+    // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
+    let mut loader =
+        Loader::open_multimodal_with(model_dir, &observer).context("Loader::open_multimodal")?;
+    load_timer.finish("main_weights");
+    startup.enter_stage(LoadStage::BuildingModel)?;
+    let component_bytes = loader.loaded_tensor_component_bytes();
+    // DFlash2 serving loads the vision encoder on its first image request
+    // (text-only serving never holds it); its bytes stay in the estimate as a
+    // cold component materialized by that request.
+    loader.drop_vision_tower();
+    let mut static_memory_estimate =
+        StaticMemoryEstimate::from_allocated_weights(component_bytes.text, component_bytes.vision);
+    static_memory_estimate.allocated.vision = false;
+    let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
+    let vision_input = ironmlx_lm::core::vision_input::VisionInputConfig::from_causal_loader(
+        architecture,
+        &loader,
+        args.max_image_pixels,
+    )?;
+    match architecture {
+        ironmlx_lm::models::ModelArchitecture::Qwen35Dense => {
+            let mut model = ironmlx_lm::models::Qwen35Model::from_loader_dflash2(&mut loader)
+                .context("Qwen35Model::from_loader_dflash2")?;
+            model.configure_m1_profile(args.m1_profile);
+            load_dflash2_model_router(
+                model,
+                family,
+                tokenizer,
+                args,
+                scheduler_config,
+                scheduler_runtime_profile,
+                static_memory_estimate,
+                vision_input,
+                load_timer,
+                startup,
+            )
+        }
+        ironmlx_lm::models::ModelArchitecture::Qwen35Moe => {
+            // MoE models hold their own Array refs. Dropping the loader before
+            // serving lets the first-forward gate/up fusion free the split
+            // expert weights instead of keeping a second resident copy.
+            let model = ironmlx_lm::models::Qwen35MoeModel::from_loader(&loader)
+                .context("Qwen35MoeModel::from_loader")?;
+            drop(loader);
+            load_dflash2_model_router(
+                model,
+                family,
+                tokenizer,
+                args,
+                scheduler_config,
+                scheduler_runtime_profile,
+                static_memory_estimate,
+                vision_input,
+                load_timer,
+                startup,
+            )
+        }
+        other => bail!("DFlash2 does not support the {other:?} target architecture"),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn serve_with_dflash2_model<M>(
+fn load_dflash2_model_router<M>(
     model: M,
     family: DFlash2TargetFamily,
     tokenizer: Tokenizer,
@@ -1042,7 +1243,9 @@ fn serve_with_dflash2_model<M>(
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     mut static_memory_estimate: StaticMemoryEstimate,
     vision_input: ironmlx_lm::core::vision_input::VisionInputConfig,
-) -> Result<()>
+    mut load_timer: LoadStageTimer,
+    startup: &mut DFlash2Startup,
+) -> Result<axum::Router>
 where
     M: ironmlx_lm::core::model::Model
         + ironmlx_lm::core::vision::DenseVlMethods
@@ -1050,11 +1253,13 @@ where
         + Send
         + 'static,
 {
+    load_timer.finish("model_build");
     let draft_dir = args
         .dflash2_model_dir
         .as_ref()
         .context("DFlash2 server started without --dflash2-model-dir")?;
-    let draft_loader = Loader::open_dflash2(draft_dir)
+    startup.enter_stage(LoadStage::ReadingDraftWeights)?;
+    let draft_loader = Loader::open_dflash2_with(draft_dir, &startup.observer())
         .with_context(|| format!("Loader::open_dflash2 {}", draft_dir.display()))?;
     let draft_bits_value = family.resolve_draft_bits(args.dflash2_draft_bits)?;
     let draft_bits = (draft_bits_value != 0).then_some(draft_bits_value);
@@ -1076,6 +1281,9 @@ where
         family.resolve_block_size(&model, args.dflash2_block_size, checkpoint_block_size)?;
     static_memory_estimate.set_allocated_speculative_weights(draft_loader.loaded_tensor_bytes());
     drop(draft_loader);
+    load_timer.finish("draft_weights");
+    // Covers this prewarm and the engine's startup warmup below.
+    startup.enter_stage(LoadStage::WarmingUp)?;
     model.dflash2_prewarm().context("DFlash2 kernel prewarm")?;
     if model.dflash2_window_cost_budget_policy() {
         draft
@@ -1083,6 +1291,7 @@ where
             .context("DFlash2 drafter prewarm")?;
     }
     mlx::clear_cache();
+    load_timer.finish("prewarm");
     if ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::WIRED_WEIGHTS) {
         // Keep the loaded target and draft weights GPU-resident so an idle
         // gap between requests does not make the next prefill re-establish
@@ -1133,13 +1342,12 @@ where
         tensor_batch_max_width,
         prefix_cache.map(|config| config.max_bytes),
     );
-    let runtime = serve_runtime()?;
-    runtime.block_on(server::serve_with_dflash2(
+    startup.runtime.block_on(server::build_dflash2_router(
+        startup.registry.clone(),
         model,
         draft,
         tokenizer,
         model_id,
-        args.resolved_network_config()?,
         scheduler_config.prefill_chunk_size,
         scheduler_config.b_max,
         scheduler_config.admission_deadline_ms,
@@ -1170,7 +1378,9 @@ fn serve_with_gemma4_drafter_model(
     scheduler_config: SchedulerServeConfig,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     vision_input: Option<ironmlx_lm::core::vision_input::VisionInputConfig>,
+    mut load_timer: LoadStageTimer,
 ) -> Result<()> {
+    load_timer.finish("model_build");
     log_scheduler_mode(scheduler_config);
     tracing::info!(
         "ironmlx serve: Gemma4 drafter enabled model_dir={} requested_draft_tokens={}",
@@ -1205,6 +1415,7 @@ fn serve_with_gemma4_drafter_model(
                 mtp_config.model_dir.display()
             )
         })?;
+    load_timer.finish("draft_weights");
 
     let model_id = single_model_id(args)?;
     let paged_prefix_cache = resolve_paged_prefix_cache_config(args, scheduler_config, &model_id)?;
@@ -1476,7 +1687,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                     .decode_cadence_mid_chunk_cap,
             },
             scheduler_runtime_profile,
-            profile_source: None,
+            profile_outcome: SchedulerProfileOutcome::DefaultWithoutProfile,
         }
     } else {
         resolve_scheduler_for_model(&args, &model_dir)?
@@ -1505,18 +1716,23 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
             "ironmlx serve --prompt-lookup requires a causal scheduler model; `{model_type}` is not supported"
         );
     }
-    // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
-    let mut loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
-    let component_bytes = loader.loaded_tensor_component_bytes();
-    if dflash2_family.is_some() {
-        // DFlash2 serving loads the vision encoder on its first image
-        // request (text-only serving never holds it); its bytes stay in the
-        // estimate as a cold component materialized by that request.
-        loader.drop_vision_tower();
+    let mut load_timer = LoadStageTimer::start(single_model_id(&args)?);
+    if let Some(family) = dflash2_family {
+        return run_dflash2(
+            &args,
+            &model_dir,
+            architecture,
+            family,
+            resolved_scheduler,
+            load_timer,
+        );
     }
-    let mut static_memory_estimate =
+    // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
+    let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
+    load_timer.finish("main_weights");
+    let component_bytes = loader.loaded_tensor_component_bytes();
+    let static_memory_estimate =
         StaticMemoryEstimate::from_allocated_weights(component_bytes.text, component_bytes.vision);
-    static_memory_estimate.allocated.vision = dflash2_family.is_none();
     let mtp_config = resolve_serve_mtp_config(
         &args,
         architecture,
@@ -1554,26 +1770,10 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
 
     match architecture {
         ironmlx_lm::models::ModelArchitecture::Qwen35Dense => {
-            let mut model = if args.dflash2_model_dir.is_some() {
-                ironmlx_lm::models::Qwen35Model::from_loader_dflash2(&mut loader)
-                    .context("Qwen35Model::from_loader_dflash2")?
-            } else {
-                ironmlx_lm::models::Qwen35Model::from_loader(&loader)
-                    .context("Qwen35Model::from_loader")?
-            };
+            let mut model = ironmlx_lm::models::Qwen35Model::from_loader(&loader)
+                .context("Qwen35Model::from_loader")?;
             model.configure_m1_profile(args.m1_profile);
-            if let Some(family) = dflash2_family {
-                serve_with_dflash2_model(
-                    model,
-                    family,
-                    tokenizer,
-                    &args,
-                    scheduler_config,
-                    scheduler_runtime_profile,
-                    static_memory_estimate,
-                    dflash2_vision_input(vision_input)?,
-                )
-            } else if let Some(mtp_config) = mtp_config.clone() {
+            if let Some(mtp_config) = mtp_config.clone() {
                 serve_with_mtp_model(
                     model,
                     tokenizer,
@@ -1583,6 +1783,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                     scheduler_runtime_profile,
                     vision_input,
                     static_memory_estimate,
+                    load_timer,
                 )
             } else {
                 serve_with_model(
@@ -1593,6 +1794,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                     scheduler_runtime_profile,
                     vision_input,
                     static_memory_estimate,
+                    load_timer,
                 )
             }
         }
@@ -1600,21 +1802,6 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
             // MoE models hold their own Array refs. Dropping the loader before
             // serving lets the first-forward gate/up fusion free the split
             // expert weights instead of keeping a second resident copy.
-            if let Some(family) = dflash2_family {
-                let model = ironmlx_lm::models::Qwen35MoeModel::from_loader(&loader)
-                    .context("Qwen35MoeModel::from_loader")?;
-                drop(loader);
-                return serve_with_dflash2_model(
-                    model,
-                    family,
-                    tokenizer,
-                    &args,
-                    scheduler_config,
-                    scheduler_runtime_profile,
-                    static_memory_estimate,
-                    dflash2_vision_input(vision_input)?,
-                );
-            }
             match qwen_moe_serve_model(loader.config_raw_value()) {
                 QwenMoeServeModel::Qwen35 => {
                     let model = ironmlx_lm::models::Qwen35MoeModel::from_loader(&loader)
@@ -1630,6 +1817,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                             scheduler_runtime_profile,
                             vision_input,
                             static_memory_estimate,
+                            load_timer,
                         )
                     } else {
                         serve_with_model(
@@ -1640,6 +1828,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                             scheduler_runtime_profile,
                             vision_input,
                             static_memory_estimate,
+                            load_timer,
                         )
                     }
                 }
@@ -1657,6 +1846,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                             scheduler_runtime_profile,
                             vision_input,
                             static_memory_estimate,
+                            load_timer,
                         )
                     } else {
                         serve_with_model(
@@ -1667,6 +1857,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                             scheduler_runtime_profile,
                             vision_input,
                             static_memory_estimate,
+                            load_timer,
                         )
                     }
                 }
@@ -1686,6 +1877,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                     scheduler_config,
                     scheduler_runtime_profile,
                     vision_input,
+                    load_timer,
                 )
             } else {
                 serve_with_model(
@@ -1696,6 +1888,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                     scheduler_runtime_profile,
                     vision_input,
                     static_memory_estimate,
+                    load_timer,
                 )
             }
         }
@@ -1710,6 +1903,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 scheduler_runtime_profile,
                 None,
                 static_memory_estimate,
+                load_timer,
             )
         }
         ironmlx_lm::models::ModelArchitecture::Llama => {
@@ -1723,6 +1917,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 scheduler_runtime_profile,
                 None,
                 static_memory_estimate,
+                load_timer,
             )
         }
         ironmlx_lm::models::ModelArchitecture::MiniCpmV46 => {
@@ -1737,6 +1932,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 scheduler_runtime_profile,
                 vision_input,
                 static_memory_estimate,
+                load_timer,
             )
         }
         ironmlx_lm::models::ModelArchitecture::DiffusionGemma => {
@@ -1752,6 +1948,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                     .context("DiffusionGemmaGenerationConfig::from_loader")?;
             let model = ironmlx_lm::models::DiffusionGemmaModel::from_loader(&loader)
                 .context("DiffusionGemmaModel::from_loader")?;
+            load_timer.finish("model_build");
             let model_weight_bytes = loader.loaded_tensor_bytes();
             serve_with_diffusion_gemma_model(
                 model,
@@ -1773,7 +1970,7 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
 mod scheduler_profile_tests {
     use ironmlx_runtime::core::scheduler_resolution::{
         check_loaded_scheduler_profile_health, default_scheduler_runtime_profile,
-        SchedulerProfileSource,
+        SchedulerProfileOutcome, SchedulerProfileSource,
     };
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2513,7 +2710,7 @@ mod scheduler_profile_tests {
         let mut resolved = ResolvedSchedulerRuntime {
             scheduler_runtime_profile: default_scheduler_runtime_profile(runtime_context()),
             scheduler_config: SchedulerServeConfig::default(),
-            profile_source: None,
+            profile_outcome: SchedulerProfileOutcome::DefaultWithoutProfile,
         };
 
         let changed = apply_adaptive_mtp_scheduler_defaults(
@@ -2545,7 +2742,7 @@ mod scheduler_profile_tests {
                 b_max: 1,
                 ..SchedulerServeConfig::default()
             },
-            profile_source: None,
+            profile_outcome: SchedulerProfileOutcome::DefaultWithoutProfile,
         };
 
         let changed = apply_adaptive_mtp_scheduler_defaults(
@@ -2569,7 +2766,7 @@ mod scheduler_profile_tests {
                 b_max: 2,
                 ..SchedulerServeConfig::default()
             },
-            profile_source: Some(SchedulerProfileSource::Store),
+            profile_outcome: SchedulerProfileOutcome::Profile(SchedulerProfileSource::Store),
         };
 
         let changed = apply_adaptive_mtp_scheduler_defaults(
@@ -2600,7 +2797,7 @@ mod scheduler_profile_tests {
                 b_max: 2,
                 ..SchedulerServeConfig::default()
             },
-            profile_source: Some(SchedulerProfileSource::Explicit),
+            profile_outcome: SchedulerProfileOutcome::Profile(SchedulerProfileSource::Explicit),
         };
 
         let changed = apply_adaptive_mtp_scheduler_defaults(
@@ -2622,7 +2819,7 @@ mod scheduler_profile_tests {
         let mut resolved = ResolvedSchedulerRuntime {
             scheduler_runtime_profile: default_scheduler_runtime_profile(runtime_context()),
             scheduler_config: SchedulerServeConfig::default(),
-            profile_source: None,
+            profile_outcome: SchedulerProfileOutcome::DefaultWithoutProfile,
         };
 
         let changed = apply_adaptive_mtp_scheduler_defaults(
@@ -3346,6 +3543,7 @@ use {
     ironmlx_runtime::core::scheduler_resolution::read_model_type,
     ironmlx_runtime::core::scheduler_resolution::resolve_memory_limit_bytes,
     ironmlx_runtime::core::scheduler_resolution::ResolvedSchedulerRuntime,
+    ironmlx_runtime::core::scheduler_resolution::SchedulerProfileOutcome,
     ironmlx_runtime::core::scheduler_resolution::SchedulerResolutionOptions,
     ironmlx_runtime::core::scheduler_resolution::SchedulerServeConfig,
     ironmlx_runtime::core::scheduler_resolution::DEFAULT_MAX_CACHE_CAP,
@@ -3369,6 +3567,7 @@ impl From<&ServeArgs> for SchedulerResolutionOptions {
             active_kv_offload: args.active_kv_offload,
             memory_limit_total_gb: args.memory_limit_total_gb,
             memory_limit_model_gb: args.memory_limit_model_gb,
+            scheduler_profile_store_root: None,
         }
     }
 }

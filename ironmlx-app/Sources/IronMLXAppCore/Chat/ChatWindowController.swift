@@ -19,7 +19,8 @@ struct ChatWindowEnvironment {
     var theme: () -> String?
     /// Downloaded conversation models, with what the backend has loaded.
     var models: () async -> [ChatModelOption]
-    var openDashboard: (DashboardInitialRoute) -> Void
+    /// Opens the Dashboard on a route; for `.agents`, on the given guide.
+    var openDashboard: (DashboardInitialRoute, AgentGuideID?) -> Void
     /// Downloads the offered upgrade; states arrive until `.ready`, `.failed` or `.idle`.
     var startUpgrade: (StarterRecommendation, @escaping @MainActor (StarterDownloadState) -> Void) -> Void
     /// Brings the window to the front.
@@ -357,8 +358,8 @@ final class ChatWindowController: NSObject, ChatWindowPresenting, NSWindowDelega
                 IronMLXAppLogger.error("Chat could not save the thinking setting: \(error)")
             }
         case .openAgents:
-            // Task 7 adds an agent preselection; until then the Agent page opens.
-            environment.openDashboard(.agents)
+            // The link names DeepSeek Harness, so its guide opens.
+            environment.openDashboard(.agents, .dsh)
         case .downloadUpgrade:
             guard let offer = upgradeOffer else { return }
             environment.startUpgrade(offer) { [weak self] state in self?.upgradeStateChanged(state) }
@@ -374,7 +375,7 @@ final class ChatWindowController: NSObject, ChatWindowPresenting, NSWindowDelega
             let session = session
             Task { await session.open(modelID: id, needsLoad: true) }
         case .openDashboardModels:
-            environment.openDashboard(.modelsManage)
+            environment.openDashboard(.modelsManage, nil)
         }
     }
 
@@ -592,7 +593,7 @@ extension ChatWindowEnvironment {
     static func live(
         configStore: AppConfigStore,
         scanner: LocalModelScanner,
-        openDashboard: @escaping (DashboardInitialRoute) -> Void,
+        openDashboard: @escaping (DashboardInitialRoute, AgentGuideID?) -> Void,
         startUpgrade: @escaping (StarterRecommendation, @escaping @MainActor (StarterDownloadState) -> Void) -> Void
     ) -> ChatWindowEnvironment {
         let catalog = try? SupportedModelCatalog.bundled()

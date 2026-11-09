@@ -166,6 +166,7 @@ public final class DashboardWindowController {
     /// while any of them is open.
     var activation: AppWindowActivation = .shared
     private let downloadService: ModelDownloadService?
+    private let loadActivity: ModelLoadActivityCenter
     /// Handed to the bridge for the onboarding page; set by the App.
     weak var chatEntry: (any ChatEntryHandling)? {
         didSet { bridge?.chatEntry = chatEntry }
@@ -175,14 +176,17 @@ public final class DashboardWindowController {
     public init(
         configStore: AppConfigStore,
         backend: any BackendRuntimeManaging,
-        downloadService: ModelDownloadService? = nil
+        downloadService: ModelDownloadService? = nil,
+        loadActivity: ModelLoadActivityCenter? = nil
     ) {
         self.configStore = configStore
         self.backend = backend
         self.downloadService = downloadService
+        self.loadActivity = loadActivity ?? ModelLoadActivityCenter(configStore: configStore)
     }
 
     public func show(route: DashboardInitialRoute = .status, agentGuide: AgentGuideID? = nil) {
+        loadActivity.setDashboardVisible(true)
         if let window {
             windowDelegate?.cancelPendingHideAfterFullScreenExit()
             activation.shown(.dashboard)
@@ -214,7 +218,8 @@ public final class DashboardWindowController {
             webView: webView,
             configStore: configStore,
             backend: backend,
-            downloadService: downloadService ?? ModelDownloadService()
+            downloadService: downloadService ?? ModelDownloadService(),
+            loadActivity: loadActivity
         )
         bridge.chatEntry = chatEntry
         DashboardBridge.handlerNames.forEach {
@@ -241,9 +246,10 @@ public final class DashboardWindowController {
             exitFullScreen: { [weak window] in
                 window?.toggleFullScreen(nil)
             },
-            hideWindow: { [weak window, weak bridge] in
+            hideWindow: { [weak window, weak bridge, loadActivity] in
                 bridge?.cancelDiagnosticExport()
                 window?.orderOut(nil)
+                loadActivity.setDashboardVisible(false)
             },
             restoreAccessoryActivation: { [weak self] in
                 self?.activation.hidden(.dashboard)
@@ -321,26 +327,6 @@ public final class DashboardWindowController {
         }
     }
 
-    /// Late preselection: applies only while the page still shows the guide it
-    /// opened on, so a guide the user already picked is never overridden.
-    static func lateAgentGuideScript(_ guide: AgentGuideID) -> String {
-        let value = DashboardBridge.jsStringLiteral(guide.rawValue)
-        return """
-        (function() {
-          if (typeof selectAgentGuide !== 'function' || typeof currentAgentGuide === 'undefined') return;
-          if (currentAgentGuide !== window.__ironmlxAgentGuideBaseline) return;
-          selectAgentGuide(\(value));
-        })();
-        """
-    }
-
-    /// Selects `guide` in the open Dashboard without ordering the window front.
-    public func preselectAgentGuideIfUntouched(_ guide: AgentGuideID) {
-        webView?.evaluateJavaScript(Self.lateAgentGuideScript(guide)) { _, error in
-            if let error { IronMLXAppLogger.error("Dashboard agent guide script error: \(error)") }
-        }
-    }
-
     static func routeScript(for route: DashboardInitialRoute, agentGuide: AgentGuideID? = nil) -> String {
         let routeValue = DashboardBridge.jsStringLiteral(route.rawValue)
         let guideValue = DashboardBridge.jsStringLiteral(agentGuide?.rawValue ?? "")
@@ -359,7 +345,6 @@ public final class DashboardWindowController {
             if (route === 'agents') {
               if (typeof navigateTo === 'function') navigateTo('chat');
               if (agentGuide && typeof selectAgentGuide === 'function') selectAgentGuide(agentGuide);
-              else if (typeof currentAgentGuide !== 'undefined') window.__ironmlxAgentGuideBaseline = currentAgentGuide;
               return;
             }
             if (typeof navigateTo === 'function') {

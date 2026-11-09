@@ -251,18 +251,13 @@ import WebKit
 
 @MainActor
 @Test func agentsRouteSelectsGuide() {
-    let script = DashboardWindowController.routeScript(for: .agents, agentGuide: .opencode)
+    let script = DashboardWindowController.routeScript(for: .agents, agentGuide: .dsh)
     #expect(script.contains("navigateTo('chat')"))
     #expect(script.contains("selectAgentGuide(agentGuide)"))
-    #expect(script.contains(#"var agentGuide = "opencode";"#))
+    #expect(script.contains(#"var agentGuide = "dsh";"#))
     let none = DashboardWindowController.routeScript(for: .agents)
     #expect(none.contains(#"var agentGuide = "";"#))
-}
-
-@MainActor
-@Test func lateAgentGuideOnlyAppliesWhileUntouched() {
-    let late = DashboardWindowController.lateAgentGuideScript(.opencode)
-    #expect(late.contains("currentAgentGuide !== window.__ironmlxAgentGuideBaseline"))
-    #expect(late.contains(#"selectAgentGuide("opencode")"#))
-    #expect(DashboardWindowController.routeScript(for: .agents).contains("__ironmlxAgentGuideBaseline = currentAgentGuide"))
+    // The guide is chosen when the page opens; nothing reselects it later.
+    #expect(!script.contains("__ironmlxAgentGuideBaseline"))
+    #expect(!none.contains("__ironmlxAgentGuideBaseline"))
 }

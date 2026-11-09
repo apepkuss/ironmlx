@@ -36,6 +36,14 @@ extension BackendAPIClient: BackendModelLoading {}
 
 public protocol BackendModelRestoring: Sendable {
     func restore(_ snapshot: BackendRecoverySnapshot) async -> BackendRestartResult
+    /// Restores `snapshot` into the backend launch `launchID`.
+    func restore(_ snapshot: BackendRecoverySnapshot, launchID: UUID?) async -> BackendRestartResult
+}
+
+extension BackendModelRestoring {
+    public func restore(_ snapshot: BackendRecoverySnapshot, launchID: UUID?) async -> BackendRestartResult {
+        await restore(snapshot)
+    }
 }
 
 public struct BackendRestartResult: Codable, Equatable, Sendable {
@@ -49,6 +57,10 @@ public struct BackendRestartResult: Codable, Equatable, Sendable {
     public var failures: [BackendModelRecoveryFailure]
     public var errorCode: String?
     public var error: String?
+    /// Models whose restore the user cancelled; they are neither loaded nor
+    /// failed, and the App stops listing them as loaded. Not part of the
+    /// JSON payload.
+    public var cancelledModels: [String] = []
 
     public init(
         success: Bool,
@@ -94,20 +106,34 @@ public struct BackendRestartCoordinator: Sendable {
     private let scanner: LocalModelScanner
     private let parameterStore: ModelParameterStore
     private let clientFactory: ClientFactory
+    /// Tracks each model load so the Dashboard shows restore progress.
+    private let loadActivity: ModelLoadActivityCenter?
+    /// Records what this restore registers, so the next rescan skips it.
+    private let registrationLedger: LocalModelRegistrationLedger
 
     public init(
         scanner: LocalModelScanner = LocalModelScanner(),
         parameterStore: ModelParameterStore = .shared,
         clientFactory: @escaping ClientFactory = { host, port in
             BackendAPIClient(host: host, port: port)
-        }
+        },
+        loadActivity: ModelLoadActivityCenter? = nil,
+        registrationLedger: LocalModelRegistrationLedger = .shared
     ) {
         self.scanner = scanner
         self.parameterStore = parameterStore
         self.clientFactory = clientFactory
+        self.loadActivity = loadActivity
+        self.registrationLedger = registrationLedger
     }
 
     public func restore(_ snapshot: BackendRecoverySnapshot) async -> BackendRestartResult {
+        await restore(snapshot, launchID: nil)
+    }
+
+    /// Registers every local model with the launch `launchID`, then loads the
+    /// snapshot's models.
+    public func restore(_ snapshot: BackendRecoverySnapshot, launchID: UUID?) async -> BackendRestartResult {
         let config = snapshot.config
         if let dflash2Model = snapshot.models.first(where: { $0.dflash2ModelDir != nil }) {
             let invalidShape = snapshot.models.count != 1 || !dflash2Model.isDefault
@@ -144,7 +170,10 @@ public struct BackendRestartCoordinator: Sendable {
             scanner: scanner,
             parameterStore: parameterStore,
             activeKvOffloadEnabled: config.activeKvOffload == true,
-            client: client
+            client: client,
+            ledger: registrationLedger,
+            launchID: launchID,
+            pass: .restore
         )
 
         let recoveryModelIDs = Set(snapshot.models.map(\.id))
@@ -154,6 +183,7 @@ public struct BackendRestartCoordinator: Sendable {
                 .map { ($0.model, $0) }
         )
         var loadedModels: [String] = []
+        var cancelledModels: [String] = []
         var failures: [BackendModelRecoveryFailure] = []
         let recoveryModels = snapshot.models.sorted(by: Self.recoveryOrder)
         let defaultCandidates = recoveryModels.filter { model in
@@ -169,9 +199,15 @@ public struct BackendRestartCoordinator: Sendable {
                     setDefault: model.id == defaultModelID,
                     scanner: scanner,
                     parameterStore: parameterStore,
-                    fullChecksum: config.verifyModelOnLoad == true
+                    fullChecksum: config.verifyModelOnLoad == true,
+                    loadActivity: loadActivity,
+                    origin: .restore
                 )
                 loadedModels.append(model.id)
+            } catch where ModelLoadActivityCenter.isUserCancellation(error) {
+                // The user chose not to load it now; that is not a failure.
+                cancelledModels.append(model.id)
+                IronMLXAppLogger.info("Model restore cancelled by the user: \(model.id)")
             } catch {
                 let failure = BackendRecoveryFailureClassifier.failure(
                     model: model.id,
@@ -201,7 +237,7 @@ public struct BackendRestartCoordinator: Sendable {
         if !failedModels.isEmpty {
             let partial = !loadedModels.isEmpty
             let primaryFailure = failures.first
-            return BackendRestartResult(
+            var result = BackendRestartResult(
                 success: false,
                 status: partial ? "models_partially_loaded" : "model_load_failed",
                 port: config.port,
@@ -215,9 +251,11 @@ public struct BackendRestartCoordinator: Sendable {
                 errorCode: primaryFailure?.code,
                 error: primaryFailure?.message
             )
+            result.cancelledModels = cancelledModels
+            return result
         }
 
-        return BackendRestartResult(
+        var result = BackendRestartResult(
             success: true,
             status: loadedModels.isEmpty ? "restarted" : "models_loaded",
             port: config.port,
@@ -227,6 +265,8 @@ public struct BackendRestartCoordinator: Sendable {
             modelLoaded: !loadedModels.isEmpty,
             loadedModels: loadedModels
         )
+        result.cancelledModels = cancelledModels
+        return result
     }
 
     private static func recoveryOrder(

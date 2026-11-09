@@ -22,6 +22,9 @@ LAN 使用 `https://<selected-ip>:<port>`，所有路由（包括健康检查）
 | [`POST /v1/models/{model_id}/load`](engine-pool.md) | 加载模型 |
 | [`POST /v1/models/{model_id}/unload`](engine-pool.md) | 卸载模型 |
 | [`GET /admin/api/models/loaded`](#app-决策运行时指标) | 已加载模型与指标 |
+| [`POST /admin/api/models/load`](#模型加载任务app) | 在 App 中加载模型 |
+| [`GET /admin/api/models/loads`](#模型加载任务app) | 加载进度 |
+| [`POST /admin/api/models/loads/{load_id}/cancel`](#模型加载任务app) | 取消加载 |
 | [`GET /admin/api/log-level`](#日志级别管理仅本机) | 查询日志级别 |
 | [`POST /admin/api/log-level`](#日志级别管理仅本机) | 修改日志级别 |
 
@@ -34,6 +37,8 @@ LAN 使用 `https://<selected-ip>:<port>`，所有路由（包括健康检查）
 ### GET /healthz
 
 无请求体。成功返回 HTTP 200 JSON。公共字段为 `status`、`degraded_reasons`、`version` 与 `mode`；模型、调度、内存和模型池详情随服务模式变化。客户端应允许可选观测字段缺失，具体请求能否执行仍以推理接口返回为准。
+
+DFlash2 服务（带 `--dflash2-model-dir` 的 `ironmlx serve`，App 运行 DFlash2 模型时即使用该方式）在启动加载模型期间已可接受连接。模型就绪前，`/healthz` 返回 HTTP 503 和 `{"status":"starting"}`，`GET /admin/api/models/loads` 报告加载进度，其他路由返回 HTTP 503、错误码 `backend_starting` 和 `Retry-After: 5`。`/healthz` 返回任何非 2xx 状态都应视为尚未就绪。
 
 `/healthz.memory.free_ram_bytes` 是操作系统报告的原始空闲页，仅用于观测；
 `available_ram_bytes` 使用与进程内存 governor 相同的可回收内存口径。内存健康
@@ -94,6 +99,39 @@ App DFlash2 discovery 返回已加载 target 的有效容量，而非 draft 模�
 App 的 `/healthz` 模型条目返回 `embedding_metrics`，包含向量请求计数、近期延迟、
 输入 token 吞吐与向量吞吐。字段含义、统计窗口和重置行为见
 [Embedding API](text-embeddings.md#运行状态)。
+
+### 已加载模型的调度配置
+
+`GET /admin/api/models/loaded` 的条目包含 `scheduler_profile`，表示模型当前使用的调度配置：`profile`（专用 scheduler profile）、`default`（默认配置）或 `default_settings_mismatch`（使用默认配置，因为本机为该模型生成的 profile 对应其他运行设置）。不使用文本生成调度器的模型（如音频、图片生成、决策和 DiffusionGemma 模型）不返回该字段。见[调度性能校准](scheduler-profile-v5.md#app-中的显示)。
+
+### 模型加载任务（App）
+
+以下路由仅 App 提供。与其他 `/admin/api/models` 路由相同、与[日志级别管理](#日志级别管理仅本机)不同，它们也挂载在 LAN 监听端：本机回环无需 Key，LAN 需带 `Authorization: Bearer <API-Key>`。DFlash2 服务也提供 `GET /admin/api/models/loads`（启动加载期间同样可用），但没有加载和取消路由。
+
+`POST /admin/api/models/load` 加载模型，模型字段见[音频资源注册示例](audio-speech-api.md#注册本地资源)。以下两个可选字段用于跟踪加载：
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `load_id` | string | 自动生成的 UUID | 本次加载的 ID，由 1–128 个字母、数字、`-`、`_` 或 `.` 组成。格式不合法返回 400 `invalid_load_id`；该 ID 仍出现在 `GET /admin/api/models/loads` 中时返回 409 `load_id_in_use`。 |
+| `async` | boolean | `false` | 加载登记后立即返回 HTTP 202 和 `{"load_id", "state"}`，不等待加载结束。 |
+
+不带 `async` 时，加载结束后才返回：HTTP 200，含 `success`、`status`（如 `loaded`、`reloaded`）、`loaded_models` 和 `load_id`。如果该模型正以相同配置加载，请求会加入这次加载，响应返回这次加载的 `load_id`，可能与请求中的不同；配置不同则返回 409 `load_in_progress`，并带正在进行的加载的 `load_id`。带 `async` 时，如果无需加载或加载立即结束，返回与不带 `async` 时相同的响应。失败时返回 `success:false`、`code` 和 `error`，HTTP status 按分类确定：MTP 与模型能力类错误为 400，`load_cancelled` 与 `load_in_progress` 为 409，内存与容量类错误为 503。错误码列表见[推理错误契约](text-vision-api.md#错误契约)。
+
+`GET /admin/api/models/loads` 返回 `{"loads": [...]}`，包含进行中的加载和最近 30 秒内结束的加载。
+
+| 字段 | 含义 |
+| --- | --- |
+| `load_id`、`model` | 加载 ID 与模型 ID |
+| `variant`、`kind`、`trigger` | `plain`、`mtp` 或 `dflash2`；`load` 或 `reload`；`admin`、`openai_control`、`request`、`deferred_reload` 或 `startup` |
+| `state` | `queued`、`loading`、`cancelling`、`loaded`、`failed` 或 `cancelled` |
+| `stage` | `queued`、`preparing_memory`、`reading_weights`、`building_model`、`reading_draft_weights`、`starting_engine` 或 `warming_up` |
+| `completed_stages` | 已完成阶段，格式为 `{stage, elapsed_ms}` |
+| `bytes_done`、`bytes_total` | 已读取和预计读取的权重字节数；`bytes_total` 先按目录估算，各 loader 报告实际大小后变为准确值 |
+| `started_unix_ms`、`finished_unix_ms` | Unix 毫秒；加载进行中时 `finished_unix_ms` 为 `null` |
+| `code`、`message` | 加载进行中和加载成功后均为 `null`。取消后 `code` 为 `load_cancelled`，`message` 仍为 `null`。失败后 `code` 为分类错误码（无法归类时为 `load_failed`），`message` 为其消息 |
+| `warning_code`、`warning` | 加载成功但有附加说明时返回，如 `scheduler_profile_hardware_mismatch` 或 `scheduler_profile_unusable`；否则为 `null` |
+
+`POST /admin/api/models/loads/{load_id}/cancel` 无请求体。成功返回 HTTP 202 和 `{"load_id", "state":"cancelling"}`；ID 不存在返回 404 `{"code":"load_not_found"}`；加载已结束返回 409 `{"code":"load_finished"}`；加载已进入 `starting_engine`、无法再取消时返回 409 `{"code":"load_finishing"}`。被取消的加载最终状态为 `cancelled`。取消新加载后模型保持未加载，等待该加载的请求收到 409 `load_cancelled`；取消重新加载则继续使用之前已加载的版本。
 
 ### 日志级别管理（仅本机）
 

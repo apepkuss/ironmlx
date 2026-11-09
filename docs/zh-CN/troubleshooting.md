@@ -9,6 +9,7 @@
 | App 无法启动 | 确认是 Apple Silicon、macOS 26.4 及以上，记录系统提示和 App 版本。源码构建请执行[构建检查](building-from-source.md)。 |
 | 模型下载中断 | 在 Dashboard 重试同一模型，不要手动移动未完成的 `.partial` 文件。 |
 | 模型被拒绝加载 | 阅读 Dashboard 错误提示，检查[模型加载](#模型加载)、可用磁盘、内存和下载完整性。 |
+| 请求提示模型不会再自动加载（will not be loaded again automatically） | 该模型上次加载失败，请求不会再重试加载。按提示处理原因（如内存或模型设置），然后在 Dashboard 中重新加载模型。 |
 | API 连接失败 | 使用 Dashboard 显示的地址和端口；本机模式只能从当前 Mac 访问。参见 [API 快速开始](developer-guide.md#api-快速开始)。 |
 | LAN 返回 401 | 重新复制当前 API Key，并作为 Bearer token 发送。 |
 | LAN 证书错误 | 安装或指定 App 导出的 CA，连接 App 显示的 IP。参见 [LAN 配置](security-boundary.md)。 |

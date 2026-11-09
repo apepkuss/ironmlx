@@ -310,49 +310,119 @@ fn local_management_router(router: Router) -> Router {
         .layer(middleware::from_fn(super::webrtc::cors))
 }
 
+/// The local listener and, in LAN mode, the authenticated LAN listener, bound
+/// before anything is served so the ports are open while the process starts.
+pub struct BoundListeners {
+    local: std::net::TcpListener,
+    local_addr: SocketAddr,
+    lan: Option<BoundLanListener>,
+}
+
+struct BoundLanListener {
+    listener: std::net::TcpListener,
+    addr: SocketAddr,
+    security: LanSecurity,
+}
+
+impl BoundListeners {
+    pub fn bind(config: &ServerNetworkConfig) -> Result<Self> {
+        let local = bind_listener(config.local_addr)
+            .with_context(|| format!("binding local listener {}", config.local_addr))?;
+        let local_addr = local
+            .local_addr()
+            .context("reading local listener address")?;
+        let lan = match config.lan_addr {
+            None => None,
+            Some(lan_addr) => {
+                let security = config
+                    .lan_security
+                    .clone()
+                    .context("lan_security_material_missing: LAN mode has no security material")?;
+                let listener = bind_listener(lan_addr)
+                    .with_context(|| format!("binding selected LAN listener {lan_addr}"))?;
+                let addr = listener
+                    .local_addr()
+                    .context("reading LAN listener address")?;
+                Some(BoundLanListener {
+                    listener,
+                    addr,
+                    security,
+                })
+            }
+        };
+        Ok(Self {
+            local,
+            local_addr,
+            lan,
+        })
+    }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    pub fn lan_addr(&self) -> Option<SocketAddr> {
+        self.lan.as_ref().map(|lan| lan.addr)
+    }
+}
+
+fn bind_listener(addr: SocketAddr) -> Result<std::net::TcpListener> {
+    let listener = std::net::TcpListener::bind(addr)?;
+    listener
+        .set_nonblocking(true)
+        .context("configuring listener")?;
+    Ok(listener)
+}
+
 pub async fn serve_router(router: Router, config: ServerNetworkConfig, label: &str) -> Result<()> {
+    serve_listeners(BoundListeners::bind(&config)?, router, label).await
+}
+
+/// Serve `router` on listeners bound earlier; it answers with its startup
+/// routes until [`SwitchableRouter::activate`] installs the full router.
+///
+/// [`SwitchableRouter::activate`]: super::startup_status::SwitchableRouter::activate
+pub async fn serve_bound(
+    listeners: BoundListeners,
+    router: super::startup_status::SwitchableRouter,
+    label: &str,
+) -> Result<()> {
+    serve_listeners(listeners, Router::new().fallback_service(router), label).await
+}
+
+async fn serve_listeners(listeners: BoundListeners, router: Router, label: &str) -> Result<()> {
     let local_router =
         local_management_router(router.clone()).layer(axum::Extension(super::webrtc::Network {
-            ip: config.local_addr.ip(),
+            ip: listeners.local_addr.ip(),
         }));
-    let local_std = std::net::TcpListener::bind(config.local_addr)
-        .with_context(|| format!("binding local listener {}", config.local_addr))?;
-    local_std
-        .set_nonblocking(true)
-        .context("configuring local listener")?;
-    let local_listener =
-        tokio::net::TcpListener::from_std(local_std).context("creating Tokio local listener")?;
+    let local_listener = tokio::net::TcpListener::from_std(listeners.local)
+        .context("creating Tokio local listener")?;
 
-    let Some(lan_addr) = config.lan_addr else {
-        tracing::info!("{label} listening locally on http://{}", config.local_addr);
+    let Some(lan) = listeners.lan else {
+        tracing::info!(
+            "{label} listening locally on http://{}",
+            listeners.local_addr
+        );
         axum::serve(local_listener, local_router).await?;
         return Ok(());
     };
-    let security = config
-        .lan_security
-        .context("lan_security_material_missing: LAN mode has no security material")?;
     let _ = rustls::crypto::ring::default_provider().install_default();
     let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
-        security.tls_certificate_pem,
-        security.tls_private_key_pem,
+        lan.security.tls_certificate_pem,
+        lan.security.tls_private_key_pem,
     )
     .await
     .context("lan_security_material_invalid: loading TLS certificate and private key")?;
-    let lan_std = std::net::TcpListener::bind(lan_addr)
-        .with_context(|| format!("binding selected LAN listener {lan_addr}"))?;
-    lan_std
-        .set_nonblocking(true)
-        .context("configuring LAN listener")?;
-    let lan_router = lan_api_router(router, security.api_key_digest).layer(axum::Extension(
-        super::webrtc::Network { ip: lan_addr.ip() },
+    let lan_router = lan_api_router(router, lan.security.api_key_digest).layer(axum::Extension(
+        super::webrtc::Network { ip: lan.addr.ip() },
     ));
     tracing::info!(
         "{label} listening locally on http://{} and on authenticated LAN endpoint https://{}",
-        config.local_addr,
-        lan_addr
+        listeners.local_addr,
+        lan.addr
     );
     let local = axum::serve(local_listener, local_router);
-    let lan = axum_server::from_tcp_rustls(lan_std, tls).serve(lan_router.into_make_service());
+    let lan = axum_server::from_tcp_rustls(lan.listener, tls).serve(lan_router.into_make_service());
     tokio::try_join!(local, lan)?;
     Ok(())
 }
@@ -628,6 +698,73 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
         assert!(String::from_utf8_lossy(&bytes).contains("request_body_too_large"));
+    }
+
+    #[tokio::test]
+    async fn startup_status_router_reports_503_until_ready_on_lan() {
+        let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).unwrap();
+        let config = ServerNetworkConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            lan_addr: Some("127.0.0.1:0".parse().unwrap()),
+            lan_security: Some(LanSecurity {
+                api_key_digest: Sha256::digest(b"imx_correct").into(),
+                tls_certificate_pem: certified.cert.pem().into_bytes(),
+                tls_private_key_pem: certified.signing_key.serialize_pem().into_bytes(),
+            }),
+        };
+        let listeners = BoundListeners::bind(&config).unwrap();
+        let local = format!("http://{}", listeners.local_addr());
+        let lan = format!("https://{}", listeners.lan_addr().unwrap());
+        let registry = ironmlx_runtime::core::load_registry::LoadRegistry::new();
+        let router = super::super::startup_status::SwitchableRouter::starting(registry);
+        let server = tokio::spawn(serve_bound(listeners, router.clone(), "startup LAN test"));
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+        let fetch = |url: String, key: Option<&'static str>| {
+            let mut request = client.get(url);
+            if let Some(key) = key {
+                request = request.bearer_auth(key);
+            }
+            request.send()
+        };
+
+        // Both listeners answer while starting; LAN still requires its key.
+        let response = fetch(format!("{lan}/healthz"), None).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        for (base, key) in [(&lan, Some("imx_correct")), (&local, None)] {
+            let response = fetch(format!("{base}/healthz"), key).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                response.json::<serde_json::Value>().await.unwrap(),
+                serde_json::json!({"status": "starting"})
+            );
+            let response = fetch(format!("{base}/admin/api/models/loads"), key)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.json::<serde_json::Value>().await.unwrap(),
+                serde_json::json!({"loads": []})
+            );
+        }
+        // Log control stays local-only.
+        let response = fetch(format!("{lan}/admin/api/log-level"), Some("imx_correct"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "backend_starting");
+
+        router.activate(Router::new().route("/healthz", get(|| async { "ready" })));
+        for (base, key) in [(&lan, Some("imx_correct")), (&local, None)] {
+            let response = fetch(format!("{base}/healthz"), key).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let response = fetch(format!("{lan}/healthz"), None).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        server.abort();
     }
 
     #[tokio::test]

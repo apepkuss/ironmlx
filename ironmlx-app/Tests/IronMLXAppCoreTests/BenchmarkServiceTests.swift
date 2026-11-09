@@ -1031,7 +1031,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(
         dashboardHTML(
             html,
-            contains: "models.filter(m => !['block_diffusion', 'decision', 'embedding', 'asr', 'alignment', 'diarization'].includes(m.capabilities?.runtime_kind))"
+            contains: "models.filter(m => isModelLoadable(m)\n      && !['block_diffusion', 'decision', 'embedding', 'asr', 'alignment', 'diarization'].includes(m.capabilities?.runtime_kind))"
         )
     )
 }
@@ -1359,9 +1359,11 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     )
 
     #expect(dashboardHTML(html, contains: "function localizeWarningResult(result)"))
-    #expect(dashboardHTML(html, contains: "warn_default_scheduler_profile_used"))
+    #expect(dashboardHTML(html, contains: "warn_scheduler_profile_hardware_mismatch"))
+    #expect(dashboardHTML(html, contains: "warn_scheduler_profile_unusable"))
+    #expect(!html.contains("scheduler_profile_unmatched"))
+    #expect(!html.contains("warn_default_scheduler_profile_used"))
     #expect(dashboardHTML(html, contains: "warn_model_reload_deferred"))
-    #expect(dashboardHTML(html, contains: "未找到该模型匹配的 scheduler profile"))
     #expect(dashboardHTML(html, contains: "showToast(localizeWarningResult(result), 'info')"))
 }
 

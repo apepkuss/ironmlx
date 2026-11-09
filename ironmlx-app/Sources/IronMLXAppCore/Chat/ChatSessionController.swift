@@ -745,10 +745,12 @@ final class ChatSessionController {
         onError?(.modelLoadFailed(modelID: modelID, message: Self.modelUnloadedMessage))
     }
 
-    /// The admin API's error `code`: from a refused response, or from the
-    /// JSON body of a non-2xx answer (`BackendAPIError.serverResponse`).
+    /// The admin API's error `code`: from a refused response, from a load the
+    /// backend registry reported failed, or from the JSON body of a non-2xx
+    /// answer (`BackendAPIError.serverResponse`).
     nonisolated static func adminErrorCode(_ error: Error) -> String? {
         if let error = error as? ChatModelLoadError { return error.code }
+        if let error = error as? ModelLoadFailedError { return error.code }
         guard case let BackendAPIError.serverResponse(_, body) = error,
               let data = body?.data(using: .utf8),
               let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]

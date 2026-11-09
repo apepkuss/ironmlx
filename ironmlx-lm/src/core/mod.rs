@@ -7,6 +7,7 @@ pub mod generated_output;
 pub mod image_input;
 pub(crate) mod image_resample;
 pub mod json_schema;
+pub mod load_observer;
 pub mod loader;
 pub mod model;
 pub mod model_input;
@@ -28,9 +29,10 @@ pub use generated_output::{
     GeneratedOutputDecoder, GeneratedOutputEvent, ImageArtifact, InputCapabilityProfile,
     ModelCapabilityProfile, OutputCapabilityProfile, ToolOutputDecoderConfig,
 };
+pub use load_observer::{LoadCancelled, LoadObserver, LoadObserverSnapshot, WeightComponent};
 pub use loader::{
     preflight_model_metadata, EosTokenId, Loader, ModelMetadataPreflight, QuantMeta, QuantMode,
-    QuantizationMetadataPreflight, TokenizerConfig,
+    QuantizationMetadataPreflight, TokenizerConfig, WEIGHT_EVAL_CHUNK_BYTES,
 };
 pub use model::Model;
 pub use native_output::{NativeOutputDecoderConfig, NativeOutputDialect, NativeOutputParser};

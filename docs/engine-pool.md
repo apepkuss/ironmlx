@@ -66,9 +66,10 @@ Startup validation:
 - `preload` models load at startup. A preload failure fails startup.
 - `lazy` models load on first request or through the control API.
 - `disabled` models are listed in the manifest but are not routable.
-- A failed lazy load leaves the model in `failed` state. Normal inference
-  requests fail fast until the model is explicitly loaded again through the
-  control API.
+- A failed lazy load leaves the model in `failed` state. Inference requests
+  never load a `failed` model again; they answer with that failure's error
+  (see [Errors](text-vision-api.md#errors)) until the model is explicitly
+  loaded again through the control API.
 - When `max_loaded_models` is reached, EnginePool evicts the least recently used
   loaded `lazy` model that is not currently in use. `preload` models are pinned.
 
@@ -108,7 +109,10 @@ SSE stream reports the error without a successful finish or `[DONE]`.
 - `GET /healthz`: returns pool status, loaded count, per-model state, and loaded
   engine health where available.
 - `POST /v1/models/:model_id/load`: explicitly loads a lazy model or retries a
-  failed model.
+  failed model. Load failures return the same classified codes and statuses as
+  request-triggered loads: 400 for MTP and model-capability codes, 503 with
+  `Retry-After: 5` for memory and capacity codes, and 503 `engine_unavailable`
+  for unclassified failures.
 - `POST /v1/models/:model_id/unload`: unloads a non-preload model if it is not
   currently in use.
 
@@ -117,7 +121,8 @@ Runtime states:
 - `unloaded`: model is enabled but not loaded.
 - `loading`: model load is in progress.
 - `loaded`: model is loaded and routable.
-- `failed`: last load attempt failed; use the load control API to retry.
+- `failed`: last load attempt failed. Inference requests do not retry it and
+  return the classified error of that failure; use the load control API to retry.
 - `disabled`: model exists in the manifest but cannot be served.
 
 ## Example

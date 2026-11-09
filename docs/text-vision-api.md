@@ -754,14 +754,19 @@ Messages uses an Anthropic envelope and a matching `request-id` header:
 | HTTP | Conditions / codes | Retry |
 | ---: | --- | --- |
 | 400 | `invalid_json`, `invalid_request`, `invalid_sampling_parameters`, `invalid_response_format`, `invalid_tools`, or other field/constraint errors | Correct the request |
+| 400 | Model load codes: MTP and model-capability errors (listed below) | Change the model's load settings |
 | 401 | `auth_invalid` | Check the LAN Bearer key |
 | 404 | `model_not_found` | Select an enabled registered model |
+| 409 | `load_cancelled`, `load_in_progress` | The model load was cancelled, or a load with different settings is running; retry after it ends |
 | 413 | `request_body_too_large`, `request_token_capacity_exceeded` | Reduce body size or token budget; context errors include capacity details |
-| 503 | `scheduler_queue_full`, `scheduler_unavailable`, `scheduler_reply_lost`, `engine_unavailable`, `diffusion_lane_overloaded` | `Retry-After: 5` |
+| 503 | `gpu_memory_insufficient`, `max_loaded_models_reached`, `model_memory_limit_exceeded`, `total_memory_limit_exceeded`, `kv_memory_budget_exceeded` | `Retry-After: 5`, except when the load left the model failed (below) |
+| 503 | `scheduler_queue_full`, `scheduler_unavailable`, `scheduler_reply_lost`, `engine_unavailable`, `diffusion_lane_overloaded` | `Retry-After: 5`, except `engine_unavailable` when the load left the model failed (below) |
 | 503 | `memory_budget_exceeded`, `memory_pressure`, `prefill_peak_unsafe`, `vision_prefill_peak_unsafe`, `cold_materialization_unsafe`, `prefix_store_backpressure` | `Retry-After: 5` |
 | 500 | `generation_error` or internal failure | Inspect diagnostics |
 
-Retryable 503 errors return JSON; Messages uses `overloaded_error` for overload. Messages 413 errors use `request_too_large`.
+Retryable 503 errors return JSON and `Retry-After: 5`, except answers for a model whose load left it in the `failed` state (below), which have no `Retry-After`. Messages uses `overloaded_error` for overload. Messages 413 errors use `request_too_large`.
+
+When a request has to load its model and the load fails, the response uses the same classified code and status as the App load API. The 400 load codes are `mtp_model_dir_required`, `mtp_base_model_not_found`, `mtp_model_not_found`, `mtp_unsupported_architecture`, `mtp_invalid_model_type`, `mtp_invalid_config`, `mtp_invalid_draft_tokens`, `mtp_incompatible`, `model_task_mismatch`, `diffusion_gemma_mtp_unsupported`, `diffusion_gemma_prompt_lookup_unsupported`, `diffusion_gemma_kv_cache_unsupported` and `diffusion_gemma_sampling_parameter_unsupported`. If the failure left the model in the `failed` state, whether or not its cause has a known code, requests do not load it again: the response has no `Retry-After`, and its message ends with "This model will not be loaded again automatically; load it again from the Dashboard or the load API after resolving this." Fix the cause, then load the model from the Dashboard, [`POST /admin/api/models/load`](service-api.md#model-loads-app) or [`POST /v1/models/{model_id}/load`](engine-pool.md#http-apis). Load failures without a known cause remain 503 `engine_unavailable`, with the same `failed`-state message ending and no `Retry-After`.
 
 These envelopes apply to inference and LAN authentication for the three text and vision protocols on this page. Speech, image generation and System One define errors in their own references. Local management success/error formats are documented in [Service and management API](service-api.md#management-endpoints).
 

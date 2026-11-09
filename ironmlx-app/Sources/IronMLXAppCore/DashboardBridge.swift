@@ -2,24 +2,6 @@ import AppKit
 import Foundation
 import WebKit
 
-private enum DFlash2AppActivationError: LocalizedError {
-    case restartFailed(message: String, code: String?)
-
-    var errorDescription: String? {
-        switch self {
-        case .restartFailed(let message, _):
-            return message
-        }
-    }
-
-    var failureCode: String? {
-        switch self {
-        case .restartFailed(_, let code):
-            return code
-        }
-    }
-}
-
 public protocol DashboardModelStatusFetching: Sendable {
     func fetchHealthz() async throws -> HealthzSnapshot
     func fetchLoadedModels() async throws -> [BackendLoadedModelInfo]
@@ -57,6 +39,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private let networkInterfacesProvider: () -> [EndpointPayload.NetworkInterface]
     private let securityStore: LANSecurityMaterialStore
     private let modelStatusClientFactory: @Sendable (String, UInt16) -> any DashboardModelStatusFetching
+    private let loadActivity: ModelLoadActivityCenter
+    /// What the running backend launch has registered, shared with backend restores.
+    private let registrationLedger: LocalModelRegistrationLedger
     private lazy var runtimeLogExporter = RuntimeLogExporter(window: webView?.window)
     private lazy var logLevelController = RuntimeLogLevelController(configStore: configStore, backend: backend)
     private var logLevelChangePending = false
@@ -106,7 +91,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         networkInterfacesProvider: @escaping () -> [EndpointPayload.NetworkInterface] = EndpointPayload.localNetworkInterfaces,
         modelStatusClientFactory: @escaping @Sendable (String, UInt16) -> any DashboardModelStatusFetching = {
             host, port in BackendAPIClient(host: host, port: port)
-        }
+        },
+        loadActivity: ModelLoadActivityCenter? = nil,
+        registrationLedger: LocalModelRegistrationLedger = .shared
     ) {
         self.webView = webView
         self.configStore = configStore
@@ -126,6 +113,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         self.securityStore = securityStore
         self.networkInterfacesProvider = networkInterfacesProvider
         self.modelStatusClientFactory = modelStatusClientFactory
+        self.loadActivity = loadActivity
+            ?? ModelLoadActivityCenter(configStore: configStore, notificationCenter: notificationCenter)
+        self.registrationLedger = registrationLedger
         super.init()
         notificationCenter.addObserver(
             self,
@@ -138,6 +128,12 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             selector: #selector(backendRuntimeDidChange(_:)),
             name: .ironMLXBackendRuntimeDidChange,
             object: nil
+        )
+        notificationCenter.addObserver(
+            self,
+            selector: #selector(modelLoadsDidChange(_:)),
+            name: .ironMLXModelLoadsDidChange,
+            object: self.loadActivity
         )
     }
 
@@ -207,6 +203,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "saveModelParams",
         "startStarterDownload",
         "openChat",
+        "cancelModelLoad",
+        "openModelLoadPanel",
+        "acknowledgeModelLoadFailure",
     ]
 
     public func userContentController(
@@ -331,6 +330,22 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 return
             }
             chatEntry.openChat()
+        case "cancelModelLoad":
+            let model = stringBody(body).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !model.isEmpty else { return }
+            let loadActivity = loadActivity
+            Task { await loadActivity.cancel(model: model) }
+        case "openModelLoadPanel":
+            // Also the page's way to ask for the current loads.
+            let model = stringBody(body).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !model.isEmpty {
+                loadActivity.markPanelOpened(model: model)
+            }
+            sendModelLoads()
+        case "acknowledgeModelLoadFailure":
+            let model = stringBody(body).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !model.isEmpty else { return }
+            loadActivity.acknowledgeFailure(model: model)
         default:
             break
         }
@@ -1168,7 +1183,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                             for: model,
                             execution: parameterStore.parameters(for: model)?.audioExecution
                         )
-                    }
+                    },
+                    loadActivity: self.loadActivity
                 )
                 let json = try Self.jsonString(result)
                 await MainActor.run {
@@ -1243,7 +1259,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             do {
                 let result = try await benchmarkSessionCoordinator.restore(
                     client: client,
-                    validateModelPath: self.benchmarkModelPathValidator(config: config)
+                    validateModelPath: self.benchmarkModelPathValidator(config: config),
+                    loadActivity: self.loadActivity
                 )
                 let json = try Self.jsonString(result)
                 await MainActor.run {
@@ -1574,31 +1591,42 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 var reloadStatus: String?
                 if let loaded {
                     do {
-                        let client = BackendAPIClient(host: config.host, port: config.port)
-                        let targetPath = try await scanner.verifiedModelPathAsync(
-                            for: repoID,
-                            fullChecksum: false
-                        )
-                        let parameters = parameterStore.parameters(for: loaded.id)
-                            ?? parameterStore.parameters(for: repoID)
-                        let response = try await client.loadModel(
+                        let scanner = scanner
+                        let parameterStore = parameterStore
+                        let loadActivity = loadActivity
+                        let response = try await loadActivity.track(
                             model: loaded.id,
-                            modelDir: targetPath,
-                            setDefault: loaded.isDefault,
-                            maxCacheCap: parameters?.maxCacheCap,
-                            pinned: loaded.pinned,
-                            mtpModelDir: loaded.mtpModelDir,
-                            mtpDraftTokens: loaded.mtpDraftTokens,
-                            promptLookup: loaded.promptLookup,
-                            reloadWhenIdle: true,
-                            deferWhenBusy: false,
-                            samplingDefaults: (parameters?.samplingDefaults ?? .empty).filtered(for: scanner.model(for: repoID)?.capabilities),
-                            audio: try scanner.audioResources(
+                            variant: loaded.mtpModelDir == nil ? .plain : .mtp,
+                            origin: .dashboard,
+                            kind: .reload
+                        ) { ticket in
+                            loadActivity.enterAppStage(ticket, .verifyingFiles)
+                            let targetPath = try await scanner.verifiedModelPathAsync(
                                 for: repoID,
-                                execution: parameters?.audioExecution
-                            ),
-                            decision: parameters?.decision
-                        )
+                                fullChecksum: false
+                            )
+                            let parameters = parameterStore.parameters(for: loaded.id)
+                                ?? parameterStore.parameters(for: repoID)
+                            let request = BackendLoadModelRequest(
+                                model: loaded.id,
+                                modelDir: targetPath,
+                                setDefault: loaded.isDefault,
+                                maxCacheCap: parameters?.maxCacheCap,
+                                pinned: loaded.pinned,
+                                mtpModelDir: loaded.mtpModelDir,
+                                mtpDraftTokens: loaded.mtpDraftTokens,
+                                promptLookup: loaded.promptLookup,
+                                reloadWhenIdle: true,
+                                deferWhenBusy: false,
+                                samplingDefaults: (parameters?.samplingDefaults ?? .empty).filtered(for: scanner.model(for: repoID)?.capabilities),
+                                audio: try scanner.audioResources(
+                                    for: repoID,
+                                    execution: parameters?.audioExecution
+                                ),
+                                decision: parameters?.decision
+                            )
+                            return try await loadActivity.loadThroughBackend(ticket, request: request)
+                        }
                         reloadStatus = response.status
                         await MainActor.run {
                             self.persistBackendLoadedModels(response.loadedModels)
@@ -1804,80 +1832,101 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             )
             return
         }
+        let loadActivity = loadActivity
         Task {
             do {
-                let loadModelPath: String
-                let loadMtpRuntime: ModelMtpRuntime?
-                if config.verifyModelOnLoad == true {
-                    loadModelPath = try await self.scanner.verifiedModelPathAsync(
-                        for: model,
-                        fullChecksum: true
-                    )
-                    loadMtpRuntime = capabilities?.supportsMtp != false
-                        ? try await ModelMtpRuntimeResolver.runtimeAsync(
+                let (response, loadMtpRuntime) = try await loadActivity.track(
+                    model: model,
+                    variant: mtpRuntime == nil ? .plain : .mtp,
+                    origin: .dashboard
+                ) { ticket in
+                    let loadModelPath: String
+                    let loadMtpRuntime: ModelMtpRuntime?
+                    if config.verifyModelOnLoad == true {
+                        loadActivity.enterAppStage(ticket, .verifyingFiles)
+                        loadModelPath = try await self.scanner.verifiedModelPathAsync(
                             for: model,
-                            useMtp: instruction.useMtp,
-                            explicitMtpModelID: instruction.mtpModelID,
-                            scanner: self.scanner,
-                            parameterStore: self.parameterStore,
                             fullChecksum: true
                         )
-                        : nil
-                } else {
-                    loadModelPath = resolvedModel
-                    loadMtpRuntime = mtpRuntime
+                        loadMtpRuntime = capabilities?.supportsMtp != false
+                            ? try await ModelMtpRuntimeResolver.runtimeAsync(
+                                for: model,
+                                useMtp: instruction.useMtp,
+                                explicitMtpModelID: instruction.mtpModelID,
+                                scanner: self.scanner,
+                                parameterStore: self.parameterStore,
+                                fullChecksum: true
+                            )
+                            : nil
+                    } else {
+                        loadModelPath = resolvedModel
+                        loadMtpRuntime = mtpRuntime
+                    }
+                    let client = BackendAPIClient(host: config.host, port: config.port)
+                    try await loadActivity.prepareBackend(
+                        ticket,
+                        startBackend: {
+                            try await self.backend.ensureRunning()
+                            try await client.waitUntilReady()
+                        },
+                        syncModels: {
+                            await LocalModelBackendRegistrar.registerLoadTarget(
+                                model,
+                                config: config,
+                                scanner: self.scanner,
+                                parameterStore: self.parameterStore,
+                                client: client,
+                                ledger: self.registrationLedger,
+                                launchID: self.backend.currentLaunchID
+                            )
+                        }
+                    )
+                    let loadedModels = try await client.fetchLoadedModels()
+                    let setDefault = !["embedding", "asr", "alignment", "diarization"].contains(capabilities?.runtimeKind ?? "") && Self.shouldSetDefaultWhenLoadingModel(
+                        model,
+                        config: config,
+                        currentLoadedModelCount: loadedModels.count
+                    )
+                    let request = BackendLoadModelRequest(
+                        model: model,
+                        modelDir: loadModelPath,
+                        setDefault: setDefault,
+                        maxCacheCap: maxCacheCap,
+                        pinned: pinned,
+                        mtpModelDir: loadMtpRuntime?.modelDir,
+                        mtpDraftTokens: loadMtpRuntime?.draftTokens,
+                        promptLookup: promptLookup,
+                        reloadWhenIdle: false,
+                        samplingDefaults: (
+                            self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
+                        ).filtered(for: capabilities),
+                        audio: try self.scanner.audioResources(
+                            for: model,
+                            execution: self.parameterStore.parameters(for: model)?.audioExecution
+                        ),
+                        decision: self.parameterStore.parameters(for: model)?.decision
+                    )
+                    let response = try await loadActivity.loadThroughBackend(ticket, request: request)
+                    return (response, loadMtpRuntime)
                 }
-                try await self.backend.ensureRunning()
-                let client = BackendAPIClient(host: config.host, port: config.port)
-                try await client.waitUntilReady()
-                await self.registerLocalModels(config: config, client: client)
-                let loadedModels = try await client.fetchLoadedModels()
-                let setDefault = !["embedding", "asr", "alignment", "diarization"].contains(capabilities?.runtimeKind ?? "") && Self.shouldSetDefaultWhenLoadingModel(
-                    model,
-                    config: config,
-                    currentLoadedModelCount: loadedModels.count
-                )
-                let response = try await client.loadModel(
-                    model: model,
-                    modelDir: loadModelPath,
-                    setDefault: setDefault,
-                    maxCacheCap: maxCacheCap,
-                    pinned: pinned,
-                    mtpModelDir: loadMtpRuntime?.modelDir,
-                    mtpDraftTokens: loadMtpRuntime?.draftTokens,
-                    promptLookup: promptLookup,
-                    reloadWhenIdle: false,
-                    samplingDefaults: (
-                        self.parameterStore.parameters(for: model)?.samplingDefaults ?? .empty
-                    ).filtered(for: capabilities),
-                    audio: try self.scanner.audioResources(
-                        for: model,
-                        execution: self.parameterStore.parameters(for: model)?.audioExecution
-                    ),
-                    decision: self.parameterStore.parameters(for: model)?.decision
-                )
                 let json = try Self.jsonString(response)
-                await MainActor.run {
-                    self.persistMtpLoadPreferenceIfRequested(
-                        model: model,
-                        instruction: instruction,
-                        mtpRuntime: loadMtpRuntime
-                    )
-                    self.persistDFlash2LoadPreferenceIfRequested(
-                        model: model,
-                        instruction: instruction
-                    )
-                    self.persistBackendLoadedModels(
-                        response.loadedModels,
-                        parameterConfirmedModelIDs: [model]
-                    )
-                    self.deliverModelOperationResult(jsonString: json, callback: callback)
-                    self.sendScannedModels()
-                }
+                self.persistMtpLoadPreferenceIfRequested(
+                    model: model,
+                    instruction: instruction,
+                    mtpRuntime: loadMtpRuntime
+                )
+                self.persistDFlash2LoadPreferenceIfRequested(
+                    model: model,
+                    instruction: instruction
+                )
+                self.persistBackendLoadedModels(
+                    response.loadedModels,
+                    parameterConfirmedModelIDs: [model]
+                )
+                self.deliverModelOperationResult(jsonString: json, callback: callback)
+                self.sendScannedModels()
             } catch {
-                await MainActor.run {
-                    self.deliverBackendError(error, callback: callback)
-                }
+                self.deliverBackendError(error, callback: callback)
             }
         }
     }
@@ -1922,50 +1971,48 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             )
             return
         }
-        Task {
-            do {
+        let scanner = scanner
+        let parameterStore = parameterStore
+        let fullChecksum = dflash2Config.verifyModelOnLoad == true
+        let flow = DFlash2ActivationFlow(
+            backend: backend,
+            configStore: configStore,
+            parameterStore: parameterStore,
+            loadActivity: loadActivity,
+            verify: {
                 _ = try await ModelDFlash2RuntimeResolver.runtimeAsync(
                     for: model,
                     useDFlash2: true,
                     explicitDraftModelID: instruction.dflash2ModelID,
-                    scanner: self.scanner,
-                    parameterStore: self.parameterStore,
-                    fullChecksum: dflash2Config.verifyModelOnLoad == true
+                    scanner: scanner,
+                    parameterStore: parameterStore,
+                    fullChecksum: fullChecksum
                 )
-                await MainActor.run {
-                    self.backend.refreshConfirmedSnapshot()
-                }
-                let result = await self.backend.restart(intent: .plannedRestart)
-                guard result.success else {
-                    throw DFlash2AppActivationError.restartFailed(
-                        message: result.error ?? "DFlash2 backend restart failed.",
-                        code: result.errorCode
-                    )
-                }
+            }
+        )
+        Task {
+            do {
+                let result = try await flow.run(
+                    model: model,
+                    kind: rollbackConfig == nil ? .load : .reload,
+                    previousConfig: previousConfig,
+                    previousParameters: previousParameters
+                )
                 let json = try Self.jsonString(result)
-                await MainActor.run {
-                    self.deliverModelOperationResult(jsonString: json, callback: callback)
-                    self.sendScannedModels()
-                    self.notificationCenter.post(
-                        name: .ironMLXLoadedModelsDidChange,
-                        object: self
-                    )
-                }
+                self.deliverModelOperationResult(jsonString: json, callback: callback)
+                self.sendScannedModels()
+                self.notificationCenter.post(
+                    name: .ironMLXLoadedModelsDidChange,
+                    object: self
+                )
             } catch {
-                _ = self.configStore.save(previousConfig)
-                try? self.parameterStore.replaceParameters(for: model, with: previousParameters)
-                await MainActor.run {
-                    self.backend.refreshConfirmedSnapshot()
-                }
-                _ = await self.backend.restart(intent: .plannedRestart)
-                await MainActor.run {
-                    self.deliverModelOperationResult(
-                        error: error.localizedDescription,
-                        code: (error as? DFlash2AppActivationError)?.failureCode,
-                        callback: callback
-                    )
-                    self.sendScannedModels()
-                }
+                self.deliverModelOperationResult(
+                    error: error.localizedDescription,
+                    code: (error as? DFlash2AppActivationError)?.failureCode
+                        ?? (error as? ModelLoadCancelledError)?.code,
+                    callback: callback
+                )
+                self.sendScannedModels()
             }
         }
     }
@@ -1995,6 +2042,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 try await client.waitUntilReady()
                 let response = try await client.unloadModel(model: model, modelDir: resolvedModel)
+                self.registrationLedger.forget(model: model)
                 let json = try Self.jsonString(response)
                 await MainActor.run {
                     self.persistBackendLoadedModels(response.loadedModels)
@@ -2205,14 +2253,10 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         for model: String,
         instruction: ModelLoadInstruction
     ) -> BackendPromptLookupConfig? {
-        let saved = parameterStore.parameters(for: model)
-        guard instruction.usePromptLookup ?? saved?.promptLookupEnabled ?? false else {
-            return nil
-        }
-        return BackendPromptLookupConfig(
+        ModelLoadParameters.promptLookupConfig(
+            saved: parameterStore.parameters(for: model),
+            usePromptLookup: instruction.usePromptLookup,
             crossRequest: instruction.crossRequestPromptLookup
-                ?? saved?.promptLookupCrossRequest
-                ?? false
         )
     }
 
@@ -2746,6 +2790,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         ),
                         decision: self.parameterStore.parameters(for: model)?.decision
                     )
+                    // Sent outside the registration record (pinned from the config).
+                    self.registrationLedger.forget(model: model)
                 } else {
                     response = try await client.setDefaultModel(model)
                 }
@@ -2904,6 +2950,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 if scanner.model(for: model)?.capabilities?.runtimeKind == "asr" {
                     try await client.updateASRSettings(model: model, settings: parameters.asr ?? .qwen3Defaults)
+                    self.registrationLedger.forget(model: model)
                     await MainActor.run {
                         self.sendJavaScript("onModelParamsReloaded(\(Self.jsStringLiteral(#"{"success":true,"status":"settings_updated"}"#)))")
                     }
@@ -2921,6 +2968,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                         samplingDefaults: .empty,
                         decision: parameters.decision
                     )
+                    self.registrationLedger.forget(model: model)
                     return
                 }
                 guard let loaded = loadedModels.first(where: { candidate in
@@ -2928,34 +2976,46 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 }) else {
                     return
                 }
-                let resolvedModel = try await scanner.verifiedModelPathAsync(
-                    for: model,
-                    fullChecksum: config.verifyModelOnLoad == true
-                )
-                let mtpRuntime = try await ModelMtpRuntimeResolver.runtimeAsync(
-                    for: model,
-                    useMtp: nil,
-                    scanner: scanner,
-                    parameterStore: parameterStore,
-                    fullChecksum: config.verifyModelOnLoad == true
-                )
-                let response = try await client.loadModel(
+                let scanner = scanner
+                let parameterStore = parameterStore
+                let loadActivity = loadActivity
+                let response = try await loadActivity.track(
                     model: model,
-                    modelDir: resolvedModel,
-                    setDefault: loaded.isDefault,
-                    maxCacheCap: parameters.maxCacheCap,
-                    pinned: loaded.pinned,
-                    mtpModelDir: mtpRuntime?.modelDir,
-                    mtpDraftTokens: mtpRuntime?.draftTokens,
-                    promptLookup: parameters.promptLookupConfig,
-                    reloadWhenIdle: true,
-                    samplingDefaults: parameters.samplingDefaults.filtered(for: scanner.model(for: model)?.capabilities),
-                    audio: try scanner.audioResources(
+                    variant: loaded.mtpModelDir == nil ? .plain : .mtp,
+                    origin: .dashboard,
+                    kind: .reload
+                ) { ticket in
+                    loadActivity.enterAppStage(ticket, .verifyingFiles)
+                    let resolvedModel = try await scanner.verifiedModelPathAsync(
                         for: model,
-                        execution: parameters.audioExecution
-                    ),
-                    decision: parameterStore.parameters(for: model)?.decision
-                )
+                        fullChecksum: config.verifyModelOnLoad == true
+                    )
+                    let mtpRuntime = try await ModelMtpRuntimeResolver.runtimeAsync(
+                        for: model,
+                        useMtp: nil,
+                        scanner: scanner,
+                        parameterStore: parameterStore,
+                        fullChecksum: config.verifyModelOnLoad == true
+                    )
+                    let request = BackendLoadModelRequest(
+                        model: model,
+                        modelDir: resolvedModel,
+                        setDefault: loaded.isDefault,
+                        maxCacheCap: parameters.maxCacheCap,
+                        pinned: loaded.pinned,
+                        mtpModelDir: mtpRuntime?.modelDir,
+                        mtpDraftTokens: mtpRuntime?.draftTokens,
+                        promptLookup: parameters.promptLookupConfig,
+                        reloadWhenIdle: true,
+                        samplingDefaults: parameters.samplingDefaults.filtered(for: scanner.model(for: model)?.capabilities),
+                        audio: try scanner.audioResources(
+                            for: model,
+                            execution: parameters.audioExecution
+                        ),
+                        decision: parameterStore.parameters(for: model)?.decision
+                    )
+                    return try await loadActivity.loadThroughBackend(ticket, request: request)
+                }
                 let json = try Self.jsonString(response)
                 await MainActor.run {
                     self.persistBackendLoadedModels(
@@ -2969,7 +3029,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 let response = BackendModelAdminResponse(
                     success: false,
                     status: "error",
-                    code: nil,
+                    code: (error as? ModelLoadCancelledError)?.code
+                        ?? (error as? ModelLoadFailedError)?.code,
                     model: nil,
                     loadedModels: [],
                     warningCode: nil,
@@ -2985,6 +3046,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func syncLoadedModels() {
+        sendModelLoads()
         Task {
             let loaded = await self.loadedModelReferences()
             let json = (try? Self.jsonString(Array(loaded).sorted())) ?? "[]"
@@ -3254,7 +3316,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             }
             if self.canSyncBackendModelState, self.configuredDFlash2Target(in: config) == nil {
                 let client = BackendAPIClient(host: config.host, port: config.port)
-                await self.registerLocalModels(models: models, config: config, client: client)
+                await self.registerChangedLocalModels(models, config: config, client: client)
             }
         }
     }
@@ -3359,21 +3421,23 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
-    private func registerLocalModels(
-        models: [LocalModel]? = nil,
+    /// Registers the scanned models whose registration changed since the
+    /// running backend launch last received it. A request made while a rescan
+    /// pass runs is folded into one rerun after it.
+    private func registerChangedLocalModels(
+        _ models: [LocalModel],
         config: AppConfig,
         client: BackendAPIClient
     ) async {
-        let configPinned = Set(config.pinnedModelReferences)
-        let localModels = models ?? scanner.scan(loadedModels: [], pinnedModels: configPinned, mtpEnabledModels: [])
-        await LocalModelBackendRegistrar.register(
-            localModels: localModels,
+        await LocalModelBackendRegistrar.rescan(
+            localModels: models,
             defaultModel: config.defaultModelReference,
             scanner: scanner,
             parameterStore: parameterStore,
             activeKvOffloadEnabled: config.activeKvOffload == true,
-            preservePinnedState: true,
-            client: client
+            client: client,
+            ledger: registrationLedger,
+            launchID: backend.currentLaunchID
         )
     }
 
@@ -3488,7 +3552,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             do {
                 let request = try await schedulerProfileGenerationRequest(
                     json: json,
-                    fullChecksum: configStore.load().verifyModelOnLoad == true
+                    purpose: .generation(fullChecksum: configStore.load().verifyModelOnLoad == true)
                 )
                 let shouldRestartBackend = backend.isRunning
                 if shouldRestartBackend {
@@ -3514,7 +3578,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 sendSchedulerProfileStatus(
                     SchedulerProfileGenerationStatus.failed(
                         request: nil,
-                        error: error.localizedDescription
+                        error: error.localizedDescription,
+                        code: (error as? SchedulerProfileModelError)?.code
                     )
                 )
             }
@@ -3530,7 +3595,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                     SchedulerProfileGenerationPreview(
                         request: try await schedulerProfileGenerationRequest(
                             json: json,
-                            fullChecksum: false
+                            purpose: .preview
                         ),
                         requestToken: payload?.requestToken
                     )
@@ -3543,9 +3608,16 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
     }
 
+    private enum SchedulerProfileRequestPurpose {
+        /// Estimates the work; reads the model and its MTP draft without repository locks.
+        case preview
+        /// Runs the calibration on a verified snapshot.
+        case generation(fullChecksum: Bool)
+    }
+
     private func schedulerProfileGenerationRequest(
         json: String,
-        fullChecksum: Bool
+        purpose: SchedulerProfileRequestPurpose
     ) async throws -> SchedulerProfileGenerationRequest {
         guard let data = json.data(using: .utf8),
               let payload = try? JSONDecoder().decode(SchedulerProfileGenerationPayload.self, from: data)
@@ -3557,27 +3629,39 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             throw SchedulerProfileGenerationRequestError.noModelSelected
         }
         let config = configStore.load()
-        guard let modelPath = try? await scanner.verifiedModelPathAsync(
-            for: model,
-            fullChecksum: fullChecksum
-        ) else {
-            throw SchedulerProfileGenerationRequestError.modelNotFound(model)
+        let scanner = scanner
+        let parameterStore = parameterStore
+        let target: SchedulerProfileModelTarget
+        switch purpose {
+        case .preview:
+            target = try await Task.detached(priority: .userInitiated) {
+                try SchedulerProfileModelLocator.previewTarget(
+                    for: model,
+                    scanner: scanner,
+                    parameterStore: parameterStore
+                )
+            }.value
+        case let .generation(fullChecksum):
+            target = try await SchedulerProfileModelLocator.generationTarget(
+                for: model,
+                scanner: scanner,
+                parameterStore: parameterStore,
+                fullChecksum: fullChecksum
+            )
         }
+        let modelPath = target.modelPath
+        let mtpRuntime = target.mtpRuntime
 
         let launchOptions = BackendLaunchOptions(config: config)
-        let mtpRuntime = try await ModelMtpRuntimeResolver.runtimeAsync(
-            for: model,
-            useMtp: nil,
-            scanner: scanner,
-            parameterStore: parameterStore,
-            fullChecksum: fullChecksum
+        let maxCacheCap = ModelLoadParameters.calibrationMaxCacheCap(
+            loadCap: ModelLoadParameters.maxCacheCap(
+                for: model,
+                scanner: scanner,
+                parameterStore: parameterStore,
+                activeKvOffloadEnabled: launchOptions.activeKvOffload
+            ),
+            launchOptions: launchOptions
         )
-        let maxCacheCap = ModelLoadParameters.maxCacheCap(
-            for: model,
-            scanner: scanner,
-            parameterStore: parameterStore,
-            activeKvOffloadEnabled: launchOptions.activeKvOffload
-        ) ?? ModelLoadParameters.conservativeLongContextCap
 
         return SchedulerProfileGenerationRequest(
             model: model,
@@ -3593,7 +3677,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             activeKvOffload: launchOptions.activeKvOffload,
             memoryLimitTotalGB: launchOptions.memoryLimitTotalGB,
             memoryLimitModelGB: launchOptions.memoryLimitModelGB,
-            maxCacheCap: maxCacheCap
+            maxCacheCap: maxCacheCap,
+            promptLookup: ModelLoadParameters.promptLookupConfig(
+                saved: parameterStore.parameters(for: model),
+                supportsPromptLookup: scanner.model(for: model)?.capabilities?.supportsPromptLookup != false
+            )
         )
     }
 
@@ -3648,6 +3736,19 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             return
         }
         sendScannedModels()
+    }
+
+    @objc private func modelLoadsDidChange(_ notification: Notification) {
+        sendModelLoads()
+    }
+
+    /// The page defines `onModelLoadsChanged` once its load views exist.
+    private func sendModelLoads() {
+        let json = (try? Self.jsonString(ModelLoadActivityList(loads: loadActivity.activities)))
+            ?? #"{"loads":[]}"#
+        sendJavaScript(
+            "if (typeof onModelLoadsChanged === 'function') { onModelLoadsChanged(\(Self.jsStringLiteral(json))); }"
+        )
     }
 
     @objc private func backendRuntimeDidChange(_ notification: Notification) {
@@ -4001,7 +4102,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private enum SchedulerProfileGenerationRequestError: LocalizedError {
         case invalidRequest
         case noModelSelected
-        case modelNotFound(String)
 
         var errorDescription: String? {
             switch self {
@@ -4009,8 +4109,6 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 "Invalid scheduler profile generation request."
             case .noModelSelected:
                 "No model is selected."
-            case let .modelNotFound(model):
-                "Model not found locally: \(model)"
             }
         }
     }

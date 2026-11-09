@@ -7,13 +7,18 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context};
 use serde::Serialize;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{oneshot, watch, Mutex, Notify};
 
 use crate::core::cache::{PagedPrefixCacheConfig, PrefixLruCacheConfig};
+use crate::core::load_error::{classify_load_error, LoadFailed, RequestLoadFailed};
+use crate::core::load_registry::{
+    LoadActivity, LoadBegin, LoadCancelled, LoadHandle, LoadInProgress, LoadKind, LoadRegistry,
+    LoadStage, LoadState, LoadTracker, LoadTriggerKind, LoadVariant, LoadWarning, WeightComponent,
+};
 use crate::core::process_memory::{
     global_process_memory_governor, MemoryReservation, PressureLevel, StaticMemoryEstimate,
 };
@@ -42,7 +47,8 @@ use ironmlx_lm::core::vision_input::VisionInputConfig;
 
 pub use crate::core::runtime_config::*;
 
-fn estimated_weight_bytes_for_roots<'a>(
+/// Bytes of the weight files under `model_paths`, each file counted once.
+pub fn estimated_weight_bytes_for_roots<'a>(
     model_paths: impl IntoIterator<Item = &'a std::path::Path>,
 ) -> Result<usize> {
     let roots: Vec<PathBuf> = model_paths.into_iter().map(PathBuf::from).collect();
@@ -157,6 +163,8 @@ pub struct EngineLoadedModelInfo {
     /// Native reasoning contract of the loaded chat template; `None` when the
     /// model exposes no supported native reasoning channel.
     pub native_output_dialect: Option<ironmlx_lm::core::native_output::NativeOutputDialect>,
+    /// Scheduler configuration in effect; `None` without a causal scheduler.
+    pub scheduler_profile: Option<crate::core::scheduler_resolution::SchedulerProfileKind>,
 }
 
 struct EnginePoolInner {
@@ -166,6 +174,38 @@ struct EnginePoolInner {
     runtime: EngineRuntimeOptions,
     capacity_policy: EnginePoolCapacityPolicy,
     load_gate: Mutex<()>,
+    load_registry: Arc<LoadRegistry>,
+    #[cfg(any(test, feature = "test-support"))]
+    test_load_hook: std::sync::Mutex<Option<Arc<TestLoadHook>>>,
+}
+
+impl EnginePoolInner {
+    fn new(
+        registry: EngineRegistry,
+        slots: HashMap<String, Arc<EngineSlot>>,
+        runtime: EngineRuntimeOptions,
+        capacity_policy: EnginePoolCapacityPolicy,
+    ) -> Self {
+        Self {
+            asr_settings: Mutex::new(HashMap::new()),
+            registry: Mutex::new(registry),
+            slots: Mutex::new(slots),
+            runtime,
+            capacity_policy,
+            load_gate: Mutex::new(()),
+            load_registry: LoadRegistry::new(),
+            #[cfg(any(test, feature = "test-support"))]
+            test_load_hook: std::sync::Mutex::new(None),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn test_load_hook(&self) -> Option<Arc<TestLoadHook>> {
+        self.test_load_hook
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 struct EngineSlot {
@@ -177,6 +217,230 @@ struct EngineSlot {
     pinned: AtomicBool,
     state: Mutex<EngineSlotState>,
     notify: Notify,
+    /// The load this slot is running, from registration until the slot state
+    /// records its result. Changed only while `state` is locked.
+    pending_load: std::sync::Mutex<Option<PendingSlotLoad>>,
+}
+
+/// How the caller of a load is identified in the load registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineLoadOptions {
+    /// Client-chosen registry id; generated when absent.
+    pub load_id: Option<String>,
+    pub trigger: LoadTriggerKind,
+    /// Reported with the load's result when it succeeds.
+    pub warning: Option<LoadWarning>,
+}
+
+impl EngineLoadOptions {
+    pub fn new(trigger: LoadTriggerKind) -> Self {
+        Self {
+            load_id: None,
+            trigger,
+            warning: None,
+        }
+    }
+}
+
+/// A request waited for a load of a slot that the model no longer uses (a
+/// reload replaced it, or restored the slot it replaced); resolve the model's
+/// slot again.
+#[derive(Debug, thiserror::Error)]
+#[error("engine slot was replaced while waiting for its load")]
+pub struct EngineSlotReplaced {
+    /// The awaited load was cancelled: the request may still be served by an
+    /// engine that is already loaded, but must not start a load itself.
+    pub load_cancelled: bool,
+}
+
+/// Stable identity of what a model configuration loads. `pinned` and
+/// `default` only affect pool policy, so two requests that differ only there
+/// load the same engine.
+pub fn engine_model_config_fingerprint(model: &EngineModelConfig) -> String {
+    let mut normalized = model.clone();
+    normalized.pinned = false;
+    normalized.default = false;
+    // FNV-1a over the Debug form: every field type is plain data without
+    // hash-ordered collections, so equal configurations print identically.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in format!("{normalized:?}").bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn load_variant(model: &EngineModelConfig) -> LoadVariant {
+    if model.mtp.is_some() {
+        LoadVariant::Mtp
+    } else {
+        LoadVariant::Plain
+    }
+}
+
+/// A slot load other callers can join. The outcome is published once the
+/// slot state holds the result.
+#[derive(Clone)]
+struct PendingSlotLoad {
+    /// Registry id of the load; it finishes there only after a reload has
+    /// settled which slot the model keeps.
+    load_id: String,
+    outcome: watch::Receiver<Option<SlotLoadOutcome>>,
+}
+
+#[derive(Debug, Clone)]
+enum SlotLoadOutcome {
+    Loaded,
+    Cancelled,
+    /// Classified like the starter's error, so joiners answer the same way.
+    Failed(LoadFailed),
+}
+
+impl SlotLoadOutcome {
+    fn failed(error: &anyhow::Error) -> Self {
+        Self::Failed(LoadFailed::from_error(error))
+    }
+
+    fn aborted() -> Self {
+        Self::Failed(LoadFailed {
+            code: None,
+            message: MODEL_LOAD_ABORTED.to_string(),
+        })
+    }
+}
+
+const MODEL_LOAD_ABORTED: &str = "model load ended without a result";
+
+impl PendingSlotLoad {
+    async fn wait(mut self) -> Result<()> {
+        let outcome = match self.outcome.wait_for(Option::is_some).await {
+            Ok(outcome) => outcome.clone(),
+            Err(_) => None,
+        };
+        match outcome {
+            Some(SlotLoadOutcome::Loaded) => Ok(()),
+            Some(SlotLoadOutcome::Cancelled) => Err(LoadCancelled.into()),
+            Some(SlotLoadOutcome::Failed(failed)) => Err(failed.into()),
+            None => Err(anyhow::anyhow!(MODEL_LOAD_ABORTED)),
+        }
+    }
+}
+
+fn is_load_cancelled(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<LoadCancelled>().is_some()
+}
+
+/// Records the end of one slot load exactly once: the slot state, clearing
+/// the pending load and waking joiners change together under the state lock.
+/// Dropped without settling (a panic), it returns the slot to `Unloaded`.
+struct SlotLoadSettler {
+    slot: Arc<EngineSlot>,
+    outcome: Option<watch::Sender<Option<SlotLoadOutcome>>>,
+}
+
+impl SlotLoadSettler {
+    async fn settle(&mut self, state: EngineSlotState, outcome: SlotLoadOutcome) {
+        let slot = self.slot.clone();
+        let mut guard = slot.state.lock().await;
+        *guard = state;
+        self.publish(outcome);
+    }
+
+    /// Cancelled loads leave the slot unloaded, not failed, so the next
+    /// request or load starts afresh.
+    async fn settle_cancelled(&mut self) {
+        let slot = self.slot.clone();
+        let mut guard = slot.state.lock().await;
+        let load_attempts = guard.load_attempts();
+        *guard = EngineSlotState::Unloaded {
+            reason: EngineUnloadReason::Manual,
+            last_error: None,
+            changed_unix_ms: unix_time_ms(),
+            load_attempts,
+        };
+        self.publish(SlotLoadOutcome::Cancelled);
+    }
+
+    async fn settle_failed(&mut self, load_attempts: u64, error: &anyhow::Error) {
+        let failure = LoadFailed::from_error(error);
+        self.settle(
+            EngineSlotState::Failed {
+                last_error: format!("{error:#}"),
+                failure: failure.clone(),
+                failed_unix_ms: unix_time_ms(),
+                load_attempts,
+            },
+            SlotLoadOutcome::Failed(failure),
+        )
+        .await;
+    }
+
+    /// Call with the slot state locked.
+    fn publish(&mut self, outcome: SlotLoadOutcome) {
+        self.slot.pending_load().take();
+        self.slot.notify.notify_waiters();
+        if let Some(sender) = self.outcome.take() {
+            sender.send_replace(Some(outcome));
+        }
+    }
+}
+
+impl Drop for SlotLoadSettler {
+    fn drop(&mut self) {
+        let Some(sender) = self.outcome.take() else {
+            return;
+        };
+        fn abort(slot: &EngineSlot, state: &mut EngineSlotState) {
+            if matches!(
+                state,
+                EngineSlotState::Unloaded { .. } | EngineSlotState::Loading { .. }
+            ) {
+                let load_attempts = state.load_attempts();
+                *state = EngineSlotState::Unloaded {
+                    reason: EngineUnloadReason::Manual,
+                    last_error: Some(MODEL_LOAD_ABORTED.to_string()),
+                    changed_unix_ms: unix_time_ms(),
+                    load_attempts,
+                };
+            }
+            slot.pending_load().take();
+            slot.notify.notify_waiters();
+        }
+        tracing::error!(model = %self.slot.model.id, "model load ended without settling its slot");
+        let outcome = Some(SlotLoadOutcome::aborted());
+        match self.slot.state.try_lock() {
+            Ok(mut state) => {
+                abort(&self.slot, &mut state);
+                sender.send_replace(outcome);
+            }
+            Err(_) => {
+                let slot = self.slot.clone();
+                let settle = async move {
+                    let mut state = slot.state.lock().await;
+                    abort(&slot, &mut state);
+                    sender.send_replace(outcome);
+                };
+                match tokio::runtime::Handle::try_current() {
+                    Ok(runtime) => {
+                        runtime.spawn(settle);
+                    }
+                    Err(_) => tracing::error!("no runtime to settle an aborted model load"),
+                }
+            }
+        }
+    }
+}
+
+/// Run a synchronous loader or model-construction section without stalling
+/// the other tasks of a multi-threaded runtime. The section stays on the
+/// current thread, which MLX weight evaluation requires.
+fn run_load_section<T>(section: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(section)
+        }
+        _ => section(),
+    }
 }
 
 enum EngineSlotState {
@@ -205,6 +469,8 @@ enum EngineSlotState {
     },
     Failed {
         last_error: String,
+        /// What later requests are told, classified like the first answer.
+        failure: LoadFailed,
         failed_unix_ms: u64,
         load_attempts: u64,
     },
@@ -406,6 +672,7 @@ impl EngineSlotState {
                 last_error,
                 failed_unix_ms,
                 load_attempts,
+                ..
             } => EngineSlotRuntimeSnapshot {
                 state: EngineRuntimeState::Failed,
                 unload_reason: None,
@@ -454,6 +721,15 @@ pub enum EngineVariant {
     MiniCpmV46(AppState<MiniCpmV46Model>),
     DiffusionGemma(crate::core::diffusion_execution::DiffusionGemmaRuntime),
     QwenImage(crate::core::qwen_image_execution::QwenImageRuntime),
+    /// Engine produced by the test load hook; holds no model.
+    #[cfg(any(test, feature = "test-support"))]
+    Test(TestEngine),
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone)]
+pub struct TestEngine {
+    model_weight_bytes: usize,
 }
 
 pub struct EngineLease {
@@ -569,31 +845,17 @@ impl EnginePoolState {
         config.validate_enabled_model_architectures()?;
         let mut slots = HashMap::with_capacity(config.models.len());
         for model in config.models {
-            let slot = Arc::new(EngineSlot {
-                configured_context_window: super::model_capacity::configured_context_window(&model),
-                model: model.clone(),
-                runtime: runtime.clone(),
-                active_requests: Arc::new(AtomicUsize::new(0)),
-                pinned: AtomicBool::new(model.pinned),
-                state: Mutex::new(EngineSlotState::Unloaded {
-                    reason: EngineUnloadReason::Startup,
-                    last_error: None,
-                    changed_unix_ms: unix_time_ms(),
-                    load_attempts: 0,
-                }),
-                notify: Notify::new(),
-            });
-            slots.insert(model.id.clone(), slot);
+            let pinned = model.pinned;
+            let slot = Arc::new(EngineSlot::new_unloaded(model, runtime.clone(), pinned));
+            slots.insert(slot.model.id.clone(), slot);
         }
         let state = Self {
-            inner: Arc::new(EnginePoolInner {
-                asr_settings: Mutex::new(HashMap::new()),
-                registry: Mutex::new(registry),
-                slots: Mutex::new(slots),
+            inner: Arc::new(EnginePoolInner::new(
+                registry,
+                slots,
                 runtime,
-                capacity_policy: EnginePoolCapacityPolicy::EvictLruIdle,
-                load_gate: Mutex::new(()),
-            }),
+                EnginePoolCapacityPolicy::EvictLruIdle,
+            )),
         };
         state.preload().await?;
         Ok(state)
@@ -605,14 +867,12 @@ impl EnginePoolState {
     ) -> Result<Self> {
         let registry = EngineRegistry::empty(max_loaded_models)?;
         Ok(Self {
-            inner: Arc::new(EnginePoolInner {
-                asr_settings: Mutex::new(HashMap::new()),
-                registry: Mutex::new(registry),
-                slots: Mutex::new(HashMap::new()),
+            inner: Arc::new(EnginePoolInner::new(
+                registry,
+                HashMap::new(),
                 runtime,
-                capacity_policy: EnginePoolCapacityPolicy::Reject,
-                load_gate: Mutex::new(()),
-            }),
+                EnginePoolCapacityPolicy::Reject,
+            )),
         })
     }
 
@@ -751,15 +1011,19 @@ impl EnginePoolState {
                     .cloned()
                     .with_context(|| format!("missing engine slot `{}`", model.id))?
             };
-            slot.ensure_loaded(&self.inner, EngineLoadTrigger::Control)
-                .await
-                .with_context(|| {
-                    format!(
-                        "preloading engine model `{}` from {}",
-                        model.id,
-                        model.path.display()
-                    )
-                })?;
+            slot.ensure_loaded(
+                &self.inner,
+                EngineLoadTrigger::Control,
+                EngineLoadOptions::new(LoadTriggerKind::Startup),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "preloading engine model `{}` from {}",
+                    model.id,
+                    model.path.display()
+                )
+            })?;
         }
         Ok(())
     }
@@ -902,28 +1166,120 @@ impl EnginePoolState {
     }
 
     pub async fn resolve_engine(&self, requested: Option<&str>) -> Result<(String, EngineLease)> {
-        let model_id = self
+        let mut may_start_load = true;
+        loop {
+            let model_id = self
+                .inner
+                .registry
+                .lock()
+                .await
+                .resolve_model_id(requested)?
+                .to_string();
+            let slot = {
+                let slots = self.inner.slots.lock().await;
+                slots
+                    .get(&model_id)
+                    .cloned()
+                    .with_context(|| format!("missing engine slot `{model_id}`"))?
+            };
+            // A reload that ended while this request waited swapped the slot
+            // (or restored the previous one): serve from the current slot. A
+            // cancelled load is not restarted by the requests that waited on
+            // it.
+            let result = slot
+                .lease_or_load(
+                    &self.inner,
+                    EngineLoadTrigger::Request,
+                    EngineLoadOptions::new(LoadTriggerKind::Request),
+                    may_start_load,
+                )
+                .await;
+            if let Some(replaced) = result
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<EngineSlotReplaced>())
+            {
+                may_start_load &= !replaced.load_cancelled;
+                continue;
+            }
+            return match result {
+                Ok(engine) => Ok((model_id, engine)),
+                Err(error) => {
+                    // Classified before the model id joins the chain, the
+                    // same way joiners and the failed slot classify it.
+                    let classified = classify_load_error(&error);
+                    let slot_failed =
+                        matches!(*slot.state.lock().await, EngineSlotState::Failed { .. });
+                    Err(error.context(RequestLoadFailed {
+                        model_id,
+                        classified,
+                        slot_failed,
+                    }))
+                }
+            };
+        }
+    }
+
+    /// Loads in progress and recently finished, shared by every load path.
+    pub fn load_registry(&self) -> Arc<LoadRegistry> {
+        self.inner.load_registry.clone()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn install_test_load_hook(&self) -> Arc<TestLoadHook> {
+        let hook = Arc::new(TestLoadHook::new());
+        *self
             .inner
-            .registry
+            .test_load_hook
             .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook.clone());
+        hook
+    }
+
+    /// Wait for `active`, a load of the same model already in progress, when
+    /// it loads the configuration identified by `config_fingerprint`;
+    /// otherwise refuse with [`LoadInProgress`].
+    pub async fn join_in_progress_load(
+        &self,
+        active: &LoadActivity,
+        config_fingerprint: &str,
+    ) -> Result<LoadActivity> {
+        if active.config_fingerprint != config_fingerprint {
+            return Err(LoadInProgress {
+                load_id: active.load_id.clone(),
+            }
+            .into());
+        }
+        let finished = self
+            .inner
+            .load_registry
+            .wait(&active.load_id)
             .await
-            .resolve_model_id(requested)?
-            .to_string();
-        let slot = {
-            let slots = self.inner.slots.lock().await;
-            slots
-                .get(&model_id)
-                .cloned()
-                .with_context(|| format!("missing engine slot `{model_id}`"))?
-        };
-        let engine = slot
-            .ensure_loaded(&self.inner, EngineLoadTrigger::Request)
-            .await
-            .with_context(|| format!("loading engine model `{model_id}`"))?;
-        Ok((model_id, engine))
+            .with_context(|| format!("model load `{}` is no longer tracked", active.load_id))?;
+        match finished.state {
+            LoadState::Loaded => Ok(finished),
+            LoadState::Cancelled => Err(LoadCancelled.into()),
+            _ => Err(LoadFailed::from_recorded(
+                finished.code.as_deref(),
+                finished.message.as_deref(),
+            )
+            .into()),
+        }
     }
 
     pub async fn load_model(&self, requested: &str) -> Result<EngineModelControlResult> {
+        self.load_model_with(
+            requested,
+            EngineLoadOptions::new(LoadTriggerKind::OpenAiControl),
+        )
+        .await
+    }
+
+    pub async fn load_model_with(
+        &self,
+        requested: &str,
+        options: EngineLoadOptions,
+    ) -> Result<EngineModelControlResult> {
         let model_id = self
             .inner
             .registry
@@ -938,7 +1294,7 @@ impl EnginePoolState {
                 .cloned()
                 .with_context(|| format!("missing engine slot `{model_id}`"))?
         };
-        slot.ensure_loaded(&self.inner, EngineLoadTrigger::Control)
+        slot.ensure_loaded(&self.inner, EngineLoadTrigger::Control, options)
             .await
             .with_context(|| format!("loading engine model `{model_id}`"))?;
         Ok(slot.control_result().await)
@@ -968,6 +1324,36 @@ impl EnginePoolState {
         model: EngineModelConfig,
         set_default: bool,
     ) -> Result<EngineModelControlResult> {
+        self.reload_dynamic_model_with(
+            model,
+            set_default,
+            EngineLoadOptions::new(LoadTriggerKind::Admin),
+        )
+        .await
+    }
+
+    /// Load `model` into a new slot, replacing the registered one only when
+    /// the load succeeds. The swap, load and rollback run in their own task:
+    /// a dropped caller neither cancels the load nor leaves the pool half
+    /// swapped.
+    pub async fn reload_dynamic_model_with(
+        &self,
+        model: EngineModelConfig,
+        set_default: bool,
+        options: EngineLoadOptions,
+    ) -> Result<EngineModelControlResult> {
+        let pool = self.clone();
+        tokio::spawn(async move { pool.run_dynamic_reload(model, set_default, options).await })
+            .await
+            .map_err(|error| anyhow::anyhow!("model reload task failed: {error}"))?
+    }
+
+    async fn run_dynamic_reload(
+        &self,
+        model: EngineModelConfig,
+        set_default: bool,
+        options: EngineLoadOptions,
+    ) -> Result<EngineModelControlResult> {
         validate_engine_model_config(&model)?;
         if set_default
             && matches!(
@@ -977,20 +1363,61 @@ impl EnginePoolState {
         {
             bail!("embedding and ASR models cannot be the default generation model");
         }
+        if model.load_policy == EngineLoadPolicy::Disabled {
+            bail!("engine model `{}` is disabled", model.id);
+        }
         let model_id = model.id.clone();
-        let new_slot = Arc::new(EngineSlot {
-            configured_context_window: super::model_capacity::configured_context_window(&model),
-            model: model.clone(),
-            runtime: self.inner.runtime.clone(),
-            active_requests: Arc::new(AtomicUsize::new(0)),
-            pinned: AtomicBool::new(model.pinned),
-            state: Mutex::new(EngineSlotState::Unloaded {
-                reason: EngineUnloadReason::Startup,
-                last_error: None,
-                changed_unix_ms: unix_time_ms(),
-                load_attempts: 0,
-            }),
-            notify: Notify::new(),
+        let config_fingerprint = engine_model_config_fingerprint(&model);
+        let current_slot = self.inner.slots.lock().await.get(&model_id).cloned();
+        let replaces_loaded = match &current_slot {
+            Some(slot) => slot.is_loaded().await,
+            None => false,
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hook) = self.inner.test_load_hook() {
+            hook.pause(TestLoadPause::BeforeRegistration).await;
+        }
+        // Registered before the slot swap: a second request for this model
+        // joins or is refused instead of replacing the slot being loaded.
+        let handle = match self.inner.load_registry.try_begin(LoadBegin {
+            load_id: options.load_id,
+            model: model_id.clone(),
+            variant: load_variant(&model),
+            kind: if replaces_loaded {
+                LoadKind::Reload
+            } else {
+                LoadKind::Load
+            },
+            trigger: options.trigger,
+            config_fingerprint: config_fingerprint.clone(),
+            warning: options.warning,
+        }) {
+            Ok(handle) => handle,
+            Err(active) => {
+                self.join_in_progress_load(&active, &config_fingerprint)
+                    .await?;
+                let slot = self
+                    .inner
+                    .slots
+                    .lock()
+                    .await
+                    .get(&model_id)
+                    .cloned()
+                    .with_context(|| format!("missing engine slot `{model_id}`"))?;
+                return Ok(slot.control_result().await);
+            }
+        };
+
+        let new_slot = Arc::new(EngineSlot::new_unloaded(
+            model.clone(),
+            self.inner.runtime.clone(),
+            model.pinned,
+        ));
+        // Requests that find the new slot join this load.
+        let (outcome, outcome_receiver) = watch::channel(None);
+        *new_slot.pending_load() = Some(PendingSlotLoad {
+            load_id: handle.load_id().to_string(),
+            outcome: outcome_receiver,
         });
 
         let old_slot = self.inner.slots.lock().await.remove(&model_id);
@@ -1002,18 +1429,31 @@ impl EnginePoolState {
             .default_model()
             .map(str::to_string);
         let was_previous_default = previous_default.as_deref() == Some(model_id.as_str());
-        {
+        let registered = {
             let mut registry = self.inner.registry.lock().await;
             registry.remove_model(&model_id);
-            registry.upsert_model(model.manifest_view(), set_default || was_previous_default)?;
-            if previous_default.is_none()
-                && matches!(
-                    model.capabilities.runtime_kind,
-                    "embedding" | "asr" | "alignment" | "diarization"
-                )
-            {
-                registry.restore_default_model(None)?;
-            }
+            registry
+                .upsert_model(model.manifest_view(), set_default || was_previous_default)
+                .and_then(|()| {
+                    if previous_default.is_none()
+                        && matches!(
+                            model.capabilities.runtime_kind,
+                            "embedding" | "asr" | "alignment" | "diarization"
+                        )
+                    {
+                        registry.restore_default_model(None)?;
+                    }
+                    Ok(())
+                })
+        };
+        if let Err(error) = registered {
+            let error = anyhow::Error::from(error);
+            let restored = self
+                .restore_replaced_slot(&model_id, old_slot, was_previous_default, previous_default)
+                .await;
+            handle.finish_failed(&error);
+            restored?;
+            return Err(error);
         }
         self.inner
             .slots
@@ -1021,28 +1461,60 @@ impl EnginePoolState {
             .await
             .insert(model_id.clone(), new_slot.clone());
 
+        let tracker = handle.tracker();
         match new_slot
-            .ensure_loaded(&self.inner, EngineLoadTrigger::Control)
+            .run_load(&self.inner, &tracker, outcome, EngineLoadTrigger::Control)
             .await
         {
-            Ok(_) => Ok(new_slot.control_result().await),
+            Ok(lease) => {
+                // A control load holds no request; release the engine
+                // reference so the model stays evictable.
+                drop(lease);
+                handle.finish_loaded();
+                Ok(new_slot.control_result().await)
+            }
             Err(error) => {
-                self.inner.slots.lock().await.remove(&model_id);
-                {
-                    let mut registry = self.inner.registry.lock().await;
-                    registry.remove_model(&model_id);
-                    if let Some(old_slot) = old_slot.as_ref() {
-                        registry
-                            .upsert_model(old_slot.model.manifest_view(), was_previous_default)?;
-                    }
-                    registry.restore_default_model(previous_default)?;
-                }
-                if let Some(old_slot) = old_slot {
-                    self.inner.slots.lock().await.insert(model_id, old_slot);
-                }
+                // A failed or cancelled reload restores the previous slot, so
+                // the model stays loaded with its earlier configuration.
+                let restored = self
+                    .restore_replaced_slot(
+                        &model_id,
+                        old_slot,
+                        was_previous_default,
+                        previous_default,
+                    )
+                    .await;
+                handle.finish_failed(&error);
+                restored?;
                 Err(error)
             }
         }
+    }
+
+    async fn restore_replaced_slot(
+        &self,
+        model_id: &str,
+        old_slot: Option<Arc<EngineSlot>>,
+        was_previous_default: bool,
+        previous_default: Option<String>,
+    ) -> Result<()> {
+        self.inner.slots.lock().await.remove(model_id);
+        {
+            let mut registry = self.inner.registry.lock().await;
+            registry.remove_model(model_id);
+            if let Some(old_slot) = old_slot.as_ref() {
+                registry.upsert_model(old_slot.model.manifest_view(), was_previous_default)?;
+            }
+            registry.restore_default_model(previous_default)?;
+        }
+        if let Some(old_slot) = old_slot {
+            self.inner
+                .slots
+                .lock()
+                .await
+                .insert(model_id.to_string(), old_slot);
+        }
+        Ok(())
     }
 
     pub async fn register_dynamic_model(
@@ -1081,22 +1553,11 @@ impl EnginePoolState {
             existing => {
                 let pinned = pinned
                     .unwrap_or_else(|| existing.as_ref().is_some_and(|slot| slot.is_pinned()));
-                let slot = Arc::new(EngineSlot {
-                    configured_context_window: super::model_capacity::configured_context_window(
-                        &model,
-                    ),
-                    model: model.clone(),
-                    runtime: self.inner.runtime.clone(),
-                    active_requests: Arc::new(AtomicUsize::new(0)),
-                    pinned: AtomicBool::new(pinned),
-                    state: Mutex::new(EngineSlotState::Unloaded {
-                        reason: EngineUnloadReason::Startup,
-                        last_error: None,
-                        changed_unix_ms: unix_time_ms(),
-                        load_attempts: 0,
-                    }),
-                    notify: Notify::new(),
-                });
+                let slot = Arc::new(EngineSlot::new_unloaded(
+                    model.clone(),
+                    self.inner.runtime.clone(),
+                    pinned,
+                ));
                 self.inner
                     .slots
                     .lock()
@@ -1309,6 +1770,7 @@ impl EnginePoolState {
                 mtp_draft_tokens: slot.model.mtp.as_ref().and_then(|mtp| mtp.draft_tokens),
                 prompt_lookup: slot.model.prompt_lookup,
                 native_output_dialect: engine.native_output_dialect(),
+                scheduler_profile: slot.model.scheduler_profile_kind,
             });
         }
         models.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1797,6 +2259,30 @@ impl EnginePoolInner {
 }
 
 impl EngineSlot {
+    fn new_unloaded(model: EngineModelConfig, runtime: EngineRuntimeOptions, pinned: bool) -> Self {
+        Self {
+            configured_context_window: super::model_capacity::configured_context_window(&model),
+            model,
+            runtime,
+            active_requests: Arc::new(AtomicUsize::new(0)),
+            pinned: AtomicBool::new(pinned),
+            state: Mutex::new(EngineSlotState::Unloaded {
+                reason: EngineUnloadReason::Startup,
+                last_error: None,
+                changed_unix_ms: unix_time_ms(),
+                load_attempts: 0,
+            }),
+            notify: Notify::new(),
+            pending_load: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn pending_load(&self) -> std::sync::MutexGuard<'_, Option<PendingSlotLoad>> {
+        self.pending_load
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn is_pinned(&self) -> bool {
         self.pinned.load(Ordering::SeqCst)
     }
@@ -1806,29 +2292,68 @@ impl EngineSlot {
     }
 
     async fn is_loaded_or_loading(&self) -> bool {
+        let state = self.state.lock().await;
         matches!(
-            &*self.state.lock().await,
+            &*state,
             EngineSlotState::Loaded { .. }
                 | EngineSlotState::Loading { .. }
                 | EngineSlotState::Draining { .. }
-        )
+        ) || self.pending_load().is_some()
     }
 
     async fn is_loaded(&self) -> bool {
         matches!(&*self.state.lock().await, EngineSlotState::Loaded { .. })
     }
 
+    /// Whether the pool still serves this model from this slot.
+    async fn is_current_slot(self: &Arc<Self>, pool: &EnginePoolInner) -> bool {
+        pool.slots
+            .lock()
+            .await
+            .get(&self.model.id)
+            .is_some_and(|slot| Arc::ptr_eq(slot, self))
+    }
+
+    /// Return a lease on the loaded engine, loading it first when needed.
+    ///
+    /// The load runs in its own task, registered in the pool's load registry
+    /// before it queues for the load gate. Callers only wait for its result:
+    /// dropping the returned future never cancels a load, and concurrent
+    /// callers join the load already running for this slot. While another
+    /// load of the same model is registered (a reload swapping slots), this
+    /// slot waits for it instead of starting a second one.
     async fn ensure_loaded(
-        &self,
-        pool: &EnginePoolInner,
+        self: &Arc<Self>,
+        pool: &Arc<EnginePoolInner>,
         trigger: EngineLoadTrigger,
+        options: EngineLoadOptions,
+    ) -> Result<EngineLease> {
+        self.lease_or_load(pool, trigger, options, true).await
+    }
+
+    /// [`Self::ensure_loaded`]; without `may_start_load` the slot is served
+    /// only when loaded or by joining a load, and otherwise answers
+    /// [`LoadCancelled`].
+    async fn lease_or_load(
+        self: &Arc<Self>,
+        pool: &Arc<EnginePoolInner>,
+        trigger: EngineLoadTrigger,
+        options: EngineLoadOptions,
+        may_start_load: bool,
     ) -> Result<EngineLease> {
         if self.model.load_policy == EngineLoadPolicy::Disabled {
             bail!("engine model `{}` is disabled", self.model.id);
         }
 
+        enum Next<'a> {
+            Wait(tokio::sync::futures::Notified<'a>),
+            Join(PendingSlotLoad),
+            JoinRegistered(String),
+            Started(oneshot::Receiver<Result<EngineLease>>),
+        }
+        let mut load_id = options.load_id;
         loop {
-            let wait_for_load = {
+            let next = {
                 let mut state = self.state.lock().await;
                 match &mut *state {
                     EngineSlotState::Loaded {
@@ -1853,7 +2378,6 @@ impl EngineSlot {
                             snapshot_use_lease.clone(),
                         ));
                     }
-                    EngineSlotState::Loading { .. } => Some(self.notify.notified()),
                     EngineSlotState::Draining { .. } => {
                         if self.active_requests.load(Ordering::SeqCst) == 0 {
                             let load_attempts = state.load_attempts();
@@ -1863,187 +2387,288 @@ impl EngineSlot {
                                 changed_unix_ms: unix_time_ms(),
                                 load_attempts,
                             };
-                            None
                         } else {
                             bail!("engine model `{}` is currently unloading", self.model.id);
                         }
                     }
-                    EngineSlotState::Failed { last_error, .. }
-                        if trigger == EngineLoadTrigger::Request =>
-                    {
-                        bail!(
-                            "engine model `{}` is in failed state: {last_error}",
-                            self.model.id
-                        );
-                    }
-                    EngineSlotState::Unloaded { .. } | EngineSlotState::Failed { .. } => None,
-                }
-            };
-            if let Some(wait_for_load) = wait_for_load {
-                wait_for_load.await;
-                continue;
-            }
-
-            let _load_gate = pool.load_gate.lock().await;
-            {
-                let mut state = self.state.lock().await;
-                match &mut *state {
-                    EngineSlotState::Loaded {
-                        engine,
-                        snapshot_use_lease,
-                        last_used_unix_ms,
-                        request_count,
+                    EngineSlotState::Failed {
+                        last_error,
+                        failure,
                         ..
-                    } => {
-                        let active_requests = if trigger == EngineLoadTrigger::Request {
-                            *last_used_unix_ms = unix_time_ms();
-                            *request_count = request_count.saturating_add(1);
-                            self.active_requests.fetch_add(1, Ordering::SeqCst);
-                            Some(self.active_requests.clone())
+                    } if trigger == EngineLoadTrigger::Request && self.pending_load().is_none() => {
+                        let failed_state =
+                            format!("engine model `{}` is in failed state", self.model.id);
+                        // Answer like the request that saw the load fail.
+                        // The failure travels as `LoadFailed`, so the model
+                        // id in the text cannot change its class; an
+                        // unclassified one keeps the raw chain as its text.
+                        let context = if failure.code.is_some() {
+                            format!("{failed_state}: {last_error}")
                         } else {
-                            None
+                            failed_state
                         };
-                        return Ok(EngineLease::new(
-                            engine.clone(),
-                            self.model.default_max_output_tokens,
-                            active_requests,
-                            snapshot_use_lease.clone(),
-                        ));
+                        return Err(anyhow::Error::from(failure.clone()).context(context));
                     }
-                    EngineSlotState::Loading { .. } => {
-                        continue;
-                    }
-                    EngineSlotState::Draining { .. } => {
-                        if self.active_requests.load(Ordering::SeqCst) == 0 {
-                            let load_attempts = state.load_attempts();
-                            *state = EngineSlotState::Unloaded {
-                                reason: EngineUnloadReason::Manual,
-                                last_error: None,
-                                changed_unix_ms: unix_time_ms(),
-                                load_attempts,
-                            };
-                        } else {
-                            bail!("engine model `{}` is currently unloading", self.model.id);
+                    EngineSlotState::Loading { .. }
+                    | EngineSlotState::Unloaded { .. }
+                    | EngineSlotState::Failed { .. } => {}
+                }
+                let mut pending = self.pending_load();
+                if let Some(load) = pending.as_ref() {
+                    Next::Join(load.clone())
+                } else if matches!(&*state, EngineSlotState::Loading { .. }) {
+                    Next::Wait(self.notify.notified())
+                } else if !may_start_load {
+                    return Err(LoadCancelled.into());
+                } else {
+                    match pool.load_registry.try_begin(LoadBegin {
+                        load_id: load_id.clone(),
+                        model: self.model.id.clone(),
+                        variant: load_variant(&self.model),
+                        kind: LoadKind::Load,
+                        trigger: options.trigger,
+                        config_fingerprint: engine_model_config_fingerprint(&self.model),
+                        warning: None,
+                    }) {
+                        Ok(handle) => {
+                            load_id = None;
+                            let (load, result) = self.spawn_load(pool, handle, trigger);
+                            *pending = Some(load);
+                            Next::Started(result)
                         }
+                        Err(active) => Next::JoinRegistered(active.load_id),
                     }
-                    EngineSlotState::Failed { last_error, .. }
-                        if trigger == EngineLoadTrigger::Request =>
-                    {
-                        bail!(
-                            "engine model `{}` is in failed state: {last_error}",
-                            self.model.id
-                        );
-                    }
-                    EngineSlotState::Unloaded { .. } | EngineSlotState::Failed { .. } => {}
-                }
-            }
-
-            let load_reservation = match pool.ensure_capacity_for(&self.model).await {
-                Ok(reservation) => reservation,
-                Err(error) => {
-                    let mut state = self.state.lock().await;
-                    let load_attempts = state.load_attempts();
-                    *state = EngineSlotState::Unloaded {
-                        reason: EngineUnloadReason::CapacityRejected,
-                        last_error: Some(format!("{error:#}")),
-                        changed_unix_ms: unix_time_ms(),
-                        load_attempts,
-                    };
-                    self.notify.notify_waiters();
-                    return Err(error);
                 }
             };
-
-            let load_attempts = {
-                let mut state = self.state.lock().await;
-                let load_attempts = state.load_attempts().saturating_add(1);
-                *state = EngineSlotState::Loading {
-                    started_unix_ms: unix_time_ms(),
-                    load_attempts,
-                };
-                self.notify.notify_waiters();
-                load_attempts
-            };
-
-            let snapshot_use_lease = match ModelSnapshotUseLease::acquire(&self.model.path) {
-                Ok(lease) => lease.map(Arc::new),
-                Err(error) => {
-                    let message = format!("{error:#}");
-                    let mut state = self.state.lock().await;
-                    *state = EngineSlotState::Failed {
-                        last_error: message,
-                        failed_unix_ms: unix_time_ms(),
-                        load_attempts,
-                    };
-                    self.notify.notify_waiters();
-                    return Err(error);
-                }
-            };
-            let result = load_engine_variant(&self.model, &self.runtime).await;
-            match result {
-                Ok(engine) => {
-                    if let Err(error) = pool
-                        .check_memory_limits_after_load(&self.model.id, &engine)
-                        .await
-                    {
-                        let message = format!("{error:#}");
-                        let mut state = self.state.lock().await;
-                        *state = EngineSlotState::Failed {
-                            last_error: message,
-                            failed_unix_ms: unix_time_ms(),
-                            load_attempts,
-                        };
-                        self.notify.notify_waiters();
-                        return Err(error);
-                    }
+            match next {
+                Next::Wait(notified) => notified.await,
+                Next::Join(load) => {
                     #[cfg(any(test, feature = "test-support"))]
-                    diagnostic_model_load_pressure_pulse();
-                    let engine = Arc::new(engine);
-                    if let Some(reservation) = load_reservation {
-                        reservation.commit();
+                    if let Some(hook) = pool.test_load_hook() {
+                        hook.note_join();
                     }
-                    global_process_memory_governor().sample_process();
-                    let now = unix_time_ms();
-                    let mut state = self.state.lock().await;
-                    let active_requests = if trigger == EngineLoadTrigger::Request {
-                        self.active_requests.fetch_add(1, Ordering::SeqCst);
-                        Some(self.active_requests.clone())
-                    } else {
-                        None
-                    };
-                    *state = EngineSlotState::Loaded {
-                        engine: engine.clone(),
-                        snapshot_use_lease: snapshot_use_lease.clone(),
-                        loaded_unix_ms: now,
-                        last_used_unix_ms: now,
-                        load_attempts,
-                        request_count: if trigger == EngineLoadTrigger::Request {
-                            1
-                        } else {
-                            0
-                        },
-                    };
-                    self.notify.notify_waiters();
-                    return Ok(EngineLease::new(
-                        engine,
-                        self.model.default_max_output_tokens,
-                        active_requests,
-                        snapshot_use_lease,
-                    ));
+                    let load_id = load.load_id.clone();
+                    let joined = load.wait().await;
+                    if trigger == EngineLoadTrigger::Request {
+                        // A reload finishes in the registry once it has kept
+                        // or restored a slot; a request then needs that slot.
+                        let _ = pool.load_registry.wait(&load_id).await;
+                        if !self.is_current_slot(pool).await {
+                            return Err(EngineSlotReplaced {
+                                load_cancelled: joined.as_ref().is_err_and(is_load_cancelled),
+                            }
+                            .into());
+                        }
+                    }
+                    joined?;
                 }
-                Err(error) => {
-                    let message = format!("{error:#}");
-                    let mut state = self.state.lock().await;
-                    *state = EngineSlotState::Failed {
-                        last_error: message,
-                        failed_unix_ms: unix_time_ms(),
-                        load_attempts,
-                    };
-                    self.notify.notify_waiters();
-                    return Err(error);
+                Next::JoinRegistered(active) => {
+                    let finished = pool.load_registry.wait(&active).await;
+                    if trigger == EngineLoadTrigger::Request && !self.is_current_slot(pool).await {
+                        return Err(EngineSlotReplaced {
+                            load_cancelled: finished
+                                .as_ref()
+                                .is_some_and(|load| load.state == LoadState::Cancelled),
+                        }
+                        .into());
+                    }
+                    match finished {
+                        Some(load) if load.state == LoadState::Cancelled => {
+                            return Err(LoadCancelled.into())
+                        }
+                        Some(load) if load.state == LoadState::Failed => {
+                            return Err(LoadFailed::from_recorded(
+                                load.code.as_deref(),
+                                load.message.as_deref(),
+                            )
+                            .into())
+                        }
+                        _ => {}
+                    }
+                }
+                Next::Started(result) => {
+                    return result
+                        .await
+                        .unwrap_or_else(|_| Err(anyhow::anyhow!(MODEL_LOAD_ABORTED)));
                 }
             }
         }
+    }
+
+    /// Start `handle`'s load of this slot in a task the caller does not own.
+    /// Joiners wait on the returned pending load; the starter receives its
+    /// lease (taken as the slot becomes loaded) or the original error.
+    fn spawn_load(
+        self: &Arc<Self>,
+        pool: &Arc<EnginePoolInner>,
+        handle: LoadHandle,
+        trigger: EngineLoadTrigger,
+    ) -> (PendingSlotLoad, oneshot::Receiver<Result<EngineLease>>) {
+        let (outcome, outcome_receiver) = watch::channel(None);
+        let (result_sender, result) = oneshot::channel();
+        let load_id = handle.load_id().to_string();
+        let slot = self.clone();
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            let tracker = handle.tracker();
+            let loaded = slot.run_load(&pool, &tracker, outcome, trigger).await;
+            match &loaded {
+                Ok(_) => handle.finish_loaded(),
+                Err(error) => handle.finish_failed(error),
+            }
+            let _ = result_sender.send(loaded);
+        });
+        (
+            PendingSlotLoad {
+                load_id,
+                outcome: outcome_receiver,
+            },
+            result,
+        )
+    }
+
+    /// Run one load of this slot to its end and record the result in the
+    /// slot. Cancellation is honoured while queued for the load gate and at
+    /// each checkpoint until the engine starts; a cancelled load leaves the
+    /// slot `Unloaded`, and its memory reservation is released.
+    ///
+    /// Returns the starter's lease, taken together with `Loaded`: a request
+    /// trigger already counts as an active request when the slot becomes
+    /// loaded, so the next queued load cannot evict it as idle.
+    async fn run_load(
+        self: &Arc<Self>,
+        pool: &EnginePoolInner,
+        tracker: &LoadTracker,
+        outcome: watch::Sender<Option<SlotLoadOutcome>>,
+        trigger: EngineLoadTrigger,
+    ) -> Result<EngineLease> {
+        let mut settler = SlotLoadSettler {
+            slot: self.clone(),
+            outcome: Some(outcome),
+        };
+        let _load_gate = tokio::select! {
+            biased;
+            () = tracker.cancelled() => {
+                settler.settle_cancelled().await;
+                return Err(LoadCancelled.into());
+            }
+            gate = pool.load_gate.lock() => gate,
+        };
+        tracker.enter_stage(LoadStage::PreparingMemory);
+
+        let load_reservation = match pool.ensure_capacity_for(&self.model).await {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                let message = format!("{error:#}");
+                let load_attempts = self.state.lock().await.load_attempts();
+                settler
+                    .settle(
+                        EngineSlotState::Unloaded {
+                            reason: EngineUnloadReason::CapacityRejected,
+                            last_error: Some(message),
+                            changed_unix_ms: unix_time_ms(),
+                            load_attempts,
+                        },
+                        SlotLoadOutcome::failed(&error),
+                    )
+                    .await;
+                return Err(error);
+            }
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(hook) = pool.test_load_hook() {
+            hook.pause(TestLoadPause::AfterPreparingMemory).await;
+        }
+        if let Err(error) = tracker.checkpoint() {
+            drop(load_reservation);
+            settler.settle_cancelled().await;
+            return Err(error);
+        }
+
+        let load_attempts = {
+            let mut state = self.state.lock().await;
+            let load_attempts = state.load_attempts().saturating_add(1);
+            *state = EngineSlotState::Loading {
+                started_unix_ms: unix_time_ms(),
+                load_attempts,
+            };
+            self.notify.notify_waiters();
+            load_attempts
+        };
+
+        let snapshot_use_lease = match ModelSnapshotUseLease::acquire(&self.model.path) {
+            Ok(lease) => lease.map(Arc::new),
+            Err(error) => {
+                drop(load_reservation);
+                settler.settle_failed(load_attempts, &error).await;
+                return Err(error);
+            }
+        };
+        #[cfg(any(test, feature = "test-support"))]
+        let loaded = match pool.test_load_hook() {
+            Some(hook) => hook.load(&self.model, tracker).await,
+            None => load_engine_variant(&self.model, &self.runtime, tracker).await,
+        };
+        #[cfg(not(any(test, feature = "test-support")))]
+        let loaded = load_engine_variant(&self.model, &self.runtime, tracker).await;
+        // Every engine passes this point before it counts as loaded, so an
+        // accepted cancel never ends in a loaded slot.
+        let loaded = loaded.and_then(|engine| {
+            before_engine_start(tracker)?;
+            Ok(engine)
+        });
+        let engine = match loaded {
+            Ok(engine) => engine,
+            Err(error) => {
+                drop(load_reservation);
+                if is_load_cancelled(&error) {
+                    settler.settle_cancelled().await;
+                } else {
+                    settler.settle_failed(load_attempts, &error).await;
+                }
+                return Err(error);
+            }
+        };
+        if let Err(error) = pool
+            .check_memory_limits_after_load(&self.model.id, &engine)
+            .await
+        {
+            drop(load_reservation);
+            settler.settle_failed(load_attempts, &error).await;
+            return Err(error);
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        diagnostic_model_load_pressure_pulse();
+        if let Some(reservation) = load_reservation {
+            reservation.commit();
+        }
+        global_process_memory_governor().sample_process();
+        let now = unix_time_ms();
+        let engine = Arc::new(engine);
+        let active_requests = (trigger == EngineLoadTrigger::Request).then(|| {
+            self.active_requests.fetch_add(1, Ordering::SeqCst);
+            self.active_requests.clone()
+        });
+        let lease = EngineLease::new(
+            engine.clone(),
+            self.model.default_max_output_tokens,
+            active_requests,
+            snapshot_use_lease.clone(),
+        );
+        settler
+            .settle(
+                EngineSlotState::Loaded {
+                    engine,
+                    snapshot_use_lease,
+                    loaded_unix_ms: now,
+                    last_used_unix_ms: now,
+                    load_attempts,
+                    request_count: u64::from(trigger == EngineLoadTrigger::Request),
+                },
+                SlotLoadOutcome::Loaded,
+            )
+            .await;
+        Ok(lease)
     }
 
     async fn model_ttl_candidate(&self, id: &str) -> ModelTtlCandidate {
@@ -2252,6 +2877,8 @@ impl EngineVariant {
             | Self::Diarization(_)
             | Self::Decision(_)
             | Self::Embedding(_) => return None,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Test(_) => return None,
         };
         (cap > 0).then_some(cap)
     }
@@ -2280,6 +2907,8 @@ impl EngineVariant {
             | Self::Diarization(_)
             | Self::Decision(_)
             | Self::Embedding(_) => Ok(0),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Test(_) => Ok(0),
         }
     }
 
@@ -2383,6 +3012,13 @@ impl EngineVariant {
                     queue_capacity: stats.queue_capacity,
                 }
             }
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Test(_) => LoadedEngineHealth::Audio {
+                scheduler: "test",
+                active_requests: 0,
+                queued_requests: 0,
+                queue_capacity: 0,
+            },
         }
     }
 
@@ -2406,6 +3042,8 @@ impl EngineVariant {
             | Self::Diarization(_)
             | Self::Decision(_)
             | Self::Embedding(_) => None,
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Test(_) => None,
         }
     }
 
@@ -2427,6 +3065,8 @@ impl EngineVariant {
             Self::Diarization(_) => "nemotron_diarization",
             Self::Decision(_) => "laya_multilingual_mlx",
             Self::Embedding(_) => "embedding_gemma2",
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Test(_) => "test",
         }
     }
 
@@ -2448,6 +3088,8 @@ impl EngineVariant {
             Self::Diarization(state) => state.model_weight_bytes(),
             Self::Decision(state) => state.model_weight_bytes(),
             Self::Embedding(state) => state.model_weight_bytes(),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Test(state) => state.model_weight_bytes,
         }
     }
 
@@ -2493,6 +3135,8 @@ impl EngineVariant {
                 let stats = state.lane.stats();
                 stats.active_requests.saturating_add(stats.queued_requests)
             }
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Test(_) => 0,
         }
     }
 
@@ -2514,6 +3158,8 @@ impl EngineVariant {
             Self::Diarization(state) => state.usage(),
             Self::Decision(state) => state.usage(),
             Self::Embedding(state) => state.usage(),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Test(_) => Default::default(),
         }
     }
 }
@@ -2588,10 +3234,75 @@ fn resolve_engine_mtp_config(
     }))
 }
 
+/// Logs how long each phase of a model load took, at the phase boundaries
+/// that load-progress stages are reported at.
+pub struct LoadStageTimer {
+    model: String,
+    started: Instant,
+    stage_started: Instant,
+}
+
+impl LoadStageTimer {
+    pub fn start(model: impl Into<String>) -> Self {
+        let now = Instant::now();
+        Self {
+            model: model.into(),
+            started: now,
+            stage_started: now,
+        }
+    }
+
+    /// Log `stage` as finished now and start timing the next stage.
+    pub fn finish(&mut self, stage: &'static str) {
+        let now = Instant::now();
+        tracing::info!(
+            model = %self.model,
+            stage,
+            elapsed_ms = now.duration_since(self.stage_started).as_millis() as u64,
+            total_ms = now.duration_since(self.started).as_millis() as u64,
+            "model load stage finished"
+        );
+        self.stage_started = now;
+    }
+}
+
+/// Directory estimates of the weights this load will read, shown until each
+/// loader reports its exact size.
+fn plan_weight_progress(model: &EngineModelConfig, tracker: &LoadTracker) {
+    if let Ok(bytes) = estimated_weight_bytes_for_roots([model.path.as_path()]) {
+        tracker.set_component_estimate(WeightComponent::Main, bytes as u64);
+    }
+    if let Some(mtp) = &model.mtp {
+        if let Ok(bytes) = estimated_weight_bytes_for_roots([mtp.model_dir.as_path()]) {
+            tracker.set_component_estimate(WeightComponent::Draft, bytes as u64);
+        }
+    }
+}
+
+/// The main weights are in memory; tokenizer and model construction follow.
+fn after_main_weights(tracker: &LoadTracker) {
+    tracker.enter_stage(LoadStage::BuildingModel);
+}
+
+/// Cancellation point after the model is built, before draft weights are read.
+fn before_draft_weights(tracker: &LoadTracker) -> Result<()> {
+    tracker.checkpoint()?;
+    tracker.enter_stage(LoadStage::ReadingDraftWeights);
+    Ok(())
+}
+
+/// Last cancellation point: once the scheduler actor starts the load runs to
+/// its end.
+fn before_engine_start(tracker: &LoadTracker) -> Result<()> {
+    tracker.begin_finishing(LoadStage::StartingEngine)
+}
+
 async fn load_engine_variant(
     model: &EngineModelConfig,
     runtime: &EngineRuntimeOptions,
+    tracker: &LoadTracker,
 ) -> Result<EngineVariant> {
+    tracker.enter_stage(LoadStage::ReadingWeights);
     if model.capabilities.runtime_kind == "diarization" {
         return Ok(EngineVariant::Diarization(
             super::diarization_execution::DiarizationRuntime::load(model.path.clone()).await?,
@@ -2628,7 +3339,7 @@ async fn load_engine_variant(
     }
     if model.capabilities.runtime_kind == "image_generation" {
         let model_weight_bytes = estimated_weight_bytes_for_roots([model.path.as_path()])?;
-        let pipeline = QwenImage21Pipeline::load(&model.path)
+        let pipeline = run_load_section(|| QwenImage21Pipeline::load(&model.path))
             .with_context(|| format!("QwenImage21Pipeline::load {}", model.path.display()))?;
         return Ok(EngineVariant::QwenImage(
             crate::core::qwen_image_execution::QwenImageRuntime::new(
@@ -2638,12 +3349,16 @@ async fn load_engine_variant(
             ),
         ));
     }
-    let loader = Loader::open_multimodal(&model.path)
+    plan_weight_progress(model, tracker);
+    let observer = tracker.observer();
+    let loader = run_load_section(|| Loader::open_multimodal_with(&model.path, &observer))
         .with_context(|| format!("Loader::open_multimodal {}", model.path.display()))?;
+    after_main_weights(tracker);
     let component_bytes = loader.loaded_tensor_component_bytes();
     let static_memory_estimate =
         StaticMemoryEstimate::from_allocated_weights(component_bytes.text, component_bytes.vision);
-    let tokenizer = Tokenizer::from_loader(&loader).context("Tokenizer::from_loader")?;
+    let tokenizer =
+        run_load_section(|| Tokenizer::from_loader(&loader)).context("Tokenizer::from_loader")?;
     let model_type = loader
         .config_raw_value()
         .get("model_type")
@@ -2660,8 +3375,9 @@ async fn load_engine_variant(
         let image_token_id = cfg.image_token_id;
         let generation_config = DiffusionGemmaGenerationConfig::from_loader(&loader)
             .context("DiffusionGemmaGenerationConfig::from_loader")?;
-        let model_impl = DiffusionGemmaModel::from_loader(&loader)
+        let model_impl = run_load_section(|| DiffusionGemmaModel::from_loader(&loader))
             .context("DiffusionGemmaModel::from_loader")?;
+        before_engine_start(tracker)?;
         let state = crate::core::diffusion_execution::build_diffusion_gemma_app_state(
             model_impl,
             tokenizer,
@@ -2695,8 +3411,8 @@ async fn load_engine_variant(
     )?);
     match architecture {
         ModelArchitecture::Qwen35Dense => {
-            let mut model_impl =
-                Qwen35Model::from_loader(&loader).context("Qwen35Model::from_loader")?;
+            let mut model_impl = run_load_section(|| Qwen35Model::from_loader(&loader))
+                .context("Qwen35Model::from_loader")?;
             model_impl.configure_m1_profile(runtime.m1_profile);
             build_qwen35_engine(
                 model_impl,
@@ -2709,13 +3425,14 @@ async fn load_engine_variant(
                 mtp_config,
                 prompt_lookup,
                 vision_input,
+                tracker,
             )
             .await
         }
         ModelArchitecture::Qwen35Moe => {
             if ironmlx_lm::models::is_qwen36_moe_config(loader.config_raw_value()) {
-                let model_impl =
-                    Qwen36MoeModel::from_loader(&loader).context("Qwen36MoeModel::from_loader")?;
+                let model_impl = run_load_section(|| Qwen36MoeModel::from_loader(&loader))
+                    .context("Qwen36MoeModel::from_loader")?;
                 build_qwen36_moe_engine(
                     model_impl,
                     tokenizer,
@@ -2727,11 +3444,12 @@ async fn load_engine_variant(
                     mtp_config,
                     prompt_lookup,
                     vision_input,
+                    tracker,
                 )
                 .await
             } else {
-                let model_impl =
-                    Qwen35MoeModel::from_loader(&loader).context("Qwen35MoeModel::from_loader")?;
+                let model_impl = run_load_section(|| Qwen35MoeModel::from_loader(&loader))
+                    .context("Qwen35MoeModel::from_loader")?;
                 build_qwen35_moe_engine(
                     model_impl,
                     tokenizer,
@@ -2743,13 +3461,14 @@ async fn load_engine_variant(
                     mtp_config,
                     prompt_lookup,
                     vision_input,
+                    tracker,
                 )
                 .await
             }
         }
         ModelArchitecture::Gemma4 => {
-            let model_impl =
-                Gemma4Model::from_loader(&loader).context("Gemma4Model::from_loader")?;
+            let model_impl = run_load_section(|| Gemma4Model::from_loader(&loader))
+                .context("Gemma4Model::from_loader")?;
             if let Some(mtp_config) = mtp_config {
                 let state = build_gemma4_drafter_causal_state(
                     model_impl,
@@ -2762,6 +3481,7 @@ async fn load_engine_variant(
                     mtp_config,
                     prompt_lookup,
                     vision_input,
+                    tracker,
                 )
                 .await?;
                 Ok(EngineVariant::Gemma4Drafter(Box::new(state)))
@@ -2776,6 +3496,7 @@ async fn load_engine_variant(
                     prefix_lru_cache,
                     prompt_lookup,
                     vision_input,
+                    tracker,
                 )
                 .await?;
                 Ok(EngineVariant::Gemma4(state))
@@ -2789,14 +3510,15 @@ async fn load_engine_variant(
                     paged_prefix_cache,
                     prefix_lru_cache,
                     vision_input,
+                    tracker,
                 )
                 .await?;
                 Ok(EngineVariant::Gemma4(state))
             }
         }
         ModelArchitecture::Glm4MoeLite => {
-            let model_impl =
-                Glm4MoeLiteModel::from_loader(&loader).context("Glm4MoeLiteModel::from_loader")?;
+            let model_impl = run_load_section(|| Glm4MoeLiteModel::from_loader(&loader))
+                .context("Glm4MoeLiteModel::from_loader")?;
             let state = build_plain_or_prompt_lookup_causal_state(
                 model_impl,
                 tokenizer,
@@ -2807,12 +3529,14 @@ async fn load_engine_variant(
                 prefix_lru_cache,
                 prompt_lookup,
                 vision_input,
+                tracker,
             )
             .await?;
             Ok(EngineVariant::Glm4MoeLite(state))
         }
         ModelArchitecture::Llama => {
-            let model_impl = LlamaModel::from_loader(&loader).context("LlamaModel::from_loader")?;
+            let model_impl = run_load_section(|| LlamaModel::from_loader(&loader))
+                .context("LlamaModel::from_loader")?;
             let state = build_plain_or_prompt_lookup_causal_state(
                 model_impl,
                 tokenizer,
@@ -2823,13 +3547,15 @@ async fn load_engine_variant(
                 prefix_lru_cache,
                 prompt_lookup,
                 vision_input,
+                tracker,
             )
             .await?;
             Ok(EngineVariant::Llama(state))
         }
         ModelArchitecture::MiniCpmV46 => {
-            let model_impl = ironmlx_lm::models::minicpmv4_6::model_from_loader(&loader)
-                .context("minicpmv4_6::model_from_loader")?;
+            let model_impl =
+                run_load_section(|| ironmlx_lm::models::minicpmv4_6::model_from_loader(&loader))
+                    .context("minicpmv4_6::model_from_loader")?;
             let state = build_plain_or_prompt_lookup_causal_state(
                 model_impl,
                 tokenizer,
@@ -2840,6 +3566,7 @@ async fn load_engine_variant(
                 prefix_lru_cache,
                 prompt_lookup,
                 vision_input,
+                tracker,
             )
             .await?;
             Ok(EngineVariant::MiniCpmV46(state))
@@ -2860,6 +3587,7 @@ async fn build_qwen35_engine(
     mtp_config: Option<ResolvedEngineMtpConfig>,
     prompt_lookup: Option<PromptLookupConfig>,
     vision_input: Option<VisionInputConfig>,
+    tracker: &LoadTracker,
 ) -> Result<EngineVariant> {
     if let Some(mtp_config) = mtp_config {
         let state = build_mtp_causal_state(
@@ -2873,6 +3601,7 @@ async fn build_qwen35_engine(
             mtp_config,
             prompt_lookup,
             vision_input,
+            tracker,
         )
         .await?;
         Ok(EngineVariant::Qwen35(state))
@@ -2887,6 +3616,7 @@ async fn build_qwen35_engine(
             prefix_lru_cache,
             prompt_lookup,
             vision_input,
+            tracker,
         )
         .await?;
         Ok(EngineVariant::Qwen35(state))
@@ -2905,6 +3635,7 @@ async fn build_qwen35_moe_engine(
     mtp_config: Option<ResolvedEngineMtpConfig>,
     prompt_lookup: Option<PromptLookupConfig>,
     vision_input: Option<VisionInputConfig>,
+    tracker: &LoadTracker,
 ) -> Result<EngineVariant> {
     if let Some(mtp_config) = mtp_config {
         let state = build_mtp_causal_state(
@@ -2918,6 +3649,7 @@ async fn build_qwen35_moe_engine(
             mtp_config,
             prompt_lookup,
             vision_input,
+            tracker,
         )
         .await?;
         Ok(EngineVariant::Qwen35Moe(state))
@@ -2932,6 +3664,7 @@ async fn build_qwen35_moe_engine(
             prefix_lru_cache,
             prompt_lookup,
             vision_input,
+            tracker,
         )
         .await?;
         Ok(EngineVariant::Qwen35Moe(state))
@@ -2950,6 +3683,7 @@ async fn build_qwen36_moe_engine(
     mtp_config: Option<ResolvedEngineMtpConfig>,
     prompt_lookup: Option<PromptLookupConfig>,
     vision_input: Option<VisionInputConfig>,
+    tracker: &LoadTracker,
 ) -> Result<EngineVariant> {
     if let Some(mtp_config) = mtp_config {
         let state = build_mtp_causal_state(
@@ -2963,6 +3697,7 @@ async fn build_qwen36_moe_engine(
             mtp_config,
             prompt_lookup,
             vision_input,
+            tracker,
         )
         .await?;
         Ok(EngineVariant::Qwen36Moe(state))
@@ -2977,6 +3712,7 @@ async fn build_qwen36_moe_engine(
             prefix_lru_cache,
             prompt_lookup,
             vision_input,
+            tracker,
         )
         .await?;
         Ok(EngineVariant::Qwen36Moe(state))
@@ -2994,6 +3730,7 @@ async fn build_plain_or_prompt_lookup_causal_state<M>(
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     prompt_lookup: Option<PromptLookupConfig>,
     vision_input: Option<VisionInputConfig>,
+    tracker: &LoadTracker,
 ) -> Result<AppState<M>>
 where
     M: Model + ironmlx_lm::core::vision::DenseVlMethods + Send + 'static,
@@ -3009,6 +3746,7 @@ where
             prefix_lru_cache,
             prompt_lookup,
             vision_input,
+            tracker,
         )
         .await
     } else {
@@ -3021,6 +3759,7 @@ where
             paged_prefix_cache,
             prefix_lru_cache,
             vision_input,
+            tracker,
         )
         .await
     }
@@ -3036,10 +3775,12 @@ async fn build_plain_causal_state<M>(
     paged_prefix_cache: Option<PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     vision_input: Option<VisionInputConfig>,
+    tracker: &LoadTracker,
 ) -> Result<AppState<M>>
 where
     M: Model + ironmlx_lm::core::vision::DenseVlMethods + Send + 'static,
 {
+    before_engine_start(tracker)?;
     let profile = model
         .scheduler_runtime_profile
         .clone()
@@ -3078,10 +3819,12 @@ async fn build_prompt_lookup_causal_state<M>(
     prefix_lru_cache: Option<PrefixLruCacheConfig>,
     prompt_lookup: PromptLookupConfig,
     vision_input: Option<VisionInputConfig>,
+    tracker: &LoadTracker,
 ) -> Result<AppState<M>>
 where
     M: Model + ironmlx_lm::core::vision::DenseVlMethods + Send + 'static,
 {
+    before_engine_start(tracker)?;
     let profile = model
         .scheduler_runtime_profile
         .clone()
@@ -3122,17 +3865,21 @@ async fn build_mtp_causal_state<M>(
     mtp_config: ResolvedEngineMtpConfig,
     prompt_lookup: Option<PromptLookupConfig>,
     vision_input: Option<VisionInputConfig>,
+    tracker: &LoadTracker,
 ) -> Result<AppState<M>>
 where
     M: Model + ironmlx_lm::core::vision::DenseVlMethods + MtpSpeculativeModel + Send + 'static,
     M::MtpHead: Send + 'static,
 {
-    let mtp_loader = Loader::open_mtp(&mtp_config.model_dir)
-        .with_context(|| format!("Loader::open_mtp {}", mtp_config.model_dir.display()))?;
+    before_draft_weights(tracker)?;
+    let observer = tracker.observer();
+    let mtp_loader =
+        run_load_section(|| Loader::open_mtp_with(&mtp_config.model_dir, &observer))
+            .with_context(|| format!("Loader::open_mtp {}", mtp_config.model_dir.display()))?;
     static_memory_estimate.set_allocated_speculative_weights(mtp_loader.loaded_tensor_bytes());
-    let mtp = model_impl
-        .load_mtp_head(&mtp_loader)
+    let mtp = run_load_section(|| model_impl.load_mtp_head(&mtp_loader))
         .with_context(|| format!("loading MTP head from {}", mtp_config.model_dir.display()))?;
+    before_engine_start(tracker)?;
     let profile = model
         .scheduler_runtime_profile
         .clone()
@@ -3175,21 +3922,29 @@ async fn build_gemma4_drafter_causal_state(
     mtp_config: ResolvedEngineMtpConfig,
     prompt_lookup: Option<PromptLookupConfig>,
     vision_input: Option<VisionInputConfig>,
+    tracker: &LoadTracker,
 ) -> Result<Gemma4DrafterAppState> {
-    let drafter_loader = Loader::open_gemma4_drafter(&mtp_config.model_dir).with_context(|| {
+    before_draft_weights(tracker)?;
+    let observer = tracker.observer();
+    let drafter_loader =
+        run_load_section(|| Loader::open_gemma4_drafter_with(&mtp_config.model_dir, &observer))
+            .with_context(|| {
+                format!(
+                    "Loader::open_gemma4_drafter {}",
+                    mtp_config.model_dir.display()
+                )
+            })?;
+    static_memory_estimate.set_allocated_speculative_weights(drafter_loader.loaded_tensor_bytes());
+    let drafter = run_load_section(|| {
+        ironmlx_lm::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
+    })
+    .with_context(|| {
         format!(
-            "Loader::open_gemma4_drafter {}",
+            "loading Gemma4 assistant drafter from {}",
             mtp_config.model_dir.display()
         )
     })?;
-    static_memory_estimate.set_allocated_speculative_weights(drafter_loader.loaded_tensor_bytes());
-    let drafter = ironmlx_lm::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
-        .with_context(|| {
-            format!(
-                "loading Gemma4 assistant drafter from {}",
-                mtp_config.model_dir.display()
-            )
-        })?;
+    before_engine_start(tracker)?;
     let profile = model
         .scheduler_runtime_profile
         .clone()
@@ -3323,6 +4078,141 @@ impl LoadedEngineHealth {
     }
 }
 
+/// Points where [`TestLoadHook`] can hold a load so a test can act on it.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestLoadPause {
+    /// A reload that has not registered in the load registry yet.
+    BeforeRegistration,
+    AfterPreparingMemory,
+    ReadingWeights,
+    BeforeDraftWeights,
+    BeforeEngineStart,
+    AfterEngineStart,
+}
+
+/// Replaces weight loading in tests: walks the stages and cancellation points
+/// of a real load (through the same stage helpers) without reading weights,
+/// and can pause at a [`TestLoadPause`] until released.
+#[cfg(any(test, feature = "test-support"))]
+pub struct TestLoadHook {
+    pause_at: std::sync::Mutex<Option<TestLoadPause>>,
+    reached_sender: tokio::sync::mpsc::UnboundedSender<TestLoadPause>,
+    reached: Mutex<tokio::sync::mpsc::UnboundedReceiver<TestLoadPause>>,
+    release: Notify,
+    loads_started: AtomicUsize,
+    fail_with: std::sync::Mutex<Option<fn() -> anyhow::Error>>,
+    joins: watch::Sender<usize>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl TestLoadHook {
+    fn new() -> Self {
+        let (reached_sender, reached) = tokio::sync::mpsc::unbounded_channel();
+        Self {
+            pause_at: std::sync::Mutex::new(None),
+            reached_sender,
+            reached: Mutex::new(reached),
+            release: Notify::new(),
+            loads_started: AtomicUsize::new(0),
+            fail_with: std::sync::Mutex::new(None),
+            joins: watch::channel(0).0,
+        }
+    }
+
+    /// Wait until `count` callers in all have joined a slot load another
+    /// caller started.
+    pub async fn wait_joins(&self, count: usize) {
+        let mut joins = self.joins.subscribe();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            joins.wait_for(|joined| *joined >= count),
+        )
+        .await
+        .expect("callers join the load")
+        .expect("hook alive");
+    }
+
+    fn note_join(&self) {
+        self.joins.send_modify(|joined| *joined += 1);
+    }
+
+    /// Fail later loads with this error once they have read the weights.
+    pub fn fail_with(&self, error: Option<fn() -> anyhow::Error>) {
+        *self.fail_with.lock().unwrap() = error;
+    }
+
+    pub fn pause_at(&self, pause: Option<TestLoadPause>) {
+        *self.pause_at.lock().unwrap() = pause;
+    }
+
+    /// The pause point a load is now held at.
+    pub async fn wait_reached(&self) -> TestLoadPause {
+        tokio::time::timeout(Duration::from_secs(10), self.reached.lock().await.recv())
+            .await
+            .expect("load reaches its pause point")
+            .expect("hook alive")
+    }
+
+    /// Let the held load continue.
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
+
+    /// Loads that got past the load gate and memory preparation.
+    pub fn loads_started(&self) -> usize {
+        self.loads_started.load(Ordering::SeqCst)
+    }
+
+    async fn pause(&self, at: TestLoadPause) {
+        let paused = *self.pause_at.lock().unwrap() == Some(at);
+        if paused {
+            self.reached_sender
+                .send(at)
+                .expect("test holds the receiver");
+            self.release.notified().await;
+        }
+    }
+
+    async fn load(
+        &self,
+        model: &EngineModelConfig,
+        tracker: &LoadTracker,
+    ) -> Result<EngineVariant> {
+        self.loads_started.fetch_add(1, Ordering::SeqCst);
+        tracker.enter_stage(LoadStage::ReadingWeights);
+        tracker.set_component_estimate(WeightComponent::Main, 1024);
+        if model.mtp.is_some() {
+            tracker.set_component_estimate(WeightComponent::Draft, 128);
+        }
+        let observer = tracker.observer();
+        observer.begin_weights(WeightComponent::Main, 1000);
+        observer.add_weight_bytes(500);
+        self.pause(TestLoadPause::ReadingWeights).await;
+        let fail_with = *self.fail_with.lock().unwrap();
+        if let Some(error) = fail_with {
+            return Err(error());
+        }
+        // The loader checks for cancellation after every weight chunk.
+        tracker.checkpoint()?;
+        observer.add_weight_bytes(500);
+        after_main_weights(tracker);
+        if model.mtp.is_some() {
+            self.pause(TestLoadPause::BeforeDraftWeights).await;
+            before_draft_weights(tracker)?;
+            observer.begin_weights(WeightComponent::Draft, 100);
+            observer.add_weight_bytes(100);
+            tracker.checkpoint()?;
+        }
+        self.pause(TestLoadPause::BeforeEngineStart).await;
+        before_engine_start(tracker)?;
+        self.pause(TestLoadPause::AfterEngineStart).await;
+        Ok(EngineVariant::Test(TestEngine {
+            model_weight_bytes: 1000,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::EngineModelCapabilities;
@@ -3330,7 +4220,7 @@ mod tests {
     use std::fs::OpenOptions;
     use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
 
     use crate::core::runtime_config::SamplingDefaults;
     use crate::core::scheduler_autotune::{
@@ -3413,6 +4303,7 @@ mod tests {
             default: false,
             pinned: false,
             scheduler_runtime_profile: Some(runtime_profile()),
+            scheduler_profile_kind: None,
             mtp: None,
             prompt_lookup: None,
             sampling_defaults: SamplingDefaults::default(),
@@ -3425,13 +4316,12 @@ mod tests {
     }
 
     fn write_minimal_model_config(model_type: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time")
-            .as_nanos();
+        // Wall-clock nanoseconds alone collide between parallel tests (macOS
+        // reports microseconds), letting one test overwrite another's model.
         let dir = std::env::temp_dir().join(format!(
-            "ironmlx-engine-pool-test-{}-{unique}",
-            std::process::id()
+            "ironmlx-engine-pool-test-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
         ));
         std::fs::create_dir_all(&dir).expect("create temp model dir");
         std::fs::write(
@@ -4166,7 +5056,7 @@ mod tests {
     async fn draining_model_rejects_new_request_until_unload_finishes() {
         let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
         let model_dir = write_minimal_model_config("qwen3_5");
-        let slot = EngineSlot {
+        let slot = std::sync::Arc::new(EngineSlot {
             configured_context_window: None,
             model: model_config("alpha", &model_dir, EngineLoadPolicy::Lazy),
             runtime: runtime_config(),
@@ -4178,10 +5068,15 @@ mod tests {
                 request_count: 1,
             }),
             notify: Notify::new(),
-        };
+            pending_load: std::sync::Mutex::new(None),
+        });
 
         let error = slot
-            .ensure_loaded(&pool.inner, EngineLoadTrigger::Request)
+            .ensure_loaded(
+                &pool.inner,
+                EngineLoadTrigger::Request,
+                super::EngineLoadOptions::new(super::LoadTriggerKind::Request),
+            )
             .await
             .expect_err("draining model must reject new requests");
 
@@ -4361,6 +5256,988 @@ mod tests {
             Some(super::EngineUnloadReason::Evicted)
         );
         assert_eq!(beta.state, EngineRuntimeState::Loaded);
+    }
+
+    mod load_lifecycle {
+        use super::{model_config, runtime_config, write_minimal_model_config};
+        use crate::core::engine_pool::{
+            EngineLoadOptions, EngineLoadPolicy, EngineModelConfig, EngineMtpSettings,
+            EnginePoolState, EngineRuntimeState, EngineSlotRuntimeSnapshot, EngineUnloadReason,
+            EngineVariant, TestLoadHook, TestLoadPause,
+        };
+        use crate::core::load_registry::{
+            LoadActivity, LoadCancelError, LoadCancelled, LoadInProgress, LoadKind, LoadStage,
+            LoadState, LoadTriggerKind,
+        };
+        use crate::core::process_memory::global_process_memory_governor;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        const WAIT: Duration = Duration::from_secs(10);
+
+        struct Fixture {
+            pool: EnginePoolState,
+            hook: Arc<TestLoadHook>,
+            config: EngineModelConfig,
+            dirs: Vec<PathBuf>,
+        }
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                for dir in &self.dirs {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
+            }
+        }
+
+        /// A registered, unloaded model "alpha" whose loads run the test load
+        /// hook instead of reading real weights.
+        async fn fixture(mtp: bool) -> Fixture {
+            let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
+            let hook = pool.install_test_load_hook();
+            let model_dir = write_minimal_model_config("qwen3_5");
+            std::fs::write(model_dir.join("model.safetensors"), vec![0_u8; 1024])
+                .expect("weight size fixture");
+            let mut dirs = vec![model_dir.clone()];
+            let mut config = model_config("alpha", &model_dir, EngineLoadPolicy::Lazy);
+            if mtp {
+                let draft_dir = write_minimal_model_config("qwen3_5_mtp");
+                std::fs::write(draft_dir.join("model.safetensors"), vec![0_u8; 128])
+                    .expect("draft size fixture");
+                config.mtp = Some(EngineMtpSettings {
+                    model_dir: draft_dir.clone(),
+                    draft_tokens: Some(2),
+                });
+                dirs.push(draft_dir);
+            }
+            pool.register_dynamic_model(config.clone(), false, None)
+                .await
+                .expect("register alpha");
+            Fixture {
+                pool,
+                hook,
+                config,
+                dirs,
+            }
+        }
+
+        fn is_load_cancelled(error: &anyhow::Error) -> bool {
+            error.downcast_ref::<LoadCancelled>().is_some()
+        }
+
+        async fn slot_snapshot(pool: &EnginePoolState, id: &str) -> EngineSlotRuntimeSnapshot {
+            let slot = pool.inner.slots.lock().await[id].clone();
+            slot.runtime_snapshot().await
+        }
+
+        async fn loaded_engine(pool: &EnginePoolState, id: &str) -> Arc<EngineVariant> {
+            let slot = pool.inner.slots.lock().await[id].clone();
+            let state = slot.state.lock().await;
+            match &*state {
+                super::EngineSlotState::Loaded { engine, .. } => engine.clone(),
+                _ => panic!("`{id}` is not loaded"),
+            }
+        }
+
+        async fn wait_for_load(pool: &EnginePoolState, model: &str) -> LoadActivity {
+            tokio::time::timeout(WAIT, async {
+                loop {
+                    if let Some(load) = pool.load_registry().in_progress_for(model) {
+                        return load;
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .await
+            .expect("load registered")
+        }
+
+        fn model_load_reserved_bytes() -> usize {
+            global_process_memory_governor()
+                .snapshot()
+                .model_load_reserved_bytes
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn loaded_models_report_their_scheduler_configuration() {
+            use crate::core::scheduler_resolution::SchedulerProfileKind;
+            let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
+            let _hook = pool.install_test_load_hook();
+            let mut dirs = Vec::new();
+            for (id, kind) in [
+                ("tuned", Some(SchedulerProfileKind::Profile)),
+                ("plain", Some(SchedulerProfileKind::Default)),
+            ] {
+                let model_dir = write_minimal_model_config("qwen3_5");
+                std::fs::write(model_dir.join("model.safetensors"), vec![0_u8; 1024])
+                    .expect("weight size fixture");
+                let mut config = model_config(id, &model_dir, EngineLoadPolicy::Lazy);
+                config.scheduler_profile_kind = kind;
+                pool.register_dynamic_model(config, false, None)
+                    .await
+                    .expect("register model");
+                pool.load_model(id).await.expect("load model");
+                dirs.push(model_dir);
+            }
+            let infos = pool.loaded_model_infos().await;
+            let kind_of = |id: &str| {
+                infos
+                    .iter()
+                    .find(|info| info.id == id)
+                    .expect("loaded model")
+                    .scheduler_profile
+            };
+            assert_eq!(kind_of("tuned"), Some(SchedulerProfileKind::Profile));
+            assert_eq!(kind_of("plain"), Some(SchedulerProfileKind::Default));
+            for dir in dirs {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn cancel_while_queued_never_takes_load_gate() {
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            let gate = pool.inner.load_gate.lock().await;
+            let load = tokio::spawn({
+                let pool = pool.clone();
+                async move { pool.load_model("alpha").await }
+            });
+            let queued = wait_for_load(&pool, "alpha").await;
+            assert_eq!(queued.state, LoadState::Queued);
+            assert_eq!(queued.trigger, LoadTriggerKind::OpenAiControl);
+
+            pool.load_registry()
+                .cancel(&queued.load_id)
+                .expect("cancel queued");
+            // The gate is still held here: the load must finish without it.
+            let error = tokio::time::timeout(WAIT, load)
+                .await
+                .expect("queued load stops while the gate is held")
+                .expect("join")
+                .expect_err("cancelled load");
+            assert!(is_load_cancelled(&error), "{error:#}");
+            drop(gate);
+
+            let finished = pool.load_registry().wait(&queued.load_id).await.unwrap();
+            assert_eq!(finished.state, LoadState::Cancelled);
+            assert_eq!(finished.completed_stages.len(), 1);
+            assert_eq!(finished.completed_stages[0].stage, LoadStage::Queued);
+            assert_eq!(fixture.hook.loads_started(), 0);
+            let slot = slot_snapshot(&pool, "alpha").await;
+            assert_eq!(slot.state, EngineRuntimeState::Unloaded);
+            assert_eq!(slot.load_attempts, 0);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn reload_after_cancel_succeeds_at_every_checkpoint() {
+            for checkpoint in [
+                None,
+                Some(TestLoadPause::AfterPreparingMemory),
+                Some(TestLoadPause::ReadingWeights),
+                Some(TestLoadPause::BeforeDraftWeights),
+                Some(TestLoadPause::BeforeEngineStart),
+            ] {
+                let fixture = fixture(true).await;
+                let pool = fixture.pool.clone();
+                let reserved_before = model_load_reserved_bytes();
+                let gate = match checkpoint {
+                    None => Some(pool.inner.load_gate.lock().await),
+                    Some(pause) => {
+                        fixture.hook.pause_at(Some(pause));
+                        None
+                    }
+                };
+                let load = tokio::spawn({
+                    let pool = pool.clone();
+                    async move { pool.load_model("alpha").await }
+                });
+                if let Some(pause) = checkpoint {
+                    assert_eq!(fixture.hook.wait_reached().await, pause);
+                }
+                let active = wait_for_load(&pool, "alpha").await;
+                pool.load_registry()
+                    .cancel(&active.load_id)
+                    .unwrap_or_else(|error| panic!("{checkpoint:?}: cancel: {error}"));
+                if checkpoint.is_some() {
+                    fixture.hook.release();
+                }
+                let error = tokio::time::timeout(WAIT, load)
+                    .await
+                    .expect("cancelled load stops")
+                    .expect("join")
+                    .expect_err("cancelled load");
+                assert!(is_load_cancelled(&error), "{checkpoint:?}: {error:#}");
+                drop(gate);
+
+                let slot = slot_snapshot(&pool, "alpha").await;
+                assert_eq!(slot.state, EngineRuntimeState::Unloaded, "{checkpoint:?}");
+                assert_eq!(slot.unload_reason, Some(EngineUnloadReason::Manual));
+                assert_eq!(slot.last_error, None, "{checkpoint:?}");
+                let finished = pool.load_registry().wait(&active.load_id).await.unwrap();
+                assert_eq!(finished.state, LoadState::Cancelled, "{checkpoint:?}");
+                assert_eq!(
+                    model_load_reserved_bytes(),
+                    reserved_before,
+                    "{checkpoint:?}: reservation released"
+                );
+
+                fixture.hook.pause_at(None);
+                let reloaded = tokio::time::timeout(WAIT, pool.load_model("alpha"))
+                    .await
+                    .expect("reload finishes")
+                    .unwrap_or_else(|error| panic!("{checkpoint:?}: reload: {error:#}"));
+                assert_eq!(reloaded.state, EngineRuntimeState::Loaded, "{checkpoint:?}");
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn cancel_after_engine_start_returns_finishing() {
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            fixture.hook.pause_at(Some(TestLoadPause::AfterEngineStart));
+            let load = tokio::spawn({
+                let pool = pool.clone();
+                async move { pool.load_model("alpha").await }
+            });
+            assert_eq!(
+                fixture.hook.wait_reached().await,
+                TestLoadPause::AfterEngineStart
+            );
+            let active = wait_for_load(&pool, "alpha").await;
+            assert_eq!(active.stage, LoadStage::StartingEngine);
+            assert_eq!(
+                pool.load_registry().cancel(&active.load_id),
+                Err(LoadCancelError::Finishing)
+            );
+            fixture.hook.release();
+
+            let loaded = tokio::time::timeout(WAIT, load)
+                .await
+                .expect("load finishes")
+                .expect("join")
+                .expect("load is no longer cancellable");
+            assert_eq!(loaded.state, EngineRuntimeState::Loaded);
+            let finished = pool.load_registry().wait(&active.load_id).await.unwrap();
+            assert_eq!(finished.state, LoadState::Loaded);
+            assert_eq!(finished.bytes_done, finished.bytes_total);
+            let stages: Vec<LoadStage> = finished
+                .completed_stages
+                .iter()
+                .map(|stage| stage.stage)
+                .collect();
+            assert_eq!(
+                stages,
+                [
+                    LoadStage::Queued,
+                    LoadStage::PreparingMemory,
+                    LoadStage::ReadingWeights,
+                    LoadStage::BuildingModel,
+                    LoadStage::StartingEngine,
+                ]
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn cancel_reload_restores_previous_engine() {
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            pool.load_model("alpha").await.expect("initial load");
+            let old_slot = pool.inner.slots.lock().await["alpha"].clone();
+            let old_engine = loaded_engine(&pool, "alpha").await;
+
+            fixture.hook.pause_at(Some(TestLoadPause::ReadingWeights));
+            let mut changed = fixture.config.clone();
+            changed.default_max_output_tokens = Some(77);
+            let reload = tokio::spawn({
+                let pool = pool.clone();
+                async move { pool.reload_dynamic_model(changed, false).await }
+            });
+            assert_eq!(
+                fixture.hook.wait_reached().await,
+                TestLoadPause::ReadingWeights
+            );
+            let active = wait_for_load(&pool, "alpha").await;
+            assert_eq!(active.kind, LoadKind::Reload);
+            assert_eq!(active.trigger, LoadTriggerKind::Admin);
+            pool.load_registry()
+                .cancel(&active.load_id)
+                .expect("cancel reload");
+            fixture.hook.release();
+
+            let error = tokio::time::timeout(WAIT, reload)
+                .await
+                .expect("reload stops")
+                .expect("join")
+                .expect_err("cancelled reload");
+            assert!(is_load_cancelled(&error), "{error:#}");
+            assert!(Arc::ptr_eq(
+                &pool.inner.slots.lock().await["alpha"],
+                &old_slot
+            ));
+            assert!(pool
+                .loaded_model_infos()
+                .await
+                .iter()
+                .any(|model| model.id == "alpha"));
+            let (_, lease) = pool.resolve_engine(Some("alpha")).await.expect("request");
+            assert!(std::ptr::eq(lease.engine(), &*old_engine));
+            let finished = pool.load_registry().wait(&active.load_id).await.unwrap();
+            assert_eq!(finished.state, LoadState::Cancelled);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn request_during_cancelled_reload_is_served_by_restored_engine() {
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            pool.load_model("alpha").await.expect("initial load");
+            let old_engine = loaded_engine(&pool, "alpha").await;
+
+            fixture.hook.pause_at(Some(TestLoadPause::ReadingWeights));
+            let mut changed = fixture.config.clone();
+            changed.default_max_output_tokens = Some(77);
+            let reload = tokio::spawn({
+                let pool = pool.clone();
+                async move { pool.reload_dynamic_model(changed, false).await }
+            });
+            assert_eq!(
+                fixture.hook.wait_reached().await,
+                TestLoadPause::ReadingWeights
+            );
+            // The request finds the reload's new slot and waits for it.
+            let request = tokio::spawn({
+                let pool = pool.clone();
+                async move {
+                    pool.resolve_engine(Some("alpha"))
+                        .await
+                        .map(|(_, lease)| lease)
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!request.is_finished());
+
+            let active = wait_for_load(&pool, "alpha").await;
+            pool.load_registry()
+                .cancel(&active.load_id)
+                .expect("cancel reload");
+            fixture.hook.pause_at(None);
+            fixture.hook.release();
+            let error = tokio::time::timeout(WAIT, reload)
+                .await
+                .expect("reload stops")
+                .expect("join")
+                .expect_err("cancelled reload");
+            assert!(is_load_cancelled(&error), "{error:#}");
+
+            let lease = tokio::time::timeout(WAIT, request)
+                .await
+                .expect("request finishes")
+                .expect("join")
+                .unwrap_or_else(|error| panic!("request is served: {error:#}"));
+            assert!(std::ptr::eq(lease.engine(), &*old_engine));
+            assert_eq!(fixture.hook.loads_started(), 2);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn replaced_slot_does_not_load_after_the_reload_succeeds() {
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            let replaced = pool.inner.slots.lock().await["alpha"].clone();
+            fixture.hook.pause_at(Some(TestLoadPause::ReadingWeights));
+            let reload = tokio::spawn({
+                let pool = pool.clone();
+                let config = fixture.config.clone();
+                async move { pool.reload_dynamic_model(config, false).await }
+            });
+            assert_eq!(
+                fixture.hook.wait_reached().await,
+                TestLoadPause::ReadingWeights
+            );
+            let stale = tokio::spawn({
+                let pool = pool.inner.clone();
+                async move {
+                    replaced
+                        .ensure_loaded(
+                            &pool,
+                            super::EngineLoadTrigger::Request,
+                            EngineLoadOptions::new(LoadTriggerKind::Request),
+                        )
+                        .await
+                        .map(|_| ())
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!stale.is_finished());
+            fixture.hook.pause_at(None);
+            fixture.hook.release();
+            tokio::time::timeout(WAIT, reload)
+                .await
+                .expect("reload finishes")
+                .expect("join")
+                .expect("reloaded");
+            let error = tokio::time::timeout(WAIT, stale)
+                .await
+                .expect("stale request ends with the reload")
+                .expect("join")
+                .expect_err("the stale slot is no longer the model's");
+            assert!(
+                error
+                    .downcast_ref::<crate::core::engine_pool::EngineSlotReplaced>()
+                    .is_some(),
+                "{error:#}"
+            );
+            // The request resolves again and is served by the reloaded engine.
+            pool.resolve_engine(Some("alpha")).await.expect("request");
+            assert_eq!(fixture.hook.loads_started(), 1);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn duplicate_load_same_config_joins() {
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            fixture.hook.pause_at(Some(TestLoadPause::ReadingWeights));
+            let first = tokio::spawn({
+                let pool = pool.clone();
+                let config = fixture.config.clone();
+                async move { pool.reload_dynamic_model(config, false).await }
+            });
+            assert_eq!(
+                fixture.hook.wait_reached().await,
+                TestLoadPause::ReadingWeights
+            );
+            // `pinned` and `set_default` do not change what gets loaded.
+            let mut same = fixture.config.clone();
+            same.pinned = true;
+            let second = tokio::spawn({
+                let pool = pool.clone();
+                async move { pool.reload_dynamic_model(same, true).await }
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!second.is_finished());
+            assert_eq!(pool.load_registry().list().len(), 1);
+            fixture.hook.release();
+
+            for load in [first, second] {
+                let result = tokio::time::timeout(WAIT, load)
+                    .await
+                    .expect("load finishes")
+                    .expect("join")
+                    .expect("joined load succeeds");
+                assert_eq!(result.state, EngineRuntimeState::Loaded);
+            }
+            assert_eq!(fixture.hook.loads_started(), 1);
+            let loads = pool.load_registry().list();
+            assert_eq!(loads.len(), 1);
+            assert_eq!(loads[0].state, LoadState::Loaded);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn duplicate_load_different_config_conflicts() {
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            fixture.hook.pause_at(Some(TestLoadPause::ReadingWeights));
+            let first = tokio::spawn({
+                let pool = pool.clone();
+                let config = fixture.config.clone();
+                async move { pool.reload_dynamic_model(config, false).await }
+            });
+            assert_eq!(
+                fixture.hook.wait_reached().await,
+                TestLoadPause::ReadingWeights
+            );
+            let active = wait_for_load(&pool, "alpha").await;
+            let mut other = fixture.config.clone();
+            other.default_max_output_tokens = Some(99);
+            let error = pool
+                .reload_dynamic_model(other, false)
+                .await
+                .expect_err("different configuration conflicts");
+            let conflict = error
+                .downcast_ref::<LoadInProgress>()
+                .unwrap_or_else(|| panic!("load_in_progress error: {error:#}"));
+            assert_eq!(conflict.load_id, active.load_id);
+            fixture.hook.release();
+
+            let loaded = tokio::time::timeout(WAIT, first)
+                .await
+                .expect("first load finishes")
+                .expect("join")
+                .expect("first load is unaffected");
+            assert_eq!(loaded.state, EngineRuntimeState::Loaded);
+            assert_eq!(pool.load_registry().list().len(), 1);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn request_triggered_load_is_registered() {
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            let (_, lease) = pool.resolve_engine(Some("alpha")).await.expect("request");
+            drop(lease);
+            let loads = pool.load_registry().list();
+            assert_eq!(loads.len(), 1);
+            assert_eq!(loads[0].model, "alpha");
+            assert_eq!(loads[0].trigger, LoadTriggerKind::Request);
+            assert_eq!(loads[0].kind, LoadKind::Load);
+            assert_eq!(loads[0].state, LoadState::Loaded);
+        }
+
+        /// Single-threaded runtime: when the load finishes, the queued load
+        /// woken by the released gate runs before the request that started
+        /// the first load, exactly the order that let it evict an idle model.
+        #[tokio::test(flavor = "current_thread")]
+        #[serial_test::serial(model_load_governor)]
+        async fn request_triggered_load_holds_its_lease_when_loaded() {
+            let mut dirs = Vec::new();
+            let mut models = Vec::new();
+            for id in ["alpha", "beta"] {
+                let dir = write_minimal_model_config("qwen3_5");
+                std::fs::write(dir.join("model.safetensors"), vec![0_u8; 1024])
+                    .expect("weight size fixture");
+                models.push(model_config(id, &dir, EngineLoadPolicy::Lazy));
+                dirs.push(dir);
+            }
+            let config = super::EnginePoolConfig {
+                default_model: Some("alpha".to_string()),
+                max_loaded_models: Some(1),
+                models,
+            };
+            let pool = EnginePoolState::new(config, runtime_config())
+                .await
+                .expect("pool");
+            let hook = pool.install_test_load_hook();
+            hook.pause_at(Some(TestLoadPause::ReadingWeights));
+            let request = tokio::spawn({
+                let pool = pool.clone();
+                async move {
+                    pool.resolve_engine(Some("alpha"))
+                        .await
+                        .map(|(_, lease)| lease)
+                }
+            });
+            assert_eq!(hook.wait_reached().await, TestLoadPause::ReadingWeights);
+            hook.pause_at(None);
+            let control = tokio::spawn({
+                let pool = pool.clone();
+                async move { pool.load_model("beta").await }
+            });
+            assert_eq!(wait_for_load(&pool, "beta").await.state, LoadState::Queued);
+            hook.release();
+
+            let lease = tokio::time::timeout(WAIT, request)
+                .await
+                .expect("request finishes")
+                .expect("join")
+                .expect("request gets alpha");
+            // The full pool cannot evict alpha while its request holds the
+            // lease, so the queued load is refused instead of thrashing.
+            let error = tokio::time::timeout(WAIT, control)
+                .await
+                .expect("queued load finishes")
+                .expect("join")
+                .expect_err("pool is full of busy models");
+            assert!(
+                format!("{error:#}").contains("engine pool capacity reached"),
+                "{error:#}"
+            );
+            assert_eq!(hook.loads_started(), 1);
+            let alpha = slot_snapshot(&pool, "alpha").await;
+            assert_eq!(alpha.state, EngineRuntimeState::Loaded);
+            assert_eq!(alpha.request_count, 1);
+            drop(lease);
+            for dir in dirs {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn request_during_load_joins_it() {
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            fixture.hook.pause_at(Some(TestLoadPause::ReadingWeights));
+            let control = tokio::spawn({
+                let pool = pool.clone();
+                async move { pool.load_model("alpha").await }
+            });
+            assert_eq!(
+                fixture.hook.wait_reached().await,
+                TestLoadPause::ReadingWeights
+            );
+            let request = tokio::spawn({
+                let pool = pool.clone();
+                async move { pool.resolve_engine(Some("alpha")).await.map(|_| ()) }
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!request.is_finished());
+            fixture.hook.release();
+            tokio::time::timeout(WAIT, control)
+                .await
+                .expect("control load")
+                .expect("join")
+                .expect("loaded");
+            tokio::time::timeout(WAIT, request)
+                .await
+                .expect("request")
+                .expect("join")
+                .expect("request joins the load");
+            assert_eq!(fixture.hook.loads_started(), 1);
+            assert_eq!(pool.load_registry().list().len(), 1);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn replaced_slot_waits_for_the_registered_reload() {
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            let replaced = pool.inner.slots.lock().await["alpha"].clone();
+            fixture.hook.pause_at(Some(TestLoadPause::ReadingWeights));
+            let reload = tokio::spawn({
+                let pool = pool.clone();
+                let config = fixture.config.clone();
+                async move { pool.reload_dynamic_model(config, false).await }
+            });
+            assert_eq!(
+                fixture.hook.wait_reached().await,
+                TestLoadPause::ReadingWeights
+            );
+            // A request that resolved the slot before the swap must not start
+            // a second load of the model.
+            let stale = tokio::spawn({
+                let pool = pool.inner.clone();
+                async move {
+                    replaced
+                        .ensure_loaded(
+                            &pool,
+                            super::EngineLoadTrigger::Request,
+                            EngineLoadOptions::new(LoadTriggerKind::Request),
+                        )
+                        .await
+                        .map(|_| ())
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!stale.is_finished());
+            assert_eq!(pool.load_registry().list().len(), 1);
+
+            let active = wait_for_load(&pool, "alpha").await;
+            pool.load_registry()
+                .cancel(&active.load_id)
+                .expect("cancel");
+            fixture.hook.release();
+            let error = tokio::time::timeout(WAIT, stale)
+                .await
+                .expect("stale request ends with the reload")
+                .expect("join")
+                .expect_err("reload was cancelled");
+            assert!(is_load_cancelled(&error), "{error:#}");
+            let error = reload.await.expect("join").expect_err("cancelled");
+            assert!(is_load_cancelled(&error), "{error:#}");
+            assert_eq!(fixture.hook.loads_started(), 1);
+        }
+
+        /// A caller that joined a load reports its failure with the code and
+        /// message the load's own caller got.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn joined_load_keeps_the_capability_error_code() {
+            use crate::core::load_error::classify_load_error;
+            use crate::core::model_management::{
+                ModelCapabilityError, DIFFUSION_GEMMA_MTP_UNSUPPORTED_CODE,
+                DIFFUSION_GEMMA_MTP_UNSUPPORTED_MESSAGE,
+            };
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            fixture.hook.pause_at(Some(TestLoadPause::ReadingWeights));
+            fixture.hook.fail_with(Some(|| {
+                ModelCapabilityError {
+                    code: DIFFUSION_GEMMA_MTP_UNSUPPORTED_CODE,
+                    message: DIFFUSION_GEMMA_MTP_UNSUPPORTED_MESSAGE,
+                }
+                .into()
+            }));
+            let initiator = tokio::spawn({
+                let pool = pool.clone();
+                let config = fixture.config.clone();
+                async move { pool.reload_dynamic_model(config, false).await }
+            });
+            assert_eq!(
+                fixture.hook.wait_reached().await,
+                TestLoadPause::ReadingWeights
+            );
+            let active = wait_for_load(&pool, "alpha").await;
+            let joiner = tokio::spawn({
+                let pool = pool.clone();
+                let fingerprint =
+                    crate::core::engine_pool::engine_model_config_fingerprint(&fixture.config);
+                async move { pool.join_in_progress_load(&active, &fingerprint).await }
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!joiner.is_finished());
+            fixture.hook.release();
+
+            let initiator = tokio::time::timeout(WAIT, initiator)
+                .await
+                .expect("load ends")
+                .expect("join")
+                .expect_err("load fails");
+            let joiner = tokio::time::timeout(WAIT, joiner)
+                .await
+                .expect("joiner ends")
+                .expect("join")
+                .expect_err("joined load fails");
+            let initiator = classify_load_error(&initiator);
+            assert_eq!(initiator.code, Some(DIFFUSION_GEMMA_MTP_UNSUPPORTED_CODE));
+            assert_eq!(classify_load_error(&joiner), initiator);
+        }
+
+        /// A cancelled first load answers the requests waiting on it with the
+        /// cancel, whichever slot they found; only a later request loads.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn request_waiting_on_cancelled_first_load_is_not_reloaded() {
+            use crate::core::load_error::{classify_load_error, LOAD_CANCELLED_CODE};
+            for via_reload in [false, true] {
+                let fixture = fixture(false).await;
+                let pool = fixture.pool.clone();
+                let old_slot = pool.inner.slots.lock().await["alpha"].clone();
+                fixture.hook.pause_at(Some(TestLoadPause::ReadingWeights));
+                let load = tokio::spawn({
+                    let pool = pool.clone();
+                    let config = fixture.config.clone();
+                    async move {
+                        if via_reload {
+                            pool.reload_dynamic_model(config, false).await.map(|_| ())
+                        } else {
+                            pool.load_model("alpha").await.map(|_| ())
+                        }
+                    }
+                });
+                assert_eq!(
+                    fixture.hook.wait_reached().await,
+                    TestLoadPause::ReadingWeights
+                );
+                // One request finds the model's current slot, one the slot it
+                // had when the load started.
+                let current = tokio::spawn({
+                    let pool = pool.clone();
+                    async move { pool.resolve_engine(Some("alpha")).await.map(|_| ()) }
+                });
+                let stale = tokio::spawn({
+                    let pool = pool.inner.clone();
+                    async move {
+                        old_slot
+                            .ensure_loaded(
+                                &pool,
+                                super::EngineLoadTrigger::Request,
+                                EngineLoadOptions::new(LoadTriggerKind::Request),
+                            )
+                            .await
+                            .map(|_| ())
+                    }
+                });
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert!(!current.is_finished());
+                assert!(!stale.is_finished());
+
+                let active = wait_for_load(&pool, "alpha").await;
+                pool.load_registry()
+                    .cancel(&active.load_id)
+                    .expect("cancel first load");
+                fixture.hook.pause_at(None);
+                fixture.hook.release();
+                let error = tokio::time::timeout(WAIT, load)
+                    .await
+                    .expect("load stops")
+                    .expect("join")
+                    .expect_err("cancelled load");
+                assert!(is_load_cancelled(&error), "{error:#}");
+                for (name, waiter) in [("current", current), ("stale", stale)] {
+                    let error = tokio::time::timeout(WAIT, waiter)
+                        .await
+                        .unwrap_or_else(|_| panic!("{name} request ends with the cancel"))
+                        .expect("join")
+                        .expect_err("the waited load was cancelled");
+                    assert!(is_load_cancelled(&error), "{name}: {error:#}");
+                    assert_eq!(
+                        classify_load_error(&error).code,
+                        Some(LOAD_CANCELLED_CODE),
+                        "{name}"
+                    );
+                }
+                assert_eq!(fixture.hook.loads_started(), 1, "reload: {via_reload}");
+                assert_eq!(
+                    slot_snapshot(&pool, "alpha").await.state,
+                    EngineRuntimeState::Unloaded
+                );
+
+                // A request made after the cancel loads the model.
+                pool.resolve_engine(Some("alpha"))
+                    .await
+                    .expect("later request loads");
+                assert_eq!(fixture.hook.loads_started(), 2, "reload: {via_reload}");
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn dropped_caller_future_does_not_cancel_load() {
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+
+            fixture.hook.pause_at(Some(TestLoadPause::ReadingWeights));
+            let caller = tokio::spawn({
+                let pool = pool.clone();
+                async move { pool.load_model("alpha").await }
+            });
+            assert_eq!(
+                fixture.hook.wait_reached().await,
+                TestLoadPause::ReadingWeights
+            );
+            let active = wait_for_load(&pool, "alpha").await;
+            caller.abort();
+            assert!(caller.await.expect_err("aborted").is_cancelled());
+            fixture.hook.release();
+            let finished = tokio::time::timeout(WAIT, pool.load_registry().wait(&active.load_id))
+                .await
+                .expect("load continues")
+                .expect("known load");
+            assert_eq!(finished.state, LoadState::Loaded);
+            assert_eq!(
+                slot_snapshot(&pool, "alpha").await.state,
+                EngineRuntimeState::Loaded
+            );
+
+            // A dropped reload caller still swaps in the new engine.
+            let mut changed = fixture.config.clone();
+            changed.default_max_output_tokens = Some(55);
+            let caller = tokio::spawn({
+                let pool = pool.clone();
+                async move { pool.reload_dynamic_model(changed, false).await }
+            });
+            assert_eq!(
+                fixture.hook.wait_reached().await,
+                TestLoadPause::ReadingWeights
+            );
+            let active = wait_for_load(&pool, "alpha").await;
+            caller.abort();
+            let _ = caller.await;
+            fixture.hook.release();
+            let finished = tokio::time::timeout(WAIT, pool.load_registry().wait(&active.load_id))
+                .await
+                .expect("reload continues")
+                .expect("known load");
+            assert_eq!(finished.state, LoadState::Loaded);
+            let slot = pool.inner.slots.lock().await["alpha"].clone();
+            assert_eq!(slot.model.default_max_output_tokens, Some(55));
+            assert_eq!(
+                slot.runtime_snapshot().await.state,
+                EngineRuntimeState::Loaded
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore = "requires QWEN35_MODEL pointing to a real checkpoint"]
+        #[serial_test::serial(mlx_metal)]
+        async fn real_model_cancel_during_weights_then_load_reports_progress() {
+            let model_dir = PathBuf::from(
+                std::env::var("QWEN35_MODEL")
+                    .expect("QWEN35_MODEL must point to a real Qwen3.5 checkpoint"),
+            );
+            let pool = EnginePoolState::new_dynamic(runtime_config(), Some(3)).expect("pool");
+            pool.register_dynamic_model(
+                model_config("alpha", &model_dir, EngineLoadPolicy::Lazy),
+                false,
+                None,
+            )
+            .await
+            .expect("register alpha");
+
+            let load = tokio::spawn({
+                let pool = pool.clone();
+                async move { pool.load_model("alpha").await }
+            });
+            let reading = tokio::time::timeout(WAIT, async {
+                loop {
+                    if let Some(load) = pool.load_registry().in_progress_for("alpha") {
+                        if matches!(
+                            load.stage,
+                            LoadStage::ReadingWeights | LoadStage::BuildingModel
+                        ) {
+                            return load;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("load reaches its weights");
+            pool.load_registry()
+                .cancel(&reading.load_id)
+                .expect("cancel while reading weights");
+            let error = load.await.expect("join").expect_err("cancelled load");
+            assert!(is_load_cancelled(&error), "{error:#}");
+            assert_eq!(
+                slot_snapshot(&pool, "alpha").await.state,
+                EngineRuntimeState::Unloaded
+            );
+
+            let loaded = pool.load_model("alpha").await.expect("load after cancel");
+            assert_eq!(loaded.state, EngineRuntimeState::Loaded);
+            let finished = pool
+                .load_registry()
+                .list()
+                .into_iter()
+                .find(|load| load.state == LoadState::Loaded)
+                .expect("finished load listed");
+            assert!(finished.bytes_total > 0);
+            assert_eq!(finished.bytes_done, finished.bytes_total);
+            let stages: Vec<LoadStage> = finished
+                .completed_stages
+                .iter()
+                .map(|stage| stage.stage)
+                .collect();
+            assert_eq!(
+                stages,
+                [
+                    LoadStage::Queued,
+                    LoadStage::PreparingMemory,
+                    LoadStage::ReadingWeights,
+                    LoadStage::BuildingModel,
+                    LoadStage::StartingEngine,
+                ]
+            );
+        }
+
+        #[test]
+        fn config_fingerprint_ignores_pin_and_default_only() {
+            let model_dir = PathBuf::from("/models/alpha");
+            let config = model_config("alpha", &model_dir, EngineLoadPolicy::Lazy);
+            let fingerprint = super::super::engine_model_config_fingerprint(&config);
+            let mut same = config.clone();
+            same.pinned = true;
+            same.default = true;
+            assert_eq!(
+                super::super::engine_model_config_fingerprint(&same),
+                fingerprint
+            );
+            let mut other = config;
+            other.default_max_output_tokens = Some(1);
+            assert_ne!(
+                super::super::engine_model_config_fingerprint(&other),
+                fingerprint
+            );
+        }
     }
 }
 

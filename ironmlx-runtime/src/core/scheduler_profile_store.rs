@@ -39,6 +39,17 @@ struct SchedulerProfileStoreEntry {
     updated_at_unix_ms: u64,
 }
 
+/// Profile files a model has in the store, relative to this machine.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelProfilePresence {
+    /// For this hardware label and runtime context.
+    pub current_settings: bool,
+    /// For this hardware label, other runtime contexts only.
+    pub other_settings: bool,
+    /// For other hardware labels.
+    pub other_hardware: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedulerProfileStoreRecord {
     pub id: String,
@@ -182,6 +193,32 @@ impl SchedulerProfileStore {
             })
             .max_by_key(|entry| entry.updated_at_unix_ms)
             .map(|entry| self.root.join(&entry.profile_path)))
+    }
+
+    /// Which profile files exist for the model at `model_path`, compared with
+    /// the current hardware label and runtime context (any schema version).
+    pub fn profile_presence_for_model(
+        &self,
+        model_path: &Path,
+        hardware_label: &str,
+        runtime_context_fingerprint: &str,
+    ) -> Result<ModelProfilePresence> {
+        let index = self.read_index()?;
+        let normalized_model_path = normalized_model_path(model_path);
+        let mut presence = ModelProfilePresence::default();
+        for entry in index.profiles.iter().filter(|entry| {
+            entry.model_path == normalized_model_path
+                && self.root.join(&entry.profile_path).exists()
+        }) {
+            if entry.hardware_label != hardware_label {
+                presence.other_hardware = true;
+            } else if entry.runtime_context_fingerprint == runtime_context_fingerprint {
+                presence.current_settings = true;
+            } else {
+                presence.other_settings = true;
+            }
+        }
+        Ok(presence)
     }
 
     pub fn list_profiles(&self) -> Result<Vec<SchedulerProfileStoreRecord>> {
@@ -457,7 +494,7 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::core::scheduler_autotune::{
@@ -466,8 +503,8 @@ mod tests {
     };
 
     use super::{
-        hardware_label_from_parts, normalized_model_path, stable_hex_hash, SchedulerProfileStore,
-        INDEX_FILE,
+        hardware_label_from_parts, normalized_model_path, stable_hex_hash, ModelProfilePresence,
+        SchedulerProfileStore, INDEX_FILE,
     };
 
     #[test]
@@ -674,6 +711,67 @@ mod tests {
             )
             .expect("find by different runtime context")
             .is_none());
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn profile_presence_tells_hardware_and_settings_apart() {
+        let temp_dir = unique_temp_dir("scheduler-profile-presence");
+        let model_a = temp_dir.join("tenant-a").join("shared-name");
+        let model_b = temp_dir.join("tenant-b").join("shared-name");
+        std::fs::create_dir_all(&model_a).expect("create first model dir");
+        std::fs::create_dir_all(&model_b).expect("create second model dir");
+        let store = SchedulerProfileStore::from_root(temp_dir.join("store"));
+        let profile = runtime_profile();
+        let fingerprint = profile.runtime_context.fingerprint();
+        let presence = |model: &Path| {
+            store
+                .profile_presence_for_model(model, "test-host", &fingerprint)
+                .expect("query presence")
+        };
+        assert_eq!(presence(&model_a), ModelProfilePresence::default());
+
+        let mut elsewhere = profile.clone();
+        elsewhere.hardware_label = "other-host".to_string();
+        let elsewhere_path = store
+            .persist_profile(&model_a, &elsewhere)
+            .expect("persist other hardware");
+        assert_eq!(
+            presence(&model_a),
+            ModelProfilePresence {
+                other_hardware: true,
+                ..Default::default()
+            }
+        );
+
+        let mut other_settings = profile.clone();
+        other_settings.runtime_context.logical_kv_cap_tokens += 1;
+        store
+            .persist_profile(&model_a, &other_settings)
+            .expect("persist other settings");
+        store
+            .persist_profile(&model_a, &profile)
+            .expect("persist current settings");
+        assert_eq!(
+            presence(&model_a),
+            ModelProfilePresence {
+                current_settings: true,
+                other_settings: true,
+                other_hardware: true,
+            }
+        );
+        assert_eq!(
+            presence(&model_b),
+            ModelProfilePresence::default(),
+            "a profile belongs to one model path"
+        );
+
+        std::fs::remove_file(&elsewhere_path).expect("remove profile file");
+        assert!(
+            !presence(&model_a).other_hardware,
+            "an index entry without its file is not a profile"
+        );
 
         std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
     }

@@ -145,6 +145,8 @@ struct ResolvedRunConfig {
     cache_states: Vec<SchedulerAutotuneCacheState>,
     /// Forwarded to every candidate serve so it uses the same data root.
     data_root: Option<PathBuf>,
+    /// Forwarded to every candidate serve so it finds the same MLX metallib.
+    mlx_metallib: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug)]
@@ -430,6 +432,7 @@ fn resolve_run_config_with_context(
         runtime_context,
         cache_states,
         data_root: ironmlx_runtime::core::data_root::configured_data_root().map(Path::to_path_buf),
+        mlx_metallib: super::configured_mlx_metallib().map(Path::to_path_buf),
     })
 }
 
@@ -778,6 +781,12 @@ fn build_serve_invocation(
             root.to_string_lossy().into_owned(),
         ]);
     }
+    if let Some(path) = &args.mlx_metallib {
+        invocation_args.extend([
+            "--mlx-metallib".to_string(),
+            path.to_string_lossy().into_owned(),
+        ]);
+    }
     invocation_args.extend([
         "serve".to_string(),
         "--model".to_string(),
@@ -809,6 +818,39 @@ fn build_serve_invocation(
     }
     if let Some(draft_tokens) = args.runtime.mtp_draft_tokens {
         invocation_args.extend(["--mtp-draft-tokens".to_string(), draft_tokens.to_string()]);
+    }
+    // Candidates run with the PromptLookup the runtime context records.
+    if args.runtime.prompt_lookup {
+        invocation_args.push("--prompt-lookup".to_string());
+        if args.runtime.prompt_lookup_cross_request {
+            invocation_args.push("--prompt-lookup-cross-request".to_string());
+        }
+        for (flag, value) in [
+            (
+                "--prompt-lookup-min-ngram",
+                args.runtime.prompt_lookup_min_ngram,
+            ),
+            (
+                "--prompt-lookup-max-ngram",
+                args.runtime.prompt_lookup_max_ngram,
+            ),
+            (
+                "--prompt-lookup-max-draft-tokens",
+                args.runtime.prompt_lookup_max_draft_tokens,
+            ),
+            (
+                "--prompt-lookup-history-window-tokens",
+                args.runtime.prompt_lookup_history_window_tokens,
+            ),
+            (
+                "--prompt-lookup-max-index-entries",
+                args.runtime.prompt_lookup_max_index_entries,
+            ),
+        ] {
+            if let Some(value) = value {
+                invocation_args.extend([flag.to_string(), value.to_string()]);
+            }
+        }
     }
     if let Some(path) = &args.runtime.paged_prefix_cache_dir {
         invocation_args.extend([
@@ -1368,6 +1410,40 @@ mod tests {
     }
 
     #[test]
+    fn build_serve_invocation_runs_candidates_with_the_calibrated_prompt_lookup() {
+        let mut args = sample_resolved_config();
+        let command =
+            build_serve_invocation(Path::new("/tmp/ironmlx"), &args, profile_config(), 19000);
+        assert!(!command
+            .args
+            .iter()
+            .any(|arg| arg.starts_with("--prompt-lookup")));
+
+        args.runtime.prompt_lookup = true;
+        args.runtime.prompt_lookup_cross_request = true;
+        args.runtime.prompt_lookup_min_ngram = Some(3);
+        args.runtime.prompt_lookup_max_ngram = Some(5);
+        args.runtime.prompt_lookup_max_draft_tokens = Some(6);
+        args.runtime.prompt_lookup_history_window_tokens = Some(4096);
+        args.runtime.prompt_lookup_max_index_entries = Some(8192);
+        let command =
+            build_serve_invocation(Path::new("/tmp/ironmlx"), &args, profile_config(), 19000);
+        let flag = |name: &str| command.args.iter().position(|arg| arg == name);
+        assert!(flag("--prompt-lookup").is_some());
+        assert!(flag("--prompt-lookup-cross-request").is_some());
+        for (name, value) in [
+            ("--prompt-lookup-min-ngram", "3"),
+            ("--prompt-lookup-max-ngram", "5"),
+            ("--prompt-lookup-max-draft-tokens", "6"),
+            ("--prompt-lookup-history-window-tokens", "4096"),
+            ("--prompt-lookup-max-index-entries", "8192"),
+        ] {
+            let at = flag(name).unwrap_or_else(|| panic!("{name} is forwarded"));
+            assert_eq!(command.args[at + 1], value, "{name}");
+        }
+    }
+
+    #[test]
     fn build_serve_invocation_forwards_the_data_root() {
         let mut args = sample_resolved_config();
         let command =
@@ -1385,6 +1461,26 @@ mod tests {
                 "serve".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn build_serve_invocation_forwards_the_mlx_metallib() {
+        let mut args = sample_resolved_config();
+        let command =
+            build_serve_invocation(Path::new("/tmp/ironmlx"), &args, profile_config(), 19000);
+        assert!(!command.args.contains(&"--mlx-metallib".to_string()));
+
+        args.mlx_metallib = Some(PathBuf::from("/tmp/App/mlx.metallib"));
+        let command =
+            build_serve_invocation(Path::new("/tmp/ironmlx"), &args, profile_config(), 19000);
+        let serve = command.args.iter().position(|a| a == "serve").unwrap();
+        let flag = command
+            .args
+            .iter()
+            .position(|a| a == "--mlx-metallib")
+            .expect("--mlx-metallib forwarded");
+        assert!(flag + 1 < serve);
+        assert_eq!(command.args[flag + 1], "/tmp/App/mlx.metallib");
     }
 
     #[test]

@@ -76,6 +76,7 @@ private final class Fixture {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("chat-window-\(UUID().uuidString)")
     var presented: [NSWindow] = []
     var routes: [DashboardInitialRoute] = []
+    var agentGuides: [AgentGuideID?] = []
     let controller: ChatWindowController
 
     init(models: [ChatModelOption] = [], manager: any BackendModelManaging = OneModelManager()) {
@@ -88,18 +89,21 @@ private final class Fixture {
             pollInterval: .milliseconds(1)
         )
         var presentedRef: ((NSWindow) -> Void)?
-        var routeRef: ((DashboardInitialRoute) -> Void)?
+        var routeRef: ((DashboardInitialRoute, AgentGuideID?) -> Void)?
         controller = ChatWindowController(session: session, environment: ChatWindowEnvironment(
             language: { "zh-Hans" },
             theme: { nil },
             models: { models },
-            openDashboard: { routeRef?($0) },
+            openDashboard: { routeRef?($0, $1) },
             startUpgrade: { _, _ in },
             present: { presentedRef?($0) },
             pageURL: IronMLXAppResourceResolver.url(forResource: "chat", withExtension: "html", subdirectory: "chat")
         ))
         presentedRef = { [unowned self] in presented.append($0) }
-        routeRef = { [unowned self] in routes.append($0) }
+        routeRef = { [unowned self] in
+            routes.append($0)
+            agentGuides.append($1)
+        }
     }
 
     deinit {
@@ -313,6 +317,8 @@ struct ChatWindowControllerTests {
         fixture.controller.bridge?.receive(["type": "openAgents"])
         fixture.controller.bridge?.receive(["type": "openDashboardModels"])
         #expect(fixture.routes == [.agents, .modelsManage])
+        // The link names DeepSeek Harness, so its guide opens whatever is installed.
+        #expect(fixture.agentGuides == [.dsh, nil])
     }
 
     /// A send the bridge refuses, or one the session drops without a reply

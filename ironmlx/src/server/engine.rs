@@ -146,6 +146,9 @@ impl EngineVariantHttpAdapter for EngineVariant {
             Self::DiffusionGemma(state) => {
                 diffusion_gemma::openai_chat_completions_with_state(state.clone(), req).await
             }
+            // The runtime's test-only engine serves no requests.
+            #[allow(unreachable_patterns)]
+            _ => super::audio::task_mismatch(super::api_error::ApiProtocol::OpenAi),
         }
     }
 
@@ -173,6 +176,9 @@ impl EngineVariantHttpAdapter for EngineVariant {
             Self::DiffusionGemma(state) => {
                 diffusion_gemma::openai_responses_with_state(state.clone(), req).await
             }
+            // The runtime's test-only engine serves no requests.
+            #[allow(unreachable_patterns)]
+            _ => super::audio::task_mismatch(super::api_error::ApiProtocol::OpenAi),
         }
     }
 
@@ -214,6 +220,9 @@ impl EngineVariantHttpAdapter for EngineVariant {
             Self::DiffusionGemma(state) => {
                 diffusion_gemma::anthropic_messages_with_state(state.clone(), req).await
             }
+            // The runtime's test-only engine serves no requests.
+            #[allow(unreachable_patterns)]
+            _ => super::audio::task_mismatch(super::api_error::ApiProtocol::Anthropic),
         }
     }
 }

@@ -1,15 +1,29 @@
+use ironmlx_runtime::core::load_error::{
+    classify_load_error, GPU_MEMORY_INSUFFICIENT_CODE, GPU_MEMORY_INSUFFICIENT_MESSAGE,
+    LOAD_CANCELLED_CODE, MTP_MODEL_DIR_REQUIRED_CODE, MTP_MODEL_DIR_REQUIRED_MESSAGE,
+};
+#[cfg(test)]
+use ironmlx_runtime::core::load_error::{
+    MAX_LOADED_MODELS_REACHED_CODE, MAX_LOADED_MODELS_REACHED_MESSAGE,
+    MODEL_MEMORY_LIMIT_EXCEEDED_CODE, MODEL_MEMORY_LIMIT_EXCEEDED_MESSAGE,
+    TOTAL_MEMORY_LIMIT_EXCEEDED_CODE, TOTAL_MEMORY_LIMIT_EXCEEDED_MESSAGE,
+};
+use ironmlx_runtime::core::load_registry::{
+    LoadActivity, LoadCancelError, LoadInProgress, LoadState,
+};
 #[cfg(test)]
 use ironmlx_runtime::core::model_management::{
     apply_load_request_scheduler_overrides, build_engine_model_config, engine_model_capabilities,
-    read_generation_sampling_defaults, EngineModelBuildRequest, DEFAULT_PROFILE_WARNING,
-    DEFAULT_PROFILE_WARNING_CODE, DIFFUSION_GEMMA_KV_CACHE_UNSUPPORTED_CODE,
+    read_generation_sampling_defaults, EngineModelBuildRequest, ModelCapabilityError,
+    DIFFUSION_GEMMA_KV_CACHE_UNSUPPORTED_CODE, SCHEDULER_PROFILE_HARDWARE_MISMATCH_WARNING,
+    SCHEDULER_PROFILE_HARDWARE_MISMATCH_WARNING_CODE,
 };
 use ironmlx_runtime::core::model_management::{
-    ModelCapabilityError, ModelLoadRequest, ModelLoadWarning as AdminWarning, ModelManagement,
-    ModelManagementError, ModelManagementOutcome, ModelManagementStatus,
+    ModelLoadRequest, ModelLoadWarning as AdminWarning, ModelManagement, ModelManagementError,
+    ModelManagementOutcome, ModelManagementStatus,
 };
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Extension, Multipart, State};
 use axum::http::StatusCode;
@@ -55,29 +69,16 @@ const INVALID_MAX_CACHE_CAP_MESSAGE: &str =
 const MODEL_NOT_LOADED_CODE: &str = "model_not_loaded";
 const MODEL_NOT_REGISTERED_CODE: &str = "model_not_registered";
 const BACKEND_UNLOAD_ERROR_CODE: &str = "backend_unload_error";
-const GPU_MEMORY_INSUFFICIENT_CODE: &str = "gpu_memory_insufficient";
-const GPU_MEMORY_INSUFFICIENT_MESSAGE: &str =
-    "Not enough available GPU memory to safely load this model. Unload one or more unused loaded models to free GPU memory, then try again.";
-const MAX_LOADED_MODELS_REACHED_CODE: &str = "max_loaded_models_reached";
-const MAX_LOADED_MODELS_REACHED_MESSAGE: &str =
-    "Maximum concurrent loaded models reached. Unload an unused loaded model before loading another model.";
-const MODEL_MEMORY_LIMIT_EXCEEDED_CODE: &str = "model_memory_limit_exceeded";
-const MODEL_MEMORY_LIMIT_EXCEEDED_MESSAGE: &str =
-    "Model memory limit reached. Unload one or more loaded models, raise Memory Limit (Model Only), or set it to Auto, then try again.";
-const TOTAL_MEMORY_LIMIT_EXCEEDED_CODE: &str = "total_memory_limit_exceeded";
-const TOTAL_MEMORY_LIMIT_EXCEEDED_MESSAGE: &str =
-    "Total memory limit reached. Unload one or more loaded models, raise Memory Limit (Total), or set it to Auto, then try again.";
-const KV_MEMORY_BUDGET_EXCEEDED_CODE: &str = "kv_memory_budget_exceeded";
-const KV_MEMORY_BUDGET_EXCEEDED_MESSAGE: &str =
-    "KV cache memory budget exceeded. Enable Active KV offload with paged prefix cache for long context, or lower MAX CONTEXT TOKENS or Max Sequences in the Dashboard, then try again.";
+const INVALID_LOAD_ID_CODE: &str = "invalid_load_id";
+const LOAD_ID_IN_USE_CODE: &str = "load_id_in_use";
+const LOAD_NOT_FOUND_CODE: &str = "load_not_found";
+const LOAD_TASK_FAILED_CODE: &str = "load_task_failed";
+const LOAD_FINISHED_CODE: &str = "load_finished";
+const LOAD_FINISHING_CODE: &str = "load_finishing";
+const MAX_LOAD_ID_LEN: usize = 128;
 const MODEL_RELOAD_BUSY_CODE: &str = "model_reload_busy";
 const MODEL_RELOAD_BUSY_MESSAGE: &str =
     "The model is processing requests. Wait for it to become idle before switching versions.";
-const MTP_MODEL_DIR_REQUIRED_CODE: &str = "mtp_model_dir_required";
-const MTP_MODEL_DIR_REQUIRED_MESSAGE: &str = "MTP draft tokens require an MTP model directory.";
-const MTP_INCOMPATIBLE_MESSAGE: &str =
-    "MTP weights are not compatible with this model. Load the model without MTP or choose matching MTP weights.";
-
 #[derive(Clone)]
 pub struct ModelManager {
     management: ModelManagement,
@@ -104,16 +105,127 @@ impl ModelManager {
         self.pool.start_memory_governor_monitor();
     }
 
+    /// Validates a load request and fixes its registry id (the client's, or a
+    /// generated one) so the response can name the load.
+    fn prepare_load(
+        &self,
+        request: LoadModelRequest,
+    ) -> std::result::Result<(ModelLoadRequest, String), AdminError> {
+        let mut parsed = parse_load_model_request(request)?;
+        let load_id = match parsed.load_id.take() {
+            Some(load_id) => {
+                if self
+                    .pool
+                    .load_registry()
+                    .list()
+                    .iter()
+                    .any(|load| load.load_id == load_id)
+                {
+                    return Err(AdminError::conflict_with_code(
+                        format!("Load id is already in use: {load_id}"),
+                        Some(LOAD_ID_IN_USE_CODE),
+                    ));
+                }
+                load_id
+            }
+            None => uuid::Uuid::new_v4().to_string(),
+        };
+        parsed.load_id = Some(load_id.clone());
+        Ok((parsed, load_id))
+    }
+
+    fn load_error(&self, error: ModelManagementError, load_id: &str) -> AdminError {
+        let mut error = AdminError::from_management_error(error);
+        // The cancelled load is the one this request registered, unless it
+        // joined another load whose id the error does not carry.
+        if error.code == Some(LOAD_CANCELLED_CODE)
+            && self
+                .pool
+                .load_registry()
+                .list()
+                .iter()
+                .any(|load| load.load_id == load_id)
+        {
+            error.load_id = Some(load_id.to_string());
+        }
+        error
+    }
+
     async fn load_model(
         &self,
         request: LoadModelRequest,
     ) -> std::result::Result<AdminModelResponse, AdminError> {
-        let parsed = parse_load_model_request(request)?;
+        let (parsed, load_id) = self.prepare_load(request)?;
         self.management
             .load_model(parsed)
             .await
             .map(AdminModelResponse::from)
-            .map_err(AdminError::from_management_error)
+            .map_err(|error| self.load_error(error, &load_id))
+    }
+
+    /// Starts a load and returns once the registry lists it. The load keeps
+    /// running in its own task whatever the caller does afterwards.
+    async fn start_load_model(
+        &self,
+        request: LoadModelRequest,
+    ) -> std::result::Result<LoadStart, AdminError> {
+        let (parsed, load_id) = self.prepare_load(request)?;
+        let model = parsed.model_reference.clone();
+        let fingerprint = self.management.load_config_fingerprint(&parsed);
+        let management = self.management.clone();
+        let mut load = Box::pin(async move { management.load_model(parsed).await });
+        // Requests that need no load, and conflicts, answer on the first poll.
+        if let Ok(result) = tokio::time::timeout(Duration::ZERO, &mut load).await {
+            return result
+                .map(|outcome| LoadStart::Finished(outcome.into()))
+                .map_err(|error| self.load_error(error, &load_id));
+        }
+        let task = tokio::spawn(load);
+        loop {
+            if task.is_finished() {
+                return match task.await {
+                    Ok(result) => result
+                        .map(|outcome| LoadStart::Finished(outcome.into()))
+                        .map_err(|error| self.load_error(error, &load_id)),
+                    Err(error) => Err(AdminError::load_task_failed(error)),
+                };
+            }
+            if let Some(running) = self.started_load(&model, &load_id, fingerprint.as_deref()) {
+                return Ok(LoadStart::Running(running));
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+
+    /// The registry entry an asynchronous load request answers with: its own
+    /// load, or a running load of the same model and configuration that it
+    /// joined. A load of other settings is never reported as this request's;
+    /// the request's task then ends with `load_in_progress`.
+    fn started_load(
+        &self,
+        model: &str,
+        load_id: &str,
+        fingerprint: Option<&str>,
+    ) -> Option<LoadActivity> {
+        let loads = self.pool.load_registry().list();
+        if let Some(own) = loads.iter().find(|load| load.load_id == load_id) {
+            // A load that already ended answers with the task's own result.
+            return (!own.state.is_terminal()).then(|| own.clone());
+        }
+        let fingerprint = fingerprint?;
+        loads.into_iter().find(|load| {
+            load.model == model
+                && !load.state.is_terminal()
+                && load.config_fingerprint == fingerprint
+        })
+    }
+
+    fn loads(&self) -> Vec<LoadActivity> {
+        self.pool.load_registry().list()
+    }
+
+    fn cancel_load(&self, load_id: &str) -> std::result::Result<(), LoadCancelError> {
+        self.pool.load_registry().cancel(load_id)
     }
 
     async fn register_model(
@@ -353,6 +465,26 @@ fn parse_load_model_request(
         }
         (None, None) => None,
     };
+    let load_id = request
+        .load_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let valid = value.len() <= MAX_LOAD_ID_LEN
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+            if valid {
+                Ok(value.to_string())
+            } else {
+                Err(AdminError::bad_request_with_code(
+                    "load_id must be 1-128 characters of letters, digits, '-', '_' or '.'.",
+                    Some(INVALID_LOAD_ID_CODE),
+                ))
+            }
+        })
+        .transpose()?;
     let prompt_lookup = request
         .prompt_lookup
         .map(PromptLookupConfig::validate)
@@ -372,6 +504,7 @@ fn parse_load_model_request(
         set_default: request.set_default.unwrap_or(false),
         reload_when_idle: request.reload_when_idle.unwrap_or(false),
         defer_when_busy: request.defer_when_busy.unwrap_or(true),
+        load_id,
     })
 }
 
@@ -515,6 +648,11 @@ fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Route
         )
         .route("/admin/api/models/register", post(register_model_handler))
         .route("/admin/api/models/load", post(load_model_handler))
+        .route("/admin/api/models/loads", get(list_loads_handler))
+        .route(
+            "/admin/api/models/loads/:load_id/cancel",
+            post(cancel_load_handler),
+        )
         .route("/admin/api/models/mtp/validate", post(validate_mtp_handler))
         .route("/admin/api/models/unload", post(unload_model_handler))
         .route(
@@ -667,10 +805,61 @@ async fn load_model_handler(
     State(manager): State<ModelManager>,
     Json(request): Json<LoadModelRequest>,
 ) -> Response {
+    if request.run_async {
+        return match manager.start_load_model(request).await {
+            Ok(LoadStart::Running(load)) => (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({"load_id": load.load_id, "state": load.state})),
+            )
+                .into_response(),
+            Ok(LoadStart::Finished(response)) => Json(response).into_response(),
+            Err(error) => error.into_response(),
+        };
+    }
     match manager.load_model(request).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => error.into_response(),
     }
+}
+
+/// How an asynchronous load request began.
+enum LoadStart {
+    /// The load is registered and still running.
+    Running(LoadActivity),
+    /// The request completed without a pending load (nothing to load, or the
+    /// load finished before it could be reported).
+    Finished(AdminModelResponse),
+}
+
+async fn list_loads_handler(State(manager): State<ModelManager>) -> Json<serde_json::Value> {
+    loads_response(manager.loads())
+}
+
+/// Body of `GET /admin/api/models/loads`.
+pub(crate) fn loads_response(loads: Vec<LoadActivity>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "loads": loads }))
+}
+
+async fn cancel_load_handler(
+    State(manager): State<ModelManager>,
+    axum::extract::Path(load_id): axum::extract::Path<String>,
+) -> Response {
+    let code = match manager.cancel_load(&load_id) {
+        Ok(()) => {
+            return (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "load_id": load_id,
+                    "state": LoadState::Cancelling,
+                })),
+            )
+                .into_response();
+        }
+        Err(LoadCancelError::NotFound) => (StatusCode::NOT_FOUND, LOAD_NOT_FOUND_CODE),
+        Err(LoadCancelError::Finished) => (StatusCode::CONFLICT, LOAD_FINISHED_CODE),
+        Err(LoadCancelError::Finishing) => (StatusCode::CONFLICT, LOAD_FINISHING_CODE),
+    };
+    (code.0, Json(serde_json::json!({"code": code.1}))).into_response()
 }
 
 async fn register_model_handler(
@@ -769,6 +958,11 @@ struct LoadModelRequest {
     prompt_lookup: Option<PromptLookupConfig>,
     reload_when_idle: Option<bool>,
     defer_when_busy: Option<bool>,
+    /// Registry id for this load, so the client can watch or cancel it.
+    load_id: Option<String>,
+    /// Return `202` as soon as the load is registered instead of waiting.
+    #[serde(default, rename = "async")]
+    run_async: bool,
     #[serde(flatten)]
     sampling_defaults: SamplingDefaults,
 }
@@ -851,6 +1045,8 @@ struct AdminModelResponse {
     warning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    load_id: Option<String>,
 }
 
 impl AdminModelResponse {
@@ -869,6 +1065,7 @@ impl AdminModelResponse {
             warning_code: warning.as_ref().map(|warning| warning.code),
             warning: warning.map(|warning| warning.message),
             error: None,
+            load_id: None,
         }
     }
 
@@ -882,6 +1079,7 @@ impl AdminModelResponse {
             warning_code: None,
             warning: None,
             error: Some(message),
+            load_id: None,
         }
     }
 }
@@ -947,6 +1145,10 @@ struct LoadedModelInfo {
     prompt_lookup: Option<PromptLookupConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ReasoningCapabilityInfo>,
+    /// `default`, `default_settings_mismatch` or `profile`: the scheduler
+    /// configuration in effect.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheduler_profile: Option<ironmlx_runtime::core::scheduler_resolution::SchedulerProfileKind>,
 }
 
 #[derive(Debug, Serialize)]
@@ -992,6 +1194,7 @@ impl From<EngineLoadedModelInfo> for LoadedModelInfo {
             decision_metrics: info.decision_metrics,
             embedding_metrics: info.embedding_metrics,
             reasoning: ReasoningCapabilityInfo::from_dialect(info.native_output_dialect),
+            scheduler_profile: info.scheduler_profile,
         }
     }
 }
@@ -1000,6 +1203,8 @@ struct AdminError {
     status: StatusCode,
     message: String,
     code: Option<&'static str>,
+    /// The load the error refers to, for load conflicts and cancellations.
+    load_id: Option<String>,
 }
 
 impl AdminError {
@@ -1054,6 +1259,7 @@ impl AdminError {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
             code,
+            load_id: None,
         }
     }
 
@@ -1062,6 +1268,7 @@ impl AdminError {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
             code,
+            load_id: None,
         }
     }
 
@@ -1070,6 +1277,7 @@ impl AdminError {
             status: StatusCode::CONFLICT,
             message: message.into(),
             code,
+            load_id: None,
         }
     }
 
@@ -1081,6 +1289,7 @@ impl AdminError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             message: message.into(),
             code,
+            load_id: None,
         }
     }
 
@@ -1095,109 +1304,34 @@ impl AdminError {
     }
 
     fn from_load_error(error: anyhow::Error) -> Self {
-        if let Some(error) = error.downcast_ref::<ModelCapabilityError>() {
-            return Self::bad_request_with_code(error.message, Some(error.code));
-        }
-        let message = format!("{error:#}");
-        if let Some(code) = mtp_error_code_from_message(&message) {
-            let user_message = if code == MTP_MODEL_DIR_REQUIRED_CODE {
-                MTP_MODEL_DIR_REQUIRED_MESSAGE
-            } else {
-                MTP_INCOMPATIBLE_MESSAGE
-            };
-            return Self::bad_request_with_code(user_message, Some(code));
-        }
-        if likely_engine_pool_model_memory_limit_error(&message) {
-            return Self::service_unavailable_with_code(
-                MODEL_MEMORY_LIMIT_EXCEEDED_MESSAGE,
-                Some(MODEL_MEMORY_LIMIT_EXCEEDED_CODE),
-            );
-        }
-        if likely_engine_pool_total_memory_limit_error(&message) {
-            return Self::service_unavailable_with_code(
-                TOTAL_MEMORY_LIMIT_EXCEEDED_MESSAGE,
-                Some(TOTAL_MEMORY_LIMIT_EXCEEDED_CODE),
-            );
-        }
-        if likely_memory_budget_error(&message) {
-            return Self::service_unavailable_with_code(
-                KV_MEMORY_BUDGET_EXCEEDED_MESSAGE,
-                Some(KV_MEMORY_BUDGET_EXCEEDED_CODE),
-            );
-        }
-        if likely_gpu_memory_error(&message) {
-            return Self::service_unavailable_with_code(
-                GPU_MEMORY_INSUFFICIENT_MESSAGE,
-                Some(GPU_MEMORY_INSUFFICIENT_CODE),
-            );
-        }
-        if likely_engine_pool_capacity_error(&message) {
-            return Self::service_unavailable_with_code(
-                MAX_LOADED_MODELS_REACHED_MESSAGE,
-                Some(MAX_LOADED_MODELS_REACHED_CODE),
-            );
-        }
+        let classified = classify_load_error(&error);
         Self {
-            status: StatusCode::BAD_REQUEST,
-            message,
-            code: None,
+            status: super::api_error::load_error_status(classified.kind),
+            message: classified.message,
+            code: classified.code,
+            load_id: error
+                .downcast_ref::<LoadInProgress>()
+                .map(|conflict| conflict.load_id.clone()),
         }
     }
-}
 
-fn mtp_error_code_from_message(message: &str) -> Option<&'static str> {
-    [
-        MTP_MODEL_DIR_REQUIRED_CODE,
-        MTP_BASE_MODEL_NOT_FOUND_CODE,
-        MTP_MODEL_NOT_FOUND_CODE,
-        MTP_UNSUPPORTED_ARCHITECTURE_CODE,
-        MTP_INVALID_MODEL_TYPE_CODE,
-        MTP_INVALID_CONFIG_CODE,
-        MTP_INVALID_DRAFT_TOKENS_CODE,
-        MTP_INCOMPATIBLE_CODE,
-    ]
-    .into_iter()
-    .find(|code| message.contains(code))
+    /// The task running a load ended without a result (it panicked).
+    fn load_task_failed(error: tokio::task::JoinError) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: format!("model load task failed: {error}"),
+            code: Some(LOAD_TASK_FAILED_CODE),
+            load_id: None,
+        }
+    }
 }
 
 impl IntoResponse for AdminError {
     fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(AdminModelResponse::from_error(self.message, self.code)),
-        )
-            .into_response()
+        let mut response = AdminModelResponse::from_error(self.message, self.code);
+        response.load_id = self.load_id;
+        (self.status, Json(response)).into_response()
     }
-}
-
-fn likely_gpu_memory_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("out of memory")
-        || lower.contains("oom")
-        || lower.contains("failed to allocate")
-        || lower.contains("memory allocation")
-}
-
-fn likely_memory_budget_error(message: &str) -> bool {
-    message.to_ascii_lowercase().contains("memory budget")
-}
-
-fn likely_engine_pool_capacity_error(message: &str) -> bool {
-    message
-        .to_ascii_lowercase()
-        .contains("engine pool capacity reached")
-}
-
-fn likely_engine_pool_model_memory_limit_error(message: &str) -> bool {
-    message
-        .to_ascii_lowercase()
-        .contains("engine pool model memory limit exceeded")
-}
-
-fn likely_engine_pool_total_memory_limit_error(message: &str) -> bool {
-    message
-        .to_ascii_lowercase()
-        .contains("engine pool total memory limit exceeded")
 }
 
 fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> HealthSnapshot {
@@ -1522,7 +1656,7 @@ mod tests {
         EngineLoadPolicy, EngineModelCapabilities, EngineModelConfig,
     };
     use ironmlx_runtime::core::scheduler_resolution::{
-        ResolvedSchedulerRuntime, SchedulerProfileSource,
+        ResolvedSchedulerRuntime, SchedulerProfileOutcome, SchedulerProfileSource,
     };
     use tower::ServiceExt;
 
@@ -1733,6 +1867,7 @@ mod tests {
                     default: false,
                     pinned: false,
                     scheduler_runtime_profile: None,
+                    scheduler_profile_kind: None,
                     mtp: None,
                     prompt_lookup: None,
                     sampling_defaults: SamplingDefaults::default(),
@@ -1953,6 +2088,52 @@ mod tests {
     }
 
     #[test]
+    fn loaded_models_report_their_scheduler_configuration() {
+        use ironmlx_runtime::core::scheduler_resolution::SchedulerProfileKind;
+        let info = |scheduler_profile| EngineLoadedModelInfo {
+            decision: None,
+            decision_metrics: None,
+            embedding_metrics: None,
+            id: "m".to_string(),
+            path: "/models/m".to_string(),
+            architecture: "llama".to_string(),
+            capabilities: EngineModelCapabilities::for_architecture(
+                ModelArchitecture::Llama,
+                false,
+            ),
+            runtime_state: EngineRuntimeState::Loaded,
+            scheduler: Some("continuous_batching"),
+            active_requests: 0,
+            queued_requests: 0,
+            queue_capacity: 8,
+            usage: ironmlx_runtime::core::runtime_usage::ModelRuntimeUsageSnapshot::default(),
+            active_kv_offload: None,
+            is_default: true,
+            pinned: false,
+            max_position_embeddings: 4096,
+            mtp_model_dir: None,
+            mtp_draft_tokens: None,
+            prompt_lookup: None,
+            native_output_dialect: None,
+            scheduler_profile,
+        };
+        let json = |kind| serde_json::to_value(LoadedModelInfo::from(info(kind))).unwrap();
+        assert_eq!(
+            json(Some(SchedulerProfileKind::Default))["scheduler_profile"],
+            "default"
+        );
+        assert_eq!(
+            json(Some(SchedulerProfileKind::Profile))["scheduler_profile"],
+            "profile"
+        );
+        assert_eq!(
+            json(Some(SchedulerProfileKind::DefaultSettingsMismatch))["scheduler_profile"],
+            "default_settings_mismatch"
+        );
+        assert!(json(None).get("scheduler_profile").is_none());
+    }
+
+    #[test]
     fn loaded_models_report_reasoning_capability() {
         use ironmlx_lm::core::native_output::NativeOutputDialect;
         let info = |dialect| EngineLoadedModelInfo {
@@ -1980,6 +2161,7 @@ mod tests {
             mtp_draft_tokens: None,
             prompt_lookup: None,
             native_output_dialect: dialect,
+            scheduler_profile: None,
         };
         let json = |dialect| {
             serde_json::to_value(LoadedModelInfo::from(info(dialect))).expect("serialize")
@@ -2030,6 +2212,7 @@ mod tests {
             mtp_draft_tokens: None,
             prompt_lookup: None,
             native_output_dialect: None,
+            scheduler_profile: None,
         };
 
         let enabled = serde_json::to_value(LoadedModelInfo::from(info.clone()))
@@ -2795,15 +2978,18 @@ mod tests {
             Some("mlx-community/Tiny-4bit".to_string()),
             Vec::new(),
             Some(AdminWarning::new(
-                DEFAULT_PROFILE_WARNING_CODE,
-                DEFAULT_PROFILE_WARNING,
+                SCHEDULER_PROFILE_HARDWARE_MISMATCH_WARNING_CODE,
+                SCHEDULER_PROFILE_HARDWARE_MISMATCH_WARNING,
             )),
         );
         let value = serde_json::to_value(response).expect("response json");
 
         assert_eq!(value["success"], true);
-        assert_eq!(value["warning_code"], "default_scheduler_profile_used");
-        assert_eq!(value["warning"], DEFAULT_PROFILE_WARNING);
+        assert_eq!(value["warning_code"], "scheduler_profile_hardware_mismatch");
+        assert_eq!(
+            value["warning"],
+            SCHEDULER_PROFILE_HARDWARE_MISMATCH_WARNING
+        );
     }
 
     #[test]
@@ -3141,7 +3327,7 @@ mod tests {
                 }],
                 metadata: ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneRuntimeProfileMetadata::synthetic(0),
             },
-            profile_source: Some(SchedulerProfileSource::Store),
+            profile_outcome: SchedulerProfileOutcome::Profile(SchedulerProfileSource::Store),
         };
 
         let overridden = apply_load_request_scheduler_overrides(resolved, Some(65536));
@@ -3160,15 +3346,9 @@ mod tests {
     }
 }
 
-use {
-    ironmlx_runtime::core::model_validation::MTP_BASE_MODEL_NOT_FOUND_CODE,
-    ironmlx_runtime::core::model_validation::MTP_INCOMPATIBLE_CODE,
-    ironmlx_runtime::core::model_validation::MTP_INVALID_CONFIG_CODE,
-    ironmlx_runtime::core::model_validation::MTP_INVALID_DRAFT_TOKENS_CODE,
-    ironmlx_runtime::core::model_validation::MTP_INVALID_MODEL_TYPE_CODE,
-    ironmlx_runtime::core::model_validation::MTP_MODEL_NOT_FOUND_CODE,
-    ironmlx_runtime::core::model_validation::MTP_UNSUPPORTED_ARCHITECTURE_CODE,
-};
+#[cfg(test)]
+use ironmlx_runtime::core::model_validation::MTP_INCOMPATIBLE_CODE;
+use ironmlx_runtime::core::model_validation::MTP_INVALID_CONFIG_CODE;
 
 impl From<ironmlx_runtime::core::model_validation::MtpCompatibility> for MtpValidationResponse {
     fn from(value: ironmlx_runtime::core::model_validation::MtpCompatibility) -> Self {
@@ -3195,7 +3375,7 @@ impl From<ModelManagementOutcome> for AdminModelResponse {
             ModelManagementStatus::Registered => "registered",
             ModelManagementStatus::Reloaded => "reloaded",
         };
-        Self::ok(
+        let mut response = Self::ok(
             status,
             outcome.model,
             outcome
@@ -3204,7 +3384,9 @@ impl From<ModelManagementOutcome> for AdminModelResponse {
                 .map(LoadedModelInfo::from)
                 .collect(),
             outcome.warning,
-        )
+        );
+        response.load_id = outcome.load_id;
+        response
     }
 }
 
@@ -3223,3 +3405,7 @@ mod asr_app_tests;
 #[cfg(test)]
 #[path = "webrtc_app_tests.rs"]
 mod webrtc_app_tests;
+
+#[cfg(test)]
+#[path = "load_progress_app_tests.rs"]
+mod load_progress_app_tests;

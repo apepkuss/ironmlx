@@ -831,18 +831,23 @@ IronMLX 扩展。客户端应按 HTTP status 和 `error.type` 判断错误类别
 | HTTP status | 稳定 `error.code` | 语义 | `Retry-After` |
 |---:|---|---|---|
 | 400 | `invalid_json`、`invalid_request`、`invalid_sampling_parameters`、`invalid_response_format`、`invalid_tools` 等 | JSON、字段、采样或输出约束不合法 | 无 |
+| 400 | MTP 与模型能力类加载错误码（见下文） | 请求触发的模型加载因模型设置被拒绝 | 无 |
 | 401 | `auth_invalid` | LAN Key 缺失或无效 | 无 |
 | 404 | `model_not_found` | 未知或被禁用的模型 | 无 |
+| 409 | `load_cancelled`、`load_in_progress` | 所需的模型加载已被取消，或该模型正以其他设置加载；待其结束后重试 | 无 |
 | 413 | `request_body_too_large` | HTTP request body 超过 32 MiB | 无 |
 | 413 | `request_token_capacity_exceeded` | 输入 token 与请求输出预算超过模型上下文容量；`error.details` 提供容量明细 | 无 |
 | 503 | `scheduler_queue_full`、`scheduler_unavailable`、`scheduler_reply_lost` | 调度器暂时不可用 | `5` 秒 |
 | 503 | `memory_budget_exceeded`、`memory_pressure`、`prefill_peak_unsafe`、`vision_prefill_peak_unsafe`、`cold_materialization_unsafe`、`prefix_store_backpressure` | 内存 governor 或存储背压暂时拒绝请求 | `5` 秒 |
-| 503 | `engine_unavailable`、`diffusion_lane_overloaded` | 模型引擎或 DiffusionGemma lane 暂时不可用 | `5` 秒 |
+| 503 | `gpu_memory_insufficient`、`max_loaded_models_reached`、`model_memory_limit_exceeded`、`total_memory_limit_exceeded`、`kv_memory_budget_exceeded` | 内存或模型池暂时无法容纳请求所需的模型 | `5` 秒；加载使模型进入 failed 状态时无（见下文） |
+| 503 | `engine_unavailable`、`diffusion_lane_overloaded` | 模型引擎或 DiffusionGemma lane 暂时不可用 | `5` 秒；`engine_unavailable` 在加载使模型进入 failed 状态时无（见下文） |
 | 500 | `generation_error` 及内部任务错误码 | 非预期服务端错误 | 无 |
 
-所有可重试 503 都返回 JSON 和 `Retry-After: 5`。IronMLX 的 Messages 本地契约使用
+可重试 503 都返回 JSON 和 `Retry-After: 5`；例外是加载使模型进入 `failed` 状态后的响应（见下文），不带 `Retry-After`。IronMLX 的 Messages 本地契约使用
 HTTP 503 + `overloaded_error` 表达暂时过载；413 使用 `request_too_large`，并通过
 上述两个稳定 code 区分传输体上限与模型上下文容量上限。
+
+请求需要加载模型而加载失败时，返回与 App 加载接口相同的错误码和 HTTP status。400 类加载错误码为 `mtp_model_dir_required`、`mtp_base_model_not_found`、`mtp_model_not_found`、`mtp_unsupported_architecture`、`mtp_invalid_model_type`、`mtp_invalid_config`、`mtp_invalid_draft_tokens`、`mtp_incompatible`、`model_task_mismatch`、`diffusion_gemma_mtp_unsupported`、`diffusion_gemma_prompt_lookup_unsupported`、`diffusion_gemma_kv_cache_unsupported` 和 `diffusion_gemma_sampling_parameter_unsupported`。如果这次失败使模型进入 `failed` 状态（无论原因能否归类为已知错误码），后续请求不会再加载它：响应不带 `Retry-After`，消息末尾为 "This model will not be loaded again automatically; load it again from the Dashboard or the load API after resolving this."。排除原因后，在 Dashboard 中或通过 [`POST /admin/api/models/load`](service-api.md#模型加载任务app)、[`POST /v1/models/{model_id}/load`](engine-pool.md#http-api) 重新加载。无法归类的加载失败仍返回 503 `engine_unavailable`，同样带上述 `failed` 状态消息结尾且不带 `Retry-After`。
 
 上述格式适用于本页三套文本与视觉协议的推理及 LAN 认证错误；语音、图片生成和 System One 的错误见各自参考。本机管理端点的成功与错误格式见[服务与管理 API](service-api.md#管理接口)。
 

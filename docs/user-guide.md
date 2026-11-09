@@ -63,6 +63,23 @@ enough free space for a complete copy. After import, use the ID shown in the mod
 list to load and manage it. Some model families also need additional runtime
 resources prepared before loading.
 
+## Load progress and cancellation
+
+Loading a model from the Dashboard opens a progress panel that lists the load
+stages, such as **Read weights** and **Warm up**, with the bytes read, the elapsed
+time and an estimate of the time left. **Continue in Background** closes the
+panel. The load keeps running when you switch pages or close and reopen the
+Dashboard, and the sidebar shows its progress, such as **Loading · 42%**. Other
+loads, such as reloads, appear there too; select the sidebar indicator to open
+the panel.
+
+**Cancel Load** stops a load. Cancelling a new load releases its memory, and
+cancelling a reload keeps the version that is loaded now. Cancelling a switch to
+DFlash2 restores the previous configuration and loads the earlier models again.
+If you cancel the DFlash2 model that the App restores at startup, the backend
+restarts in normal mode with no models loaded; the model's DFlash2 setting is
+kept, so you can load it with DFlash2 again later.
+
 ## Weight format labels
 
 In the App's **Model Management** list, quantized checkpoints display their

@@ -53,7 +53,9 @@
 | `GET` | `/admin/api/log-level` | 查询日志级别 | 仅本机回环 | [服务与管理 API](service-api.md#日志级别管理仅本机) |
 | `POST` | `/admin/api/log-level` | 修改日志级别 | 仅本机回环 | [服务与管理 API](service-api.md#日志级别管理仅本机) |
 | `POST` | `/admin/api/models/register` | 注册本地模型资源 | App 模型管理 daemon | [音频资源注册示例](audio-speech-api.md#注册本地资源) |
-| `POST` | `/admin/api/models/load` | 加载本地模型 | App 模型管理 daemon | [音频资源注册示例](audio-speech-api.md#注册本地资源) |
+| `POST` | `/admin/api/models/load` | 加载本地模型；可选 `load_id` 与 `async` | App 模型管理 daemon | [模型加载任务](service-api.md#模型加载任务app) |
+| `GET` | `/admin/api/models/loads` | 加载进度 | App / DFlash2 | [模型加载任务](service-api.md#模型加载任务app) |
+| `POST` | `/admin/api/models/loads/{load_id}/cancel` | 取消加载 | App 模型管理 daemon | [模型加载任务](service-api.md#模型加载任务app) |
 
 局域网认证见[服务与管理 API](service-api.md#服务地址认证与约定)。独立 System One 的认证及模型发现形状见其[独立 CLI 说明](laya-systemone-api.md#可选的独立-cli)。
 
