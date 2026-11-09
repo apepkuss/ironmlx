@@ -9,7 +9,7 @@
       "type": "application",
       "bom-ref": "application:ironmlx",
       "name": "IronMLX",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "licenses": [
         {
           "expression": "Apache-2.0"
