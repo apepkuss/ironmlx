@@ -88,10 +88,25 @@ struct ChatRequestBuilderTests {
         #expect(build(turns).body["max_output_tokens"] as? Int == 4096)
         #expect(build(turns, reasoning: .on, capability: nil).body["max_output_tokens"] as? Int == 4096)
         #expect(build(turns, reasoning: .on, capability: toggle).body["max_output_tokens"] as? Int == 8192)
-        // 200 bytes ≈ 100 input tokens: what is left of a 3000-token window.
-        #expect(build(turns, contextWindow: 3000).body["max_output_tokens"] as? Int == 2900)
+        // Output takes at most half of a 3000-token window.
+        #expect(build(turns, contextWindow: 3000).body["max_output_tokens"] as? Int == 1500)
         #expect(build(turns, reasoning: .on, capability: toggle, contextWindow: 3000, configured: 16_384)
-            .body["max_output_tokens"] as? Int == 2900)
+            .body["max_output_tokens"] as? Int == 1500)
+        // A message larger than half the window gets what the estimate leaves:
+        // 4000 bytes ≈ 2000 input tokens.
+        let long = [ChatTurn(role: .user, text: String(repeating: "a", count: 4000))]
+        #expect(build(long, contextWindow: 3000).body["max_output_tokens"] as? Int == 1000)
+    }
+
+    @Test func outputReachingTheContextKeepsHistory() {
+        let turns = [
+            ChatTurn(role: .user, text: "first"), ChatTurn(role: .assistant, text: "reply"),
+            ChatTurn(role: .user, text: "second"),
+        ]
+        let request = build(turns, contextWindow: 4096, configured: 4096)
+        #expect(request.droppedTurnCount == 0)
+        #expect(input(request).count == 3)
+        #expect(request.body["max_output_tokens"] as? Int == 2048)
     }
 
     @Test func trimsOldestTurnsToFitContext() {

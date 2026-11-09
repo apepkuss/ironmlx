@@ -11,7 +11,8 @@ struct ChatRequest {
 /// Builds the stateless streaming request for one reply. The whole history is
 /// sent each time (`store: false`); when history plus the output budget does
 /// not fit, whole exchanges are dropped from the oldest, never the last user
-/// message.
+/// message. The output budget is at most half the context window, so history
+/// still fits when the configured output reaches the context size.
 enum ChatRequestBuilder {
     /// Output budget when the model has no configured `max_output_tokens`.
     /// Thinking and the answer share it, so thinking gets more.
@@ -33,8 +34,9 @@ enum ChatRequestBuilder {
         loadAttachment: (String) -> Data? = { _ in nil }
     ) -> ChatRequest {
         let thinking = capability != nil && reasoning != .off
-        let desiredOutput = configuredMaxOutputTokens.flatMap { $0 > 0 ? $0 : nil }
+        let configuredOutput = configuredMaxOutputTokens.flatMap { $0 > 0 ? $0 : nil }
             ?? (thinking ? defaultThinkingOutputTokens : defaultOutputTokens)
+        let desiredOutput = min(configuredOutput, max(1, contextWindow / 2))
 
         let turns = conversation.turns
         var messages = turns.indices.compactMap { index in
