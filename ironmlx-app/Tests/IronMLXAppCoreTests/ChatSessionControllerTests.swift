@@ -49,6 +49,12 @@ private func overflowBody(serverMax: Int) -> String {
     #"{"error":{"message":"request requires 9000 total tokens","type":"invalid_request_error","param":null,"code":"request_token_capacity_exceeded","details":{"required_total_tokens":9000,"input_tokens":4904,"requested_max_output_tokens":4096,"server_max_context_tokens":\#(serverMax),"max_allowed_output_tokens":0}}}"#
 }
 
+/// Captured from a real 4096-token Qwen3.5-4B Chat request: the estimate
+/// leaves 4079 output tokens, but the rendered input actually needs 22.
+private func shortPromptOverflowBody(allowedOutput: Int = 4074) -> String {
+    #"{"error":{"message":"request requires 4101 total tokens: 22 input tokens + 4079 maximum output tokens; the server maximum context capacity is 4096 tokens (Dashboard → MAX CONTEXT TOKENS). Reduce request max_tokens to 4074 or less, or increase MAX CONTEXT TOKENS in the Dashboard.","type":"invalid_request_error","code":"request_token_capacity_exceeded","details":{"required_total_tokens":4101,"input_tokens":22,"requested_max_output_tokens":4079,"server_max_context_tokens":4096,"max_allowed_output_tokens":\#(allowedOutput)}}}"#
+}
+
 private final class FakeTransport: ChatResponsesTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var scripts: [Script]
@@ -237,11 +243,12 @@ private func chatModel(
     vision: Bool = false,
     runtimeKind: String = "causal",
     pinned: Bool = false,
-    mtpModelDir: String? = nil
+    mtpModelDir: String? = nil,
+    contextWindow: Int = 262_144
 ) -> BackendLoadedModelInfo {
     BackendLoadedModelInfo(
         id: id, model: id, path: "/models/\(id)", architecture: "qwen3_5", isDefault: isDefault,
-        maxPositionEmbeddings: 262_144, pinned: pinned, mtpEnabled: mtpModelDir != nil, mtpModelDir: mtpModelDir,
+        maxPositionEmbeddings: contextWindow, pinned: pinned, mtpEnabled: mtpModelDir != nil, mtpModelDir: mtpModelDir,
         mtpDraftTokens: mtpModelDir == nil ? nil : 3,
         capabilities: BackendModelCapabilities(
             runtimeKind: runtimeKind, supportsStreaming: true, supportsVision: vision, supportsMtp: false,
@@ -473,6 +480,80 @@ struct ChatSessionControllerTests {
         #expect(harness.errors.isEmpty)
         #expect(harness.finished.last?.text == "fits")
         #expect(harness.controller.conversation.turns.count == 6)
+    }
+
+    @Test(arguments: [false, true])
+    func retriesShortPromptUsingServerOutputBudget(streamedError: Bool) async throws {
+        let harness = Harness(loaded: [chatModel(starterModel, contextWindow: 4096)])
+        await harness.open()
+        if streamedError {
+            let envelope = try #require(JSONSerialization.jsonObject(with: Data(shortPromptOverflowBody().utf8)) as? [String: Any])
+            let error = try #require(envelope["error"] as? [String: Any])
+            let response = try JSONSerialization.data(withJSONObject: ["status": "failed", "error": error])
+            harness.transport.enqueue(.stream([
+                StreamStep(time: 0.05, data: sse("response.failed", "\"response\":\(String(decoding: response, as: UTF8.self))")),
+            ]))
+        } else {
+            harness.transport.enqueue(.http(status: 413, body: shortPromptOverflowBody()))
+        }
+        harness.transport.enqueue(.stream([text("IRONMLX_CHAT_OK", at: 0.1), completed(outputTokens: 5, at: 0.2)]))
+
+        await harness.controller.send(text: "Reply with exactly IRONMLX_CHAT_OK.", imagePaths: [])
+
+        let requests = harness.transport.requests
+        #expect(requests.count == 2)
+        #expect(requests.first?["max_output_tokens"] as? Int == 4079)
+        #expect(requests.last?["max_output_tokens"] as? Int == 4074)
+        #expect(requests.map(inputCount) == [1, 1])
+        #expect(harness.trimmed.isEmpty)
+        #expect(harness.errors.isEmpty)
+        #expect(harness.finished.last?.text == "IRONMLX_CHAT_OK")
+        let saved = try #require(ChatStore(root: harness.root).list().first)
+        #expect(saved.turns.map(\.text) == ["Reply with exactly IRONMLX_CHAT_OK.", "IRONMLX_CHAT_OK"])
+    }
+
+    @Test(arguments: [0, -1, 4079, 5000])
+    func doesNotRetryAnUnusableServerOutputBudget(allowedOutput: Int) async {
+        let harness = Harness(loaded: [chatModel(starterModel, contextWindow: 4096)])
+        await harness.open()
+        harness.transport.enqueue(.http(status: 413, body: shortPromptOverflowBody(allowedOutput: allowedOutput)))
+
+        await harness.controller.send(text: "Reply with exactly IRONMLX_CHAT_OK.", imagePaths: [])
+
+        #expect(harness.transport.requests.count == 1)
+        #expect(harness.errors == [.contextOverflow])
+        #expect(harness.finished.isEmpty)
+    }
+
+    @Test func unansweredQuestionsDoNotPreventOutputBudgetRecovery() async {
+        let history = ChatConversation(modelID: starterModel, turns: [
+            ChatTurn(role: .user, text: "An earlier request failed without a reply."),
+        ])
+        let harness = Harness(loaded: [chatModel(starterModel, contextWindow: 4096)], configure: { try? $0.save(history) })
+        await harness.open()
+        harness.controller.openConversation(id: history.id)
+        harness.transport.enqueue(.http(status: 413, body: shortPromptOverflowBody()))
+        harness.transport.enqueue(.stream([text("fits", at: 0.1), completed(outputTokens: 1, at: 0.2)]))
+
+        await harness.controller.send(text: "Reply with exactly IRONMLX_CHAT_OK.", imagePaths: [])
+
+        #expect(harness.transport.requests.map(inputCount) == [1, 1])
+        #expect(harness.transport.requests.last?["max_output_tokens"] as? Int == 4074)
+        #expect(harness.errors.isEmpty)
+        #expect(harness.finished.last?.text == "fits")
+    }
+
+    @Test func reducedOutputBudgetStillRetriesOnlyOnce() async {
+        let harness = Harness(loaded: [chatModel(starterModel, contextWindow: 4096)])
+        await harness.open()
+        harness.transport.enqueue(.http(status: 413, body: shortPromptOverflowBody()))
+        harness.transport.enqueue(.http(status: 413, body: shortPromptOverflowBody(allowedOutput: 4060)))
+
+        await harness.controller.send(text: "Reply with exactly IRONMLX_CHAT_OK.", imagePaths: [])
+
+        #expect(harness.transport.requests.count == 2)
+        #expect(harness.errors == [.contextOverflow])
+        #expect(harness.finished.isEmpty)
     }
 
     @Test func secondContextOverflowIsReported() async throws {

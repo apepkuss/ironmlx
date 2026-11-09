@@ -484,7 +484,7 @@ final class ChatSessionController {
 
     private enum Outcome {
         case finished
-        case contextOverflow(serverMaxContext: Int?)
+        case contextOverflow(serverMaxContext: Int?, maxOutputTokens: Int?)
         /// The server no longer serves the model (see `modelUnavailableCodes`).
         case modelUnavailable
         case failed(ChatError)
@@ -503,11 +503,12 @@ final class ChatSessionController {
         await task.value
     }
 
-    /// One retry after a context overflow: drop at least one more exchange
-    /// and use the server's reported context size.
+    /// One retry after a context overflow: trim history when possible, or
+    /// use the server's remaining output budget for the last user message.
     private func stream(_ reply: ActiveReply, model: ChatModelInfo) async {
         var contextWindow = min(model.contextWindow, serverContextLimits[model.modelID] ?? .max)
         var minimumDropped = 0
+        var outputBudget = configuredMaxOutputTokens(model.modelID)
         for attempt in 0..<2 {
             let request = ChatRequestBuilder.build(
                 conversation: conversation,
@@ -515,7 +516,7 @@ final class ChatSessionController {
                 reasoning: reasoningChoice,
                 capability: model.reasoning,
                 contextWindow: contextWindow,
-                configuredMaxOutputTokens: configuredMaxOutputTokens(model.modelID),
+                configuredMaxOutputTokens: outputBudget,
                 minimumDroppedTurns: minimumDropped,
                 loadAttachment: { [store] in store.attachmentData(named: $0) }
             )
@@ -524,16 +525,27 @@ final class ChatSessionController {
             switch outcome {
             case .finished:
                 return
-            case let .contextOverflow(serverMax):
+            case let .contextOverflow(serverMax, maxOutput):
                 if let serverMax { serverContextLimits[model.modelID] = serverMax }
                 let smallerWindow = min(contextWindow, serverMax ?? contextWindow)
-                let historyLeft = conversation.turns.count - 1 > request.droppedTurnCount
-                guard attempt == 0, historyLeft || smallerWindow < contextWindow else {
+                let inputCount = (request.body["input"] as? [[String: Any]])?.count ?? 0
+                let historyLeft = inputCount > 1
+                let requestedOutput = request.body["max_output_tokens"] as? Int ?? 1
+                let smallerOutput = maxOutput.flatMap { $0 > 0 && $0 < requestedOutput ? $0 : nil }
+                guard attempt == 0, historyLeft || smallerWindow < contextWindow || smallerOutput != nil else {
                     fail(reply, .contextOverflow)
                     return
                 }
                 contextWindow = smallerWindow
-                minimumDropped = request.droppedTurnCount + 1
+                if !historyLeft, let smallerOutput {
+                    // Text estimates omit template overhead. The server's
+                    // tokenized input gives an exact limit without discarding
+                    // the last question or changing the model's saved settings.
+                    outputBudget = smallerOutput
+                    minimumDropped = request.droppedTurnCount
+                } else {
+                    minimumDropped = request.droppedTurnCount + 1
+                }
             case .modelUnavailable:
                 guard activeReply === reply else { return }
                 activeReply = nil
@@ -593,7 +605,10 @@ final class ChatSessionController {
                     case let .failed(message):
                         await coalescer.finish()
                         if reply.firstToken == nil, let serverMax = Self.contextOverflowLimit(in: message) {
-                            return .contextOverflow(serverMaxContext: serverMax)
+                            return .contextOverflow(
+                                serverMaxContext: serverMax,
+                                maxOutputTokens: Self.contextOverflowOutputLimit(in: message)
+                            )
                         }
                         return .failed(.server(code: nil, message: message))
                     }
@@ -674,14 +689,17 @@ final class ChatSessionController {
 
     /// `api_error.rs` answers a request that does not fit with HTTP 413 and
     /// `error.code == "request_token_capacity_exceeded"`, plus the server's
-    /// context size in `error.details.server_max_context_tokens`.
+    /// context size and remaining output budget in `error.details`.
     private static func outcome(status: Int, body: Data) -> Outcome {
         let envelope = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
         let error = envelope?["error"] as? [String: Any]
         let code = error?["code"] as? String
         if code == contextOverflowCode {
             let details = error?["details"] as? [String: Any]
-            return .contextOverflow(serverMaxContext: (details?["server_max_context_tokens"] as? NSNumber)?.intValue)
+            return .contextOverflow(
+                serverMaxContext: (details?["server_max_context_tokens"] as? NSNumber)?.intValue,
+                maxOutputTokens: (details?["max_allowed_output_tokens"] as? NSNumber)?.intValue
+            )
         }
         if let code, modelUnavailableCodes.contains(code) {
             return .modelUnavailable
@@ -696,6 +714,13 @@ final class ChatSessionController {
     /// after admission; its message is `SchedulerError::RequestTooLarge`'s text.
     static func contextOverflowLimit(in message: String) -> Int? {
         guard let match = message.firstMatch(of: /the server maximum context capacity is (\d+) tokens/) else {
+            return nil
+        }
+        return Int(match.1)
+    }
+
+    private static func contextOverflowOutputLimit(in message: String) -> Int? {
+        guard let match = message.firstMatch(of: /Reduce request max_tokens to (\d+) or less/) else {
             return nil
         }
         return Int(match.1)
