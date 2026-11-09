@@ -19,6 +19,8 @@ IronMLX 的推理在本机 Apple Silicon 上执行。默认 local 模式仅绑�
 配置、模型、缓存、日志、故障记录和调度器报告默认保存在 `~/.ironmlx`。LAN
 API Key 与 TLS 私钥保存在用户默认 macOS Keychain；普通配置只保存凭据标识和
 证书指纹。完整路径见[数据位置与卸载](storage-and-uninstall.md)。
+菜单栏对话的会话及其图片附件只保存在这台 Mac 的 `~/.ironmlx/chats/` 中（见
+[数据位置与卸载](storage-and-uninstall.md)），不会进入诊断信息导出。
 
 ## 请求与日志
 

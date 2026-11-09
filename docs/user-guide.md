@@ -21,7 +21,9 @@ The status page shows a running local endpoint, the loaded
    DMG window and eject the disk image.
 4. If you downloaded the ZIP, extract it to a local folder.
 5. In Finder's Applications folder, find and double-click IronMLX (or open the
-   extracted App when using the ZIP).
+   extracted App when using the ZIP). If no model is available yet, the App
+   first opens a window that can download a recommended model for
+   [chat](#menu-bar-chat).
 6. Use the Dashboard to search Hugging Face or ModelScope, download, or load a
    compatible model.
 7. Check the service at `http://127.0.0.1:9068/healthz`.
@@ -33,6 +35,43 @@ included in the installer and remain subject to the upstream model repository's
 license and access terms.
 
 If the health check fails, see [Troubleshooting](troubleshooting.md).
+
+## Menu bar chat
+
+Choose **Chat** from the IronMLX menu bar icon to talk with a local model in a
+small window. Chat uses the local service on this Mac and starts it if it is
+stopped.
+
+If no chat model has been downloaded, the **No chat model yet** window opens
+instead. When a starter model from the catalogue fits this Mac's memory, the
+window recommends it. **Download Recommended Model** downloads it from
+huggingface.co, or from hf-mirror.com when huggingface.co cannot be reached,
+then loads it as the default model. If the window stays open, chat opens when
+the model is ready. If you close it or choose **Continue in Background**, the
+download keeps running, the menu shows its progress under **Chat**, and
+IronMLX asks for permission to notify you when the model is ready.
+**Choose a Model Myself** opens **Models → Model Download** in the Dashboard.
+
+Chat uses a loaded chat model, preferring the default model. If none is
+loaded, it loads a downloaded one (the default model, otherwise a starter
+model, otherwise the smallest) and makes it the default. The model menu at the
+top of the window lists downloaded chat models. Switching asks for confirmation,
+unloads the current default model unless it is pinned, and loads the new one as
+the default; **Manage models…** opens **Models → Model Manager**. Chat does not load or
+switch DFlash2 models: while a model runs with DFlash2, chat uses that model,
+and switching happens in the Dashboard.
+
+Messages are text, up to 100,000 characters. With a model that can read
+images, you can attach up to 4 images per message, each under 20 MB, with the
+**Add image** button, by dragging, or by pasting. For models that support
+thinking, **Think** turns it on or off and, when the model offers levels,
+selects **Low**, **Medium** (the default) or **High**.
+
+**History** lists earlier conversations and **New chat** starts another. Only
+the latest 20 conversations are kept, on this Mac; see
+[Data locations and uninstall](storage-and-uninstall.md). The
+**Connect DeepSeek Harness or another agent →** link in the history panel opens
+the Dashboard **Agent** page at the [DeepSeek Harness](dsh.md) guide.
 
 ## Download and update models
 

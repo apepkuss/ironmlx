@@ -22,6 +22,9 @@ Configuration, models, caches, logs, incident records, and scheduler reports are
 stored under `~/.ironmlx` by default. LAN API keys and TLS private keys are kept
 in the user's default macOS Keychain; ordinary configuration stores only a
 credential identifier and certificate fingerprint. See [Data locations and uninstall](storage-and-uninstall.md).
+Menu bar chat conversations and their image attachments are stored only on
+this Mac under `~/.ironmlx/chats/` (see [Data locations and uninstall](storage-and-uninstall.md))
+and are not included in diagnostic exports.
 
 ## Requests and logs
 
