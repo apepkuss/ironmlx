@@ -42,6 +42,7 @@ final class ChatEntryController: ChatEntryHandling {
     private var backendStartTask: Task<Void, Never>?
     private let localModelsProvider: LocalModelsProvider
     private let loadedModelsProvider: LoadedModelsProvider
+    private var languageObserver: NSObjectProtocol?
 
     init(
         configStore: AppConfigStore,
@@ -95,6 +96,19 @@ final class ChatEntryController: ChatEntryHandling {
             Task { await notifier.userLeftDownloadWindow() }
         }
         notifier.onOpenChat = { [weak self] _ in self?.openChat() }
+        // An open no-model window follows a language change made in the Dashboard.
+        languageObserver = NotificationCenter.default.addObserver(
+            forName: .ironMLXMenuLanguageDidChange, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.window.model.language = self.configStore.load().language
+            }
+        }
+    }
+
+    isolated deinit {
+        if let languageObserver { NotificationCenter.default.removeObserver(languageObserver) }
     }
 
     /// Subscribes to the coordinator and shows a starter download an earlier
@@ -118,6 +132,9 @@ final class ChatEntryController: ChatEntryHandling {
 
     /// What the no-model window shows.
     var noModelWindowState: StarterDownloadState { window.model.state }
+
+    /// The language the no-model window shows.
+    var noModelWindowLanguage: String { window.model.language }
 
     var starterModelName: String? { upgrade?.recommendation.entry.name ?? recommendation?.entry.name }
 

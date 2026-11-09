@@ -149,6 +149,8 @@ struct ChatEntryControllerTests {
         f.controller.openChat()
         await waitUntil { f.controller.isNoModelWindowVisible }
         #expect(f.controller.isNoModelWindowVisible)
+        // The backend start is a separate task; it need not run before the window shows.
+        await waitUntil { f.backend.ensureRunningCalls > 0 }
         #expect(f.backend.state == .starting)
         #expect(f.backend.ensureRunningCalls == 1)
         #expect(f.presenter.shown.isEmpty)
@@ -170,6 +172,7 @@ struct ChatEntryControllerTests {
         await waitUntil { !f.presenter.shown.isEmpty }
         #expect(f.presenter.shown.map(\.modelID) == [Self.starter])
         #expect(f.presenter.shown.map(\.needsLoad) == [true])
+        await waitUntil { f.backend.ensureRunningCalls > 0 }
         #expect(f.backend.state == .starting)
         #expect(f.backend.ensureRunningCalls == 1)
         f.backend.release()
@@ -244,6 +247,22 @@ struct ChatEntryControllerTests {
         await waitUntil { f.controller.isNoModelWindowVisible }
         #expect(f.controller.isNoModelWindowVisible)
         #expect(f.controller.noModelWindowState == .idle)
+        f.controller.closeNoModelWindow()
+        f.backend.release()
+    }
+
+    @Test func openNoModelWindowFollowsLanguageChange() async throws {
+        let f = try fixture(localModels: [])
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let store = AppConfigStore(url: f.root.appendingPathComponent("config.json"))
+        #expect(store.update { $0.language = "en" })
+        f.controller.openChat()
+        await waitUntil { f.controller.isNoModelWindowVisible }
+        #expect(f.controller.noModelWindowLanguage == "en")
+
+        #expect(store.update { $0.language = "zh-Hans" })
+        NotificationCenter.default.post(name: .ironMLXMenuLanguageDidChange, object: nil)
+        #expect(f.controller.noModelWindowLanguage == "zh-Hans")
         f.controller.closeNoModelWindow()
         f.backend.release()
     }
