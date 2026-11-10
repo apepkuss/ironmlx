@@ -180,7 +180,9 @@ fn flash_ragged_b4_matches_b1_and_preserves_inactive_and_adopted_rows() {
         offsets(&batch),
         lengths.iter().map(|n| n + 1).collect::<Vec<_>>()
     );
-    if std::env::var("IRONMLX_FLASH_PAGED_BATCHING").as_deref() != Ok("off") {
+    let native = model.native_paged_batching_enabled();
+    println!("native_paged_batching={native}");
+    if native {
         let stats = model.paging_telemetry().unwrap().snapshot();
         assert_eq!(
             stats.experts.phases[0].request_width, 4,
