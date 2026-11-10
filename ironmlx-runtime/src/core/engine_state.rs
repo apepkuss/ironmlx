@@ -1392,6 +1392,15 @@ mod health_tests {
             Some(&M1ExecutionPlan::resolve(true, None)),
         );
         assert_eq!(unsupported.model_id, base.model_id);
+        let mut off = base.clone();
+        let off_plan = M1ExecutionPlan::resolve_for_mode(
+            ironmlx_core::m1_profile::M1ProfileMode::Off,
+            true,
+            Some(M1Device::Pro),
+        )
+        .unwrap();
+        namespace_m1_prefix_cache(&mut off, Some(&off_plan));
+        assert_eq!(off.model_id, base.model_id);
         let mut a = base.clone();
         let mut b = base;
         namespace_m1_prefix_cache(&mut a, Some(&pro));
@@ -1399,6 +1408,11 @@ mod health_tests {
         assert_ne!(a.model_id, b.model_id);
         assert_ne!(a.model_id, unchanged.model_id);
         let handle = test_scheduler_handle();
+        let device = M1Device::current();
+        let engine_plan = Arc::new(M1ExecutionPlan::resolve(
+            true,
+            Some(device.unwrap_or(M1Device::Pro)),
+        ));
         let collector = build_health_collector(
             "model-a".into(),
             4096,
@@ -1407,13 +1421,17 @@ mod health_tests {
             &handle,
             health::MtpHealthConfig::disabled(),
             health::PromptLookupHealthConfig::disabled(),
-            Some(pro.clone()),
+            Some(engine_plan.clone()),
         );
-        pro.record_narrow();
+        engine_plan.record_narrow();
         let snapshot = collector.snapshot();
-        assert_eq!(snapshot.m1_profiles[0].model, "model-a");
-        assert_eq!(snapshot.m1_profiles[0].plan.narrow_projection_calls, 1);
-        assert_eq!(snapshot.m1_profiles[0].plan.ane, "not_implemented");
+        if device.is_some() {
+            assert_eq!(snapshot.m1_profiles[0].model, "model-a");
+            assert_eq!(snapshot.m1_profiles[0].plan.narrow_projection_calls, 1);
+            assert_eq!(snapshot.m1_profiles[0].plan.ane, "not_implemented");
+        } else {
+            assert!(snapshot.m1_profiles.is_empty());
+        }
     }
 
     #[test]

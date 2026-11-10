@@ -1,7 +1,9 @@
 # M1 Pro/Max GPU execution
 
 `ironmlx serve` and `ironmlx generate` accept `--m1-profile auto|off`.
-The default is **off**. `auto` constructs an engine-owned GPU plan only for
+The default is **auto**, including standard App launches; no App switch or
+extra launch argument is required. Pass `off` to disable the dedicated route.
+`auto` activates an engine-owned GPU plan only for
 Qwen3.8-27B affine4/group64 on a real Apple M1 Pro or M1 Max GPU. Unsupported
 devices/models retain the established execution path. This does not change
 `--m5-dflash2-profile`, its defaults, kernels or global Metal settings.
@@ -21,7 +23,7 @@ scopes take priority over the M1 projection route, including wide verify blocks.
 
 No extra resident weight format or full-layer dequantized weight workspace is
 created. Chunk sizes, speculative budgets, attention and recurrent state
-algorithms keep their existing policies. The row-group settings are opt-in
+algorithms keep their existing policies. The row-group settings are hardware-qualified
 recipes, not a claim of measured speedup. Dedicated M1 tiled prefill GEMM,
 attention kernels and further tuning are future work.
 
@@ -31,8 +33,12 @@ model-owned plan. Scoped state masks nested inactive models and restores its
 previous value on return/error/unwind. M1 selection does not install global
 environment variables or mutate the M5 `OnceLock` profile.
 
-`healthz.m1_profiles`, omitted when no M1 plan was requested, reports each model's
-status, device, fingerprint and narrow/prefill/fallback projection-call counts.
+`healthz.m1_profiles` is scoped to real M1 Pro/Max hardware. It reports each
+causal model's status, device, fingerprint and narrow/prefill/fallback
+projection-call counts, including `off` and `unsupported_model` states.
+Other devices omit the field entirely, including nested and aggregate health
+responses. Hardware detection is cached independently of the profile mode;
+non-M1 devices do not own an M1 plan or prepare M1 weights/kernels/workspaces.
 These count graph construction routes, not GPU timing measurements. The daemon
 aggregates entries without combining different models' plans. DFlash2 execution
 fingerprints and ordinary/MTP paged-prefix namespaces include the M1 recipe;

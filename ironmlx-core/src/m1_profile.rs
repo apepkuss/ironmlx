@@ -1,11 +1,12 @@
-//! Explicit, engine-owned M1 GPU plans. Never installs process-wide settings.
+//! Hardware-qualified, engine-owned M1 GPU plans. Never installs global settings.
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum M1ProfileMode {
-    #[default]
     Off,
+    #[default]
     Auto,
 }
 
@@ -28,6 +29,20 @@ pub enum M1Device {
 }
 
 impl M1Device {
+    /// Real device identity, cached independently of the profile mode. Reading
+    /// metadata does not prepare any M1 kernels, weights or GPU workspaces.
+    pub fn current() -> Option<Self> {
+        static DEVICE: OnceLock<Option<M1Device>> = OnceLock::new();
+        *DEVICE.get_or_init(|| {
+            let architecture = mlx::metal::architecture().ok()?;
+            if !architecture.starts_with("applegpu_g13") {
+                return None;
+            }
+            let memory = mlx::memory::snapshot();
+            Self::detect(memory.device_name.as_deref()?, &architecture)
+        })
+    }
+
     pub fn detect(name: &str, architecture: &str) -> Option<Self> {
         // Check the real Metal architecture too: a name/diagnostic override
         // alone must never route M5 (or another GPU) to this plan.
@@ -72,6 +87,21 @@ pub struct M1PlanSnapshot {
 }
 
 impl M1ExecutionPlan {
+    /// Unsupported hardware owns no M1 plan. On M1 Pro/Max an explicit `off`
+    /// remains observable without activating dispatch or cache namespaces.
+    pub fn resolve_for_mode(
+        mode: M1ProfileMode,
+        qualified: bool,
+        device: Option<M1Device>,
+    ) -> Option<Self> {
+        let device = device?;
+        let mut plan = Self::resolve(qualified, Some(device));
+        if mode == M1ProfileMode::Off {
+            plan.status = "off";
+        }
+        Some(plan)
+    }
+
     pub fn resolve(qualified: bool, device: Option<M1Device>) -> Self {
         Self {
             device,
@@ -154,6 +184,31 @@ mod tests {
         assert_ne!(pro.fingerprint(), max.fingerprint());
         assert!(!M1ExecutionPlan::resolve(false, Some(M1Device::Pro)).is_active());
         assert!(!M1ExecutionPlan::resolve(true, None).is_active());
-        assert_eq!(M1ProfileMode::default(), M1ProfileMode::Off);
+        assert_eq!(M1ProfileMode::default(), M1ProfileMode::Auto);
+    }
+
+    #[test]
+    fn hardware_gates_plans_independently_of_mode_and_model() {
+        for mode in [M1ProfileMode::Auto, M1ProfileMode::Off] {
+            for qualified in [false, true] {
+                assert!(M1ExecutionPlan::resolve_for_mode(mode, qualified, None).is_none());
+                for device in [M1Device::Pro, M1Device::Max] {
+                    let plan =
+                        M1ExecutionPlan::resolve_for_mode(mode, qualified, Some(device)).unwrap();
+                    assert_eq!(plan.device, Some(device));
+                    assert_eq!(plan.is_active(), mode == M1ProfileMode::Auto && qualified);
+                    assert_eq!(
+                        plan.status,
+                        if mode == M1ProfileMode::Off {
+                            "off"
+                        } else if qualified {
+                            "active"
+                        } else {
+                            "unsupported_model"
+                        }
+                    );
+                }
+            }
+        }
     }
 }

@@ -421,21 +421,18 @@ impl Qwen35Model {
 
     /// Configure once before engine creation. M5/global settings are never touched.
     pub fn configure_m1_profile(&mut self, mode: ironmlx_core::m1_profile::M1ProfileMode) {
-        use ironmlx_core::m1_profile::{M1Device, M1ExecutionPlan, M1ProfileMode};
-        if mode == M1ProfileMode::Off {
+        use ironmlx_core::m1_profile::{M1Device, M1ExecutionPlan};
+        let Some(device) = M1Device::current() else {
             self.text.m1_plan = None;
             return;
-        }
-        let architecture = mlx::metal::architecture().unwrap_or_default();
-        let memory = mlx::memory::snapshot();
-        let device = memory
-            .device_name
-            .as_deref()
-            .and_then(|name| M1Device::detect(name, &architecture));
+        };
         let qualified = super::dflash2_lane::is_qwen38_27b(self.config())
             && self.exact_batched_verify_profile
                 == super::speculative::ExactBatchedVerifyProfile::Affine4;
-        let plan = std::sync::Arc::new(M1ExecutionPlan::resolve(qualified, device));
+        let plan = std::sync::Arc::new(
+            M1ExecutionPlan::resolve_for_mode(mode, qualified, Some(device))
+                .expect("M1 Pro/Max device was checked"),
+        );
         tracing::info!(status=plan.status, fingerprint=%plan.fingerprint(), "M1 GPU execution plan");
         self.text.m1_plan = Some(plan);
     }
@@ -2155,18 +2152,32 @@ mod tests {
         }
         // The production selector must reject this fixture despite having
         // exercised the complete GPU/model wiring under a private test plan.
-        model.configure_m1_profile(ironmlx_core::m1_profile::M1ProfileMode::Auto);
-        println!(
-            "M1_ACTUAL_SELECTOR {:?}",
-            crate::core::Model::m1_execution_plan(&model)
-                .unwrap()
-                .snapshot()
-        );
-        assert!(!crate::core::Model::m1_execution_plan(&model)
-            .unwrap()
-            .is_active());
-        model.configure_m1_profile(ironmlx_core::m1_profile::M1ProfileMode::Off);
-        assert!(crate::core::Model::m1_execution_plan(&model).is_none());
+        for mode in [
+            ironmlx_core::m1_profile::M1ProfileMode::Auto,
+            ironmlx_core::m1_profile::M1ProfileMode::Off,
+        ] {
+            model.configure_m1_profile(mode);
+            let plan = crate::core::Model::m1_execution_plan(&model);
+            println!(
+                "M1_ACTUAL_SELECTOR {mode:?} {:?}",
+                plan.as_ref().map(|p| p.snapshot())
+            );
+            if let Some(device) = M1Device::current() {
+                let plan = plan.expect("M1 diagnostics remain available even when off");
+                assert_eq!(plan.device, Some(device));
+                assert!(!plan.is_active());
+                assert_eq!(
+                    plan.status,
+                    if mode == ironmlx_core::m1_profile::M1ProfileMode::Off {
+                        "off"
+                    } else {
+                        "unsupported_model"
+                    }
+                );
+            } else {
+                assert!(plan.is_none());
+            }
+        }
         Ok(())
     }
 

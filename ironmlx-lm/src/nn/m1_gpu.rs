@@ -167,6 +167,19 @@ mod tests {
         assert!(!active());
         let _a = Scope::enter(Some(&a));
         {
+            let off = Arc::new(
+                M1ExecutionPlan::resolve_for_mode(
+                    ironmlx_core::m1_profile::M1ProfileMode::Off,
+                    true,
+                    Some(M1Device::Pro),
+                )
+                .unwrap(),
+            );
+            let _off = Scope::enter(Some(&off));
+            assert!(!active());
+        }
+        assert!(active());
+        {
             let _off = Scope::enter(None);
             assert!(!active());
         }

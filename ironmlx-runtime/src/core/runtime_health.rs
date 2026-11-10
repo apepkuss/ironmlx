@@ -1278,9 +1278,35 @@ pub struct M1HealthInfo {
     pub plan: ironmlx_core::m1_profile::M1PlanSnapshot,
 }
 
+impl M1HealthInfo {
+    fn for_device(
+        model: &str,
+        device: Option<ironmlx_core::m1_profile::M1Device>,
+        plan: Option<&ironmlx_core::m1_profile::M1ExecutionPlan>,
+    ) -> Option<Self> {
+        let device = device?;
+        let plan = plan
+            .filter(|plan| plan.device == Some(device))
+            .map(|plan| plan.snapshot())
+            .unwrap_or_else(|| {
+                ironmlx_core::m1_profile::M1ExecutionPlan::resolve(false, Some(device)).snapshot()
+            });
+        Some(Self {
+            model: model.to_owned(),
+            plan,
+        })
+    }
+}
+
+// Keep the hardware gate at the common serialization boundary too: aggregated
+// and nested health responses must not expose M1 metadata on another device.
+fn hide_m1_profiles(profiles: &[M1HealthInfo]) -> bool {
+    profiles.is_empty() || ironmlx_core::m1_profile::M1Device::current().is_none()
+}
+
 #[derive(Debug, Serialize)]
 pub struct HealthSnapshot {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "hide_m1_profiles")]
     pub m1_profiles: Vec<M1HealthInfo>,
     pub status: HealthStatus,
     pub degraded_reasons: Vec<HealthDegradedReason>,
@@ -1352,15 +1378,13 @@ impl SchedulerHealthCollector {
             &process_governor,
         );
         HealthSnapshot {
-            m1_profiles: self
-                .m1_plan
-                .as_ref()
-                .map(|plan| M1HealthInfo {
-                    model: self.model_name.clone(),
-                    plan: plan.snapshot(),
-                })
-                .into_iter()
-                .collect(),
+            m1_profiles: M1HealthInfo::for_device(
+                &self.model_name,
+                ironmlx_core::m1_profile::M1Device::current(),
+                self.m1_plan.as_deref(),
+            )
+            .into_iter()
+            .collect(),
             status,
             degraded_reasons,
             uptime_secs,
@@ -1625,6 +1649,63 @@ mod tests {
             mtp,
             ActiveKvOffloadSharedStats::new(&crate::core::cache::ActiveKvOffloadConfig::disabled()),
         )
+    }
+
+    #[test]
+    fn m1_health_is_hardware_scoped_even_for_off_and_generic_models() {
+        use ironmlx_core::m1_profile::{M1Device, M1ExecutionPlan, M1ProfileMode};
+        for device in [M1Device::Pro, M1Device::Max] {
+            for mode in [M1ProfileMode::Auto, M1ProfileMode::Off] {
+                for qualified in [false, true] {
+                    let plan =
+                        M1ExecutionPlan::resolve_for_mode(mode, qualified, Some(device)).unwrap();
+                    plan.record_fallback();
+                    assert!(M1HealthInfo::for_device("model", None, Some(&plan)).is_none());
+                    let info =
+                        M1HealthInfo::for_device("model", Some(device), Some(&plan)).unwrap();
+                    assert_eq!(info.plan.device, Some(device));
+                    assert_eq!(info.plan.status, plan.status);
+                    assert_eq!(info.plan.fallback_projection_calls, 1);
+                }
+            }
+            let generic = M1HealthInfo::for_device("other-model", Some(device), None).unwrap();
+            assert_eq!(generic.plan.status, "unsupported_model");
+            assert_eq!(generic.plan.device, Some(device));
+            assert_eq!(generic.plan.narrow_projection_calls, 0);
+        }
+        assert!(M1HealthInfo::for_device("other-model", None, None).is_none());
+    }
+
+    #[test]
+    fn serialized_health_never_exposes_m1_profiles_on_other_hardware() {
+        use ironmlx_core::m1_profile::{M1Device, M1ExecutionPlan, M1ProfileMode};
+        let device = M1Device::current();
+        for mode in [M1ProfileMode::Auto, M1ProfileMode::Off] {
+            let mut collector = test_collector(MtpHealthConfig::disabled());
+            collector.m1_plan = M1ExecutionPlan::resolve_for_mode(mode, true, device).map(Arc::new);
+            let snapshot = collector.snapshot();
+            let value = serde_json::to_value(&snapshot).unwrap();
+            assert_eq!(value.get("m1_profiles").is_some(), device.is_some());
+            if device.is_some() {
+                assert_eq!(
+                    value["m1_profiles"][0]["status"],
+                    if mode == M1ProfileMode::Off {
+                        "off"
+                    } else {
+                        "active"
+                    }
+                );
+            }
+        }
+        // The common serializer also filters an externally constructed snapshot,
+        // covering nested/aggregate endpoints with a stale or injected plan.
+        let mut snapshot = test_collector(MtpHealthConfig::disabled()).snapshot();
+        snapshot.m1_profiles = vec![M1HealthInfo {
+            model: "stale-plan".into(),
+            plan: M1ExecutionPlan::resolve(true, Some(device.unwrap_or(M1Device::Pro))).snapshot(),
+        }];
+        let value = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(value.get("m1_profiles").is_some(), device.is_some());
     }
 
     fn test_collector_with_active_kv(

@@ -1,8 +1,9 @@
 # M1 Pro/Max GPU 推理通道
 
 `ironmlx serve` 与 `ironmlx generate` 新增 `--m1-profile auto|off`，默认
-`off`。`auto` 只为真实 M1 Pro/Max 上的 Qwen3.8-27B affine4/group64 建立逐模型
-执行计划，其他设备、模型与格式沿用原路径。M5 的开关、默认参数、专用内核及全局
+`auto`，标准 App 启动也自动采用此默认值，无需额外开关或启动参数；可显式使用
+`off` 关闭专用通道。`auto` 只为真实 M1 Pro/Max 上的 Qwen3.8-27B affine4/group64
+激活逐模型执行计划，其他设备、模型与格式沿用原路径。M5 的开关、默认参数、专用内核及全局
 Metal 设置保持原样。
 
 首版使用已有原生 GPU 算子：单行投影走 product-stable QMV；2–16 行走
@@ -17,8 +18,10 @@ affine4 QMM。GatedDeltaNet 复用带 shape/dtype 检查的融合 q/k norm 与 g
 模型会屏蔽外层状态，返回、错误和 unwind 后恢复。M1 不写全局环境变量，也不修改
 M5 profile 的 `OnceLock`。
 
-`healthz.m1_profiles` 报告逐模型状态、设备、指纹和 narrow/prefill/fallback
-投影调用次数；未请求 M1 计划时省略此字段。计数反映构图时的路由选择，不是 GPU
+`healthz.m1_profiles` 只在真实 M1 Pro/Max 上报告各因果模型的状态、设备、指纹和
+narrow/prefill/fallback 投影调用次数，包含 `off` 和 `unsupported_model` 状态。
+其他设备完全省略该字段，聚合及嵌套健康响应也遵守此规则。硬件识别独立于开关并缓存结果；
+非 M1 设备不创建 M1 计划，也不准备 M1 权重、内核或 workspace。计数反映构图时的路由选择，不是 GPU
 耗时。DFlash2 指纹和普通/MTP 的 SSD 前缀缓存命名空间包含 M1 配方，内存前缀缓存
 仍由各 actor 独立持有。
 
@@ -26,5 +29,5 @@ M5 profile 的 `OnceLock`。
 内存上限、常驻策略、chunk 大小或投机预算。ANE 尚未接入，M1 报告
 `ane: not_implemented`；现有 M5 的 `--ane` 行为不受影响。
 
-Pro/Max 行分组是默认关闭的候选配方，不代表已验证性能提升。专用 M1 tiled prefill
+Pro/Max 行分组是按硬件与模型资格自动选择的配方，不代表已验证性能提升。专用 M1 tiled prefill
 GEMM、attention 内核与进一步调参留待后续。

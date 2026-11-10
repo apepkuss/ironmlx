@@ -229,8 +229,10 @@ pub struct ServeArgs {
     )]
     pub m5_dflash2_profile: ironmlx_core::m5_profile::M5ProfileMode,
 
-    /// Opt-in M1 Pro/Max Qwen3.8 affine4 GPU plan. ANE is not used.
-    #[arg(long = "m1-profile", default_value = "off", value_parser = parse_m1_profile_mode)]
+    /// Automatically select the qualified M1 Pro/Max Qwen3.8 affine4 GPU
+    /// plan. Other devices keep their existing route. Pass `off` to disable.
+    /// ANE is not used by this plan.
+    #[arg(long = "m1-profile", default_value = "auto", value_parser = parse_m1_profile_mode)]
     pub m1_profile: ironmlx_core::m1_profile::M1ProfileMode,
 
     /// Neural Engine use. `auto` follows the M5 DFlash2 profile: Dense
@@ -2213,7 +2215,7 @@ mod scheduler_profile_tests {
     }
 
     #[test]
-    fn m1_profile_is_explicit_and_independent_of_m5() {
+    fn m1_profile_defaults_to_auto_and_is_independent_of_m5() {
         #[derive(Parser)]
         struct Wrapper {
             #[command(flatten)]
@@ -2222,7 +2224,11 @@ mod scheduler_profile_tests {
         let defaults = Wrapper::try_parse_from(["serve"]).unwrap();
         assert_eq!(
             defaults.args.m1_profile,
-            ironmlx_core::m1_profile::M1ProfileMode::Off
+            ironmlx_core::m1_profile::M1ProfileMode::Auto
+        );
+        assert_eq!(
+            defaults.args.m5_dflash2_profile,
+            ironmlx_core::m5_profile::M5ProfileMode::Auto
         );
         let enabled = Wrapper::try_parse_from([
             "serve",
@@ -2239,6 +2245,15 @@ mod scheduler_profile_tests {
         assert_eq!(
             enabled.args.m5_dflash2_profile,
             ironmlx_core::m5_profile::M5ProfileMode::Off
+        );
+        let disabled = Wrapper::try_parse_from(["serve", "--m1-profile", "off"]).unwrap();
+        assert_eq!(
+            disabled.args.m1_profile,
+            ironmlx_core::m1_profile::M1ProfileMode::Off
+        );
+        assert_eq!(
+            disabled.args.m5_dflash2_profile,
+            ironmlx_core::m5_profile::M5ProfileMode::Auto
         );
         assert!(Wrapper::try_parse_from(["serve", "--m1-profile", "on"]).is_err());
     }
