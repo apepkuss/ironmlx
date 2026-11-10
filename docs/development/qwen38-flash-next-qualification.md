@@ -108,10 +108,12 @@ shard. Known-route prefetch holds at most one raw expert, drains on drop, and
 never predicts a future layer's router. `no_cache` is an explicit A/B policy;
 it does not establish controller-cold SSD throughput.
 
-Native batching `auto` is enabled only for the validated Apple M5 Max GPU.
-Other/unknown GPUs retain per-request execution, with an explicit health reason.
-`on` is an experimental qualification override and is not validation of M1–M4
-or other M5 models. SSD loading and low-memory budgeting remain available.
+Native batching `auto` is enabled by Apple GPU generation: 17 (M5 family) or
+newer, read from the Metal architecture name. Older/unknown GPUs retain
+per-request execution, with an explicit health reason. Only M5 Max has been
+measured; other M5 models are enabled by generation without on-device
+validation. `on` is an experimental qualification override and is not
+validation of M1–M4. SSD loading and low-memory budgeting remain available.
 
 Paging accepts native B2/B4 inputs and shares expert packs/execution across
 requests. Routing and shared projections retain each request's B1 shape.
@@ -401,7 +403,8 @@ Do not attribute the observed difference to scan protection or prefetch alone.
    These demonstrate planner accounting only; live Metal limits and competing
    allocations can lower the usable budget. Default B2/32K is rejected at that
    budget. Start M1 Pro qualification with ordinary B1/4K, then expand only
-   after on-device measurement. Native auto stays restricted to M5 Max.
+   after on-device measurement. Native auto follows GPU generation 17+, so it
+   stays off on M1–M4 and is on, unmeasured, for other M5 models.
 4. **No controller-cold disk throughput, thermal endurance, real low-memory
    pressure/swap recovery, or long-duration SSD wear qualification.** Both I/O
    policies pass correctness, but forcing a small cache on this 128 GiB host

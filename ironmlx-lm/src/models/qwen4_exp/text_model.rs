@@ -243,7 +243,8 @@ impl FlashTextModel {
     ) -> Result<Self> {
         let cfg = FlashTextConfig::from_root(loader.config_raw_value())?;
         let layer_major_verify = execution.verify_order == FlashVerifyOrder::Layer;
-        let qualified = native_batch_qualified(mlx::memory::snapshot().device_name.as_deref());
+        let qualified =
+            native_batch_qualified(ironmlx_core::m5_profile::hardware_architecture().as_deref());
         let native_paged_batching = match execution.paged_batching {
             FlashPagedBatching::Auto => qualified,
             FlashPagedBatching::On => true,
@@ -995,23 +996,36 @@ impl Drop for SubmittedGroup {
     }
 }
 
-fn native_batch_qualified(device: Option<&str>) -> bool {
-    device == Some("Apple M5 Max")
+/// `auto` runs native paged batches on Apple GPU generation 17 (M5 family) or
+/// newer, by Metal architecture name such as `applegpu_g17s`. Measured on M5
+/// Max only.
+fn native_batch_qualified(architecture: Option<&str>) -> bool {
+    architecture
+        .and_then(ironmlx_core::m5_profile::gpu_generation)
+        .is_some_and(|generation| generation >= ironmlx_core::m5_profile::MIN_GPU_GENERATION)
 }
+
 #[cfg(test)]
 mod native_batch_tests {
     use super::*;
     #[test]
-    fn auto_requires_a_validated_gpu() {
-        assert!(native_batch_qualified(Some("Apple M5 Max")));
-        for device in [
-            None,
-            Some("Apple M1 Pro"),
-            Some("Apple M4 Max"),
-            Some("Apple M5 Pro"),
-            Some("Apple M6 Max"),
+    fn auto_requires_gpu_generation_17_or_newer() {
+        for architecture in [
+            "applegpu_g17",
+            "applegpu_g17p",
+            "applegpu_g17s",
+            "applegpu_g18s",
         ] {
-            assert!(!native_batch_qualified(device));
+            assert!(native_batch_qualified(Some(architecture)), "{architecture}");
+        }
+        for architecture in [
+            None,
+            Some("applegpu_g13s"),
+            Some("applegpu_g16s"),
+            Some("applegpu_gx"),
+            Some("Apple M5 Max"),
+        ] {
+            assert!(!native_batch_qualified(architecture), "{architecture:?}");
         }
     }
 }
