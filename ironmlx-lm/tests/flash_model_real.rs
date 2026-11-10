@@ -2,7 +2,7 @@
 //! passing does not expose the model through the production scheduler.
 use ironmlx_lm::{
     core::{tensor_file::ModelTensorFiles, Loader},
-    models::qwen4_exp::text_model::{ExpertPagingOptions, FlashTextModel},
+    models::qwen4_exp::text_model::{ExpertPagingOptions, FlashExecutionOptions, FlashTextModel},
 };
 use mlx::Dtype;
 use sha2::{Digest, Sha256};
@@ -56,6 +56,7 @@ fn real_flash_text_prefill_and_decode() {
             staging_bytes: 16 * 1024 * 1024,
             pack_bytes,
         }),
+        FlashExecutionOptions::from_environment().unwrap(),
     )
     .unwrap();
     drop(loader);

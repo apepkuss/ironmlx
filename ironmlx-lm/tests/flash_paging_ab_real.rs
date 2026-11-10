@@ -35,6 +35,9 @@ fn flash_paging_scan_and_replay_controls() {
     let mut request = FlashLoadRequest::new(48 << 30, 1, 4096, scan_tokens, 0);
     request.expert_residency = ironmlx_lm::core::residency::ExpertResidency::Ssd;
     request.expert_cache_limit_bytes = cache_mib << 20;
+    request.execution =
+        ironmlx_lm::models::qwen4_exp::text_model::FlashExecutionOptions::from_environment()
+            .unwrap();
     let plan = FlashLoadPlan::inspect(Path::new(&path), &request).unwrap();
     let loader = plan.open_loader(Path::new(&path)).unwrap();
     let model = plan.build_model(&loader).unwrap();

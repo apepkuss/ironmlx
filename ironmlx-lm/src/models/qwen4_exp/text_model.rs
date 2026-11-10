@@ -37,6 +37,53 @@ pub struct ExpertPagingOptions {
     pub staging_bytes: usize,
     pub pack_bytes: usize,
 }
+/// Order in which a speculative window is verified.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FlashVerifyOrder {
+    #[default]
+    Layer,
+    Token,
+}
+/// Whether batches above one row run paged experts as one native group.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FlashPagedBatching {
+    /// Native on a qualified GPU, per-row elsewhere.
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FlashExecutionOptions {
+    pub verify_order: FlashVerifyOrder,
+    pub paged_batching: FlashPagedBatching,
+}
+impl FlashExecutionOptions {
+    /// Optional explicit process configuration. Invalid settings are errors.
+    pub fn from_environment() -> Result<Self> {
+        let verify_order = match std::env::var("IRONMLX_FLASH_VERIFY_ORDER")
+            .unwrap_or_else(|_| "layer".to_owned())
+            .as_str()
+        {
+            "layer" => FlashVerifyOrder::Layer,
+            "token" => FlashVerifyOrder::Token,
+            _ => anyhow::bail!("IRONMLX_FLASH_VERIFY_ORDER must be layer or token"),
+        };
+        let paged_batching = match std::env::var("IRONMLX_FLASH_PAGED_BATCHING")
+            .unwrap_or_else(|_| "auto".to_owned())
+            .as_str()
+        {
+            "auto" => FlashPagedBatching::Auto,
+            "on" => FlashPagedBatching::On,
+            "off" => FlashPagedBatching::Off,
+            _ => anyhow::bail!("IRONMLX_FLASH_PAGED_BATCHING must be auto, on or off"),
+        };
+        Ok(Self {
+            verify_order,
+            paged_batching,
+        })
+    }
+}
 struct Layer {
     attention: Attention,
     ple: Option<PleLayer>,
@@ -181,6 +228,7 @@ impl FlashTextModel {
             ple_staging_bytes,
             qsa_scratch_bytes,
             None,
+            FlashExecutionOptions::default(),
         )
     }
 
@@ -191,26 +239,18 @@ impl FlashTextModel {
         ple_staging_bytes: usize,
         qsa_scratch_bytes: usize,
         paging: Option<ExpertPagingOptions>,
+        execution: FlashExecutionOptions,
     ) -> Result<Self> {
         let cfg = FlashTextConfig::from_root(loader.config_raw_value())?;
-        let layer_major_verify = match std::env::var("IRONMLX_FLASH_VERIFY_ORDER")
-            .unwrap_or_else(|_| "layer".to_owned())
-            .as_str()
-        {
-            "layer" => true,
-            "token" => false,
-            _ => anyhow::bail!("IRONMLX_FLASH_VERIFY_ORDER must be layer or token"),
-        };
-        let batch_mode =
-            std::env::var("IRONMLX_FLASH_PAGED_BATCHING").unwrap_or_else(|_| "auto".into());
+        let layer_major_verify = execution.verify_order == FlashVerifyOrder::Layer;
         let qualified = native_batch_qualified(mlx::memory::snapshot().device_name.as_deref());
-        let native_paged_batching = match batch_mode.as_str() {
-            "auto" => qualified,
-            "on" => true,
-            "off" => false,
-            _ => anyhow::bail!("IRONMLX_FLASH_PAGED_BATCHING must be auto, on or off"),
+        let native_paged_batching = match execution.paged_batching {
+            FlashPagedBatching::Auto => qualified,
+            FlashPagedBatching::On => true,
+            FlashPagedBatching::Off => false,
         };
-        let native_batch_unqualified = batch_mode == "auto" && !qualified;
+        let native_batch_unqualified =
+            execution.paged_batching == FlashPagedBatching::Auto && !qualified;
         let telemetry = Arc::new(crate::core::paging_stats::PagingTelemetry::new(
             paging.is_some(),
         ));
@@ -416,6 +456,12 @@ impl FlashTextModel {
     }
     pub(crate) fn expert_paging_enabled(&self) -> bool {
         self.experts.is_some()
+    }
+    /// Whether batches above one row run paged experts as one native group.
+    /// False with fully resident experts, with batching off, and with `auto`
+    /// on a GPU that does not qualify.
+    pub fn native_paged_batching_enabled(&self) -> bool {
+        self.expert_paging_enabled() && self.native_paged_batching
     }
 
     pub fn new_cache(&self, cap: i32) -> Result<FlashCache> {

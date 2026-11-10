@@ -7,7 +7,7 @@ use ironmlx_lm::{
         tensor_file::ModelTensorFiles,
         Loader, Model,
     },
-    models::qwen4_exp::text_model::{ExpertPagingOptions, FlashTextModel},
+    models::qwen4_exp::text_model::{ExpertPagingOptions, FlashExecutionOptions, FlashTextModel},
 };
 use mlx::{Array, Dtype};
 use std::{path::Path, sync::Arc};
@@ -71,6 +71,7 @@ fn flash_ragged_b4_matches_b1_and_preserves_inactive_and_adopted_rows() {
             staging_bytes: 16 * 1024 * 1024,
             pack_bytes: 64 * 1024 * 1024,
         }),
+        FlashExecutionOptions::from_environment().unwrap(),
     )
     .unwrap();
     drop(loader);

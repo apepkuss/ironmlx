@@ -96,6 +96,9 @@ fn flash_prefix_cross_process_exact_b1_b2_b4() {
             min_free_bytes: 0,
         });
     }
+    request.execution =
+        ironmlx_lm::models::qwen4_exp::text_model::FlashExecutionOptions::from_environment()
+            .unwrap();
     let plan = FlashLoadPlan::inspect(Path::new(&snapshot), &request).unwrap();
     let loader = plan.open_loader(Path::new(&snapshot)).unwrap();
     let model = plan.build_model(&loader).unwrap();

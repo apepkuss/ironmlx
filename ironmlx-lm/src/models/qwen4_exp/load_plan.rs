@@ -2,7 +2,7 @@
 //! routed experts are either resident or served by a separately bounded cache.
 use super::{
     config::FlashTextConfig,
-    text_model::{ExpertPagingOptions, FlashTextModel},
+    text_model::{ExpertPagingOptions, FlashExecutionOptions, FlashTextModel},
 };
 use crate::core::{
     residency::{ExpertResidency, ResidencyPlan, ResidencyRequest},
@@ -24,6 +24,7 @@ pub struct FlashLoadRequest {
     pub active_pages: Option<crate::core::active_pages::ActivePagesConfig>,
     pub expert_residency: ExpertResidency,
     pub expert_cache_limit_bytes: u64,
+    pub execution: FlashExecutionOptions,
 }
 impl FlashLoadRequest {
     pub fn new(
@@ -48,11 +49,13 @@ impl FlashLoadRequest {
             } else {
                 16 * GIB
             },
+            execution: FlashExecutionOptions::default(),
         }
     }
     /// Optional explicit process configuration, shared by App and CLI. Invalid
     /// settings are errors, never a silent return to full-weight loading.
     pub fn with_environment(mut self) -> Result<Self> {
+        self.execution = FlashExecutionOptions::from_environment()?;
         if let Ok(value) = std::env::var("IRONMLX_FLASH_EXPERT_RESIDENCY") {
             self.expert_residency = match value.as_str() {
                 "auto" => ExpertResidency::Auto,
@@ -107,6 +110,8 @@ pub struct FlashLoadPlan {
     pub ple_staging_bytes: usize,
     pub qsa_scratch_bytes: usize,
     pub paging: Option<ExpertPagingOptions>,
+    #[serde(skip)]
+    pub execution: FlashExecutionOptions,
 }
 impl FlashLoadPlan {
     pub fn inspect(path: &Path, request: &FlashLoadRequest) -> Result<Self> {
@@ -281,6 +286,7 @@ impl FlashLoadPlan {
             ple_staging_bytes: 16 * MIB as usize,
             qsa_scratch_bytes: usize::try_from(scratch)?,
             paging,
+            execution: request.execution,
         })
     }
     pub fn open_loader(&self, path: &Path) -> Result<Loader> {
@@ -301,6 +307,7 @@ impl FlashLoadPlan {
             self.ple_staging_bytes,
             self.qsa_scratch_bytes,
             self.paging,
+            self.execution,
         )?;
         if let Some(config) = &self.active_pages {
             model = model.with_active_state(config.clone())?;

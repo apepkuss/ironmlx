@@ -4,7 +4,7 @@ use ironmlx_core::sampler::Sampler;
 use ironmlx_lm::{
     core::{tensor_file::ModelTensorFiles, Loader, Tokenizer},
     models::{
-        qwen4_exp::text_model::{ExpertPagingOptions, FlashTextModel},
+        qwen4_exp::text_model::{ExpertPagingOptions, FlashExecutionOptions, FlashTextModel},
         DFlash2DraftModel,
     },
 };
@@ -75,6 +75,7 @@ fn flash_ordinary_and_real_dflash2_generation_match_exactly() {
             staging_bytes: 16 * 1024 * 1024,
             pack_bytes: 64 * 1024 * 1024,
         }),
+        FlashExecutionOptions::from_environment().unwrap(),
     )
     .unwrap();
     drop(loader);

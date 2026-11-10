@@ -9,7 +9,7 @@
 //! mask; the output line counts them as `qsa_mask_steps`.
 use ironmlx_lm::{
     core::{tensor_file::ModelTensorFiles, Loader},
-    models::qwen4_exp::text_model::FlashTextModel,
+    models::qwen4_exp::text_model::{FlashExecutionOptions, FlashTextModel},
 };
 use mlx::Dtype;
 use sha2::{Digest, Sha256};
@@ -65,6 +65,7 @@ fn real_flash_resident_decode_digest() {
         16 * 1024 * 1024,
         scratch,
         None,
+        FlashExecutionOptions::from_environment().unwrap(),
     )
     .unwrap();
     drop(loader);

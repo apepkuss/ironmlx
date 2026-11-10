@@ -245,8 +245,7 @@ impl FlashTextModel {
             .map(|_| (0..batch).map(|_| Vec::new()).collect())
             .collect();
         let result = (|| {
-            if self.expert_paging_enabled()
-                && self.native_paged_batching
+            if self.native_paged_batching_enabled()
                 && batch > 1
                 && (!mode.is_verify() || self.layer_major_verify)
             {
@@ -492,7 +491,7 @@ impl Model for FlashTextModel {
         Some(Arc::clone(&self.paging_telemetry))
     }
     fn requires_split_batched_prefill_for_token_parity(&self) -> bool {
-        !(self.expert_paging_enabled() && self.native_paged_batching)
+        !self.native_paged_batching_enabled()
     }
 
     fn requires_b1_prefill_partition(&self) -> bool {
