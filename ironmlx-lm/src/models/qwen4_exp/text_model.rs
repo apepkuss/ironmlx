@@ -886,6 +886,10 @@ impl FlashTextModel {
         let streams = vec![&embedding; self.config.hc_count as usize];
         let mut hyper = mlx::ops::shape::concatenate_on(&streams, -1, target)?;
         let mut captures = Vec::new();
+        // Resident single-token decode reads nothing back between groups, so
+        // its groups are submitted without waiting. Paged paths keep the wait.
+        let nonblocking = seq == 1 && self.experts.is_none() && self.active_pages.is_none();
+        let mut submitted = SubmittedGroup(None);
         for (index, state) in cache.layers.iter_mut().enumerate() {
             hyper = self.forward_layer_on(
                 index,
@@ -906,7 +910,12 @@ impl FlashTextModel {
             }
             // Submit bounded subgraphs; do not retain a 48-layer lazy graph.
             if index % 4 == 3 {
-                hyper.eval()?;
+                if nonblocking {
+                    mlx::transforms::async_eval(&[&hyper])?;
+                    submitted.0 = Some(hyper.clone());
+                } else {
+                    hyper.eval()?;
+                }
             }
         }
         let hidden = self.mixer.final_mix_on(&hyper, target)?;
@@ -914,6 +923,8 @@ impl FlashTextModel {
         for capture in &captures {
             capture.eval()?;
         }
+        // `hidden` depends on every submitted group, so nothing is in flight.
+        submitted.0 = None;
         cache.position += seq;
         Ok(FlashHiddenOutput { hidden, captures })
     }
@@ -923,6 +934,18 @@ impl FlashTextModel {
     }
     pub(crate) fn project_on(&self, hidden: &Array, target: StreamOrDevice) -> Result<Array> {
         self.head.forward_on(hidden, target)
+    }
+}
+
+/// The last group submitted without waiting. If the forward returns early,
+/// dropping this waits for that group so no submitted work outlives the call.
+struct SubmittedGroup(Option<Array>);
+
+impl Drop for SubmittedGroup {
+    fn drop(&mut self) {
+        if let Some(group) = self.0.take() {
+            let _ = group.eval();
+        }
     }
 }
 
