@@ -10,7 +10,7 @@ use ironmlx_lm::{
         dflash2::{
             DFlash2DraftModel, DFlash2Target, DFlash2TargetForwardMode as Mode, DFlash2TargetOutput,
         },
-        qwen4_exp::text_model::{ExpertPagingOptions, FlashTextModel},
+        qwen4_exp::text_model::{ExpertPagingOptions, FlashExecutionOptions, FlashTextModel},
     },
 };
 use mlx::{Array, Dtype};
@@ -296,6 +296,7 @@ fn fixture() -> (FlashTextModel, DFlash2DraftModel) {
                 64 << 20
             },
         }),
+        FlashExecutionOptions::from_environment().unwrap(),
     )
     .unwrap();
     drop(loader);

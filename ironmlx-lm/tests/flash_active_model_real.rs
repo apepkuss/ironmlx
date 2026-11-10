@@ -116,6 +116,9 @@ fn flash_active_full_vocab_quality_and_b2_b4_isolation() {
         ironmlx_lm::core::residency::ExpertResidency::Ssd
     };
     request.expert_cache_limit_bytes = 2 << 30;
+    request.execution =
+        ironmlx_lm::models::qwen4_exp::text_model::FlashExecutionOptions::from_environment()
+            .unwrap();
     let plan = FlashLoadPlan::inspect(Path::new(&path), &request).unwrap();
     let loader = plan.open_loader(Path::new(&path)).unwrap();
     let model = plan.build_model(&loader).unwrap();

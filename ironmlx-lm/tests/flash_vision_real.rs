@@ -6,7 +6,7 @@ use ironmlx_lm::{
     },
     models::{
         dflash2::{DFlash2Target, DFlash2TargetForwardMode},
-        qwen4_exp::text_model::{ExpertPagingOptions, FlashTextModel},
+        qwen4_exp::text_model::{ExpertPagingOptions, FlashExecutionOptions, FlashTextModel},
     },
 };
 use mlx::{Array, Dtype};
@@ -73,6 +73,7 @@ fn flash_image_tower_positions_full_graph_and_speculative_restore() {
             staging_bytes: 16 << 20,
             pack_bytes: 2 << 30,
         }),
+        FlashExecutionOptions::from_environment().unwrap(),
     )
     .unwrap();
     drop(loader);

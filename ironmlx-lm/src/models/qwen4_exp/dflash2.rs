@@ -22,7 +22,7 @@ impl DFlash2Target for FlashTextModel {
     }
 
     fn dflash2_group_cost_policy(&self) -> bool {
-        self.expert_paging_enabled() && self.native_paged_batching
+        self.native_paged_batching_enabled()
     }
 
     fn dflash2_validate_draft_config(&self, draft: &DFlash2Config) -> Result<()> {
@@ -115,7 +115,7 @@ impl DFlash2Target for FlashTextModel {
             )
         });
         format!("qwen38-flash-next-vl-v5{active};mlx=65383d68c;numeric-base=a8f66b590;rope=reference-power;quant={quant};capture=completed-hc-mean;ple=bounded-ssd;experts={};dispatch=source-e512;prefill=scheduler-image-tail-v1;verify={};paging-batch={};prefix=v1;artifact={}",
-            if self.expert_paging_enabled(){"bounded-ssd"}else{"resident"},if self.layer_major_verify{"layer-major-q1"}else{"token-major-q1"},if self.native_paged_batching && self.expert_paging_enabled(){"native"}else{"row"}, self.artifact_identity)
+            if self.expert_paging_enabled(){"bounded-ssd"}else{"resident"},if self.layer_major_verify{"layer-major-q1"}else{"token-major-q1"},if self.native_paged_batching_enabled(){"native"}else{"row"}, self.artifact_identity)
     }
     fn dflash2_instance(&self) -> Option<&DFlash2Instance> {
         Some(&self.dflash_instance)
