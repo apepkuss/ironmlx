@@ -52,6 +52,7 @@ PAGES = (
     ("storage-and-uninstall.md", "Storage and uninstall", "数据位置与卸载", "Find local data and remove the app when needed.", "查找本地数据目录与卸载方法。"),
     ("support.md", "Support", "获取支持", "Find reporting guidance and the supported platform.", "了解支持平台与问题反馈方式。"),
     ("versioning-and-releases.md", "Versioning and releases", "版本与发布", "Understand version numbers and release channels.", "了解版本编号与发布渠道。"),
+    ("release-notes/0.4.0.md", "0.4.0 release notes", "0.4.0 发布说明", "Review the changes in version 0.4.0.", "查看 0.4.0 版本的变更。"),
     ("release-notes/0.3.0.md", "0.3.0 release notes", "0.3.0 发布说明", "Review the changes in version 0.3.0.", "查看 0.3.0 版本的变更。"),
     ("release-notes/0.2.0.md", "0.2.0 release notes", "0.2.0 发布说明", "Review the changes in version 0.2.0.", "查看 0.2.0 版本的变更。"),
     ("release-notes/0.1.0.md", "0.1.0 release notes", "0.1.0 发布说明", "Review the changes in version 0.1.0.", "查看 0.1.0 版本的变更。"),
@@ -67,8 +68,8 @@ GROUPS = (
     ("agents", "Supported agents", "支持的 Agents", "Configure supported agent applications to use local IronMLX inference.", "配置受支持的 Agent 应用，连接 IronMLX 本地推理服务。", PAGES[24:28]),
     ("inference", "CLI & advanced configuration", "CLI 与高级配置", "Configure CLI serving, acceleration, and optional offline calibration.", "配置 CLI 服务、生成加速与可选的离线性能校准。", PAGES[28:32]),
     ("maintenance", "Maintenance & troubleshooting", "维护与排障", "Keep the app running and investigate problems.", "维护应用运行，诊断与处理问题。", PAGES[32:38]),
-    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[38:42]),
-    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[42:]),
+    ("releases", "Releases", "发布", "Review versions, release channels, and release notes.", "查看版本信息、发布渠道与发布说明。", PAGES[38:43]),
+    ("security", "Security & licensing", "安全与许可", "Understand privacy, access, and model usage boundaries.", "了解隐私、访问权限与模型使用边界。", PAGES[43:]),
 )
 PAGE_MAP = {entry[0]: entry for entry in PAGES}
 GROUP_MAP = {entry[0]: group for group in GROUPS for entry in group[5]}
