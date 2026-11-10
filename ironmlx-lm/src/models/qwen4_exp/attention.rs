@@ -161,6 +161,47 @@ fn positions(start: i32, length: i32, stride: i32) -> Result<Array> {
     Ok(Array::try_from((all.as_slice(), [3, 1, length]))?)
 }
 
+/// Flag slot written by every pick of one decode row: its block index, or the
+/// spare slot `blocks` for a sentinel or an index past the completed blocks.
+/// The scatter that consumes these slots has no bounds check.
+fn decode_slots_on(selected: &Array, blocks: i32, target: StreamOrDevice) -> Result<Array> {
+    // As u32 a negative index is larger than any block index, so one
+    // `minimum` sends both out-of-range sides to the spare slot.
+    let spare = Array::try_from((&[blocks as u32][..], ()))?;
+    Ok(selected
+        .astype_on(Dtype::Uint32, target)?
+        .minimum_on(&spare, target)?
+        .reshape_on([selected.size() as i32], target)?)
+}
+
+/// Bool `[1,1,1,total]` mask for one decode row: every selected completed
+/// block plus the incomplete tail, built without reading `selected` back to
+/// the host. `selected` holds `picks` Int32 block indices with `-1` sentinels.
+fn decode_mask_on(
+    selected: &Array,
+    total: i32,
+    ratio: i32,
+    target: StreamOrDevice,
+) -> Result<Array> {
+    let blocks = total / ratio;
+    let index = decode_slots_on(selected, blocks, target)?;
+    let flags = mlx::ops::indexing::put_along_axis_on(
+        &Array::zeros_on([blocks + 1], Dtype::Bool, target)?,
+        &index,
+        &Array::try_from((&[true][..], ()))?,
+        0,
+        target,
+    )?;
+    let mut row =
+        mlx::ops::shape::repeat_on(&flags.slice_on([0], [blocks], target)?, ratio, 0, target)?;
+    let tail = total - blocks * ratio;
+    if tail > 0 {
+        let visible = Array::try_from((vec![true; tail as usize].as_slice(), [tail]))?;
+        row = concatenate_on(&[&row, &visible], 0, target)?;
+    }
+    Ok(row.reshape_on([1, 1, 1, total], target)?)
+}
+
 fn append(old: &Option<Array>, new: &Array, axis: i32, target: StreamOrDevice) -> Result<Array> {
     Ok(match old {
         Some(old) => concatenate_on(&[old, new], axis, target)?,
@@ -323,25 +364,8 @@ impl QsaAttention {
         if seq > 1 || state.uses_paged_at(total, cfg.num_key_value_heads, cfg.head_dim) {
             return Ok((None, Some(selected)));
         }
-        let selected_host = selected.to_vec::<i32>()?;
-        let mut mask = vec![false; (seq * total) as usize];
-        for t in 0..seq {
-            let end = state.offset + t + 1;
-            let complete = end / ratio;
-            let row = &mut mask[(t * total) as usize..((t + 1) * total) as usize];
-            if complete <= picks {
-                row[..end as usize].fill(true);
-            } else {
-                for &block in &selected_host[(t * picks) as usize..((t + 1) * picks) as usize] {
-                    if block >= 0 && block < complete {
-                        row[(block * ratio) as usize..((block + 1) * ratio) as usize].fill(true);
-                    }
-                }
-                row[(complete * ratio) as usize..end as usize].fill(true);
-            }
-        }
         Ok((
-            Some(Array::try_from((mask.as_slice(), [1, 1, seq, total]))?),
+            Some(decode_mask_on(&selected, total, ratio, target)?),
             Some(selected),
         ))
     }
@@ -502,5 +526,74 @@ impl QsaAttention {
         state.offset += seq;
         *cache = state;
         Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The host loop the GPU mask replaced, for one decode row.
+    fn host_decode_mask(selected: &[i32], total: i32, ratio: i32) -> Vec<bool> {
+        let complete = total / ratio;
+        let mut row = vec![false; total as usize];
+        for &block in selected {
+            if block >= 0 && block < complete {
+                row[(block * ratio) as usize..((block + 1) * ratio) as usize].fill(true);
+            }
+        }
+        row[(complete * ratio) as usize..].fill(true);
+        row
+    }
+
+    fn mask(selected: &[i32], total: i32, ratio: i32) -> Vec<bool> {
+        let picks = selected.len() as i32;
+        let array = Array::try_from((selected, [1, 1, picks])).unwrap();
+        let mask = decode_mask_on(&array, total, ratio, ().into()).unwrap();
+        assert_eq!(mask.shape().as_slice(), [1, 1, 1, total]);
+        assert_eq!(mask.dtype(), Dtype::Bool);
+        mask.to_vec::<bool>().unwrap()
+    }
+
+    #[test]
+    fn decode_mask_matches_host_reference() {
+        let spread = |count: i32, last: i32| -> Vec<i32> {
+            (0..count).rev().map(|i| i * last / (count - 1)).collect()
+        };
+        let mut with_sentinels = vec![-1, -1, -1];
+        with_sentinels.extend(spread(509, 824));
+        // Indices past the completed blocks select nothing, like sentinels.
+        let mut past_the_end = vec![825, 830, i32::MAX];
+        past_the_end.extend(spread(509, 824));
+        let cases: [(Vec<i32>, i32); 6] = [
+            (past_the_end, 3301),
+            ((1..=512).collect(), 2052),
+            ((1..=512).collect(), 2053),
+            ((0..=511).collect(), 2055),
+            (spread(512, 824), 3301),
+            (with_sentinels, 3301),
+        ];
+        for (selected, total) in cases {
+            assert_eq!(selected.len(), 512);
+            assert_eq!(
+                mask(&selected, total, 4),
+                host_decode_mask(&selected, total, 4),
+                "total={total}"
+            );
+        }
+        let small = mask(&[2, 0], 14, 4);
+        let expected: Vec<bool> = (0..14).map(|column| !(4..8).contains(&column)).collect();
+        assert_eq!(small, expected);
+    }
+
+    #[test]
+    fn decode_slots_stay_inside_the_flag_buffer() {
+        let selected = [-1, i32::MIN, 0, 512, 513, 520, i32::MAX];
+        let array = Array::try_from((&selected[..], [1, 1, 7])).unwrap();
+        let slots = decode_slots_on(&array, 513, ().into()).unwrap();
+        assert_eq!(
+            slots.astype(Dtype::Int32).unwrap().to_vec::<i32>().unwrap(),
+            [513, 513, 0, 512, 513, 513, 513]
+        );
     }
 }
