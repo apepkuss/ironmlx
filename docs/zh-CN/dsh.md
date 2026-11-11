@@ -47,7 +47,7 @@ rm -f "$probe_file"
 
 文本轮应以 `completed` 结束并返回 `IRONMLX_OK`；工具轮应有匹配的 `tool_call` 和成功的 `tool_result`，返回文件标记并以 `completed` 结束。仅收到描述读取动作的文本不算通过。官方 Desktop 请重新打开应用并新建 IronMLX 会话，在聊天中使用相同的文件读取检查。
 
-已验证仅安装社区版时的官方未安装提示与配置隔离；安装官方 Desktop `0.2.1-rc.2` 后，已核对签名发布包标识 `com.deepseek.dsh` 并通过真实安装检测。成功写入、旧版本、合并、备份、重复执行和阻止条件通过临时目录验证。官方 Desktop `0.2.1-rc.2` 已通过同一原生配置服务的真实写入验证，确认备份权限、默认模型、原有设置和社区版配置均符合预期。重新打开官方 Desktop 后，已确认默认使用 IronMLX 的 Qwen3.5-4B-MLX-4bit，并发送“Hi”收到正常回复。2026-11-01 已使用官方 Desktop 携带的 CLI、隔离 home 与原生一键配置服务，完成官方 CLI 文本回复和真实工具执行验收，详见[客户端验收证据](../validation/agent-client-acceptance.json)。配置成功提示本身不代表已完成聊天验证。
+已验证仅安装社区版时的官方未安装提示与配置隔离；安装官方 Desktop `0.2.1-rc.2` 后，已核对签名发布包标识 `com.deepseek.dsh` 并通过真实安装检测。成功写入、旧版本、合并、备份、重复执行和阻止条件通过临时目录验证。官方 Desktop `0.2.1-rc.2` 已通过同一原生配置服务的真实写入验证，确认备份权限、默认模型、原有设置和社区版配置均符合预期。重新打开官方 Desktop 后，已确认默认使用 IronMLX 的 Qwen3.5-4B-MLX-4bit，并发送“Hi”收到正常回复。2026-11-01 已使用官方 Desktop 携带的 CLI、隔离 home 与原生一键配置服务，完成官方 CLI 文本回复和真实工具执行验收。配置成功提示本身不代表已完成聊天验证。
 
 ## DSH Desktop App 配置
 
@@ -65,7 +65,7 @@ rm -f "$probe_file"
 
 已有文件在修改前保存为同目录下的 `*.ironmlx-backup-<UUID>`；保留其他 provider 和设置，YAML 格式及注释可能被规范化，原始文本可从备份恢复。重复应用相同配置不重复生成备份。单轮输出预算最多采用 `4096` tokens，并受模型公布容量限制。
 
-“配置已保存”只表示写入完成。打开社区版 DSH Desktop，新建会话并选择 **IronMLX / 你的模型**，按下文验证连接。本机未安装时的提示已通过原生 Dashboard 测试；已安装路径使用临时配置验证；2026-11-01 已通过真实社区 Desktop host 执行一次 read，返回随机文件标记、isError=false，且会话正常完成，详见[客户端验收证据](../validation/agent-client-acceptance.json)。已成功的文本聊天直接复用。
+“配置已保存”只表示写入完成。打开社区版 DSH Desktop，新建会话并选择 **IronMLX / 你的模型**，按下文验证连接。本机未安装时的提示已通过原生 Dashboard 测试；已安装路径使用临时配置验证；2026-11-01 已通过真实社区 Desktop host 执行一次 read，返回随机文件标记、isError=false，且会话正常完成。已成功的文本聊天直接复用。
 
 ### 手动配置
 
@@ -101,7 +101,7 @@ DSH Desktop 通过 GUI 保存提供方配置，不会自动加载 CLI overlay，
 
 验证 Desktop 路径时，新建会话并选择 IronMLX 模型，要求模型只回复 `IRONMLX_OK`。正常返回即可确认提供方发现和 Responses 请求可用。工具仍由 DSH Desktop 在本机执行；IronMLX 只负责推理和返回结构化工具调用。
 
-验证工具调用时，创建一个包含随机标记的临时文本文件，在 Desktop 聊天中要求使用 `read` 读取该文件。应确认实际读取动作、成功的工具结果，以及包含标记的最终回复。已安装的社区 Desktop host 已通过此项，详见[客户端验收证据](../validation/agent-client-acceptance.json)。
+验证工具调用时，创建一个包含随机标记的临时文本文件，在 Desktop 聊天中要求使用 `read` 读取该文件。应确认实际读取动作、成功的工具结果，以及包含标记的最终回复。已安装的社区 Desktop host 已通过此项。
 
 ### 常见配置问题
 

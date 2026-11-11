@@ -83,6 +83,6 @@ Hermes 负责执行 terminal、MCP 等工具，并将工具结果回传给 IronM
 
 ## 已记录的客户端验证
 
-2026-10-22 的真实 CLI 会话使用专用 `ironmlx` Profile，记录了执行 `pwd` 的一次 `terminal` 调用、匹配且 `exit_code: 0` 的工具结果，以及最终回复中的实际工作目录。2026-11-01 的验收核对直接复用此记录，详见[客户端验收证据](../validation/agent-client-acceptance.json)。
+2026-10-22 的真实 CLI 会话使用专用 `ironmlx` Profile，记录了执行 `pwd` 的一次 `terminal` 调用、匹配且 `exit_code: 0` 的工具结果，以及最终回复中的实际工作目录。2026-11-01 的验收核对直接复用此记录。
 
 `hermesRepositoryAcceptsGeneratedProfileAndProvider` 仅在设置 `IRONMLX_TEST_HERMES_REPO` 与 `IRONMLX_TEST_HERMES_PYTHON` 时执行可选的仓库检查。该项只验证 Profile／Provider 解析，不执行文本或工具轮次；默认测试及配置解析检查不能代替上方“验证”中的真实命令。相关实现未变化且未出现新问题时复用已有客户端证据。

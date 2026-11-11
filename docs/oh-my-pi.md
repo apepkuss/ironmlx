@@ -82,7 +82,7 @@ If it fails, check the endpoint, model ID and template support, then see [Troubl
 
 ## Recorded client verification
 
-The OMP 18.12.6 run on 2026-10-22 explicitly enabled the real-client test and passed both text and tool checks: `IRONMLX_OK`, one `bash` execution, and no tool error. This evidence was reused in the 2026-11-01 acceptance review; see the [client acceptance evidence](validation/agent-client-acceptance.json).
+The OMP 18.12.6 run on 2026-10-22 explicitly enabled the real-client test and passed both text and tool checks: `IRONMLX_OK`, one `bash` execution, and no tool error. This evidence was reused in the 2026-11-01 acceptance review.
 
 The live test is opt-in. From the repository root, with OMP installed and `mlx-community/Qwen3.5-4B-MLX-4bit` loaded on port 9068, run:
 

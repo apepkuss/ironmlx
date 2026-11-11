@@ -47,7 +47,7 @@ rm -f "$probe_file"
 
 The text turn must finish with `completed` and return `IRONMLX_OK`. The tool turn must contain matching `tool_call` and successful `tool_result` events, return the file marker, and finish with `completed`. A text description of a read is insufficient. For official Desktop, reopen the app and start a new IronMLX chat; use the same file-reading check in chat.
 
-Official missing-installation prompts and isolation were verified with only community Desktop installed. After installing official Desktop `0.2.1-rc.2`, its signed distribution identity `com.deepseek.dsh` and real installation detection were verified. Successful writes, version gates, merges, backups, repeated setup, and stop conditions are tested in temporary directories. Official Desktop `0.2.1-rc.2` has also passed real configuration writes through the same native service, including backup permissions, default model, preserved settings, and community isolation. After reopening official Desktop, its default selection used IronMLX with Qwen3.5-4B-MLX-4bit, and a Hi message received a normal reply. Official CLI text and tool execution were subsequently verified on 2026-11-01 using the installed official Desktop CLI, an isolated home, and production one-click configuration. See the [client acceptance evidence](validation/agent-client-acceptance.json). A saved-configuration result alone does not certify a chat turn.
+Official missing-installation prompts and isolation were verified with only community Desktop installed. After installing official Desktop `0.2.1-rc.2`, its signed distribution identity `com.deepseek.dsh` and real installation detection were verified. Successful writes, version gates, merges, backups, repeated setup, and stop conditions are tested in temporary directories. Official Desktop `0.2.1-rc.2` has also passed real configuration writes through the same native service, including backup permissions, default model, preserved settings, and community isolation. After reopening official Desktop, its default selection used IronMLX with Qwen3.5-4B-MLX-4bit, and a Hi message received a normal reply. Official CLI text and tool execution were subsequently verified on 2026-11-01 using the installed official Desktop CLI, an isolated home, and production one-click configuration. A saved-configuration result alone does not certify a chat turn.
 
 ## DSH Desktop App configuration
 
@@ -65,7 +65,7 @@ If the existing `llm-pi-ai` entry has `disabled: true`, setup reports a conflict
 
 Existing files are backed up beside the originals as `*.ironmlx-backup-<UUID>` before modification. Other providers and settings are retained; YAML formatting and comments may be normalized, with original text retained in backups. Reapplying unchanged configuration does not create more backups. The output budget is capped at 4096 tokens and bounded by advertised model capacity.
 
-Configuration saved is separate from connection verified: open community DSH Desktop, start a new chat, select **IronMLX / your model**, and run the verification below. Native Dashboard tests cover the uninstalled machine; configuration writes are tested in temporary fixtures. The installed community Desktop host passed real tool execution on 2026-11-01: one read call returned a random file marker with isError=false and the turn completed. See the [client acceptance evidence](validation/agent-client-acceptance.json); the existing successful text chat was reused.
+Configuration saved is separate from connection verified: open community DSH Desktop, start a new chat, select **IronMLX / your model**, and run the verification below. Native Dashboard tests cover the uninstalled machine; configuration writes are tested in temporary fixtures. The installed community Desktop host passed real tool execution on 2026-11-01: one read call returned a random file marker with isError=false and the turn completed. The existing successful text chat was reused.
 
 ### Manual setup
 
@@ -101,7 +101,7 @@ On the IronMLX Dashboard **Agent** page, select **DSH Desktop**. The guide provi
 
 To verify the Desktop path, start a new chat with the IronMLX model and ask it to reply with exactly `IRONMLX_OK`. A normal response confirms provider discovery and a Responses request. Tool execution still happens inside DSH Desktop; IronMLX only performs inference and returns structured tool calls.
 
-For tool verification, create a disposable text file containing a random marker and ask the Desktop chat to use `read` to read that file. Confirm an actual read action, a successful tool result, and a final reply containing the marker. The installed community host passed this check; see the [client acceptance evidence](validation/agent-client-acceptance.json).
+For tool verification, create a disposable text file containing a random marker and ask the Desktop chat to use `read` to read that file. Confirm an actual read action, a successful tool result, and a final reply containing the marker. The installed community host passed this check.
 
 ### Common configuration problems
 

@@ -135,17 +135,14 @@ OpenCode 2.2.5 CLI 与 Desktop 使用该配置连接 App 管理的 Qwen3.8-27B 4
 unevaluated 属性。模型调用到达本地执行器时已还原为原始参数对象；文件中的
 随机标记出现在最终回答和后续历史回放中。Desktop 界面已确认工具调用完成，
 以及 Low 思考档的后续回放；独立 CLI 传输检查覆盖 None、Low、Medium、Xhigh。
-此项不代表 AFT 完整插件运行时或可选格式断言已验收，详见
-[Schema 验收记录](../validation/json-schema-full-acceptance.json)。
+此项不代表 AFT 完整插件运行时或可选格式断言已验收。
 
 后续补测已在显式格式断言模式下通过全部 1,074 个官方 optional 实例，包括
 国际化域名和邮箱；默认注释行为单独验证。OpenCode 2.2.5 还在隔离项目中加载了
 官方 AFT 0.63.5 npm 包及原生程序。启用全部 AFT 工具后，实际发布的 28 个工具
 Schema（含宿主工具）均被接受；真实 `aft_callgraph`、`aft_outline` 及历史回放
 返回了本地仓库中随机命名的函数。此项覆盖用户报告的插件集成，未覆盖语义向量、
-远程集成和 AFT 每项业务操作，详见
-[真实 AFT 记录](../validation/opencode-aft-real-acceptance.json) 和
-[optional 测试记录](../validation/json-schema-optional-acceptance.json)。
+远程集成和 AFT 每项业务操作。
 
 
 2026-11-06，分支构建的真实 macOS App 已通过连续验收：在 Dashboard 点击一键配置，
@@ -156,9 +153,7 @@ Qwen3.5-4B 4bit 模型。文本检查返回 `IRONMLX_OK`；一次成功的 `read
 262144-token 上下文容量和 4096-token 输出上限。
 
 本轮验证覆盖本地 ad-hoc App 的 Dashboard 到 CLI 功能链路；发布包、交互式 TUI、
-长上下文压缩、开启思考和视觉请求不在此次验收范围。此前的 fixture 和传输捕获
-检查仍保留。版本身份、检查结果、已复现问题和验证边界见
-[验收证据](../validation/opencode-chat-acceptance.json)。
+长上下文压缩、开启思考和视觉请求不在此次验收范围。
 
 2026-11-07 的单独 Desktop 验收补齐了此前 CLI 验收遗漏的 Desktop 运行时识别和
 DFlash2 独占模型识别。仅安装 OpenCode Desktop 2.2.5 时，在真实 Dashboard

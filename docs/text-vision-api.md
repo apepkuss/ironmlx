@@ -700,8 +700,6 @@ Native grammar lowering still has depth, size and expression limits; these selec
 
 Tool arguments and structured final answers use object-oriented API contracts. Structured-output schemas must declare an object-only root, directly or through references/composition; nullable roots and untyped `{}` roots are rejected, and successful final answers are checked again to be objects. `strict:true` additionally requires `additionalProperties:false` and every declared property in `required` for object schemas, including referenced definitions. Strict value schemas must declare a type, finite `const`/`enum`, or a reference/composition establishing such a shape; array elements must also have a constrained shape. Constraint fragments need not repeat their enclosing type. Ordinary non-strict parameters retain standard `{}` semantics. Strict validation never silently falls back to a weaker profile. Successful completion does not guarantee that every valid schema is easy for every model to generate; check truncation and error status before executing tools or consuming structured output.
 
-API profile regression evidence is recorded in [the contract acceptance report](validation/json-schema-api-contract-acceptance.json).
-
 ### Output budgets
 
 Input (including templates and images) plus requested output must fit the effective context capacity; excess returns 413 request_token_capacity_exceeded. max_output_tokens/max_tokens include reasoning, answer text and tool calls.

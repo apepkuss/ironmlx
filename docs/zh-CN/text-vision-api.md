@@ -774,8 +774,6 @@ Schema 校验采用 OpenCode 2.2.5 使用的 Draft 2020-12 语义。固定版本
 
 工具参数与结构化最终回答采用面向对象的 API 契约。结构化输出的 Schema 必须直接或通过引用、组合声明仅允许对象的根类型；可空根类型和未声明类型的 `{}` 根会被拒绝，成功的最终回答还会再次检查是否为对象。`strict:true` 额外要求对象 Schema 设置 `additionalProperties:false`，且所有声明属性列入 `required`，包括引用的定义。严格模式下，每个值 Schema 必须声明类型、有限的 `const`/`enum`，或通过引用、组合明确其结构；数组元素也必须有明确约束。附加约束片段不必重复外层类型。普通非严格参数仍保留标准 `{}` 语义，严格校验不会静默降级。通过完成校验不代表所有模型都容易生成任意合法 Schema；执行工具或消费结构化输出前，仍需检查截断和错误状态。
 
-API 契约回归证据见[契约验收记录](../validation/json-schema-api-contract-acceptance.json)。
-
 ### 输出预算
 
 输入（包括模板与图片）加请求输出预算必须符合有效上下文容量，超限返回 413 request_token_capacity_exceeded。max_output_tokens/max_tokens 包含思考、正文与工具调用。

@@ -156,8 +156,7 @@ The model call reached the local executor as the original argument object; its
 random file marker appeared in the final answer and subsequent history replay.
 Desktop visibly completed the tool call and a Low reasoning follow-up. Separate
 CLI transport checks cover None, Low, Medium and Xhigh. This is not a full AFT
-plugin-runtime or optional-format qualification. See the
-[Schema acceptance record](validation/json-schema-full-acceptance.json).
+plugin-runtime or optional-format qualification.
 
 A follow-up passed all 1,074 official optional instances with explicit format
 assertions, including internationalized hostnames and email addresses. Default
@@ -167,9 +166,7 @@ All 28 advertised tool schemas (including host tools, with all AFT tools enabled
 were accepted; real `aft_callgraph`, `aft_outline` and history replay returned
 randomly named functions from the local repository. This covers the reported
 plugin integration; semantic embeddings, remote integrations and every AFT
-business operation are outside this regression. See the
-[real AFT record](validation/opencode-aft-real-acceptance.json) and
-[optional suite record](validation/json-schema-optional-acceptance.json).
+business operation are outside this regression.
 
 
 On 2026-11-06, continuous acceptance passed with the branch's real macOS App:
@@ -183,9 +180,7 @@ advertised the live model's 262144-token context and 4096-token output limit.
 
 This verifies the Dashboard-to-CLI functional path using a local ad-hoc App build;
 it does not qualify release packaging, the interactive TUI, long-context
-compaction, reasoning-on, or vision. Earlier fixture and captured-transport
-checks are preserved alongside identities, results, and coverage boundaries in the
-[acceptance evidence](validation/opencode-chat-acceptance.json).
+compaction, reasoning-on, or vision.
 
 On 2026-11-07, a separate Desktop check closed two gaps in that earlier CLI-only
 acceptance: Desktop runtime discovery and exclusive DFlash2 model discovery.
