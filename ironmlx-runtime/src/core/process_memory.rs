@@ -700,6 +700,34 @@ impl ProcessMemoryGovernor {
         self.update(native_memory_telemetry())
     }
 
+    /// Sample after this process released buffers, until `settled` accepts a
+    /// sample. The footprint the system reports keeps falling for a few
+    /// hundred milliseconds after a release: a decision taken on the first
+    /// sample charges the caller for memory that is already on its way out.
+    /// The wait ends early once the footprint has stopped falling.
+    pub fn refresh_after_release(
+        &self,
+        settled: &mut dyn FnMut(&MemoryGovernorSnapshot) -> bool,
+    ) -> MemoryGovernorSnapshot {
+        const INTERVAL: Duration = Duration::from_millis(20);
+        const MAX_WAIT: Duration = Duration::from_millis(500);
+        const FLAT_SAMPLES: u32 = 8;
+        let started = Instant::now();
+        let mut snapshot = self.refresh_process();
+        let mut flat = 0;
+        while !settled(&snapshot) && flat < FLAT_SAMPLES && started.elapsed() < MAX_WAIT {
+            std::thread::sleep(INTERVAL);
+            let next = self.refresh_process();
+            flat = if next.current_usage_bytes < snapshot.current_usage_bytes {
+                0
+            } else {
+                flat + 1
+            };
+            snapshot = next;
+        }
+        snapshot
+    }
+
     pub fn update(&self, telemetry: MemoryTelemetry) -> MemoryGovernorSnapshot {
         let mut state = self.state.lock().expect("memory governor state poisoned");
         let current = telemetry.current_usage_bytes().unwrap_or(0);

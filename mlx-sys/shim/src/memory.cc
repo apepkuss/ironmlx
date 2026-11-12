@@ -65,6 +65,10 @@ std::size_t get_peak_memory() {
   return mlx::core::get_peak_memory();
 }
 
+void reset_peak_memory() {
+  mlx::core::reset_peak_memory();
+}
+
 std::size_t get_memory_limit() {
   return mlx::core::get_memory_limit();
 }

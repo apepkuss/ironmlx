@@ -10,6 +10,7 @@ namespace cxx_mlx {
 std::size_t get_active_memory();
 std::size_t get_cache_memory();
 std::size_t get_peak_memory();
+void reset_peak_memory();
 std::size_t get_memory_limit();
 std::size_t set_cache_limit(std::size_t limit);
 std::size_t set_wired_limit(std::size_t limit);

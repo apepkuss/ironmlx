@@ -516,6 +516,39 @@ fn long_prefill_single() -> bool {
     })
 }
 
+/// Governor samples after a synchronous reclaim, until the pressure level
+/// is back to normal or the released memory has left the footprint.
+fn settle_after_reclaim(
+    governor: &crate::core::process_memory::ProcessMemoryGovernor,
+) -> crate::core::process_memory::MemoryGovernorSnapshot {
+    governor.refresh_after_release(&mut |snapshot| {
+        snapshot.pressure_level == crate::core::process_memory::PressureLevel::Normal
+    })
+}
+
+/// Return MLX's idle buffers to the system and reserve `bytes`, waiting for
+/// the release to show in the footprint while the reservation lacks headroom.
+fn reserve_after_release(
+    governor: &Arc<crate::core::process_memory::ProcessMemoryGovernor>,
+    bytes: usize,
+) -> Result<
+    crate::core::process_memory::MemoryReservation,
+    crate::core::process_memory::MemoryReservationError,
+> {
+    mlx::transforms::clear_cache();
+    let mut reservation = None;
+    governor.refresh_after_release(&mut |_| {
+        let attempt = governor.try_reserve(bytes, "dflash2_admission");
+        let settled = !matches!(
+            attempt,
+            Err(crate::core::process_memory::MemoryReservationError::InsufficientHeadroom { .. })
+        );
+        reservation = Some(attempt);
+        settled
+    });
+    reservation.unwrap_or_else(|| governor.try_reserve(bytes, "dflash2_admission"))
+}
+
 /// M5 profile setting `DFLASH2_LONG_ADMISSION_LAST_DEFER_MS`.
 fn long_admission_last_defer() -> Option<std::time::Duration> {
     static BOUND: std::sync::OnceLock<Option<std::time::Duration>> = std::sync::OnceLock::new();
@@ -1296,19 +1329,43 @@ where
                     );
                 }
                 if snapshot.pressure_level != crate::core::process_memory::PressureLevel::Normal {
-                    let retain_ratio = match snapshot.pressure_level {
-                        crate::core::process_memory::PressureLevel::Normal => 1.0,
-                        crate::core::process_memory::PressureLevel::Soft => 0.5,
-                        crate::core::process_memory::PressureLevel::Hard
-                        | crate::core::process_memory::PressureLevel::Emergency => 0.0,
-                    };
+                    // Buffers the last request released stay in MLX's pool
+                    // and count as usage: return them before anything the
+                    // prefix cache holds is charged for the pressure.
+                    mlx::transforms::clear_cache();
+                    snapshot = settle_after_reclaim(&governor);
+                }
+                if snapshot.pressure_level != crate::core::process_memory::PressureLevel::Normal {
+                    // Free what brings the process, with this request, back
+                    // under the recovery watermark: least recently used
+                    // artifacts go first, so the conversation being served
+                    // keeps its prefix whenever older ones cover the need.
+                    let recovery_bytes = (snapshot.effective_ceiling_bytes as f64
+                        * governor.config().recovery_ratio)
+                        as usize;
+                    let needed_bytes = snapshot
+                        .current_usage_bytes
+                        .saturating_add(
+                            snapshot
+                                .reserved_bytes
+                                .saturating_sub(snapshot.model_load_reserved_bytes),
+                        )
+                        .saturating_add(memory_charge.bytes())
+                        .saturating_add(vision_prefill_bytes)
+                        .saturating_sub(recovery_bytes);
                     if let Some(cache) = prefix_cache.as_mut() {
                         let cache_bytes = cache.snapshot().bytes;
-                        let target_bytes = (cache_bytes as f64 * retain_ratio) as usize;
-                        let reclaimed_bytes = cache.shrink_to(target_bytes);
+                        let target_bytes = match snapshot.pressure_level {
+                            crate::core::process_memory::PressureLevel::Emergency => 0,
+                            _ => cache_bytes.saturating_sub(needed_bytes),
+                        };
+                        let spare = cache.restorable_for(&request, &prefix_fingerprint);
+                        let reclaimed_bytes = cache.shrink_to_sparing(target_bytes, spare);
                         if reclaimed_bytes > 0 {
                             tracing::info!(
+                                needed_bytes,
                                 reclaimed_bytes,
+                                retained_bytes = cache.snapshot().bytes,
                                 ?snapshot.pressure_level,
                                 "memory governor shrank DFlash2 prefix cache"
                             );
@@ -1316,7 +1373,7 @@ where
                     }
                     worker_prefix_cache_counters.publish(prefix_cache.as_ref());
                     mlx::transforms::clear_cache();
-                    snapshot = governor.sample_process();
+                    snapshot = settle_after_reclaim(&governor);
                 }
                 if snapshot.pressure_level != crate::core::process_memory::PressureLevel::Normal {
                     let error = SchedulerError::MemoryPressure {
@@ -1328,10 +1385,47 @@ where
                     worker_in_flight.fetch_sub(1, Ordering::Release);
                     continue;
                 }
-                let governor_reservation = match governor.try_reserve(
-                    memory_charge.bytes().saturating_add(vision_prefill_bytes),
-                    "dflash2_admission",
-                ) {
+                let governor_request_bytes =
+                    memory_charge.bytes().saturating_add(vision_prefill_bytes);
+                let mut governor_reservation =
+                    governor.try_reserve(governor_request_bytes, "dflash2_admission");
+                if governor_reservation.is_err() {
+                    // Count the request against what the process really
+                    // holds: MLX's pool of released buffers goes first.
+                    governor_reservation = reserve_after_release(&governor, governor_request_bytes);
+                }
+                if let Err(
+                    crate::core::process_memory::MemoryReservationError::InsufficientHeadroom {
+                        projected_bytes,
+                        target_bytes,
+                        ..
+                    },
+                ) = &governor_reservation
+                {
+                    // The prefix cache yields to a request it leaves no room
+                    // for, oldest artifacts first. A cache smaller than the
+                    // shortfall stays: dropping it would not admit the request.
+                    let needed_bytes = projected_bytes.saturating_sub(*target_bytes);
+                    if let Some(cache) = prefix_cache.as_mut() {
+                        let cache_bytes = cache.snapshot().bytes;
+                        if cache_bytes >= needed_bytes {
+                            // The artifact this request restores goes last.
+                            let spare = cache.restorable_for(&request, &prefix_fingerprint);
+                            let reclaimed_bytes = cache
+                                .shrink_to_sparing(cache_bytes.saturating_sub(needed_bytes), spare);
+                            tracing::info!(
+                                needed_bytes,
+                                reclaimed_bytes,
+                                retained_bytes = cache.snapshot().bytes,
+                                "DFlash2 prefix cache shrank to admit a request"
+                            );
+                            worker_prefix_cache_counters.publish(prefix_cache.as_ref());
+                            governor_reservation =
+                                reserve_after_release(&governor, governor_request_bytes);
+                        }
+                    }
+                }
+                let governor_reservation = match governor_reservation {
                     Ok(reservation) => reservation,
                     Err(error) => {
                         let snapshot = governor.snapshot();

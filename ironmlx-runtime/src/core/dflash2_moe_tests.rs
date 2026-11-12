@@ -2614,7 +2614,9 @@ fn chat_follow_up_turns_restore_the_previous_prompt_up_to_its_generation_suffix(
             let (cached, hit) = run(&ids2, Some(&mut cache));
             assert_eq!(hit, reusable, "turn 2 restores turn 1 up to its suffix");
             let (repeat, hit) = run(&ids1, Some(&mut cache));
-            assert_eq!(hit, ids1.len(), "an exact repeat restores the whole prompt");
+            // Turn 2 replaced turn 1's whole-prompt entry, so a repeat of
+            // turn 1 restores its turn boundary and prefills the suffix.
+            assert_eq!(hit, reusable, "an exact repeat restores the turn boundary");
             assert_eq!(
                 repeat, turn1,
                 "an exact repeat decodes like turn 1 ({kwargs:?})"
@@ -2656,8 +2658,10 @@ fn chat_follow_up_turns_restore_the_previous_prompt_up_to_its_generation_suffix(
 /// Every array of a DFlash2 prefix artifact as bits, for exact comparison.
 fn artifact_bits(artifact: &DFlash2PrefixArtifact) -> Vec<(Vec<i32>, Vec<u32>)> {
     use ironmlx_lm::core::cache::prefix_payload::PrefixLayerPayload;
-    let mut arrays = vec![&artifact.context_hidden, &artifact.last_hidden];
-    for layer in &artifact.target_cache.main_layers {
+    let entry = artifact.target_entry().expect("artifact entry");
+    let context_tail = artifact.context_tail().expect("artifact context");
+    let mut arrays = vec![&context_tail, &artifact.last_hidden];
+    for layer in &entry.main_layers {
         match layer {
             PrefixLayerPayload::FullDense { k, v }
             | PrefixLayerPayload::FullPaged {

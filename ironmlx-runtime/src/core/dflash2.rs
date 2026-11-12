@@ -4,6 +4,7 @@
 //! state machine. The only shared piece is model-agnostic token resolution.
 
 use std::collections::VecDeque;
+use std::rc::Rc;
 #[cfg(feature = "tools")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -24,7 +25,7 @@ use crate::core::speculative::{
 };
 use crate::core::vl_prefix::PrefixFingerprint;
 use crate::Result;
-use ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntry;
+use ironmlx_lm::core::cache::prefix_payload::{PagedPrefixEntry, PrefixLayerPayload};
 use ironmlx_lm::core::model_input::build_position_ids;
 use ironmlx_lm::core::model_input::{
     build_position_ids_vl, count_image_pad, extend_vl_chunk_end_for_image_pad, slice_pos_ids_axis2,
@@ -201,16 +202,252 @@ fn extend_batched_q16_qualification_capabilities(
     Ok(capabilities)
 }
 
+/// One contiguous run of target K/V, shared by every artifact that covers it.
+///
+/// The arrays are compact copies: an artifact never keeps a view into a
+/// request's K/V buffer, which is allocated for the prompt plus its whole
+/// output and would stay resident for as long as the view does.
+#[derive(Debug)]
+struct DFlash2KvSegment {
+    /// `[1, heads, tokens, dim]` K and V per full-attention layer.
+    layers: Vec<(Array, Array)>,
+    tokens: i32,
+    bytes: usize,
+}
+
+/// The leading `tokens` positions of a shared segment.
+#[derive(Debug, Clone)]
+struct DFlash2KvSegmentRef {
+    segment: Rc<DFlash2KvSegment>,
+    tokens: i32,
+}
+
+/// A compact run of consecutive target context positions, shared by every
+/// artifact whose retained context tail overlaps it.
+#[derive(Debug)]
+struct DFlash2ContextChunk {
+    /// `[1, tokens, hidden]`.
+    hidden: Array,
+    tokens: i32,
+    bytes: usize,
+}
+
+/// Positions `start..stop` of a shared context chunk.
+#[derive(Debug, Clone)]
+struct DFlash2ContextRef {
+    chunk: Rc<DFlash2ContextChunk>,
+    start: i32,
+    stop: i32,
+}
+
+/// The trailing `tokens` positions of `context`, or `None` when it is shorter.
+fn context_suffix(context: &[DFlash2ContextRef], tokens: i32) -> Option<Vec<DFlash2ContextRef>> {
+    let mut missing = tokens;
+    let mut suffix = Vec::new();
+    for part in context.iter().rev() {
+        if missing <= 0 {
+            break;
+        }
+        let taken = (part.stop - part.start).min(missing);
+        suffix.push(DFlash2ContextRef {
+            chunk: Rc::clone(&part.chunk),
+            start: part.stop - taken,
+            stop: part.stop,
+        });
+        missing -= taken;
+    }
+    suffix.reverse();
+    (missing == 0).then_some(suffix)
+}
+
+#[derive(Debug, Clone)]
+enum DFlash2ArtifactLayer {
+    /// A full-attention layer; its K/V is the artifact's segment chain.
+    Dense,
+    /// Fixed-size per-artifact state (GatedDelta conv and recurrent state).
+    State(PrefixLayerPayload),
+}
+
+/// What a saved position is to its conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DFlash2PrefixRole {
+    /// A position later prompts continue from: a chat turn boundary, or a
+    /// prefill chunk boundary of a prompt without one.
+    Boundary,
+    /// A whole prompt. A follow-up shares its first `reusable_len` tokens (a
+    /// chat prompt without its generation suffix), so any longer prompt with
+    /// that prefix supersedes it.
+    Prompt { reusable_len: usize },
+}
+
 #[derive(Debug, Clone)]
 struct DFlash2PrefixArtifact {
+    id: u64,
     token_ids: Vec<u32>,
     fingerprint: String,
-    target_cache: PagedPrefixEntry,
-    context_hidden: Array,
+    role: DFlash2PrefixRole,
+    layers: Vec<DFlash2ArtifactLayer>,
+    /// Consecutive K/V segments covering `[0, cached_len)`.
+    kv: Vec<DFlash2KvSegmentRef>,
+    /// Consecutive context chunks covering the retained tail, which ends at
+    /// `cached_len`.
+    context: Vec<DFlash2ContextRef>,
     last_hidden: Array,
     cached_len: i32,
-    payload_bytes: usize,
+    /// Bytes only this artifact holds (state, final hidden, token ids).
+    own_bytes: usize,
     generation: u64,
+}
+
+impl DFlash2PrefixArtifact {
+    /// The retained `[1, S, hidden]` target context ending at `cached_len`.
+    fn context_tail(&self) -> Result<Array> {
+        let mut parts = Vec::with_capacity(self.context.len());
+        for part in &self.context {
+            if part.start == 0 && part.stop == part.chunk.tokens {
+                parts.push(part.chunk.hidden.clone());
+            } else {
+                parts.push(slice_context_range(
+                    &part.chunk.hidden,
+                    part.start,
+                    part.stop,
+                )?);
+            }
+        }
+        match parts.as_slice() {
+            [] => Err(anyhow!("DFlash2 prefix artifact has no target context")),
+            [only] => Ok(only.clone()),
+            _ => Ok(mlx::ops::shape::concatenate(
+                &parts.iter().collect::<Vec<_>>(),
+                1,
+            )?),
+        }
+    }
+
+    fn dense_layers(&self) -> usize {
+        self.layers
+            .iter()
+            .filter(|layer| matches!(layer, DFlash2ArtifactLayer::Dense))
+            .count()
+    }
+
+    /// K and V of dense layer `dense_index`, one pair per segment.
+    fn dense_segments(&self, dense_index: usize) -> Result<Vec<(Array, Array)>> {
+        let mut segments = Vec::with_capacity(self.kv.len());
+        for part in &self.kv {
+            let (k, v) =
+                part.segment.layers.get(dense_index).ok_or_else(|| {
+                    anyhow!("DFlash2 prefix segment lacks dense layer {dense_index}")
+                })?;
+            if part.tokens == part.segment.tokens {
+                segments.push((k.clone(), v.clone()));
+            } else {
+                segments.push((
+                    slice_sequence_range(k, 0, part.tokens)?,
+                    slice_sequence_range(v, 0, part.tokens)?,
+                ));
+            }
+        }
+        Ok(segments)
+    }
+
+    /// Write this artifact's state into row 0 of a fresh target cache.
+    fn restore_into(&self, target_cache: &mut [LayerCache]) -> Result<()> {
+        anyhow::ensure!(
+            target_cache.len() == self.layers.len(),
+            "DFlash2 prefix artifact has {} layers, target cache has {}",
+            self.layers.len(),
+            target_cache.len()
+        );
+        let mut dense_index = 0_usize;
+        for (index, (cache, layer)) in target_cache.iter_mut().zip(&self.layers).enumerate() {
+            match layer {
+                DFlash2ArtifactLayer::Dense => {
+                    let LayerCache::Full(kv) = cache else {
+                        anyhow::bail!("DFlash2 prefix artifact layer {index} expects dense K/V");
+                    };
+                    let segments = self.dense_segments(dense_index)?;
+                    let segments: Vec<(&Array, &Array)> =
+                        segments.iter().map(|(k, v)| (k, v)).collect();
+                    kv.restore_dense_prefix_segments_for_row_on(&segments, 0, self.cached_len, ())?;
+                    dense_index += 1;
+                }
+                DFlash2ArtifactLayer::State(payload) => {
+                    let entry = PagedPrefixEntry {
+                        main_layers: vec![payload.clone()],
+                        ..PagedPrefixEntry::default()
+                    };
+                    restore_prefix_entry_for_row(
+                        std::slice::from_mut(cache),
+                        &entry,
+                        0,
+                        self.cached_len,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The artifact as one ordinary prefix entry (dense K/V concatenated).
+    #[cfg(test)]
+    pub(crate) fn target_entry(&self) -> Result<PagedPrefixEntry> {
+        let mut main_layers = Vec::with_capacity(self.layers.len());
+        let mut dense_index = 0_usize;
+        for layer in &self.layers {
+            match layer {
+                DFlash2ArtifactLayer::Dense => {
+                    let segments = self.dense_segments(dense_index)?;
+                    let keys: Vec<&Array> = segments.iter().map(|(k, _)| k).collect();
+                    let values: Vec<&Array> = segments.iter().map(|(_, v)| v).collect();
+                    main_layers.push(PrefixLayerPayload::FullDense {
+                        k: mlx::ops::shape::concatenate(&keys, 2)?,
+                        v: mlx::ops::shape::concatenate(&values, 2)?,
+                    });
+                    dense_index += 1;
+                }
+                DFlash2ArtifactLayer::State(payload) => main_layers.push(payload.clone()),
+            }
+        }
+        Ok(PagedPrefixEntry {
+            main_layers,
+            ..PagedPrefixEntry::default()
+        })
+    }
+}
+
+/// Positions `start..stop` of a `[1, S, hidden]` array.
+fn slice_context_range(array: &Array, start: i32, stop: i32) -> Result<Array> {
+    let shape = array.shape();
+    let dims = shape.as_slice();
+    anyhow::ensure!(
+        dims.len() == 3 && 0 <= start && start < stop && stop <= dims[1],
+        "DFlash2 cannot slice context {start}..{stop} from shape {dims:?}"
+    );
+    Ok(mlx::ops::indexing::slice_strided_on(
+        array,
+        &[0_i32, start, 0][..],
+        &[1_i32, stop, dims[2]][..],
+        &[1_i32, 1, 1][..],
+        StreamOrDevice::default(),
+    )?)
+}
+
+/// `[.., start..stop, ..]` along the sequence axis of a `[1, H, S, D]` array.
+fn slice_sequence_range(array: &Array, start: i32, stop: i32) -> Result<Array> {
+    let shape = array.shape();
+    let dims = shape.as_slice();
+    anyhow::ensure!(
+        dims.len() == 4 && 0 <= start && start <= stop && stop <= dims[2],
+        "DFlash2 cannot slice sequence range {start}..{stop} from shape {dims:?}"
+    );
+    Ok(mlx::ops::indexing::slice_strided_on(
+        array,
+        [0_i32, 0, start, 0],
+        [dims[0], dims[1], stop, dims[3]],
+        [1_i32, 1, 1, 1],
+        StreamOrDevice::default(),
+    )?)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -223,16 +460,47 @@ pub(crate) struct DFlash2PrefixCacheSnapshot {
     pub(crate) evictions: u64,
 }
 
+/// One position of a request's prefill, to be saved by
+/// [`DFlash2PrefixCache::insert`].
+struct DFlash2PrefixSave<'a> {
+    token_ids: &'a [u32],
+    /// The fingerprint a prefix of this prompt has at a given token count.
+    fingerprint: &'a dyn Fn(usize) -> String,
+    role: DFlash2PrefixRole,
+    /// Row 0 holds the state at `token_ids`.
+    target_cache: &'a [LayerCache],
+    /// The retained target context ending at `token_ids`.
+    context_hidden: &'a Array,
+    last_hidden: &'a Array,
+    /// The artifact this request restored or last saved; the new artifact
+    /// shares its K/V and context and copies only the positions after it.
+    parent: Option<u64>,
+}
+
 /// Request-independent DFlash2 prefix artifacts.
 ///
 /// DFlash2 cannot reuse the ordinary prefix entry alone: the drafter also
 /// needs the target-layer hidden-state tail and the final target hidden state
 /// at the exact restored position. The cache therefore owns those values as
 /// one atomically inserted, in-memory-only artifact.
+///
+/// Target K/V dominates an artifact, and the artifacts of one conversation
+/// are prefixes of each other. An artifact saved after a restore, or after an
+/// earlier save of the same request, therefore stores only the K/V and
+/// context positions it adds and shares the rest with that parent;
+/// `total_bytes` counts every shared segment and chunk once.
+///
+/// What cannot be shared is each artifact's fixed-size state, so a
+/// conversation keeps a bounded set of positions instead of two more every
+/// turn: its newest whole prompt, its [`Self::RECENT_BOUNDARIES`] newest
+/// boundaries, and of the older boundaries the shortest in each power-of-two
+/// length range (a prompt that rewinds further recomputes at most half of
+/// what it keeps).
 pub(crate) struct DFlash2PrefixCache {
     max_bytes: usize,
     total_bytes: usize,
     generation: u64,
+    next_id: u64,
     hits: u64,
     misses: u64,
     saves: u64,
@@ -241,21 +509,87 @@ pub(crate) struct DFlash2PrefixCache {
     /// Where a chat prompt's next turn diverges; a prompt ending in a
     /// generation suffix is also saved without it (see [`ChatTurnBoundary`]).
     turn_boundary: Option<ChatTurnBoundary>,
+    /// What a prefill chunk needs while it runs; the cache makes room for it.
+    prefill_working_set: PrefillWorkingSet,
+}
+
+/// Memory a prefill chunk uses while it runs and returns when it ends,
+/// learned from the chunks this process has run. It grows with the chunk
+/// (per-token intermediates) and with the context the chunk attends to
+/// (attention scores), so the estimate is a per-token cost linear in the
+/// context length, anchored at the shortest and longest contexts seen for
+/// the largest chunk size seen.
+#[derive(Debug, Default)]
+struct PrefillWorkingSet {
+    chunk_len: usize,
+    /// (context length after the chunk, bytes per chunk token)
+    shortest: Option<(usize, usize)>,
+    longest: Option<(usize, usize)>,
+}
+
+impl PrefillWorkingSet {
+    fn observe(&mut self, chunk_len: usize, context_len: usize, bytes: usize) {
+        // A short chunk's fixed costs would inflate the per-token figure.
+        if chunk_len == 0 || chunk_len < self.chunk_len {
+            return;
+        }
+        if chunk_len > self.chunk_len {
+            *self = Self {
+                chunk_len,
+                ..Self::default()
+            };
+        }
+        let point = (context_len, bytes / chunk_len);
+        if self.shortest.is_none_or(|(len, _)| context_len <= len) {
+            self.shortest = Some(point);
+        }
+        if self.longest.is_none_or(|(len, _)| context_len >= len) {
+            self.longest = Some(point);
+        }
+    }
+
+    /// Zero until a chunk has been observed: nothing saved before then came
+    /// from a prefill larger than the ones already measured.
+    fn estimate(&self, chunk_len: usize, context_len: usize) -> usize {
+        let (Some((short_len, short_bytes)), Some((long_len, long_bytes))) =
+            (self.shortest, self.longest)
+        else {
+            return 0;
+        };
+        let per_context_token = if long_len > short_len {
+            long_bytes.saturating_sub(short_bytes) as f64 / (long_len - short_len) as f64
+        } else {
+            0.0
+        };
+        let per_token =
+            short_bytes as f64 + per_context_token * (context_len as f64 - short_len as f64);
+        (per_token.max(0.0) * chunk_len as f64) as usize
+    }
 }
 
 impl DFlash2PrefixCache {
+    /// A restore writes one K/V update per segment and layer, so a chain this
+    /// long is folded into one segment by the save that would extend it.
+    const MAX_KV_SEGMENTS: usize = 16;
+    /// A restore concatenates the context tail from its chunks.
+    const MAX_CONTEXT_CHUNKS: usize = 16;
+    /// Newest boundaries a conversation always keeps.
+    const RECENT_BOUNDARIES: usize = 3;
+
     pub(crate) fn new(max_bytes: usize) -> Result<Self> {
         anyhow::ensure!(max_bytes > 0, "DFlash2 prefix cache max_bytes must be > 0");
         Ok(Self {
             max_bytes,
             total_bytes: 0,
             generation: 0,
+            next_id: 0,
             hits: 0,
             misses: 0,
             saves: 0,
             evictions: 0,
             entries: Vec::new(),
             turn_boundary: None,
+            prefill_working_set: PrefillWorkingSet::default(),
         })
     }
 
@@ -280,18 +614,7 @@ impl DFlash2PrefixCache {
         prompt_ids: &[u32],
         fingerprint: &dyn Fn(usize) -> String,
     ) -> Option<DFlash2PrefixArtifact> {
-        let hit_index = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                entry.token_ids.len() <= prompt_ids.len()
-                    && prompt_ids.starts_with(&entry.token_ids)
-                    && entry.fingerprint == fingerprint(entry.token_ids.len())
-            })
-            .max_by_key(|(_, entry)| entry.cached_len)
-            .map(|(index, _)| index);
-        let Some(hit_index) = hit_index else {
+        let Some(hit_index) = self.longest_index(prompt_ids, fingerprint) else {
             self.misses = self.misses.saturating_add(1);
             return None;
         };
@@ -301,84 +624,476 @@ impl DFlash2PrefixCache {
         Some(self.entries[hit_index].clone())
     }
 
+    fn longest_index(
+        &self,
+        prompt_ids: &[u32],
+        fingerprint: &dyn Fn(usize) -> String,
+    ) -> Option<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry.token_ids.len() <= prompt_ids.len()
+                    && prompt_ids.starts_with(&entry.token_ids)
+                    && entry.fingerprint == fingerprint(entry.token_ids.len())
+            })
+            .max_by_key(|(_, entry)| entry.cached_len)
+            .map(|(index, _)| index)
+    }
+
+    /// The artifact `request` would restore, without counting a lookup.
+    pub(crate) fn restorable_for(
+        &self,
+        request: &GenerateRequest,
+        runtime_fingerprint: &str,
+    ) -> Option<u64> {
+        let identity = PrefixFingerprint::for_request(
+            &request.prompt_ids,
+            request.pixel_values.as_deref(),
+            request.image_grid_thw.as_deref(),
+            request.image_token_id,
+            request.image_spatial_merge_size,
+        )
+        .ok()?;
+        let key = |len: usize| match identity.at(len) {
+            Some(images) => format!("{runtime_fingerprint};{images}"),
+            None => runtime_fingerprint.to_owned(),
+        };
+        self.longest_index(&request.prompt_ids, &key)
+            .map(|index| self.entries[index].id)
+    }
+
+    /// Save one prefill position.
+    ///
+    /// `shortfall` returns how many bytes must be freed before the bytes the
+    /// save stores fit the process (0 when they fit). The request's own K/V
+    /// is allocated to its full capacity up front, so it is already part of
+    /// the process's usage. Other artifacts are evicted to
+    /// cover a shortfall; the save is skipped when they cannot.
+    ///
+    /// Returns the saved artifact's id, or `None` when nothing was saved.
     fn insert(
         &mut self,
-        token_ids: &[u32],
-        fingerprint: &str,
-        target_cache: &[LayerCache],
-        context_hidden: &Array,
-        last_hidden: &Array,
-    ) -> Result<bool> {
-        let Some((target_cache, cached_len)) = prefix_entry_for_row(target_cache, 0)? else {
-            return Ok(false);
+        save: DFlash2PrefixSave<'_>,
+        shortfall: &dyn Fn(usize) -> usize,
+    ) -> Result<Option<u64>> {
+        let DFlash2PrefixSave {
+            token_ids,
+            fingerprint: fingerprint_at,
+            role,
+            target_cache,
+            context_hidden,
+            last_hidden,
+            parent,
+        } = save;
+        let fingerprint = fingerprint_at(token_ids.len());
+        let Some((entry, cached_len)) = prefix_entry_for_row(target_cache, 0)? else {
+            return Ok(None);
         };
         anyhow::ensure!(
             cached_len == i32::try_from(token_ids.len())?,
             "DFlash2 prefix cache target offset {cached_len} != token length {}",
             token_ids.len()
         );
-        target_cache.eval()?;
+        // Evaluates the request's K/V and state; the K/V here are views.
+        entry.eval()?;
+        let last_hidden = &last_hidden.contiguous(false)?;
         mlx::transforms::eval(&[context_hidden, last_hidden])?;
-        let payload_bytes = target_cache
-            .observability_stats(cached_len)
-            .payload_bytes
-            .saturating_add(array_payload_bytes(context_hidden))
+        let tail_len = sequence_len(context_hidden)?;
+        anyhow::ensure!(
+            0 < tail_len && tail_len <= cached_len,
+            "DFlash2 prefix cache context of {tail_len} positions at offset {cached_len}"
+        );
+        let tail_bytes = array_payload_bytes(context_hidden);
+        let context_bytes_per_token = tail_bytes / usize::try_from(tail_len)?;
+
+        let mut layers = Vec::with_capacity(entry.main_layers.len());
+        let mut dense_views = Vec::new();
+        let mut state_bytes = 0_usize;
+        for payload in entry.main_layers {
+            match payload {
+                PrefixLayerPayload::FullDense { k, v } => {
+                    layers.push(DFlash2ArtifactLayer::Dense);
+                    dense_views.push((k, v));
+                }
+                other => {
+                    let stats = PagedPrefixEntry {
+                        main_layers: vec![other.clone()],
+                        ..PagedPrefixEntry::default()
+                    }
+                    .observability_stats(cached_len);
+                    state_bytes = state_bytes.saturating_add(stats.payload_bytes);
+                    layers.push(DFlash2ArtifactLayer::State(other));
+                }
+            }
+        }
+        let dense_bytes = dense_views.iter().fold(0_usize, |bytes, (k, v)| {
+            bytes
+                .saturating_add(array_payload_bytes(k))
+                .saturating_add(array_payload_bytes(v))
+        });
+        let own_bytes = state_bytes
             .saturating_add(array_payload_bytes(last_hidden))
             .saturating_add(token_ids.len().saturating_mul(std::mem::size_of::<u32>()))
             .saturating_add(fingerprint.len());
-        if payload_bytes > self.max_bytes {
-            return Ok(false);
+        if dense_bytes
+            .saturating_add(tail_bytes)
+            .saturating_add(own_bytes)
+            > self.max_bytes
+        {
+            return Ok(None);
+        }
+
+        // The parent's K/V and context are reused when it is this state's
+        // prefix.
+        let parent = parent
+            .and_then(|id| self.entries.iter().find(|entry| entry.id == id))
+            .filter(|parent| {
+                parent.cached_len <= cached_len
+                    && token_ids.starts_with(&parent.token_ids)
+                    && parent.dense_layers() == dense_views.len()
+            })
+            .map(|parent| {
+                (
+                    parent.id,
+                    parent.kv.clone(),
+                    parent.context.clone(),
+                    parent.cached_len,
+                )
+            });
+        // A long chain is folded: the new segment covers the whole prefix and
+        // replaces the chain in every artifact that shares it.
+        let fold = parent
+            .as_ref()
+            .is_some_and(|(_, chain, _, _)| chain.len() >= Self::MAX_KV_SEGMENTS);
+        let (base_len, mut kv) = match &parent {
+            Some((_, chain, _, parent_len)) if !fold => (*parent_len, chain.clone()),
+            _ => (0, Vec::new()),
+        };
+        let added_tokens = cached_len - base_len;
+        let bytes_per_token = if cached_len > 0 {
+            dense_bytes / usize::try_from(cached_len)?
+        } else {
+            0
+        };
+        let added_bytes = bytes_per_token.saturating_mul(usize::try_from(added_tokens)?);
+
+        // The tail's leading positions are the end of the parent's tail. A
+        // tail spread over too many chunks is stored whole instead.
+        let context_shape = context_hidden.shape();
+        let context_dtype = context_hidden.dtype();
+        let mut context = Vec::new();
+        let mut shared_context_tokens = 0_i32;
+        if let Some((_, _, parent_context, parent_len)) = &parent {
+            let shared = tail_len - (cached_len - parent_len);
+            let suffix = (shared > 0)
+                .then(|| context_suffix(parent_context, shared))
+                .flatten()
+                .filter(|suffix| {
+                    suffix.len() < Self::MAX_CONTEXT_CHUNKS
+                        && suffix.iter().all(|part| {
+                            part.chunk.hidden.dtype() == context_dtype
+                                && part.chunk.hidden.shape().as_slice().get(2)
+                                    == context_shape.as_slice().get(2)
+                        })
+                });
+            if let Some(suffix) = suffix {
+                context = suffix;
+                shared_context_tokens = shared;
+            }
+        }
+        let added_context_tokens = tail_len - shared_context_tokens;
+        let added_context_bytes =
+            context_bytes_per_token.saturating_mul(usize::try_from(added_context_tokens)?);
+
+        let needed = shortfall(
+            added_bytes
+                .saturating_add(added_context_bytes)
+                .saturating_add(own_bytes),
+        );
+        if needed > 0 {
+            let keep = parent.as_ref().map(|(id, ..)| *id);
+            let target = self.total_bytes.saturating_sub(needed);
+            if self.shrink_keeping(target, keep) < needed {
+                tracing::info!(
+                    ?role,
+                    cached_len,
+                    needed_bytes = needed,
+                    "DFlash2 prefix artifact not saved: no memory headroom"
+                );
+                return Ok(None);
+            }
+            // Freed buffers return to the system, not to MLX's buffer cache.
+            mlx::transforms::clear_cache();
         }
 
         if let Some(index) = self.entries.iter().position(|entry| {
             entry.fingerprint == fingerprint && entry.token_ids.as_slice() == token_ids
         }) {
-            let previous = self.entries.swap_remove(index);
-            self.total_bytes = self.total_bytes.saturating_sub(previous.payload_bytes);
+            self.entries.swap_remove(index);
         }
+
+        // Compact copies of the added positions, evaluated once the artifact
+        // is in place.
+        let mut copies = Vec::new();
+        let mut new_segment = None;
+        if added_tokens > 0 {
+            let mut segment_layers = Vec::with_capacity(dense_views.len());
+            for (k, v) in &dense_views {
+                segment_layers.push((
+                    slice_sequence_range(k, base_len, cached_len)?.contiguous(false)?,
+                    slice_sequence_range(v, base_len, cached_len)?.contiguous(false)?,
+                ));
+            }
+            copies.extend(
+                segment_layers
+                    .iter()
+                    .flat_map(|(k, v)| [k.clone(), v.clone()]),
+            );
+            let segment = Rc::new(DFlash2KvSegment {
+                layers: segment_layers,
+                tokens: added_tokens,
+                bytes: added_bytes,
+            });
+            new_segment = Some(Rc::clone(&segment));
+            kv.push(DFlash2KvSegmentRef {
+                segment,
+                tokens: added_tokens,
+            });
+        }
+        drop(dense_views);
+        if added_context_tokens > 0 {
+            let hidden = slice_context_range(context_hidden, shared_context_tokens, tail_len)?
+                .contiguous(false)?;
+            copies.push(hidden.clone());
+            context.push(DFlash2ContextRef {
+                chunk: Rc::new(DFlash2ContextChunk {
+                    hidden,
+                    tokens: added_context_tokens,
+                    bytes: added_context_bytes,
+                }),
+                start: 0,
+                stop: added_context_tokens,
+            });
+        }
+        if let (true, Some((_, chain, _, _)), Some(folded)) = (fold, &parent, kv.first()) {
+            // Dropping the old chain before the copy is evaluated keeps the
+            // fold from holding the prefix twice.
+            let folded = folded.clone();
+            for entry in &mut self.entries {
+                rebase_kv_chain(&mut entry.kv, chain, &folded);
+            }
+        }
+        drop(parent);
+
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
         let generation = self.next_generation();
-        self.total_bytes = self.total_bytes.saturating_add(payload_bytes);
         self.entries.push(DFlash2PrefixArtifact {
+            id,
             token_ids: token_ids.to_vec(),
-            fingerprint: fingerprint.to_owned(),
-            target_cache,
-            context_hidden: context_hidden.clone(),
+            fingerprint,
+            role,
+            layers,
+            kv,
+            context,
             last_hidden: last_hidden.clone(),
             cached_len,
-            payload_bytes,
+            own_bytes,
             generation,
         });
+        if let Err(error) = mlx::transforms::eval(&copies.iter().collect::<Vec<_>>()) {
+            // Every artifact that points at the failed K/V copy goes with it
+            // (a fold re-pointed the parent's sharers at it).
+            self.entries.retain(|entry| {
+                entry.id != id
+                    && !new_segment.as_ref().is_some_and(|failed| {
+                        entry
+                            .kv
+                            .iter()
+                            .any(|part| Rc::ptr_eq(&part.segment, failed))
+                    })
+            });
+            self.recount();
+            return Err(error.into());
+        }
+        drop(copies);
+        drop(new_segment);
         self.saves = self.saves.saturating_add(1);
+        self.retain_conversation_points(id, fingerprint_at);
+        self.recount();
         self.shrink_to(self.max_bytes);
-        Ok(true)
+        Ok(self
+            .entries
+            .iter()
+            .any(|entry| entry.id == id)
+            .then_some(id))
+    }
+
+    /// Drop what the conversation continued by artifact `id` no longer needs:
+    /// whole prompts it supersedes, and boundaries beyond the retained set
+    /// (see the type's documentation).
+    fn retain_conversation_points(&mut self, id: u64, fingerprint_at: &dyn Fn(usize) -> String) {
+        let Some(saved) = self.entries.iter().find(|entry| entry.id == id) else {
+            return;
+        };
+        let tokens = saved.token_ids.as_slice();
+        let mut dropped = Vec::new();
+        // `(tokens, id)` of the conversation's boundaries.
+        let mut boundaries = Vec::new();
+        for entry in &self.entries {
+            let len = entry.token_ids.len();
+            match entry.role {
+                DFlash2PrefixRole::Prompt { reusable_len } => {
+                    if entry.id != id
+                        && reusable_len < tokens.len()
+                        && entry.token_ids.get(..reusable_len) == tokens.get(..reusable_len)
+                        && entry.fingerprint == fingerprint_at(len)
+                    {
+                        dropped.push(entry.id);
+                    }
+                }
+                DFlash2PrefixRole::Boundary => {
+                    if entry.id == id
+                        || (len < tokens.len()
+                            && tokens.starts_with(&entry.token_ids)
+                            && entry.fingerprint == fingerprint_at(len))
+                    {
+                        boundaries.push((len, entry.id));
+                    }
+                }
+            }
+        }
+        boundaries.sort_unstable();
+        let older = boundaries.len().saturating_sub(Self::RECENT_BOUNDARIES);
+        // Shortest first: the boundary kept for a length range never changes
+        // as the conversation grows.
+        let mut kept_range = None;
+        for &(len, boundary) in &boundaries[..older] {
+            let range = len.checked_ilog2();
+            if kept_range == Some(range) {
+                dropped.push(boundary);
+            } else {
+                kept_range = Some(range);
+            }
+        }
+        if dropped.is_empty() {
+            return;
+        }
+        self.entries.retain(|entry| !dropped.contains(&entry.id));
+        self.evictions = self
+            .evictions
+            .saturating_add(u64::try_from(dropped.len()).unwrap_or(u64::MAX));
     }
 
     fn invalidate(&mut self, token_ids: &[u32], fingerprint: &str) {
         if let Some(index) = self.entries.iter().position(|entry| {
             entry.fingerprint == fingerprint && entry.token_ids.as_slice() == token_ids
         }) {
-            let removed = self.entries.swap_remove(index);
-            self.total_bytes = self.total_bytes.saturating_sub(removed.payload_bytes);
+            self.entries.swap_remove(index);
             self.evictions = self.evictions.saturating_add(1);
+            self.recount();
         }
     }
 
+    /// Evict least recently used artifacts until at most `target_bytes`
+    /// remain; returns the bytes released.
     pub(crate) fn shrink_to(&mut self, target_bytes: usize) -> usize {
+        self.shrink_keeping(target_bytes, None)
+    }
+
+    /// [`Self::shrink_to`] that evicts artifact `spare` only once the others
+    /// are gone and `target_bytes` is still exceeded: artifacts of one
+    /// conversation share their K/V, so evicting in age order alone would
+    /// drop the one a request is about to restore for the little the older
+    /// ones release.
+    pub(crate) fn shrink_to_sparing(&mut self, target_bytes: usize, spare: Option<u64>) -> usize {
+        let before = self.total_bytes;
+        self.shrink_keeping(target_bytes, spare);
+        self.shrink_keeping(target_bytes, None);
+        before.saturating_sub(self.total_bytes)
+    }
+
+    /// Before a prefill chunk runs: evict what its working memory, and what
+    /// the chunk allocates to keep, would otherwise push past the governor's
+    /// hard watermark; least recently used first, the request's own lineage
+    /// last.
+    fn make_room_for_prefill_chunk(
+        &mut self,
+        chunk_len: usize,
+        context_len: usize,
+        allocation_bytes: usize,
+        lineage: Option<u64>,
+        shortfall: &dyn Fn(usize) -> usize,
+    ) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let working_bytes = self.prefill_working_set.estimate(chunk_len, context_len);
+        if working_bytes == 0 {
+            return;
+        }
+        let needed = shortfall(working_bytes.saturating_add(allocation_bytes));
+        if needed == 0 {
+            return;
+        }
+        let reclaimed = self.shrink_to_sparing(self.total_bytes.saturating_sub(needed), lineage);
+        if reclaimed > 0 {
+            // Freed buffers return to the system, not to MLX's buffer cache.
+            mlx::transforms::clear_cache();
+            tracing::info!(
+                working_bytes,
+                needed_bytes = needed,
+                reclaimed_bytes = reclaimed,
+                retained_bytes = self.total_bytes,
+                "DFlash2 prefix cache shrank to make room for a prefill chunk"
+            );
+        }
+    }
+
+    fn shrink_keeping(&mut self, target_bytes: usize, keep: Option<u64>) -> usize {
         let before = self.total_bytes;
         while self.total_bytes > target_bytes {
             let Some((index, _)) = self
                 .entries
                 .iter()
                 .enumerate()
+                .filter(|(_, entry)| Some(entry.id) != keep)
                 .min_by_key(|(_, entry)| entry.generation)
             else {
                 break;
             };
-            let removed = self.entries.swap_remove(index);
-            self.total_bytes = self.total_bytes.saturating_sub(removed.payload_bytes);
+            self.entries.swap_remove(index);
             self.evictions = self.evictions.saturating_add(1);
+            self.recount();
         }
         before.saturating_sub(self.total_bytes)
+    }
+
+    /// Resident bytes: each artifact's own state plus every shared K/V
+    /// segment and context chunk once.
+    fn recount(&mut self) {
+        let mut seen: Vec<*const DFlash2KvSegment> = Vec::new();
+        let mut seen_context: Vec<*const DFlash2ContextChunk> = Vec::new();
+        let mut total = 0_usize;
+        for entry in &self.entries {
+            total = total.saturating_add(entry.own_bytes);
+            for part in &entry.kv {
+                let pointer = Rc::as_ptr(&part.segment);
+                if !seen.contains(&pointer) {
+                    seen.push(pointer);
+                    total = total.saturating_add(part.segment.bytes);
+                }
+            }
+            for part in &entry.context {
+                let pointer = Rc::as_ptr(&part.chunk);
+                if !seen_context.contains(&pointer) {
+                    seen_context.push(pointer);
+                    total = total.saturating_add(part.chunk.bytes);
+                }
+            }
+        }
+        self.total_bytes = total;
     }
 
     pub(crate) fn snapshot(&self) -> DFlash2PrefixCacheSnapshot {
@@ -396,6 +1111,39 @@ impl DFlash2PrefixCache {
         self.generation = self.generation.wrapping_add(1);
         self.generation
     }
+}
+
+/// Replace the leading segments `kv` shares with `old_chain` by the same
+/// positions of `folded`, a copy of everything `old_chain` covers.
+fn rebase_kv_chain(
+    kv: &mut Vec<DFlash2KvSegmentRef>,
+    old_chain: &[DFlash2KvSegmentRef],
+    folded: &DFlash2KvSegmentRef,
+) {
+    let mut shared = 0_usize;
+    let mut tokens = 0_i32;
+    for (part, old) in kv.iter().zip(old_chain) {
+        // Positions past what the old chain uses of a segment are not in
+        // the folded copy.
+        if !Rc::ptr_eq(&part.segment, &old.segment) || part.tokens > old.tokens {
+            break;
+        }
+        shared += 1;
+        tokens += part.tokens;
+        if part.tokens < old.tokens {
+            break;
+        }
+    }
+    if shared == 0 || tokens > folded.tokens {
+        return;
+    }
+    kv.splice(
+        ..shared,
+        [DFlash2KvSegmentRef {
+            segment: Rc::clone(&folded.segment),
+            tokens,
+        }],
+    );
 }
 
 #[derive(Debug, Error)]
@@ -1593,6 +2341,9 @@ where
         let mut last_hidden: Option<Array> = None;
         let mut position = 0_i32;
         let mut prefix_cache_hit_tokens = 0_usize;
+        // The artifact this request restored or last saved; the next save
+        // shares its K/V.
+        let mut prefix_lineage: Option<u64> = None;
         let prompt_len_i32 = i32::try_from(prompt_len).context("DFlash2 prompt is too long")?;
         let mut phases = PrefillPhaseDiagnostic::start();
 
@@ -1600,22 +2351,19 @@ where
             let artifact = cache.load_longest(&request.prompt_ids, &prefix_key);
             PrefillPhaseDiagnostic::mark(&mut phases, "load", 0);
             if let Some(artifact) = artifact {
-                let restore_result = restore_prefix_entry_for_row(
-                    &mut target_cache,
-                    &artifact.target_cache,
-                    0,
-                    artifact.cached_len,
-                );
+                let restore_result = artifact.restore_into(&mut target_cache);
                 PrefillPhaseDiagnostic::mark(&mut phases, "restore_graph", artifact.cached_len);
                 let restore_result = restore_result.and_then(|()| {
-                    materialize_dflash2_target_cache_prefix(&target_cache, artifact.cached_len)
+                    materialize_dflash2_target_cache_prefix(&target_cache, artifact.cached_len)?;
+                    artifact.context_tail()
                 });
                 PrefillPhaseDiagnostic::mark(&mut phases, "materialize", artifact.cached_len);
                 match restore_result {
-                    Ok(()) => {
+                    Ok(context_tail) => {
                         position = artifact.cached_len;
+                        prefix_lineage = Some(artifact.id);
                         prefix_cache_hit_tokens = artifact.token_ids.len();
-                        context_hidden = Some(artifact.context_hidden);
+                        context_hidden = Some(context_tail);
                         last_hidden = Some(artifact.last_hidden);
                     }
                     Err(error) => {
@@ -1684,6 +2432,25 @@ where
             };
             let start = position as usize;
             let stop = start + chunk_len as usize;
+            // A cold prefill's first chunk also allocates the target cache.
+            let cache_allocation_bytes = if position == 0 {
+                model
+                    .dflash2_target_cache_cost()
+                    .request_bytes(usize::try_from(cap)?)
+            } else {
+                0
+            };
+            if let Some(cache) = prefix_cache.as_deref_mut() {
+                cache.make_room_for_prefill_chunk(
+                    chunk_len as usize,
+                    stop,
+                    cache_allocation_bytes,
+                    prefix_lineage,
+                    &prefill_chunk_shortfall,
+                );
+            }
+            mlx::memory::begin_peak_window();
+            let active_before_chunk = mlx::memory::snapshot().active_bytes;
             let input: Array =
                 (&request.prompt_ids[start..stop], &[1_i32, chunk_len][..]).try_into()?;
             let output = match vl.as_mut() {
@@ -1734,6 +2501,15 @@ where
                 .collect();
             chunk_outputs.extend([retained, chunk_last_hidden]);
             mlx::transforms::eval(&chunk_outputs)?;
+            if let Some(cache) = prefix_cache.as_deref_mut() {
+                cache.prefill_working_set.observe(
+                    chunk_len as usize,
+                    stop,
+                    mlx::memory::peak_window_bytes()
+                        .saturating_sub(active_before_chunk)
+                        .saturating_sub(cache_allocation_bytes),
+                );
+            }
             PrefillPhaseDiagnostic::mark(&mut phases, "chunk", chunk_len);
             memory_phase_diagnostic("prefill_chunk_evaluated", position + chunk_len, prompt_len);
             ensure_dflash2_request_not_cancelled(is_cancelled)?;
@@ -1758,18 +2534,31 @@ where
                 ),
             };
             if let (true, Some(cache)) = (cache_this_boundary, prefix_cache.as_deref_mut()) {
-                match cache.insert(
-                    &request.prompt_ids[..stop],
-                    &prefix_key(stop),
-                    &target_cache,
-                    retained,
-                    chunk_last_hidden,
-                ) {
-                    Ok(true) => tracing::debug!(
-                        cached_len = stop,
-                        "DFlash2 cross-request prefix artifact saved"
-                    ),
-                    Ok(false) => {}
+                let role = match turn_boundary {
+                    Some(boundary) if stop as i32 != boundary => DFlash2PrefixRole::Prompt {
+                        reusable_len: usize::try_from(boundary)?,
+                    },
+                    None if stop == prompt_len => DFlash2PrefixRole::Prompt { reusable_len: stop },
+                    _ => DFlash2PrefixRole::Boundary,
+                };
+                let save = DFlash2PrefixSave {
+                    token_ids: &request.prompt_ids[..stop],
+                    fingerprint: &prefix_key,
+                    role,
+                    target_cache: &target_cache,
+                    context_hidden: retained,
+                    last_hidden: chunk_last_hidden,
+                    parent: prefix_lineage,
+                };
+                match cache.insert(save, &prefix_save_shortfall) {
+                    Ok(Some(id)) => {
+                        prefix_lineage = Some(id);
+                        tracing::debug!(
+                            cached_len = stop,
+                            "DFlash2 cross-request prefix artifact saved"
+                        );
+                    }
+                    Ok(None) => {}
                     Err(error) => tracing::warn!(
                         cached_len = stop,
                         error = %error,
@@ -5123,6 +5912,45 @@ fn sequence_len_batched(array: &Array) -> Result<i32> {
     Ok(dims[1])
 }
 
+/// Bytes the process must free before a prefix save fits under the
+/// governor's soft watermark, where admission starts to shed the cache and
+/// reject requests.
+fn prefix_save_shortfall(stored_bytes: usize) -> usize {
+    memory_shortfall(stored_bytes, |snapshot| snapshot.soft_watermark_bytes)
+}
+
+/// Bytes the process must free before a prefill chunk's working memory fits
+/// under the governor's hard watermark: the margin below the ceiling covers
+/// what the estimate misses.
+fn prefill_chunk_shortfall(working_bytes: usize) -> usize {
+    memory_shortfall(working_bytes, |snapshot| snapshot.hard_watermark_bytes)
+}
+
+/// Bytes the process must free before `bytes` more fit under `limit`.
+/// Buffers MLX holds for reuse are returned first: they count as usage but
+/// are not needed.
+fn memory_shortfall(
+    bytes: usize,
+    limit: fn(&crate::core::process_memory::MemoryGovernorSnapshot) -> usize,
+) -> usize {
+    let governor = crate::core::process_memory::global_process_memory_governor();
+    let shortfall = |snapshot: crate::core::process_memory::MemoryGovernorSnapshot| {
+        if snapshot.effective_ceiling_bytes == 0 {
+            return 0;
+        }
+        snapshot
+            .current_usage_bytes
+            .saturating_add(bytes)
+            .saturating_sub(limit(&snapshot))
+    };
+    let needed = shortfall(governor.sample_process());
+    if needed == 0 {
+        return 0;
+    }
+    mlx::transforms::clear_cache();
+    shortfall(governor.refresh_after_release(&mut |snapshot| shortfall(*snapshot) == 0))
+}
+
 fn array_payload_bytes(array: &Array) -> usize {
     array.size().saturating_mul(array.dtype().byte_size())
 }
@@ -6304,15 +7132,164 @@ mod tests {
     ) -> DFlash2PrefixArtifact {
         let hidden = Array::zeros((1_i32, 1_i32, 2_i32), mlx::Dtype::Float32).expect("hidden");
         DFlash2PrefixArtifact {
+            id: generation,
             token_ids: token_ids.to_vec(),
             fingerprint: fingerprint.to_owned(),
-            target_cache: PagedPrefixEntry::default(),
-            context_hidden: hidden.clone(),
+            role: DFlash2PrefixRole::Boundary,
+            layers: Vec::new(),
+            kv: Vec::new(),
+            context: vec![DFlash2ContextRef {
+                chunk: Rc::new(DFlash2ContextChunk {
+                    hidden: hidden.clone(),
+                    tokens: 1,
+                    bytes: 0,
+                }),
+                start: 0,
+                stop: 1,
+            }],
             last_hidden: hidden,
             cached_len: i32::try_from(token_ids.len()).expect("cached len"),
-            payload_bytes,
+            own_bytes: payload_bytes,
             generation,
         }
+    }
+
+    /// One full-attention layer whose K/V buffer is allocated `step` positions
+    /// at a time, like a request's buffer sized for its whole output.
+    fn test_dense_target_cache(step: i32) -> Vec<LayerCache> {
+        vec![LayerCache::Full(
+            ironmlx_lm::core::cache::kv_cache::KVCache::new(
+                1,
+                2,
+                4,
+                4,
+                mlx::Dtype::Float32,
+                1 << 20,
+            )
+            .with_step(step),
+        )]
+    }
+
+    /// Append positions `start..stop`; position `p` holds the value `p`.
+    fn append_test_positions(target_cache: &mut [LayerCache], start: i32, stop: i32) {
+        let LayerCache::Full(kv) = &mut target_cache[0] else {
+            panic!("dense layer");
+        };
+        let mut data = Vec::new();
+        for _head in 0..2 {
+            for position in start..stop {
+                data.extend([position as f32; 4]);
+            }
+        }
+        let update: Array = (data.as_slice(), (1_i32, 2_i32, stop - start, 4_i32))
+            .try_into()
+            .expect("update");
+        let (keys, values) = kv
+            .update_and_fetch(&update, &update, &[stop - start])
+            .expect("append");
+        mlx::transforms::eval(&[&keys, &values]).expect("eval append");
+    }
+
+    /// Context positions a test artifact retains.
+    const TEST_CONTEXT_LIMIT: i32 = 24;
+
+    /// Save `target_cache` at `token_ids`; context position `p` holds `p`.
+    fn save_test_tokens(
+        cache: &mut DFlash2PrefixCache,
+        target_cache: &[LayerCache],
+        token_ids: &[u32],
+        parent: Option<u64>,
+        role: DFlash2PrefixRole,
+        shortfall: &dyn Fn(usize) -> usize,
+    ) -> Option<u64> {
+        let len = i32::try_from(token_ids.len()).expect("len");
+        let tail: Vec<f32> = ((len - TEST_CONTEXT_LIMIT).max(0)..len)
+            .flat_map(|position| [position as f32; 2])
+            .collect();
+        let context: Array = (
+            tail.as_slice(),
+            (1_i32, i32::try_from(tail.len() / 2).expect("tail"), 2_i32),
+        )
+            .try_into()
+            .expect("context");
+        let hidden = Array::zeros((1_i32, 1_i32, 2_i32), mlx::Dtype::Float32).expect("hidden");
+        cache
+            .insert(
+                DFlash2PrefixSave {
+                    token_ids,
+                    fingerprint: &|_| "runtime".to_owned(),
+                    role,
+                    target_cache,
+                    context_hidden: &context,
+                    last_hidden: &hidden,
+                    parent,
+                },
+                shortfall,
+            )
+            .expect("save")
+    }
+
+    /// Save a boundary at tokens `0..len`.
+    fn save_test_prefix(
+        cache: &mut DFlash2PrefixCache,
+        target_cache: &[LayerCache],
+        len: u32,
+        parent: Option<u64>,
+    ) -> Option<u64> {
+        let token_ids: Vec<u32> = (0..len).collect();
+        save_test_tokens(
+            cache,
+            target_cache,
+            &token_ids,
+            parent,
+            DFlash2PrefixRole::Boundary,
+            &|_| 0,
+        )
+    }
+
+    fn test_artifact(cache: &DFlash2PrefixCache, id: u64) -> &DFlash2PrefixArtifact {
+        cache
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .expect("artifact")
+    }
+
+    /// The position every restored context row holds.
+    fn restored_test_context(cache: &DFlash2PrefixCache, id: u64) -> Vec<f32> {
+        let tail = test_artifact(cache, id).context_tail().expect("context");
+        let values = tail.to_vec::<f32>().expect("context values");
+        values.chunks(2).map(|position| position[0]).collect()
+    }
+
+    fn test_context(len: i32) -> Vec<f32> {
+        ((len - TEST_CONTEXT_LIMIT).max(0)..len)
+            .map(|position| position as f32)
+            .collect()
+    }
+
+    /// The first head's key value at every restored position.
+    fn restored_test_positions(cache: &DFlash2PrefixCache, id: u64) -> Vec<f32> {
+        let artifact = test_artifact(cache, id);
+        let mut target_cache = test_dense_target_cache(256);
+        artifact.restore_into(&mut target_cache).expect("restore");
+        let (entry, cached_len) = prefix_entry_for_row(&target_cache, 0)
+            .expect("entry")
+            .expect("restored state");
+        assert_eq!(cached_len, artifact.cached_len);
+        let PrefixLayerPayload::FullDense { k, .. } = &entry.main_layers[0] else {
+            panic!("dense layer");
+        };
+        let values = k.to_vec::<f32>().expect("keys");
+        values
+            .chunks(4)
+            .take(usize::try_from(cached_len).expect("len"))
+            .map(|position| position[0])
+            .collect()
+    }
+
+    fn test_positions(len: i32) -> Vec<f32> {
+        (0..len).map(|position| position as f32).collect()
     }
 
     fn fixed_json_constraint() -> ConstraintSession {
@@ -6690,7 +7667,7 @@ mod tests {
             test_prefix_artifact(&[1, 2, 3, 4], "runtime-a", 96, 2),
             test_prefix_artifact(&[1, 2, 3, 4, 5], "runtime-b", 128, 3),
         ];
-        cache.total_bytes = 288;
+        cache.recount();
 
         let hit = cache
             .load_longest(&[1, 2, 3, 4, 9], &|_| "runtime-a".to_owned())
@@ -6712,12 +7689,302 @@ mod tests {
             test_prefix_artifact(&[1], "runtime", 100, 1),
             test_prefix_artifact(&[2], "runtime", 100, 2),
         ];
-        cache.total_bytes = 200;
+        cache.recount();
 
         assert_eq!(cache.shrink_to(100), 100);
         assert_eq!(cache.entries.len(), 1);
         assert_eq!(cache.entries[0].token_ids, vec![2]);
         assert_eq!(cache.snapshot().evictions, 1);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefix_cache_pressure_shrink_spares_the_artifact_a_request_restores() {
+        let mut cache = DFlash2PrefixCache::new(1024).expect("cache");
+        cache.entries = vec![
+            test_prefix_artifact(&[1], "runtime", 100, 1),
+            test_prefix_artifact(&[1, 2], "runtime", 100, 2),
+            test_prefix_artifact(&[1, 2, 3], "runtime", 100, 3),
+        ];
+        cache.recount();
+        let spare = cache
+            .longest_index(&[1, 5], &|_| "runtime".to_owned())
+            .map(|index| cache.entries[index].id);
+        assert_eq!(spare, Some(1));
+
+        // The oldest artifact is the one restored: the newer ones go first.
+        assert_eq!(cache.shrink_to_sparing(100, spare), 200);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.entries[0].token_ids, vec![1]);
+        // It goes too when the others did not cover the need.
+        assert_eq!(cache.shrink_to_sparing(50, spare), 100);
+        assert!(cache.entries.is_empty());
+    }
+
+    #[test]
+    fn prefill_working_set_grows_with_the_chunk_and_its_context() {
+        let mut working_set = PrefillWorkingSet::default();
+        assert_eq!(working_set.estimate(2048, 2048), 0);
+
+        // 1000 bytes a token, plus 1 byte a token for each context token.
+        let bytes = |chunk: usize, context: usize| chunk * (1000 + context);
+        working_set.observe(2048, 2048, bytes(2048, 2048));
+        assert_eq!(working_set.estimate(2048, 16384), bytes(2048, 2048));
+        working_set.observe(2048, 4096, bytes(2048, 4096));
+        working_set.observe(2048, 8192, bytes(2048, 8192));
+        assert_eq!(working_set.estimate(2048, 16384), bytes(2048, 16384));
+        assert_eq!(working_set.estimate(200, 20000), bytes(200, 20000));
+
+        // A shorter chunk's fixed costs do not enter the per-token figure.
+        working_set.observe(1, 8193, 1 << 30);
+        assert_eq!(working_set.estimate(2048, 16384), bytes(2048, 16384));
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefix_cache_makes_room_for_a_prefill_chunk_sparing_the_request_lineage() {
+        let mut cache = DFlash2PrefixCache::new(1024).expect("cache");
+        cache.entries = vec![
+            test_prefix_artifact(&[1], "runtime", 100, 1),
+            test_prefix_artifact(&[1, 2], "runtime", 100, 2),
+            test_prefix_artifact(&[1, 2, 3], "runtime", 100, 3),
+        ];
+        cache.recount();
+        let lineage = Some(cache.entries[0].id);
+
+        // Nothing is known about a chunk's working memory yet.
+        cache.make_room_for_prefill_chunk(8, 8, 0, lineage, &|_| 150);
+        assert_eq!(cache.entries.len(), 3);
+
+        cache.prefill_working_set.observe(8, 8, 800);
+        // The chunk fits: the cache is not asked.
+        cache.make_room_for_prefill_chunk(8, 8, 50, lineage, &|needed| {
+            assert_eq!(needed, 850);
+            0
+        });
+        assert_eq!(cache.entries.len(), 3);
+        // 150 bytes short: the two artifacts outside the lineage go.
+        cache.make_room_for_prefill_chunk(8, 8, 0, lineage, &|_| 150);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.entries[0].token_ids, vec![1]);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefix_cache_artifact_shares_its_parent_kv_and_context() {
+        let mut cache = DFlash2PrefixCache::new(1 << 20).expect("cache");
+        let mut target_cache = test_dense_target_cache(256);
+        append_test_positions(&mut target_cache, 0, 5);
+        let first = save_test_prefix(&mut cache, &target_cache, 5, None).expect("first");
+        append_test_positions(&mut target_cache, 5, 8);
+        let second = save_test_prefix(&mut cache, &target_cache, 8, Some(first)).expect("second");
+
+        // K/V is 2 heads x 4 dims x f32 for K and for V: 64 bytes a position;
+        // context is 2 x f32: 8 bytes a position. Each is stored once.
+        let own = |tokens: usize| 8 + tokens * std::mem::size_of::<u32>() + "runtime".len();
+        let shared = 8 * 64 + 8 * 8;
+        assert_eq!(cache.snapshot().bytes, own(5) + own(8) + shared);
+        assert_eq!(test_artifact(&cache, second).context.len(), 2);
+        assert_eq!(restored_test_positions(&cache, first), test_positions(5));
+        assert_eq!(restored_test_positions(&cache, second), test_positions(8));
+        assert_eq!(restored_test_context(&cache, first), test_context(5));
+        assert_eq!(restored_test_context(&cache, second), test_context(8));
+
+        // The shared positions stay while either artifact needs them.
+        cache.entries.retain(|entry| entry.id == second);
+        cache.recount();
+        assert_eq!(cache.snapshot().bytes, own(8) + shared);
+        assert_eq!(restored_test_positions(&cache, second), test_positions(8));
+        assert_eq!(restored_test_context(&cache, second), test_context(8));
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefix_cache_artifact_does_not_keep_the_request_buffer() {
+        let mut cache = DFlash2PrefixCache::new(1 << 30).expect("cache");
+        // 65536 positions x 64 bytes: a 4 MiB request buffer for 4 positions.
+        let mut target_cache = test_dense_target_cache(65_536);
+        append_test_positions(&mut target_cache, 0, 4);
+        let id = save_test_prefix(&mut cache, &target_cache, 4, None).expect("saved");
+        mlx::transforms::clear_cache();
+        let with_request = mlx::memory::snapshot().active_bytes;
+        drop(target_cache);
+        mlx::transforms::clear_cache();
+        let released = with_request.saturating_sub(mlx::memory::snapshot().active_bytes);
+        assert!(
+            released >= 4 << 20,
+            "dropping the request released {released} bytes"
+        );
+        assert_eq!(restored_test_positions(&cache, id), test_positions(4));
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefix_cache_folds_a_long_kv_chain_for_every_sharer() {
+        let mut cache = DFlash2PrefixCache::new(1 << 20).expect("cache");
+        let mut target_cache = test_dense_target_cache(256);
+        let mut parent = None;
+        let turns = i32::try_from(DFlash2PrefixCache::MAX_KV_SEGMENTS).expect("turns") + 1;
+        for turn in 0..turns {
+            append_test_positions(&mut target_cache, turn * 2, turn * 2 + 2);
+            let len = u32::try_from(turn * 2 + 2).expect("len");
+            parent = save_test_prefix(&mut cache, &target_cache, len, parent);
+            assert!(parent.is_some());
+        }
+
+        // The last save found a full chain: one segment now backs every
+        // artifact the conversation kept.
+        assert!(cache.entries.len() > DFlash2PrefixCache::RECENT_BOUNDARIES);
+        let folded = cache.entries.last().expect("last").kv[0].segment.clone();
+        assert_eq!(folded.tokens, turns * 2);
+        for entry in &cache.entries {
+            assert_eq!(entry.kv.len(), 1);
+            assert!(Rc::ptr_eq(&entry.kv[0].segment, &folded));
+            assert_eq!(entry.kv[0].tokens, entry.cached_len);
+            assert_eq!(
+                restored_test_positions(&cache, entry.id),
+                test_positions(entry.cached_len)
+            );
+            assert_eq!(
+                restored_test_context(&cache, entry.id),
+                test_context(entry.cached_len)
+            );
+        }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefix_cache_stores_a_fragmented_context_tail_whole() {
+        let mut cache = DFlash2PrefixCache::new(1 << 20).expect("cache");
+        let mut target_cache = test_dense_target_cache(256);
+        let mut parent = None;
+        // One position a save: every tail would share one chunk per save.
+        for len in 1..=40_i32 {
+            append_test_positions(&mut target_cache, len - 1, len);
+            parent = save_test_prefix(
+                &mut cache,
+                &target_cache,
+                u32::try_from(len).expect("len"),
+                parent,
+            );
+            let id = parent.expect("saved");
+            assert!(
+                test_artifact(&cache, id).context.len() <= DFlash2PrefixCache::MAX_CONTEXT_CHUNKS
+            );
+            assert_eq!(restored_test_context(&cache, id), test_context(len));
+        }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefix_cache_keeps_a_bounded_set_of_conversation_positions() {
+        let mut cache = DFlash2PrefixCache::new(1 << 20).expect("cache");
+
+        // Another conversation is left alone.
+        let mut other_cache = test_dense_target_cache(256);
+        append_test_positions(&mut other_cache, 0, 4);
+        let other = save_test_tokens(
+            &mut cache,
+            &other_cache,
+            &[9, 9, 9, 9],
+            None,
+            DFlash2PrefixRole::Prompt { reusable_len: 2 },
+            &|_| 0,
+        )
+        .expect("other");
+
+        // Every turn saves its boundary, then its whole prompt: the boundary
+        // plus a generation suffix the next turn does not share.
+        let mut parent = None;
+        for turn in 1..=7_u32 {
+            let boundary = turn * 10;
+            let mut kv = test_dense_target_cache(256);
+            append_test_positions(&mut kv, 0, boundary as i32);
+            parent = save_test_prefix(&mut cache, &kv, boundary, parent);
+            assert!(parent.is_some());
+            let mut prompt: Vec<u32> = (0..boundary).collect();
+            prompt.extend([900, 901]);
+            append_test_positions(&mut kv, boundary as i32, boundary as i32 + 2);
+            let saved = save_test_tokens(
+                &mut cache,
+                &kv,
+                &prompt,
+                parent,
+                DFlash2PrefixRole::Prompt {
+                    reusable_len: boundary as usize,
+                },
+                &|_| 0,
+            );
+            assert!(saved.is_some());
+        }
+
+        // Kept: the newest prompt, the three newest boundaries, and of the
+        // older ones the shortest in 8..16, 16..32 and 32..64.
+        let mut kept: Vec<usize> = cache
+            .entries
+            .iter()
+            .filter(|entry| entry.id != other)
+            .map(|entry| entry.token_ids.len())
+            .collect();
+        kept.sort_unstable();
+        assert_eq!(kept, vec![10, 20, 40, 50, 60, 70, 72]);
+        assert!(cache.entries.iter().any(|entry| entry.id == other));
+        assert_eq!(cache.snapshot().evictions, 7);
+        for entry in &cache.entries {
+            if entry.id != other && entry.role == DFlash2PrefixRole::Boundary {
+                assert_eq!(
+                    restored_test_positions(&cache, entry.id),
+                    test_positions(entry.cached_len)
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefix_cache_save_yields_to_a_memory_shortfall() {
+        let mut cache = DFlash2PrefixCache::new(1 << 20).expect("cache");
+        let mut target_cache = test_dense_target_cache(256);
+        append_test_positions(&mut target_cache, 0, 4);
+        let first = save_test_prefix(&mut cache, &target_cache, 4, None).expect("first");
+        let mut other_cache = test_dense_target_cache(256);
+        append_test_positions(&mut other_cache, 0, 4);
+        let other = save_test_tokens(
+            &mut cache,
+            &other_cache,
+            &[9, 9, 9, 9],
+            None,
+            DFlash2PrefixRole::Boundary,
+            &|_| 0,
+        )
+        .expect("other");
+        append_test_positions(&mut target_cache, 4, 6);
+
+        // More than the cache can free without its parent: nothing is saved,
+        // and the unrelated artifact was given up trying.
+        let token_ids: Vec<u32> = (0..6).collect();
+        let saved = save_test_tokens(
+            &mut cache,
+            &target_cache,
+            &token_ids,
+            Some(first),
+            DFlash2PrefixRole::Boundary,
+            &|_| usize::MAX,
+        );
+        assert_eq!(saved, None);
+        assert!(cache.entries.iter().all(|entry| entry.id != other));
+        assert_eq!(restored_test_positions(&cache, first), test_positions(4));
+
+        // A shortfall the cache can cover keeps the save.
+        let saved = save_test_tokens(
+            &mut cache,
+            &target_cache,
+            &token_ids,
+            Some(first),
+            DFlash2PrefixRole::Boundary,
+            &|_| 0,
+        );
+        assert!(saved.is_some());
     }
 
     #[test]

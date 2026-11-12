@@ -683,55 +683,96 @@ impl KVCache {
         cached_len: i32,
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
+        self.restore_dense_prefix_segments_for_row_on(&[(k, v)], row, cached_len, target)
+    }
+
+    /// Restore a dense prefix stored as consecutive `[1, heads, len, dim]`
+    /// K/V segments whose lengths sum to `cached_len`. Each segment is
+    /// written at its own offset, so the prefix is never concatenated into a
+    /// second full-length array first.
+    pub fn restore_dense_prefix_segments_for_row_on(
+        &mut self,
+        segments: &[(&Array, &Array)],
+        row: usize,
+        cached_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
         let target = target.into();
         if row >= self.batch as usize {
             anyhow::bail!(
-                "KVCache::restore_dense_prefix_layer_for_row_on: row {} >= batch {}",
+                "KVCache::restore_dense_prefix_segments_for_row_on: row {} >= batch {}",
                 row,
                 self.batch
             );
         }
         if self.paged.is_some() {
             anyhow::bail!(
-                "KVCache::restore_dense_prefix_layer_for_row_on: dense prefix restore requires dense KV storage"
+                "KVCache::restore_dense_prefix_segments_for_row_on: dense prefix restore requires dense KV storage"
             );
         }
         if cached_len < 0 || cached_len > self.cap {
             anyhow::bail!(
-                "KVCache::restore_dense_prefix_layer_for_row_on: cached_len {cached_len} outside [0, {}]",
+                "KVCache::restore_dense_prefix_segments_for_row_on: cached_len {cached_len} outside [0, {}]",
                 self.cap
             );
         }
-        let k_shape = k.shape();
-        let k_shape = k_shape.as_slice();
-        if k_shape != [1_i32, self.n_kv_heads, cached_len, self.head_dim] {
-            anyhow::bail!(
-                "KVCache::restore_dense_prefix_layer_for_row_on: K shape {:?} incompatible with [1,{},{cached_len},{}]",
-                k_shape,
-                self.n_kv_heads,
-                self.head_dim
-            );
+        let mut segment_lens = Vec::with_capacity(segments.len());
+        let mut total_len = 0_i32;
+        for (k, v) in segments {
+            let k_shape = k.shape();
+            let k_shape = k_shape.as_slice();
+            let v_shape = v.shape();
+            let v_shape = v_shape.as_slice();
+            let len = k_shape.get(2).copied().unwrap_or(-1);
+            if len < 0 || k_shape != [1_i32, self.n_kv_heads, len, self.head_dim] {
+                anyhow::bail!(
+                    "KVCache::restore_dense_prefix_segments_for_row_on: K shape {:?} incompatible with [1,{},len,{}]",
+                    k_shape,
+                    self.n_kv_heads,
+                    self.head_dim
+                );
+            }
+            if v_shape != [1_i32, self.n_kv_heads, len, self.v_head_dim] {
+                anyhow::bail!(
+                    "KVCache::restore_dense_prefix_segments_for_row_on: V shape {:?} incompatible with [1,{},{len},{}]",
+                    v_shape,
+                    self.n_kv_heads,
+                    self.v_head_dim
+                );
+            }
+            if k.dtype() != self.dtype || v.dtype() != self.dtype {
+                anyhow::bail!(
+                    "KVCache::restore_dense_prefix_segments_for_row_on: dtype mismatch K={} V={} expected {}",
+                    k.dtype(),
+                    v.dtype(),
+                    self.dtype
+                );
+            }
+            total_len = total_len.checked_add(len).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "KVCache::restore_dense_prefix_segments_for_row_on: segment lengths overflow"
+                )
+            })?;
+            segment_lens.push(len);
         }
-        let v_shape = v.shape();
-        let v_shape = v_shape.as_slice();
-        if v_shape != [1_i32, self.n_kv_heads, cached_len, self.v_head_dim] {
+        if total_len != cached_len {
             anyhow::bail!(
-                "KVCache::restore_dense_prefix_layer_for_row_on: V shape {:?} incompatible with [1,{},{cached_len},{}]",
-                v_shape,
-                self.n_kv_heads,
-                self.v_head_dim
-            );
-        }
-        if k.dtype() != self.dtype || v.dtype() != self.dtype {
-            anyhow::bail!(
-                "KVCache::restore_dense_prefix_layer_for_row_on: dtype mismatch K={} V={} expected {}",
-                k.dtype(),
-                v.dtype(),
-                self.dtype
+                "KVCache::restore_dense_prefix_segments_for_row_on: segment lengths sum to {total_len}, expected {cached_len}"
             );
         }
         if let Some(tq) = &mut self.turboquant {
-            tq.restore_dense_prefix_for_row_on(k, v, &mut self.offsets, row, cached_len, target)?;
+            let (k, v) = match segments {
+                [(k, v)] => ((*k).clone(), (*v).clone()),
+                _ => {
+                    let keys: Vec<&Array> = segments.iter().map(|(k, _)| *k).collect();
+                    let values: Vec<&Array> = segments.iter().map(|(_, v)| *v).collect();
+                    (
+                        concatenate_on(&keys, 2, target)?,
+                        concatenate_on(&values, 2, target)?,
+                    )
+                }
+            };
+            tq.restore_dense_prefix_for_row_on(&k, &v, &mut self.offsets, row, cached_len, target)?;
             return Ok(());
         }
         if cached_len > 0 {
@@ -745,24 +786,49 @@ impl KVCache {
                     ((cached_len + self.step - 1) / self.step * self.step).min(self.cap);
                 self.grow_to(target_capacity, target)?;
             }
-            let keys_full = self.keys.as_ref().expect("grow_to allocated keys");
-            let values_full = self.values.as_ref().expect("grow_to allocated values");
-            self.keys = Some(slice_update_on(
-                keys_full,
-                k,
-                [row as i32, 0, 0, 0],
-                [row as i32 + 1, self.n_kv_heads, cached_len, self.head_dim],
-                [1_i32, 1, 1, 1],
-                target,
-            )?);
-            self.values = Some(slice_update_on(
-                values_full,
-                v,
-                [row as i32, 0, 0, 0],
-                [row as i32 + 1, self.n_kv_heads, cached_len, self.v_head_dim],
-                [1_i32, 1, 1, 1],
-                target,
-            )?);
+            let mut keys_full = self.keys.take().expect("grow_to allocated keys");
+            let mut values_full = self.values.take().expect("grow_to allocated values");
+            let mut start = 0_i32;
+            let mut written: Result<()> = Ok(());
+            for ((k, v), len) in segments.iter().zip(segment_lens) {
+                if len == 0 {
+                    continue;
+                }
+                let stop = start + len;
+                let updated = slice_update_on(
+                    &keys_full,
+                    k,
+                    [row as i32, 0, start, 0],
+                    [row as i32 + 1, self.n_kv_heads, stop, self.head_dim],
+                    [1_i32, 1, 1, 1],
+                    target,
+                )
+                .and_then(|keys| {
+                    slice_update_on(
+                        &values_full,
+                        v,
+                        [row as i32, 0, start, 0],
+                        [row as i32 + 1, self.n_kv_heads, stop, self.v_head_dim],
+                        [1_i32, 1, 1, 1],
+                        target,
+                    )
+                    .map(|values| (keys, values))
+                });
+                match updated {
+                    Ok((keys, values)) => {
+                        keys_full = keys;
+                        values_full = values;
+                    }
+                    Err(error) => {
+                        written = Err(error.into());
+                        break;
+                    }
+                }
+                start = stop;
+            }
+            self.keys = Some(keys_full);
+            self.values = Some(values_full);
+            written?;
         }
         self.offsets[row] = cached_len;
         Ok(())
