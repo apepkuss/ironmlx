@@ -2657,10 +2657,20 @@ fn chat_follow_up_turns_restore_the_previous_prompt_up_to_its_generation_suffix(
 
 /// Every array of a DFlash2 prefix artifact as bits, for exact comparison.
 fn artifact_bits(artifact: &DFlash2PrefixArtifact) -> Vec<(Vec<i32>, Vec<u32>)> {
-    use ironmlx_lm::core::cache::prefix_payload::PrefixLayerPayload;
     let entry = artifact.target_entry().expect("artifact entry");
     let context_tail = artifact.context_tail().expect("artifact context");
-    let mut arrays = vec![&context_tail, &artifact.last_hidden];
+    prefix_state_bits(&entry, &context_tail, &artifact.last_hidden)
+}
+
+/// A target prefix entry with its context tail and final hidden state as
+/// bits.
+fn prefix_state_bits(
+    entry: &PagedPrefixEntry,
+    context_tail: &Array,
+    last_hidden: &Array,
+) -> Vec<(Vec<i32>, Vec<u32>)> {
+    use ironmlx_lm::core::cache::prefix_payload::PrefixLayerPayload;
+    let mut arrays = vec![context_tail, last_hidden];
     for layer in &entry.main_layers {
         match layer {
             PrefixLayerPayload::FullDense { k, v }
@@ -2693,4 +2703,169 @@ fn artifact_bits(artifact: &DFlash2PrefixArtifact) -> Vec<(Vec<i32>, Vec<u32>)> 
             )
         })
         .collect()
+}
+
+/// A follow-up turn whose prefix comes back from the disk store decodes
+/// like one whose prefix is still cached, both after the cache gave the
+/// prefix up and after a restart; the stored state is bit-identical to the
+/// cached one.
+pub(super) fn assert_disk_restored_prefix_matches_memory_hit<M>(
+    target: &M,
+    draft: &DFlash2DraftModel,
+    tokenizer: &Tokenizer,
+) where
+    M: Model + ironmlx_lm::core::vision::DenseVlMethods + DFlash2Target,
+{
+    use crate::core::chat_prefix::ChatTurnBoundary;
+    use crate::core::dflash2_prefix_store::{tests as store_tests, DFlash2DiskStore};
+    use ironmlx_lm::core::Message;
+
+    const FINGERPRINT: &str = "disk-prefix-test";
+    let message = |role: &str, content: &str| Message {
+        role: role.to_owned(),
+        content: content.to_owned(),
+    };
+    let run = |ids: &[u32], cache: &mut DFlash2PrefixCache| {
+        let mut stream = DFlash2TextGenerationStream::new_scheduler_b1_text_only_with_cancellation(
+            target,
+            draft,
+            tokenizer,
+            request(ids.to_vec(), 24, Vec::new(), Sampler::greedy()),
+            DFlash2ExecutionOptions {
+                block_size: 8,
+                p2: DFlash2P2Options::default(),
+            },
+            Some((cache, FINGERPRINT)),
+            &|| false,
+        )
+        .expect("DFlash2 stream");
+        let hit = stream.prefix_cache_hit_tokens();
+        (drain(|| stream.next_token()), hit)
+    };
+    let boundary = ChatTurnBoundary::probe(tokenizer).expect("generation suffixes");
+    let notes = "The survey log records tide heights, bird counts and the weather each morning. "
+        .repeat(200);
+    let question = format!("{notes}Summarize these notes.");
+    let encode = |messages: &[Message]| {
+        let text = tokenizer
+            .apply_chat_template(messages, true, None)
+            .expect("template");
+        tokenizer.encode(&text, false).expect("encode")
+    };
+    let ids1 = encode(&[message("user", &question)]);
+    let ids2 = encode(&[
+        message("user", &question),
+        message("assistant", "The log tracks tides, birds and weather."),
+        message("user", "Which of the three varies most?"),
+    ]);
+    let reusable = boundary
+        .reusable_len(&ids1)
+        .expect("turn 1 ends in a suffix");
+    assert_eq!(ids2[..reusable], ids1[..reusable]);
+    let new_cache = || {
+        DFlash2PrefixCache::new(8 << 30)
+            .expect("prefix cache")
+            .with_turn_boundary(Some(boundary.clone()))
+    };
+
+    // The prefix stays cached.
+    let mut memory = new_cache();
+    let (turn1, hit) = run(&ids1, &mut memory);
+    assert_eq!(hit, 0);
+    let cached_bits = memory
+        .entries
+        .iter()
+        .find(|entry| entry.token_ids.len() == reusable)
+        .map(artifact_bits)
+        .expect("artifact at the turn boundary");
+    let (expected, hit) = run(&ids2, &mut memory);
+    assert_eq!(hit, reusable, "turn 2 restores turn 1 from the cache");
+    drop(memory);
+
+    let dir = store_tests::temp_root("dflash2-real-disk-restore");
+    let disk_cache = || {
+        let store =
+            DFlash2DiskStore::open(&dir, &store_tests::test_identity(), None).expect("store");
+        new_cache().with_disk(Some(DFlash2PrefixWriter::spawn(store).expect("writer")))
+    };
+
+    // The cache gives the prefix up; it comes back from disk.
+    let mut cache = disk_cache();
+    let (first, hit) = run(&ids1, &mut cache);
+    assert_eq!((first, hit), (turn1, 0));
+    cache.disk.as_ref().expect("disk").flush();
+    cache.shrink_to(0);
+    assert!(cache.entries.is_empty());
+    let stored = cache
+        .disk_candidate(&ids2, &|_| FINGERPRINT.to_owned(), 0)
+        .expect("stored boundary");
+    assert_eq!(usize::try_from(stored.cached_len).expect("len"), reusable);
+    let mut restored_cache = target
+        .make_cache(1, stored.cached_len + 64, target.cache_dtype())
+        .expect("target cache");
+    let restored = cache
+        .restore_from_disk(&stored, &mut restored_cache, None, &|_| 0)
+        .expect("restore from disk");
+    let (entry, _) = prefix_entry_for_row(&restored_cache, 0)
+        .expect("restored entry")
+        .expect("restored state");
+    assert!(
+        prefix_state_bits(&entry, &restored.context_tail, &restored.last_hidden) == cached_bits,
+        "the stored boundary is bit-identical to the cached one"
+    );
+    drop((entry, restored, restored_cache));
+    let (from_disk, hit) = run(&ids2, &mut cache);
+    assert_eq!(hit, reusable, "turn 2 restores turn 1 from disk");
+    assert_eq!(
+        from_disk, expected,
+        "restored from disk decodes like cached"
+    );
+    assert!(
+        cache.entries.iter().any(|entry| {
+            entry.token_ids.len() == reusable && entry.role == DFlash2PrefixRole::Boundary
+        }),
+        "the restored boundary is cached again"
+    );
+    cache.disk.as_ref().expect("disk").flush();
+    drop(cache);
+
+    // A new process finds the prefix on disk.
+    let mut cache = disk_cache();
+    assert!(cache.entries.is_empty());
+    let (after_restart, hit) = run(&ids2, &mut cache);
+    // Turn 2 stored its own, longer boundary before the restart.
+    assert!(hit >= reusable, "turn 2 restores from disk after a restart");
+    assert_eq!(
+        after_restart, expected,
+        "decodes like cached after a restart"
+    );
+    let snapshot = cache.disk_snapshot().expect("disk");
+    assert_eq!(
+        (snapshot.hits, snapshot.invalid, snapshot.failed),
+        (1, 0, 0)
+    );
+    eprintln!(
+        "[dflash2 disk prefix] turn1 {} tokens, turn2 {} tokens: restored {reusable} from disk, {hit} after restart; store {} entries, {} bytes",
+        ids1.len(),
+        ids2.len(),
+        snapshot.entries,
+        snapshot.bytes
+    );
+    drop(cache);
+    std::fs::remove_dir_all(dir).expect("cleanup");
+}
+
+#[test]
+#[ignore]
+#[serial(mlx_metal)]
+fn qwen36_moe_dflash2_disk_restored_prefix_matches_memory_hit() {
+    let Some(fixture) = fixture() else {
+        eprintln!("skipping: QWEN36_MOE_DFLASH2_TARGET or DFLASH2_MODEL is not set");
+        return;
+    };
+    assert_disk_restored_prefix_matches_memory_hit(
+        &fixture.target,
+        &fixture.draft,
+        &fixture.tokenizer,
+    );
 }

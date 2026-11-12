@@ -130,6 +130,18 @@ impl PagedPrefixCacheConfig {
     }
 }
 
+/// Where a DFlash2 engine also keeps its prefix cache on disk (under the
+/// `dflash2` subdirectory of `dir`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DFlash2PrefixDiskConfig {
+    pub dir: PathBuf,
+    /// Bytes the store may hold; unlimited when `None`.
+    pub max_bytes: Option<u64>,
+    /// The target model's directory: stored state is reused only for the
+    /// same weights.
+    pub model_dir: PathBuf,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrefixLruCacheConfig {
     pub max_bytes: usize,
@@ -1431,7 +1443,11 @@ impl PagedPrefixStore {
                 continue;
             }
             let key = entry.file_name().to_string_lossy().into_owned();
-            if key.starts_with(".tmp-") {
+            // The DFlash2 prefix store shares this directory and keeps its
+            // own limit.
+            if key.starts_with(".tmp-")
+                || key == crate::core::dflash2_prefix_store::DFLASH2_STORE_DIR
+            {
                 continue;
             }
             let metadata = entry
@@ -2869,6 +2885,34 @@ mod tests {
         assert!(
             directory_size(&root) <= first_entry_bytes + 1,
             "SSD cache directory should stay within the configured capacity"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_store_eviction_skips_the_dflash2_directory() {
+        let root = temp_root("prefix-store-skips-dflash2");
+        let dflash2 = root.join(crate::core::dflash2_prefix_store::DFLASH2_STORE_DIR);
+        std::fs::create_dir_all(dflash2.join("identity")).unwrap();
+        // Older than every entry and larger than the limit.
+        std::fs::write(dflash2.join("identity").join("range"), vec![0_u8; 1 << 20]).unwrap();
+        let entry1 = single_full_paged_entry(1.0);
+        let entry2 = single_full_paged_entry(2.0);
+        let spec1 = spec(vec![1, 2], 2, None, entry1.main_layer_specs(), vec![], None);
+        let spec2 = spec(vec![3, 4], 2, None, entry2.main_layer_specs(), vec![], None);
+
+        let unlimited = PagedPrefixStore::new(&root);
+        let key1 = unlimited.save(&spec1, &entry1).expect("save first entry");
+        let first_entry_bytes = directory_size(&root.join(&key1));
+        let limited = PagedPrefixStore::new(&root).with_max_bytes(first_entry_bytes as usize + 1);
+        let key2 = limited.save(&spec2, &entry2).expect("save second entry");
+
+        assert!(!root.join(&key1).exists(), "the oldest entry is evicted");
+        assert!(root.join(&key2).exists(), "the new entry stays");
+        assert!(
+            dflash2.join("identity").join("range").exists(),
+            "the DFlash2 store is neither evicted nor counted"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

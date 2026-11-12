@@ -1103,6 +1103,7 @@ where
         crate::core::dflash2::DFlash2P2Options::default(),
         draft_quantization_bits,
         prefix_cache,
+        None,
         scheduler_runtime_profile,
         static_memory_estimate,
         vision_input,
@@ -1126,6 +1127,7 @@ pub async fn build_dflash2_engine_with_options<M>(
     p2_options: crate::core::dflash2::DFlash2P2Options,
     draft_quantization_bits: Option<i32>,
     prefix_cache: Option<crate::core::cache::PrefixLruCacheConfig>,
+    prefix_cache_disk: Option<crate::core::cache::DFlash2PrefixDiskConfig>,
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     static_memory_estimate: crate::core::process_memory::StaticMemoryEstimate,
     vision_input: VisionInputConfig,
@@ -1237,6 +1239,7 @@ where
             budget_state,
             cache_cost: dflash2_cache_cost,
             prefix_cache_max_bytes: prefix_cache.map(|config| config.max_bytes),
+            prefix_cache_disk: prefix_cache_disk.map(|config| (config, prefill_chunk_size)),
             initial_draft_budget,
             target_execution_fingerprint,
             verify_profile,
@@ -1323,6 +1326,7 @@ where
             dflash2_handle.prefix_cache_hit_tokens.clone(),
             dflash2_handle.runtime_usage.clone(),
         )
+        .with_prefix_cache_disk(dflash2_handle.prefix_cache_disk.clone())
         .with_ragged_linear(dflash2_handle.ragged_linear.clone()),
         prompt_lookup: health::PromptLookupHealthConfig::disabled(),
         active_kv_offload: crate::core::cache::ActiveKvOffloadSharedStats::new(

@@ -325,6 +325,7 @@ async fn main() -> Result<()> {
         },
         Some(4),
         None,
+        None,
         default_scheduler_runtime_profile(SchedulerAutotuneRuntimeContext::local_default(
             effective_cap,
         )),

@@ -681,6 +681,9 @@ pub(crate) struct DFlash2ActorConfig {
     pub(crate) budget_state: BudgetState,
     pub(crate) cache_cost: DFlash2TargetCacheCost,
     pub(crate) prefix_cache_max_bytes: Option<usize>,
+    /// Where the prefix cache is also kept on disk, and the prefill chunk
+    /// size its stored state was computed with.
+    pub(crate) prefix_cache_disk: Option<(crate::core::cache::DFlash2PrefixDiskConfig, usize)>,
     pub(crate) initial_draft_budget: usize,
     pub(crate) target_execution_fingerprint: String,
     pub(crate) verify_profile: String,
@@ -759,6 +762,7 @@ pub struct DFlash2ActorHandle {
     pub(crate) prefix_cache_saves: Arc<AtomicU64>,
     pub(crate) prefix_cache_evictions: Arc<AtomicU64>,
     pub(crate) prefix_cache_hit_tokens: Arc<AtomicU64>,
+    pub(crate) prefix_cache_disk: crate::core::runtime_health::DFlash2PrefixDiskCounters,
     pub(crate) ragged_linear: DFlash2RaggedLinearCounters,
 }
 
@@ -782,6 +786,86 @@ impl DFlash2PrefixCacheCounters {
         self.misses.store(snapshot.misses, Ordering::Relaxed);
         self.saves.store(snapshot.saves, Ordering::Relaxed);
         self.evictions.store(snapshot.evictions, Ordering::Relaxed);
+    }
+}
+
+/// What stored target state depends on besides the model and the target's
+/// own execution fingerprint: the build (version and executable), the
+/// resolved profile settings with the Neural Engine mode, and every
+/// experimental switch in the environment. State stored under another value
+/// is never read; a rebuilt or updated backend therefore starts a new store.
+fn store_execution_profile() -> String {
+    let executable = std::env::current_exe()
+        .and_then(std::fs::metadata)
+        .map(|meta| {
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |since| since.as_secs());
+            (meta.len(), modified)
+        })
+        .unwrap_or_default();
+    let mut switches: Vec<(String, String)> = std::env::vars_os()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .filter(|(name, _)| name.starts_with("IRONMLX_EXPERIMENTAL_"))
+        .collect();
+    switches.sort();
+    let profile = serde_json::to_string(&crate::core::runtime_health::M5ProfileHealth::current())
+        .unwrap_or_default();
+    format!(
+        "ironmlx={};executable={executable:?};profile={profile};switches={switches:?}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// Open the prefix cache's disk store. A store that cannot be opened leaves
+/// the cache in memory only; it never keeps the engine from starting.
+fn open_prefix_disk_writer(
+    config: &crate::core::cache::DFlash2PrefixDiskConfig,
+    target_execution_fingerprint: &str,
+    prefill_chunk_size: usize,
+    draft: &DFlash2DraftModel,
+) -> Option<crate::core::dflash2_prefix_writer::DFlash2PrefixWriter> {
+    use crate::core::dflash2_prefix_store::{DFlash2DiskStore, DFlash2StoreIdentity};
+    let draft_config = draft.config();
+    let open = || -> Result<_> {
+        let identity = DFlash2StoreIdentity::for_model_dir(
+            &config.model_dir,
+            target_execution_fingerprint,
+            &store_execution_profile(),
+            prefill_chunk_size,
+            &draft_config.dflash_config.target_layer_ids,
+            usize::try_from(draft_config.sliding_window - 1)?,
+        )?;
+        let store = DFlash2DiskStore::open(&config.dir, &identity, config.max_bytes)?;
+        let snapshot = store.snapshot();
+        tracing::info!(
+            dir = %config.dir.display(),
+            identity = %identity.key(),
+            max_bytes = ?config.max_bytes,
+            entries = snapshot.entries,
+            bytes = snapshot.bytes,
+            discarded = snapshot.invalid,
+            "DFlash2 prefix cache disk store opened"
+        );
+        crate::core::dflash2_prefix_writer::DFlash2PrefixWriter::spawn(store)
+    };
+    match open() {
+        Ok(writer) => Some(writer),
+        Err(error) => {
+            tracing::warn!(
+                dir = %config.dir.display(),
+                error = %error,
+                "DFlash2 prefix cache disk store not opened; the cache stays in memory only"
+            );
+            None
+        }
     }
 }
 
@@ -868,6 +952,7 @@ where
         budget_state,
         cache_cost,
         prefix_cache_max_bytes,
+        prefix_cache_disk,
         initial_draft_budget,
         target_execution_fingerprint,
         verify_profile,
@@ -992,8 +1077,16 @@ where
         evictions: Arc::clone(&prefix_cache_evictions),
         hit_tokens: Arc::clone(&prefix_cache_hit_tokens),
     };
+    let prefix_cache_disk_counters = crate::core::runtime_health::DFlash2PrefixDiskCounters {
+        max_bytes: prefix_cache_disk
+            .as_ref()
+            .and_then(|(config, _)| config.max_bytes),
+        ..Default::default()
+    };
+    let worker_prefix_cache_disk_counters = prefix_cache_disk_counters.clone();
     let runtime_usage = Arc::new(crate::core::runtime_usage::ModelRuntimeUsageCounters::default());
     let worker_runtime_usage = Arc::clone(&runtime_usage);
+    let disk_target_execution_fingerprint = target_execution_fingerprint.clone();
     let prefix_fingerprint = format!(
         "dflash2-prefix-v2:ironmlx={};backend=mlx;kernel-contract=row-exact-v1;prefill=scheduler-b1-chunk-v2-cold-single;target={};draft-dtype={};draft-hidden={};draft-layer-count={};target-layers={:?};sliding-window={};block-size={}",
         env!("CARGO_PKG_VERSION"),
@@ -1064,7 +1157,20 @@ where
                     generation_suffixes = ?turn_boundary.as_ref().map(|b| b.suffixes()),
                     "DFlash2 prefix cache chat turn boundary"
                 );
-                cache.with_turn_boundary(turn_boundary)
+                let disk = prefix_cache_disk.as_ref().and_then(|(config, chunk_size)| {
+                    open_prefix_disk_writer(
+                        config,
+                        &disk_target_execution_fingerprint,
+                        *chunk_size,
+                        &draft,
+                    )
+                });
+                if let Some(disk) = &disk {
+                    let _ = worker_prefix_cache_disk_counters
+                        .store
+                        .set(disk.shared_store());
+                }
+                cache.with_turn_boundary(turn_boundary).with_disk(disk)
             });
         let mut next_request_id = 1_u64;
         let mut active = Vec::<ActiveDFlash2Request<'_, M>>::with_capacity(b_max);
@@ -2437,6 +2543,7 @@ where
         prefix_cache_saves,
         prefix_cache_evictions,
         prefix_cache_hit_tokens,
+        prefix_cache_disk: prefix_cache_disk_counters,
         ragged_linear,
     }
 }

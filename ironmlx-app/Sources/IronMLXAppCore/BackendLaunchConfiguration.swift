@@ -292,6 +292,12 @@ public struct BackendLaunchConfiguration: Equatable {
             appendIntegerFlag("--memory-limit-total-gb", options.memoryLimitTotalGB, to: &arguments)
             appendIntegerFlag("--memory-limit-model-gb", options.memoryLimitModelGB, to: &arguments)
             appendIntegerFlag("--prefix-lru-cache-max-bytes", options.prefixLruCacheMaxBytes, to: &arguments)
+            // With DFlash2 the directory only adds a disk store behind the
+            // in-memory prefix cache, which it therefore requires.
+            if let pagedPrefixCacheDir = options.pagedPrefixCacheDir, options.prefixLruCacheMaxBytes != nil {
+                arguments += ["--paged-prefix-cache-dir", pagedPrefixCacheDir]
+                appendIntegerFlag("--ssd-prefix-cache-max-gb", options.ssdPrefixCacheMaxGB, to: &arguments)
+            }
             if !options.m5DFlash2Profile {
                 arguments += ["--m5-dflash2-profile", "off"]
             }

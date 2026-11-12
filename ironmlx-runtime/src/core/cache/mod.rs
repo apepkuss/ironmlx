@@ -14,7 +14,8 @@ pub use prefix_store::{
     process_shared_prefix_lru_cache, shrink_process_prefix_lru_caches,
     shutdown_process_async_prefix_store_queue, AsyncPrefixStoreAdmission,
     AsyncPrefixStoreCancellation, AsyncPrefixStorePermit, AsyncPrefixStoreQueue,
-    AsyncPrefixStoreStats, AsyncPrefixStoreSubmit, PagedPrefixCacheConfig, PagedPrefixLoadStatus,
-    PagedPrefixStore, PrefixLruCache, PrefixLruCacheConfig, PrefixLruInsertResult,
-    PrefixLruInsertStatus, SharedPrefixLruCache, DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
+    AsyncPrefixStoreStats, AsyncPrefixStoreSubmit, DFlash2PrefixDiskConfig, PagedPrefixCacheConfig,
+    PagedPrefixLoadStatus, PagedPrefixStore, PrefixLruCache, PrefixLruCacheConfig,
+    PrefixLruInsertResult, PrefixLruInsertStatus, SharedPrefixLruCache,
+    DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
 };

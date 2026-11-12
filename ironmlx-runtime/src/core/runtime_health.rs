@@ -174,6 +174,7 @@ pub struct DFlash2HealthInfo {
     pub prefix_cache_evictions: u64,
     pub prefix_cache_hit_tokens: u64,
     pub runtime_usage: crate::core::runtime_usage::ModelRuntimeUsageSnapshot,
+    pub prefix_cache_disk: DFlash2PrefixDiskHealth,
     pub ragged_linear: DFlash2RaggedLinearHealth,
     pub m5_profile: M5ProfileHealth,
 }
@@ -239,6 +240,58 @@ impl M5ProfileHealth {
                 .collect(),
             ane_mode: Some(profile.ane.as_str()),
             ane_status: Some(profile.ane_status().as_str()),
+        }
+    }
+}
+
+/// The DFlash2 prefix cache's disk store.
+#[derive(Debug, Default, Serialize)]
+pub struct DFlash2PrefixDiskHealth {
+    pub enabled: bool,
+    pub max_bytes: Option<u64>,
+    pub entries: usize,
+    pub bytes: u64,
+    pub hits: u64,
+    pub saves: u64,
+    /// Saves given up before writing (queue full, no memory for the copy).
+    pub dropped: u64,
+    /// Saves that failed while writing.
+    pub failed: u64,
+    /// Stored artifacts discarded as unusable.
+    pub invalid: u64,
+}
+
+/// Reads the disk store's own counters, so writes that finish after a
+/// request are visible without another request.
+#[derive(Clone, Default)]
+pub struct DFlash2PrefixDiskCounters {
+    pub(crate) max_bytes: Option<u64>,
+    pub(crate) store: Arc<
+        std::sync::OnceLock<
+            Arc<std::sync::Mutex<crate::core::dflash2_prefix_store::DFlash2DiskStore>>,
+        >,
+    >,
+}
+
+impl DFlash2PrefixDiskCounters {
+    fn snapshot(&self) -> DFlash2PrefixDiskHealth {
+        let Some(store) = self.store.get() else {
+            return DFlash2PrefixDiskHealth::default();
+        };
+        let snapshot = store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot();
+        DFlash2PrefixDiskHealth {
+            enabled: true,
+            max_bytes: self.max_bytes,
+            entries: snapshot.entries,
+            bytes: snapshot.bytes,
+            hits: snapshot.hits,
+            saves: snapshot.saves,
+            dropped: snapshot.dropped,
+            failed: snapshot.failed,
+            invalid: snapshot.invalid,
         }
     }
 }
@@ -397,6 +450,7 @@ pub struct DFlash2HealthConfig {
     prefix_cache_evictions: Arc<AtomicU64>,
     prefix_cache_hit_tokens: Arc<AtomicU64>,
     runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
+    prefix_cache_disk: DFlash2PrefixDiskCounters,
     ragged_linear: DFlash2RaggedLinearCounters,
 }
 
@@ -460,8 +514,14 @@ impl DFlash2HealthConfig {
             runtime_usage: Arc::new(
                 crate::core::runtime_usage::ModelRuntimeUsageCounters::default(),
             ),
+            prefix_cache_disk: DFlash2PrefixDiskCounters::default(),
             ragged_linear: DFlash2RaggedLinearCounters::default(),
         }
+    }
+
+    pub fn with_prefix_cache_disk(mut self, prefix_cache_disk: DFlash2PrefixDiskCounters) -> Self {
+        self.prefix_cache_disk = prefix_cache_disk;
+        self
     }
 
     pub fn with_ragged_linear(mut self, ragged_linear: DFlash2RaggedLinearCounters) -> Self {
@@ -582,6 +642,7 @@ impl DFlash2HealthConfig {
             prefix_cache_evictions,
             prefix_cache_hit_tokens,
             runtime_usage,
+            prefix_cache_disk: DFlash2PrefixDiskCounters::default(),
             ragged_linear: DFlash2RaggedLinearCounters::default(),
         }
     }
@@ -652,6 +713,7 @@ impl DFlash2HealthConfig {
             prefix_cache_evictions: self.prefix_cache_evictions.load(Ordering::Relaxed),
             prefix_cache_hit_tokens: self.prefix_cache_hit_tokens.load(Ordering::Relaxed),
             runtime_usage: self.runtime_usage.snapshot(self.prefix_cache_enabled),
+            prefix_cache_disk: self.prefix_cache_disk.snapshot(),
             ragged_linear: self.ragged_linear.snapshot(),
             m5_profile: M5ProfileHealth::current(),
         }

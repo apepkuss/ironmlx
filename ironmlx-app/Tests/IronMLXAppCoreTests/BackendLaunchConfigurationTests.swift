@@ -98,10 +98,51 @@ private var defaultDataPathArguments: [String] {
     #expect(argumentValue("--max-cache-cap", in: config.arguments) == "65536")
     #expect(!config.arguments.contains("--scheduler-profile"))
     #expect(!config.arguments.contains("--kv-quant"))
-    #expect(!config.arguments.contains("--paged-prefix-cache-dir"))
+    #expect(argumentValue("--paged-prefix-cache-dir", in: config.arguments) == "/tmp/prefix")
+    #expect(!config.arguments.contains("--ssd-prefix-cache-max-gb"))
     #expect(argumentValue("--prefix-lru-cache-max-bytes", in: config.arguments) == "2147483648")
     #expect(!config.arguments.contains("--active-kv-offload"))
     #expect(!config.arguments.contains("--max-loaded-models"))
+}
+
+private func dflash2CacheLaunchArguments(config: AppConfig) -> [String] {
+    BackendLaunchConfiguration(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"),
+        host: "127.0.0.1",
+        port: 9068,
+        options: BackendLaunchOptions(config: config, physicalMemoryBytes: 64 * 1024 * 1024 * 1024),
+        dflash2Runtime: ModelDFlash2Runtime(
+            targetModelID: "target",
+            targetModelDir: "/models/target",
+            draftModelID: "draft",
+            draftModelDir: "/models/draft",
+            checkpointBlockSize: 8,
+            blockSize: 8,
+            draftBits: 4,
+            tensorBatchMaxWidth: 1,
+            maxCacheCap: 65_536
+        )
+    ).arguments
+}
+
+@Test func dflash2LaunchPassesSSDCacheArguments() {
+    let arguments = dflash2CacheLaunchArguments(
+        config: AppConfig(hotCache: 8, coldCache: 20, cacheEnable: true, cacheDir: "/tmp/cache")
+    )
+
+    #expect(argumentValue("--paged-prefix-cache-dir", in: arguments) == "/tmp/cache")
+    #expect(argumentValue("--ssd-prefix-cache-max-gb", in: arguments) == "20")
+    #expect(arguments.contains("--prefix-lru-cache-max-bytes"))
+}
+
+@Test func dflash2LaunchOmitsSSDCacheArgumentsWhenCacheDisabled() {
+    let arguments = dflash2CacheLaunchArguments(
+        config: AppConfig(coldCache: 20, cacheEnable: false, cacheDir: "/tmp/cache")
+    )
+
+    #expect(!arguments.contains("--paged-prefix-cache-dir"))
+    #expect(!arguments.contains("--ssd-prefix-cache-max-gb"))
+    #expect(!arguments.contains("--prefix-lru-cache-max-bytes"))
 }
 
 private func argumentValue(_ flag: String, in arguments: [String]) -> String? {
@@ -470,14 +511,14 @@ private func dflash2LaunchArguments(config appConfig: AppConfig) -> [String] {
 }
 
 @Test func dflash2ArgumentsTurnM5ProfileOffWhenDisabled() {
-    let arguments = dflash2LaunchArguments(config: AppConfig(m5Dflash2Profile: false))
+    let arguments = dflash2CacheLaunchArguments(config: AppConfig(m5Dflash2Profile: false))
     #expect(argumentValue("--m5-dflash2-profile", in: arguments) == "off")
 }
 
 @Test func dflash2ArgumentsKeepAneAutomaticByDefaultAndPassOffWhenDisabled() {
     #expect(!dflash2LaunchArguments(config: AppConfig()).contains("--ane"))
     #expect(!dflash2LaunchArguments(config: AppConfig(ane: true)).contains("--ane"))
-    let arguments = dflash2LaunchArguments(config: AppConfig(ane: false))
+    let arguments = dflash2CacheLaunchArguments(config: AppConfig(ane: false))
     #expect(argumentValue("--ane", in: arguments) == "off")
     // Independent of the M5 profile choice.
     let both = dflash2LaunchArguments(config: AppConfig(m5Dflash2Profile: false, ane: false))

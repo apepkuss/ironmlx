@@ -64,6 +64,13 @@ pub(crate) struct DFlash2ExecutionOptions {
     pub(crate) block_size: usize,
     pub(crate) p2: DFlash2P2Options,
 }
+#[cfg(test)]
+use super::dflash2_prefix_store::DFlash2DiskSnapshot;
+use super::dflash2_prefix_store::{
+    restore_planned, DFlash2DiskEntry, DFlash2DiskLayer, DFlash2DiskRange, DFlash2DiskRestored,
+    DFlash2DiskSave,
+};
+use super::dflash2_prefix_writer::DFlash2PrefixWriter;
 use {
     ironmlx_lm::core::cache::layer::prefix_entry_for_row,
     ironmlx_lm::core::cache::layer::restore_prefix_entry_for_row,
@@ -416,6 +423,30 @@ impl DFlash2PrefixArtifact {
     }
 }
 
+/// The artifact's K/V from position `from` on, as its own segments, when
+/// whole segments cover exactly those positions.
+fn whole_kv_ranges(artifact: &DFlash2PrefixArtifact, from: i32) -> Option<Vec<DFlash2DiskRange>> {
+    let mut ranges = Vec::new();
+    let mut start = 0_i32;
+    for part in &artifact.kv {
+        let stop = start + part.tokens;
+        if start >= from {
+            if part.tokens != part.segment.tokens || (ranges.is_empty() && start != from) {
+                return None;
+            }
+            ranges.push(DFlash2DiskRange {
+                start,
+                stop,
+                layers: part.segment.layers.clone(),
+            });
+        } else if stop > from {
+            return None;
+        }
+        start = stop;
+    }
+    (!ranges.is_empty()).then_some(ranges)
+}
+
 /// Positions `start..stop` of a `[1, S, hidden]` array.
 fn slice_context_range(array: &Array, start: i32, stop: i32) -> Result<Array> {
     let shape = array.shape();
@@ -462,6 +493,7 @@ pub(crate) struct DFlash2PrefixCacheSnapshot {
 
 /// One position of a request's prefill, to be saved by
 /// [`DFlash2PrefixCache::insert`].
+#[derive(Clone, Copy)]
 struct DFlash2PrefixSave<'a> {
     token_ids: &'a [u32],
     /// The fingerprint a prefix of this prompt has at a given token count.
@@ -492,7 +524,7 @@ struct DFlash2PrefixSave<'a> {
 ///
 /// What cannot be shared is each artifact's fixed-size state, so a
 /// conversation keeps a bounded set of positions instead of two more every
-/// turn: its newest whole prompt, its [`Self::RECENT_BOUNDARIES`] newest
+/// turn: its newest whole prompt, its [`RECENT_BOUNDARIES`](super::dflash2_prefix_store::RECENT_BOUNDARIES) newest
 /// boundaries, and of the older boundaries the shortest in each power-of-two
 /// length range (a prompt that rewinds further recomputes at most half of
 /// what it keeps).
@@ -511,6 +543,9 @@ pub(crate) struct DFlash2PrefixCache {
     turn_boundary: Option<ChatTurnBoundary>,
     /// What a prefill chunk needs while it runs; the cache makes room for it.
     prefill_working_set: PrefillWorkingSet,
+    /// Where boundaries are also kept on disk, to be restored after the
+    /// cache gave them up or the process restarted.
+    disk: Option<DFlash2PrefixWriter>,
 }
 
 /// Memory a prefill chunk uses while it runs and returns when it ends,
@@ -573,8 +608,6 @@ impl DFlash2PrefixCache {
     const MAX_KV_SEGMENTS: usize = 16;
     /// A restore concatenates the context tail from its chunks.
     const MAX_CONTEXT_CHUNKS: usize = 16;
-    /// Newest boundaries a conversation always keeps.
-    const RECENT_BOUNDARIES: usize = 3;
 
     pub(crate) fn new(max_bytes: usize) -> Result<Self> {
         anyhow::ensure!(max_bytes > 0, "DFlash2 prefix cache max_bytes must be > 0");
@@ -590,7 +623,18 @@ impl DFlash2PrefixCache {
             entries: Vec::new(),
             turn_boundary: None,
             prefill_working_set: PrefillWorkingSet::default(),
+            disk: None,
         })
+    }
+
+    pub(crate) fn with_disk(mut self, disk: Option<DFlash2PrefixWriter>) -> Self {
+        self.disk = disk;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disk_snapshot(&self) -> Option<DFlash2DiskSnapshot> {
+        self.disk.as_ref().map(|disk| disk.store().snapshot())
     }
 
     pub(crate) fn with_turn_boundary(mut self, turn_boundary: Option<ChatTurnBoundary>) -> Self {
@@ -672,7 +716,227 @@ impl DFlash2PrefixCache {
     /// cover a shortfall; the save is skipped when they cannot.
     ///
     /// Returns the saved artifact's id, or `None` when nothing was saved.
+    /// A boundary also goes to the disk store, saved here or not.
     fn insert(
+        &mut self,
+        save: DFlash2PrefixSave<'_>,
+        shortfall: &dyn Fn(usize) -> usize,
+    ) -> Result<Option<u64>> {
+        let saved = self.insert_in_memory(save, shortfall)?;
+        if save.role == DFlash2PrefixRole::Boundary {
+            self.store_on_disk(&save, saved, shortfall);
+        }
+        Ok(saved)
+    }
+
+    /// Queue a boundary for the disk store. A failure costs the stored copy,
+    /// never the request.
+    fn store_on_disk(
+        &self,
+        save: &DFlash2PrefixSave<'_>,
+        saved: Option<u64>,
+        shortfall: &dyn Fn(usize) -> usize,
+    ) {
+        let Some(disk) = &self.disk else {
+            return;
+        };
+        let tokens = save.token_ids.len();
+        match self.disk_save(disk, save, saved, shortfall) {
+            Ok(Some(disk_save)) => {
+                let bytes = disk_save.payload_bytes();
+                if !disk.submit(disk_save) {
+                    tracing::info!(
+                        tokens,
+                        bytes,
+                        "DFlash2 prefix artifact not written to disk: the write queue is full"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                disk.store().note_dropped();
+                tracing::warn!(
+                    tokens,
+                    error = %error,
+                    "DFlash2 prefix artifact not written to disk"
+                );
+            }
+        }
+    }
+
+    /// What the disk store lacks of `save`: the positions after the longest
+    /// stored artifact of the same conversation. `None` when the artifact is
+    /// already stored or its copy does not fit in memory.
+    fn disk_save(
+        &self,
+        disk: &DFlash2PrefixWriter,
+        save: &DFlash2PrefixSave<'_>,
+        saved: Option<u64>,
+        shortfall: &dyn Fn(usize) -> usize,
+    ) -> Result<Option<DFlash2DiskSave>> {
+        let token_ids = save.token_ids;
+        let cached_len = i32::try_from(token_ids.len())?;
+        let lineage = disk.store().lineage(token_ids, save.fingerprint);
+        if lineage.stored {
+            return Ok(None);
+        }
+        let Some((entry, entry_len)) = prefix_entry_for_row(save.target_cache, 0)? else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            entry_len == cached_len,
+            "DFlash2 prefix store target offset {entry_len} != token length {cached_len}"
+        );
+        // Arrays the writer thread only copies: compact and evaluated here.
+        let mut written = Vec::new();
+        let mut layers = Vec::with_capacity(entry.main_layers.len());
+        let mut dense_views = Vec::new();
+        for payload in entry.main_layers {
+            match payload {
+                PrefixLayerPayload::FullDense { k, v } => {
+                    layers.push(DFlash2DiskLayer::Dense);
+                    dense_views.push((k, v));
+                }
+                PrefixLayerPayload::Linear {
+                    conv_state,
+                    recurrent_state,
+                } => {
+                    let conv_state = conv_state.contiguous(false)?;
+                    let recurrent_state = recurrent_state.contiguous(false)?;
+                    written.extend([conv_state.clone(), recurrent_state.clone()]);
+                    layers.push(DFlash2DiskLayer::State(PrefixLayerPayload::Linear {
+                        conv_state,
+                        recurrent_state,
+                    }));
+                }
+                _ => anyhow::bail!("DFlash2 prefix store cannot hold this layer's state"),
+            }
+        }
+        let tail_len = sequence_len(save.context_hidden)?;
+        let tail_start = cached_len - tail_len;
+        let context_start = lineage.parent_len.max(tail_start);
+        let context =
+            slice_context_range(save.context_hidden, context_start - tail_start, tail_len)?
+                .contiguous(false)?;
+        let last_hidden = save.last_hidden.contiguous(false)?;
+        let mut copied_bytes = array_payload_bytes(&context);
+        written.extend([context.clone(), last_hidden.clone()]);
+
+        // The cached artifact's own segments when they are exactly the
+        // missing positions (a cold prompt's whole K/V); a copy otherwise.
+        let shared = saved
+            .and_then(|id| self.entries.iter().find(|entry| entry.id == id))
+            .and_then(|artifact| whole_kv_ranges(artifact, lineage.parent_len));
+        let kv = match shared {
+            Some(ranges) => ranges,
+            None => {
+                let mut range_layers = Vec::with_capacity(dense_views.len());
+                for (k, v) in &dense_views {
+                    let k = slice_sequence_range(k, lineage.parent_len, cached_len)?
+                        .contiguous(false)?;
+                    let v = slice_sequence_range(v, lineage.parent_len, cached_len)?
+                        .contiguous(false)?;
+                    copied_bytes = copied_bytes
+                        .saturating_add(array_payload_bytes(&k))
+                        .saturating_add(array_payload_bytes(&v));
+                    written.extend([k.clone(), v.clone()]);
+                    range_layers.push((k, v));
+                }
+                vec![DFlash2DiskRange {
+                    start: lineage.parent_len,
+                    stop: cached_len,
+                    layers: range_layers,
+                }]
+            }
+        };
+        if shortfall(copied_bytes) > 0 {
+            disk.store().note_dropped();
+            tracing::info!(
+                tokens = token_ids.len(),
+                bytes = copied_bytes,
+                "DFlash2 prefix artifact not written to disk: no memory headroom for its copy"
+            );
+            return Ok(None);
+        }
+        mlx::transforms::eval(&written.iter().collect::<Vec<_>>())?;
+        Ok(Some(DFlash2DiskSave {
+            token_ids: token_ids.to_vec(),
+            fingerprint: (save.fingerprint)(token_ids.len()),
+            layers,
+            parent: lineage.parent,
+            ancestors: lineage.ancestors,
+            kv,
+            context_start,
+            context,
+            context_tail_len: tail_len,
+            last_hidden,
+        }))
+    }
+
+    /// A stored artifact for this prompt that is longer than the cached hit
+    /// of `cached_len` positions.
+    fn disk_candidate(
+        &self,
+        prompt_ids: &[u32],
+        fingerprint: &dyn Fn(usize) -> String,
+        cached_len: i32,
+    ) -> Option<DFlash2DiskEntry> {
+        self.disk
+            .as_ref()?
+            .store()
+            .longest(prompt_ids, fingerprint)
+            .filter(|stored| stored.cached_len > cached_len)
+    }
+
+    /// Read a stored artifact into row 0 of a fresh target cache, evicting
+    /// cached artifacts (`spare`, a shorter cached prefix of the same prompt,
+    /// last) when the bytes read would otherwise pass the limit `shortfall`
+    /// measures against. A failure removes the stored artifact;
+    /// the caller then needs a fresh cache.
+    fn restore_from_disk(
+        &mut self,
+        stored: &DFlash2DiskEntry,
+        target_cache: &mut [LayerCache],
+        spare: Option<u64>,
+        shortfall: &dyn Fn(usize) -> usize,
+    ) -> Result<DFlash2DiskRestored> {
+        let plan = self
+            .disk
+            .as_ref()
+            .and_then(|disk| disk.store().begin_restore(&stored.key))
+            .ok_or_else(|| anyhow!("DFlash2 prefix store no longer holds the artifact"))?;
+        // Nothing is evicted for a restore that cannot succeed.
+        if let Err(error) = plan.check() {
+            if let Some(disk) = &self.disk {
+                disk.store().finish_restore(&stored.key, false);
+            }
+            return Err(error);
+        }
+        if !self.entries.is_empty() {
+            let needed = shortfall(usize::try_from(plan.payload_bytes()).unwrap_or(usize::MAX));
+            if needed > 0 {
+                let reclaimed =
+                    self.shrink_to_sparing(self.total_bytes.saturating_sub(needed), spare);
+                if reclaimed > 0 {
+                    // Freed buffers return to the system, not to MLX's cache.
+                    mlx::transforms::clear_cache();
+                    tracing::info!(
+                        needed_bytes = needed,
+                        reclaimed_bytes = reclaimed,
+                        retained_bytes = self.total_bytes,
+                        "DFlash2 prefix cache shrank to make room for a restore from disk"
+                    );
+                }
+            }
+        }
+        let restored = restore_planned(&plan, target_cache);
+        if let Some(disk) = &self.disk {
+            disk.store().finish_restore(&stored.key, restored.is_ok());
+        }
+        restored
+    }
+
+    fn insert_in_memory(
         &mut self,
         save: DFlash2PrefixSave<'_>,
         shortfall: &dyn Fn(usize) -> usize,
@@ -964,19 +1228,9 @@ impl DFlash2PrefixCache {
                 }
             }
         }
-        boundaries.sort_unstable();
-        let older = boundaries.len().saturating_sub(Self::RECENT_BOUNDARIES);
-        // Shortest first: the boundary kept for a length range never changes
-        // as the conversation grows.
-        let mut kept_range = None;
-        for &(len, boundary) in &boundaries[..older] {
-            let range = len.checked_ilog2();
-            if kept_range == Some(range) {
-                dropped.push(boundary);
-            } else {
-                kept_range = Some(range);
-            }
-        }
+        dropped.extend(super::dflash2_prefix_store::superseded_boundaries(
+            &mut boundaries,
+        ));
         if dropped.is_empty() {
             return;
         }
@@ -2348,9 +2602,75 @@ where
         let mut phases = PrefillPhaseDiagnostic::start();
 
         if let Some(cache) = prefix_cache.as_deref_mut() {
-            let artifact = cache.load_longest(&request.prompt_ids, &prefix_key);
+            let mut artifact = cache.load_longest(&request.prompt_ids, &prefix_key);
             PrefillPhaseDiagnostic::mark(&mut phases, "load", 0);
-            if let Some(artifact) = artifact {
+            // The disk store is used only for a longer prefix than the cache
+            // holds.
+            let cached = artifact
+                .as_ref()
+                .map(|artifact| (artifact.id, artifact.cached_len));
+            let cached_len = cached.map_or(0, |(_, len)| len);
+            let mut restored_from_disk = false;
+            if let Some(stored) = cache.disk_candidate(&request.prompt_ids, &prefix_key, cached_len)
+            {
+                // A handle here would keep the cached prefix alive through
+                // an eviction that makes room for the restore.
+                drop(artifact.take());
+                let cached_id = cached.map(|(id, _)| id);
+                match cache.restore_from_disk(
+                    &stored,
+                    &mut target_cache,
+                    cached_id,
+                    &prefill_chunk_shortfall,
+                ) {
+                    Ok(restored) => {
+                        tracing::info!(
+                            tokens = restored.tokens,
+                            bytes = stored.bytes,
+                            "DFlash2 prefix restored from disk"
+                        );
+                        // The prefill resumes after this boundary and never
+                        // saves it, so it is cached again here: the next turn
+                        // finds it in memory, and this request's own saves
+                        // share its K/V (as it shares the shorter cached
+                        // prefix's, when that is still there).
+                        let save = DFlash2PrefixSave {
+                            token_ids: &request.prompt_ids[..restored.tokens],
+                            fingerprint: &prefix_key,
+                            role: DFlash2PrefixRole::Boundary,
+                            target_cache: &target_cache,
+                            context_hidden: &restored.context_tail,
+                            last_hidden: &restored.last_hidden,
+                            parent: cached_id,
+                        };
+                        match cache.insert(save, &prefix_save_shortfall) {
+                            Ok(saved) => prefix_lineage = saved,
+                            Err(error) => tracing::warn!(
+                                cached_len = restored.cached_len,
+                                error = %error,
+                                "DFlash2 prefix restored from disk not cached again"
+                            ),
+                        }
+                        position = restored.cached_len;
+                        prefix_cache_hit_tokens = restored.tokens;
+                        context_hidden = Some(restored.context_tail);
+                        last_hidden = Some(restored.last_hidden);
+                        restored_from_disk = true;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            cached_len = stored.cached_len,
+                            error = %error,
+                            "unusable DFlash2 prefix artifact removed from disk; falling back"
+                        );
+                        target_cache = model.make_cache(1, cap, model.cache_dtype())?;
+                        // The cached prefix, if the restore left it.
+                        artifact = cache.load_longest(&request.prompt_ids, &prefix_key);
+                    }
+                }
+                PrefillPhaseDiagnostic::mark(&mut phases, "disk_restore", position);
+            }
+            if let Some(artifact) = artifact.filter(|_| !restored_from_disk) {
                 let restore_result = artifact.restore_into(&mut target_cache);
                 PrefillPhaseDiagnostic::mark(&mut phases, "restore_graph", artifact.cached_len);
                 let restore_result = restore_result.and_then(|()| {
@@ -6670,6 +6990,29 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "loads the full local Qwen3.8 target and DFlash2 draft checkpoints"]
+    #[serial(mlx_metal)]
+    fn qwen38_dflash2_disk_restored_prefix_matches_memory_hit() {
+        use ironmlx_lm::models::{dflash2::DFlash2DraftModel, Qwen35Model};
+        use ironmlx_lm::{core::loader::Loader, core::tokenizer::Tokenizer};
+
+        let target_dir = std::env::var("QWEN38_MODEL").expect("QWEN38_MODEL not set");
+        let draft_dir = std::env::var("DFLASH2_MODEL").expect("DFLASH2_MODEL not set");
+        let mut target_loader = Loader::open(std::path::Path::new(&target_dir))
+            .expect("open Qwen3.8 target checkpoint");
+        let tokenizer = Tokenizer::from_loader(&target_loader).expect("load tokenizer");
+        let target =
+            Qwen35Model::from_loader_dflash2(&mut target_loader).expect("load DFlash2 target");
+        let draft_loader = Loader::open_dflash2(std::path::Path::new(&draft_dir))
+            .expect("open DFlash2 draft checkpoint");
+        let draft = DFlash2DraftModel::from_loader(&draft_loader, target.config(), Some(4))
+            .expect("load runtime-quantized DFlash2 draft");
+        super::moe_tests::assert_disk_restored_prefix_matches_memory_hit(
+            &target, &draft, &tokenizer,
+        );
+    }
+
+    #[test]
     #[ignore = "loads the full local Qwen3.8 target and block-16-capable DFlash2 draft checkpoints"]
     #[serial(mlx_metal)]
     fn qwen38_b32_q16_linear_matches_ordinary_generation() {
@@ -7245,6 +7588,218 @@ mod tests {
             DFlash2PrefixRole::Boundary,
             &|_| 0,
         )
+    }
+
+    /// A cache whose boundaries are also written to a store in a new
+    /// temporary directory.
+    fn test_disk_cache(name: &str) -> (DFlash2PrefixCache, std::path::PathBuf) {
+        use crate::core::dflash2_prefix_store::{tests as store_tests, DFlash2DiskStore};
+        let dir = store_tests::temp_root(name);
+        let store =
+            DFlash2DiskStore::open(&dir, &store_tests::test_identity(), None).expect("store");
+        let writer = DFlash2PrefixWriter::spawn(store).expect("writer");
+        let cache = DFlash2PrefixCache::new(1 << 30)
+            .expect("cache")
+            .with_disk(Some(writer));
+        (cache, dir)
+    }
+
+    fn flush_disk(cache: &DFlash2PrefixCache) {
+        cache.disk.as_ref().expect("disk").flush();
+    }
+
+    /// Restore the stored artifact for tokens `0..len` into a fresh cache;
+    /// returns the first head's key value at every position and the context.
+    fn restored_from_test_disk(
+        cache: &mut DFlash2PrefixCache,
+        len: u32,
+    ) -> Result<(Vec<f32>, Vec<f32>)> {
+        let prompt: Vec<u32> = (0..len).collect();
+        let stored = cache
+            .disk_candidate(&prompt, &|_| "runtime".to_owned(), 0)
+            .ok_or_else(|| anyhow!("nothing stored"))?;
+        let mut target_cache = test_dense_target_cache(256);
+        let restored = cache.restore_from_disk(&stored, &mut target_cache, None, &|_| 0)?;
+        let (entry, cached_len) = prefix_entry_for_row(&target_cache, 0)?.expect("restored");
+        assert_eq!(cached_len, restored.cached_len);
+        let PrefixLayerPayload::FullDense { k, .. } = &entry.main_layers[0] else {
+            panic!("dense layer");
+        };
+        let positions = k
+            .to_vec::<f32>()?
+            .chunks(4)
+            .take(usize::try_from(cached_len)?)
+            .map(|position| position[0])
+            .collect();
+        let context = restored
+            .context_tail
+            .to_vec::<f32>()?
+            .chunks(2)
+            .map(|position| position[0])
+            .collect();
+        Ok((positions, context))
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_cache_restores_from_disk_after_memory_eviction() {
+        let (mut cache, dir) = test_disk_cache("dflash2-cache-disk-restore");
+        let mut target_cache = test_dense_target_cache(256);
+        append_test_positions(&mut target_cache, 0, 40);
+        let first = save_test_prefix(&mut cache, &target_cache, 40, None);
+        append_test_positions(&mut target_cache, 40, 50);
+        save_test_prefix(&mut cache, &target_cache, 50, first).expect("saved");
+        flush_disk(&cache);
+        cache.shrink_to(0);
+        assert!(cache.entries.is_empty());
+
+        let (positions, context) = restored_from_test_disk(&mut cache, 50).expect("restore");
+        assert_eq!(positions, test_positions(50));
+        assert_eq!(context, test_context(50));
+        let snapshot = cache.disk_snapshot().expect("disk");
+        assert_eq!((snapshot.entries, snapshot.saves, snapshot.hits), (2, 2, 1));
+        drop(cache);
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_cache_uses_the_disk_only_for_a_longer_prefix() {
+        let (mut cache, dir) = test_disk_cache("dflash2-cache-disk-longer");
+        let mut target_cache = test_dense_target_cache(256);
+        append_test_positions(&mut target_cache, 0, 50);
+        save_test_prefix(&mut cache, &target_cache, 50, None).expect("saved");
+        flush_disk(&cache);
+        let prompt: Vec<u32> = (0..60).collect();
+        let key = |_: usize| "runtime".to_owned();
+        assert!(cache.disk_candidate(&prompt, &key, 50).is_none());
+        assert_eq!(
+            cache
+                .disk_candidate(&prompt, &key, 40)
+                .map(|stored| stored.cached_len),
+            Some(50)
+        );
+        assert!(cache
+            .disk_candidate(&prompt, &|_| "other".to_owned(), 0)
+            .is_none());
+        drop(cache);
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_cache_writes_only_boundary_artifacts_to_disk() {
+        let (mut cache, dir) = test_disk_cache("dflash2-cache-disk-roles");
+        let mut target_cache = test_dense_target_cache(256);
+        append_test_positions(&mut target_cache, 0, 20);
+        let boundary = save_test_prefix(&mut cache, &target_cache, 20, None);
+        append_test_positions(&mut target_cache, 20, 30);
+        let tokens: Vec<u32> = (0..30).collect();
+        save_test_tokens(
+            &mut cache,
+            &target_cache,
+            &tokens,
+            boundary,
+            DFlash2PrefixRole::Prompt { reusable_len: 20 },
+            &|_| 0,
+        )
+        .expect("saved");
+        flush_disk(&cache);
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.disk_snapshot().expect("disk").entries, 1);
+        let stored = cache
+            .disk_candidate(&tokens, &|_| "runtime".to_owned(), 0)
+            .expect("boundary");
+        assert_eq!(stored.cached_len, 20);
+        drop(cache);
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_cache_writes_only_new_positions_after_a_fold() {
+        use crate::core::dflash2_prefix_store::tests::file_names;
+        let (mut cache, dir) = test_disk_cache("dflash2-cache-disk-fold");
+        let mut target_cache = test_dense_target_cache(256);
+        let mut parent = None;
+        let saves = DFlash2PrefixCache::MAX_KV_SEGMENTS as u32 + 4;
+        for turn in 1..=saves {
+            let len = turn * 10;
+            append_test_positions(&mut target_cache, len as i32 - 10, len as i32);
+            parent = save_test_prefix(&mut cache, &target_cache, len, parent);
+            flush_disk(&cache);
+        }
+        // The cache folded its chain; the store kept one file per save.
+        assert!(test_artifact(&cache, parent.expect("saved")).kv.len() < saves as usize);
+        let root = cache.disk.as_ref().expect("disk").store().root().to_owned();
+        assert_eq!(file_names(&root.join("segments")).len(), saves as usize);
+        cache.shrink_to(0);
+        let (positions, context) =
+            restored_from_test_disk(&mut cache, saves * 10).expect("restore");
+        assert_eq!(positions, test_positions(saves as i32 * 10));
+        assert_eq!(context, test_context(saves as i32 * 10));
+        drop(cache);
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_cache_saves_to_disk_when_memory_refuses_the_artifact() {
+        let (mut cache, dir) = test_disk_cache("dflash2-cache-disk-no-memory");
+        let mut target_cache = test_dense_target_cache(256);
+        append_test_positions(&mut target_cache, 0, 40);
+        save_test_prefix(&mut cache, &target_cache, 40, None).expect("saved");
+        flush_disk(&cache);
+        cache.shrink_to(0);
+        append_test_positions(&mut target_cache, 40, 50);
+        let tokens: Vec<u32> = (0..50).collect();
+        // The whole prefix does not fit in memory; the ten new positions do.
+        let saved = save_test_tokens(
+            &mut cache,
+            &target_cache,
+            &tokens,
+            None,
+            DFlash2PrefixRole::Boundary,
+            &|bytes| if bytes > 1500 { bytes } else { 0 },
+        );
+        assert_eq!(saved, None);
+        assert!(cache.entries.is_empty());
+        flush_disk(&cache);
+        let (positions, context) = restored_from_test_disk(&mut cache, 50).expect("restore");
+        assert_eq!(positions, test_positions(50));
+        assert_eq!(context, test_context(50));
+        drop(cache);
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_cache_falls_back_to_cold_prefill_on_a_bad_disk_entry() {
+        use crate::core::dflash2_prefix_store::tests::file_names;
+        let (mut cache, dir) = test_disk_cache("dflash2-cache-disk-bad");
+        let mut target_cache = test_dense_target_cache(256);
+        append_test_positions(&mut target_cache, 0, 40);
+        save_test_prefix(&mut cache, &target_cache, 40, None).expect("saved");
+        flush_disk(&cache);
+        cache.shrink_to(0);
+        let segments = cache
+            .disk
+            .as_ref()
+            .expect("disk")
+            .store()
+            .root()
+            .join("segments");
+        for name in file_names(&segments) {
+            std::fs::remove_file(segments.join(name)).expect("remove");
+        }
+        assert!(restored_from_test_disk(&mut cache, 40).is_err());
+        let prompt: Vec<u32> = (0..40).collect();
+        assert!(cache
+            .disk_candidate(&prompt, &|_| "runtime".to_owned(), 0)
+            .is_none());
+        assert_eq!(cache.disk_snapshot().expect("disk").invalid, 1);
+        drop(cache);
+        std::fs::remove_dir_all(dir).expect("cleanup");
     }
 
     fn test_artifact(cache: &DFlash2PrefixCache, id: u64) -> &DFlash2PrefixArtifact {
@@ -7834,7 +8389,7 @@ mod tests {
 
         // The last save found a full chain: one segment now backs every
         // artifact the conversation kept.
-        assert!(cache.entries.len() > DFlash2PrefixCache::RECENT_BOUNDARIES);
+        assert!(cache.entries.len() > crate::core::dflash2_prefix_store::RECENT_BOUNDARIES);
         let folded = cache.entries.last().expect("last").kv[0].segment.clone();
         assert_eq!(folded.tokens, turns * 2);
         for entry in &cache.entries {

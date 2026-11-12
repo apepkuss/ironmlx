@@ -294,6 +294,9 @@ pub struct ServeArgs {
     /// K/V stays quantized while prefix cache entries are persisted as packed
     /// TurboQuant tensors. When passed without a value, defaults to
     /// <data-root>/cache/paged_prefix_cache (~/.ironmlx/cache/paged_prefix_cache).
+    /// With --dflash2-model-dir the directory only adds a disk store behind
+    /// the in-memory prefix cache (--prefix-lru-cache-max-bytes, required):
+    /// K/V stays dense and the decode kernels are unchanged.
     #[arg(
         long = "paged-prefix-cache-dir",
         num_args = 0..=1,
@@ -311,7 +314,8 @@ pub struct ServeArgs {
     pub paged_prefix_cache_max_pages: Option<i32>,
 
     /// Maximum SSD prefix cache directory size in GiB. If omitted, the SSD
-    /// directory is not pruned by size.
+    /// directory is not pruned by size. With --dflash2-model-dir the limit
+    /// applies to the DFlash2 store inside the directory.
     #[arg(long = "ssd-prefix-cache-max-gb")]
     pub ssd_prefix_cache_max_gb: Option<usize>,
 
@@ -434,6 +438,32 @@ fn resolve_dflash2_prefix_lru_cache_config(
     args.prefix_lru_cache_max_bytes
         .map(ironmlx_runtime::core::cache::prefix_store::PrefixLruCacheConfig::new)
         .transpose()
+}
+
+/// With DFlash2, `--paged-prefix-cache-dir` only adds a disk store behind the
+/// in-memory prefix cache; K/V stays dense and the decode kernels are
+/// unchanged.
+fn resolve_dflash2_prefix_disk_config(
+    args: &ServeArgs,
+) -> Result<Option<ironmlx_runtime::core::cache::DFlash2PrefixDiskConfig>> {
+    let Some(dir) = args.paged_prefix_cache_dir.as_ref() else {
+        return Ok(None);
+    };
+    if args.prefix_lru_cache_max_bytes.is_none() {
+        bail!("--paged-prefix-cache-dir with DFlash2 requires --prefix-lru-cache-max-bytes");
+    }
+    let model_dir = args
+        .model
+        .as_ref()
+        .context("DFlash2 prefix disk cache requires --model")?;
+    Ok(Some(
+        ironmlx_runtime::core::cache::DFlash2PrefixDiskConfig {
+            dir: paged_prefix_cache_root(dir, ironmlx_runtime::core::data_root::data_root)?,
+            max_bytes: resolve_ssd_prefix_cache_max_bytes(args)?
+                .map(|bytes| u64::try_from(bytes).unwrap_or(u64::MAX)),
+            model_dir: expand_home_path(Path::new(model_dir))?,
+        },
+    ))
 }
 
 pub(crate) fn resolve_model_ttl(args: &ServeArgs) -> Result<Option<Duration>> {
@@ -636,13 +666,11 @@ fn ensure_dflash2_serve_supported(
     if resolve_prompt_lookup_config(args)?.is_some() {
         bail!("--dflash2-model-dir cannot be combined with PromptLookup");
     }
-    if args.kv_quant.turboquant_bits().is_some()
-        || args.paged_prefix_cache_dir.is_some()
-        || args.active_kv_offload
-    {
-        bail!(
-            "--dflash2-model-dir has not qualified KV quantization, paged/SSD prefix cache, or active KV offload"
-        );
+    if args.kv_quant.turboquant_bits().is_some() || args.active_kv_offload {
+        bail!("--dflash2-model-dir has not qualified KV quantization or active KV offload");
+    }
+    if args.paged_prefix_cache_dir.is_some() && args.prefix_lru_cache_max_bytes.is_none() {
+        bail!("--paged-prefix-cache-dir with DFlash2 requires --prefix-lru-cache-max-bytes");
     }
     if scheduler_config.b_max == 0 {
         bail!("--dflash2-model-dir requires --max-sequences greater than zero");
@@ -1317,6 +1345,7 @@ where
 
     let model_id = single_model_id(args)?;
     let prefix_cache = resolve_dflash2_prefix_lru_cache_config(args)?;
+    let prefix_cache_disk = resolve_dflash2_prefix_disk_config(args)?;
     let (tensor_batch_requested_max_width, tensor_batch_max_width) =
         resolve_dflash2_tensor_batch_width(
             args,
@@ -1342,6 +1371,13 @@ where
         tensor_batch_max_width,
         prefix_cache.map(|config| config.max_bytes),
     );
+    if let Some(disk) = &prefix_cache_disk {
+        tracing::info!(
+            dir = %disk.dir.display(),
+            max_bytes = ?disk.max_bytes,
+            "ironmlx serve: DFlash2 prefix cache disk store enabled"
+        );
+    }
     startup.runtime.block_on(server::build_dflash2_router(
         startup.registry.clone(),
         model,
@@ -1361,6 +1397,7 @@ where
         },
         draft_bits,
         prefix_cache,
+        prefix_cache_disk,
         scheduler_runtime_profile,
         static_memory_estimate,
         vision_input,
@@ -2000,12 +2037,12 @@ mod scheduler_profile_tests {
         apply_adaptive_mtp_scheduler_defaults, build_engine_model_config_for_pool,
         ensure_dflash2_serve_supported, load_scheduler_profile_for_model, qwen_moe_serve_model,
         read_engine_pool_manifest, resolve_active_kv_offload_config,
-        resolve_dflash2_prefix_lru_cache_config, resolve_dflash2_tensor_batch_width,
-        resolve_memory_limit_bytes, resolve_model_ttl, resolve_paged_prefix_cache_config,
-        resolve_prefix_lru_cache_config, resolve_prompt_lookup_config,
-        resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
-        resolve_serve_mtp_config, single_model_id, KvQuantArg, QwenMoeServeModel,
-        ResolvedSchedulerRuntime, SchedulerServeConfig, ServeArgs,
+        resolve_dflash2_prefix_disk_config, resolve_dflash2_prefix_lru_cache_config,
+        resolve_dflash2_tensor_batch_width, resolve_memory_limit_bytes, resolve_model_ttl,
+        resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
+        resolve_prompt_lookup_config, resolve_scheduler_runtime_profile,
+        resolve_scheduler_serve_config, resolve_serve_mtp_config, single_model_id, KvQuantArg,
+        QwenMoeServeModel, ResolvedSchedulerRuntime, SchedulerServeConfig, ServeArgs,
     };
     use super::{paged_prefix_cache_root, DEFAULT_PAGED_PREFIX_CACHE_DIR};
     use std::path::Path;
@@ -2179,6 +2216,37 @@ mod scheduler_profile_tests {
         )
         .expect_err("DFlash2 must reject MTP mixing");
         assert!(format!("{error:#}").contains("cannot be combined with MTP"));
+        std::fs::remove_dir_all(draft_dir).expect("remove draft dir");
+    }
+
+    #[test]
+    fn dflash2_serve_accepts_a_prefix_cache_dir_but_not_kv_quant_or_offload() {
+        let draft_dir = unique_temp_dir("dflash2-serve-prefix-disk");
+        std::fs::create_dir_all(&draft_dir).expect("create draft dir");
+        let config = SchedulerServeConfig {
+            b_max: 1,
+            ..SchedulerServeConfig::default()
+        };
+        let supported = |args: &ServeArgs| {
+            ensure_dflash2_serve_supported(
+                args,
+                ironmlx_lm::models::ModelArchitecture::Qwen35Dense,
+                &serde_json::json!({}),
+                config,
+            )
+        };
+        let mut args = base_args();
+        args.dflash2_model_dir = Some(draft_dir.clone());
+        args.paged_prefix_cache_dir = Some(draft_dir.join("cache"));
+        let error = supported(&args).expect_err("a directory without the memory limit");
+        assert!(format!("{error:#}").contains("requires --prefix-lru-cache-max-bytes"));
+
+        args.prefix_lru_cache_max_bytes = Some(4096);
+        supported(&args).expect("DFlash2 accepts a prefix cache directory");
+
+        args.active_kv_offload = true;
+        let error = supported(&args).expect_err("DFlash2 must reject active KV offload");
+        assert!(format!("{error:#}").contains("has not qualified"));
         std::fs::remove_dir_all(draft_dir).expect("remove draft dir");
     }
 
@@ -3273,6 +3341,42 @@ mod scheduler_profile_tests {
             .expect("enabled");
 
         assert_eq!(config.max_bytes, 4096);
+    }
+
+    #[test]
+    fn dflash2_accepts_a_prefix_cache_dir_and_disk_limit() {
+        let prefix_dir = unique_temp_dir("ironmlx-dflash2-prefix-disk");
+        let mut args = base_args();
+        args.model = Some("/models/target".to_owned());
+        args.prefix_lru_cache_max_bytes = Some(4096);
+        args.paged_prefix_cache_dir = Some(prefix_dir.clone());
+        args.ssd_prefix_cache_max_gb = Some(2);
+
+        let config = resolve_dflash2_prefix_disk_config(&args)
+            .expect("DFlash2 prefix disk config")
+            .expect("enabled");
+
+        assert_eq!(config.dir, prefix_dir);
+        assert_eq!(config.max_bytes, Some(2 << 30));
+        assert_eq!(config.model_dir, PathBuf::from("/models/target"));
+
+        args.paged_prefix_cache_dir = None;
+        assert!(resolve_dflash2_prefix_disk_config(&args)
+            .expect("no directory")
+            .is_none());
+    }
+
+    #[test]
+    fn dflash2_prefix_cache_dir_requires_the_memory_limit() {
+        let mut args = base_args();
+        args.model = Some("/models/target".to_owned());
+        args.paged_prefix_cache_dir = Some(unique_temp_dir("ironmlx-dflash2-prefix-disk-only"));
+
+        let error = resolve_dflash2_prefix_disk_config(&args).expect_err("no memory limit");
+
+        assert!(error.to_string().contains(
+            "--paged-prefix-cache-dir with DFlash2 requires --prefix-lru-cache-max-bytes"
+        ));
     }
 
     #[test]
