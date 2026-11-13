@@ -469,6 +469,7 @@ impl Gemma4Model {
             &hidden,
             input_ids,
             per_row_lens,
+            None,
             cache,
             target,
         )
@@ -644,10 +645,19 @@ impl Gemma4Model {
             );
         }
         let t0 = Instant::now();
+        let image_blocks = if img_count > 0 {
+            Some(super::cross_modal::image_token_blocks(
+                input_ids,
+                image_token_id,
+            )?)
+        } else {
+            None
+        };
         let out = self.text.forward_embeddings_with_shared_kv_on(
             &hidden,
             &per_layer_ids,
             per_row_lens,
+            image_blocks.as_deref(),
             cache,
             target,
         )?;
@@ -1016,10 +1026,12 @@ impl crate::core::vision::DenseVlMethods for Gemma4Model {
             );
         }
         let t0 = Instant::now();
+        let image_blocks = super::cross_modal::image_token_blocks(input_ids, image_token_id)?;
         let hidden = self.text.forward_embeddings_on(
             &hidden,
             &per_layer_ids,
             Some(per_row_lens),
+            Some(&image_blocks),
             cache,
             target,
         )?;
@@ -1035,6 +1047,10 @@ impl crate::core::vision::DenseVlMethods for Gemma4Model {
             );
         }
         Ok(logits)
+    }
+
+    fn image_blocks_need_one_forward(&self) -> bool {
+        self.text.config().vision_attention_is_bidirectional()
     }
 
     fn estimate_vision_prefill_tensor_bytes(

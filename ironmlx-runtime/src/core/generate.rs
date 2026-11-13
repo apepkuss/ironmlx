@@ -301,6 +301,12 @@ impl<'m, M: ironmlx_lm::core::model::Model + DenseVlMethods> GenerationStream<'m
                 n = adjusted_end - pos;
             }
 
+            ironmlx_lm::core::model_input::ensure_whole_image_blocks(
+                model.image_blocks_need_one_forward(),
+                &request.prompt_ids,
+                request.image_token_id,
+                &[pos, pos + n],
+            )?;
             let chunk_result: Result<Option<Array>> = (|| -> Result<Option<Array>> {
                 let chunk_ids = &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
                 let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
@@ -1297,6 +1303,21 @@ mod p6_7_helper_tests {
             .collect();
         assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, 42, 0, 256), 256);
         assert_eq!(extend_vl_chunk_end_for_image_pad(&ids, -1, 0, 256), 256);
+    }
+
+    #[test]
+    fn whole_image_blocks_reject_a_cut_between_two_image_tokens() {
+        use ironmlx_lm::core::model_input::ensure_whole_image_blocks;
+        const IMG: i32 = 9;
+        let prompt: [u32; 7] = [1, 9, 9, 9, 2, 3, 4];
+        // Before the block, right after it, in text, and at both ends.
+        ensure_whole_image_blocks(true, &prompt, IMG, &[0, 1, 4, 5, 7]).unwrap();
+        assert!(ensure_whole_image_blocks(true, &prompt, IMG, &[4, 2]).is_err());
+        assert!(ensure_whole_image_blocks(true, &prompt, IMG, &[3]).is_err());
+        // Other models may cut anywhere.
+        ensure_whole_image_blocks(false, &prompt, IMG, &[2]).unwrap();
+        let signed: [i32; 3] = [9, 9, 1];
+        assert!(ensure_whole_image_blocks(true, &signed, IMG, &[1]).is_err());
     }
 
     #[test]

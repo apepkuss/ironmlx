@@ -496,6 +496,22 @@ struct Gemma4DrafterWindowPolicy {
     cfg: MtpSpeculativeConfig,
 }
 
+/// `end`, moved past the image block it falls inside, if any: a forward call
+/// over `[.., end)` must not stop between two tokens of one image.
+fn image_block_end(prompt_ids: &[u32], image_token_id: i32, end: i32) -> i32 {
+    let Ok(pad) = u32::try_from(image_token_id) else {
+        return end;
+    };
+    let mut end = end.max(0) as usize;
+    if end == 0 || end >= prompt_ids.len() || prompt_ids[end - 1] != pad {
+        return end as i32;
+    }
+    while end < prompt_ids.len() && prompt_ids[end] == pad {
+        end += 1;
+    }
+    end as i32
+}
+
 /// Have the hot prefix cache give up what a reservation of `bytes` lacks,
 /// and wait for the release to show. Cached prefixes are a convenience for
 /// later prompts; the request in hand must not fail, or run its prefill in
@@ -5436,6 +5452,12 @@ fn forward_single_vl_suffix<M: Model + DenseVlMethods>(
             "forward_single_vl_suffix: invalid range [{start_pos}, {split_at}, {end_pos})"
         );
     }
+    ironmlx_lm::core::model_input::ensure_whole_image_blocks(
+        model.image_blocks_need_one_forward(),
+        prompt_ids,
+        image_token_id,
+        &[start_pos, split_at],
+    )?;
     let last_pos = split_at;
     let mut image_pad_cursor = vision_rows_start;
 
@@ -15644,6 +15666,12 @@ impl<M: Model> Scheduler<M> {
                             &prompt_ids_u32,
                             0,
                         ) as i32;
+                        ironmlx_lm::core::model_input::ensure_whole_image_blocks(
+                            model.image_blocks_need_one_forward(),
+                            &prompt_ids_u32,
+                            img_token_id,
+                            &[prefix_len],
+                        )?;
                         let prefix_input_ids = mlx::ops::indexing::slice_strided(
                             &input_ids,
                             &[0_i32, 0][..],
@@ -15763,7 +15791,13 @@ impl<M: Model> Scheduler<M> {
                             mlx::StreamOrDevice::default(),
                         )?
                     }
-                } else if paged_prefix_cache_config.is_some() {
+                } else if paged_prefix_cache_config.is_some()
+                    && !model.image_blocks_need_one_forward()
+                {
+                    // Skipped for a model whose image blocks need one forward
+                    // call: this path replays what a restored prefix leaves
+                    // one token at a time, images included. Such a batch is
+                    // prefilled whole below, without the prefix cache.
                     forward_batched_vl_with_paged_prefix(
                         model,
                         prefill_cache,
@@ -17237,6 +17271,12 @@ impl<M: Model> Scheduler<M> {
         }
 
         // Build chunk-local input_ids [1, chunk_len].
+        ironmlx_lm::core::model_input::ensure_whole_image_blocks(
+            model.image_blocks_need_one_forward(),
+            &handle.prompt_ids,
+            handle.image_token_id,
+            &[handle.chunk_start, chunk_end],
+        )?;
         let chunk_ids_u32 = &handle.prompt_ids[handle.chunk_start as usize..chunk_end as usize];
         let chunk_ids_i32: Vec<i32> = chunk_ids_u32.iter().map(|&t| t as i32).collect();
         let input_ids: Array = (&chunk_ids_i32[..], &[1_i32, chunk_len][..])
@@ -18481,6 +18521,12 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
             ));
         }
 
+        ironmlx_lm::core::model_input::ensure_whole_image_blocks(
+            DenseVlMethods::image_blocks_need_one_forward(model),
+            &handle.prompt_ids,
+            handle.image_token_id,
+            &[handle.chunk_start, chunk_end],
+        )?;
         let chunk_ids = &handle.prompt_ids[handle.chunk_start as usize..chunk_end as usize];
         let chunk_arr: Array = (chunk_ids, &[1_i32, chunk_len][..]).try_into()?;
         let chunk_pos_ids = match (
@@ -19363,9 +19409,14 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
                     "prefill_admitted_gemma4_drafter_single: invalid prefill chunk length {n}"
                 ));
             }
-            if is_vl && prefill_chunk_size != 0 {
-                let adjusted_end =
-                    extend_vl_chunk_end_for_image_pad(&prompt_ids, image_token_id, pos, pos + n);
+            if is_vl {
+                let adjusted_end = if prefill_chunk_size != 0 {
+                    extend_vl_chunk_end_for_image_pad(&prompt_ids, image_token_id, pos, pos + n)
+                } else {
+                    // Unchunked, the prompt is only cut by the memory plan or
+                    // at the split point; neither may land inside an image.
+                    image_block_end(&prompt_ids, image_token_id, pos + n)
+                };
                 n = adjusted_end - pos;
                 if prefill_plan
                     .as_ref()
@@ -19388,6 +19439,12 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
                 }
             }
 
+            ironmlx_lm::core::model_input::ensure_whole_image_blocks(
+                DenseVlMethods::image_blocks_need_one_forward(model),
+                &prompt_ids,
+                image_token_id,
+                &[pos, pos + n],
+            )?;
             let chunk_ids = &prompt_ids[pos as usize..(pos as usize + n as usize)];
             let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
             let chunk_pos_ids = match (dummy_position_ids.as_ref(), position_ids_full.as_ref()) {
@@ -22634,6 +22691,7 @@ mod tests {
     #[derive(Default)]
     struct StepDecodeMaskModel {
         hybrid_cache: bool,
+        whole_image_blocks: bool,
         decode_lens_seen: std::sync::Mutex<Vec<Vec<i32>>>,
         decode_positions_seen: std::sync::Mutex<Vec<Vec<i32>>>,
         decode_mask_seen: std::sync::Mutex<Vec<bool>>,
@@ -22822,6 +22880,10 @@ mod tests {
     }
 
     impl DenseVlMethods for StepDecodeMaskModel {
+        fn image_blocks_need_one_forward(&self) -> bool {
+            self.whole_image_blocks
+        }
+
         fn batched_prefill_vl(
             &self,
             input_ids: &mlx::Array,
@@ -30620,6 +30682,78 @@ mod tests {
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn batched_vl_prefill_never_cuts_a_prompt_for_a_model_with_whole_image_blocks() {
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
+        use mlx::Dtype;
+
+        fn vl_req_with_pixel(value: f32) -> GenerateRequest {
+            let pixel_values: mlx::Array = (&[value; 4][..], &[1_i32, 4][..])
+                .try_into()
+                .expect("pixel_values");
+            let pixel_values = mlx::ops::astype(&pixel_values, Dtype::Bfloat16).unwrap();
+            let mut vl_req = mk_req(vec![1, IMAGE_TOKEN_ID as u32, 2]);
+            vl_req.pixel_values = Some(vec![pixel_values]);
+            vl_req.image_grid_thw = Some(vec![(1_i32, 2_i32, 2_i32)]);
+            vl_req.image_spatial_merge_size = 2;
+            vl_req.image_token_id = IMAGE_TOKEN_ID;
+            vl_req
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-batch-vl-whole-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "vl-test", 2, 32)
+            .expect("prefix config");
+
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable prefix cache");
+        let id_0 = scheduler.admit(vl_req_with_pixel(0.0)).expect("admit vl 0");
+        let id_1 = scheduler.admit(vl_req_with_pixel(1.0)).expect("admit vl 1");
+        let model = StepDecodeMaskModel {
+            whole_image_blocks: true,
+            ..Default::default()
+        };
+        let events = scheduler.prefill_admitted(&model).expect("prefill");
+
+        // With the prefix cache on, other models prefill `[N - 1]` and then
+        // the last token, or replay token by token after a partial restore.
+        assert_eq!(model.batched_prefill_batches(), vec![2]);
+        assert_eq!(model.batched_prefill_lens(), vec![vec![3, 3]]);
+        assert_eq!(model.hidden_seq_lens(), Vec::<i32>::new());
+        assert_eq!(model.forward_seq_lens(), Vec::<i32>::new());
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].id, id_0);
+        assert_eq!(events[1].id, id_1);
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+
+        // Nothing is saved on this path; the directory may not exist.
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn image_block_end_moves_a_cut_out_of_an_image() {
+        const IMG: u32 = 9;
+        let prompt = [1, IMG, IMG, IMG, 2, 3];
+        assert_eq!(image_block_end(&prompt, IMG as i32, 2), 4);
+        assert_eq!(image_block_end(&prompt, IMG as i32, 3), 4);
+        // Already at a block edge, in text, or at either end of the prompt.
+        for end in [0, 1, 4, 5, 6] {
+            assert_eq!(image_block_end(&prompt, IMG as i32, end), end);
+        }
+        assert_eq!(image_block_end(&prompt, -1, 2), 2);
     }
 
     #[test]

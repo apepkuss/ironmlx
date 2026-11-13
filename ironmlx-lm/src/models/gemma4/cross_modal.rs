@@ -54,3 +54,66 @@ pub fn replace_image_tokens(
     let mask: Array = (mask.as_slice(), &[b, s, 1][..]).try_into()?;
     Ok(ops::where_(&mask, &routed, text_embeds)?)
 }
+
+/// Where the images sit in a `[B, S]` batch of token ids: for every row, the
+/// `[start, end)` ranges of consecutive image tokens. One range is one image
+/// block: a model with bidirectional vision attention lets its tokens see
+/// each other in both directions, so a block has to go through the model in
+/// a single forward call.
+pub fn image_token_blocks(input_ids: &Array, image_token_id: i32) -> Result<Vec<Vec<(i32, i32)>>> {
+    let shape = input_ids.shape();
+    let dims = shape.as_slice();
+    if dims.len() != 2 {
+        return Err(anyhow!("image_token_blocks expects [B,S], got {dims:?}"));
+    }
+    let (b, s) = (dims[0] as usize, dims[1] as usize);
+    let ids: Vec<i32> = ops::astype(input_ids, Dtype::Int32)?
+        .reshape(&[(b * s) as i32][..])?
+        .to_vec::<i32>()?;
+    Ok(ids
+        .chunks(s.max(1))
+        .map(|row| image_token_blocks_in_row(row, image_token_id))
+        .collect())
+}
+
+pub fn image_token_blocks_in_row(row: &[i32], image_token_id: i32) -> Vec<(i32, i32)> {
+    let mut blocks = Vec::new();
+    let mut start = None;
+    for (pos, &id) in row.iter().enumerate() {
+        match (id == image_token_id, start) {
+            (true, None) => start = Some(pos),
+            (false, Some(begin)) => {
+                blocks.push((begin as i32, pos as i32));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(begin) = start {
+        blocks.push((begin as i32, row.len() as i32));
+    }
+    blocks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_token_blocks_are_the_runs_of_image_tokens_in_each_row() {
+        const IMG: i32 = 9;
+        assert_eq!(
+            image_token_blocks_in_row(&[1, IMG, IMG, 2, IMG, 3, IMG, IMG], IMG),
+            vec![(1, 3), (4, 5), (6, 8)]
+        );
+        assert!(image_token_blocks_in_row(&[1, 2, 3], IMG).is_empty());
+
+        let ids: Array = (&[IMG, IMG, 1, 2, 3, IMG][..], &[2_i32, 3][..])
+            .try_into()
+            .unwrap();
+        assert_eq!(
+            image_token_blocks(&ids, IMG).unwrap(),
+            vec![vec![(0, 2)], vec![(2, 3)]]
+        );
+    }
+}

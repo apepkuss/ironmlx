@@ -188,6 +188,10 @@ pub struct Gemma4TextConfig {
     pub rope_parameters: HashMap<String, Gemma4RopeParams>,
     #[serde(default = "default_sliding_window")]
     pub sliding_window: i32,
+    /// `"vision"`: the tokens of one image attend to each other in both
+    /// directions in the sliding-window layers.
+    #[serde(default)]
+    pub use_bidirectional_attention: Option<String>,
     #[serde(default = "default_max_position_embeddings")]
     pub max_position_embeddings: i32,
     #[serde(default)]
@@ -492,6 +496,11 @@ impl Gemma4VisionConfig {
 }
 
 impl Gemma4TextConfig {
+    /// `use_bidirectional_attention: "vision"`.
+    pub fn vision_attention_is_bidirectional(&self) -> bool {
+        self.use_bidirectional_attention.as_deref() == Some("vision")
+    }
+
     fn validate_and_finalize(&mut self) -> Result<()> {
         self.validate_and_finalize_impl(false)
     }
@@ -501,6 +510,13 @@ impl Gemma4TextConfig {
     }
 
     fn validate_and_finalize_impl(&mut self, assistant: bool) -> Result<()> {
+        if let Some(mode) = self.use_bidirectional_attention.as_deref() {
+            if mode != "vision" {
+                return Err(anyhow!(
+                    "Gemma4TextConfig: unsupported use_bidirectional_attention `{mode}`"
+                ));
+            }
+        }
         if !matches!(
             self.model_type.as_str(),
             "gemma4_text" | "gemma4_unified_text"

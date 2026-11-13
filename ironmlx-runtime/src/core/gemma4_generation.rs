@@ -813,6 +813,12 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
                 n = adjusted_end - pos;
             }
 
+            ironmlx_lm::core::model_input::ensure_whole_image_blocks(
+                DenseVlMethods::image_blocks_need_one_forward(model),
+                &request.prompt_ids,
+                request.image_token_id,
+                &[pos, pos + n],
+            )?;
             let chunk_ids = &request.prompt_ids[pos as usize..(pos as usize + n as usize)];
             let chunk_arr: Array = (chunk_ids, &[1_i32, n][..]).try_into()?;
             let chunk_pos_ids = match (dummy_position_ids.as_ref(), position_ids_full.as_ref()) {

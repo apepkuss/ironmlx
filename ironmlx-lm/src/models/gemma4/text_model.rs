@@ -165,7 +165,7 @@ impl Gemma4TextModel {
             ));
         }
         let hidden = self.embed_on(input_ids, target)?;
-        self.forward_embeddings_on(&hidden, input_ids, per_row_lens, cache, target)
+        self.forward_embeddings_on(&hidden, input_ids, per_row_lens, None, cache, target)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -174,6 +174,7 @@ impl Gemma4TextModel {
         hidden: &Array,
         per_layer_token_ids: &Array,
         per_row_lens: Option<&[i32]>,
+        image_blocks: Option<&[Vec<(i32, i32)>]>,
         cache: Option<&mut [LayerCache]>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
@@ -191,6 +192,7 @@ impl Gemma4TextModel {
             hidden,
             per_layer_inputs.as_ref(),
             per_row_lens,
+            image_blocks,
             cache,
             target,
             None,
@@ -210,6 +212,7 @@ impl Gemma4TextModel {
         hidden: &Array,
         per_layer_token_ids: &Array,
         per_row_lens: Option<&[i32]>,
+        image_blocks: Option<&[Vec<(i32, i32)>]>,
         cache: Option<&mut [LayerCache]>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Gemma4TextForwardOutput> {
@@ -219,6 +222,7 @@ impl Gemma4TextModel {
             hidden,
             per_layer_inputs.as_ref(),
             per_row_lens,
+            image_blocks,
             cache,
             target,
             None,
@@ -231,6 +235,7 @@ impl Gemma4TextModel {
         hidden: &Array,
         per_layer_inputs: Option<&Array>,
         per_row_lens: Option<&[i32]>,
+        image_blocks: Option<&[Vec<(i32, i32)>]>,
         cache: Option<&mut [LayerCache]>,
         target: StreamOrDevice,
         layer_last_trace: Option<&mut Vec<Array>>,
@@ -240,6 +245,7 @@ impl Gemma4TextModel {
                 hidden,
                 per_layer_inputs,
                 per_row_lens,
+                image_blocks,
                 cache,
                 target,
                 layer_last_trace,
@@ -253,6 +259,7 @@ impl Gemma4TextModel {
         hidden: &Array,
         per_layer_inputs: Option<&Array>,
         per_row_lens: Option<&[i32]>,
+        image_blocks: Option<&[Vec<(i32, i32)>]>,
         mut cache: Option<&mut [LayerCache]>,
         target: StreamOrDevice,
         mut layer_last_trace: Option<&mut Vec<Array>>,
@@ -293,10 +300,32 @@ impl Gemma4TextModel {
         let explicit_masks = cache.is_some() || per_row_lens.is_some() || batch > 1;
         let single_row_decode = cache.is_some() && per_row_lens.is_none() && batch == 1 && seq == 1;
         let single_row_decode_len = offsets.values().first().copied().unwrap_or(0) + seq;
+        // Image tokens see the rest of their image only where the model asks
+        // for it, and only in the sliding-window layers: the global layers
+        // stay causal.
+        let image_blocks = image_blocks
+            .filter(|_| self.cfg.vision_attention_is_bidirectional())
+            .filter(|rows| rows.iter().flatten().any(|(start, end)| end - start > 1));
+        if let Some(rows) = image_blocks {
+            if rows.len() != batch as usize {
+                return Err(anyhow!(
+                    "Gemma4TextModel: image_blocks.len()={} != batch={}",
+                    rows.len(),
+                    batch
+                ));
+            }
+        }
         let full_mask = if explicit_masks && !single_row_decode {
             let t0 = Instant::now();
-            let mask =
-                build_attention_mask(offsets.values(), lens, seq, None, Dtype::Bfloat16, target)?;
+            let mask = build_attention_mask(
+                offsets.values(),
+                lens,
+                seq,
+                None,
+                None,
+                Dtype::Bfloat16,
+                target,
+            )?;
             profile::eval("gemma4_text_full_mask_build", &[&mask], t0, profile)?;
             Some(mask)
         } else {
@@ -306,6 +335,7 @@ impl Gemma4TextModel {
         let needs_sliding_decode_mask =
             single_row_decode && single_row_decode_len > self.cfg.sliding_window;
         let sliding_mask = if needs_sliding_decode_mask
+            || image_blocks.is_some()
             || (!single_row_decode && (explicit_masks || seq > self.cfg.sliding_window))
         {
             let t0 = Instant::now();
@@ -314,6 +344,7 @@ impl Gemma4TextModel {
                 lens,
                 seq,
                 Some(self.cfg.sliding_window),
+                image_blocks,
                 Dtype::Bfloat16,
                 target,
             )?;
@@ -479,6 +510,7 @@ impl Gemma4TextModel {
             per_layer_inputs.as_ref(),
             None,
             None,
+            None,
             target,
             Some(&mut trace),
         )?;
@@ -510,6 +542,7 @@ impl Gemma4TextModel {
                 &lens,
                 seq,
                 Some(self.cfg.sliding_window),
+                None,
                 Dtype::Bfloat16,
                 target,
             )?)
@@ -660,11 +693,16 @@ fn slice_last_token(hidden: &Array, target: StreamOrDevice) -> Result<Array> {
     .reshape_on((b, h), target)?)
 }
 
+/// Additive attention mask `[B, 1, q_len, k_len]`: causal, limited to the
+/// last `window` keys when given. `image_blocks` (per row, `[start, end)`
+/// in query positions) additionally lets each image token see the later
+/// tokens of its own image; the window still bounds how far back it sees.
 fn build_attention_mask(
     offsets: &[i32],
     per_row_lens: &[i32],
     q_len: i32,
     window: Option<i32>,
+    image_blocks: Option<&[Vec<(i32, i32)>]>,
     dtype: Dtype,
     target: StreamOrDevice,
 ) -> Result<Array> {
@@ -710,6 +748,23 @@ fn build_attention_mask(
                 flat[base + self_k as usize] = 0.0;
             }
         }
+        for &(start, end) in image_blocks
+            .and_then(|rows| rows.get(row))
+            .into_iter()
+            .flatten()
+        {
+            if start < 0 || end > real || start >= end {
+                return Err(anyhow!(
+                    "Gemma4 mask: image block [{start}, {end}) outside row {row} of {real} tokens"
+                ));
+            }
+            for q in start..end {
+                let base = (row * q_len as usize + q as usize) * k_len as usize;
+                for k in q + 1..end {
+                    flat[base + (offset + k) as usize] = 0.0;
+                }
+            }
+        }
     }
     let arr_f32: Array = (&flat[..], &[b as i32, 1_i32, q_len, k_len][..]).try_into()?;
     Ok(mlx::ops::cast::astype_on(&arr_f32, dtype, target)?)
@@ -721,8 +776,16 @@ mod tests {
 
     #[test]
     fn sliding_mask_window_edges() {
-        let mask =
-            build_attention_mask(&[0], &[514], 514, Some(512), Dtype::Float32, ().into()).unwrap();
+        let mask = build_attention_mask(
+            &[0],
+            &[514],
+            514,
+            Some(512),
+            None,
+            Dtype::Float32,
+            ().into(),
+        )
+        .unwrap();
         let v: Vec<f32> = mask.to_vec().unwrap();
         let q_len = 514usize;
         let k_len = 514usize;
@@ -732,5 +795,52 @@ mod tests {
         assert!(at(512, 0).is_infinite() && at(512, 0).is_sign_negative());
         assert_eq!(at(512, 1), 0.0);
         assert_eq!(at(513, 2), 0.0);
+    }
+
+    #[test]
+    fn image_block_tokens_see_the_rest_of_their_image_and_nothing_later() {
+        // Three cached tokens, then: text, image, image, image, text.
+        let blocks = vec![vec![(1, 4)]];
+        let mask = build_attention_mask(
+            &[3],
+            &[5],
+            5,
+            Some(4),
+            Some(&blocks),
+            Dtype::Float32,
+            ().into(),
+        )
+        .unwrap();
+        let v: Vec<f32> = mask.to_vec().unwrap();
+        let open = |q: usize, k: usize| v[q * 8 + k] == 0.0;
+
+        // The first image token (absolute 4) sees the later image tokens...
+        assert!(open(1, 5) && open(1, 6));
+        // ...not the text after the image...
+        assert!(!open(1, 7));
+        // ...and no further back than the window allows.
+        assert!(open(1, 1) && !open(1, 0));
+        assert!(open(2, 6) && !open(2, 7));
+        // Text stays causal on both sides of the image.
+        assert!(!open(0, 4));
+        assert!(open(4, 6) && open(4, 7) && !open(4, 3));
+
+        // Without blocks nothing looks ahead.
+        let causal =
+            build_attention_mask(&[3], &[5], 5, Some(4), None, Dtype::Float32, ().into()).unwrap();
+        let causal: Vec<f32> = causal.to_vec().unwrap();
+        assert!(causal[8 + 5] != 0.0);
+
+        let outside = vec![vec![(3, 6)]];
+        assert!(build_attention_mask(
+            &[3],
+            &[5],
+            5,
+            Some(4),
+            Some(&outside),
+            Dtype::Float32,
+            ().into()
+        )
+        .is_err());
     }
 }

@@ -40,6 +40,15 @@ pub trait DenseVlMethods {
         target: mlx::StreamOrDevice,
     ) -> crate::Result<mlx::Array>;
 
+    /// Whether every image block (a run of consecutive image tokens) has to
+    /// go through the model in one forward call: its tokens attend to each
+    /// other in both directions, so a block cut across two calls is computed
+    /// wrongly. Execution drivers must then never start or end a call inside
+    /// a block.
+    fn image_blocks_need_one_forward(&self) -> bool {
+        false
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn forward_vl_chunk(
         &self,

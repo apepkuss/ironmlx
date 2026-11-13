@@ -920,6 +920,36 @@ pub fn extend_vl_chunk_end_for_image_pad(
     end as i32
 }
 
+/// For a model whose image blocks need one forward call
+/// (`DenseVlMethods::image_blocks_need_one_forward`): fail if any of `cuts`,
+/// the positions in `prompt_ids` where one forward call ends and the next
+/// begins, lies between two image tokens. The prefill paths keep cuts out of
+/// image blocks; this turns a path that does not into an error instead of an
+/// image the model reads wrongly.
+pub fn ensure_whole_image_blocks<T: Copy + Into<i64>>(
+    needs_whole_blocks: bool,
+    prompt_ids: &[T],
+    image_token_id: i32,
+    cuts: &[i32],
+) -> Result<()> {
+    if !needs_whole_blocks || image_token_id < 0 {
+        return Ok(());
+    }
+    let is_image = |pos: usize| prompt_ids[pos].into() == i64::from(image_token_id);
+    for &cut in cuts {
+        let Ok(cut) = usize::try_from(cut) else {
+            continue;
+        };
+        if cut > 0 && cut < prompt_ids.len() && is_image(cut - 1) && is_image(cut) {
+            return Err(anyhow!(
+                "prefill would cut an image block at token {cut} of {}; this model needs every image in one forward call",
+                prompt_ids.len()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Slice a MRoPE `[3, 1, S]` position-id tensor on axis 2 by a half-open
 /// range `[start, stop)`. Returns `[3, 1, stop - start]`.
 pub fn slice_pos_ids_axis2(pos_full: &mlx::Array, start: i32, stop: i32) -> Result<mlx::Array> {
