@@ -917,16 +917,18 @@ impl EnginePoolState {
                 // MLX cache reclaim is idempotent and does not invalidate
                 // request KV or model weights.
                 mlx::transforms::clear_cache();
-                let retain_ratio = match snapshot.pressure_level {
-                    PressureLevel::Normal => 1.0,
-                    PressureLevel::Soft => 0.75,
-                    PressureLevel::Hard => 0.25,
-                    PressureLevel::Emergency => 0.0,
-                };
-                match crate::core::cache::shrink_process_prefix_lru_caches(retain_ratio) {
-                    Ok(reclaimed_bytes) if reclaimed_bytes > 0 => {
+                // Only what usage itself is over the recovery watermark:
+                // a request's reservations are served where they are made,
+                // and taking more evicts prefixes its follow-ups restore.
+                let governor = global_process_memory_governor();
+                let needed_bytes = governor.recovery_overage(&governor.refresh_process());
+                match crate::core::cache::reclaim_process_prefix_lru_bytes(needed_bytes, None) {
+                    Ok(reclaimed) if reclaimed.bytes > 0 => {
                         tracing::info!(
-                            reclaimed_bytes,
+                            needed_bytes,
+                            reclaimed_bytes = reclaimed.bytes,
+                            covered_entries = reclaimed.covered_entries,
+                            other_entries = reclaimed.other_entries,
                             ?snapshot.pressure_level,
                             "memory governor shrank process hot prefix cache"
                         );
@@ -2051,16 +2053,30 @@ impl EnginePoolInner {
             Ok(reservation) => Some(reservation),
             Err(first_error) => {
                 // One reclaim/retry attempt. Every action is idempotent:
-                // clearing an empty MLX cache is a no-op, prefix shrink has an
-                // absolute target, and idle eviction rechecks ownership while
-                // holding the slot lock.
+                // clearing an empty MLX cache is a no-op, the prefix cache
+                // gives up only what is still missing, and idle eviction
+                // rechecks ownership while holding the slot lock.
                 mlx::transforms::clear_cache();
-                let retain_ratio = match first_snapshot.pressure_level {
-                    PressureLevel::Normal => 0.75,
-                    PressureLevel::Soft => 0.50,
-                    PressureLevel::Hard | PressureLevel::Emergency => 0.0,
-                };
-                crate::core::cache::shrink_process_prefix_lru_caches(retain_ratio)?;
+                let needed_bytes = governor.reservation_shortfall(
+                    &governor.refresh_process(),
+                    estimated_weight_bytes,
+                    crate::core::process_memory::ReservationNeed::Admission,
+                );
+                let reclaimed =
+                    crate::core::cache::reclaim_process_prefix_lru_bytes(needed_bytes, None)?;
+                if reclaimed.bytes > 0 {
+                    mlx::transforms::clear_cache();
+                    // The release takes a few samples to show.
+                    governor.refresh_after_release(&mut |snapshot| {
+                        snapshot.pressure_level == PressureLevel::Normal
+                    });
+                    tracing::info!(
+                        model = target_id,
+                        needed_bytes,
+                        reclaimed_bytes = reclaimed.bytes,
+                        "hot prefix cache made room for a model load"
+                    );
+                }
                 let _ = self.evict_lru_idle_engine(target_id).await?;
                 let retry_snapshot = governor.refresh_process();
                 if retry_snapshot.pressure_level != PressureLevel::Normal {

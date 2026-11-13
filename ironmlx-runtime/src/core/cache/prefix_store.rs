@@ -50,7 +50,9 @@ pub const DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE: i32 = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PagedPrefixCacheConfig {
-    pub root: PathBuf,
+    /// Directory of the SSD store. `None` keeps prefixes in memory only (the
+    /// prefix LRU cache); nothing is written to or read from disk.
+    pub root: Option<PathBuf>,
     pub model_id: String,
     pub block_size: i32,
     pub max_pages: i32,
@@ -79,11 +81,30 @@ impl PagedPrefixCacheConfig {
         max_disk_bytes: Option<usize>,
     ) -> Result<Self> {
         let config = Self {
-            root: root.as_ref().to_path_buf(),
+            root: Some(root.as_ref().to_path_buf()),
             model_id: model_id.into(),
             block_size,
             max_pages,
             max_disk_bytes,
+            turn_boundary: None,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Paged K/V without an SSD store: prefixes are reused only through the
+    /// in-memory prefix LRU cache.
+    pub fn memory_only(
+        model_id: impl Into<String>,
+        block_size: i32,
+        max_pages: i32,
+    ) -> Result<Self> {
+        let config = Self {
+            root: None,
+            model_id: model_id.into(),
+            block_size,
+            max_pages,
+            max_disk_bytes: None,
             turn_boundary: None,
         };
         config.validate()?;
@@ -103,8 +124,11 @@ impl PagedPrefixCacheConfig {
             .and_then(|boundary| boundary.reusable_len(prompt_ids))
     }
 
-    pub fn store(&self) -> PagedPrefixStore {
-        PagedPrefixStore::new(&self.root).with_optional_max_bytes(self.max_disk_bytes)
+    /// The SSD store, when this cache has one.
+    pub fn store(&self) -> Option<PagedPrefixStore> {
+        self.root
+            .as_ref()
+            .map(|root| PagedPrefixStore::new(root).with_optional_max_bytes(self.max_disk_bytes))
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -226,23 +250,38 @@ pub fn process_shared_prefix_lru_cache(
     Ok(cache)
 }
 
-pub fn shrink_process_prefix_lru_caches(retain_ratio: f64) -> Result<usize> {
-    anyhow::ensure!((0.0..=1.0).contains(&retain_ratio), "invalid retain ratio");
+/// What a reclaim took out of the hot prefix cache.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PrefixLruReclaim {
+    pub bytes: usize,
+    /// Entries a longer cached entry still covers.
+    pub covered_entries: usize,
+    pub other_entries: usize,
+}
+
+/// The process-wide hot prefix cache, if any runtime has created it.
+pub fn process_prefix_lru_cache() -> Result<Option<SharedPrefixLruCache>> {
     let Some(registry) = PROCESS_PREFIX_LRU_CACHE.get() else {
-        return Ok(0);
+        return Ok(None);
     };
-    let cache = registry
+    Ok(registry
         .lock()
         .map_err(|_| anyhow::anyhow!("process prefix LRU registry lock poisoned"))?
-        .upgrade();
-    let Some(cache) = cache else {
-        return Ok(0);
+        .upgrade())
+}
+
+/// [`PrefixLruCache::reclaim`] on the process-wide hot prefix cache.
+pub fn reclaim_process_prefix_lru_bytes(
+    needed_bytes: usize,
+    spare_model: Option<&str>,
+) -> Result<PrefixLruReclaim> {
+    let Some(cache) = process_prefix_lru_cache()? else {
+        return Ok(PrefixLruReclaim::default());
     };
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("process prefix LRU cache lock poisoned"))?;
-    let target = ((cache.max_bytes() as f64) * retain_ratio) as usize;
-    Ok(cache.shrink_to(target))
+    Ok(cache.reclaim(needed_bytes, spare_model))
 }
 
 const PROCESS_PREFIX_STORE_QUEUE_CAPACITY: usize = 4;
@@ -721,18 +760,18 @@ impl AsyncPrefixStoreQueue {
     }
 
     fn reserve_pending(&self, bytes: usize) -> bool {
-        if bytes > self.0.max_pending_bytes
-            || self.0.counters.pending_jobs.load(Ordering::Acquire) >= self.0.capacity
-        {
+        if self.0.counters.pending_jobs.load(Ordering::Acquire) >= self.0.capacity {
             return false;
         }
+        // One save larger than the byte limit is still accepted when nothing
+        // else is waiting: otherwise a long prompt could never reach disk.
         let reserved = self.0.counters.pending_bytes.fetch_update(
             Ordering::AcqRel,
             Ordering::Acquire,
             |current| {
                 current
                     .checked_add(bytes)
-                    .filter(|projected| *projected <= self.0.max_pending_bytes)
+                    .filter(|projected| *projected <= self.0.max_pending_bytes || current == 0)
             },
         );
         if reserved.is_err() {
@@ -886,6 +925,13 @@ impl PrefixLruCache {
         lengths
     }
 
+    /// Whether exactly this prefix is cached. Leaves recency untouched.
+    pub fn contains(&self, spec: &PagedPrefixKeySpec) -> bool {
+        self.entries
+            .get(&PagedPrefixStore::key_for(spec))
+            .is_some_and(|entry| entry.spec == *spec)
+    }
+
     pub fn load_observed(&mut self, spec: &PagedPrefixKeySpec) -> Result<PagedPrefixLoadResult> {
         let key = PagedPrefixStore::key_for(spec);
         let Some(entry) = self.entries.get(&key) else {
@@ -972,14 +1018,89 @@ impl PrefixLruCache {
         }
     }
 
-    /// Shrink to an absolute byte target. When multiple models own entries,
-    /// reclaim first from the owner furthest above its equal fair share, then
-    /// evict that owner's least-recently-used entry.
+    /// Count the entries a prompt of `model_id` can restore as used now, so a
+    /// reclaim made to admit that prompt takes them last.
+    pub fn touch_prefixes_of(&mut self, model_id: &str, prompt_ids: &[u32]) {
+        let keys = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                let tokens = &entry.spec.token_ids;
+                entry.spec.model_id == model_id
+                    && tokens.len() <= prompt_ids.len()
+                    && tokens
+                        .iter()
+                        .zip(prompt_ids)
+                        .all(|(&cached, &prompt)| i64::from(cached) == i64::from(prompt))
+            })
+            .map(|(key, entry)| (entry.spec.token_ids.len(), key.clone()))
+            .collect::<std::collections::BTreeSet<_>>();
+        // Shortest first: the longest ends up the most recent.
+        for (_, key) in keys {
+            self.touch(&key);
+        }
+    }
+
+    /// Shrink to an absolute byte target; the order is [`Self::reclaim`]'s
+    /// with no model spared.
     pub fn shrink_to(&mut self, target_bytes: usize) -> usize {
+        self.evict_to(target_bytes, None).bytes
+    }
+
+    /// Evict until at least `needed_bytes` are gone or the cache is empty.
+    ///
+    /// Covered entries go first, least recently used first: an entry is
+    /// covered when a longer cached entry of the same model continues its
+    /// tokens, so a later prompt that would restore it restores the longer
+    /// one instead (a chunk checkpoint under its turn boundary, an earlier
+    /// turn under a later one). Then, as before, the model furthest above
+    /// its equal share loses its least recently used entry; `spare_model`,
+    /// the model the memory is wanted for, loses its own last.
+    pub fn reclaim(&mut self, needed_bytes: usize, spare_model: Option<&str>) -> PrefixLruReclaim {
+        self.evict_to(self.total_bytes.saturating_sub(needed_bytes), spare_model)
+    }
+
+    fn covered_keys(&self) -> Vec<(String, u64)> {
+        let mut covered = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                self.entries
+                    .values()
+                    .any(|longer| longer.spec.continues(&entry.spec))
+            })
+            .map(|(key, entry)| (key.clone(), entry.generation))
+            .collect::<Vec<_>>();
+        covered.sort_unstable_by_key(|(_, generation)| *generation);
+        covered
+    }
+
+    fn remove_entry(&mut self, key: &str) {
+        if let Some(entry) = self.entries.remove(key) {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.stats.payload_bytes);
+        }
+    }
+
+    fn evict_to(&mut self, target_bytes: usize, spare_model: Option<&str>) -> PrefixLruReclaim {
         let before = self.total_bytes;
+        let mut reclaim = PrefixLruReclaim::default();
+        if self.total_bytes > target_bytes {
+            for (key, _) in self.covered_keys() {
+                if self.total_bytes <= target_bytes {
+                    break;
+                }
+                self.remove_entry(&key);
+                reclaim.covered_entries += 1;
+            }
+        }
         while self.total_bytes > target_bytes {
+            let spared = |entry: &PrefixLruEntry| spare_model == Some(entry.spec.model_id.as_str());
+            let others_remain = self.entries.values().any(|entry| !spared(entry));
             let mut owner_bytes = HashMap::<&str, usize>::new();
             for entry in self.entries.values() {
+                if others_remain && spared(entry) {
+                    continue;
+                }
                 let owner_bytes = owner_bytes.entry(entry.spec.model_id.as_str()).or_default();
                 *owner_bytes = owner_bytes.saturating_add(entry.stats.payload_bytes);
             }
@@ -988,34 +1109,32 @@ impl PrefixLruCache {
             } else {
                 target_bytes / owner_bytes.len()
             };
-            let selected_owner = owner_bytes
+            let Some(selected_owner) = owner_bytes
                 .iter()
                 .max_by_key(|(_, bytes)| bytes.saturating_sub(fair_share))
-                .map(|(owner, _)| *owner);
-            let candidate = self
-                .entries
-                .iter()
-                .filter(|(_, entry)| {
-                    selected_owner.is_none_or(|owner| entry.spec.model_id == owner)
-                })
-                .min_by_key(|(_, entry)| entry.generation)
-                .map(|(key, entry)| (key.clone(), entry.generation));
-            let Some((key, generation)) = candidate else {
+                .map(|(owner, _)| *owner)
+            else {
                 break;
             };
-            if let Some(entry) = self.entries.remove(&key) {
-                self.total_bytes = self.total_bytes.saturating_sub(entry.stats.payload_bytes);
-            }
-            self.recency.retain(|(recency_key, recency_generation)| {
-                recency_key != &key || *recency_generation != generation
-            });
+            let Some(key) = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| entry.spec.model_id == selected_owner)
+                .min_by_key(|(_, entry)| entry.generation)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.remove_entry(&key);
+            reclaim.other_entries += 1;
         }
         self.recency.retain(|(key, generation)| {
             self.entries
                 .get(key)
                 .is_some_and(|entry| entry.generation == *generation)
         });
-        before.saturating_sub(self.total_bytes)
+        reclaim.bytes = before.saturating_sub(self.total_bytes);
+        reclaim
     }
 }
 
@@ -2441,6 +2560,37 @@ mod tests {
 
     #[test]
     #[serial_test::serial(mlx_metal)]
+    fn prefix_lru_cache_contains_leaves_recency_alone() {
+        let mut cache =
+            PrefixLruCache::new(PrefixLruCacheConfig::new(64).expect("config")).expect("cache");
+        let entry1 = single_full_paged_entry(1.0);
+        let entry2 = single_full_paged_entry(2.0);
+        let entry3 = single_full_paged_entry(3.0);
+        let spec1 = spec(vec![1, 2], 2, None, entry1.main_layer_specs(), vec![], None);
+        let spec2 = spec(vec![3, 4], 2, None, entry2.main_layer_specs(), vec![], None);
+        let spec3 = spec(vec![5, 6], 2, None, entry3.main_layer_specs(), vec![], None);
+
+        assert!(!cache.contains(&spec1));
+        cache.insert(spec1.clone(), entry1).expect("insert spec1");
+        cache.insert(spec2.clone(), entry2).expect("insert spec2");
+        assert!(cache.contains(&spec1));
+
+        // A load would have made spec1 the most recent; `contains` does not.
+        cache.insert(spec3.clone(), entry3).expect("insert spec3");
+        assert!(!cache.contains(&spec1));
+        assert!(cache.contains(&spec2) && cache.contains(&spec3));
+    }
+
+    #[test]
+    fn memory_only_paged_prefix_cache_has_no_store() {
+        let config = PagedPrefixCacheConfig::memory_only("model", 128, 16).expect("config");
+        assert_eq!(config.root, None);
+        assert!(config.store().is_none());
+        assert!(PagedPrefixCacheConfig::memory_only("model", 0, 16).is_err());
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
     fn prefix_lru_cache_hits_and_evicts_least_recent_entry() {
         let mut cache =
             PrefixLruCache::new(PrefixLruCacheConfig::new(64).expect("config")).expect("cache");
@@ -2519,6 +2669,112 @@ mod tests {
         assert_eq!(cache.cached_lengths_descending(10), vec![6, 4, 2]);
         assert_eq!(cache.cached_lengths_descending(5), vec![4, 2]);
         assert_eq!(cache.cached_lengths_descending(1), Vec::<i32>::new());
+    }
+
+    fn lru_spec(model: &str, tokens: Vec<i32>, entry: &PagedPrefixEntry) -> PagedPrefixKeySpec {
+        let cached_len = tokens.len() as i32;
+        let mut spec = spec(
+            tokens,
+            cached_len,
+            None,
+            entry.main_layer_specs(),
+            vec![],
+            None,
+        );
+        spec.model_id = model.to_owned();
+        spec
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_lru_reclaim_takes_covered_entries_before_recent_use_decides() {
+        let mut cache =
+            PrefixLruCache::new(PrefixLruCacheConfig::new(160).expect("config")).expect("cache");
+        let entry = single_full_paged_entry(1.0);
+        // Oldest first: another conversation, then one conversation's chunk
+        // checkpoint, first turn and second turn.
+        let other = lru_spec("m", vec![9, 9], &entry);
+        let checkpoint = lru_spec("m", vec![1, 2], &entry);
+        let turn1 = lru_spec("m", vec![1, 2, 3], &entry);
+        let turn2 = lru_spec("m", vec![1, 2, 3, 4], &entry);
+        for spec in [&other, &checkpoint, &turn1, &turn2] {
+            cache.insert(spec.clone(), entry.clone()).expect("insert");
+        }
+        // The checkpoint was used last; it is still covered.
+        cache.load_observed(&checkpoint).expect("touch");
+
+        let reclaim = cache.reclaim(33, None);
+
+        assert_eq!(
+            reclaim,
+            PrefixLruReclaim {
+                bytes: 64,
+                covered_entries: 2,
+                other_entries: 0
+            }
+        );
+        assert!(cache.contains(&other) && cache.contains(&turn2));
+        assert!(!cache.contains(&checkpoint) && !cache.contains(&turn1));
+
+        // Nothing covered is left: least recently used goes.
+        assert_eq!(cache.reclaim(1, None).other_entries, 1);
+        assert!(!cache.contains(&other) && cache.contains(&turn2));
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_lru_reclaim_spares_the_requesting_model_until_others_are_gone() {
+        let mut cache =
+            PrefixLruCache::new(PrefixLruCacheConfig::new(160).expect("config")).expect("cache");
+        let entry = single_full_paged_entry(1.0);
+        let mine_old = lru_spec("mine", vec![1, 2], &entry);
+        let theirs = lru_spec("theirs", vec![3, 4], &entry);
+        let mine_new = lru_spec("mine", vec![5, 6], &entry);
+        for spec in [&mine_old, &theirs, &mine_new] {
+            cache.insert(spec.clone(), entry.clone()).expect("insert");
+        }
+
+        assert_eq!(cache.reclaim(1, Some("mine")).bytes, 32);
+        assert!(!cache.contains(&theirs));
+        assert!(cache.contains(&mine_old) && cache.contains(&mine_new));
+
+        assert_eq!(cache.reclaim(1, Some("mine")).bytes, 32);
+        assert!(!cache.contains(&mine_old) && cache.contains(&mine_new));
+        assert_eq!(cache.reclaim(usize::MAX, Some("mine")).bytes, 32);
+        assert_eq!(cache.reclaim(1, Some("mine")), PrefixLruReclaim::default());
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_lru_reclaim_for_a_prompt_takes_what_it_can_restore_last() {
+        let mut cache =
+            PrefixLruCache::new(PrefixLruCacheConfig::new(160).expect("config")).expect("cache");
+        let entry = single_full_paged_entry(1.0);
+        // The arriving prompt's conversation is the least recently used.
+        let mine = lru_spec("m", vec![1, 2, 3], &entry);
+        let other = lru_spec("m", vec![7, 8], &entry);
+        cache.insert(mine.clone(), entry.clone()).expect("insert");
+        cache.insert(other.clone(), entry.clone()).expect("insert");
+
+        cache.touch_prefixes_of("m", &[1, 2, 3, 4, 5]);
+        cache.reclaim(1, Some("m"));
+
+        assert!(cache.contains(&mine) && !cache.contains(&other));
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_lru_entry_of_another_model_or_kind_covers_nothing() {
+        let entry = single_full_paged_entry(1.0);
+        let short = lru_spec("m", vec![1, 2], &entry);
+        let long = lru_spec("m", vec![1, 2, 3], &entry);
+        assert!(long.continues(&short));
+        assert!(!short.continues(&long) && !long.continues(&long));
+        assert!(!lru_spec("n", vec![1, 2, 3], &entry).continues(&short));
+        assert!(!lru_spec("m", vec![1, 7, 3], &entry).continues(&short));
+        let mut image = long.clone();
+        image.fingerprint = Some("image".to_owned());
+        assert!(!image.continues(&short));
     }
 
     #[test]
@@ -2624,12 +2880,36 @@ mod tests {
             None,
         );
         let payload_bytes = entry.observability_stats(2).payload_bytes;
-        let queue = AsyncPrefixStoreQueue::new(1, payload_bytes - 1).expect("queue");
+        let queue = AsyncPrefixStoreQueue::new(2, payload_bytes - 1).expect("queue");
+        // Larger than the byte limit, but nothing else is waiting.
+        let oversize = match queue.try_admit(
+            PagedPrefixStore::new(temp_root("unused")),
+            wanted,
+            AsyncPrefixStoreCancellation::default(),
+        ) {
+            AsyncPrefixStoreAdmission::Admitted(permit) => permit,
+            _ => panic!("an oversize save is admitted into an empty queue"),
+        };
+        let second_entry = single_full_paged_entry(51.0);
+        let second = spec(
+            vec![52, 53],
+            2,
+            None,
+            second_entry.main_layer_specs(),
+            vec![],
+            None,
+        );
         assert_eq!(
-            queue.try_enqueue(PagedPrefixStore::new(temp_root("unused")), wanted, entry),
+            queue.try_enqueue(
+                PagedPrefixStore::new(temp_root("unused")),
+                second,
+                second_entry
+            ),
             AsyncPrefixStoreSubmit::Backpressured
         );
         assert_eq!(queue.stats().backpressured_total, 1);
+        drop(oversize);
+        assert_eq!(queue.stats().pending_bytes, 0);
         queue.shutdown();
 
         let root = temp_root("async-prefix-store-cancel");

@@ -158,9 +158,6 @@ impl SchedulerProfileRuntimeArgs {
         } else {
             None
         };
-        if self.prefix_lru_cache_max_bytes.is_some() && self.paged_prefix_cache_dir.is_none() {
-            bail!("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir");
-        }
         if self.prefix_lru_cache_max_bytes == Some(0) {
             bail!("--prefix-lru-cache-max-bytes must be > 0");
         }
@@ -174,7 +171,9 @@ impl SchedulerProfileRuntimeArgs {
                 mtp_draft_tokens: self.mtp_draft_tokens,
                 prompt_lookup,
                 kv_quantization: self.kv_quant.profile_context(),
-                paged_prefix_cache_enabled: self.paged_prefix_cache_dir.is_some(),
+                // The in-memory prefix cache alone also uses paged K/V.
+                paged_prefix_cache_enabled: self.paged_prefix_cache_dir.is_some()
+                    || self.prefix_lru_cache_max_bytes.is_some(),
                 paged_prefix_cache_block_size: self.paged_prefix_cache_block_size,
                 paged_prefix_cache_max_pages: self.paged_prefix_cache_max_pages,
                 prefix_lru_cache_max_bytes: self.prefix_lru_cache_max_bytes,

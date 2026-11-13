@@ -393,7 +393,9 @@ pub fn scheduler_runtime_context_for_model(
             mtp_draft_tokens,
             prompt_lookup,
             kv_quantization: args.kv_quantization,
-            paged_prefix_cache_enabled: args.paged_prefix_cache_dir.is_some(),
+            // The in-memory prefix cache alone also uses paged K/V.
+            paged_prefix_cache_enabled: args.paged_prefix_cache_dir.is_some()
+                || args.prefix_lru_cache_max_bytes.is_some(),
             paged_prefix_cache_block_size: args.paged_prefix_cache_block_size,
             paged_prefix_cache_max_pages: args.paged_prefix_cache_max_pages,
             prefix_lru_cache_max_bytes: args.prefix_lru_cache_max_bytes,

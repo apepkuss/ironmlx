@@ -622,6 +622,19 @@ pub struct ProcessMemoryGovernor {
     sample_gate: Mutex<()>,
     state: Mutex<GovernorState>,
     manage_mlx_cache: bool,
+    #[cfg(test)]
+    test_telemetry: Mutex<Option<TestTelemetrySource>>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct TestTelemetrySource(Arc<dyn Fn() -> MemoryTelemetry + Send + Sync>);
+
+#[cfg(test)]
+impl std::fmt::Debug for TestTelemetrySource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("TestTelemetrySource")
+    }
 }
 
 pub type SharedProcessMemoryGovernor = Arc<ProcessMemoryGovernor>;
@@ -657,7 +670,30 @@ impl ProcessMemoryGovernor {
                 last_sample_at: None,
             }),
             manage_mlx_cache,
+            #[cfg(test)]
+            test_telemetry: Mutex::new(None),
         })
+    }
+
+    /// Replace the native sampler, so a test decides what every sample
+    /// reports, including the ones taken after a reclaim.
+    #[cfg(test)]
+    pub(crate) fn set_test_telemetry(
+        &self,
+        source: impl Fn() -> MemoryTelemetry + Send + Sync + 'static,
+    ) {
+        *self.test_telemetry.lock().unwrap() = Some(TestTelemetrySource(Arc::new(source)));
+    }
+
+    fn telemetry(&self) -> MemoryTelemetry {
+        #[cfg(test)]
+        {
+            let source = self.test_telemetry.lock().unwrap().clone();
+            if let Some(source) = source {
+                return (source.0)();
+            }
+        }
+        native_memory_telemetry()
     }
 
     pub fn shared_default() -> SharedProcessMemoryGovernor {
@@ -685,7 +721,7 @@ impl ProcessMemoryGovernor {
                 return state.snapshot;
             }
         }
-        self.update(native_memory_telemetry())
+        self.update(self.telemetry())
     }
 
     /// Force an authoritative native sample after this process has performed
@@ -697,7 +733,7 @@ impl ProcessMemoryGovernor {
             .sample_gate
             .lock()
             .expect("memory governor sample gate poisoned");
-        self.update(native_memory_telemetry())
+        self.update(self.telemetry())
     }
 
     /// Sample after this process released buffers, until `settled` accepts a
@@ -1051,6 +1087,84 @@ impl ProcessMemoryGovernor {
         };
     }
 
+    /// Bytes that must leave the process before `bytes` more can be
+    /// reserved for `need`: what the reservation would put above the
+    /// headroom target, and, while the pressure level refuses it, what keeps
+    /// usage above the watermark the level comes back down under.
+    pub fn reservation_shortfall(
+        &self,
+        snapshot: &MemoryGovernorSnapshot,
+        bytes: usize,
+        need: ReservationNeed,
+    ) -> usize {
+        let ceiling = snapshot.effective_ceiling_bytes;
+        if ceiling == 0 {
+            return 0;
+        }
+        let liability = match need {
+            ReservationNeed::Prefill => prefill_cache_growth_liability(*snapshot),
+            ReservationNeed::Admission => 0,
+        };
+        let headroom = snapshot
+            .current_usage_bytes
+            .saturating_add(snapshot.reserved_bytes)
+            .saturating_add(liability)
+            .saturating_add(bytes)
+            .saturating_sub(ratio_bytes(ceiling, self.config.prefill_headroom_ratio));
+        // The level follows usage plus outstanding reservations, so both
+        // have to fit under the recovery watermark.
+        let pressure = if need.refused_at(snapshot.pressure_level) {
+            self.recovery_overage_with(
+                snapshot,
+                snapshot
+                    .reserved_bytes
+                    .saturating_sub(snapshot.model_load_reserved_bytes),
+            )
+        } else {
+            0
+        };
+        headroom.max(pressure)
+    }
+
+    /// Whether reserving `bytes` for `need` would be refused on this sample.
+    pub fn reservation_blocked(
+        &self,
+        snapshot: &MemoryGovernorSnapshot,
+        bytes: usize,
+        need: ReservationNeed,
+    ) -> bool {
+        need.refused_at(snapshot.pressure_level)
+            || self.reservation_shortfall(snapshot, bytes, need) > 0
+    }
+
+    /// Bytes by which usage alone exceeds the watermark a raised pressure
+    /// level recovers under. Reservations are left out: whoever makes one
+    /// frees what it needs through [`Self::reservation_shortfall`].
+    pub fn recovery_overage(&self, snapshot: &MemoryGovernorSnapshot) -> usize {
+        self.recovery_overage_with(snapshot, 0)
+    }
+
+    fn recovery_overage_with(&self, snapshot: &MemoryGovernorSnapshot, extra: usize) -> usize {
+        snapshot
+            .current_usage_bytes
+            .saturating_add(extra)
+            .saturating_sub(ratio_bytes(
+                snapshot.effective_ceiling_bytes,
+                self.config.recovery_ratio,
+            ))
+    }
+
+    /// The peak growth [`Self::plan_prefill_chunk`] reserves for a chunk
+    /// planned in full.
+    pub fn prefill_chunk_growth(
+        requested_tokens: usize,
+        kv_len: usize,
+        batch_size: usize,
+        meta: &ModelMeta,
+    ) -> usize {
+        estimate_prefill_peak_growth(meta, requested_tokens, kv_len, batch_size)
+    }
+
     pub fn plan_prefill_chunk(
         self: &Arc<Self>,
         requested_tokens: usize,
@@ -1261,6 +1375,25 @@ pub struct MemoryReservation {
     cache_growth_liability_bytes: usize,
     kind: ReservationKind,
     committed: bool,
+}
+
+/// What a reservation is for, as far as making room for it goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservationNeed {
+    /// Prefill working memory: refused from hard pressure up, and charged
+    /// the buffer cache growth of a first prefill reservation.
+    Prefill,
+    /// A new request or model: refused at any raised pressure.
+    Admission,
+}
+
+impl ReservationNeed {
+    fn refused_at(self, level: PressureLevel) -> bool {
+        match self {
+            Self::Prefill => level.rank() >= PressureLevel::Hard.rank(),
+            Self::Admission => level != PressureLevel::Normal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

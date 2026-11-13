@@ -496,6 +496,77 @@ struct Gemma4DrafterWindowPolicy {
     cfg: MtpSpeculativeConfig,
 }
 
+/// Have the hot prefix cache give up what a reservation of `bytes` lacks,
+/// and wait for the release to show. Cached prefixes are a convenience for
+/// later prompts; the request in hand must not fail, or run its prefill in
+/// smaller chunks, to keep them. `cache`: the cache to take from, the
+/// process-wide one when `None`.
+fn make_room_for_reservation(
+    governor: &crate::core::process_memory::SharedProcessMemoryGovernor,
+    cache: Option<&PrefixLruCacheHandle>,
+    spare_model: Option<&str>,
+    purpose: &'static str,
+    bytes: usize,
+    need: crate::core::process_memory::ReservationNeed,
+) -> crate::core::process_memory::MemoryGovernorSnapshot {
+    let blocked = |snapshot: &crate::core::process_memory::MemoryGovernorSnapshot| {
+        governor.reservation_blocked(snapshot, bytes, need)
+    };
+    let process_cache;
+    let cache = match cache {
+        Some(cache) => Some(cache),
+        None => {
+            process_cache = crate::core::cache::process_prefix_lru_cache()
+                .ok()
+                .flatten();
+            process_cache.as_ref()
+        }
+    };
+    let cached_bytes = cache
+        .and_then(|cache| lock_prefix_lru_cache(cache).ok())
+        .map_or(0, |cache| cache.total_bytes());
+    // MLX's idle buffers first: they cost nothing to give back.
+    mlx::transforms::clear_cache();
+    let mut snapshot = governor.refresh_process();
+    let mut needed = governor.reservation_shortfall(&snapshot, bytes, need);
+    if !blocked(&snapshot) || (needed > 0 && cached_bytes == 0) {
+        // Admitted, or short of memory with nothing here to give.
+        return snapshot;
+    }
+    // That release, and a level that only lags behind usage, show within a
+    // few samples; evicting on the first one would take more than is needed.
+    snapshot = governor.refresh_after_release(&mut |snapshot| !blocked(snapshot));
+    needed = governor.reservation_shortfall(&snapshot, bytes, need);
+    let Some(cache) = cache.filter(|_| needed > 0) else {
+        return snapshot;
+    };
+    let reclaimed = match lock_prefix_lru_cache(cache) {
+        Ok(mut cache) => cache.reclaim(needed, spare_model),
+        Err(error) => {
+            tracing::warn!(%error, purpose, "hot prefix cache reclaim failed");
+            return snapshot;
+        }
+    };
+    if reclaimed.bytes > 0 {
+        // Freed entries return to the system, not to MLX's buffer cache.
+        mlx::transforms::clear_cache();
+        snapshot = governor.refresh_after_release(&mut |snapshot| !blocked(snapshot));
+    }
+    tracing::info!(
+        purpose,
+        needed_bytes = needed,
+        reclaimed_bytes = reclaimed.bytes,
+        covered_entries = reclaimed.covered_entries,
+        other_entries = reclaimed.other_entries,
+        still_blocked = blocked(&snapshot),
+        level = ?snapshot.pressure_level,
+        usage_bytes = snapshot.current_usage_bytes,
+        reserved_bytes = snapshot.reserved_bytes,
+        "hot prefix cache made room for a reservation"
+    );
+    snapshot
+}
+
 fn reserve_vision_prefill<M: DenseVlMethods>(
     governor: Option<&crate::core::process_memory::SharedProcessMemoryGovernor>,
     model: &M,
@@ -549,8 +620,14 @@ fn reserve_vision_prefill<M: DenseVlMethods>(
     match governor.try_reserve_prefill(estimated_bytes, "vision_prefill") {
         Ok(reservation) => Ok(Some(reservation)),
         Err(first_error) => {
-            mlx::transforms::clear_cache();
-            governor.refresh_process();
+            make_room_for_reservation(
+                governor,
+                None,
+                None,
+                "vision_prefill",
+                estimated_bytes,
+                crate::core::process_memory::ReservationNeed::Prefill,
+            );
             governor
                 .try_reserve_prefill(estimated_bytes, "vision_prefill")
                 .map(Some)
@@ -2735,8 +2812,11 @@ fn queue_immutable_block_store(
         .key
         .parent
         .and_then(|parent| pool.entries.get(&parent).map(|entry| entry.chain_hash));
+    // Without an SSD store the block lives in memory only.
+    let Some(store) = config.store() else {
+        return Ok(ImmutableBlockStoreAttempt::Persisted);
+    };
     let spec = immutable_block_store_spec(config, cache, &entry.key.tokens, parent_hash)?;
-    let store = config.store();
     if store.contains_persisted(&spec)? {
         return Ok(ImmutableBlockStoreAttempt::Persisted);
     }
@@ -2827,6 +2907,9 @@ fn try_load_immutable_block_from_store(
     let Some(config) = config else {
         return Ok(None);
     };
+    let Some(store) = config.store() else {
+        return Ok(None);
+    };
     let spec = immutable_block_store_spec(config, cache, tokens, parent_hash)?;
     let reservation = if let Some(governor) = governor {
         governor.sample_process();
@@ -2842,7 +2925,7 @@ fn try_load_immutable_block_from_store(
     } else {
         None
     };
-    let observed = config.store().load_observed(&spec)?;
+    let observed = store.load_observed(&spec)?;
     if observed.status != PagedPrefixLoadStatus::Hit {
         return Ok(None);
     }
@@ -3157,6 +3240,17 @@ fn is_turn_boundary(
     config.and_then(|config| config.turn_reusable_len(prompt_ids)) == Some(split)
 }
 
+/// Whether saving all of `prompt_ids` would only duplicate its turn boundary.
+/// A chat prompt is saved at its boundary (see [`prefix_split_point`]); the
+/// whole prompt is never restored: the same prompt restores at most its
+/// split point and the next turn diverges at the boundary.
+fn whole_prompt_save_is_redundant(
+    config: Option<&PagedPrefixCacheConfig>,
+    prompt_ids: &[u32],
+) -> bool {
+    config.is_some_and(|config| config.turn_reusable_len(prompt_ids).is_some())
+}
+
 fn try_save_turn_boundary_prefix(
     config: Option<&PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
@@ -3184,7 +3278,7 @@ fn try_save_turn_boundary_prefix(
 }
 
 fn paged_prefix_restore_candidates(
-    store: &PagedPrefixStore,
+    store: Option<&PagedPrefixStore>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
     config: &PagedPrefixCacheConfig,
     prompt_ids: &[u32],
@@ -3206,7 +3300,9 @@ fn paged_prefix_restore_candidates(
             lock_prefix_lru_cache(prefix_lru_cache)?.cached_lengths_descending(longest as usize),
         );
     }
-    cached_lengths.extend(store.cached_lengths_descending(longest)?);
+    if let Some(store) = store {
+        cached_lengths.extend(store.cached_lengths_descending(longest)?);
+    }
     cached_lengths.sort_unstable_by(|a, b| b.cmp(a));
     cached_lengths.dedup();
     let mut candidates = Vec::with_capacity(cached_lengths.len());
@@ -3297,28 +3393,69 @@ fn try_insert_prefix_lru_entry(
     }
 }
 
+/// Where an admitted prefix save goes besides the prefix LRU cache.
+enum PrefixSavePermit {
+    Disk(Box<AsyncPrefixStorePermit>),
+    /// No SSD store is configured.
+    MemoryOnly,
+}
+
+/// Decide whether a prefix should be extracted and saved. `None`: skip it.
+/// `Some((key, None))`: it is already saved or on its way. Otherwise the
+/// caller extracts the entry, puts it in the prefix LRU cache and submits it.
 fn try_admit_prefix_store_entry(
-    store: PagedPrefixStore,
+    store: Option<PagedPrefixStore>,
+    prefix_lru_cache: Option<&PrefixLruCacheHandle>,
     spec: &PagedPrefixKeySpec,
     main_row: usize,
     mtp_row: Option<usize>,
-) -> Result<Option<(String, Option<AsyncPrefixStorePermit>)>> {
-    let key = PagedPrefixStore::key_for(spec);
-    match crate::core::cache::process_async_prefix_store_queue().try_admit(
+) -> Result<Option<(String, Option<PrefixSavePermit>)>> {
+    admit_prefix_save(
+        crate::core::cache::process_async_prefix_store_queue(),
         store,
-        spec.clone(),
-        AsyncPrefixStoreCancellation::default(),
-    ) {
-        AsyncPrefixStoreAdmission::Admitted(permit) => Ok(Some((key, Some(*permit)))),
+        prefix_lru_cache,
+        spec,
+        main_row,
+        mtp_row,
+    )
+}
+
+fn admit_prefix_save(
+    queue: &crate::core::cache::AsyncPrefixStoreQueue,
+    store: Option<PagedPrefixStore>,
+    prefix_lru_cache: Option<&PrefixLruCacheHandle>,
+    spec: &PagedPrefixKeySpec,
+    main_row: usize,
+    mtp_row: Option<usize>,
+) -> Result<Option<(String, Option<PrefixSavePermit>)>> {
+    let key = PagedPrefixStore::key_for(spec);
+    // The prefix LRU cache alone: no SSD store, or its queue has no room.
+    let memory_only = |key: String| -> Result<Option<(String, Option<PrefixSavePermit>)>> {
+        let Some(prefix_lru_cache) = prefix_lru_cache else {
+            return Ok(None);
+        };
+        let cached = lock_prefix_lru_cache(prefix_lru_cache)?.contains(spec);
+        Ok(Some((
+            key,
+            (!cached).then_some(PrefixSavePermit::MemoryOnly),
+        )))
+    };
+    let Some(store) = store else {
+        return memory_only(key);
+    };
+    match queue.try_admit(store, spec.clone(), AsyncPrefixStoreCancellation::default()) {
+        AsyncPrefixStoreAdmission::Admitted(permit) => {
+            Ok(Some((key, Some(PrefixSavePermit::Disk(permit)))))
+        }
         AsyncPrefixStoreAdmission::Coalesced => Ok(Some((key, None))),
         AsyncPrefixStoreAdmission::Backpressured => {
             tracing::warn!(
                 main_row,
                 ?mtp_row,
                 key,
-                "paged SSD prefix cache extraction skipped by async-store backpressure"
+                "paged SSD prefix cache write skipped by async-store backpressure"
             );
-            Ok(None)
+            memory_only(key)
         }
         AsyncPrefixStoreAdmission::Closed => {
             Err(anyhow!("paged SSD prefix cache async store is closed"))
@@ -3327,13 +3464,23 @@ fn try_admit_prefix_store_entry(
 }
 
 fn submit_prefix_store_entry(
-    permit: AsyncPrefixStorePermit,
+    permit: PrefixSavePermit,
     key: String,
     entry: PagedPrefixEntry,
     cached_len: i32,
     main_row: usize,
     mtp_row: Option<usize>,
 ) -> Result<Option<String>> {
+    let permit = match permit {
+        PrefixSavePermit::Disk(permit) => *permit,
+        PrefixSavePermit::MemoryOnly => {
+            // The prefix LRU cache holds these same arrays. Left lazy they
+            // would keep the whole page pool they were sliced from alive
+            // (the SSD path evaluates them when it queues the write).
+            entry.eval()?;
+            return Ok(Some(key));
+        }
+    };
     let stats = entry.observability_stats(cached_len);
     match permit.submit(entry) {
         AsyncPrefixStoreSubmit::Queued => {
@@ -3376,7 +3523,7 @@ fn try_restore_paged_prefix_for_prompt_row(
     }
     let store = config.store();
     for (restore_len, cached_len) in
-        paged_prefix_restore_candidates(&store, prefix_lru_cache, config, prompt_ids)?
+        paged_prefix_restore_candidates(store.as_ref(), prefix_lru_cache, config, prompt_ids)?
     {
         let Some(spec) = prefix_key_spec_for_caches(
             &config.model_id,
@@ -3396,6 +3543,10 @@ fn try_restore_paged_prefix_for_prompt_row(
             log_prefix_lru_hit("hit", &key, cache_row, None, restore_len, stats, load_us);
             return Ok(Some(cached_len));
         }
+        // In memory only: the LRU lookup above was the whole search.
+        let Some(store) = store.as_ref() else {
+            continue;
+        };
         let load_start = Instant::now();
         let observed = store.load_observed(&spec)?;
         let load_us = load_start.elapsed().as_micros();
@@ -3457,7 +3608,7 @@ fn try_restore_paged_prefix_for_prompt_rows(
     }
     let store = config.store();
     for (restore_len, cached_len) in
-        paged_prefix_restore_candidates(&store, prefix_lru_cache, config, prompt_ids)?
+        paged_prefix_restore_candidates(store.as_ref(), prefix_lru_cache, config, prompt_ids)?
     {
         let Some(spec) = prefix_key_spec_for_caches(
             &config.model_id,
@@ -3488,6 +3639,10 @@ fn try_restore_paged_prefix_for_prompt_rows(
             }
             return Ok(Some(cached_len));
         }
+        // In memory only: the LRU lookup above was the whole search.
+        let Some(store) = store.as_ref() else {
+            continue;
+        };
         let load_start = Instant::now();
         let observed = store.load_observed(&spec)?;
         let load_us = load_start.elapsed().as_micros();
@@ -3586,7 +3741,9 @@ fn try_save_paged_prefix_for_prompt_row(
         return Ok(None);
     };
     let store = config.store();
-    let Some((key, permit)) = try_admit_prefix_store_entry(store, &spec, cache_row, None)? else {
+    let Some((key, permit)) =
+        try_admit_prefix_store_entry(store, prefix_lru_cache, &spec, cache_row, None)?
+    else {
         return Ok(None);
     };
     let Some(permit) = permit else {
@@ -3685,7 +3842,7 @@ fn try_restore_paged_prefix_for_prompt_with_mtp_row(
     }
     let store = config.store();
     for (restore_len, cached_len) in
-        paged_prefix_restore_candidates(&store, prefix_lru_cache, config, prompt_ids)?
+        paged_prefix_restore_candidates(store.as_ref(), prefix_lru_cache, config, prompt_ids)?
     {
         let Some(mut spec) = prefix_key_spec_for_caches(
             &config.model_id,
@@ -3724,6 +3881,10 @@ fn try_restore_paged_prefix_for_prompt_with_mtp_row(
             );
             return Ok(Some((cached_len, last_hidden)));
         }
+        // In memory only: the LRU lookup above was the whole search.
+        let Some(store) = store.as_ref() else {
+            continue;
+        };
         let load_start = Instant::now();
         let observed = store.load_observed(&spec)?;
         let load_us = load_start.elapsed().as_micros();
@@ -3849,8 +4010,13 @@ fn try_save_paged_prefix_for_prompt_with_mtp_row(
     spec.mtp_layers = mtp_layer_specs_for_cache(mtp_cache, cached_len);
     spec.mtp_last_hidden = Some(PrefixTensorSpec::from_array(last_hidden));
     let store = config.store();
-    let Some((key, permit)) =
-        try_admit_prefix_store_entry(store, &spec, main_cache_row, Some(mtp_cache_row))?
+    let Some((key, permit)) = try_admit_prefix_store_entry(
+        store,
+        prefix_lru_cache,
+        &spec,
+        main_cache_row,
+        Some(mtp_cache_row),
+    )?
     else {
         return Ok(None);
     };
@@ -4434,6 +4600,9 @@ fn forward_batched_text_cold_miss_with_paged_prefix<M: Model>(
     mlx::transforms::eval(&[&logits])?;
 
     for (row, ids) in prompt_ids.iter().enumerate() {
+        if whole_prompt_save_is_redundant(prefix_cache_config, ids) {
+            continue;
+        }
         try_save_batched_text_prefix_row(
             prefix_cache_config,
             prefix_lru_cache,
@@ -4592,24 +4761,26 @@ fn forward_batched_text_with_paged_prefix<M: Model>(
                 }
             }
             if pos + 1 == ids.len() {
-                match try_save_paged_prefix_for_prompt_row(
-                    prefix_cache_config,
-                    prefix_lru_cache,
-                    cache,
-                    row,
-                    ids,
-                    &PrefixFingerprint::text(),
-                ) {
-                    Ok(Some(key)) => {
-                        tracing::debug!(
-                            "paged SSD prefix cache saved batched text prompt: row={row} key={key}"
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        tracing::warn!(
-                            "paged SSD prefix cache batched text prompt save skipped: row={row} {err:#}"
-                        );
+                if !whole_prompt_save_is_redundant(prefix_cache_config, ids) {
+                    match try_save_paged_prefix_for_prompt_row(
+                        prefix_cache_config,
+                        prefix_lru_cache,
+                        cache,
+                        row,
+                        ids,
+                        &PrefixFingerprint::text(),
+                    ) {
+                        Ok(Some(key)) => {
+                            tracing::debug!(
+                                "paged SSD prefix cache saved batched text prompt: row={row} key={key}"
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            tracing::warn!(
+                                "paged SSD prefix cache batched text prompt save skipped: row={row} {err:#}"
+                            );
+                        }
                     }
                 }
                 final_logits[row] = Some(slice_logits_row(&logits, row)?);
@@ -4889,6 +5060,9 @@ fn forward_batched_vl_cold_miss_with_paged_prefix<M: Model + DenseVlMethods>(
     mlx::transforms::eval(&[&logits])?;
 
     for row in 0..b {
+        if whole_prompt_save_is_redundant(prefix_cache_config, &prompt_ids_u32[row]) {
+            continue;
+        }
         try_save_batched_vl_prefix_row(
             prefix_cache_config,
             prefix_lru_cache,
@@ -5165,24 +5339,26 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
                 }
             }
             if pos + 1 == ids.len() {
-                match try_save_paged_prefix_for_prompt_row(
-                    prefix_cache_config,
-                    prefix_lru_cache,
-                    cache,
-                    row,
-                    ids_u32,
-                    fingerprint,
-                ) {
-                    Ok(Some(key)) => {
-                        tracing::debug!(
-                            "paged SSD prefix cache saved batched VL prompt: row={row} key={key}"
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(err) => {
-                        tracing::warn!(
-                            "paged SSD prefix cache batched VL prompt save skipped: row={row} {err:#}"
-                        );
+                if !whole_prompt_save_is_redundant(prefix_cache_config, ids_u32) {
+                    match try_save_paged_prefix_for_prompt_row(
+                        prefix_cache_config,
+                        prefix_lru_cache,
+                        cache,
+                        row,
+                        ids_u32,
+                        fingerprint,
+                    ) {
+                        Ok(Some(key)) => {
+                            tracing::debug!(
+                                "paged SSD prefix cache saved batched VL prompt: row={row} key={key}"
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            tracing::warn!(
+                                "paged SSD prefix cache batched VL prompt save skipped: row={row} {err:#}"
+                            );
+                        }
                     }
                 }
                 final_logits[row] = Some(slice_logits_row(&logits, row)?);
@@ -5771,15 +5947,46 @@ impl<M: Model> Scheduler<M> {
         let Some(governor) = self.process_memory_governor.as_ref() else {
             return Ok(None);
         };
-        governor.sample_process();
+        let growth = crate::core::process_memory::ProcessMemoryGovernor::prefill_chunk_growth(
+            requested_tokens,
+            kv_len,
+            batch_size,
+            &self.meta,
+        );
+        let need = crate::core::process_memory::ReservationNeed::Prefill;
+        let make_room = || {
+            make_room_for_reservation(
+                governor,
+                self.prefix_lru_cache.as_ref(),
+                self.paged_prefix_cache
+                    .as_ref()
+                    .map(|config| config.model_id.as_str()),
+                "prefill_chunk",
+                growth,
+                need,
+            )
+        };
+        // The chunk in full: a plan that only fits shrunk is a slower prefill.
+        // Only when there are cached prefixes to take: with none, making room
+        // would just empty MLX's buffer cache under every shrunk chunk.
+        let cached_bytes = self
+            .prefix_lru_cache
+            .as_ref()
+            .and_then(|cache| lock_prefix_lru_cache(cache).ok())
+            .map_or(0, |cache| cache.total_bytes());
+        if cached_bytes > 0
+            && governor.reservation_blocked(&governor.sample_process(), growth, need)
+        {
+            make_room();
+        }
         match governor.plan_prefill_chunk(requested_tokens, kv_len, batch_size, &self.meta) {
             Ok(plan) => Ok(Some(plan)),
             Err(first_error) => {
                 // One idempotent reclaim-and-retry is part of the prefill
-                // contract. `clear_cache` only releases MLX's reusable buffer
-                // cache; it does not mutate model weights or request KV.
-                mlx::transforms::clear_cache();
-                governor.refresh_process();
+                // contract. It releases MLX's reusable buffer cache and
+                // cached prefixes; it does not mutate model weights or
+                // request KV.
+                make_room();
                 governor
                     .plan_prefill_chunk(requested_tokens, kv_len, batch_size, &self.meta)
                     .map(Some)
@@ -7117,7 +7324,25 @@ impl<M: Model> Scheduler<M> {
         }
 
         let governor_reservation = if let Some(governor) = self.process_memory_governor.as_ref() {
-            let snapshot = governor.sample_process();
+            let need = crate::core::process_memory::ReservationNeed::Admission;
+            let mut snapshot = governor.sample_process();
+            if governor.reservation_blocked(&snapshot, requested_bytes, need) {
+                let model_id = self
+                    .paged_prefix_cache
+                    .as_ref()
+                    .map(|config| config.model_id.as_str());
+                if let (Some(cache), Some(model_id)) = (self.prefix_lru_cache.as_ref(), model_id) {
+                    lock_prefix_lru_cache(cache)?.touch_prefixes_of(model_id, &req.prompt_ids);
+                }
+                snapshot = make_room_for_reservation(
+                    governor,
+                    self.prefix_lru_cache.as_ref(),
+                    model_id,
+                    "scheduler_admission",
+                    requested_bytes,
+                    need,
+                );
+            }
             if snapshot.pressure_level != crate::core::process_memory::PressureLevel::Normal {
                 self.budget_state.release(requested_bytes);
                 return Err(anyhow::Error::new(SchedulerError::MemoryPressure {
@@ -12321,7 +12546,9 @@ impl<M: Model> Scheduler<M> {
             // a second host synchronization on every prefill chunk.
             mtp_prev_hidden = Some(chunk_last_hidden.clone());
             let new_pos = pos + n;
-            if let Some(cache) = self.cache.as_ref() {
+            let redundant = new_pos as usize == prompt_ids.len()
+                && whole_prompt_save_is_redundant(self.paged_prefix_cache.as_ref(), &prompt_ids);
+            if let Some(cache) = self.cache.as_ref().filter(|_| !redundant) {
                 match try_save_paged_prefix_for_prompt_with_mtp(
                     self.paged_prefix_cache.as_ref(),
                     self.prefix_lru_cache.as_ref(),
@@ -15777,7 +16004,9 @@ impl<M: Model> Scheduler<M> {
                 };
                 (state.prompt_ids.clone(), prefix_fingerprint)
             };
-            if let Some(cache) = self.cache.as_ref() {
+            if let Some(cache) = self.cache.as_ref().filter(|_| {
+                !whole_prompt_save_is_redundant(paged_prefix_cache_config.as_ref(), &prompt_ids)
+            }) {
                 match try_save_paged_prefix_for_prompt(
                     paged_prefix_cache_config.as_ref(),
                     prefix_lru_cache.as_ref(),
@@ -17215,19 +17444,21 @@ impl<M: Model> Scheduler<M> {
                 )?;
             }
         } else {
-            match try_save_paged_prefix_for_prompt(
-                self.paged_prefix_cache.as_ref(),
-                self.prefix_lru_cache.as_ref(),
-                &temp_cache,
-                &prompt_ids,
-                &prefix_fingerprint,
-            ) {
-                Ok(Some(key)) => {
-                    tracing::debug!("paged SSD prefix cache saved during mid-admit: key={key}");
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    tracing::warn!("paged SSD prefix cache mid-admit save skipped: {err:#}");
+            if !whole_prompt_save_is_redundant(self.paged_prefix_cache.as_ref(), &prompt_ids) {
+                match try_save_paged_prefix_for_prompt(
+                    self.paged_prefix_cache.as_ref(),
+                    self.prefix_lru_cache.as_ref(),
+                    &temp_cache,
+                    &prompt_ids,
+                    &prefix_fingerprint,
+                ) {
+                    Ok(Some(key)) => {
+                        tracing::debug!("paged SSD prefix cache saved during mid-admit: key={key}");
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        tracing::warn!("paged SSD prefix cache mid-admit save skipped: {err:#}");
+                    }
                 }
             }
 
@@ -17697,21 +17928,25 @@ impl<M: Model> Scheduler<M> {
         let new_pos = chunk_end;
         handle.mtp_prev_hidden = Some(chunk_last_hidden.clone());
         handle.last_prompt_hidden = Some(chunk_last_hidden.clone());
-        match try_save_paged_prefix_for_prompt_with_mtp(
-            self.paged_prefix_cache.as_ref(),
-            self.prefix_lru_cache.as_ref(),
-            &handle.temp_cache,
-            &handle.mtp_cache,
-            &chunk_last_hidden,
-            &handle.prompt_ids[..new_pos as usize],
-            &handle.prefix_fingerprint,
-        ) {
-            Ok(Some(key)) => {
-                tracing::debug!("paged SSD prefix cache MTP mid-admit saved: key={key}");
-            }
-            Ok(None) => {}
-            Err(err) => {
-                tracing::warn!("paged SSD prefix cache MTP mid-admit save skipped: {err:#}");
+        let redundant = new_pos as usize == handle.prompt_ids.len()
+            && whole_prompt_save_is_redundant(self.paged_prefix_cache.as_ref(), &handle.prompt_ids);
+        if !redundant {
+            match try_save_paged_prefix_for_prompt_with_mtp(
+                self.paged_prefix_cache.as_ref(),
+                self.prefix_lru_cache.as_ref(),
+                &handle.temp_cache,
+                &handle.mtp_cache,
+                &chunk_last_hidden,
+                &handle.prompt_ids[..new_pos as usize],
+                &handle.prefix_fingerprint,
+            ) {
+                Ok(Some(key)) => {
+                    tracing::debug!("paged SSD prefix cache MTP mid-admit saved: key={key}");
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!("paged SSD prefix cache MTP mid-admit save skipped: {err:#}");
+                }
             }
         }
         drop(prefill_plan);
@@ -21432,6 +21667,196 @@ mod tests {
         assert_eq!(governor.snapshot().reserved_bytes, 0);
     }
 
+    /// A scheduler over a hot prefix cache of one-GiB entries (never
+    /// evaluated, so they occupy nothing), and a governor whose every sample
+    /// reports `base_bytes` plus what is cached: evicting an entry is the
+    /// only way usage falls.
+    fn scheduler_with_metered_hot_cache(
+        base_bytes: usize,
+        entries: &[(&str, Vec<i32>)],
+    ) -> (
+        Scheduler<FinishedPhaseFakeModel>,
+        crate::core::process_memory::SharedProcessMemoryGovernor,
+        SharedPrefixLruCache,
+        Vec<PagedPrefixKeySpec>,
+    ) {
+        use crate::core::process_memory::{
+            HostVmStatistics, MemoryGovernorConfig, MemoryTelemetry, ProcessMemoryGovernor,
+        };
+        const GIB: usize = 1 << 30;
+        let cache = Arc::new(Mutex::new(
+            PrefixLruCache::new(PrefixLruCacheConfig::new(64 * GIB).expect("config"))
+                .expect("cache"),
+        ));
+        let mut specs = Vec::new();
+        for (model, tokens) in entries {
+            let half_gib =
+                || Array::zeros((1_i32, 1_i32, 2_i32, 1_i32 << 26), Dtype::Float32).expect("pages");
+            let entry = PagedPrefixEntry {
+                main_layers: vec![PrefixLayerPayload::FullPaged {
+                    k_pages: half_gib(),
+                    v_pages: half_gib(),
+                }],
+                mtp_layers: vec![],
+                mtp_last_hidden: None,
+                gemma4_drafter_last_hidden: None,
+            };
+            let spec = PagedPrefixKeySpec {
+                entry_kind: PrefixEntryKind::WholePrefix,
+                model_id: (*model).to_owned(),
+                token_ids: tokens.clone(),
+                cached_len: tokens.len() as i32,
+                fingerprint: None,
+                block_size: 2,
+                kv_cache_profile: None,
+                main_layers: entry.main_layer_specs(),
+                mtp_layers: vec![],
+                mtp_last_hidden: None,
+                gemma4_drafter_last_hidden: None,
+            };
+            cache
+                .lock()
+                .unwrap()
+                .insert(spec.clone(), entry)
+                .expect("insert");
+            specs.push(spec);
+        }
+        // Ceiling 24 GiB: headroom target 21.6, recovery 20.4, hard 22.8.
+        let governor = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                static_reserve_bytes: 4 * GIB,
+                minimum_prefill_chunk_tokens: 1,
+                ..MemoryGovernorConfig::default()
+            })
+            .expect("governor"),
+        );
+        let metered = Arc::clone(&cache);
+        governor.set_test_telemetry(move || {
+            let usage = base_bytes + metered.lock().unwrap().total_bytes();
+            MemoryTelemetry {
+                total_ram_bytes: 32 * GIB,
+                phys_footprint_bytes: Some(usage),
+                vm: Some(HostVmStatistics {
+                    free_bytes: 8 * GIB,
+                    inactive_bytes: 2 * GIB,
+                    active_bytes: 8 * GIB,
+                    wired_bytes: 8 * GIB,
+                }),
+                mlx_active_bytes: Some(usage),
+                mlx_cache_bytes: Some(0),
+                metal_limit_bytes: Some(24 * GIB),
+            }
+        });
+        // Past the promotion debounce.
+        governor.refresh_process();
+        governor.refresh_process();
+
+        let mut scheduler = Scheduler::<FinishedPhaseFakeModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        scheduler
+            .enable_paged_prefix_cache(
+                crate::core::cache::PagedPrefixCacheConfig::memory_only("mine", 2, 32)
+                    .expect("prefix config"),
+            )
+            .expect("enable prefix cache");
+        scheduler
+            .enable_shared_prefix_lru_cache(Arc::clone(&cache))
+            .expect("enable hot cache");
+        scheduler.process_memory_governor = Some(Arc::clone(&governor));
+        (scheduler, governor, cache, specs)
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefill_chunk_takes_the_room_it_lacks_from_the_hot_prefix_cache() {
+        const GIB: usize = 1 << 30;
+        let growth = crate::core::process_memory::ProcessMemoryGovernor::prefill_chunk_growth(
+            2048,
+            0,
+            1,
+            &crate::core::memory_budget::test_meta_qwen35(),
+        );
+        // The chunk, with the half GiB of buffer cache growth a first prefill
+        // reservation is charged, fits under the 21.6 GiB target once two of
+        // the four entries are gone, and not before.
+        let (scheduler, governor, cache, specs) = scheduler_with_metered_hot_cache(
+            21 * GIB + GIB * 3 / 5 - growth - GIB * 5 / 2,
+            &[
+                ("mine", vec![1, 2]),
+                ("mine", vec![1, 2, 3]),
+                ("mine", vec![7, 8]),
+                ("mine", vec![9, 9]),
+            ],
+        );
+        assert!(governor.reservation_blocked(
+            &governor.snapshot(),
+            growth,
+            crate::core::process_memory::ReservationNeed::Prefill
+        ));
+
+        let plan = scheduler
+            .plan_prefill_chunk(2048, 0, 1)
+            .expect("the cache must give way")
+            .expect("governed plan");
+
+        assert_eq!(plan.selected_tokens, 2048, "planned in full, not shrunk");
+        let cache = cache.lock().unwrap();
+        assert!(
+            !cache.contains(&specs[0]),
+            "the entry a longer one covers goes first"
+        );
+        assert!(cache.contains(&specs[3]), "the most recent entry stays");
+        assert_eq!(cache.len(), 2, "and no more is taken than the chunk lacks");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefill_chunk_still_fails_when_the_hot_prefix_cache_has_nothing_to_give() {
+        const GIB: usize = 1 << 30;
+        let (scheduler, _governor, _cache, _specs) =
+            scheduler_with_metered_hot_cache(23 * GIB, &[]);
+        let error = scheduler
+            .plan_prefill_chunk(2048, 0, 1)
+            .expect_err("no room and nothing to evict");
+        assert!(matches!(
+            error.downcast_ref::<SchedulerError>(),
+            Some(SchedulerError::PrefillPeakUnsafe { .. })
+        ));
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn admission_under_pressure_evicts_other_prefixes_and_keeps_the_prompts_own() {
+        const GIB: usize = 1 << 30;
+        // 22.2 GiB: soft pressure, which refuses admission. Getting under
+        // the 20.4 GiB recovery watermark takes two of the three entries.
+        let (mut scheduler, governor, cache, specs) = scheduler_with_metered_hot_cache(
+            19 * GIB + GIB / 5,
+            &[
+                // The arriving prompt's own prefix is the least recently used.
+                ("mine", vec![1, 2, 3]),
+                ("mine", vec![7, 8]),
+                ("mine", vec![9, 9]),
+            ],
+        );
+        assert_eq!(
+            governor.snapshot().pressure_level,
+            crate::core::process_memory::PressureLevel::Soft
+        );
+
+        scheduler
+            .admit(mk_req(vec![1, 2, 3, 4]))
+            .expect("the cache must give way");
+
+        let cache = cache.lock().unwrap();
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains(&specs[0]));
+    }
+
     #[test]
     fn process_governor_admission_reservation_rolls_back_on_evict_and_rejection() {
         use crate::core::process_memory::{
@@ -21450,7 +21875,7 @@ mod tests {
             })
             .unwrap(),
         );
-        let telemetry = |usage| MemoryTelemetry {
+        let telemetry = move |usage| MemoryTelemetry {
             total_ram_bytes: 32 * gib,
             phys_footprint_bytes: Some(usage),
             vm: Some(HostVmStatistics {
@@ -21478,8 +21903,11 @@ mod tests {
         assert_eq!(governor.snapshot().reserved_bytes, 0);
         assert_eq!(scheduler.budget_state.active_bytes(), 0);
 
-        governor.update(telemetry(23 * gib));
-        governor.update(telemetry(23 * gib));
+        // Admission samples again after its reclaim; keep those samples at
+        // the same pressure.
+        governor.set_test_telemetry(move || telemetry(23 * gib));
+        governor.refresh_process();
+        governor.refresh_process();
         let error = scheduler
             .admit(mk_req(vec![5, 6, 7, 8]))
             .expect_err("hard pressure must reject");
@@ -28853,6 +29281,7 @@ mod tests {
         assert_eq!(
             config
                 .store()
+                .expect("SSD store")
                 .cached_lengths_descending(32)
                 .expect("whole-prefix lengths"),
             Vec::<i32>::new(),
@@ -29396,6 +29825,126 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
+    fn prefix_save_refused_by_the_ssd_queue_still_reaches_the_lru_cache() {
+        let mut kv = KVCache::new(1, 1, 2, 2, Dtype::Float32, 8);
+        kv.enable_paged(2, 8).expect("paged cache");
+        kv.bind_paged_execution_rows(&[PagedKvBlockOwner::Request(1)])
+            .expect("bind owner");
+        let data = [1.0_f32, 2.0, 3.0, 4.0];
+        let k: Array = (&data[..], (1_i32, 1_i32, 2_i32, 2_i32))
+            .try_into()
+            .unwrap();
+        kv.update_and_fetch(&k, &k.clone(), &[2]).expect("fill");
+        let layers = vec![LayerCache::Full(kv)];
+        let spec_for = |tokens: &[u32]| {
+            prefix_key_spec_for_caches("model", tokens, 2, None, 2, &layers)
+                .expect("spec")
+                .expect("paged layers")
+        };
+        let (held, wanted) = (spec_for(&[1, 2]), spec_for(&[3, 4]));
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-prefix-save-refused-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let store = PagedPrefixStore::new(&root);
+
+        // One slot, taken: every further disk save is refused.
+        let queue = crate::core::cache::AsyncPrefixStoreQueue::new(1, 1 << 20).expect("queue");
+        let (_, taken) = admit_prefix_save(&queue, Some(store.clone()), None, &held, 0, None)
+            .expect("first admission")
+            .expect("admitted");
+        assert!(matches!(taken, Some(PrefixSavePermit::Disk(_))));
+
+        // Without a prefix LRU cache there is nowhere to put it.
+        assert!(
+            admit_prefix_save(&queue, Some(store.clone()), None, &wanted, 0, None)
+                .expect("refused")
+                .is_none()
+        );
+        let lru: PrefixLruCacheHandle = Arc::new(Mutex::new(
+            PrefixLruCache::new(PrefixLruCacheConfig::new(1 << 20).expect("L1 config"))
+                .expect("L1 cache"),
+        ));
+        let (_, permit) =
+            admit_prefix_save(&queue, Some(store.clone()), Some(&lru), &wanted, 0, None)
+                .expect("refused by the queue")
+                .expect("kept in memory");
+        assert!(matches!(permit, Some(PrefixSavePermit::MemoryOnly)));
+
+        // Already in the prefix LRU cache: nothing to extract again.
+        let (entry, _) = prefix_entry_for_row(&layers, 0)
+            .expect("entry")
+            .expect("row");
+        lru.lock()
+            .expect("L1 lock")
+            .insert(wanted.clone(), entry)
+            .expect("insert");
+        let (_, permit) = admit_prefix_save(&queue, Some(store), Some(&lru), &wanted, 0, None)
+            .expect("refused by the queue")
+            .expect("already cached");
+        assert!(permit.is_none());
+        drop(taken);
+        queue.shutdown();
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn memory_only_prefix_cache_reuses_a_prefix_without_an_ssd_store() {
+        let config = crate::core::cache::PagedPrefixCacheConfig::memory_only("step-test", 2, 32)
+            .expect("prefix config");
+        assert!(config.store().is_none());
+
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable paged prefix cache");
+        scheduler
+            .enable_prefix_lru_cache(
+                crate::core::cache::PrefixLruCacheConfig::new(1024 * 1024).expect("L1 config"),
+            )
+            .expect("enable prefix LRU cache");
+
+        scheduler
+            .admit(mk_req(vec![1, 2, 3, 4]))
+            .expect("admit warm");
+        let warm_model = StepDecodeMaskModel::default();
+        scheduler
+            .prefill_admitted(&warm_model)
+            .expect("warm prefill");
+        assert_eq!(warm_model.hidden_seq_lens(), vec![3]);
+        scheduler.evict_all().expect("clear warm request");
+
+        scheduler
+            .admit(mk_req(vec![1, 2, 3, 4]))
+            .expect("admit hit");
+        let hit_model = StepDecodeMaskModel::default();
+        scheduler.prefill_admitted(&hit_model).expect("hit prefill");
+
+        assert_eq!(
+            hit_model.hidden_seq_lens(),
+            vec![1],
+            "only the unsealed tail is recomputed"
+        );
+        let stats = scheduler.request_owned_kv_stats().immutable_prefix;
+        assert_eq!(stats.idle_block_hits, 1);
+        assert_eq!(
+            (
+                stats.ssd_blocks_queued,
+                stats.ssd_block_hits,
+                stats.ssd_store_backpressure
+            ),
+            (0, 0, 0),
+            "nothing goes to or comes from disk"
+        );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
     fn prefill_admitted_batched_text_uses_paged_ssd_immutable_blocks_on_exact_hits() {
         let root = std::env::temp_dir().join(format!(
             "ironmlx-paged-prefix-batch-text-{}",
@@ -29836,13 +30385,81 @@ mod tests {
 
         // Turn 1 ends a chunk before its suffix.
         assert_eq!(run(vec![1, 2, 3, 7, 8]), (vec![3], vec![2]));
+        // Only the boundary is saved: the whole prompt would never be restored.
+        let saved = || {
+            config
+                .store()
+                .expect("SSD store")
+                .cached_lengths_descending(64)
+                .expect("saved lengths")
+        };
+        assert_eq!(saved(), vec![3]);
         // Turn 2 restores [1, 2, 3] and ends a chunk before its own suffix.
         assert_eq!(run(vec![1, 2, 3, 4, 5, 7, 8]), (vec![2], vec![2]));
         // Turn 3 restores turn 2's boundary, saved on its restored path.
         assert_eq!(run(vec![1, 2, 3, 4, 5, 6, 7, 8]), (vec![1], vec![2]));
         // An exact repeat restores the boundary and computes its suffix.
         assert_eq!(run(vec![1, 2, 3, 7, 8]), (vec![], vec![2]));
+        assert_eq!(saved(), vec![6, 5, 3], "one entry per turn boundary");
+        // A prompt without a generation suffix has no boundary: it keeps the
+        // split before its last token and the whole prompt.
+        run(vec![11, 12, 13, 14]);
+        assert_eq!(saved(), vec![6, 5, 4, 3]);
 
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    /// A chat prompt admitted while another request is decoding is saved at
+    /// its turn boundary only, and its row is still installed.
+    #[test]
+    #[serial(mlx_metal)]
+    fn mid_admitted_chat_prompt_saves_only_its_turn_boundary() {
+        let _prefix_store_isolation = PrefixStoreTestIsolation::new();
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-paged-prefix-mid-turn-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config = turn_boundary_prefix_config(&root);
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config.clone())
+            .expect("enable prefix cache");
+        let model = StepDecodeMaskModel::hybrid();
+        scheduler.admit(mk_req(vec![21, 22, 23])).expect("admit 0");
+        scheduler.prefill_admitted(&model).expect("prefill");
+
+        let mut mid_req = mk_req(vec![1, 2, 3, 7, 8]);
+        mid_req.prefill_chunk_size = 512;
+        let mut handle = scheduler
+            .admit_mid_begin(mid_req, &model)
+            .expect("admit_mid_begin");
+        while !scheduler
+            .admit_mid_chunk(&mut handle, &model)
+            .expect("chunk")
+        {}
+        scheduler
+            .admit_mid_finalize(handle, &model)
+            .expect("finalize");
+        assert_eq!(scheduler.step(&model).expect("step").len(), 2);
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+
+        let mut saved = config
+            .store()
+            .expect("SSD store")
+            .cached_lengths_descending(64)
+            .expect("saved lengths");
+        // The first request has no suffix: its split (2) and whole prompt (3).
+        saved.retain(|len| *len != 2);
+        assert_eq!(
+            saved,
+            vec![3],
+            "the chat prompt is saved at its boundary only"
+        );
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
@@ -29880,6 +30497,16 @@ mod tests {
         // is replayed one position at a time.
         assert_eq!(model.forward_seq_lens(), vec![3, 1, 1]);
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        // Row 0 is saved at its boundary (3) only; row 1 has none and keeps
+        // its split (3) and whole prompt (4).
+        assert_eq!(
+            config
+                .store()
+                .expect("SSD store")
+                .cached_lengths_descending(64)
+                .expect("saved lengths"),
+            vec![4, 3]
+        );
 
         let mut next = scheduler_with_cache(1);
         next.admit(mk_req(vec![1, 2, 3, 4, 7, 8]))

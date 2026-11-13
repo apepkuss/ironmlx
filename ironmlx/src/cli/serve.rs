@@ -294,6 +294,8 @@ pub struct ServeArgs {
     /// K/V stays quantized while prefix cache entries are persisted as packed
     /// TurboQuant tensors. When passed without a value, defaults to
     /// <data-root>/cache/paged_prefix_cache (~/.ironmlx/cache/paged_prefix_cache).
+    /// Without this option, --prefix-lru-cache-max-bytes alone keeps prefixes
+    /// in memory only and nothing is written to disk.
     /// With --dflash2-model-dir the directory only adds a disk store behind
     /// the in-memory prefix cache (--prefix-lru-cache-max-bytes, required):
     /// K/V stays dense and the decode kernels are unchanged.
@@ -320,8 +322,9 @@ pub struct ServeArgs {
     pub ssd_prefix_cache_max_gb: Option<usize>,
 
     /// Maximum bytes for the in-process cross-request prefix LRU cache. Disabled
-    /// by default. Ordinary/MTP serving requires --paged-prefix-cache-dir;
-    /// DFlash2 uses a dedicated in-memory artifact and does not enable SSD.
+    /// by default. Alone it is a memory-only prefix cache; add
+    /// --paged-prefix-cache-dir to also keep prefixes on SSD. Ordinary/MTP
+    /// serving stores K/V in pages either way; DFlash2 keeps K/V dense.
     #[arg(long = "prefix-lru-cache-max-bytes")]
     pub prefix_lru_cache_max_bytes: Option<usize>,
 
@@ -352,10 +355,16 @@ pub(crate) fn resolve_paged_prefix_cache_config(
     scheduler_config: SchedulerServeConfig,
     model_id: &str,
 ) -> Result<Option<ironmlx_runtime::core::cache::prefix_store::PagedPrefixCacheConfig>> {
-    let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
+    // The directory adds the SSD store; the in-memory prefix cache alone
+    // still needs paged K/V.
+    if args.paged_prefix_cache_dir.is_none() && args.prefix_lru_cache_max_bytes.is_none() {
         return Ok(None);
-    };
-    let root = paged_prefix_cache_root(root, ironmlx_runtime::core::data_root::data_root)?;
+    }
+    let root = args
+        .paged_prefix_cache_dir
+        .as_ref()
+        .map(|root| paged_prefix_cache_root(root, ironmlx_runtime::core::data_root::data_root))
+        .transpose()?;
     let block_size = args.paged_prefix_cache_block_size;
     if block_size <= 0 {
         bail!("--paged-prefix-cache-block-size must be > 0");
@@ -375,14 +384,17 @@ pub(crate) fn resolve_paged_prefix_cache_config(
             i32::try_from(pages).context("derived paged prefix cache max_pages exceeds i32")?
         }
     };
-    let max_disk_bytes = resolve_ssd_prefix_cache_max_bytes(args)?;
-    ironmlx_runtime::core::cache::prefix_store::PagedPrefixCacheConfig::new_with_max_disk_bytes(
-        root,
-        model_id.to_string(),
-        block_size,
-        max_pages,
-        max_disk_bytes,
-    )
+    use ironmlx_runtime::core::cache::prefix_store::PagedPrefixCacheConfig;
+    match root {
+        Some(root) => PagedPrefixCacheConfig::new_with_max_disk_bytes(
+            root,
+            model_id.to_string(),
+            block_size,
+            max_pages,
+            resolve_ssd_prefix_cache_max_bytes(args)?,
+        ),
+        None => PagedPrefixCacheConfig::memory_only(model_id.to_string(), block_size, max_pages),
+    }
     .map(Some)
 }
 
@@ -395,10 +407,14 @@ fn resolve_ssd_prefix_cache_max_bytes(args: &ServeArgs) -> Result<Option<usize>>
 pub(crate) fn resolve_engine_paged_prefix_cache_settings(
     args: &ServeArgs,
 ) -> Result<Option<ironmlx_runtime::core::engine_pool::EnginePagedPrefixCacheSettings>> {
-    let Some(root) = args.paged_prefix_cache_dir.as_ref() else {
+    if args.paged_prefix_cache_dir.is_none() && args.prefix_lru_cache_max_bytes.is_none() {
         return Ok(None);
-    };
-    let root = paged_prefix_cache_root(root, ironmlx_runtime::core::data_root::data_root)?;
+    }
+    let root = args
+        .paged_prefix_cache_dir
+        .as_ref()
+        .map(|root| paged_prefix_cache_root(root, ironmlx_runtime::core::data_root::data_root))
+        .transpose()?;
     let block_size = args.paged_prefix_cache_block_size;
     if block_size <= 0 {
         bail!("--paged-prefix-cache-block-size must be > 0");
@@ -427,7 +443,7 @@ pub(crate) fn resolve_prefix_lru_cache_config(
         return Ok(None);
     };
     if paged_prefix_cache.is_none() {
-        bail!("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir");
+        bail!("--prefix-lru-cache-max-bytes needs paged K/V, which this engine did not enable");
     }
     ironmlx_runtime::core::cache::prefix_store::PrefixLruCacheConfig::new(max_bytes).map(Some)
 }
@@ -926,12 +942,19 @@ where
     let active_kv_offload = resolve_active_kv_offload_config(args)?;
     let prompt_lookup = resolve_prompt_lookup_config(args)?;
     if let Some(config) = &paged_prefix_cache {
-        tracing::info!(
-            "ironmlx serve: paged SSD prefix cache enabled dir={} block_size={} max_pages={}",
-            config.root.display(),
-            config.block_size,
-            config.max_pages
-        );
+        match config.root.as_ref() {
+            Some(root) => tracing::info!(
+                "ironmlx serve: paged SSD prefix cache enabled dir={} block_size={} max_pages={}",
+                root.display(),
+                config.block_size,
+                config.max_pages
+            ),
+            None => tracing::info!(
+                "ironmlx serve: memory-only prefix cache enabled (no SSD store) block_size={} max_pages={}",
+                config.block_size,
+                config.max_pages
+            ),
+        }
     }
     if let Some(config) = &prefix_lru_cache {
         tracing::info!(
@@ -1544,10 +1567,6 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
     if resolve_prompt_lookup_config(&args)?.is_some() {
         bail!("--model-manifest uses per-model prompt_lookup entries; do not pass global PromptLookup flags");
     }
-    if args.prefix_lru_cache_max_bytes.is_some() && args.paged_prefix_cache_dir.is_none() {
-        bail!("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir");
-    }
-
     let manifest = read_engine_pool_manifest(manifest_path)?;
     let _registry = ironmlx_runtime::core::engine_pool::EngineRegistry::new(manifest.clone())?;
     let scheduler_profile_store = if args.scheduler_profile.is_none() {
@@ -2038,11 +2057,12 @@ mod scheduler_profile_tests {
         ensure_dflash2_serve_supported, load_scheduler_profile_for_model, qwen_moe_serve_model,
         read_engine_pool_manifest, resolve_active_kv_offload_config,
         resolve_dflash2_prefix_disk_config, resolve_dflash2_prefix_lru_cache_config,
-        resolve_dflash2_tensor_batch_width, resolve_memory_limit_bytes, resolve_model_ttl,
-        resolve_paged_prefix_cache_config, resolve_prefix_lru_cache_config,
-        resolve_prompt_lookup_config, resolve_scheduler_runtime_profile,
-        resolve_scheduler_serve_config, resolve_serve_mtp_config, single_model_id, KvQuantArg,
-        QwenMoeServeModel, ResolvedSchedulerRuntime, SchedulerServeConfig, ServeArgs,
+        resolve_dflash2_tensor_batch_width, resolve_engine_paged_prefix_cache_settings,
+        resolve_memory_limit_bytes, resolve_model_ttl, resolve_paged_prefix_cache_config,
+        resolve_prefix_lru_cache_config, resolve_prompt_lookup_config,
+        resolve_scheduler_runtime_profile, resolve_scheduler_serve_config,
+        resolve_serve_mtp_config, single_model_id, KvQuantArg, QwenMoeServeModel,
+        ResolvedSchedulerRuntime, SchedulerServeConfig, ServeArgs,
     };
     use super::{paged_prefix_cache_root, DEFAULT_PAGED_PREFIX_CACHE_DIR};
     use std::path::Path;
@@ -3139,7 +3159,7 @@ mod scheduler_profile_tests {
         .expect("prefix config")
         .expect("enabled");
 
-        assert_eq!(cfg.root, prefix_dir);
+        assert_eq!(cfg.root, Some(prefix_dir.clone()));
         std::fs::remove_dir_all(temp_dir).expect("cleanup mtp dir");
         std::fs::remove_dir_all(prefix_dir).ok();
     }
@@ -3196,7 +3216,7 @@ mod scheduler_profile_tests {
             .join(".ironmlx")
             .join("cache")
             .join("paged_prefix_cache");
-        assert_eq!(cfg.root, expected);
+        assert_eq!(cfg.root, Some(expected));
     }
 
     #[test]
@@ -3270,16 +3290,39 @@ mod scheduler_profile_tests {
     }
 
     #[test]
-    fn serve_prefix_lru_cache_requires_paged_prefix_cache() {
+    fn serve_prefix_lru_cache_alone_is_a_memory_only_prefix_cache() {
         let mut args = base_args();
-        args.prefix_lru_cache_max_bytes = Some(1024);
+        args.prefix_lru_cache_max_bytes = Some(4096);
+        let config = SchedulerServeConfig {
+            b_max: 2,
+            max_cache_cap: 128,
+            ..SchedulerServeConfig::default()
+        };
 
-        let err =
-            resolve_prefix_lru_cache_config(&args, None).expect_err("L1 requires paged SSD cache");
+        let paged = resolve_paged_prefix_cache_config(&args, config, "/tmp/model")
+            .expect("prefix config")
+            .expect("paged K/V enabled");
+        assert_eq!(paged.root, None);
+        assert!(paged.store().is_none());
+        let lru = resolve_prefix_lru_cache_config(&args, Some(&paged))
+            .expect("L1 config")
+            .expect("enabled");
+        assert_eq!(lru.max_bytes, 4096);
+        let pool = resolve_engine_paged_prefix_cache_settings(&args)
+            .expect("engine pool settings")
+            .expect("paged K/V enabled");
+        assert_eq!(pool.root, None);
 
-        assert!(err
-            .to_string()
-            .contains("--prefix-lru-cache-max-bytes requires --paged-prefix-cache-dir"));
+        // Neither option: no prefix cache and dense K/V, as before.
+        args.prefix_lru_cache_max_bytes = None;
+        assert!(
+            resolve_paged_prefix_cache_config(&args, config, "/tmp/model")
+                .expect("prefix config")
+                .is_none()
+        );
+        assert!(resolve_engine_paged_prefix_cache_settings(&args)
+            .expect("engine pool settings")
+            .is_none());
     }
 
     #[test]

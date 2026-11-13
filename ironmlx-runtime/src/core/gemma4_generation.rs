@@ -260,7 +260,7 @@ impl Gemma4DrafterPrefixCache {
 
         let store = config.store();
         for (restore_len, cached_len) in gemma4_drafter_prefix_restore_candidates(
-            &store,
+            store.as_ref(),
             self.prefix_lru_cache(),
             prompt_ids.len(),
         )? {
@@ -296,6 +296,10 @@ impl Gemma4DrafterPrefixCache {
                 }));
             }
 
+            // In memory only: the LRU lookup above was the whole search.
+            let Some(store) = store.as_ref() else {
+                continue;
+            };
             let load_start = Instant::now();
             let observed = store.load_observed(&spec)?;
             let load_us = load_start.elapsed().as_micros();
@@ -384,25 +388,43 @@ impl Gemma4DrafterPrefixCache {
             ));
         }
 
-        let store = config.store();
         let key = PagedPrefixStore::key_for(&spec);
-        let permit = match crate::core::cache::process_async_prefix_store_queue().try_admit(
-            store,
-            spec.clone(),
-            AsyncPrefixStoreCancellation::default(),
-        ) {
-            AsyncPrefixStoreAdmission::Admitted(permit) => *permit,
-            AsyncPrefixStoreAdmission::Coalesced => return Ok(Some(key)),
-            AsyncPrefixStoreAdmission::Backpressured => {
-                tracing::warn!(
-                    key,
-                    "paged SSD prefix cache Gemma4 drafter extraction skipped by async-store backpressure"
-                );
-                return Ok(None);
+        // `None`: no SSD store, the prefix LRU cache is the only place.
+        let permit = match config.store() {
+            None => {
+                let Some(prefix_lru_cache) = self.prefix_lru_cache() else {
+                    return Ok(None);
+                };
+                if gemma4_lock_prefix_lru_cache(prefix_lru_cache)?.contains(&spec) {
+                    return Ok(Some(key));
+                }
+                None
             }
-            AsyncPrefixStoreAdmission::Closed => {
-                return Err(anyhow!("paged SSD prefix cache async store is closed"));
-            }
+            Some(store) => match crate::core::cache::process_async_prefix_store_queue().try_admit(
+                store,
+                spec.clone(),
+                AsyncPrefixStoreCancellation::default(),
+            ) {
+                AsyncPrefixStoreAdmission::Admitted(permit) => Some(*permit),
+                AsyncPrefixStoreAdmission::Coalesced => return Ok(Some(key)),
+                AsyncPrefixStoreAdmission::Backpressured => {
+                    tracing::warn!(
+                        key,
+                        "paged SSD prefix cache Gemma4 drafter write skipped by async-store backpressure"
+                    );
+                    // The prefix LRU cache still takes it.
+                    let Some(prefix_lru_cache) = self.prefix_lru_cache() else {
+                        return Ok(None);
+                    };
+                    if gemma4_lock_prefix_lru_cache(prefix_lru_cache)?.contains(&spec) {
+                        return Ok(Some(key));
+                    }
+                    None
+                }
+                AsyncPrefixStoreAdmission::Closed => {
+                    return Err(anyhow!("paged SSD prefix cache async store is closed"));
+                }
+            },
         };
 
         let Some((mut entry, entry_cached_len)) = prefix_entry_for_row(cache, 0)? else {
@@ -422,6 +444,13 @@ impl Gemma4DrafterPrefixCache {
             spec.clone(),
             entry.clone(),
         )?;
+        let Some(permit) = permit else {
+            // Held by the prefix LRU cache only: evaluate, as the SSD path
+            // does when it queues the write, so the entry does not keep the
+            // page pool it was sliced from alive.
+            entry.eval()?;
+            return Ok(Some(key));
+        };
         match permit.submit(entry) {
             AsyncPrefixStoreSubmit::Queued => {
                 tracing::debug!(
@@ -471,7 +500,7 @@ fn gemma4_empty_prefix_stats(cached_len: i32) -> PagedPrefixEntryStats {
 }
 
 fn gemma4_drafter_prefix_restore_candidates(
-    store: &PagedPrefixStore,
+    store: Option<&PagedPrefixStore>,
     prefix_lru_cache: Option<&Gemma4DrafterPrefixLruHandle>,
     prompt_len: usize,
 ) -> Result<Vec<(usize, i32)>> {
@@ -487,7 +516,9 @@ fn gemma4_drafter_prefix_restore_candidates(
                 .cached_lengths_descending(max_cached_len as usize),
         );
     }
-    cached_lengths.extend(store.cached_lengths_descending(max_cached_len)?);
+    if let Some(store) = store {
+        cached_lengths.extend(store.cached_lengths_descending(max_cached_len)?);
+    }
     cached_lengths.sort_unstable_by(|a, b| b.cmp(a));
     cached_lengths.dedup();
 

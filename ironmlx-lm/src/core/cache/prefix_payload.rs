@@ -126,6 +126,23 @@ pub struct PagedPrefixKeySpec {
 }
 
 impl PagedPrefixKeySpec {
+    /// Whether this spec is a longer prefix of the same kind that starts
+    /// with `shorter`'s tokens: a prompt `shorter` can serve, this one serves
+    /// further.
+    pub fn continues(&self, shorter: &Self) -> bool {
+        self.token_ids.len() > shorter.token_ids.len()
+            && self.entry_kind == shorter.entry_kind
+            && self.model_id == shorter.model_id
+            && self.fingerprint == shorter.fingerprint
+            && self.block_size == shorter.block_size
+            && self.kv_cache_profile == shorter.kv_cache_profile
+            && self.mtp_layers.len() == shorter.mtp_layers.len()
+            && self.mtp_last_hidden.is_some() == shorter.mtp_last_hidden.is_some()
+            && self.gemma4_drafter_last_hidden.is_some()
+                == shorter.gemma4_drafter_last_hidden.is_some()
+            && self.token_ids.starts_with(&shorter.token_ids)
+    }
+
     pub fn payload_bytes(&self) -> usize {
         let main = self
             .main_layers

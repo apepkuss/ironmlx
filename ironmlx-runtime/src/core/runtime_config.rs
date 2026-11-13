@@ -736,7 +736,8 @@ pub(crate) fn validate_engine_model_config(model: &EngineModelConfig) -> Result<
 
 #[derive(Debug, Clone)]
 pub struct EnginePagedPrefixCacheSettings {
-    pub root: PathBuf,
+    /// SSD store directory; `None` keeps prefixes in memory only.
+    pub root: Option<PathBuf>,
     pub block_size: i32,
     pub max_pages: Option<i32>,
     pub max_disk_bytes: Option<usize>,
@@ -809,13 +810,20 @@ impl EngineRuntimeOptions {
                 i32::try_from(pages).context("derived paged prefix cache max_pages exceeds i32")?
             }
         };
-        PagedPrefixCacheConfig::new_with_max_disk_bytes(
-            &settings.root,
-            model_id.to_string(),
-            settings.block_size,
-            max_pages,
-            settings.max_disk_bytes,
-        )
+        match settings.root.as_ref() {
+            Some(root) => PagedPrefixCacheConfig::new_with_max_disk_bytes(
+                root,
+                model_id.to_string(),
+                settings.block_size,
+                max_pages,
+                settings.max_disk_bytes,
+            ),
+            None => PagedPrefixCacheConfig::memory_only(
+                model_id.to_string(),
+                settings.block_size,
+                max_pages,
+            ),
+        }
         .map(Some)
     }
 

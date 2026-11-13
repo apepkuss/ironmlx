@@ -1024,7 +1024,8 @@ where
             paged_prefix_cache_dir: scheduler_features
                 .paged_prefix_cache
                 .as_ref()
-                .map(|config| config.root.display().to_string()),
+                .and_then(|config| config.root.as_ref())
+                .map(|root| root.display().to_string()),
             paged_prefix_cache_block_size: args.paged_prefix_cache_block_size,
             paged_prefix_cache_max_pages: scheduler_features
                 .paged_prefix_cache
@@ -1223,7 +1224,8 @@ where
         paged_prefix_cache_dir: scheduler_features
             .paged_prefix_cache
             .as_ref()
-            .map(|config| config.root.display().to_string()),
+            .and_then(|config| config.root.as_ref())
+            .map(|root| root.display().to_string()),
         paged_prefix_cache_block_size: args.paged_prefix_cache_block_size,
         paged_prefix_cache_max_pages: scheduler_features
             .paged_prefix_cache
@@ -1483,7 +1485,8 @@ fn run_for_gemma4_model(
         paged_prefix_cache_dir: scheduler_features
             .paged_prefix_cache
             .as_ref()
-            .map(|config| config.root.display().to_string()),
+            .and_then(|config| config.root.as_ref())
+            .map(|root| root.display().to_string()),
         paged_prefix_cache_block_size: args.paged_prefix_cache_block_size,
         paged_prefix_cache_max_pages: scheduler_features
             .paged_prefix_cache

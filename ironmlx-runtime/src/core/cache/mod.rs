@@ -11,11 +11,11 @@ pub use active_kv::{
 };
 pub use prefix_store::{
     cancel_process_async_prefix_store_model, process_async_prefix_store_queue,
-    process_shared_prefix_lru_cache, shrink_process_prefix_lru_caches,
+    process_prefix_lru_cache, process_shared_prefix_lru_cache, reclaim_process_prefix_lru_bytes,
     shutdown_process_async_prefix_store_queue, AsyncPrefixStoreAdmission,
     AsyncPrefixStoreCancellation, AsyncPrefixStorePermit, AsyncPrefixStoreQueue,
     AsyncPrefixStoreStats, AsyncPrefixStoreSubmit, DFlash2PrefixDiskConfig, PagedPrefixCacheConfig,
     PagedPrefixLoadStatus, PagedPrefixStore, PrefixLruCache, PrefixLruCacheConfig,
-    PrefixLruInsertResult, PrefixLruInsertStatus, SharedPrefixLruCache,
+    PrefixLruInsertResult, PrefixLruInsertStatus, PrefixLruReclaim, SharedPrefixLruCache,
     DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
 };
