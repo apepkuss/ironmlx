@@ -792,6 +792,15 @@ pub struct StepEvent {
     pub finish_reason: Option<&'static str>,
 }
 
+/// Who accounts for warming a cold vision tower during a chunked prefill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VisionWarmUp {
+    /// Begin it here and commit it once the chunk that runs the tower is done.
+    Begin,
+    /// The caller has begun it and commits it.
+    HeldByCaller,
+}
+
 /// State shared across the three `admit_mid_*` calls that make up a
 /// chunked mid-batch admit (B1-p2.3c+). Built by [`Scheduler::admit_mid_begin`],
 /// mutated by [`Scheduler::admit_mid_chunk`] calls, consumed by
@@ -15970,7 +15979,9 @@ impl<M: Model> Scheduler<M> {
             turboquant_bits,
         )?);
         self.cache_rows = vec![row_idx];
-        let mut handle = self.admit_mid_begin_inner(id, row_idx, model)?;
+        // `prefill_admitted` has begun the warm-up of everything this row needs.
+        let mut handle =
+            self.admit_mid_begin_inner(id, row_idx, model, VisionWarmUp::HeldByCaller)?;
         handle.chunk_size = i32::try_from(chunk_size)
             .map_err(|_| anyhow!("adaptive prefill chunk exceeds i32"))?
             .max(1);
@@ -16577,7 +16588,7 @@ impl<M: Model> Scheduler<M> {
         let id = self.admit(req)?;
 
         // From here on, any Err must roll back the slot.
-        match self.admit_mid_begin_inner(id, row_idx, model) {
+        match self.admit_mid_begin_inner(id, row_idx, model, VisionWarmUp::Begin) {
             Ok(h) => Ok(h),
             Err(e) => {
                 let _ = self.evict(id);
@@ -16590,11 +16601,16 @@ impl<M: Model> Scheduler<M> {
     /// rollback. Steps: extract per-row state, compute floored
     /// `cap_for_temp`, detect dtype, allocate temp_cache, pre-build
     /// full-prompt position ids, and compute full-prompt vision embeddings.
+    ///
+    /// `vision_warm_up` says who accounts for a cold vision tower: the
+    /// tracker waits for a warm-up in progress, so a caller that has begun
+    /// one itself must say so or this would wait for it forever.
     fn admit_mid_begin_inner(
         &mut self,
         id: RequestId,
         row_idx: usize,
         model: &M,
+        vision_warm_up: VisionWarmUp,
     ) -> Result<AdmitMidHandle>
     where
         M: DenseVlMethods,
@@ -16747,7 +16763,7 @@ impl<M: Model> Scheduler<M> {
         // For VL: pre-compute vision embeddings once (`[N_image_pad_total,
         // hidden]`). Each chunk slices the rows it consumes; tracking the
         // running offset via `image_pad_consumed`.
-        let cold_materialization_guard = if is_vl {
+        let cold_materialization_guard = if is_vl && vision_warm_up == VisionWarmUp::Begin {
             self.begin_cold_materialization(
                 crate::core::process_memory::MaterializationComponents {
                     text: false,
@@ -21596,6 +21612,95 @@ mod tests {
             ComponentMaterializationState::Warm
         );
         assert_eq!(governor.snapshot().reserved_bytes, 0);
+    }
+
+    /// The first image request after a load warms the vision tower. When its
+    /// prompt is longer than one prefill chunk, the chunked path must not
+    /// wait for the warm-up its own caller has begun.
+    #[test]
+    #[serial(mlx_metal)]
+    fn chunked_prefill_of_the_first_image_request_does_not_wait_on_itself() {
+        use crate::core::process_memory::{
+            ComponentMaterializationState, HostVmStatistics, MaterializationComponent,
+            MemoryGovernorConfig, MemoryTelemetry, ProcessMemoryGovernor, StaticMemoryEstimate,
+        };
+        use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let gib = 1024 * 1024 * 1024;
+            let governor = Arc::new(
+                ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                    static_reserve_bytes: 4 * gib,
+                    minimum_prefill_chunk_tokens: 1,
+                    ..MemoryGovernorConfig::default()
+                })
+                .expect("governor"),
+            );
+            governor.update(MemoryTelemetry {
+                total_ram_bytes: 32 * gib,
+                phys_footprint_bytes: Some(4 * gib),
+                vm: Some(HostVmStatistics {
+                    free_bytes: 8 * gib,
+                    inactive_bytes: 2 * gib,
+                    active_bytes: 8 * gib,
+                    wired_bytes: 8 * gib,
+                }),
+                mlx_active_bytes: Some(4 * gib),
+                mlx_cache_bytes: Some(0),
+                metal_limit_bytes: Some(24 * gib),
+            });
+            let tracker = crate::core::process_memory::ColdMaterializationTracker::new(
+                StaticMemoryEstimate {
+                    text_cold_bytes: 8_192,
+                    vision_cold_bytes: 8_192,
+                    ..StaticMemoryEstimate::default()
+                },
+            );
+            let tracker_slot = Arc::new(OnceLock::new());
+            tracker_slot
+                .set(Arc::clone(&tracker))
+                .expect("install tracker");
+            let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+                1,
+                32768,
+                crate::core::memory_budget::test_meta_qwen35(),
+            )
+            .expect("scheduler");
+            scheduler.process_memory_governor = Some(Arc::clone(&governor));
+            scheduler.share_cold_materialization_tracker(tracker_slot);
+
+            let pixel_values: mlx::Array = (&[0.0_f32; 4][..], &[1_i32, 4][..])
+                .try_into()
+                .expect("pixel_values");
+            let pixel_values = mlx::ops::astype(&pixel_values, Dtype::Bfloat16).unwrap();
+            let mut req = mk_req(vec![1, IMAGE_TOKEN_ID as u32, 2, 3, 4, 5]);
+            req.pixel_values = Some(vec![pixel_values]);
+            req.image_grid_thw = Some(vec![(1_i32, 2_i32, 2_i32)]);
+            req.image_spatial_merge_size = 2;
+            req.image_token_id = IMAGE_TOKEN_ID;
+            // Shorter than the prompt: the prefill is chunked.
+            req.prefill_chunk_size = 2;
+            scheduler.admit(req).expect("admit");
+
+            let events = scheduler
+                .prefill_admitted(&StepDecodeMaskModel::default())
+                .expect("prefill");
+            let _ = done_tx.send((
+                events.len(),
+                tracker.state(MaterializationComponent::Vision),
+                tracker.state(MaterializationComponent::Text),
+                governor.snapshot().reserved_bytes,
+            ));
+        });
+
+        let (events, vision, text, reserved) = done_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the chunked image prefill hung or panicked");
+        assert_eq!(events, 1);
+        assert_eq!(vision, ComponentMaterializationState::Warm);
+        assert_eq!(text, ComponentMaterializationState::Warm);
+        assert_eq!(reserved, 0);
     }
 
     #[test]
