@@ -11,6 +11,19 @@ fn reference_decode(
     lengths: &[i32],
     shape: RefShape,
 ) -> Vec<f32> {
+    reference_decode_from(q, k_pages, v_pages, block_table, lengths, None, shape)
+}
+
+/// Row `b` attends to positions `starts[b]..lengths[b]`.
+fn reference_decode_from(
+    q: &[f32],
+    k_pages: &[f32],
+    v_pages: &[f32],
+    block_table: &[i32],
+    lengths: &[i32],
+    starts: Option<&[i32]>,
+    shape: RefShape,
+) -> Vec<f32> {
     let RefShape {
         batch,
         q_heads,
@@ -27,11 +40,12 @@ fn reference_decode(
 
     for b in 0..batch {
         let len = lengths[b] as usize;
+        let start = starts.map_or(0, |starts| starts[b] as usize);
         for qh in 0..q_heads {
             let kvh = qh / q_group;
             let mut scores = vec![0.0_f32; len];
             let mut max_score = f32::NEG_INFINITY;
-            for t in 0..len {
+            for t in start..len {
                 let page_col = t / block_size;
                 let in_page = t % block_size;
                 let page_id = block_table[b * max_blocks + page_col] as usize;
@@ -46,14 +60,14 @@ fn reference_decode(
             }
 
             let mut denom = 0.0_f32;
-            for score in &mut scores {
+            for score in &mut scores[start..] {
                 *score = (*score - max_score).exp();
                 denom += *score;
             }
 
             for d in 0..head_dim {
                 let mut acc = 0.0_f32;
-                for t in 0..len {
+                for t in start..len {
                     let page_col = t / block_size;
                     let in_page = t % block_size;
                     let page_id = block_table[b * max_blocks + page_col] as usize;
@@ -87,6 +101,88 @@ fn assert_close(got: &[f32], expected: &[f32]) {
             "idx {idx}: got {g}, expected {e}, diff {}",
             (g - e).abs()
         );
+    }
+}
+
+/// Rows that attend to a window of their cache, as a sliding-window layer
+/// does: one short enough for the single-pass kernel, one long enough for
+/// the parallel kernels (128 positions and up).
+#[test]
+fn paged_decode_from_a_start_position_matches_reference() {
+    for (seq_len, starts) in [(11_usize, [0_i32, 4]), (300, [173, 0])] {
+        let shape = RefShape {
+            batch: 2,
+            q_heads: 4,
+            kv_heads: 2,
+            head_dim: 8,
+            block_size: 4,
+            max_blocks: seq_len.div_ceil(4),
+            scale: 0.35,
+        };
+        let pages = shape.batch * shape.max_blocks;
+        let wave =
+            |n: usize, step: f32| -> Vec<f32> { (0..n).map(|i| (i as f32 * step).sin()).collect() };
+        let q_data = wave(shape.batch * shape.q_heads * shape.head_dim, 0.37);
+        let page_values = pages * shape.kv_heads * shape.block_size * shape.head_dim;
+        let k_data = wave(page_values, 0.011);
+        let v_data = wave(page_values, 0.023);
+        let table_data: Vec<i32> = (0..pages as i32).collect();
+        let lengths_data = [seq_len as i32, seq_len as i32 - 3];
+
+        let dims =
+            |a: usize, b: usize, c: usize, d: usize| [a as i32, b as i32, c as i32, d as i32];
+        let q: Array = (
+            &q_data[..],
+            &dims(shape.batch, shape.q_heads, 1, shape.head_dim)[..],
+        )
+            .try_into()
+            .unwrap();
+        let page_dims = dims(pages, shape.kv_heads, shape.block_size, shape.head_dim);
+        let k_pages: Array = (&k_data[..], &page_dims[..]).try_into().unwrap();
+        let v_pages: Array = (&v_data[..], &page_dims[..]).try_into().unwrap();
+        let block_table: Array = (
+            &table_data[..],
+            &[shape.batch as i32, shape.max_blocks as i32][..],
+        )
+            .try_into()
+            .unwrap();
+        let lengths: Array = (&lengths_data[..], &[2_i32][..]).try_into().unwrap();
+        let starts_arr: Array = (&starts[..], &[2_i32][..]).try_into().unwrap();
+
+        let run = |starts: Option<&Array>| -> Vec<f32> {
+            fast::paged_scaled_dot_product_attention_decode_from_on(
+                &q,
+                &k_pages,
+                &v_pages,
+                &block_table,
+                &lengths,
+                starts,
+                shape.scale,
+                shape.block_size as i32,
+                (),
+            )
+            .expect("paged decode")
+            .to_vec()
+            .expect("to_vec")
+        };
+        let expected = reference_decode_from(
+            &q_data,
+            &k_data,
+            &v_data,
+            &table_data,
+            &lengths_data,
+            Some(&starts),
+            shape,
+        );
+        assert_close(&run(Some(&starts_arr)), &expected);
+
+        // Without a start the rows attend to everything, as before.
+        let whole = reference_decode(&q_data, &k_data, &v_data, &table_data, &lengths_data, shape);
+        assert_close(&run(None), &whole);
+        assert!(whole
+            .iter()
+            .zip(&expected)
+            .any(|(a, b)| (a - b).abs() > 1e-3));
     }
 }
 

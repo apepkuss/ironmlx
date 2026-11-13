@@ -476,7 +476,13 @@ impl Gemma4Attention {
                             }
                         };
                         let maybe_cached_out = if c.paged().is_some() {
-                            c.try_update_and_attend_decode_on(&q, &k, &v, lens, 1.0, mask, target)?
+                            // The paged kernel does not read `mask`: a
+                            // sliding layer tells it the window instead.
+                            let window = (self.layer_kind == Gemma4LayerKind::Sliding)
+                                .then_some(self.sliding_window);
+                            c.try_update_and_attend_decode_window_on(
+                                &q, &k, &v, lens, 1.0, mask, window, target,
+                            )?
                         } else if stable_verify_attention
                             && !query_isolated
                             && !segment_stable_sliding

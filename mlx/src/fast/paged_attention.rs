@@ -136,11 +136,13 @@ if (len_i <= 0) {
 }
 
 uint len = uint(len_i);
+int start_i = starts[batch];
+uint start = start_i > 0 ? min(uint(start_i), len - 1) : 0;
 float scale = float(scale_arr[0]);
 float max_value = -3.4028234663852886e38f;
 float denom_value = 0.0f;
 
-for (uint t = 0; t < len; ++t) {
+for (uint t = start; t < len; ++t) {
     uint block_col = t / uint(BLOCK_SIZE);
     uint in_block = t - block_col * uint(BLOCK_SIZE);
     int page_i = block_table[batch * uint(MAX_BLOCKS) + block_col];
@@ -204,6 +206,8 @@ uint pos_base = pos_block * uint(QK_POSITIONS_PER_SIMDGROUP);
 uint q_base = (batch * uint(H_Q) + q_head) * uint(HEAD_DIM);
 int len_i = lengths[batch];
 uint len = len_i > 0 ? uint(len_i) : 0;
+int start_i = starts[batch];
+uint start = (start_i > 0 && len > 0) ? min(uint(start_i), len - 1) : 0;
 
 thread float acc[QK_POSITIONS_PER_SIMDGROUP];
 #pragma clang loop unroll(full)
@@ -216,7 +220,7 @@ for (uint dim = lane; dim < uint(HEAD_DIM); dim += 32) {
     #pragma clang loop unroll(full)
     for (uint i = 0; i < uint(QK_POSITIONS_PER_SIMDGROUP); ++i) {
         uint pos = pos_base + i;
-        if (pos < len) {
+        if (pos >= start && pos < len) {
             uint block_col = pos / uint(BLOCK_SIZE);
             uint in_block = pos - block_col * uint(BLOCK_SIZE);
             int page_i = block_table[batch * uint(MAX_BLOCKS) + block_col];
@@ -242,7 +246,7 @@ if (lane == 0) {
         uint pos = pos_base + i;
         if (pos < uint(MAX_SEQ_LEN)) {
             float score = -3.4028234663852886e38f;
-            if (pos < len) {
+            if (pos >= start && pos < len) {
                 score = score_acc[i] * scale;
             } else if (len_i <= 0 && pos == 0) {
                 score = 0.0f;
@@ -281,7 +285,9 @@ for (uint q = 0; q < uint(V_Q_HEADS_PER_GROUP); ++q) {
 
 int len_i = lengths[batch];
 uint len = len_i > 0 ? uint(len_i) : 0;
-if (pos < len) {
+int start_i = starts[batch];
+uint start = (start_i > 0 && len > 0) ? min(uint(start_i), len - 1) : 0;
+if (pos >= start && pos < len) {
     uint block_col = pos / uint(BLOCK_SIZE);
     uint in_block = pos - block_col * uint(BLOCK_SIZE);
     int page_i = block_table[batch * uint(MAX_BLOCKS) + block_col];
@@ -401,8 +407,55 @@ pub fn paged_scaled_dot_product_attention_decode_on(
     block_size: i32,
     target: impl Into<StreamOrDevice>,
 ) -> Result<Array> {
+    paged_scaled_dot_product_attention_decode_from_on(
+        queries,
+        k_pages,
+        v_pages,
+        block_table,
+        lengths,
+        None,
+        scale,
+        block_size,
+        target,
+    )
+}
+
+/// [`paged_scaled_dot_product_attention_decode_on`] over part of each row:
+/// row `b` attends to positions `starts[b]..lengths[b]` only (`starts`:
+/// `[B]` int32; `None` is all zeros). This is how a sliding-window layer
+/// reads a cache that holds more than its window.
+#[allow(clippy::too_many_arguments)]
+pub fn paged_scaled_dot_product_attention_decode_from_on(
+    queries: &Array,
+    k_pages: &Array,
+    v_pages: &Array,
+    block_table: &Array,
+    lengths: &Array,
+    starts: Option<&Array>,
+    scale: f32,
+    block_size: i32,
+    target: impl Into<StreamOrDevice>,
+) -> Result<Array> {
     let shape =
         validate_decode_inputs(queries, k_pages, v_pages, block_table, lengths, block_size)?;
+    let zeros;
+    let starts = match starts {
+        Some(starts) => {
+            if starts.dtype() != Dtype::Int32 || starts.shape().as_slice() != [shape.batch] {
+                return Err(Error::Mlx(format!(
+                    "paged SDPA decode starts must be int32 [{}], got {:?} {:?}",
+                    shape.batch,
+                    starts.dtype(),
+                    starts.shape().as_slice()
+                )));
+            }
+            starts
+        }
+        None => {
+            zeros = Array::zeros((shape.batch,), Dtype::Int32)?;
+            &zeros
+        }
+    };
     let target = target.into();
     if shape.max_seq_len() >= PAGED_SDPA_PARALLEL_DECODE_SEQ_THRESHOLD {
         return paged_scaled_dot_product_attention_decode_parallel_on(
@@ -411,6 +464,7 @@ pub fn paged_scaled_dot_product_attention_decode_on(
             v_pages,
             block_table,
             lengths,
+            starts,
             scale,
             shape,
             target,
@@ -423,6 +477,7 @@ pub fn paged_scaled_dot_product_attention_decode_on(
         v_pages,
         block_table,
         lengths,
+        starts,
         scale,
         shape,
         target,
@@ -436,6 +491,7 @@ fn paged_scaled_dot_product_attention_decode_serial_on(
     v_pages: &Array,
     block_table: &Array,
     lengths: &Array,
+    starts: &Array,
     scale: f32,
     shape: DecodeShape,
     target: StreamOrDevice,
@@ -447,7 +503,15 @@ fn paged_scaled_dot_product_attention_decode_serial_on(
     let serial_start = profile.start();
     let mut outputs = kernel
         .dispatch_builder()
-        .inputs(&[queries, k_pages, v_pages, block_table, lengths, &scale_arr])
+        .inputs(&[
+            queries,
+            k_pages,
+            v_pages,
+            block_table,
+            lengths,
+            starts,
+            &scale_arr,
+        ])
         .output_shapes(&[output_shape])
         .output_dtypes(&[queries.dtype()])
         .grid(
@@ -479,6 +543,7 @@ fn paged_scaled_dot_product_attention_decode_parallel_on(
     v_pages: &Array,
     block_table: &Array,
     lengths: &Array,
+    starts: &Array,
     scale: f32,
     shape: DecodeShape,
     target: StreamOrDevice,
@@ -495,7 +560,7 @@ fn paged_scaled_dot_product_attention_decode_parallel_on(
     let qk_start = profile.start();
     let mut score_outputs = cached_paged_sdpa_qk_decode_kernel()?
         .dispatch_builder()
-        .inputs(&[queries, k_pages, block_table, lengths, &scale_arr])
+        .inputs(&[queries, k_pages, block_table, lengths, starts, &scale_arr])
         .output_shapes(&[scores_shape])
         .output_dtypes(&[Dtype::Float32])
         .grid(
@@ -538,7 +603,7 @@ fn paged_scaled_dot_product_attention_decode_parallel_on(
     let weighted_v_chunk_start = profile.start();
     let mut partial_outputs = cached_paged_sdpa_weighted_v_chunk_kernel()?
         .dispatch_builder()
-        .inputs(&[&weights, v_pages, block_table, lengths])
+        .inputs(&[&weights, v_pages, block_table, lengths, starts])
         .output_shapes(&[partial_shape])
         .output_dtypes(&[Dtype::Float32])
         .grid(
@@ -763,6 +828,7 @@ fn cached_paged_sdpa_decode_kernel() -> Result<&'static MetalKernel> {
             "v_pages",
             "block_table",
             "lengths",
+            "starts",
             "scale_arr",
         ])
         .outputs(&["out"])
@@ -780,7 +846,14 @@ fn cached_paged_sdpa_qk_decode_kernel() -> Result<&'static MetalKernel> {
     }
 
     let kernel = MetalKernel::builder("mlx_fast_paged_sdpa_qk_decode")
-        .inputs(&["queries", "k_pages", "block_table", "lengths", "scale_arr"])
+        .inputs(&[
+            "queries",
+            "k_pages",
+            "block_table",
+            "lengths",
+            "starts",
+            "scale_arr",
+        ])
         .outputs(&["scores"])
         .source(PAGED_SDPA_QK_DECODE_SOURCE)
         .ensure_row_contiguous(true)
@@ -796,7 +869,7 @@ fn cached_paged_sdpa_weighted_v_chunk_kernel() -> Result<&'static MetalKernel> {
     }
 
     let kernel = MetalKernel::builder("mlx_fast_paged_sdpa_weighted_v_chunk")
-        .inputs(&["weights", "v_pages", "block_table", "lengths"])
+        .inputs(&["weights", "v_pages", "block_table", "lengths", "starts"])
         .outputs(&["v_partial"])
         .source(PAGED_SDPA_WEIGHTED_V_CHUNK_SOURCE)
         .ensure_row_contiguous(true)

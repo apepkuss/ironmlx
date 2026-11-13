@@ -1175,6 +1175,99 @@ impl PagedKVCache {
         self.paged_decode_attention_on(queries, offsets, scale, target)
     }
 
+    /// Whether hot/cold tiering is enabled: decode may then stream cold
+    /// pages, which [`Self::update_and_attend_decode_window_on`] cannot do.
+    pub(crate) fn has_hot_cold_tiering(&self) -> bool {
+        self.hot_cold.is_some()
+    }
+
+    /// [`Self::update_and_attend_decode_on`] for a sliding-window layer: each
+    /// row attends to its last `window` positions, the appended one included.
+    /// Not available with hot/cold tiering.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_and_attend_decode_window_on(
+        &mut self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        offsets: &mut [i32],
+        per_row_lens: &[i32],
+        window: i32,
+        scale: f32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        anyhow::ensure!(
+            window > 0 && self.hot_cold.is_none(),
+            "PagedKVCache::update_and_attend_decode_window_on: window={window}, hot/cold tiering={}",
+            self.hot_cold.is_some()
+        );
+        let target = target.into();
+        self.validate_decode_inputs(queries, k, v, offsets, per_row_lens)?;
+        self.append_on_inner(k, v, offsets, per_row_lens, target, false)?;
+        self.windowed_decode_attention_on(queries, offsets, window, scale, target)
+    }
+
+    /// Attention over each row's last `window` positions. The kernel gets
+    /// only the pages the window touches, in a table of fixed width: its
+    /// cost and its compiled shape then depend on the window, not on how
+    /// much the cache holds.
+    fn windowed_decode_attention_on(
+        &self,
+        queries: &Array,
+        offsets: &[i32],
+        window: i32,
+        scale: f32,
+        target: StreamOrDevice,
+    ) -> Result<Array> {
+        let block_size = self.block_size;
+        // A window that starts inside a page spills one page over.
+        let columns = (ceil_div(window, block_size) + 1) as usize;
+        let mut table = vec![-1_i32; self.batch as usize * columns];
+        let mut lengths = Vec::with_capacity(self.batch as usize);
+        let mut starts = Vec::with_capacity(self.batch as usize);
+        for (row, &offset) in offsets.iter().enumerate() {
+            let start = (offset - window).max(0);
+            let first_block = start / block_size;
+            let blocks = (ceil_div(offset, block_size) - first_block).max(0) as usize;
+            anyhow::ensure!(
+                blocks <= columns,
+                "PagedKVCache: window of {window} at offset {offset} spans {blocks} pages, table holds {columns}"
+            );
+            for column in 0..blocks {
+                table[row * columns + column] =
+                    self.block_tables[row][first_block as usize + column];
+            }
+            lengths.push(offset - first_block * block_size);
+            starts.push(start - first_block * block_size);
+        }
+        let table: Array = (table.as_slice(), &[self.batch, columns as i32][..]).try_into()?;
+        let lengths: Array = (lengths.as_slice(), &[self.batch][..]).try_into()?;
+        let starts: Array = (starts.as_slice(), &[self.batch][..]).try_into()?;
+        let k_pages = self.k_pages.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "PagedKVCache::update_and_attend_decode_window_on: K pages are unallocated"
+            )
+        })?;
+        let v_pages = self.v_pages.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "PagedKVCache::update_and_attend_decode_window_on: V pages are unallocated"
+            )
+        })?;
+        Ok(
+            mlx::fast::paged_scaled_dot_product_attention_decode_from_on(
+                queries,
+                k_pages,
+                v_pages,
+                &table,
+                &lengths,
+                Some(&starts),
+                scale,
+                block_size,
+                target,
+            )?,
+        )
+    }
+
     fn paged_decode_attention_on(
         &self,
         queries: &Array,

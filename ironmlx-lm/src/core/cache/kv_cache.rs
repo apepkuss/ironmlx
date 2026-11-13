@@ -1187,6 +1187,38 @@ impl KVCache {
         mask_arr: Option<&Array>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Option<Array>> {
+        self.try_update_and_attend_decode_window_on(
+            queries,
+            k,
+            v,
+            per_row_lens,
+            scale,
+            mask_arr,
+            None,
+            target,
+        )
+    }
+
+    /// [`Self::try_update_and_attend_decode_on`] for a layer that attends to
+    /// its last `window` positions only (`None`: to everything cached).
+    ///
+    /// The paged kernel reads the pages itself and never sees `mask_arr`, so
+    /// a sliding-window layer has to state its window here: without it the
+    /// layer would attend to the whole cache once that outgrows the window.
+    /// Returns `None`, leaving the caller to its masked path, when the paged
+    /// kernel cannot honour the window (hot/cold tiering).
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_update_and_attend_decode_window_on(
+        &mut self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        scale: f32,
+        mask_arr: Option<&Array>,
+        window: Option<i32>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Option<Array>> {
         if self.paged.is_some()
             && self.supports_paged_decode_attention(queries, k, v, per_row_lens, mask_arr)
         {
@@ -1195,15 +1227,28 @@ impl KVCache {
                 None => unreachable!("paged cache presence checked before decode dispatch"),
             };
             let target = target.into();
-            return Ok(Some(paged.update_and_attend_decode_on(
-                queries,
-                k,
-                v,
-                &mut self.offsets,
-                per_row_lens,
-                scale,
-                target,
-            )?));
+            return match window {
+                None => Ok(Some(paged.update_and_attend_decode_on(
+                    queries,
+                    k,
+                    v,
+                    &mut self.offsets,
+                    per_row_lens,
+                    scale,
+                    target,
+                )?)),
+                Some(_) if paged.has_hot_cold_tiering() => Ok(None),
+                Some(window) => Ok(Some(paged.update_and_attend_decode_window_on(
+                    queries,
+                    k,
+                    v,
+                    &mut self.offsets,
+                    per_row_lens,
+                    window,
+                    scale,
+                    target,
+                )?)),
+            };
         }
 
         if self.turboquant.is_none()
@@ -2754,6 +2799,82 @@ mod tests {
                 "attn[{idx}] mismatch: actual={a} expected={e}"
             );
         }
+    }
+
+    /// A sliding-window layer on a paged cache: the decode step attends to
+    /// the last `window` positions, whatever the cache holds and wherever
+    /// the window starts inside a page.
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn paged_decode_attention_honours_a_sliding_window() {
+        const HEADS: i32 = 2;
+        const DIM: i32 = 8;
+        const WINDOW: i32 = 6;
+        let step = |seed: usize, phase: f32| -> Array {
+            let data: Vec<f32> = (0..(HEADS * DIM) as usize)
+                .map(|i| ((seed * 31 + i) as f32 * 0.137 + phase).sin())
+                .collect();
+            (data.as_slice(), (1_i32, HEADS, 1_i32, DIM))
+                .try_into()
+                .unwrap()
+        };
+        let mut paged = KVCache::new(1, HEADS, DIM, DIM, Dtype::Float32, 64);
+        // Pages of 4: a window of 6 starts inside a page most of the time.
+        paged.enable_paged(4, 16).expect("enable paged");
+        let mut dense = KVCache::new(1, HEADS, DIM, DIM, Dtype::Float32, 64);
+
+        for t in 0..23_usize {
+            let (q, k, v) = (step(t, 0.3), step(t, 1.1), step(t, 2.3));
+            let got = paged
+                .try_update_and_attend_decode_window_on(
+                    &q,
+                    &k,
+                    &v,
+                    &[1],
+                    0.25,
+                    None,
+                    Some(WINDOW),
+                    (),
+                )
+                .expect("paged decode")
+                .expect("paged kernel used");
+
+            let (keys, values) = dense
+                .update_and_fetch_for_attention_on(&k, &v, &[1], ())
+                .expect("dense update");
+            let len = t as i32 + 1;
+            let from = (len - WINDOW).max(0);
+            let tail = |a: &Array| {
+                mlx::ops::indexing::slice_strided(
+                    a,
+                    &[0_i32, 0, from, 0][..],
+                    &[1_i32, HEADS, len, DIM][..],
+                    &[1_i32, 1, 1, 1][..],
+                )
+                .expect("tail")
+            };
+            let expected = mlx::fast::scaled_dot_product_attention_on(
+                &q,
+                &tail(&keys),
+                &tail(&values),
+                0.25,
+                "",
+                None,
+                None,
+                (),
+            )
+            .expect("dense attention");
+
+            let got = got.to_vec::<f32>().expect("got");
+            let expected = expected.to_vec::<f32>().expect("expected");
+            for (idx, (&g, &e)) in got.iter().zip(&expected).enumerate() {
+                assert!(
+                    (g - e).abs() <= 1.0e-5,
+                    "step {t} attn[{idx}]: paged={g} dense={e}"
+                );
+            }
+        }
+        assert_eq!(paged.offsets(), &[23]);
     }
 
     #[test]

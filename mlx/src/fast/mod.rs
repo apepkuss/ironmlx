@@ -18,7 +18,8 @@ mod turboquant;
 
 pub use metal_kernel::{DispatchBuilder, MetalKernel, MetalKernelBuilder, Set, TemplateArg, Unset};
 pub use paged_attention::{
-    paged_scaled_dot_product_attention_decode, paged_scaled_dot_product_attention_decode_on,
+    paged_scaled_dot_product_attention_decode, paged_scaled_dot_product_attention_decode_from_on,
+    paged_scaled_dot_product_attention_decode_on,
 };
 pub use turboquant::{
     turbo_dequantize, turbo_dequantize_on, turbo_quantize, turbo_quantize_on,
