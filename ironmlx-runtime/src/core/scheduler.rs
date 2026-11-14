@@ -4543,12 +4543,15 @@ fn try_save_batched_text_prefix_row(
 /// [`prefix_split_point`]), saving it, then the rows' last tokens as one
 /// decode step. Returns `None` after the first stage when a row has more
 /// than its last token left (a chat turn boundary): the caller replays the
-/// rest from `split_at`.
+/// rest from `split_at`. `dummy_position_ids` stands in for both stages'
+/// positions for a model that derives them from the cache.
+#[allow(clippy::too_many_arguments)]
 fn forward_batched_text_cold_miss_with_paged_prefix<M: Model>(
     model: &M,
     cache: &mut [LayerCache],
     prompt_ids: &[Vec<u32>],
     split_at: &[usize],
+    dummy_position_ids: Option<&Array>,
     prefix_cache_config: Option<&PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
 ) -> Result<Option<Array>> {
@@ -4575,7 +4578,10 @@ fn forward_batched_text_cold_miss_with_paged_prefix<M: Model>(
         .expect("batch is non-empty");
     let prefix_input_ids =
         batched_text_input_ids(prompt_ids, &prefix_lens, max_prefix_len as usize)?;
-    let position_ids = build_position_ids_batched(&prefix_lens, max_prefix_len)?;
+    let position_ids = match dummy_position_ids {
+        Some(dummy) => dummy.clone(),
+        None => build_position_ids_batched(&prefix_lens, max_prefix_len)?,
+    };
     let prefix_logits = forward_batched_text_prefill(
         model,
         &prefix_input_ids,
@@ -4611,7 +4617,10 @@ fn forward_batched_text_cold_miss_with_paged_prefix<M: Model>(
         .collect();
     let last_input_ids: Array = (&last_tokens[..], &[b as i32, 1_i32][..]).try_into()?;
     let per_row_lens = vec![1_i32; b];
-    let position_ids = build_decode_position_ids(&prefix_lens)?;
+    let position_ids = match dummy_position_ids {
+        Some(dummy) => dummy.clone(),
+        None => build_decode_position_ids(&prefix_lens)?,
+    };
     let decode_mask = maybe_build_sparse_decode_mask(cache, &per_row_lens)?;
     let logits = model.forward_on(
         &last_input_ids,
@@ -4703,15 +4712,13 @@ fn forward_batched_text_with_paged_prefix<M: Model>(
         .zip(&replay_from)
         .map(|(ids, &start)| prefix_split_point(prefix_cache_config, ids, start))
         .collect();
-    if dummy_position_ids.is_none()
-        && replay_from.iter().all(|&pos| pos == 0)
-        && prompt_ids.iter().all(|ids| ids.len() > 1)
-    {
+    if replay_from.iter().all(|&pos| pos == 0) && prompt_ids.iter().all(|ids| ids.len() > 1) {
         match forward_batched_text_cold_miss_with_paged_prefix(
             model,
             cache,
             prompt_ids,
             &split_at,
+            dummy_position_ids,
             prefix_cache_config,
             prefix_lru_cache,
         )? {
@@ -22933,6 +22940,9 @@ mod tests {
     struct StepDecodeMaskModel {
         hybrid_cache: bool,
         whole_image_blocks: bool,
+        /// Derives positions from the cache, like Gemma4: the scheduler
+        /// passes dummy position ids.
+        cache_positions: bool,
         decode_lens_seen: std::sync::Mutex<Vec<Vec<i32>>>,
         decode_positions_seen: std::sync::Mutex<Vec<Vec<i32>>>,
         decode_mask_seen: std::sync::Mutex<Vec<bool>>,
@@ -23109,6 +23119,10 @@ mod tests {
 
         fn model_meta(&self) -> ironmlx_lm::core::model::ModelMeta {
             crate::core::memory_budget::test_meta_qwen35()
+        }
+
+        fn requires_position_ids(&self) -> bool {
+            !self.cache_positions
         }
 
         fn num_hidden_layers(&self) -> usize {
@@ -30441,6 +30455,57 @@ mod tests {
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefill_admitted_batched_text_paged_prefix_cold_miss_prefills_whole_rows_without_position_ids(
+    ) {
+        // A cold batch of a model that takes dummy position ids must prefill
+        // its rows in one call, not replay them a token at a time.
+        for (prompts, batched_lens, forward_lens) in [
+            (
+                [vec![1_u32, 2, 3, 4], vec![5, 6, 7, 8]],
+                Vec::<Vec<i32>>::new(),
+                vec![3, 1],
+            ),
+            (
+                [vec![1_u32, 2, 3, 4], vec![5, 6, 7]],
+                vec![vec![3, 2]],
+                vec![1],
+            ),
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "ironmlx-paged-prefix-batch-text-dummy-pos-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "step-test", 2, 32)
+                .expect("prefix config");
+            let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+                2,
+                32768,
+                crate::core::memory_budget::test_meta_qwen35(),
+            )
+            .expect("scheduler startup");
+            scheduler
+                .enable_paged_prefix_cache(config)
+                .expect("enable prefix cache");
+            for prompt in prompts {
+                scheduler.admit(mk_req(prompt)).expect("admit");
+            }
+            let model = StepDecodeMaskModel {
+                cache_positions: true,
+                ..StepDecodeMaskModel::default()
+            };
+            let events = scheduler.prefill_admitted(&model).expect("prefill");
+
+            assert_eq!(model.batched_prefill_lens(), batched_lens);
+            assert_eq!(model.forward_seq_lens(), forward_lens);
+            assert_eq!(events.len(), 2);
+
+            crate::core::cache::process_async_prefix_store_queue().wait_idle();
+            std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+        }
     }
 
     #[test]
