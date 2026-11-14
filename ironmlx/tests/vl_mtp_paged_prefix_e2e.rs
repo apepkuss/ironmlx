@@ -159,7 +159,10 @@ fn openai_vl_body(image_path: &Path) -> serde_json::Value {
             ]
         }],
         "max_tokens": 4,
-        "stream": false
+        "stream": false,
+        // Thinking is off so four tokens reach answer text; this case checks
+        // cache reuse, not reasoning.
+        "chat_template_kwargs": {"enable_thinking": false}
     })
 }
 
@@ -315,11 +318,14 @@ async fn wait_cache_entry_dirs(cache_dir: &Path, min_count: usize, timeout: Dura
     }
 }
 
-fn assert_cache_entries_have_mtp_payload(cache_dir: &Path) {
+/// A chat prompt is saved once, at its turn boundary (the whole prompt would
+/// only duplicate it), so each distinct image leaves exactly one entry.
+fn assert_cache_entries_have_mtp_payload(cache_dir: &Path, expected_entries: usize) {
     let entries = cache_entry_dirs(cache_dir);
-    assert!(
-        entries.len() >= 2,
-        "expected prefix cache entries in {}",
+    assert_eq!(
+        entries.len(),
+        expected_entries,
+        "prefix cache entries in {}",
         cache_dir.display()
     );
     for entry in entries {
@@ -376,7 +382,8 @@ async fn run_vl_mtp_paged_prefix_cache_exact_hit_batch_and_image_miss(
     let warm = post_chat(&client, port, body.clone()).await;
     let warm_health = healthz(&client, port).await;
     assert_eq!(warm_health["mtp"]["prefill_count"], 1, "{warm_health}");
-    assert_cache_entries_have_mtp_payload(&cache_dir);
+    wait_cache_entry_dirs(&cache_dir, 1, Duration::from_secs(10)).await;
+    assert_cache_entries_have_mtp_payload(&cache_dir, 1);
 
     let (hit_a, hit_b) = tokio::join!(
         post_chat(&client, port, body.clone()),
@@ -421,10 +428,13 @@ async fn run_vl_mtp_paged_prefix_cache_exact_hit_batch_and_image_miss(
         negative_health["mtp"]["prefill_count"], 3,
         "{negative_health}"
     );
+    // One save per distinct image at its turn boundary: the warm request and
+    // the flipped-image miss. The exact hits restore that boundary and save
+    // nothing new.
     wait_log_count(
         &server,
         "paged SSD prefix cache MTP saved",
-        6,
+        2,
         Duration::from_secs(10),
     )
     .await;
@@ -434,8 +444,8 @@ async fn run_vl_mtp_paged_prefix_cache_exact_hit_batch_and_image_miss(
         hits_before_negative,
         "different image must not hit an existing VL prefix cache entry; stderr:\n{final_logs}"
     );
-    wait_cache_entry_dirs(&cache_dir, 4, Duration::from_secs(10)).await;
-    assert_cache_entries_have_mtp_payload(&cache_dir);
+    wait_cache_entry_dirs(&cache_dir, 2, Duration::from_secs(10)).await;
+    assert_cache_entries_have_mtp_payload(&cache_dir, 2);
 
     std::fs::remove_dir_all(&cache_dir).expect("cleanup prefix cache dir");
     std::fs::remove_dir_all(&image_dir).expect("cleanup image temp dir");

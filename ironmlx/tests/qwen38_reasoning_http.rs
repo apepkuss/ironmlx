@@ -75,6 +75,15 @@ async fn boot_server(port: u16) -> (tokio::task::JoinHandle<anyhow::Result<()>>,
     );
     let model_id = format!("mlx-community/Qwen3.8-27B-{}bit", quantization.bits);
     let tokenizer = Tokenizer::from_loader(&loader).expect("Tokenizer::from_loader");
+    // Same vision setup as `ironmlx serve`; without it the server treats the
+    // model as text-only and rejects the image request below.
+    let vision_input = ironmlx_lm::core::vision_input::VisionInputConfig::from_causal_loader(
+        ironmlx_lm::models::ModelArchitecture::from_config_value(loader.config_raw_value())
+            .expect("Qwen3.8 architecture"),
+        &loader,
+        None,
+    )
+    .expect("Qwen3.8 vision input config");
     let model = Qwen35Model::from_loader(&loader).expect("Qwen35Model::from_loader");
     let served_model_id = model_id.clone();
     let profile = scheduler_profile(&model_id);
@@ -96,7 +105,7 @@ async fn boot_server(port: u16) -> (tokio::task::JoinHandle<anyhow::Result<()>>,
             ActiveKvOffloadConfig::disabled(),
             profile,
             false,
-            None,
+            Some(vision_input),
             Default::default(),
         )
         .await

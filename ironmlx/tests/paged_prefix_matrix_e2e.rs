@@ -467,13 +467,20 @@ fn write_flipped_image(src: &Path, dst: &Path) {
         .expect("write flipped image");
 }
 
+/// Thinking is off so the small token budgets below reach answer text instead of
+/// ending inside the reasoning block; these cases check cache reuse, not reasoning.
+fn no_thinking() -> serde_json::Value {
+    serde_json::json!({"enable_thinking": false})
+}
+
 fn text_body(prompt: &str) -> serde_json::Value {
     serde_json::json!({
         "model": "paged-prefix-matrix",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 3,
         "temperature": 0.0,
-        "stream": false
+        "stream": false,
+        "chat_template_kwargs": no_thinking()
     })
 }
 
@@ -489,7 +496,8 @@ fn vl_body(image_path: &Path) -> serde_json::Value {
         }],
         "max_tokens": 16,
         "temperature": 0.0,
-        "stream": false
+        "stream": false,
+        "chat_template_kwargs": no_thinking()
     })
 }
 
@@ -1485,7 +1493,8 @@ async fn run_paged_kv_multi_token_parity_case(
         // drafted_tokens <= windows even after a real d=2 window ran.
         "max_tokens": 8,
         "temperature": 0.0,
-        "stream": false
+        "stream": false,
+        "chat_template_kwargs": no_thinking()
     });
 
     let single_cache_dir = unique_temp_dir(&format!("{temp_name}-mtp-paged-d1"));
