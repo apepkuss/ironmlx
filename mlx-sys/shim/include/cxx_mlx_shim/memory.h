@@ -4,8 +4,11 @@
 #include <cstdint>
 
 #include "rust/cxx.h"
+#include "mlx/array.h"
 
 namespace cxx_mlx {
+
+using MlxArray = mlx::core::array;
 
 std::size_t get_active_memory();
 std::size_t get_cache_memory();
@@ -15,6 +18,9 @@ std::size_t get_memory_limit();
 std::size_t set_cache_limit(std::size_t limit);
 std::size_t set_wired_limit(std::size_t limit);
 void start_residency_refresh(std::uint32_t interval_ms);
+std::size_t pin_resident(rust::Slice<const MlxArray* const> arrays);
+std::size_t unpin_resident(rust::Slice<const MlxArray* const> arrays);
+std::size_t get_pinned_memory();
 std::size_t get_memory_size();
 std::size_t get_max_recommended_memory();
 rust::String get_device_name();

@@ -985,6 +985,7 @@ mod tests {
                 weight_bytes: 3 * 1024 * 1024 * 1024,
                 max_position_embeddings: 32768,
                 spatial_merge_size: 2,
+                cache_cost: None,
             }
         }
 

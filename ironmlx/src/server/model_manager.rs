@@ -1605,6 +1605,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             mlx_cache_bytes: mlx_memory.cache_bytes,
             mlx_peak_bytes: mlx_memory.peak_bytes,
             mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
+            resident_weights: ironmlx_runtime::core::resident_weights::health(),
             process_governor,
             prefix_store,
             immutable_prefix_blocks,
@@ -2615,6 +2616,7 @@ mod tests {
                 mlx_cache_bytes: 0,
                 mlx_peak_bytes: 0,
                 mlx_memory_limit_bytes: 0,
+                resident_weights: Default::default(),
                 process_governor:
                     ironmlx_runtime::core::process_memory::MemoryGovernorSnapshot::default(),
                 prefix_store:
@@ -3032,6 +3034,7 @@ mod tests {
 
     pub(super) fn serve_args() -> ServeArgs {
         ServeArgs {
+            resident_weights: Default::default(),
             model: None,
             model_id: None,
             model_manifest: None,

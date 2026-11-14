@@ -475,6 +475,9 @@ impl Qwen35Model {
                 .unwrap_or_else(|| self.approx_weight_bytes()),
             max_position_embeddings: cfg.max_position_embeddings,
             spatial_merge_size,
+            // Only the full-attention layers keep K and V per token; the
+            // linear-attention layers hold a fixed state.
+            cache_cost: Some(qwen35_dflash2_target_cache_cost(cfg).into()),
         }
     }
 

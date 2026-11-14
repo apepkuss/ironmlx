@@ -1443,12 +1443,11 @@ where
                 }
                 if snapshot.pressure_level != crate::core::process_memory::PressureLevel::Normal {
                     // Free what brings the process, with this request, back
-                    // under the recovery watermark: least recently used
-                    // artifacts go first, so the conversation being served
-                    // keeps its prefix whenever older ones cover the need.
-                    let recovery_bytes = (snapshot.effective_ceiling_bytes as f64
-                        * governor.config().recovery_ratio)
-                        as usize;
+                    // under the soft watermark, where the level returns to
+                    // normal: least recently used artifacts go first, so the
+                    // conversation being served keeps its prefix whenever
+                    // older ones cover the need.
+                    let recovery_bytes = snapshot.soft_watermark_bytes;
                     let needed_bytes = snapshot
                         .current_usage_bytes
                         .saturating_add(
@@ -1500,7 +1499,13 @@ where
                     // holds: MLX's pool of released buffers goes first.
                     governor_reservation = reserve_after_release(&governor, governor_request_bytes);
                 }
-                if let Err(
+                // The prefix cache yields to a request it leaves no room
+                // for, oldest artifacts first. Evicting an artifact does not
+                // always return its recorded size to the process, so the
+                // cache keeps yielding until the request fits or there is
+                // nothing left to evict. A cache smaller than the shortfall
+                // stays: dropping it would not admit the request.
+                while let Err(
                     crate::core::process_memory::MemoryReservationError::InsufficientHeadroom {
                         projected_bytes,
                         target_bytes,
@@ -1508,28 +1513,29 @@ where
                     },
                 ) = &governor_reservation
                 {
-                    // The prefix cache yields to a request it leaves no room
-                    // for, oldest artifacts first. A cache smaller than the
-                    // shortfall stays: dropping it would not admit the request.
                     let needed_bytes = projected_bytes.saturating_sub(*target_bytes);
-                    if let Some(cache) = prefix_cache.as_mut() {
-                        let cache_bytes = cache.snapshot().bytes;
-                        if cache_bytes >= needed_bytes {
-                            // The artifact this request restores goes last.
-                            let spare = cache.restorable_for(&request, &prefix_fingerprint);
-                            let reclaimed_bytes = cache
-                                .shrink_to_sparing(cache_bytes.saturating_sub(needed_bytes), spare);
-                            tracing::info!(
-                                needed_bytes,
-                                reclaimed_bytes,
-                                retained_bytes = cache.snapshot().bytes,
-                                "DFlash2 prefix cache shrank to admit a request"
-                            );
-                            worker_prefix_cache_counters.publish(prefix_cache.as_ref());
-                            governor_reservation =
-                                reserve_after_release(&governor, governor_request_bytes);
-                        }
+                    let Some(cache) = prefix_cache.as_mut() else {
+                        break;
+                    };
+                    let cache_bytes = cache.snapshot().bytes;
+                    if cache_bytes < needed_bytes {
+                        break;
                     }
+                    // The artifact this request restores goes last.
+                    let spare = cache.restorable_for(&request, &prefix_fingerprint);
+                    let reclaimed_bytes =
+                        cache.shrink_to_sparing(cache_bytes.saturating_sub(needed_bytes), spare);
+                    if reclaimed_bytes == 0 {
+                        break;
+                    }
+                    tracing::info!(
+                        needed_bytes,
+                        reclaimed_bytes,
+                        retained_bytes = cache.snapshot().bytes,
+                        "DFlash2 prefix cache shrank to admit a request"
+                    );
+                    worker_prefix_cache_counters.publish(prefix_cache.as_ref());
+                    governor_reservation = reserve_after_release(&governor, governor_request_bytes);
                 }
                 let governor_reservation = match governor_reservation {
                     Ok(reservation) => reservation,

@@ -70,16 +70,20 @@ impl KvBudgetPolicy {
     }
 }
 
+/// Cache bytes one more token costs a sequence, by the model's own account
+/// ([`ModelMeta::cache_cost`]).
 pub fn kv_bytes_per_token(meta: &ModelMeta) -> usize {
-    (meta.num_hidden_layers as usize)
-        * (meta.num_key_value_heads as usize)
-        * (meta.effective_head_dim() as usize)
-        * 2  // K + V
-        * 2 // bf16
+    meta.cache_cost().bytes_per_token
 }
 
+/// Cache bytes of `b` sequences of `cap` tokens each: what grows per token
+/// plus what every sequence holds whatever its length.
 pub fn kv_cache_bytes(b: usize, cap: usize, meta: &ModelMeta) -> usize {
-    b * cap * kv_bytes_per_token(meta)
+    let cost = meta.cache_cost();
+    b.saturating_mul(
+        cap.saturating_mul(cost.bytes_per_token)
+            .saturating_add(cost.fixed_bytes_per_sequence),
+    )
 }
 
 pub fn system_total_ram_bytes() -> usize {
@@ -306,8 +310,8 @@ pub fn validate_startup_budget_with_policy(
         b_max,
         effective_cap_max,
         meta,
-        kv_bytes_per_token(meta),
-        0,
+        meta.cache_cost().bytes_per_token,
+        meta.cache_cost().fixed_bytes_per_sequence,
         policy,
         system_total_ram_bytes(),
     )
@@ -343,8 +347,8 @@ fn validate_startup_budget_with_policy_for_total_ram(
         b_max,
         effective_cap_max,
         meta,
-        kv_bytes_per_token(meta),
-        0,
+        meta.cache_cost().bytes_per_token,
+        meta.cache_cost().fixed_bytes_per_sequence,
         policy,
         total_ram_bytes,
     )
@@ -406,6 +410,7 @@ pub fn test_meta_qwen35() -> ModelMeta {
         weight_bytes: 3 * 1024 * 1024 * 1024,
         max_position_embeddings: 32768,
         spatial_merge_size: 2,
+        cache_cost: None,
     }
 }
 
@@ -431,6 +436,7 @@ pub fn test_meta_qwen35_moe() -> ModelMeta {
         weight_bytes: 17 * 1024 * 1024 * 1024,
         max_position_embeddings: 262144,
         spatial_merge_size: 2,
+        cache_cost: None,
     }
 }
 
@@ -445,6 +451,7 @@ pub fn test_meta_gemma4_12b() -> ModelMeta {
         weight_bytes: 8 * 1024 * 1024 * 1024,
         max_position_embeddings: 262144,
         spatial_merge_size: 3,
+        cache_cost: None,
     }
 }
 
@@ -518,6 +525,50 @@ mod tests {
         let bytes = kv_cache_bytes(1, 1024, &meta());
         assert_eq!(bytes, 1024 * 114_688);
         assert_eq!(kv_cache_bytes(2, 1024, &meta()), 2 * bytes);
+    }
+
+    /// Qwen3.8-27B: 64 layers of which every fourth is full attention, 4 KV
+    /// heads of 256. Counting every layer says 262144 bytes a token; the
+    /// model's own cost is a quarter of that plus a fixed state.
+    fn qwen38_27b_meta(own_cost: bool) -> ModelMeta {
+        ModelMeta {
+            num_hidden_layers: 64,
+            num_attention_heads: 24,
+            num_key_value_heads: 4,
+            hidden_size: 5120,
+            head_dim: Some(256),
+            weight_bytes: 16_054_262_240,
+            max_position_embeddings: 262_144,
+            spatial_merge_size: 2,
+            cache_cost: own_cost.then_some(ironmlx_lm::core::model::CacheCost {
+                bytes_per_token: 65_536,
+                fixed_bytes_per_sequence: 154 << 20,
+            }),
+        }
+    }
+
+    #[test]
+    fn budget_uses_the_models_own_cache_cost() {
+        let uniform = qwen38_27b_meta(false);
+        let own = qwen38_27b_meta(true);
+        assert_eq!(kv_bytes_per_token(&uniform), 262_144);
+        assert_eq!(kv_bytes_per_token(&own), 65_536);
+        // A request of 4262 tokens: 1.1 GB by the uniform count, 0.4 GB in fact.
+        assert_eq!(kv_cache_bytes(1, 4262, &uniform), 1_117_257_728);
+        assert_eq!(kv_cache_bytes(1, 4262, &own), 4262 * 65_536 + (154 << 20));
+        assert_eq!(
+            kv_cache_bytes(3, 100, &own),
+            3 * (100 * 65_536 + (154 << 20))
+        );
+
+        // Two sequences at the default 32768 cap on a 32 GB machine.
+        let total_ram = 34_359_738_368;
+        let refused = validate_with_total_ram(2, 32_768, &uniform, total_ram)
+            .expect_err("17.2 GB by the uniform count exceeds the 16.2 GB available");
+        assert_eq!(refused.requested_bytes, 17_179_869_184);
+        let state = validate_with_total_ram(2, 32_768, &own, total_ram)
+            .expect("4.6 GB by the model's own count fits");
+        assert!(state.soft_limit() >= 2 * (32_768 * 65_536 + (154 << 20)));
     }
 
     #[test]

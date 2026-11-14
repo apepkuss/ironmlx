@@ -651,6 +651,11 @@ impl Loader {
         self.weights.tensors().keys().map(|s| s.as_str())
     }
 
+    /// The sanitized, eagerly loaded tensors.
+    pub fn loaded_tensors(&self) -> impl Iterator<Item = &Array> {
+        self.weights.tensors().values()
+    }
+
     /// Total storage bytes of the sanitized, eagerly loaded tensors.
     pub fn loaded_tensor_bytes(&self) -> usize {
         tensor_storage_bytes(self.weights.tensors())

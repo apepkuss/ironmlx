@@ -755,6 +755,8 @@ pub struct EngineRuntimeOptions {
     pub model_ttl: Option<Duration>,
     pub memory_limits: EnginePoolMemoryLimits,
     pub active_kv_offload: ActiveKvOffloadConfig,
+    /// Whether loaded weights are kept GPU-resident.
+    pub resident_weights: crate::core::resident_weights::ResidentWeightsMode,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

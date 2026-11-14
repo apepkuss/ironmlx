@@ -36,8 +36,6 @@ use {
 
 const DEFAULT_DFLASH2_TENSOR_BATCH_MAX_WIDTH: usize = 4;
 const DEFAULT_PAGED_PREFIX_CACHE_DIR: &str = "~/.ironmlx/cache/paged_prefix_cache";
-/// Interval at which the wired DFlash2 weights renew their residency request.
-const RESIDENCY_REFRESH_MS: u32 = 500;
 
 #[derive(Args, Clone, Debug)]
 pub struct ServeArgs {
@@ -340,6 +338,15 @@ pub struct ServeArgs {
     /// when offload is enabled.
     #[arg(long = "active-kv-offload-dir")]
     pub active_kv_offload_dir: Option<PathBuf>,
+
+    /// Keep the loaded weights GPU-resident, so that macOS cannot compress
+    /// them between requests when memory is tight (generation would slow
+    /// several times over while they are decompressed again). `auto`: when
+    /// the weights are at most two thirds of the device's recommended working
+    /// set. `on`: whatever their size. `off`: never. Resident memory cannot
+    /// be compressed or swapped, so it is taken from the rest of the machine.
+    #[arg(long = "resident-weights", default_value = "auto")]
+    pub resident_weights: ironmlx_runtime::core::resident_weights::ResidentWeightsMode,
 }
 
 impl ServeArgs {
@@ -1043,6 +1050,12 @@ where
         .load_mtp_head(&mtp_loader)
         .with_context(|| format!("loading MTP head from {}", mtp_config.model_dir.display()))?;
     static_memory_estimate.set_allocated_speculative_weights(mtp_loader.loaded_tensor_bytes());
+    ironmlx_runtime::core::resident_weights::pin_loaded_weights(
+        args.resident_weights,
+        &format!("{} (MTP head)", single_model_id(args)?),
+        mtp_loader.loaded_tensors(),
+        mtp_loader.loaded_tensor_bytes(),
+    );
     load_timer.finish("draft_weights");
 
     let model_id = single_model_id(args)?;
@@ -1343,27 +1356,47 @@ where
     }
     mlx::clear_cache();
     load_timer.finish("prewarm");
-    if ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::WIRED_WEIGHTS) {
-        // Keep the loaded target and draft weights GPU-resident so an idle
-        // gap between requests does not make the next prefill re-establish
-        // residency for every expert it touches.
+    {
+        // Keep the loaded target and draft weights GPU-resident: macOS cannot
+        // then compress them between requests, and an idle gap does not make
+        // the next prefill re-establish residency for everything it touches.
+        // Only the weights are allocated at this point, and this server never
+        // unloads them, so the wired limit covers exactly the weights.
+        use ironmlx_runtime::core::resident_weights::{ResidentDecision, ResidentWeightsMode};
         let limit = mlx::memory::snapshot().active_bytes;
-        match mlx::memory::set_wired_limit(limit) {
-            Ok(previous) => {
-                tracing::info!(limit, previous, "DFlash2 weights wired");
-                // macOS drops the residency within seconds of GPU idleness.
-                match mlx::memory::start_residency_refresh(RESIDENCY_REFRESH_MS) {
-                    Ok(()) => tracing::info!(
-                        interval_ms = RESIDENCY_REFRESH_MS,
-                        "DFlash2 weight residency refresh started"
-                    ),
-                    Err(error) => {
-                        tracing::warn!(%error, "DFlash2 weight residency refresh not started")
-                    }
+        let max_recommended = mlx::memory::snapshot().max_recommended_bytes.unwrap_or(0);
+        // The M5 profile's setting (or its environment override) asks for
+        // resident weights whatever their size, as `on` does.
+        let mode = if args.resident_weights == ResidentWeightsMode::Auto
+            && ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::WIRED_WEIGHTS)
+        {
+            ResidentWeightsMode::On
+        } else {
+            args.resident_weights
+        };
+        let mut decision =
+            ironmlx_runtime::core::resident_weights::decide(mode, limit, 0, max_recommended);
+        if decision == ResidentDecision::Resident {
+            match mlx::memory::set_wired_limit(limit) {
+                Ok(previous) => tracing::info!(limit, previous, "DFlash2 weights wired"),
+                Err(error) => {
+                    tracing::warn!(limit, %error, "DFlash2 weights not wired");
+                    decision = ResidentDecision::Failed;
                 }
             }
-            Err(error) => tracing::warn!(limit, %error, "DFlash2 weights not wired"),
+        } else {
+            tracing::info!(
+                limit,
+                max_recommended,
+                ?decision,
+                "DFlash2 weights not wired"
+            );
         }
+        ironmlx_runtime::core::resident_weights::record_wired_limit(
+            &single_model_id(args)?,
+            decision,
+            limit,
+        );
     }
 
     let model_id = single_model_id(args)?;
@@ -1468,6 +1501,12 @@ fn serve_with_gemma4_drafter_model(
         )
     })?;
     static_memory_estimate.set_allocated_speculative_weights(drafter_loader.loaded_tensor_bytes());
+    ironmlx_runtime::core::resident_weights::pin_loaded_weights(
+        args.resident_weights,
+        &format!("{} (drafter)", single_model_id(args)?),
+        drafter_loader.loaded_tensors(),
+        drafter_loader.loaded_tensor_bytes(),
+    );
     let drafter = ironmlx_lm::models::gemma4::Gemma4AssistantModel::from_loader(&drafter_loader)
         .with_context(|| {
             format!(
@@ -1618,6 +1657,7 @@ fn run_engine_pool(args: ServeArgs, manifest_path: &Path) -> Result<()> {
                 )?,
             },
             active_kv_offload,
+            resident_weights: args.resident_weights,
         },
     };
     let config = ironmlx_runtime::core::engine_pool::EnginePoolConfig {
@@ -1786,6 +1826,12 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
     // open_multimodal so Qwen VL checkpoints retain vision_tower.* keys.
     let loader = Loader::open_multimodal(&model_dir).context("Loader::open_multimodal")?;
     load_timer.finish("main_weights");
+    ironmlx_runtime::core::resident_weights::pin_loaded_weights(
+        args.resident_weights,
+        &single_model_id(&args)?,
+        loader.loaded_tensors(),
+        loader.loaded_tensor_bytes(),
+    );
     let component_bytes = loader.loaded_tensor_component_bytes();
     let static_memory_estimate =
         StaticMemoryEstimate::from_allocated_weights(component_bytes.text, component_bytes.vision);
@@ -2162,6 +2208,7 @@ mod scheduler_profile_tests {
             model_ttl_minutes: None,
             active_kv_offload: false,
             active_kv_offload_dir: None,
+            resident_weights: Default::default(),
         }
     }
 
@@ -3744,6 +3791,7 @@ pub(crate) fn engine_runtime_config(
                 )?,
             },
             active_kv_offload: resolve_active_kv_offload_config(args)?,
+            resident_weights: args.resident_weights,
         },
     })
 }

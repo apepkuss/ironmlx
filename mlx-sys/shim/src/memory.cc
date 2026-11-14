@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "mlx/device.h"
 #include "mlx/memory.h"
@@ -79,6 +80,30 @@ std::size_t set_cache_limit(std::size_t limit) {
 
 std::size_t set_wired_limit(std::size_t limit) {
   return mlx::core::set_wired_limit(limit);
+}
+
+namespace {
+std::vector<mlx::core::array> to_vector(
+    rust::Slice<const MlxArray* const> arrays) {
+  std::vector<mlx::core::array> vec;
+  vec.reserve(arrays.size());
+  for (size_t i = 0; i < arrays.size(); ++i) {
+    vec.push_back(*arrays[i]);  // copy ctor — refcount-shared, cheap
+  }
+  return vec;
+}
+}  // namespace
+
+std::size_t pin_resident(rust::Slice<const MlxArray* const> arrays) {
+  return mlx::core::pin_resident(to_vector(arrays));
+}
+
+std::size_t unpin_resident(rust::Slice<const MlxArray* const> arrays) {
+  return mlx::core::unpin_resident(to_vector(arrays));
+}
+
+std::size_t get_pinned_memory() {
+  return mlx::core::get_pinned_memory();
 }
 
 #if __has_include(<Metal/Metal.hpp>)

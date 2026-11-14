@@ -821,6 +821,11 @@ impl Qwen35MoeModel {
             weight_bytes: self.approx_weight_bytes(),
             max_position_embeddings: cfg.max_position_embeddings,
             spatial_merge_size,
+            // Only the full-attention layers keep K and V per token; the
+            // linear-attention layers hold a fixed state.
+            cache_cost: Some(
+                crate::models::dflash2::DFlash2Target::dflash2_target_cache_cost(self).into(),
+            ),
         }
     }
 }

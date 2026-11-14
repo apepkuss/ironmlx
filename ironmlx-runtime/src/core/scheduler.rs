@@ -7324,7 +7324,20 @@ impl<M: Model> Scheduler<M> {
 
         // B1-p2.5: memory budget admission gate.
         let row_cap = req.prompt_ids.len().saturating_add(req.max_new_tokens);
-        let charged_cap = self.budget_state.resident_charge_cap(row_cap);
+        // Without paged storage the live rows share one dense buffer, every
+        // row as wide as the widest: a short request admitted beside a long
+        // one occupies the long one's width. (Paged rows take only the
+        // pages they fill.)
+        let physical_cap = if self.paged_prefix_cache.is_none() {
+            self.slots
+                .iter()
+                .flatten()
+                .map(|live| live.prompt_ids.len().saturating_add(live.max_new_tokens))
+                .fold(row_cap, usize::max)
+        } else {
+            row_cap
+        };
+        let charged_cap = self.budget_state.resident_charge_cap(physical_cap);
         let requested_bytes =
             crate::core::memory_budget::kv_cache_bytes(1, charged_cap, &self.meta);
         let allowance = if req.priority.is_background() {
@@ -15207,9 +15220,20 @@ impl<M: Model> Scheduler<M> {
         let mut events = Vec::with_capacity(active_rows.len());
 
         for (compact_row, &row_idx) in active_rows.iter().enumerate() {
+            // The temporary scheduler reserves this row's KV when it admits
+            // the row, so the reservation made at admission is handed over
+            // rather than held alongside it; once the row is prefilled its
+            // KV is part of the footprint and neither is held.
+            let row_id = self.slots[row_idx]
+                .as_ref()
+                .expect("active row implies slot is Some")
+                .id;
+            self.commit_governor_admission(row_id);
             let mut temp = self.temp_mtp_scheduler_for_row(row_idx)?;
+            // Context keeps the error's type, so a memory refusal still
+            // reaches the client as one.
             let row_events = temp.prefill_admitted_inner(model).map_err(|error| {
-                anyhow!("prefill_admitted_row_isolated row {row_idx}: {error:#}")
+                error.context(format!("prefill_admitted_row_isolated row {row_idx}"))
             })?;
             temp.commit_all_governor_admissions();
             let temp_prng_key = temp.prng_key_for_row(0)?;
@@ -21890,7 +21914,7 @@ mod tests {
     fn admission_under_pressure_evicts_other_prefixes_and_keeps_the_prompts_own() {
         const GIB: usize = 1 << 30;
         // 22.2 GiB: soft pressure, which refuses admission. Getting under
-        // the 20.4 GiB recovery watermark takes two of the three entries.
+        // the 21.6 GiB soft watermark takes one of the three entries.
         let (mut scheduler, governor, cache, specs) = scheduler_with_metered_hot_cache(
             19 * GIB + GIB / 5,
             &[
@@ -21910,8 +21934,26 @@ mod tests {
             .expect("the cache must give way");
 
         let cache = cache.lock().unwrap();
-        assert_eq!(cache.len(), 1);
-        assert!(cache.contains(&specs[0]));
+        assert_eq!(cache.len(), 2, "no more is taken than the level needs");
+        assert!(cache.contains(&specs[0]) && !cache.contains(&specs[1]));
+    }
+
+    #[test]
+    fn admission_charges_a_dense_row_at_the_widest_live_row() {
+        let meta = crate::core::memory_budget::test_meta_qwen35();
+        let charge = |cap| crate::core::memory_budget::kv_cache_bytes(1, cap, &meta);
+        let mut scheduler =
+            Scheduler::<FinishedPhaseFakeModel>::new(2, 32768, meta).expect("scheduler");
+        let mut long = mk_req((0..1000).collect());
+        long.max_new_tokens = 24;
+        scheduler.admit(long).expect("admit long");
+        assert_eq!(scheduler.budget_state.active_bytes(), charge(1024));
+
+        // Four tokens of prompt, but the shared buffer gives it 1024 too.
+        let mut short = mk_req(vec![1, 2, 3, 4]);
+        short.max_new_tokens = 16;
+        scheduler.admit(short).expect("admit short");
+        assert_eq!(scheduler.budget_state.active_bytes(), 2 * charge(1024));
     }
 
     #[test]

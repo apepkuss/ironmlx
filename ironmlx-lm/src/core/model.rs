@@ -10,6 +10,14 @@ use crate::core::cache::TurboQuantKVBits;
 use crate::core::cache::layer::LayerCache;
 use crate::Result;
 
+/// What one sequence's cache holds: bytes that grow with every token, and
+/// bytes held for the sequence whatever its length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheCost {
+    pub bytes_per_token: usize,
+    pub fixed_bytes_per_sequence: usize,
+}
+
 /// Architecture metadata available without a concrete model configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelMeta {
@@ -24,9 +32,29 @@ pub struct ModelMeta {
     /// VL vision spatial merge size (= VisionConfig.spatial_merge_size).
     /// Defaults to 2 for text-only models (unused when no images present).
     pub spatial_merge_size: i32,
+    /// The model's own cache cost. `None`: every layer keeps BF16 K and V
+    /// for every token ([`Self::uniform_kv_bytes_per_token`]), which
+    /// overstates a model whose layers do not all do that.
+    pub cache_cost: Option<CacheCost>,
 }
 
 impl ModelMeta {
+    /// BF16 K and V on every layer.
+    pub fn uniform_kv_bytes_per_token(&self) -> usize {
+        (self.num_hidden_layers.max(0) as usize)
+            * (self.num_key_value_heads.max(0) as usize)
+            * (self.effective_head_dim().max(0) as usize)
+            * 2
+            * 2
+    }
+
+    pub fn cache_cost(&self) -> CacheCost {
+        self.cache_cost.unwrap_or(CacheCost {
+            bytes_per_token: self.uniform_kv_bytes_per_token(),
+            fixed_bytes_per_sequence: 0,
+        })
+    }
+
     pub fn effective_head_dim(&self) -> i32 {
         self.head_dim
             .unwrap_or(self.hidden_size / self.num_attention_heads)

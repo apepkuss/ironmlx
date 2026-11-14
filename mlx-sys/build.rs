@@ -26,6 +26,14 @@ fn main() {
         );
     }
 
+    // The shim is compiled against these headers and reaches into MLX's
+    // private residency state, so it must be rebuilt whenever the MLX install
+    // is replaced, even at the same path.
+    println!(
+        "cargo:rerun-if-changed={}",
+        lib_dir.join("libmlx.a").display()
+    );
+
     // Link search path
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
 

@@ -505,6 +505,7 @@ impl Gemma4Model {
     pub fn model_meta(&self) -> ModelMeta {
         let cfg = self.config();
         ModelMeta {
+            cache_cost: None,
             // Memory budget uses this as KV-bearing layer count.
             num_hidden_layers: cfg.first_kv_shared_layer_idx() as i32,
             num_attention_heads: cfg.num_attention_heads,

@@ -189,6 +189,15 @@ pub struct DFlash2TargetCacheCost {
     pub fixed_bytes_per_sequence: usize,
 }
 
+impl From<DFlash2TargetCacheCost> for crate::core::model::CacheCost {
+    fn from(cost: DFlash2TargetCacheCost) -> Self {
+        Self {
+            bytes_per_token: cost.bytes_per_token,
+            fixed_bytes_per_sequence: cost.fixed_bytes_per_sequence,
+        }
+    }
+}
+
 /// One target verification shape whose row-wise logits and state transitions
 /// are certified against ordinary Q=1 decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -917,11 +917,11 @@ impl EnginePoolState {
                 // MLX cache reclaim is idempotent and does not invalidate
                 // request KV or model weights.
                 mlx::transforms::clear_cache();
-                // Only what usage itself is over the recovery watermark:
+                // Only what keeps usage itself at or above the soft watermark:
                 // a request's reservations are served where they are made,
                 // and taking more evicts prefixes its follow-ups restore.
                 let governor = global_process_memory_governor();
-                let needed_bytes = governor.recovery_overage(&governor.refresh_process());
+                let needed_bytes = governor.pressure_overage(&governor.refresh_process());
                 match crate::core::cache::reclaim_process_prefix_lru_bytes(needed_bytes, None) {
                     Ok(reclaimed) if reclaimed.bytes > 0 => {
                         tracing::info!(
@@ -957,6 +957,12 @@ impl EnginePoolState {
                 }
                 while idle_eviction_needed(snapshot, governor.config()) {
                     let evict_all = snapshot.pressure_level == PressureLevel::Emergency;
+                    if !pressure_may_evict_idle_engine(
+                        snapshot.pressure_level,
+                        inner.loaded_engine_count().await,
+                    ) {
+                        break;
+                    }
                     match inner.evict_lru_idle_engine("memory-pressure").await {
                         Ok(true) => {
                             snapshot = governor.refresh_process();
@@ -2022,7 +2028,28 @@ fn idle_eviction_needed(
     observed > (snapshot.effective_ceiling_bytes as f64 * config.recovery_ratio) as usize
 }
 
+/// Whether the pressure monitor may unload an idle model. Unloading makes
+/// room for the other loaded models; the last one has nobody to make room
+/// for. It is idle only between two requests of whoever is using it, its
+/// next request would load it straight back, and under the same pressure
+/// that load may be refused. Only an emergency, with the process already
+/// over its ceiling, takes the last model too.
+fn pressure_may_evict_idle_engine(level: PressureLevel, loaded_engines: usize) -> bool {
+    level == PressureLevel::Emergency || loaded_engines > 1
+}
+
 impl EnginePoolInner {
+    async fn loaded_engine_count(&self) -> usize {
+        let slots = self.slots.lock().await.clone();
+        let mut loaded = 0;
+        for slot in slots.values() {
+            if matches!(&*slot.state.lock().await, EngineSlotState::Loaded { .. }) {
+                loaded += 1;
+            }
+        }
+        loaded
+    }
+
     async fn ensure_capacity_for(
         &self,
         model: &EngineModelConfig,
@@ -3373,6 +3400,12 @@ async fn load_engine_variant(
     let component_bytes = loader.loaded_tensor_component_bytes();
     let static_memory_estimate =
         StaticMemoryEstimate::from_allocated_weights(component_bytes.text, component_bytes.vision);
+    crate::core::resident_weights::pin_loaded_weights(
+        runtime.resident_weights,
+        &model.id,
+        loader.loaded_tensors(),
+        loader.loaded_tensor_bytes(),
+    );
     let tokenizer =
         run_load_section(|| Tokenizer::from_loader(&loader)).context("Tokenizer::from_loader")?;
     let model_type = loader
@@ -4297,6 +4330,7 @@ mod tests {
 
     fn runtime_config() -> EngineRuntimeOptions {
         EngineRuntimeOptions {
+            resident_weights: Default::default(),
             m1_profile: ironmlx_core::m1_profile::M1ProfileMode::Off,
             kv_cache_turboquant_bits: None,
             scheduler_autotune_report: false,
@@ -4411,6 +4445,34 @@ mod tests {
         config.sampling_defaults.temperature = Some(0.5);
         assert!(validate_engine_model_config(&config).is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pressure_never_unloads_the_last_model_short_of_an_emergency() {
+        use crate::core::process_memory::PressureLevel;
+        // Several models: the least recently used idle one goes, as before.
+        assert!(super::pressure_may_evict_idle_engine(
+            PressureLevel::Hard,
+            2
+        ));
+        assert!(super::pressure_may_evict_idle_engine(
+            PressureLevel::Hard,
+            3
+        ));
+        // The only model stays loaded between its requests.
+        assert!(!super::pressure_may_evict_idle_engine(
+            PressureLevel::Hard,
+            1
+        ));
+        assert!(!super::pressure_may_evict_idle_engine(
+            PressureLevel::Hard,
+            0
+        ));
+        // Over the ceiling, everything idle may go.
+        assert!(super::pressure_may_evict_idle_engine(
+            PressureLevel::Emergency,
+            1
+        ));
     }
 
     #[test]

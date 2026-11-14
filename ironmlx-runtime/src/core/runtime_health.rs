@@ -77,6 +77,7 @@ pub struct MemoryInfo {
     pub mlx_cache_bytes: usize,
     pub mlx_peak_bytes: usize,
     pub mlx_memory_limit_bytes: usize,
+    pub resident_weights: crate::core::resident_weights::ResidentWeightsHealth,
     pub process_governor: crate::core::process_memory::MemoryGovernorSnapshot,
     pub prefix_store: crate::core::cache::AsyncPrefixStoreStats,
     pub immutable_prefix_blocks: crate::core::scheduler_actor::ImmutablePrefixBlockHealth,
@@ -1458,6 +1459,7 @@ impl SchedulerHealthCollector {
                 mlx_cache_bytes: mlx_memory.cache_bytes,
                 mlx_peak_bytes: mlx_memory.peak_bytes,
                 mlx_memory_limit_bytes: mlx_memory.memory_limit_bytes,
+                resident_weights: crate::core::resident_weights::health(),
                 process_governor,
                 prefix_store,
                 immutable_prefix_blocks: self.immutable_prefix_blocks.snapshot(),
@@ -2403,6 +2405,7 @@ mod tests {
                 mlx_cache_bytes: 22,
                 mlx_peak_bytes: 33,
                 mlx_memory_limit_bytes: 44,
+                resident_weights: Default::default(),
                 process_governor: crate::core::process_memory::MemoryGovernorSnapshot::default(),
                 prefix_store: crate::core::cache::AsyncPrefixStoreStats::default(),
                 immutable_prefix_blocks:

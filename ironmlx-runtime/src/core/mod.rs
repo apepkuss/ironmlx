@@ -23,6 +23,7 @@ pub use dflash2::DFlash2TextGenerationStream;
 pub use generate::{GenerateEvent, GenerateRequest, GenerationStream};
 pub use scheduler::{Phase, RequestId, RequestState, Scheduler, SchedulerError, StepEvent};
 
+pub mod resident_weights;
 pub mod runtime_config;
 
 pub(crate) mod adaptive_admission;

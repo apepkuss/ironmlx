@@ -396,6 +396,7 @@ impl LlamaModel {
             weight_bytes: self.approx_weight_bytes(),
             max_position_embeddings: cfg.max_position_embeddings,
             spatial_merge_size: 2,
+            cache_cost: None,
         }
     }
 }

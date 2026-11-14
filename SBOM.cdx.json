@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:1b442e0e-d14e-57f7-917c-d92cb6548ac7",
+  "serialNumber": "urn:uuid:661d3fc3-560a-5799-a595-1c1cde895ed1",
   "version": 1,
   "metadata": {
     "component": {
@@ -13452,9 +13452,9 @@
     },
     {
       "type": "library",
-      "bom-ref": "native:MLX C++ with bundled JACCL@73ad5df20cb30be4192e5c4d0ae8130674773427",
+      "bom-ref": "native:MLX C++ with bundled JACCL@8b39c1037825f3179dd5a04477565c1eedf4605e",
       "name": "MLX C++ with bundled JACCL",
-      "version": "73ad5df20cb30be4192e5c4d0ae8130674773427",
+      "version": "8b39c1037825f3179dd5a04477565c1eedf4605e",
       "licenses": [
         {
           "expression": "MIT"
@@ -13471,7 +13471,7 @@
         },
         {
           "name": "ironmlx:source-commit",
-          "value": "73ad5df20cb30be4192e5c4d0ae8130674773427"
+          "value": "8b39c1037825f3179dd5a04477565c1eedf4605e"
         }
       ],
       "externalReferences": [
@@ -13480,13 +13480,13 @@
           "url": "https://github.com/apepkuss/mlx.git"
         }
       ],
-      "purl": "pkg:github/apepkuss/mlx@73ad5df20cb30be4192e5c4d0ae8130674773427"
+      "purl": "pkg:github/apepkuss/mlx@8b39c1037825f3179dd5a04477565c1eedf4605e"
     },
     {
       "type": "library",
-      "bom-ref": "native:MLX Metal kernel headers (vendored, IronMLX fork)@73ad5df20cb30be4192e5c4d0ae8130674773427",
+      "bom-ref": "native:MLX Metal kernel headers (vendored, IronMLX fork)@8b39c1037825f3179dd5a04477565c1eedf4605e",
       "name": "MLX Metal kernel headers (vendored, IronMLX fork)",
-      "version": "73ad5df20cb30be4192e5c4d0ae8130674773427",
+      "version": "8b39c1037825f3179dd5a04477565c1eedf4605e",
       "licenses": [
         {
           "expression": "MIT"
@@ -13503,7 +13503,7 @@
         },
         {
           "name": "ironmlx:source-commit",
-          "value": "73ad5df20cb30be4192e5c4d0ae8130674773427"
+          "value": "8b39c1037825f3179dd5a04477565c1eedf4605e"
         }
       ],
       "externalReferences": [
@@ -13512,7 +13512,7 @@
           "url": "https://github.com/apepkuss/mlx.git"
         }
       ],
-      "purl": "pkg:github/apepkuss/mlx@73ad5df20cb30be4192e5c4d0ae8130674773427"
+      "purl": "pkg:github/apepkuss/mlx@8b39c1037825f3179dd5a04477565c1eedf4605e"
     },
     {
       "type": "library",

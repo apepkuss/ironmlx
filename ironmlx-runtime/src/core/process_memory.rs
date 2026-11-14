@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::core::memory_budget::kv_bytes_per_token;
 use ironmlx_lm::core::model::ModelMeta;
 
 const GIB: usize = 1024 * 1024 * 1024;
@@ -809,7 +808,6 @@ impl ProcessMemoryGovernor {
             self.config.emergency_overage_bytes,
             telemetry.current_usage_bytes().is_some(),
         );
-        let recovery = ratio_bytes(effective_ceiling, self.config.recovery_ratio);
         if telemetry_degraded {
             // A partial sample cannot prove that the process is safe. Enter the
             // fail-safe soft state immediately so admission pauses without
@@ -821,14 +819,7 @@ impl ProcessMemoryGovernor {
             state.candidate_samples = 0;
             state.recovery_samples = 0;
         } else {
-            let current_with_reservations = pressure_usage;
-            advance_pressure_state(
-                &mut state,
-                observed,
-                current_with_reservations,
-                recovery,
-                self.config,
-            );
+            advance_pressure_state(&mut state, observed, self.config);
         }
 
         state.snapshot.current_usage_bytes = current;
@@ -941,12 +932,11 @@ impl ProcessMemoryGovernor {
             snapshot.effective_ceiling_bytes,
             self.config.prefill_headroom_ratio,
         );
-        let cache_growth_liability =
-            if kind == ReservationKind::Prefill && snapshot.prefill_reservations == 0 {
-                prefill_cache_growth_liability(snapshot)
-            } else {
-                0
-            };
+        let cache_growth_liability = if kind == ReservationKind::Prefill {
+            prefill_cache_growth_liability(snapshot, bytes, target)
+        } else {
+            0
+        };
         let reserved_bytes = bytes.saturating_add(cache_growth_liability);
         let projected = snapshot
             .current_usage_bytes
@@ -1040,9 +1030,13 @@ impl ProcessMemoryGovernor {
         let non_cache_usage = snapshot
             .current_usage_bytes
             .saturating_sub(snapshot.mlx_cache_bytes);
-        let unreserved_headroom = safe_target
-            .saturating_sub(non_cache_usage)
-            .saturating_sub(snapshot.reserved_bytes);
+        // What prefill reserved for the cache's own growth is the cache's
+        // to use, not something to keep clear of.
+        let unreserved_headroom = safe_target.saturating_sub(non_cache_usage).saturating_sub(
+            snapshot
+                .reserved_bytes
+                .saturating_sub(snapshot.prefill_cache_growth_reserved_bytes),
+        );
         let normal_budget = ratio_bytes(
             snapshot.effective_ceiling_bytes,
             self.config.mlx_cache_ratio,
@@ -1090,7 +1084,7 @@ impl ProcessMemoryGovernor {
     /// Bytes that must leave the process before `bytes` more can be
     /// reserved for `need`: what the reservation would put above the
     /// headroom target, and, while the pressure level refuses it, what keeps
-    /// usage above the watermark the level comes back down under.
+    /// usage from classifying as normal again.
     pub fn reservation_shortfall(
         &self,
         snapshot: &MemoryGovernorSnapshot,
@@ -1101,20 +1095,17 @@ impl ProcessMemoryGovernor {
         if ceiling == 0 {
             return 0;
         }
-        let liability = match need {
-            ReservationNeed::Prefill => prefill_cache_growth_liability(*snapshot),
-            ReservationNeed::Admission => 0,
-        };
+        // Buffer cache growth is not counted: it takes what a reservation
+        // leaves, and nothing is freed to make room for it.
         let headroom = snapshot
             .current_usage_bytes
             .saturating_add(snapshot.reserved_bytes)
-            .saturating_add(liability)
             .saturating_add(bytes)
             .saturating_sub(ratio_bytes(ceiling, self.config.prefill_headroom_ratio));
         // The level follows usage plus outstanding reservations, so both
-        // have to fit under the recovery watermark.
+        // have to come under the soft watermark.
         let pressure = if need.refused_at(snapshot.pressure_level) {
-            self.recovery_overage_with(
+            self.pressure_overage_with(
                 snapshot,
                 snapshot
                     .reserved_bytes
@@ -1137,20 +1128,22 @@ impl ProcessMemoryGovernor {
             || self.reservation_shortfall(snapshot, bytes, need) > 0
     }
 
-    /// Bytes by which usage alone exceeds the watermark a raised pressure
-    /// level recovers under. Reservations are left out: whoever makes one
-    /// frees what it needs through [`Self::reservation_shortfall`].
-    pub fn recovery_overage(&self, snapshot: &MemoryGovernorSnapshot) -> usize {
-        self.recovery_overage_with(snapshot, 0)
+    /// Bytes that have to go for usage alone to classify as normal again:
+    /// what puts it at or above the soft watermark. Reservations are left
+    /// out: whoever makes one frees what it needs through
+    /// [`Self::reservation_shortfall`].
+    pub fn pressure_overage(&self, snapshot: &MemoryGovernorSnapshot) -> usize {
+        self.pressure_overage_with(snapshot, 0)
     }
 
-    fn recovery_overage_with(&self, snapshot: &MemoryGovernorSnapshot, extra: usize) -> usize {
+    fn pressure_overage_with(&self, snapshot: &MemoryGovernorSnapshot, extra: usize) -> usize {
         snapshot
             .current_usage_bytes
             .saturating_add(extra)
+            .saturating_add(1)
             .saturating_sub(ratio_bytes(
                 snapshot.effective_ceiling_bytes,
-                self.config.recovery_ratio,
+                self.config.soft_ratio,
             ))
     }
 
@@ -1183,11 +1176,13 @@ impl ProcessMemoryGovernor {
             snapshot.effective_ceiling_bytes,
             self.config.prefill_headroom_ratio,
         );
-        let cache_growth_liability = prefill_cache_growth_liability(snapshot);
+        // Buffer cache growth is left out of the baseline: the cache limit
+        // is itself sized to the headroom, so counting it here would leave
+        // no chunk any room whenever headroom is short. The reservation
+        // gives the cache only what the chunk leaves over.
         let baseline = snapshot
             .current_usage_bytes
-            .saturating_add(snapshot.reserved_bytes)
-            .saturating_add(cache_growth_liability);
+            .saturating_add(snapshot.reserved_bytes);
         let minimum = requested_tokens.min(self.config.minimum_prefill_chunk_tokens.max(1));
         let minimum_bytes = estimate_prefill_peak_growth(meta, minimum, kv_len, batch_size);
         if baseline.saturating_add(minimum_bytes) > target {
@@ -1228,8 +1223,6 @@ impl ProcessMemoryGovernor {
 fn advance_pressure_state(
     state: &mut GovernorState,
     observed: PressureLevel,
-    current: usize,
-    recovery_watermark: usize,
     config: MemoryGovernorConfig,
 ) {
     let level = state.snapshot.pressure_level;
@@ -1253,8 +1246,12 @@ fn advance_pressure_state(
         return;
     }
 
+    // The level comes down one step once usage has classified below it for
+    // `recovery_samples` samples in a row. It does not also have to fall to
+    // a lower watermark: with resident weights the idle footprint can sit
+    // above any such mark for good, and the level would never recover.
     state.candidate_samples = 0;
-    if current <= recovery_watermark {
+    if observed.rank() < level.rank() {
         state.recovery_samples = state.recovery_samples.saturating_add(1);
         if state.recovery_samples >= config.recovery_samples {
             state.snapshot.pressure_level = match level {
@@ -1295,13 +1292,27 @@ fn ratio_bytes(bytes: usize, ratio: f64) -> usize {
     ((bytes as f64) * ratio) as usize
 }
 
-fn prefill_cache_growth_liability(snapshot: MemoryGovernorSnapshot) -> usize {
+/// How far MLX's buffer cache may still grow under a first prefill
+/// reservation of `transient_bytes`: up to its limit, and no further than
+/// the headroom the reservation leaves under `target`.
+fn prefill_cache_growth_liability(
+    snapshot: MemoryGovernorSnapshot,
+    transient_bytes: usize,
+    target: usize,
+) -> usize {
     if snapshot.prefill_reservations > 0 {
         return 0;
     }
+    let left_over = target.saturating_sub(
+        snapshot
+            .current_usage_bytes
+            .saturating_add(snapshot.reserved_bytes)
+            .saturating_add(transient_bytes),
+    );
     snapshot
         .mlx_cache_limit_bytes
         .saturating_sub(snapshot.mlx_cache_bytes)
+        .min(left_over)
 }
 
 pub fn estimate_prefill_peak_growth(
@@ -1313,7 +1324,11 @@ pub fn estimate_prefill_peak_growth(
     let batch = batch_size.max(1);
     let query = query_tokens.max(1);
     let context = kv_len.saturating_add(query).max(1);
-    let kv_growth = kv_bytes_per_token(meta)
+    // Deliberately the uniform every-layer figure, not the model's own
+    // cache cost: measured prefill peaks run above this estimate, and the
+    // overstatement on hybrid models is part of what covers them.
+    let kv_growth = meta
+        .uniform_kv_bytes_per_token()
         .saturating_mul(query)
         .saturating_mul(batch);
     let score_peak = (meta.num_attention_heads.max(1) as usize)
@@ -1893,6 +1908,46 @@ mod tests {
         assert_eq!(governor.snapshot().pressure_level, PressureLevel::Normal);
     }
 
+    /// Resident weights make the idle footprint most of the ceiling. A
+    /// request pushes the level up; once it is over, usage is back under the
+    /// soft watermark and the level has to come back down with it, even
+    /// though usage never falls to 85% of the ceiling.
+    #[test]
+    fn level_recovers_when_idle_usage_sits_between_recovery_and_soft_watermarks() {
+        let governor = ProcessMemoryGovernor::new(config()).unwrap();
+        // Ceiling 20.8 GiB: soft 18.72, hard 19.76, the old recovery mark 17.68.
+        let sample = |usage_tenths_gib: usize| MemoryTelemetry {
+            metal_limit_bytes: Some(gib(208) / 10),
+            ..telemetry(gib(usage_tenths_gib) / 10)
+        };
+        governor.update(sample(200));
+        governor.update(sample(200));
+        assert_eq!(governor.snapshot().pressure_level, PressureLevel::Hard);
+
+        // Idle again at 17.8 GiB: 85.6% of the ceiling.
+        governor.update(sample(178));
+        assert_eq!(governor.snapshot().pressure_level, PressureLevel::Hard);
+        governor.update(sample(178));
+        assert_eq!(governor.snapshot().pressure_level, PressureLevel::Soft);
+        governor.update(sample(178));
+        governor.update(sample(178));
+        assert_eq!(governor.snapshot().pressure_level, PressureLevel::Normal);
+
+        // Usage that still classifies as soft keeps the level there.
+        governor.update(sample(190));
+        governor.update(sample(190));
+        assert_eq!(governor.snapshot().pressure_level, PressureLevel::Soft);
+        for _ in 0..4 {
+            governor.update(sample(190));
+        }
+        assert_eq!(governor.snapshot().pressure_level, PressureLevel::Soft);
+        // One sample back above interrupts a recovery in progress.
+        governor.update(sample(178));
+        governor.update(sample(190));
+        governor.update(sample(178));
+        assert_eq!(governor.snapshot().pressure_level, PressureLevel::Soft);
+    }
+
     #[test]
     fn emergency_promotion_is_immediate_but_recovers_stepwise() {
         let governor = ProcessMemoryGovernor::new(config()).unwrap();
@@ -2207,6 +2262,7 @@ mod tests {
             weight_bytes: 0,
             max_position_embeddings: 131_072,
             spatial_merge_size: 2,
+            cache_cost: None,
         };
         let plan = governor
             .plan_prefill_chunk(4096, 32_768, 1, &meta)
@@ -2224,6 +2280,49 @@ mod tests {
                     MemoryReservationError::Pressure { .. }
                 ))
         ));
+    }
+
+    #[test]
+    fn prefill_plan_fits_when_headroom_is_smaller_than_the_buffer_cache_budget() {
+        let governor = Arc::new(ProcessMemoryGovernor::new(config()).unwrap());
+        governor.update(telemetry(gib(21)));
+        governor.update(telemetry(gib(21)));
+        let before = governor.snapshot();
+        let target = ratio_bytes(before.effective_ceiling_bytes, 0.90);
+        let headroom = target - before.current_usage_bytes;
+        // The cache limit has been sized to all of the headroom.
+        assert_eq!(before.mlx_cache_limit_bytes, headroom);
+        let meta = ModelMeta {
+            num_hidden_layers: 32,
+            num_attention_heads: 32,
+            num_key_value_heads: 8,
+            hidden_size: 4096,
+            head_dim: Some(128),
+            weight_bytes: 0,
+            max_position_embeddings: 131_072,
+            spatial_merge_size: 2,
+            cache_cost: None,
+        };
+
+        let plan = governor
+            .plan_prefill_chunk(64, 0, 1, &meta)
+            .expect("the chunk fits in the headroom");
+        assert_eq!(plan.selected_tokens, 64);
+        // The cache keeps only what the chunk leaves over.
+        assert_eq!(
+            plan.cache_growth_liability_bytes,
+            headroom - plan.estimated_peak_growth_bytes
+        );
+        let during = governor.snapshot();
+        assert_eq!(during.current_usage_bytes + during.reserved_bytes, target);
+        assert_eq!(
+            during.mlx_cache_limit_bytes,
+            plan.cache_growth_liability_bytes
+        );
+        assert_eq!(
+            governor.reservation_shortfall(&before, 64 * MIB, ReservationNeed::Prefill),
+            0
+        );
     }
 
     #[test]

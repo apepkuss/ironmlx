@@ -833,9 +833,9 @@
         "license_file": "native-mlx-mit.txt",
         "license_sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
         "repository": "https://github.com/apepkuss/mlx.git",
-        "revision": "73ad5df20cb30be4192e5c4d0ae8130674773427",
+        "revision": "8b39c1037825f3179dd5a04477565c1eedf4605e",
         "source_integrity": {
-          "commit": "73ad5df20cb30be4192e5c4d0ae8130674773427",
+          "commit": "8b39c1037825f3179dd5a04477565c1eedf4605e",
           "type": "git"
         },
         "upstream_repository": "https://github.com/ml-explore/mlx.git",
@@ -847,9 +847,9 @@
         "license_file": "native-mlx-kernel-headers-fork-mit.txt",
         "license_sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
         "repository": "https://github.com/apepkuss/mlx.git",
-        "revision": "73ad5df20cb30be4192e5c4d0ae8130674773427",
+        "revision": "8b39c1037825f3179dd5a04477565c1eedf4605e",
         "source_integrity": {
-          "commit": "73ad5df20cb30be4192e5c4d0ae8130674773427",
+          "commit": "8b39c1037825f3179dd5a04477565c1eedf4605e",
           "files": 17,
           "tree_sha256": "34427d535d5778e47a6b5764d792e6b6c2ae8e3bbbe629c3b54d77ea98687016",
           "type": "git-files"

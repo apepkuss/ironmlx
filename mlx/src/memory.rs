@@ -59,3 +59,29 @@ pub fn set_wired_limit(limit: usize) -> crate::Result<usize> {
 pub fn start_residency_refresh(interval_ms: u32) -> crate::Result<()> {
     Ok(mlx_sys::memory::ffi::start_residency_refresh(interval_ms)?)
 }
+
+/// Keep the memory of evaluated arrays GPU-resident and return the bytes
+/// newly pinned. A pinned buffer stays resident whatever the wired limit is
+/// and does not use its budget; the pin ends when the buffer is unpinned or
+/// freed. Arrays that are not evaluated, and small buffers that share the
+/// allocator's heap, are skipped.
+pub fn pin_resident(arrays: &[&crate::Array]) -> crate::Result<usize> {
+    let raw: Vec<*const mlx_sys::array::ffi::MlxArray> =
+        arrays.iter().map(|a| a.as_inner() as *const _).collect();
+    // SAFETY: each pointer borrows a live `&Array` for the duration of this
+    // call; the shim copies the array handles before using them.
+    Ok(unsafe { mlx_sys::memory::ffi::pin_resident(&raw) }?)
+}
+
+/// Undo [`pin_resident`] and return the bytes unpinned.
+pub fn unpin_resident(arrays: &[&crate::Array]) -> crate::Result<usize> {
+    let raw: Vec<*const mlx_sys::array::ffi::MlxArray> =
+        arrays.iter().map(|a| a.as_inner() as *const _).collect();
+    // SAFETY: as in `pin_resident`.
+    Ok(unsafe { mlx_sys::memory::ffi::unpin_resident(&raw) }?)
+}
+
+/// Bytes currently pinned by [`pin_resident`].
+pub fn pinned_bytes() -> usize {
+    mlx_sys::memory::ffi::get_pinned_memory()
+}

@@ -13,7 +13,7 @@ upload, inference and result workflows belong in upstream applications.
 ## Release build
 
 The release builder requires a clean MLX checkout pinned to commit
-`73ad5df20cb30be4192e5c4d0ae8130674773427`. By default it uses the sibling
+`8b39c1037825f3179dd5a04477565c1eedf4605e`. By default it uses the sibling
 checkout at `../iron-rivals/mlx`; set `MLX_SRC` to another clean checkout of
 that exact commit when needed.
 
