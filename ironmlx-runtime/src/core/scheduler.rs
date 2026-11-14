@@ -3225,6 +3225,7 @@ fn try_restore_paged_prefix_for_prompt(
         0,
         prompt_ids,
         fingerprint,
+        0,
     )
 }
 
@@ -3527,6 +3528,7 @@ fn try_restore_paged_prefix_for_prompt_row(
     cache_row: usize,
     prompt_ids: &[u32],
     fingerprint: &PrefixFingerprint,
+    min_restore_len: usize,
 ) -> Result<Option<i32>> {
     let Some(config) = config else {
         return Ok(None);
@@ -3540,6 +3542,8 @@ fn try_restore_paged_prefix_for_prompt_row(
     let store = config.store();
     for (restore_len, cached_len) in
         paged_prefix_restore_candidates(store.as_ref(), prefix_lru_cache, config, prompt_ids)?
+            .into_iter()
+            .take_while(|&(restore_len, _)| restore_len >= min_restore_len)
     {
         let Some(spec) = prefix_key_spec_for_caches(
             &config.model_id,
@@ -3599,6 +3603,7 @@ fn try_restore_paged_prefix_for_prompt_rows(
     cache_rows: &[usize],
     prompt_ids: &[u32],
     fingerprint: &PrefixFingerprint,
+    min_restore_len: usize,
 ) -> Result<Option<i32>> {
     if cache_rows.is_empty() {
         return Ok(None);
@@ -3614,6 +3619,7 @@ fn try_restore_paged_prefix_for_prompt_rows(
             cache_rows[0],
             prompt_ids,
             fingerprint,
+            min_restore_len,
         );
     }
     let Some(config) = config else {
@@ -3625,6 +3631,8 @@ fn try_restore_paged_prefix_for_prompt_rows(
     let store = config.store();
     for (restore_len, cached_len) in
         paged_prefix_restore_candidates(store.as_ref(), prefix_lru_cache, config, prompt_ids)?
+            .into_iter()
+            .take_while(|&(restore_len, _)| restore_len >= min_restore_len)
     {
         let Some(spec) = prefix_key_spec_for_caches(
             &config.model_id,
@@ -4679,6 +4687,7 @@ fn forward_batched_text_with_paged_prefix<M: Model>(
             &group,
             &prompt_ids[first_row],
             &PrefixFingerprint::text(),
+            0,
         )?
         .unwrap_or(0) as usize;
         runtime_usage
@@ -5093,11 +5102,76 @@ fn forward_batched_vl_cold_miss_with_paged_prefix<M: Model + DenseVlMethods>(
     Ok(Some(logits))
 }
 
+/// Where a replay of `prompt_ids` must start to carry no image token: just
+/// past its last image block (0 without images).
+fn image_free_replay_start(prompt_ids: &[u32], image_token_id: i32) -> usize {
+    let Ok(pad) = u32::try_from(image_token_id) else {
+        return 0;
+    };
+    prompt_ids
+        .iter()
+        .rposition(|&tok| tok == pad)
+        .map_or(0, |last| last + 1)
+}
+
+/// Whether [`try_restore_paged_prefix_for_prompt_rows`] would find a prefix
+/// of at least `min_restore_len` tokens, without loading it.
+fn paged_prefix_restore_available(
+    config: Option<&PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<&PrefixLruCacheHandle>,
+    cache: &[LayerCache],
+    prompt_ids: &[u32],
+    fingerprint: &PrefixFingerprint,
+    min_restore_len: usize,
+) -> Result<bool> {
+    let Some(config) = config else {
+        return Ok(false);
+    };
+    if prompt_ids.len() <= 1 || (!fingerprint.is_vl() && cache_is_fullpaged_only(cache)) {
+        return Ok(false);
+    }
+    let store = config.store();
+    for (restore_len, cached_len) in
+        paged_prefix_restore_candidates(store.as_ref(), prefix_lru_cache, config, prompt_ids)?
+    {
+        if restore_len < min_restore_len {
+            break;
+        }
+        let Some(spec) = prefix_key_spec_for_caches(
+            &config.model_id,
+            &prompt_ids[..restore_len],
+            cached_len,
+            fingerprint.at(cached_len as usize).as_deref(),
+            config.block_size,
+            cache,
+        )?
+        else {
+            return Ok(false);
+        };
+        if let Some(prefix_lru_cache) = prefix_lru_cache {
+            if lock_prefix_lru_cache(prefix_lru_cache)?.contains(&spec) {
+                return Ok(true);
+            }
+        }
+        if let Some(store) = store.as_ref() {
+            if store.contains(&spec)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Batched VL prefill through the paged prefix cache. `None`: the batch
+/// cannot use it without cutting an image block of a model that needs whole
+/// blocks in one forward call (see
+/// [`DenseVlMethods::image_blocks_need_one_forward`]); nothing has run and
+/// the caller prefills the batch whole.
 fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
     model: &M,
     cache: &mut [LayerCache],
     input: BatchedVlPrefixReplay<'_>,
-) -> Result<Array> {
+) -> Result<Option<Array>> {
     let BatchedVlPrefixReplay {
         prompt_ids,
         pixel_values,
@@ -5148,22 +5222,60 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
         .zip(&prompt_ids_u32)
         .map(|(fingerprint, ids)| fingerprint.at(ids.len()))
         .collect::<Vec<_>>();
-    let mut replay_from = vec![0_usize; b];
-    for group in prefix_restore_groups(&prompt_ids_u32, Some(&full_prompt_keys))? {
+    // Past a restored prefix rows replay one token at a time. A model that
+    // needs whole image blocks in one forward call must not replay an image:
+    // its rows restore past their last image block or not at all.
+    let whole_image_blocks = model.image_blocks_need_one_forward();
+    let image_free_from: Vec<usize> = prompt_ids_u32
+        .iter()
+        .map(|ids| {
+            if whole_image_blocks {
+                image_free_replay_start(ids, image_token_id)
+            } else {
+                0
+            }
+        })
+        .collect();
+    let restore_groups = prefix_restore_groups(&prompt_ids_u32, Some(&full_prompt_keys))?;
+    // Unless every image row can restore that far, all rows prefill cold
+    // (and save), so no row replays an image.
+    let mut restore = true;
+    for group in &restore_groups {
         let first_row = group[0];
-        let restored = try_restore_paged_prefix_for_prompt_rows(
-            prefix_cache_config,
-            prefix_lru_cache,
-            cache,
-            &group,
-            &prompt_ids_u32[first_row],
-            &fingerprints[first_row],
-        )?
-        .unwrap_or(0) as usize;
-        runtime_usage
-            .record_prefix_cache_hit_tokens((restored as u64).saturating_mul(group.len() as u64));
-        for row in group {
-            replay_from[row] = restored;
+        if image_free_from[first_row] > 0
+            && !paged_prefix_restore_available(
+                prefix_cache_config,
+                prefix_lru_cache,
+                cache,
+                &prompt_ids_u32[first_row],
+                &fingerprints[first_row],
+                image_free_from[first_row],
+            )?
+        {
+            restore = false;
+            break;
+        }
+    }
+    let mut replay_from = vec![0_usize; b];
+    if restore {
+        for group in restore_groups {
+            let first_row = group[0];
+            let restored = try_restore_paged_prefix_for_prompt_rows(
+                prefix_cache_config,
+                prefix_lru_cache,
+                cache,
+                &group,
+                &prompt_ids_u32[first_row],
+                &fingerprints[first_row],
+                image_free_from[first_row],
+            )?
+            .unwrap_or(0) as usize;
+            runtime_usage.record_prefix_cache_hit_tokens(
+                (restored as u64).saturating_mul(group.len() as u64),
+            );
+            for row in group {
+                replay_from[row] = restored;
+            }
         }
     }
 
@@ -5173,12 +5285,23 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
         .zip(&replay_from)
         .map(|(ids, &start)| prefix_split_point(prefix_cache_config, ids, start))
         .collect();
-    if replay_from.iter().all(|&pos| pos == 0)
-        && prompt_ids.iter().all(|ids| ids.len() > 1)
-        && prompt_ids
-            .iter()
-            .all(|ids| ids.last().copied() != Some(image_token_id))
+    let cold = replay_from.iter().all(|&pos| pos == 0);
+    if cold
+        && (prompt_ids.iter().any(|ids| ids.len() <= 1)
+            || prompt_ids
+                .iter()
+                .any(|ids| ids.last().copied() == Some(image_token_id))
+            || split_at
+                .iter()
+                .zip(&image_free_from)
+                .any(|(&split, &free_from)| split < free_from))
     {
+        // Without the cold path rows replay from 0; with a split inside the
+        // images they would replay an image from the split.
+        if image_free_from.iter().any(|&free_from| free_from > 0) {
+            return Ok(None);
+        }
+    } else if cold {
         match forward_batched_vl_cold_miss_with_paged_prefix(
             model,
             cache,
@@ -5194,9 +5317,18 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
             prefix_lru_cache,
             &fingerprints,
         )? {
-            Some(logits) => return Ok(logits),
+            Some(logits) => return Ok(Some(logits)),
             None => replay_from.clone_from(&split_at),
         }
+    }
+    for row in 0..b {
+        anyhow::ensure!(
+            replay_from[row] >= image_free_from[row],
+            "forward_batched_vl_with_paged_prefix: row {row} would replay an image block \
+             token by token (replay from {}, images end at {})",
+            replay_from[row],
+            image_free_from[row]
+        );
     }
 
     let position_streams = if dummy_position_ids.is_some() {
@@ -5388,7 +5520,7 @@ fn forward_batched_vl_with_paged_prefix<M: Model + DenseVlMethods>(
             anyhow!("forward_batched_vl_with_paged_prefix: missing final logits for row {row}")
         })?);
     }
-    concat_logits_rows(rows)
+    concat_logits_rows(rows).map(Some)
 }
 
 fn count_image_pad_i32(tokens: &[i32], image_token_id: i32) -> usize {
@@ -15469,6 +15601,7 @@ impl<M: Model> Scheduler<M> {
                         &group,
                         &prompt_ids[first_row],
                         &PrefixFingerprint::text(),
+                        0,
                     )?
                     .unwrap_or(0) as usize;
                     self.runtime_usage.record_prefix_cache_hit_tokens(
@@ -15515,11 +15648,7 @@ impl<M: Model> Scheduler<M> {
                             .record_prefix_cache_hit_tokens(restored as u64);
                         immutable_replay_from[cache_row] = usize::try_from(restored)
                             .map_err(|_| anyhow!("negative immutable restore length"))?;
-                        tracing::debug!(
-                            cache_row,
-                            restored,
-                            "FullPaged immutable prefix block hit"
-                        );
+                        tracing::info!(cache_row, restored, "FullPaged immutable prefix block hit");
                     }
                 }
             }
@@ -15815,13 +15944,7 @@ impl<M: Model> Scheduler<M> {
                             mlx::StreamOrDevice::default(),
                         )?
                     }
-                } else if paged_prefix_cache_config.is_some()
-                    && !model.image_blocks_need_one_forward()
-                {
-                    // Skipped for a model whose image blocks need one forward
-                    // call: this path replays what a restored prefix leaves
-                    // one token at a time, images included. Such a batch is
-                    // prefilled whole below, without the prefix cache.
+                } else if let Some(logits) = if paged_prefix_cache_config.is_some() {
                     forward_batched_vl_with_paged_prefix(
                         model,
                         prefill_cache,
@@ -15838,6 +15961,12 @@ impl<M: Model> Scheduler<M> {
                         },
                     )?
                 } else {
+                    None
+                } {
+                    logits
+                } else {
+                    // No prefix cache, or a batch it cannot take without
+                    // cutting an image block: prefill it whole.
                     let attention_mask =
                         build_batch_attention_mask(&prompt_lens, max_len, Dtype::Bfloat16)?;
                     let linear_attention_mask = build_batch_linear_mask(&prompt_lens, max_len)?;
@@ -16187,7 +16316,7 @@ impl<M: Model> Scheduler<M> {
                         &prompt_ids[..reusable_len],
                     )?;
                     if published > 0 {
-                        tracing::debug!(
+                        tracing::info!(
                             published,
                             request_owner = ?owner,
                             "FullPaged immutable prefix blocks published"
@@ -16255,17 +16384,44 @@ impl<M: Model> Scheduler<M> {
             .as_ref()
             .ok_or_else(|| anyhow!("adaptive prefill row is absent"))?
             .id;
-        self.discard_retained_immutable_prefix_cache();
         let cap = self.prefill_cache_cap();
         let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&[row_idx])?;
-        self.cache = Some(self.make_model_cache_for_rows(
-            model,
-            &[row_idx],
-            cap,
-            model.cache_dtype(),
-            turboquant_bits,
-        )?);
-        self.cache_rows = vec![row_idx];
+        let retain_immutable_pool = turboquant_bits.is_none()
+            && self.cache_rows.is_empty()
+            && self.cache.is_some()
+            && self
+                .immutable_prefix_blocks
+                .as_ref()
+                .is_some_and(|pool| !pool.is_empty());
+        if retain_immutable_pool {
+            // Keep the published prefix blocks: this prompt may restore them
+            // in place. The row stays out of the execution layout until
+            // `admit_mid_finalize` adds it.
+            let mut new_cache =
+                self.make_model_cache_for_rows(model, &[row_idx], cap, model.cache_dtype(), None)?;
+            let owners = self.block_owners_for_rows(&[row_idx])?;
+            let mut retained_cache = self.cache.take().expect("retained cache checked above");
+            anyhow::ensure!(
+                reuse_full_paged_storage(
+                    &mut new_cache,
+                    &mut retained_cache,
+                    &owners,
+                    "prefill_single_adaptive_chunks",
+                )?,
+                "retained immutable prefix pool has no reusable FullPaged storage"
+            );
+            self.cache = Some(new_cache);
+        } else {
+            self.discard_retained_immutable_prefix_cache();
+            self.cache = Some(self.make_model_cache_for_rows(
+                model,
+                &[row_idx],
+                cap,
+                model.cache_dtype(),
+                turboquant_bits,
+            )?);
+            self.cache_rows = vec![row_idx];
+        }
         // `prefill_admitted` has begun the warm-up of everything this row needs.
         let mut handle =
             self.admit_mid_begin_inner(id, row_idx, model, VisionWarmUp::HeldByCaller)?;
@@ -16989,7 +17145,8 @@ impl<M: Model> Scheduler<M> {
         } else {
             None
         };
-        if immutable_restored_start.is_some() {
+        if let Some(restored) = immutable_restored_start {
+            tracing::info!(row_idx, restored, "FullPaged immutable prefix block hit");
             if let (Some(pool), Some(cache)) =
                 (self.immutable_prefix_blocks.as_mut(), self.cache.as_mut())
             {
@@ -17499,13 +17656,20 @@ impl<M: Model> Scheduler<M> {
                 (self.immutable_prefix_blocks.as_mut(), self.cache.as_mut())
             {
                 let reusable_len = prompt_ids.len().saturating_sub(1);
-                publish_immutable_prefix_blocks(
+                let published = publish_immutable_prefix_blocks(
                     pool,
                     cache,
                     prefix_config.as_ref(),
                     owner,
                     &prompt_ids[..reusable_len],
                 )?;
+                if published > 0 {
+                    tracing::info!(
+                        published,
+                        request_owner = ?owner,
+                        "FullPaged immutable prefix blocks published"
+                    );
+                }
             }
         } else {
             if !whole_prompt_save_is_redundant(self.paged_prefix_cache.as_ref(), &prompt_ids) {
@@ -17527,6 +17691,41 @@ impl<M: Model> Scheduler<M> {
             }
 
             self.install_cache_with_temp_row(model, &temp_cache, row_idx)?;
+            // A FullPaged text prompt is reusable only through immutable
+            // blocks (whole-prefix saves skip it), so publish them here as
+            // the one-shot prefill does.
+            if !prefix_fingerprint.is_vl()
+                && self
+                    .kv_cache_turboquant_bits_for_rows(&[row_idx])?
+                    .is_none()
+                && self.cache.as_deref().is_some_and(cache_is_fullpaged_only)
+            {
+                let owner = self
+                    .request_block_tables
+                    .get(&id)
+                    .ok_or_else(|| anyhow!("mid-admit request block table absent"))?
+                    .owner;
+                let prefix_config = self.paged_prefix_cache.clone();
+                if let (Some(pool), Some(cache)) =
+                    (self.immutable_prefix_blocks.as_mut(), self.cache.as_mut())
+                {
+                    let reusable_len = prompt_ids.len().saturating_sub(1);
+                    let published = publish_immutable_prefix_blocks(
+                        pool,
+                        cache,
+                        prefix_config.as_ref(),
+                        owner,
+                        &prompt_ids[..reusable_len],
+                    )?;
+                    if published > 0 {
+                        tracing::info!(
+                            published,
+                            request_owner = ?owner,
+                            "FullPaged immutable prefix blocks published"
+                        );
+                    }
+                }
+            }
         }
 
         // Sample first generated token using centralized PRNG state.
@@ -29354,6 +29553,95 @@ mod tests {
         std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
+    /// A prompt prefilled in chunks (here: longer than its chunk size)
+    /// publishes its FullPaged prefix blocks like a one-shot prefill, and the
+    /// next chunked prompt restores them instead of starting over.
+    #[test]
+    #[serial(mlx_metal)]
+    fn fullpaged_immutable_prefix_is_published_and_reused_by_chunked_prefill() {
+        let root = std::env::temp_dir().join(format!(
+            "ironmlx-immutable-chunked-prefix-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let config =
+            crate::core::cache::PagedPrefixCacheConfig::new(&root, "immutable-chunked", 2, 64)
+                .expect("prefix config");
+        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler startup");
+        scheduler
+            .enable_paged_prefix_cache(config)
+            .expect("enable paged prefix cache");
+        let chunked = |prompt: Vec<u32>| {
+            let mut req = mk_req(prompt);
+            req.prefill_chunk_size = 2;
+            req
+        };
+
+        let warm = scheduler
+            .admit(chunked(vec![1, 2, 3, 4, 5, 6]))
+            .expect("admit warm request");
+        let warm_model = StepDecodeMaskModel::default();
+        scheduler
+            .prefill_admitted(&warm_model)
+            .expect("warm prefill");
+        assert!(
+            warm_model.hidden_seq_lens().len() > 1,
+            "the warm prompt must be prefilled in chunks"
+        );
+        let warm_stats = scheduler.request_owned_kv_stats();
+        assert_eq!(warm_stats.immutable_prefix.published_blocks, 2);
+        scheduler.evict(warm).expect("evict warm request");
+        scheduler.evict_all().expect("reset scheduler phase");
+
+        let hit = scheduler
+            .admit(chunked(vec![1, 2, 3, 4, 9, 10]))
+            .expect("admit hit request");
+        let hit_model = StepDecodeMaskModel::default();
+        let events = scheduler
+            .prefill_admitted(&hit_model)
+            .expect("chunked immutable hit prefill");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, hit);
+        let hit_stats = scheduler.request_owned_kv_stats();
+        assert_eq!(hit_stats.immutable_prefix.restored_blocks, 2);
+        assert_eq!(hit_stats.immutable_prefix.idle_block_hits, 2);
+        assert_eq!(hit_model.forward_seq_lens(), vec![1]);
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("chunked immutable hit invariants");
+        scheduler.evict(hit).expect("evict hit request");
+        scheduler.evict_all().expect("reset after hit");
+
+        // A different chunked prompt misses the retained pool, prefills
+        // detached and publishes its own blocks beside the retained ones.
+        let miss = scheduler
+            .admit(chunked(vec![7, 8, 9, 10, 11, 12]))
+            .expect("admit miss request");
+        let miss_model = StepDecodeMaskModel::default();
+        let events = scheduler
+            .prefill_admitted(&miss_model)
+            .expect("chunked immutable miss prefill");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].id, miss);
+        let miss_stats = scheduler.request_owned_kv_stats();
+        assert_eq!(miss_stats.immutable_prefix.restored_blocks, 2);
+        assert_eq!(miss_stats.immutable_prefix.published_blocks, 4);
+        assert_eq!(miss_stats.immutable_prefix.blocks, 4);
+        scheduler
+            .validate_request_owned_kv_invariants()
+            .expect("chunked immutable miss invariants");
+
+        scheduler.evict(miss).expect("evict miss request");
+        scheduler.evict_all().expect("reset after miss");
+        scheduler.discard_retained_immutable_prefix_cache();
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
+    }
+
     #[test]
     #[serial(mlx_metal)]
     fn fullpaged_immutable_prefix_round_trips_through_block_ssd_schema() {
@@ -30728,21 +31016,29 @@ mod tests {
 
     #[test]
     #[serial(mlx_metal)]
-    fn batched_vl_prefill_never_cuts_a_prompt_for_a_model_with_whole_image_blocks() {
+    fn batched_vl_prefill_never_cuts_an_image_block_for_a_model_with_whole_image_blocks() {
         use ironmlx_lm::core::model_input::IMAGE_TOKEN_ID;
         use mlx::Dtype;
 
-        fn vl_req_with_pixel(value: f32) -> GenerateRequest {
+        const IMG: u32 = IMAGE_TOKEN_ID as u32;
+
+        fn vl_req(prompt: Vec<u32>, value: f32) -> GenerateRequest {
             let pixel_values: mlx::Array = (&[value; 4][..], &[1_i32, 4][..])
                 .try_into()
                 .expect("pixel_values");
             let pixel_values = mlx::ops::astype(&pixel_values, Dtype::Bfloat16).unwrap();
-            let mut vl_req = mk_req(vec![1, IMAGE_TOKEN_ID as u32, 2]);
+            let mut vl_req = mk_req(prompt);
             vl_req.pixel_values = Some(vec![pixel_values]);
             vl_req.image_grid_thw = Some(vec![(1_i32, 2_i32, 2_i32)]);
             vl_req.image_spatial_merge_size = 2;
             vl_req.image_token_id = IMAGE_TOKEN_ID;
             vl_req
+        }
+        fn whole_blocks() -> StepDecodeMaskModel {
+            StepDecodeMaskModel {
+                whole_image_blocks: true,
+                ..Default::default()
+            }
         }
 
         let root = std::env::temp_dir().join(format!(
@@ -30751,38 +31047,79 @@ mod tests {
         ));
         let config = crate::core::cache::PagedPrefixCacheConfig::new(&root, "vl-test", 2, 32)
             .expect("prefix config");
-
-        let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
-            2,
-            32768,
-            crate::core::memory_budget::test_meta_qwen35(),
-        )
-        .expect("scheduler startup");
-        scheduler
-            .enable_paged_prefix_cache(config)
-            .expect("enable prefix cache");
-        let id_0 = scheduler.admit(vl_req_with_pixel(0.0)).expect("admit vl 0");
-        let id_1 = scheduler.admit(vl_req_with_pixel(1.0)).expect("admit vl 1");
-        let model = StepDecodeMaskModel {
-            whole_image_blocks: true,
-            ..Default::default()
+        let scheduler = || {
+            let mut scheduler = Scheduler::<StepDecodeMaskModel>::new(
+                2,
+                32768,
+                crate::core::memory_budget::test_meta_qwen35(),
+            )
+            .expect("scheduler startup");
+            scheduler
+                .enable_paged_prefix_cache(config.clone())
+                .expect("enable prefix cache");
+            scheduler
         };
-        let events = scheduler.prefill_admitted(&model).expect("prefill");
 
-        // With the prefix cache on, other models prefill `[N - 1]` and then
-        // the last token, or replay token by token after a partial restore.
-        assert_eq!(model.batched_prefill_batches(), vec![2]);
-        assert_eq!(model.batched_prefill_lens(), vec![vec![3, 3]]);
+        // Cold: the image ends before the split, so the batch prefills (and
+        // saves) up to it in one call and decodes the last token.
+        let mut cold = scheduler();
+        let id_0 = cold.admit(vl_req(vec![1, IMG, 2], 0.0)).expect("admit 0");
+        let id_1 = cold.admit(vl_req(vec![1, IMG, 2], 1.0)).expect("admit 1");
+        let model = whole_blocks();
+        let events = cold.prefill_admitted(&model).expect("cold prefill");
+        assert_eq!(model.batched_prefill_lens(), vec![vec![2, 2]]);
         assert_eq!(model.hidden_seq_lens(), Vec::<i32>::new());
-        assert_eq!(model.forward_seq_lens(), Vec::<i32>::new());
+        assert_eq!(model.forward_seq_lens(), vec![1]);
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].id, id_0);
         assert_eq!(events[1].id, id_1);
-
         crate::core::cache::process_async_prefix_store_queue().wait_idle();
 
-        // Nothing is saved on this path; the directory may not exist.
-        std::fs::remove_dir_all(root).ok();
+        // Exact hits restore past the image and replay only the last token.
+        let mut hit = scheduler();
+        hit.admit(vl_req(vec![1, IMG, 2], 0.0))
+            .expect("admit hit 0");
+        hit.admit(vl_req(vec![1, IMG, 2], 1.0))
+            .expect("admit hit 1");
+        let model = whole_blocks();
+        hit.prefill_admitted(&model).expect("hit prefill");
+        assert_eq!(model.batched_prefill_batches(), Vec::<i32>::new());
+        assert_eq!(model.forward_seq_lens(), vec![1]);
+        assert_eq!(model.vision_grid_lens(), Vec::<usize>::new());
+
+        // One row hits, the other misses: no row may replay its image token
+        // by token, so both prefill cold up to the split.
+        let mut mixed = scheduler();
+        mixed
+            .admit(vl_req(vec![1, IMG, 2], 0.0))
+            .expect("admit mixed hit");
+        mixed
+            .admit(vl_req(vec![1, IMG, 2], 2.0))
+            .expect("admit mixed miss");
+        let model = whole_blocks();
+        mixed.prefill_admitted(&model).expect("mixed prefill");
+        assert_eq!(model.batched_prefill_lens(), vec![vec![2, 2]]);
+        assert_eq!(model.hidden_seq_lens(), Vec::<i32>::new());
+        assert_eq!(model.forward_seq_lens(), vec![1]);
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+
+        // A prompt ending in its image cannot be split before the image:
+        // the batch prefills whole.
+        let mut whole = scheduler();
+        whole
+            .admit(vl_req(vec![1, 2, IMG], 3.0))
+            .expect("admit tail 0");
+        whole
+            .admit(vl_req(vec![1, 2, IMG], 4.0))
+            .expect("admit tail 1");
+        let model = whole_blocks();
+        whole.prefill_admitted(&model).expect("whole prefill");
+        assert_eq!(model.batched_prefill_lens(), vec![vec![3, 3]]);
+        assert_eq!(model.hidden_seq_lens(), Vec::<i32>::new());
+        assert_eq!(model.forward_seq_lens(), Vec::<i32>::new());
+
+        crate::core::cache::process_async_prefix_store_queue().wait_idle();
+        std::fs::remove_dir_all(root).expect("cleanup prefix cache");
     }
 
     #[test]
