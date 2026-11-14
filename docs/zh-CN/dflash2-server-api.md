@@ -205,11 +205,15 @@ HTTP transport、严格字段校验、错误 envelope 与断连语义见
 - MTP；
 - Prompt Lookup；
 - KV quantization；
-- paged/persistent prefix cache；
+- 普通 paged KV 前缀缓存；
 - active KV offload；
 - Scheduler profile 与 Scheduler autotune report。
 
-独立路径可使用自己的内存前缀缓存。
+独立路径的前缀缓存使用 dense K/V。通过 `--prefix-lru-cache-max-bytes` 设置内存预算；
+可另加 `--paged-prefix-cache-dir`，在独立的 DFlash2 存储中持久化兼容条目，供重启后
+复用。配置目录必须显式设置内存预算，不会启用 paged attention。
+`--ssd-prefix-cache-max-gb` 可限制磁盘存储容量。内存缓存会在压力下或为请求准入腾出
+空间而缩减。详见 [0.5.0 变更](release-notes/0.5.0.md)。
 
 这些限制用于保持 DFlash2 路径的 cache 所有权、数值正确性与性能资格独立，不会静默
 回退到其他 speculative 路径。

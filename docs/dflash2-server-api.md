@@ -139,7 +139,14 @@ See the [Text and vision API](text-vision-api.md) for strict fields, errors and 
 
 ## Incompatible combinations
 
-The path rejects MTP, Prompt Lookup, KV quantization, paged/persistent prefix cache, Active KV offload, Scheduler profiles and Scheduler autotune reports. It does not silently switch to another speculative path. Its own in-memory prefix cache is separate from these excluded caches.
+The path rejects MTP, Prompt Lookup, KV quantization, ordinary paged KV prefix caching, Active KV offload, Scheduler profiles and Scheduler autotune reports. It does not silently switch to another speculative path.
+
+Its own prefix cache uses dense K/V. Set `--prefix-lru-cache-max-bytes` for an
+in-memory budget; optionally add `--paged-prefix-cache-dir` to persist compatible
+entries in a separate DFlash2 store across restarts. The directory requires an
+explicit memory budget and does not enable paged attention. Use
+`--ssd-prefix-cache-max-gb` to bound the disk store. The memory cache can shrink
+under pressure and to admit requests. See the [0.5.0 changes](release-notes/0.5.0.md).
 
 ## Health metrics
 
