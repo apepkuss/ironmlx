@@ -487,8 +487,8 @@ impl Qwen35MoeModel {
     }
 
     /// Construct per-layer cache list matching this model's hybrid topology.
-    /// Matches `Qwen35Model::make_cache` style (one-shot allocate to cap to
-    /// avoid grow_to on first decode step).
+    /// Matches `Qwen35Model::make_cache`: full-attention buffers grow by
+    /// [`crate::core::cache::kv_growth_step`] up to `cap`.
     pub fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>> {
         let cfg = self.config();
         let head_dim = cfg.effective_head_dim();
@@ -496,11 +496,9 @@ impl Qwen35MoeModel {
         for i in 0..cfg.num_hidden_layers {
             match cfg.layer_kind(i) {
                 AttnKind::Full => {
-                    // P8a-stage6: one-shot allocate to full cap (step >= cap)
-                    // so the first decode step at long context never triggers
-                    // grow_to. KVCache's default step=256 would otherwise
-                    // round prefill alloc down to a step boundary and force
-                    // a full-buffer reallocation + memcpy on decode step 1.
+                    // Grow by one step at a time instead of allocating the
+                    // whole `prompt + max_new_tokens` up front; a grow
+                    // copies the buffer once per step of written tokens.
                     out.push(LayerCache::Full(
                         KVCache::new(
                             batch,
@@ -510,7 +508,7 @@ impl Qwen35MoeModel {
                             dtype,
                             cap,
                         )
-                        .with_step(cap),
+                        .with_step(crate::core::cache::kv_growth_step(cap)),
                     ));
                 }
                 AttnKind::Linear => {

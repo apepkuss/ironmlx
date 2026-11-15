@@ -3245,6 +3245,32 @@ where
         )
     }
 
+    /// Tokens of committed context in the target cache: the prompt and
+    /// every committed output token, published or pending.
+    pub(crate) fn kv_context_tokens(&self) -> usize {
+        self.history.len()
+    }
+
+    pub(crate) fn prompt_tokens(&self) -> usize {
+        self.request.prompt_ids.len()
+    }
+
+    pub(crate) fn max_new_tokens(&self) -> usize {
+        self.request.max_new_tokens
+    }
+
+    /// Positions one window may write past the committed context.
+    pub(crate) fn verify_scratch_tokens(&self) -> usize {
+        dflash2_verify_scratch_tokens(self.block_size, self.p2_options.tree_max_nodes)
+    }
+
+    /// Lower the output budget when K/V growth is refused. Every window
+    /// sizes its draft from the remaining budget, so later windows stay
+    /// within the K/V already charged and the row ends with `length`.
+    pub(crate) fn shrink_max_new_tokens(&mut self, max_new_tokens: usize) {
+        self.request.max_new_tokens = self.request.max_new_tokens.min(max_new_tokens);
+    }
+
     /// Whether the next window of this row may run as a ragged linear batch
     /// row: greedy, unconstrained, fixed positive draft budget, and enough
     /// remaining tokens for a full linear block. Other rows keep their own

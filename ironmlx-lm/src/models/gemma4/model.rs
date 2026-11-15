@@ -444,7 +444,7 @@ impl Gemma4Model {
                     dtype,
                     cap,
                 )
-                .with_step(cap),
+                .with_step(crate::core::cache::kv_growth_step(cap)),
             ));
         }
         Ok(out)

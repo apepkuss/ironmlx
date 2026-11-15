@@ -223,8 +223,8 @@ impl Glm4MoeLiteModel {
         attn + dense + routed + shared + embed_head
     }
 
-    /// Per-layer latent MLA cache, one-shot preallocated to `cap` (via
-    /// `with_step(cap)`) so the first decode step never triggers a grow.
+    /// Per-layer latent MLA cache bounded by `cap`; buffers grow by
+    /// [`crate::core::cache::kv_growth_step`] as tokens are written.
     pub fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>> {
         let cfg = &self.cfg;
         let n = cfg.num_hidden_layers as usize;
@@ -232,7 +232,7 @@ impl Glm4MoeLiteModel {
             .map(|_| {
                 LayerCache::Mla(
                     MlaLatentCache::new(batch, cfg.kv_lora_rank, cfg.qk_rope_head_dim, dtype, cap)
-                        .with_step(cap),
+                        .with_step(crate::core::cache::kv_growth_step(cap)),
                 )
             })
             .collect())

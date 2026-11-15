@@ -5,6 +5,8 @@ pub mod gated_delta;
 pub use gated_delta::*;
 pub mod kv_cache;
 pub use kv_cache::*;
+pub mod kv_growth;
+pub use kv_growth::*;
 pub mod layer;
 pub use layer::*;
 pub mod mtp_cache;

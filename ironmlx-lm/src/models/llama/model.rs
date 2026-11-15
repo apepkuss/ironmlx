@@ -198,13 +198,18 @@ impl LlamaModel {
         attn + mlp + embed_head
     }
 
-    /// Per-layer KV cache, one-shot preallocated to `cap` (via `with_step(cap)`)
-    /// so the first decode step never triggers a grow.
+    /// Per-layer KV cache bounded by `cap`; buffers grow by
+    /// [`crate::core::cache::kv_growth_step`] as tokens are written.
     pub fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>> {
         let hd = self.cfg.effective_head_dim();
         let nkv = self.cfg.num_key_value_heads;
         Ok((0..self.layers.len())
-            .map(|_| LayerCache::Full(KVCache::new(batch, nkv, hd, hd, dtype, cap).with_step(cap)))
+            .map(|_| {
+                LayerCache::Full(
+                    KVCache::new(batch, nkv, hd, hd, dtype, cap)
+                        .with_step(crate::core::cache::kv_growth_step(cap)),
+                )
+            })
             .collect())
     }
 

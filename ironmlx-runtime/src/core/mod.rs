@@ -7,6 +7,7 @@ pub mod dflash2;
 pub mod gemma4_generation;
 pub mod generate;
 pub mod generation_types;
+pub mod kv_growth;
 pub mod memory_budget;
 pub mod mtp_draft_cap_calibration;
 pub mod process_memory;

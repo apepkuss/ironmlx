@@ -1091,9 +1091,14 @@ pub struct RequestState {
     pub decode_cadence_mid_chunk_cap: usize,
     /// Optional TurboQuant K/V bit-widths for full-attention KV cache reads.
     pub kv_cache_turboquant_bits: Option<TurboQuantKVBits>,
-    /// KV cache bytes charged to budget at admit time. Released on
-    /// row completion / eviction. B1-p2.5.
+    /// KV cache bytes charged to budget: at admit time for the prompt's
+    /// growth step, then extended step by step as the row generates.
+    /// Released on row completion / eviction. B1-p2.5.
     pub kv_bytes_admitted: usize,
+    /// Tokens of K/V `kv_bytes_admitted` pays for.
+    pub kv_charged_tokens: usize,
+    /// The request's own K/V capacity: prompt plus requested output.
+    pub kv_request_cap: usize,
 }
 
 /// One-token look-ahead owned by the ordinary SchedulerActor B=1 greedy
@@ -6171,6 +6176,159 @@ impl<M: Model> Scheduler<M> {
         }
     }
 
+    /// Widest K/V write of one decode step: a speculative window of the
+    /// largest configured draft plus its bonus token.
+    fn kv_growth_lookahead(&self) -> usize {
+        let mtp = self
+            .mtp_state
+            .as_ref()
+            .map_or(0, |state| state.cfg.max_draft_tokens);
+        let drafter = self
+            .gemma4_drafter_state
+            .as_ref()
+            .map_or(0, |state| state.cfg.max_draft_tokens);
+        let lookup = self.prompt_lookup_state.as_ref().map_or(0, |state| {
+            state
+                .rows
+                .values()
+                .map(|row| row.cfg.max_draft_tokens)
+                .fold(state.cfg.max_draft_tokens, usize::max)
+        });
+        crate::core::kv_growth::kv_growth_lookahead(mtp.max(drafter).max(lookup).saturating_add(1))
+    }
+
+    /// Extend each decoding row's K/V charge one growth step ahead of its
+    /// context before the step runs. The returned reservations cover the
+    /// grow's transient copy and are dropped once the step is done.
+    ///
+    /// A refused extension makes the prefix cache yield and retries once;
+    /// if it is still refused the row's output budget shrinks to what its
+    /// charge holds, and the existing length check ends it there.
+    fn extend_kv_charges_for_decode(
+        &mut self,
+    ) -> Vec<crate::core::process_memory::MemoryReservation> {
+        let lookahead = self.kv_growth_lookahead();
+        let bytes_per_token = crate::core::memory_budget::kv_bytes_per_token(&self.meta);
+        let dense = self.paged_prefix_cache.is_none();
+        let model_id = self
+            .paged_prefix_cache
+            .as_ref()
+            .map(|config| config.model_id.clone());
+        let mut reservations = Vec::new();
+        for slot_row in 0..self.slots.len() {
+            let Some(state) = self.slots[slot_row].as_ref() else {
+                continue;
+            };
+            if state.finished || state.generated_tokens.is_empty() {
+                continue;
+            }
+            let pending = self
+                .mtp_state
+                .as_ref()
+                .and_then(|mtp| mtp.rows.get(&slot_row))
+                .map_or(0, |row| row.pending_tokens.len());
+            let context = state
+                .prompt_ids
+                .len()
+                .saturating_add(state.generated_tokens.len())
+                .saturating_add(pending);
+            let Some(extended) = crate::core::kv_growth::extended_charge_tokens(
+                context,
+                state.kv_charged_tokens,
+                state.kv_request_cap,
+                lookahead,
+            ) else {
+                continue;
+            };
+            let charge = |tokens: usize| {
+                crate::core::memory_budget::kv_cache_bytes(
+                    1,
+                    self.budget_state.resident_charge_cap(tokens),
+                    &self.meta,
+                )
+            };
+            let delta = charge(extended).saturating_sub(charge(state.kv_charged_tokens));
+            // Growing a dense buffer copies what it holds once.
+            let transient = if dense {
+                bytes_per_token.saturating_mul(context)
+            } else {
+                0
+            };
+            let granted =
+                self.reserve_kv_growth(delta, delta.saturating_add(transient), model_id.as_deref());
+            let state = self.slots[slot_row].as_mut().expect("slot checked above");
+            match granted {
+                Some(reservation) => {
+                    state.kv_bytes_admitted = state.kv_bytes_admitted.saturating_add(delta);
+                    state.kv_charged_tokens = extended;
+                    reservations.extend(reservation);
+                }
+                None => {
+                    let clamped = crate::core::kv_growth::clamped_max_new_tokens(
+                        state.prompt_ids.len(),
+                        state.generated_tokens.len(),
+                        state.kv_charged_tokens,
+                        0,
+                        state.max_new_tokens,
+                    );
+                    if clamped < state.max_new_tokens {
+                        tracing::warn!(
+                            request_id = state.id.0,
+                            context_tokens = context,
+                            charged_tokens = state.kv_charged_tokens,
+                            requested_max_new_tokens = state.max_new_tokens,
+                            max_new_tokens = clamped,
+                            "kv growth denied; output budget shrinks to the current charge"
+                        );
+                        state.max_new_tokens = clamped;
+                        crate::core::kv_growth::record_kv_growth_denied();
+                    }
+                }
+            }
+        }
+        reservations
+    }
+
+    /// Charge `budget_bytes` to the memory budget and reserve
+    /// `governor_bytes` with the process-memory governor, letting the
+    /// prefix cache yield once if the governor refuses. `None` when either
+    /// refuses; the budget charge is then undone.
+    fn reserve_kv_growth(
+        &self,
+        budget_bytes: usize,
+        governor_bytes: usize,
+        model_id: Option<&str>,
+    ) -> Option<Option<crate::core::process_memory::MemoryReservation>> {
+        if self.budget_state.try_admit(budget_bytes).is_err() {
+            return None;
+        }
+        let Some(governor) = self.process_memory_governor.as_ref() else {
+            return Some(None);
+        };
+        // Decode does not sample process memory: reserving on stale
+        // telemetry would fail closed, so sample first.
+        governor.sample_process();
+        if let Ok(reservation) = governor.try_reserve(governor_bytes, "kv_growth") {
+            return Some(Some(reservation));
+        }
+        make_room_for_reservation(
+            governor,
+            self.prefix_lru_cache.as_ref(),
+            model_id,
+            "kv_growth",
+            governor_bytes,
+            crate::core::process_memory::ReservationNeed::Prefill,
+        );
+        match governor.try_reserve(governor_bytes, "kv_growth") {
+            Ok(reservation) => Some(Some(reservation)),
+            Err(error) => {
+                tracing::warn!(%error, "process memory governor refused kv growth");
+                self.budget_state.release(budget_bytes);
+                None
+            }
+        }
+    }
+
     fn commit_governor_admission(&mut self, id: RequestId) {
         if let Some(reservation) = self.governor_admission_reservations.remove(&id) {
             reservation.commit();
@@ -7463,6 +7621,13 @@ impl<M: Model> Scheduler<M> {
 
         // B1-p2.5: memory budget admission gate.
         let row_cap = req.prompt_ids.len().saturating_add(req.max_new_tokens);
+        // K/V grows with the output: admission charges the prompt's growth
+        // step and the decode loop extends the charge as the row generates.
+        let row_charge = crate::core::kv_growth::initial_charge_tokens(
+            req.prompt_ids.len(),
+            row_cap,
+            self.kv_growth_lookahead(),
+        );
         // Without paged storage the live rows share one dense buffer, every
         // row as wide as the widest: a short request admitted beside a long
         // one occupies the long one's width. (Paged rows take only the
@@ -7471,10 +7636,10 @@ impl<M: Model> Scheduler<M> {
             self.slots
                 .iter()
                 .flatten()
-                .map(|live| live.prompt_ids.len().saturating_add(live.max_new_tokens))
-                .fold(row_cap, usize::max)
+                .map(|live| live.kv_charged_tokens)
+                .fold(row_charge, usize::max)
         } else {
-            row_cap
+            row_charge
         };
         let charged_cap = self.budget_state.resident_charge_cap(physical_cap);
         let requested_bytes =
@@ -7597,6 +7762,8 @@ impl<M: Model> Scheduler<M> {
             decode_cadence_mid_chunk_cap: req.decode_cadence_mid_chunk_cap,
             kv_cache_turboquant_bits: req.kv_cache_turboquant_bits,
             kv_bytes_admitted: requested_bytes,
+            kv_charged_tokens: physical_cap,
+            kv_request_cap: row_cap,
         };
         let seed = state.sampler.seed;
         self.slots[row_idx] = Some(state);
@@ -9473,6 +9640,7 @@ impl<M: Model> Scheduler<M> {
     }
 
     fn step_prompt_lookup_ordinary_inner(&mut self, model: &M) -> Result<Vec<StepEvent>> {
+        let _kv_growth = self.extend_kv_charges_for_decode();
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
                 "step_prompt_lookup_ordinary illegal in {:?} phase",
@@ -9526,6 +9694,7 @@ impl<M: Model> Scheduler<M> {
             &mut PromptLookupStats,
         ) -> Result<PromptLookupMtpShadowOutput>,
     {
+        let _kv_growth = self.extend_kv_charges_for_decode();
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
                 "step_prompt_lookup illegal in {:?} phase: call prefill_admitted_prompt_lookup first",
@@ -13375,6 +13544,7 @@ impl<M: Model> Scheduler<M> {
     where
         M: MtpSpeculativeModel,
     {
+        let _kv_growth = self.extend_kv_charges_for_decode();
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
                 "step_mtp_batch illegal in {:?} phase: call prefill_admitted_mtp_batch first",
@@ -14716,6 +14886,7 @@ impl<M: Model> Scheduler<M> {
     where
         M: MtpSpeculativeModel,
     {
+        let _kv_growth = self.extend_kv_charges_for_decode();
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
                 "step_mtp_single illegal in {:?} phase: call prefill_admitted_mtp_single first",
@@ -16514,6 +16685,7 @@ impl<M: Model> Scheduler<M> {
         model: &M,
         input_token: Option<&Array>,
     ) -> Result<()> {
+        let _kv_growth = self.extend_kv_charges_for_decode();
         anyhow::ensure!(
             self.b1_greedy_pipeline_pending.is_none(),
             "B1 greedy pipeline already has a pending token"
@@ -16761,6 +16933,7 @@ impl<M: Model> Scheduler<M> {
     }
 
     fn step_inner(&mut self, model: &M) -> Result<Vec<StepEvent>> {
+        let _kv_growth = self.extend_kv_charges_for_decode();
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
                 "step illegal in {:?} phase: call prefill_admitted first",
@@ -19859,6 +20032,7 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
         drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
         refill_after_emit: bool,
     ) -> Result<Vec<StepEvent>> {
+        let _kv_growth = self.extend_kv_charges_for_decode();
         if self.phase != Phase::Decoding {
             return Err(anyhow!(
                 "step_gemma4_drafter_batch illegal in {:?} phase: call prefill_admitted_gemma4_drafter_batch first",
@@ -22164,6 +22338,78 @@ mod tests {
         short.max_new_tokens = 16;
         scheduler.admit(short).expect("admit short");
         assert_eq!(scheduler.budget_state.active_bytes(), 2 * charge(1024));
+    }
+
+    #[test]
+    fn admission_charges_the_prompt_growth_step_not_the_output_budget() {
+        let meta = crate::core::memory_budget::test_meta_qwen35();
+        let charge = |cap| crate::core::memory_budget::kv_cache_bytes(1, cap, &meta);
+        let step = usize::try_from(ironmlx_lm::core::cache::kv_growth_step_tokens()).unwrap();
+        let mut scheduler =
+            Scheduler::<FinishedPhaseFakeModel>::new(1, 65_536, meta).expect("scheduler");
+        let mut request = mk_req((0..1000).collect());
+        request.max_new_tokens = 30_000;
+        scheduler.admit(request).expect("admit");
+        assert_eq!(scheduler.budget_state.active_bytes(), charge(step));
+    }
+
+    #[test]
+    fn decode_extends_the_kv_charge_and_shrinks_the_budget_when_refused() {
+        let meta = crate::core::memory_budget::test_meta_qwen35();
+        let charge = |cap| crate::core::memory_budget::kv_cache_bytes(1, cap, &meta);
+        let step = usize::try_from(ironmlx_lm::core::cache::kv_growth_step_tokens()).unwrap();
+        // Room for the admission step and one extension, not a second one.
+        let budget_state = crate::core::memory_budget::BudgetState::with_soft_limit(
+            charge(2 * step),
+            usize::MAX,
+            usize::MAX,
+            crate::core::memory_budget::KvBudgetPolicy::FullResident,
+        );
+        let mut scheduler = Scheduler::<FinishedPhaseFakeModel>::new_with_state(
+            1,
+            65_536,
+            budget_state,
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            meta,
+        )
+        .expect("scheduler");
+        let prompt = 1000;
+        let mut request = mk_req((0..prompt as u32).collect());
+        request.max_new_tokens = 30_000;
+        scheduler.admit(request).expect("admit");
+        let row = scheduler
+            .slots
+            .iter()
+            .position(Option::is_some)
+            .expect("admitted row");
+        let set_generated = |scheduler: &mut Scheduler<FinishedPhaseFakeModel>, n: usize| {
+            scheduler.slots[row].as_mut().unwrap().generated_tokens = vec![5; n];
+        };
+
+        // Within the lookahead of the admission step: nothing to extend.
+        set_generated(&mut scheduler, step - prompt - 300);
+        assert!(scheduler.extend_kv_charges_for_decode().is_empty());
+        assert_eq!(scheduler.budget_state.active_bytes(), charge(step));
+
+        // Close to the end of the step: the charge grows by one step.
+        set_generated(&mut scheduler, step - prompt - 100);
+        scheduler.extend_kv_charges_for_decode();
+        let state = scheduler.slots[row].as_ref().unwrap();
+        assert_eq!(state.kv_charged_tokens, 2 * step);
+        assert_eq!(state.kv_bytes_admitted, charge(2 * step));
+        assert_eq!(state.max_new_tokens, 30_000);
+        assert_eq!(scheduler.budget_state.active_bytes(), charge(2 * step));
+
+        // The next step does not fit the budget: the output budget shrinks
+        // to what the charge holds and the row will end with `length`.
+        let denied_before = crate::core::kv_growth::kv_growth_denied_total();
+        set_generated(&mut scheduler, 2 * step - prompt - 100);
+        scheduler.extend_kv_charges_for_decode();
+        let state = scheduler.slots[row].as_ref().unwrap();
+        assert_eq!(state.kv_charged_tokens, 2 * step);
+        assert_eq!(state.max_new_tokens, 2 * step - prompt);
+        assert_eq!(scheduler.budget_state.active_bytes(), charge(2 * step));
+        assert!(crate::core::kv_growth::kv_growth_denied_total() > denied_before);
     }
 
     #[test]

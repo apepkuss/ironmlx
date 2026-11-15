@@ -40,7 +40,7 @@ where
     priority: RequestPriority,
     event_tx: mpsc::UnboundedSender<StepEvent>,
     stream: DFlash2TextGenerationStream<'m, M>,
-    _memory_charge: DFlash2MemoryCharge,
+    memory_charge: DFlash2MemoryCharge,
     /// Error from taking the first token for publication at admission. The
     /// token has left the stream, so the next step fails the request through
     /// the normal completion instead of decoding on without it.
@@ -210,6 +210,7 @@ fn reserve_ragged_group_memory(
     Ok(DFlash2MemoryCharge {
         budget_state: budget_state.clone(),
         bytes: requested_bytes,
+        tokens: cap_tokens,
     })
 }
 
@@ -330,11 +331,35 @@ where
 struct DFlash2MemoryCharge {
     budget_state: BudgetState,
     bytes: usize,
+    /// Target-cache tokens per row these bytes pay for.
+    tokens: usize,
 }
 
 impl DFlash2MemoryCharge {
     fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    fn tokens(&self) -> usize {
+        self.tokens
+    }
+
+    /// Charge `bytes` more for a row grown to `tokens`; false, with nothing
+    /// charged, when the budget refuses.
+    fn try_extend(&mut self, tokens: usize, bytes: usize) -> bool {
+        if self.budget_state.try_admit(bytes).is_err() {
+            return false;
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.tokens = tokens;
+        true
+    }
+
+    /// Undo a [`Self::try_extend`] the process-memory governor refused.
+    fn undo_extend(&mut self, tokens: usize, bytes: usize) {
+        self.budget_state.release(bytes);
+        self.bytes = self.bytes.saturating_sub(bytes);
+        self.tokens = tokens;
     }
 }
 
@@ -365,6 +390,7 @@ fn reserve_dflash2_request_memory(
     Ok(DFlash2MemoryCharge {
         budget_state: budget_state.clone(),
         bytes: requested_bytes,
+        tokens: token_cap,
     })
 }
 
@@ -528,6 +554,119 @@ fn settle_after_reclaim(
 
 /// Return MLX's idle buffers to the system and reserve `bytes`, waiting for
 /// the release to show in the footprint while the reservation lacks headroom.
+/// Target-cache tokens charged when a DFlash2 request is admitted: its
+/// prompt and the growth lookahead (two verify windows), rounded up to a
+/// growth step, never above the request's whole capacity.
+fn dflash2_initial_charge_tokens(
+    prompt_tokens: usize,
+    max_new_tokens: usize,
+    block_size: usize,
+    tree_max_nodes: usize,
+) -> usize {
+    let scratch = crate::core::dflash2::dflash2_verify_scratch_tokens(block_size, tree_max_nodes);
+    crate::core::kv_growth::initial_charge_tokens(
+        prompt_tokens,
+        crate::core::dflash2::dflash2_target_cache_tokens(
+            prompt_tokens,
+            max_new_tokens,
+            block_size,
+            tree_max_nodes,
+        ),
+        crate::core::kv_growth::kv_growth_lookahead(scratch),
+    )
+}
+
+/// Extend a DFlash2 row's K/V charge one growth step ahead of its context
+/// before its next window. The returned reservation covers the grow's
+/// transient copy until the window is done. A refused extension makes the
+/// prefix cache yield and retries once; if it is still refused, the row's
+/// output budget shrinks to what its charge holds and it ends with
+/// `length`.
+fn extend_dflash2_kv_charge<M>(
+    request: &mut ActiveDFlash2Request<'_, M>,
+    cache_cost: DFlash2TargetCacheCost,
+    governor: &crate::core::process_memory::SharedProcessMemoryGovernor,
+    prefix_cache: Option<&mut DFlash2PrefixCache>,
+) -> Option<crate::core::process_memory::MemoryReservation>
+where
+    M: DFlash2Target,
+{
+    let stream = &request.stream;
+    let scratch = stream.verify_scratch_tokens();
+    let context = stream.kv_context_tokens();
+    let charged = request.memory_charge.tokens();
+    let extended = crate::core::kv_growth::extended_charge_tokens(
+        context,
+        charged,
+        stream.target_cache_tokens(),
+        crate::core::kv_growth::kv_growth_lookahead(scratch),
+    )?;
+    let delta = cache_cost
+        .request_bytes(extended)
+        .saturating_sub(cache_cost.request_bytes(charged));
+    // Growing the dense target cache copies what it holds once.
+    let governor_bytes = delta.saturating_add(cache_cost.bytes_per_token.saturating_mul(context));
+    let mut reservation = None;
+    if request.memory_charge.try_extend(extended, delta) {
+        // Decode does not sample process memory: reserving on stale
+        // telemetry would fail closed, so sample first.
+        governor.sample_process();
+        let mut attempt = governor.try_reserve(governor_bytes, "dflash2_kv_growth");
+        if let (
+            Err(crate::core::process_memory::MemoryReservationError::InsufficientHeadroom {
+                projected_bytes,
+                target_bytes,
+                ..
+            }),
+            Some(cache),
+        ) = (&attempt, prefix_cache)
+        {
+            let needed_bytes = projected_bytes.saturating_sub(*target_bytes);
+            let cache_bytes = cache.snapshot().bytes;
+            let reclaimed_bytes = cache.shrink_to(cache_bytes.saturating_sub(needed_bytes));
+            if reclaimed_bytes > 0 {
+                tracing::info!(
+                    needed_bytes,
+                    reclaimed_bytes,
+                    retained_bytes = cache.snapshot().bytes,
+                    "DFlash2 prefix cache shrank for kv growth"
+                );
+            }
+            attempt = reserve_after_release(governor, governor_bytes);
+        }
+        match attempt {
+            Ok(granted) => reservation = Some(granted),
+            Err(error) => {
+                tracing::warn!(%error, "process memory governor refused DFlash2 kv growth");
+                request.memory_charge.undo_extend(charged, delta);
+            }
+        }
+    }
+    if request.memory_charge.tokens() < extended {
+        let stream = &mut request.stream;
+        let clamped = crate::core::kv_growth::clamped_max_new_tokens(
+            stream.prompt_tokens(),
+            context.saturating_sub(stream.prompt_tokens()),
+            request.memory_charge.tokens(),
+            scratch,
+            stream.max_new_tokens(),
+        );
+        if clamped < stream.max_new_tokens() {
+            tracing::warn!(
+                request_id = request.request_id.0,
+                context_tokens = context,
+                charged_tokens = request.memory_charge.tokens(),
+                requested_max_new_tokens = stream.max_new_tokens(),
+                max_new_tokens = clamped,
+                "DFlash2 kv growth denied; output budget shrinks to the current charge"
+            );
+            stream.shrink_max_new_tokens(clamped);
+            crate::core::kv_growth::record_kv_growth_denied();
+        }
+    }
+    reservation
+}
+
 fn reserve_after_release(
     governor: &Arc<crate::core::process_memory::ProcessMemoryGovernor>,
     bytes: usize,
@@ -1399,7 +1538,7 @@ where
                 let memory_charge = match reserve_dflash2_request_memory(
                     &budget_state,
                     cache_cost,
-                    crate::core::dflash2::dflash2_target_cache_tokens(
+                    dflash2_initial_charge_tokens(
                         request.prompt_ids.len(),
                         request.max_new_tokens,
                         block_size,
@@ -1410,7 +1549,7 @@ where
                     } else {
                         paused_background
                             .iter()
-                            .map(|request| request._memory_charge.bytes())
+                            .map(|request| request.memory_charge.bytes())
                             .fold(0usize, usize::saturating_add)
                     },
                     &worker_memory_budget_exceeded_count,
@@ -1652,7 +1791,7 @@ where
                     let candidate_charge = match reserve_dflash2_request_memory(
                         &budget_state,
                         cache_cost,
-                        crate::core::dflash2::dflash2_target_cache_tokens(
+                        dflash2_initial_charge_tokens(
                             candidate.prompt_ids.len(),
                             candidate.max_new_tokens,
                             block_size,
@@ -1663,7 +1802,7 @@ where
                         } else {
                             paused_background
                                 .iter()
-                                .map(|request| request._memory_charge.bytes())
+                                .map(|request| request.memory_charge.bytes())
                                 .fold(0usize, usize::saturating_add)
                         },
                         &worker_memory_budget_exceeded_count,
@@ -1813,7 +1952,7 @@ where
                         priority,
                         event_tx,
                         stream,
-                        _memory_charge: memory_charge,
+                        memory_charge,
                         admission_failure: None,
                     });
                 }
@@ -1908,6 +2047,22 @@ where
             }
 
             DFlash2StepDiagnostic::mark(&mut step_diagnostic, "next_tokens");
+            // Charge each row's K/V growth before its window runs; the
+            // reservations cover the grows' transient copies for this step.
+            let kv_growth_governor = crate::core::process_memory::global_process_memory_governor();
+            let _kv_growth_reservations = active
+                .iter_mut()
+                .zip(&outcomes)
+                .filter(|(_, outcome)| !outcome.finished && outcome.failure.is_none())
+                .filter_map(|(request, _)| {
+                    extend_dflash2_kv_charge(
+                        request,
+                        cache_cost,
+                        &kv_growth_governor,
+                        prefix_cache.as_mut(),
+                    )
+                })
+                .collect::<Vec<_>>();
             // The stream already owns a materialized token before any draft
             // window is built. Publish it immediately so TTFT does not include
             // the following speculative draft/verify cycle.
@@ -2150,10 +2305,15 @@ where
                     && selected.iter().all(|&index| !outcomes[index].finished)
                     && ragged_group.is_none()
                 {
+                    // Charged like the rows' own caches: the tokens each row's
+                    // charge already covers, not its whole output budget.
                     let cap_tokens = crate::core::dflash2::ragged_batch_cache_cap(
-                        selected
-                            .iter()
-                            .map(|&index| active[index].stream.ragged_cache_tokens()),
+                        selected.iter().map(|&index| {
+                            active[index]
+                                .memory_charge
+                                .tokens()
+                                .min(active[index].stream.ragged_cache_tokens())
+                        }),
                     );
                     match reserve_ragged_group_memory(
                         &budget_state,

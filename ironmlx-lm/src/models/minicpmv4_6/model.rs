@@ -198,10 +198,10 @@ impl MiniCpmV46Model {
     /// logic driven by `cfg.layer_kind(i)`, same GPU-perf note re: cap floor.
     /// Bug fixes must be mirrored in `qwen3_5/model.rs`.
     ///
-    /// **GPU-perf note (B1-p2.3f T4):** the per-layer K/V buffer width
-    /// equals the cap because `KVCache::with_step(cap)` is used for
-    /// one-shot allocation (avoids grow_to + memcpy on first decode
-    /// step at long context — P8a-stage6 optimization). Production
+    /// **GPU-perf note (B1-p2.3f T4):** full-attention K/V buffers grow by
+    /// [`crate::core::cache::kv_growth_step`] tokens as they are written,
+    /// up to `cap`; a buffer narrower than one step is as wide as `cap`.
+    /// Production
     /// callers (Scheduler main cache + admit_mid temp cache,
     /// GenerationStream cache) MUST pre-clamp their requested cap to
     /// at least `crate::models::qwen3_5::MIN_KV_CACHE_CAP_FOR_GPU_PERF`
@@ -220,11 +220,9 @@ impl MiniCpmV46Model {
         for i in 0..cfg.num_hidden_layers {
             match cfg.layer_kind(i) {
                 AttnKind::Full => {
-                    // P8a-stage6: one-shot allocate to full cap (step >= cap)
-                    // so the first decode step at long context never triggers
-                    // grow_to. KVCache's default step=256 would otherwise
-                    // round prefill alloc down to a step boundary and force
-                    // a full-buffer reallocation + memcpy on decode step 1.
+                    // Grow by one step at a time instead of allocating the
+                    // whole `prompt + max_new_tokens` up front; a grow
+                    // copies the buffer once per step of written tokens.
                     out.push(LayerCache::Full(
                         KVCache::new(
                             batch,
@@ -234,7 +232,7 @@ impl MiniCpmV46Model {
                             dtype,
                             cap,
                         )
-                        .with_step(cap),
+                        .with_step(crate::core::cache::kv_growth_step(cap)),
                     ));
                 }
                 AttnKind::Linear => {
