@@ -517,6 +517,21 @@ fn image_block_end(prompt_ids: &[u32], image_token_id: i32, end: i32) -> i32 {
 /// later prompts; the request in hand must not fail, or run its prefill in
 /// smaller chunks, to keep them. `cache`: the cache to take from, the
 /// process-wide one when `None`.
+/// Whether a row's prefill failed because the process could not hold it:
+/// such a refusal fails only that row of a batch, not its neighbours.
+pub(crate) fn is_row_memory_refusal(error: &anyhow::Error) -> bool {
+    matches!(
+        GenerationError::from_error(error).scheduler_error,
+        Some(
+            SchedulerError::PrefillPeakUnsafe { .. }
+                | SchedulerError::VisionPrefillPeakUnsafe { .. }
+                | SchedulerError::MemoryPressure { .. }
+                | SchedulerError::MemoryBudgetExceeded { .. }
+                | SchedulerError::ColdMaterializationUnsafe { .. }
+        )
+    )
+}
+
 fn make_room_for_reservation(
     governor: &crate::core::process_memory::SharedProcessMemoryGovernor,
     cache: Option<&PrefixLruCacheHandle>,
@@ -6327,6 +6342,33 @@ impl<M: Model> Scheduler<M> {
                 None
             }
         }
+    }
+
+    /// Fail the rows of a batched prefill that were refused for lack of
+    /// memory: each gets a terminal error event and leaves the scheduler,
+    /// releasing its slot, budget charge and reservation. The batch's cache
+    /// still has their (empty) compact rows; the next decode step rebuilds
+    /// the layout without them.
+    fn reject_refused_prefill_rows(
+        &mut self,
+        refused: Vec<(RequestId, anyhow::Error)>,
+        events: &mut Vec<StepEvent>,
+    ) -> Result<()> {
+        for (id, error) in refused {
+            tracing::warn!(
+                request_id = id.0,
+                error = %format!("{error:#}"),
+                "batched prefill refused one row for lack of memory; the other rows continue"
+            );
+            events.push(StepEvent {
+                error: Some(GenerationError::from_error(&error)),
+                id,
+                token: 0,
+                finish_reason: None,
+            });
+            self.evict(id)?;
+        }
+        Ok(())
     }
 
     fn commit_governor_admission(&mut self, id: RequestId) {
@@ -13128,23 +13170,49 @@ impl<M: Model> Scheduler<M> {
             self.make_model_cache_for_rows(model, &active_rows, final_cap, dtype, turboquant_bits)?;
         let fill_single_row_initial_window = active_rows.len() == 1;
 
+        let mut refused = Vec::new();
         for (dst_row, &row_idx) in active_rows.iter().enumerate() {
-            let mut temp = self.temp_mtp_scheduler_for_row(row_idx)?;
-            let event = temp
-                // For B>1, materialize only the prompt and first target token
-                // in each temporary scheduler. Drafting here would select
-                // tokens with B=1 execution morphology before the rows are
-                // assembled into the production batch. A true B=1 request
-                // retains the established single-row fast path.
-                .prefill_admitted_mtp_single_with_options(
-                    model,
-                    mtp,
-                    cfg,
-                    None,
-                    fill_single_row_initial_window,
-                    projection,
-                )
-                .map_err(|err| anyhow!("prefill_admitted_mtp_batch row {row_idx}: {err:#}"))?;
+            let row_id = self.slots[row_idx]
+                .as_ref()
+                .expect("active row implies slot is Some")
+                .id;
+            // The temporary scheduler reserves this row's KV when it admits
+            // the row, so the admission reservation is handed over rather
+            // than held alongside it.
+            self.commit_governor_admission(row_id);
+            let prefilled = self
+                .temp_mtp_scheduler_for_row(row_idx)
+                .and_then(|mut temp| {
+                    // For B>1, materialize only the prompt and first target token
+                    // in each temporary scheduler. Drafting here would select
+                    // tokens with B=1 execution morphology before the rows are
+                    // assembled into the production batch. A true B=1 request
+                    // retains the established single-row fast path.
+                    let event = temp.prefill_admitted_mtp_single_with_options(
+                        model,
+                        mtp,
+                        cfg,
+                        None,
+                        fill_single_row_initial_window,
+                        projection,
+                    )?;
+                    Ok((temp, event))
+                });
+            // Context keeps the error's type, so a memory refusal still
+            // reaches the client as one.
+            let (mut temp, event) = match prefilled {
+                Ok(prefilled) => prefilled,
+                Err(error) if active_rows.len() > 1 && is_row_memory_refusal(&error) => {
+                    refused.push((
+                        row_id,
+                        error.context(format!("prefill_admitted_mtp_batch row {row_idx}")),
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error.context(format!("prefill_admitted_mtp_batch row {row_idx}")));
+                }
+            };
             let temp_cache = temp.cache.take().ok_or_else(|| {
                 anyhow!("prefill_admitted_mtp_batch row {row_idx}: temp cache absent")
             })?;
@@ -13178,10 +13246,10 @@ impl<M: Model> Scheduler<M> {
         }
 
         let all_finished = active_rows.iter().all(|&row| {
-            self.slots[row]
+            let state = self.slots[row]
                 .as_ref()
-                .expect("active row implies slot is Some")
-                .finished
+                .expect("active row implies slot is Some");
+            state.finished || refused.iter().any(|(id, _)| *id == state.id)
         });
         self.cache = Some(final_cache);
         self.cache_rows = active_rows.clone();
@@ -13200,6 +13268,7 @@ impl<M: Model> Scheduler<M> {
         // the window boundary; doing that work here delays TTFT and charges a
         // decode window to prefill instead of aggregate generation time.
         self.mtp_state = Some(mtp_state);
+        self.reject_refused_prefill_rows(refused, &mut events)?;
 
         Ok(events)
     }
@@ -15528,6 +15597,7 @@ impl<M: Model> Scheduler<M> {
             turboquant_bits,
         )?;
         let mut events = Vec::with_capacity(active_rows.len());
+        let mut refused = Vec::new();
 
         for (compact_row, &row_idx) in active_rows.iter().enumerate() {
             // The temporary scheduler reserves this row's KV when it admits
@@ -15539,12 +15609,39 @@ impl<M: Model> Scheduler<M> {
                 .expect("active row implies slot is Some")
                 .id;
             self.commit_governor_admission(row_id);
-            let mut temp = self.temp_mtp_scheduler_for_row(row_idx)?;
             // Context keeps the error's type, so a memory refusal still
             // reaches the client as one.
-            let row_events = temp.prefill_admitted_inner(model).map_err(|error| {
-                error.context(format!("prefill_admitted_row_isolated row {row_idx}"))
-            })?;
+            let prefilled = self
+                .temp_mtp_scheduler_for_row(row_idx)
+                .and_then(|mut temp| {
+                    #[cfg(test)]
+                    if tests::REFUSE_ROW_ISOLATED_PREFILL.with(std::cell::Cell::get)
+                        == Some(row_idx)
+                    {
+                        return Err(anyhow::Error::new(SchedulerError::PrefillPeakUnsafe {
+                            requested_tokens: 1,
+                            selected_tokens: 0,
+                            target_bytes: 0,
+                        }));
+                    }
+                    let row_events = temp.prefill_admitted_inner(model)?;
+                    Ok((temp, row_events))
+                });
+            let (mut temp, row_events) = match prefilled {
+                Ok(prefilled) => prefilled,
+                Err(error) if is_row_memory_refusal(&error) => {
+                    refused.push((
+                        row_id,
+                        error.context(format!("prefill_admitted_row_isolated row {row_idx}")),
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(
+                        error.context(format!("prefill_admitted_row_isolated row {row_idx}"))
+                    );
+                }
+            };
             temp.commit_all_governor_admissions();
             let temp_prng_key = temp.prng_key_for_row(0)?;
             let temp_cache = temp.cache.take().ok_or_else(|| {
@@ -15573,10 +15670,10 @@ impl<M: Model> Scheduler<M> {
         }
 
         let all_finished = active_rows.iter().all(|&row| {
-            self.slots[row]
+            let state = self.slots[row]
                 .as_ref()
-                .expect("active row implies slot is Some")
-                .finished
+                .expect("active row implies slot is Some");
+            state.finished || refused.iter().any(|(id, _)| *id == state.id)
         });
         self.cache = Some(final_cache);
         self.cache_rows = active_rows.to_vec();
@@ -15585,6 +15682,7 @@ impl<M: Model> Scheduler<M> {
         } else {
             Phase::Decoding
         };
+        self.reject_refused_prefill_rows(refused, &mut events)?;
         Ok(events)
     }
 
@@ -15657,7 +15755,27 @@ impl<M: Model> Scheduler<M> {
             .filter(|&chunk_size| chunk_size > 0)
             .and_then(|chunk_size| usize::try_from(chunk_size).ok());
         let requested_tokens = configured_chunk_size.map_or(t, |chunk_size| t.min(chunk_size));
-        let prefill_plan = self.plan_prefill_chunk(requested_tokens, 0, b)?;
+        // Text rows can be prefilled one at a time, each in chunks its own
+        // peak allows, when the batch does not fit at once; then only a row
+        // that cannot fit even alone is refused.
+        let row_by_row_fallback = b > 1
+            && prefill_rows.iter().all(|&row| {
+                self.slots[row]
+                    .as_ref()
+                    .is_some_and(|state| state.pixel_values.is_none())
+            });
+        let prefill_plan = match self.plan_prefill_chunk(requested_tokens, 0, b) {
+            Ok(plan) => plan,
+            Err(error) if row_by_row_fallback && is_row_memory_refusal(&error) => {
+                tracing::info!(
+                    rows = b,
+                    requested_tokens = t,
+                    "batched prefill does not fit; prefilling row by row"
+                );
+                return self.prefill_admitted_row_isolated(model, &prefill_rows);
+            }
+            Err(error) => return Err(error),
+        };
         let selected_tokens = prefill_plan
             .as_ref()
             .map_or(requested_tokens, |plan| plan.selected_tokens);
@@ -15671,6 +15789,16 @@ impl<M: Model> Scheduler<M> {
                 );
             }
             let plan = prefill_plan.as_ref().expect("batched prefill plan exists");
+            if row_by_row_fallback {
+                tracing::info!(
+                    rows = b,
+                    requested_tokens = t,
+                    selected_tokens = plan.selected_tokens,
+                    "batched prefill does not fit; prefilling row by row"
+                );
+                drop(prefill_plan);
+                return self.prefill_admitted_row_isolated(model, &prefill_rows);
+            }
             return Err(anyhow::Error::new(SchedulerError::PrefillPeakUnsafe {
                 requested_tokens: t,
                 selected_tokens: plan.selected_tokens,
@@ -19279,24 +19407,76 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
             );
         }
 
+        self.prefill_gemma4_drafter_rows_isolated(&active_rows, model, drafter, cfg)
+    }
+
+    /// Prefill each row of a Gemma4 drafter batch on its own, then assemble
+    /// the batch. A row refused for lack of memory leaves with its own error
+    /// and the other rows continue.
+    fn prefill_gemma4_drafter_rows_isolated(
+        &mut self,
+        active_rows: &[usize],
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
+        cfg: MtpSpeculativeConfig,
+    ) -> Result<Vec<StepEvent>> {
         let mut temp_rows = Vec::with_capacity(active_rows.len());
         let mut row_states = HashMap::with_capacity(active_rows.len());
         let mut stats = MtpSpeculativeStats::default();
         let mut events = Vec::with_capacity(active_rows.len());
+        let mut refused = Vec::new();
         let mut final_cap = MIN_KV_CACHE_CAP_FOR_GPU_PERF;
         let dtype = model.cache_dtype();
-        for &row_idx in &active_rows {
-            let mut temp = self.temp_gemma4_drafter_scheduler_for_row(row_idx)?;
-            let event = temp
-                // Only materialize each row's prompt and first target token
-                // here. Filling an initial speculative window inside the
-                // temporary B=1 scheduler would select tokens using B=1
-                // execution morphology before the rows are assembled into
-                // the production batch.
-                .prefill_admitted_gemma4_drafter_single(model, drafter, cfg, false)
-                .map_err(|err| {
-                    anyhow!("prefill_admitted_gemma4_drafter_batch row {row_idx}: {err:#}")
-                })?;
+        for &row_idx in active_rows {
+            let row_id = self.slots[row_idx]
+                .as_ref()
+                .expect("active row implies slot is Some")
+                .id;
+            // The temporary scheduler reserves this row's KV when it admits
+            // the row, so the reservation made at admission is handed over
+            // rather than held alongside it.
+            self.commit_governor_admission(row_id);
+            // Only materialize each row's prompt and first target token
+            // here. Filling an initial speculative window inside the
+            // temporary B=1 scheduler would select tokens using B=1
+            // execution morphology before the rows are assembled into the
+            // production batch.
+            let prefilled = self
+                .temp_gemma4_drafter_scheduler_for_row(row_idx)
+                .and_then(|mut temp| {
+                    #[cfg(test)]
+                    if tests::REFUSE_ROW_ISOLATED_PREFILL.with(std::cell::Cell::get)
+                        == Some(row_idx)
+                    {
+                        return Err(anyhow::Error::new(SchedulerError::PrefillPeakUnsafe {
+                            requested_tokens: 1,
+                            selected_tokens: 0,
+                            target_bytes: 0,
+                        }));
+                    }
+                    let event =
+                        temp.prefill_admitted_gemma4_drafter_single(model, drafter, cfg, false)?;
+                    Ok((temp, event))
+                });
+            // Context keeps the error's type, so a memory refusal still
+            // reaches the client as one.
+            let (mut temp, event) = match prefilled {
+                Ok(prefilled) => prefilled,
+                Err(error) if is_row_memory_refusal(&error) => {
+                    refused.push((
+                        row_id,
+                        error.context(format!(
+                            "prefill_admitted_gemma4_drafter_batch row {row_idx}"
+                        )),
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(error.context(format!(
+                        "prefill_admitted_gemma4_drafter_batch row {row_idx}"
+                    )));
+                }
+            };
             let temp_cache = temp.cache.take().ok_or_else(|| {
                 anyhow!("prefill_admitted_gemma4_drafter_batch row {row_idx}: temp cache absent")
             })?;
@@ -19327,6 +19507,18 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
             slot.constraint = temp_slot.constraint.clone();
             temp_rows.push((row_idx, temp_cache));
             events.extend(event);
+        }
+
+        // Refused rows leave before the batch is assembled, so the batch
+        // cache and the drafter state hold only the rows that prefilled.
+        self.reject_refused_prefill_rows(refused, &mut events)?;
+        let active_rows: Vec<usize> = active_rows
+            .iter()
+            .copied()
+            .filter(|&row| self.slots[row].is_some())
+            .collect();
+        if active_rows.is_empty() {
+            return Ok(events);
         }
 
         let turboquant_bits = self.kv_cache_turboquant_bits_for_rows(&active_rows)?;
@@ -19420,6 +19612,27 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
             let start = compact_row * max_prompt_len_usize;
             flat[start..start + prompt_ids.len()].copy_from_slice(prompt_ids);
         }
+        let uniform_prompt_lens = prompt_lens.iter().all(|&len| len == max_prompt_len);
+        if uniform_prompt_lens && max_prompt_len > 2_048 {
+            // Long prompts prefill in planned chunks, smaller ones when memory
+            // is short. When not even the smallest chunk fits for every row
+            // at once, prefill the rows one at a time instead, so only a row
+            // that cannot fit alone is refused.
+            let requested_tokens = usize::try_from(max_prompt_len.min(2_048))?;
+            let fits = match self.plan_prefill_chunk(requested_tokens, 0, batch) {
+                Ok(_) => true,
+                Err(error) if is_row_memory_refusal(&error) => false,
+                Err(error) => return Err(error),
+            };
+            if !fits {
+                tracing::info!(
+                    rows = batch,
+                    requested_tokens,
+                    "Gemma4 drafter batch prefill does not fit; prefilling row by row"
+                );
+                return self.prefill_gemma4_drafter_rows_isolated(active_rows, model, drafter, cfg);
+            }
+        }
         let input_ids: Array =
             (&flat[..], &[i32::try_from(batch)?, max_prompt_len][..]).try_into()?;
         let cap = self.prefill_cache_cap();
@@ -19434,7 +19647,6 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
         let position_ids = self.reusable_dummy_position_ids()?;
         let mut stats = MtpSpeculativeStats::default();
         let forward_start = Instant::now();
-        let uniform_prompt_lens = prompt_lens.iter().all(|&len| len == max_prompt_len);
         let (output, output_start) = if uniform_prompt_lens && max_prompt_len > 2_048 {
             let mut start = 0_i32;
             let mut final_output = None;
@@ -21448,6 +21660,29 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        /// Test fault injection: the row-isolated prefill refuses this slot
+        /// row for lack of memory.
+        pub(super) static REFUSE_ROW_ISOLATED_PREFILL: std::cell::Cell<Option<usize>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// Clears [`REFUSE_ROW_ISOLATED_PREFILL`] when a test ends.
+    struct RefuseRowIsolatedPrefill;
+
+    impl RefuseRowIsolatedPrefill {
+        fn row(row: usize) -> Self {
+            REFUSE_ROW_ISOLATED_PREFILL.with(|cell| cell.set(Some(row)));
+            Self
+        }
+    }
+
+    impl Drop for RefuseRowIsolatedPrefill {
+        fn drop(&mut self) {
+            REFUSE_ROW_ISOLATED_PREFILL.with(|cell| cell.set(None));
+        }
+    }
     use std::collections::VecDeque;
 
     use crate::core::speculative::MtpSpeculativeConfig;
@@ -28551,6 +28786,313 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!((events[0].id, events[0].token), (id_0, 3));
         assert_eq!((events[1].id, events[1].token), (id_2, 4));
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn row_isolated_prefill_refuses_only_the_row_that_does_not_fit() {
+        let model = RecordingPrefillModel {
+            split_batched_prefill: true,
+            ..RecordingPrefillModel::default()
+        };
+        let mut scheduler = Scheduler::<RecordingPrefillModel>::new(
+            2,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        let kept = scheduler.admit(mk_req(vec![1, 2, 3])).expect("admit kept");
+        let refused = scheduler
+            .admit(mk_req(vec![4, 5, 6]))
+            .expect("admit refused");
+        let kept_charge = scheduler.slots[0].as_ref().unwrap().kv_bytes_admitted;
+
+        let _refuse = RefuseRowIsolatedPrefill::row(1);
+        let events = scheduler
+            .prefill_admitted(&model)
+            .expect("one refused row does not fail the batch");
+
+        assert_eq!(events.len(), 2);
+        let kept_event = events.iter().find(|event| event.id == kept).unwrap();
+        assert!(kept_event.error.is_none());
+        let refused_event = events.iter().find(|event| event.id == refused).unwrap();
+        assert!(matches!(
+            refused_event
+                .error
+                .as_ref()
+                .and_then(|error| error.scheduler_error),
+            Some(SchedulerError::PrefillPeakUnsafe { .. })
+        ));
+        assert_eq!(scheduler.active_count(), 1);
+        assert_eq!(scheduler.budget_state.active_bytes(), kept_charge);
+        assert!(!scheduler.poisoned);
+        assert!(
+            scheduler.slots[1].is_none(),
+            "the refused row left its slot"
+        );
+        assert!(scheduler.slots[0]
+            .as_ref()
+            .is_some_and(|state| state.id == kept));
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn batched_prefill_that_does_not_fit_prefills_row_by_row() {
+        use crate::core::process_memory::{
+            HostVmStatistics, MemoryGovernorConfig, MemoryTelemetry, ProcessMemoryGovernor,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const GIB: usize = 1 << 30;
+        let meta = crate::core::memory_budget::test_meta_qwen35();
+        let model = RecordingPrefillModel::default();
+        // Ceiling 24 GiB: headroom target 21.6 GiB.
+        let governor = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                static_reserve_bytes: 4 * GIB,
+                minimum_prefill_chunk_tokens: 1,
+                ..MemoryGovernorConfig::default()
+            })
+            .expect("governor"),
+        );
+        let usage = Arc::new(AtomicUsize::new(16 * GIB));
+        let metered = Arc::clone(&usage);
+        governor.set_test_telemetry(move || {
+            let usage = metered.load(Ordering::Relaxed);
+            MemoryTelemetry {
+                total_ram_bytes: 32 * GIB,
+                phys_footprint_bytes: Some(usage),
+                vm: Some(HostVmStatistics {
+                    free_bytes: 8 * GIB,
+                    inactive_bytes: 2 * GIB,
+                    active_bytes: 8 * GIB,
+                    wired_bytes: 8 * GIB,
+                }),
+                mlx_active_bytes: Some(usage),
+                mlx_cache_bytes: Some(0),
+                metal_limit_bytes: Some(24 * GIB),
+            }
+        });
+        governor.refresh_process();
+        governor.refresh_process();
+        let mut scheduler =
+            Scheduler::<RecordingPrefillModel>::new(2, 32768, meta).expect("scheduler");
+        scheduler.enable_process_memory_governor(Arc::clone(&governor));
+        let prompt = 2_000;
+        let first = scheduler
+            .admit(mk_req((0..prompt as u32).collect()))
+            .expect("admit first");
+        let second = scheduler
+            .admit(mk_req((0..prompt as u32).collect()))
+            .expect("admit second");
+
+        // Usage that leaves room for one row's prefill, not for both at once.
+        let one = crate::core::process_memory::ProcessMemoryGovernor::prefill_chunk_growth(
+            prompt, 0, 1, &meta,
+        );
+        let both = crate::core::process_memory::ProcessMemoryGovernor::prefill_chunk_growth(
+            prompt, 0, 2, &meta,
+        );
+        let target = governor.reservation_target_bytes();
+        let reserved = governor.snapshot().reserved_bytes;
+        usage.store(target - reserved - (one + both) / 2, Ordering::Relaxed);
+        governor.refresh_process();
+        governor.refresh_process();
+
+        let events = scheduler
+            .prefill_admitted(&model)
+            .expect("a batch that does not fit is prefilled row by row");
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.error.is_none()));
+        assert!(events.iter().any(|event| event.id == first));
+        assert!(events.iter().any(|event| event.id == second));
+        assert!(
+            model.text_forward_batches().iter().all(|&batch| batch == 1),
+            "each row is prefilled alone: {:?}",
+            model.text_forward_batches()
+        );
+        assert_eq!(scheduler.active_count(), 2);
+    }
+
+    /// A Gemma4 target and drafter from `GEMMA4_LONG_CONTEXT_MODEL` and
+    /// `GEMMA4_LONG_CONTEXT_DRAFTER`, and a two-row scheduler whose governor
+    /// leaves room for one row's first prefill chunk but not for both at
+    /// once, and allows no smaller chunk. Both rows are admitted with prompts
+    /// of 2100 tokens.
+    fn gemma4_drafter_batch_that_does_not_fit() -> (
+        ironmlx_lm::models::Gemma4Model,
+        ironmlx_lm::models::gemma4::Gemma4AssistantModel,
+        Scheduler<ironmlx_lm::models::Gemma4Model>,
+        [RequestId; 2],
+    ) {
+        use crate::core::process_memory::{
+            HostVmStatistics, MemoryGovernorConfig, MemoryTelemetry, ProcessMemoryGovernor,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const GIB: usize = 1 << 30;
+        let open = |var: &str| {
+            ironmlx_lm::core::Loader::open(std::path::Path::new(
+                &std::env::var(var).unwrap_or_else(|_| panic!("{var} is required")),
+            ))
+            .expect("Loader::open")
+        };
+        let model =
+            ironmlx_lm::models::Gemma4Model::from_loader(&open("GEMMA4_LONG_CONTEXT_MODEL"))
+                .expect("Gemma4 target");
+        let drafter = ironmlx_lm::models::gemma4::Gemma4AssistantModel::from_loader(&open(
+            "GEMMA4_LONG_CONTEXT_DRAFTER",
+        ))
+        .expect("Gemma4 drafter");
+        let meta = model.model_meta();
+        let governor = Arc::new(
+            ProcessMemoryGovernor::new(MemoryGovernorConfig {
+                static_reserve_bytes: 4 * GIB,
+                minimum_prefill_chunk_tokens: 2_048,
+                ..MemoryGovernorConfig::default()
+            })
+            .expect("governor"),
+        );
+        let usage = Arc::new(AtomicUsize::new(16 * GIB));
+        let metered = Arc::clone(&usage);
+        governor.set_test_telemetry(move || {
+            let usage = metered.load(Ordering::Relaxed);
+            MemoryTelemetry {
+                total_ram_bytes: 32 * GIB,
+                phys_footprint_bytes: Some(usage),
+                vm: Some(HostVmStatistics {
+                    free_bytes: 8 * GIB,
+                    inactive_bytes: 2 * GIB,
+                    active_bytes: 8 * GIB,
+                    wired_bytes: 8 * GIB,
+                }),
+                mlx_active_bytes: Some(usage),
+                mlx_cache_bytes: Some(0),
+                metal_limit_bytes: Some(24 * GIB),
+            }
+        });
+        governor.refresh_process();
+        governor.refresh_process();
+        let mut scheduler = Scheduler::new(2, 4096, meta.clone()).expect("scheduler");
+        scheduler.enable_process_memory_governor(Arc::clone(&governor));
+        let prompt = 2_100_u32;
+        let ids = [0_u32, 1].map(|row| {
+            scheduler
+                .admit(mk_req(
+                    (0..prompt).map(|token| 1_000 + token + row).collect(),
+                ))
+                .expect("admit")
+        });
+        let chunk = 2_048;
+        let one = ProcessMemoryGovernor::prefill_chunk_growth(chunk, 0, 1, &meta);
+        let both = ProcessMemoryGovernor::prefill_chunk_growth(chunk, 0, 2, &meta);
+        let target = governor.reservation_target_bytes();
+        let reserved = governor.snapshot().reserved_bytes;
+        usage.store(target - reserved - (one + both) / 2, Ordering::Relaxed);
+        governor.refresh_process();
+        governor.refresh_process();
+        (model, drafter, scheduler, ids)
+    }
+
+    /// Run a Gemma4 drafter batch to the end; tokens per request.
+    fn finish_gemma4_drafter_batch(
+        scheduler: &mut Scheduler<ironmlx_lm::models::Gemma4Model>,
+        model: &ironmlx_lm::models::Gemma4Model,
+        drafter: &ironmlx_lm::models::gemma4::Gemma4AssistantModel,
+        mut events: Vec<StepEvent>,
+    ) -> HashMap<RequestId, Vec<u32>> {
+        let mut tokens: HashMap<RequestId, Vec<u32>> = HashMap::new();
+        loop {
+            for event in events {
+                if event.error.is_none() {
+                    tokens.entry(event.id).or_default().push(event.token);
+                }
+            }
+            if scheduler.phase() != Phase::Decoding {
+                return tokens;
+            }
+            events = scheduler
+                .step_gemma4_drafter_batch(model, drafter)
+                .expect("step");
+        }
+    }
+
+    #[test]
+    #[ignore = "needs GEMMA4_LONG_CONTEXT_MODEL and GEMMA4_LONG_CONTEXT_DRAFTER"]
+    #[serial(mlx_metal)]
+    fn gemma4_drafter_batch_that_does_not_fit_prefills_row_by_row() {
+        let (model, drafter, mut scheduler, ids) = gemma4_drafter_batch_that_does_not_fit();
+        let cfg = MtpSpeculativeConfig::new(4, Sampler::greedy()).expect("cfg");
+        let events = scheduler
+            .prefill_admitted_gemma4_drafter_batch(&model, &drafter, cfg)
+            .expect("a batch that does not fit is prefilled row by row");
+        assert!(events.iter().all(|event| event.error.is_none()));
+        let tokens = finish_gemma4_drafter_batch(&mut scheduler, &model, &drafter, events);
+        for id in ids {
+            assert!(
+                tokens.get(&id).is_some_and(|tokens| !tokens.is_empty()),
+                "request {} generated nothing",
+                id.0
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "needs GEMMA4_LONG_CONTEXT_MODEL and GEMMA4_LONG_CONTEXT_DRAFTER"]
+    #[serial(mlx_metal)]
+    fn gemma4_drafter_batch_refuses_only_the_row_that_does_not_fit() {
+        let (model, drafter, mut scheduler, [kept, refused]) =
+            gemma4_drafter_batch_that_does_not_fit();
+        let kept_charge = scheduler.slots[0].as_ref().unwrap().kv_bytes_admitted;
+        let cfg = MtpSpeculativeConfig::new(4, Sampler::greedy()).expect("cfg");
+        let _refuse = RefuseRowIsolatedPrefill::row(1);
+        let events = scheduler
+            .prefill_admitted_gemma4_drafter_batch(&model, &drafter, cfg)
+            .expect("one refused row does not fail the batch");
+        let refused_event = events.iter().find(|event| event.id == refused).unwrap();
+        assert!(matches!(
+            refused_event
+                .error
+                .as_ref()
+                .and_then(|error| error.scheduler_error),
+            Some(SchedulerError::PrefillPeakUnsafe { .. })
+        ));
+        assert!(!scheduler.poisoned);
+        assert_eq!(scheduler.active_count(), 1);
+        assert!(
+            scheduler.slots[1].is_none(),
+            "the refused row left its slot"
+        );
+        assert!(
+            scheduler.budget_state.active_bytes() >= kept_charge,
+            "the kept row is still charged"
+        );
+        let tokens = finish_gemma4_drafter_batch(&mut scheduler, &model, &drafter, events);
+        assert!(tokens.get(&kept).is_some_and(|tokens| !tokens.is_empty()));
+        assert!(!tokens.contains_key(&refused));
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn row_isolated_prefill_with_every_row_refused_leaves_a_clean_scheduler() {
+        let model = RecordingPrefillModel {
+            split_batched_prefill: true,
+            ..RecordingPrefillModel::default()
+        };
+        let mut scheduler = Scheduler::<RecordingPrefillModel>::new(
+            1,
+            32768,
+            crate::core::memory_budget::test_meta_qwen35(),
+        )
+        .expect("scheduler");
+        // A one-row batch keeps the established behaviour: the refusal is
+        // the prefill's error.
+        scheduler.admit(mk_req(vec![1, 2, 3])).expect("admit");
+        let _refuse = RefuseRowIsolatedPrefill::row(0);
+        let single = scheduler.prefill_admitted_row_isolated(&model, &[0]);
+        let events = single.expect("row-isolated prefill reports refusals as events");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].error.is_some());
+        assert_eq!(scheduler.active_count(), 0);
+        assert_eq!(scheduler.budget_state.active_bytes(), 0);
     }
 
     #[test]

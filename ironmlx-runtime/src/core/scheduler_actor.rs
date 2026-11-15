@@ -40,9 +40,9 @@ use crate::core::prompt_lookup::{
     PromptLookupQualificationRuntimeConfig, PromptLookupQualificationStats, PromptLookupStats,
 };
 use crate::core::scheduler::{
-    ActiveKvParkedRequest, AdmitMidHandle, Gemma4DrafterAdmitMidHandle, ImmutablePrefixBlockStats,
-    MtpAdmitMidHandle, PausedBackgroundRequest, Phase, PromptLookupMtpStepOutcome, RequestId,
-    Scheduler, StepEvent,
+    is_row_memory_refusal, ActiveKvParkedRequest, AdmitMidHandle, Gemma4DrafterAdmitMidHandle,
+    ImmutablePrefixBlockStats, MtpAdmitMidHandle, PausedBackgroundRequest, Phase,
+    PromptLookupMtpStepOutcome, RequestId, Scheduler, StepEvent,
 };
 use crate::core::speculative::{MtpSpeculativeConfig, MtpSpeculativeStats};
 use crate::core::speculative_qualification::{
@@ -746,21 +746,65 @@ fn prefill_admitted_route_and_optional_b1_pipeline<M, A>(
     mode: &mut A,
     counters: &SchedulerActorMtpCounters,
     can_prime_b1_pipeline: bool,
-    event_txs: &HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
 ) -> Result<usize>
 where
     M: Model + DenseVlMethods,
     A: SchedulerActorMtpMode<M>,
 {
-    let events = mode.prefill_admitted(sched, model, counters)?;
+    let events = match mode.prefill_admitted(sched, model, counters) {
+        Ok(events) => events,
+        Err(error) if is_row_memory_refusal(&error) => {
+            return refuse_prefill_batch(sched, &error, event_txs);
+        }
+        Err(error) => return Err(error),
+    };
     let event_count = events.len();
     for event in events {
+        // A row refused during a batched prefill has left the scheduler;
+        // its error is its last event.
+        let refused = event.error.is_some().then_some(event.id);
         route_event(event, event_txs);
+        if let Some(id) = refused {
+            event_txs.remove(&id);
+        }
     }
     if can_prime_b1_pipeline && mode.allow_b1_greedy_pipeline() {
         let _ = sched.prime_b1_greedy_pipeline(model)?;
     }
     Ok(event_count)
+}
+
+/// A prefill the memory guards refused as a whole fails only the requests of
+/// that batch. Queued requests have not been measured yet: they keep their
+/// place and get their own prefill. Returns the number of requests failed.
+fn refuse_prefill_batch<M>(
+    sched: &mut Scheduler<M>,
+    error: &anyhow::Error,
+    event_txs: &mut HashMap<RequestId, mpsc::UnboundedSender<StepEvent>>,
+) -> Result<usize>
+where
+    M: Model + DenseVlMethods,
+{
+    let ids: Vec<RequestId> = sched.active().iter().map(|state| state.id).collect();
+    sched.evict_all()?;
+    let failure = crate::core::scheduler::GenerationError::from_error(error);
+    for &id in &ids {
+        tracing::warn!(
+            request_id = id.0,
+            error = %format!("{error:#}"),
+            "prefill refused one request for lack of memory; queued requests keep their place"
+        );
+        if let Some(tx) = event_txs.remove(&id) {
+            let _ = tx.send(StepEvent {
+                id,
+                token: 0,
+                finish_reason: None,
+                error: Some(failure.clone()),
+            });
+        }
+    }
+    Ok(ids.len())
 }
 
 struct SchedulerActorNoMtp;
@@ -3727,7 +3771,7 @@ fn driver_loop<M, A>(
                 &mut mtp_mode,
                 &mtp_counters,
                 can_prime_b1_pipeline,
-                &event_txs,
+                &mut event_txs,
             )
         };
         match prefill_result {
@@ -7663,6 +7707,164 @@ pub(crate) mod tests {
             check(inner, prefill).await;
             std::fs::remove_dir_all(root).ok();
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial(mlx_metal)]
+    async fn prefill_refused_for_memory_fails_its_batch_and_keeps_the_queue() {
+        // Refuse the first prefill the way the peak guard does; later
+        // prefills run normally.
+        struct RefuseFirstPrefill {
+            inner: SchedulerActorNoMtp,
+            refused: bool,
+        }
+        impl SchedulerActorMtpMode<SchedulerActorFakeModel> for RefuseFirstPrefill {
+            type MidAdmitHandle = <SchedulerActorNoMtp as SchedulerActorMtpMode<
+                SchedulerActorFakeModel,
+            >>::MidAdmitHandle;
+            fn mid_admit_request_id(handle: &Self::MidAdmitHandle) -> RequestId {
+                <SchedulerActorNoMtp as SchedulerActorMtpMode<SchedulerActorFakeModel>>::mid_admit_request_id(handle)
+            }
+            fn mid_admit_chunk_start(handle: &Self::MidAdmitHandle) -> i32 {
+                <SchedulerActorNoMtp as SchedulerActorMtpMode<SchedulerActorFakeModel>>::mid_admit_chunk_start(handle)
+            }
+            fn mid_admit_prompt_len(handle: &Self::MidAdmitHandle) -> i32 {
+                <SchedulerActorNoMtp as SchedulerActorMtpMode<SchedulerActorFakeModel>>::mid_admit_prompt_len(handle)
+            }
+            fn mid_admit_chunk_size(handle: &Self::MidAdmitHandle) -> i32 {
+                <SchedulerActorNoMtp as SchedulerActorMtpMode<SchedulerActorFakeModel>>::mid_admit_chunk_size(handle)
+            }
+            fn set_mid_admit_chunk_size(handle: &mut Self::MidAdmitHandle, chunk_size: i32) {
+                <SchedulerActorNoMtp as SchedulerActorMtpMode<SchedulerActorFakeModel>>::set_mid_admit_chunk_size(handle, chunk_size);
+            }
+            fn mid_admit_decode_cadence_mid_chunk_cap(handle: &Self::MidAdmitHandle) -> usize {
+                <SchedulerActorNoMtp as SchedulerActorMtpMode<SchedulerActorFakeModel>>::mid_admit_decode_cadence_mid_chunk_cap(handle)
+            }
+            fn prefill_admitted(
+                &mut self,
+                sched: &mut Scheduler<SchedulerActorFakeModel>,
+                model: &SchedulerActorFakeModel,
+                counters: &SchedulerActorMtpCounters,
+            ) -> Result<Vec<StepEvent>> {
+                if !self.refused {
+                    self.refused = true;
+                    return Err(anyhow::Error::new(
+                        crate::core::scheduler::SchedulerError::PrefillPeakUnsafe {
+                            requested_tokens: 1,
+                            selected_tokens: 0,
+                            target_bytes: 0,
+                        },
+                    ));
+                }
+                self.inner.prefill_admitted(sched, model, counters)
+            }
+            fn step(
+                &mut self,
+                sched: &mut Scheduler<SchedulerActorFakeModel>,
+                model: &SchedulerActorFakeModel,
+                counters: &SchedulerActorMtpCounters,
+                admission_pending: bool,
+            ) -> Result<Vec<StepEvent>> {
+                self.inner.step(sched, model, counters, admission_pending)
+            }
+            fn begin_mid_admit(
+                &mut self,
+                sched: &mut Scheduler<SchedulerActorFakeModel>,
+                model: &SchedulerActorFakeModel,
+                request: GenerateRequest,
+            ) -> Result<Self::MidAdmitHandle> {
+                self.inner.begin_mid_admit(sched, model, request)
+            }
+            fn advance_mid_admit_chunk(
+                &mut self,
+                sched: &mut Scheduler<SchedulerActorFakeModel>,
+                model: &SchedulerActorFakeModel,
+                handle: &mut Self::MidAdmitHandle,
+            ) -> Result<bool> {
+                self.inner.advance_mid_admit_chunk(sched, model, handle)
+            }
+            fn finalize_mid_admit(
+                &mut self,
+                sched: &mut Scheduler<SchedulerActorFakeModel>,
+                model: &SchedulerActorFakeModel,
+                handle: Self::MidAdmitHandle,
+                counters: &SchedulerActorMtpCounters,
+            ) -> Result<(RequestId, StepEvent)> {
+                self.inner
+                    .finalize_mid_admit(sched, model, handle, counters)
+            }
+        }
+
+        configure_local_test_metallib();
+        // Two rows fill the first batch; the third request arrives inside the
+        // admission window and waits in the queue.
+        let handle = spawn_scheduler_actor_with_mode(
+            Arc::new(Mutex::new(SchedulerActorFakeModel)),
+            RefuseFirstPrefill {
+                inner: SchedulerActorNoMtp,
+                refused: false,
+            },
+            2,
+            Duration::from_millis(300),
+            4,
+            32,
+            256,
+            crate::core::memory_budget::test_meta_qwen35(),
+            None,
+            None,
+            AdaptiveAdmissionPolicy::disabled(),
+            ActiveKvOffloadConfig::disabled(),
+        )
+        .unwrap();
+        let mut replies = Vec::new();
+        for token in [3, 4, 5] {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let mut request = mk_req(token);
+            request.stop_token_ids.clear();
+            request.max_new_tokens = 4;
+            handle
+                .cmd_tx
+                .send(SchedulerCommand::Admit { request, reply_tx })
+                .await
+                .unwrap();
+            replies.push(reply_rx);
+        }
+        let mut outcomes = Vec::new();
+        for reply_rx in replies {
+            let reply = tokio::time::timeout(Duration::from_secs(5), reply_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            let Ok(mut reply) = reply else {
+                outcomes.push("queued request rejected".to_owned());
+                continue;
+            };
+            let mut tokens = 0;
+            let outcome = loop {
+                let event = tokio::time::timeout(Duration::from_secs(5), reply.event_rx.recv())
+                    .await
+                    .unwrap()
+                    .expect("terminal event");
+                if let Some(error) = event.error {
+                    assert!(matches!(
+                        error.scheduler_error,
+                        Some(crate::core::scheduler::SchedulerError::PrefillPeakUnsafe { .. })
+                    ));
+                    break "refused".to_owned();
+                }
+                tokens += 1;
+                if event.finish_reason.is_some() {
+                    break format!("finished after {tokens} tokens");
+                }
+            };
+            outcomes.push(outcome);
+        }
+        assert_eq!(
+            outcomes,
+            ["refused", "refused", "finished after 4 tokens"],
+            "the refusal fails the batch it hit; the queued request still runs"
+        );
+        wait_for_scheduler_resources_to_be_released(&handle).await;
     }
 
     #[test]
