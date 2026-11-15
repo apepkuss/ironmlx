@@ -255,7 +255,7 @@ pub fn gemma4_shared_kv_from_cache_on(
                 "Gemma4 drafter shared KV restore: layer {idx} restored batch must be 1"
             ));
         }
-        states.insert(cfg.layer_kind(idx), SharedKv { keys, values });
+        states.insert(cfg.layer_kind(idx), SharedKv::new(keys, values));
     }
 
     for idx in 0..cfg.num_hidden_layers as usize {
@@ -517,7 +517,7 @@ fn stack_shared_kv_kind_on(
     let value_refs = value_rows.iter().collect::<Vec<_>>();
     let keys = mlx::ops::shape::concatenate_on(&key_refs[..], 0, target)?;
     let values = mlx::ops::shape::concatenate_on(&value_refs[..], 0, target)?;
-    Ok(Some((SharedKv { keys, values }, lens)))
+    Ok(Some((SharedKv::new(keys, values), lens)))
 }
 
 fn validate_shared_kv_dims(
@@ -756,7 +756,7 @@ fn slice_shared_kv_row_range_on(
         &[1_i32, 1, 1, 1][..],
         target,
     )?;
-    Ok(SharedKv { keys, values })
+    Ok(SharedKv::new(keys, values))
 }
 
 #[cfg(test)]
@@ -1086,12 +1086,9 @@ mod tests {
         let mut states = Gemma4SharedKvStates::default();
         states.insert(
             Gemma4LayerKind::Sliding,
-            SharedKv {
-                keys: keys.clone(),
-                values: values.clone(),
-            },
+            SharedKv::new(keys.clone(), values.clone()),
         );
-        states.insert(Gemma4LayerKind::Full, SharedKv { keys, values });
+        states.insert(Gemma4LayerKind::Full, SharedKv::new(keys, values));
         states
     }
 
@@ -1263,21 +1260,9 @@ mod tests {
             .try_into()
             .expect("values1");
         let mut row0 = Gemma4SharedKvStates::default();
-        row0.insert(
-            Gemma4LayerKind::Full,
-            SharedKv {
-                keys: keys0,
-                values: values0,
-            },
-        );
+        row0.insert(Gemma4LayerKind::Full, SharedKv::new(keys0, values0));
         let mut row1 = Gemma4SharedKvStates::default();
-        row1.insert(
-            Gemma4LayerKind::Full,
-            SharedKv {
-                keys: keys1,
-                values: values1,
-            },
-        );
+        row1.insert(Gemma4LayerKind::Full, SharedKv::new(keys1, values1));
 
         let (stacked, lens) =
             stack_shared_kv_kind_for_test(&[&row0, &row1], Gemma4LayerKind::Full, ().into())
@@ -1302,7 +1287,7 @@ mod tests {
             .try_into()
             .expect("values");
         let mut states = Gemma4SharedKvStates::default();
-        states.insert(Gemma4LayerKind::Sliding, SharedKv { keys, values });
+        states.insert(Gemma4LayerKind::Sliding, SharedKv::new(keys, values));
         let batched = BatchedSharedKvStates {
             states,
             sliding_lens: Some(vec![5]),

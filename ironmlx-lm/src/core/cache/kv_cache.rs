@@ -10,7 +10,7 @@ use mlx::ops::shape::concatenate_on;
 use mlx::{Array, Dtype, StreamOrDevice};
 
 use super::{
-    PagedKVCache, PagedKvBlockOwner, PagedKvHotColdConfig, PagedKvHotColdSummary,
+    PagedDecodeView, PagedKVCache, PagedKvBlockOwner, PagedKvHotColdConfig, PagedKvHotColdSummary,
     PagedKvImmutableBlockHandle, PagedKvPhysicalStats, PagedPrefixLayer, TurboQuantKVBits,
     TurboQuantKVCache, TurboQuantPrefixLayer,
 };
@@ -1219,6 +1219,35 @@ impl KVCache {
         window: Option<i32>,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Option<Array>> {
+        Ok(self
+            .try_update_and_attend_decode_with_view_on(
+                queries,
+                k,
+                v,
+                per_row_lens,
+                scale,
+                mask_arr,
+                window,
+                target,
+            )?
+            .map(|(out, _)| out))
+    }
+
+    /// [`Self::try_update_and_attend_decode_window_on`] that also returns,
+    /// for the paged kernel, the view of the pages it read (see
+    /// [`PagedKVCache::update_and_attend_decode_with_view_on`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_update_and_attend_decode_with_view_on(
+        &mut self,
+        queries: &Array,
+        k: &Array,
+        v: &Array,
+        per_row_lens: &[i32],
+        scale: f32,
+        mask_arr: Option<&Array>,
+        window: Option<i32>,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Option<(Array, Option<PagedDecodeView>)>> {
         if self.paged.is_some()
             && self.supports_paged_decode_attention(queries, k, v, per_row_lens, mask_arr)
         {
@@ -1226,29 +1255,19 @@ impl KVCache {
                 Some(paged) => paged,
                 None => unreachable!("paged cache presence checked before decode dispatch"),
             };
-            let target = target.into();
-            return match window {
-                None => Ok(Some(paged.update_and_attend_decode_on(
-                    queries,
-                    k,
-                    v,
-                    &mut self.offsets,
-                    per_row_lens,
-                    scale,
-                    target,
-                )?)),
-                Some(_) if paged.has_hot_cold_tiering() => Ok(None),
-                Some(window) => Ok(Some(paged.update_and_attend_decode_window_on(
-                    queries,
-                    k,
-                    v,
-                    &mut self.offsets,
-                    per_row_lens,
-                    window,
-                    scale,
-                    target,
-                )?)),
-            };
+            if window.is_some() && paged.has_hot_cold_tiering() {
+                return Ok(None);
+            }
+            return Ok(Some(paged.update_and_attend_decode_with_view_on(
+                queries,
+                k,
+                v,
+                &mut self.offsets,
+                per_row_lens,
+                window,
+                scale,
+                target,
+            )?));
         }
 
         if self.turboquant.is_none()
@@ -1263,7 +1282,7 @@ impl KVCache {
             .turboquant
             .as_mut()
             .expect("checked turboquant is some");
-        Ok(Some(tq.update_and_attend_decode_on(
+        let out = tq.update_and_attend_decode_on(
             queries,
             k,
             v,
@@ -1273,7 +1292,8 @@ impl KVCache {
             mask_arr,
             output_dtype,
             target,
-        )?))
+        )?;
+        Ok(Some((out, None)))
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context};
 use mlx::{Array, StreamOrDevice};
 use std::time::Instant;
 
-use crate::core::cache::KVCache;
+use crate::core::cache::{KVCache, PagedDecodeView};
 use crate::core::Loader;
 use crate::nn::{Linear, RmsNorm};
 use crate::Result;
@@ -13,10 +13,40 @@ use super::profile;
 use super::quant_fusion::{fused_quant_compatibility, FusedQuantCompatibility};
 use super::rope::{Gemma4Rope, RopeOffsets};
 
+/// The K/V a layer hands to the layers that reuse it.
+///
+/// After a paged decode step it may also carry the view of the pages the
+/// owning layer attended to: a reusing layer then attends through it to the
+/// same positions. When the caller did not ask for dense K/V, `keys` and
+/// `values` then hold only this step's position, and `dense` is false.
 #[derive(Clone)]
 pub struct SharedKv {
     pub keys: Array,
     pub values: Array,
+    paged: Option<PagedDecodeView>,
+    dense: bool,
+}
+
+impl SharedKv {
+    pub fn new(keys: Array, values: Array) -> Self {
+        Self {
+            keys,
+            values,
+            paged: None,
+            dense: true,
+        }
+    }
+
+    /// The same K/V without the paged view, so that holding it does not keep
+    /// the page pool referenced past this step.
+    pub fn without_paged_view(&self) -> Self {
+        Self {
+            keys: self.keys.clone(),
+            values: self.values.clone(),
+            paged: None,
+            dense: self.dense,
+        }
+    }
 }
 
 struct ProjectedQkv {
@@ -337,6 +367,7 @@ impl Gemma4Attention {
         offsets: &RopeOffsets,
         shared_kv: Option<&SharedKv>,
         cache: Option<&mut KVCache>,
+        dense_kv: bool,
         target: impl Into<StreamOrDevice>,
     ) -> Result<(Array, SharedKv)> {
         let target = target.into();
@@ -406,6 +437,19 @@ impl Gemma4Attention {
         let mut cached_attention_out: Option<Array> = None;
         let kv = match shared_kv {
             Some(kv) => {
+                // Decode reads the owning layer's pages directly; dense K/V
+                // would copy every cached position out first.
+                let paged_view = kv.paged.as_ref().filter(|_| {
+                    seq == 1 && per_row_lens.is_none_or(|lens| lens.iter().all(|&n| n == 1))
+                });
+                if let Some(view) = paged_view {
+                    cached_attention_out = Some(view.attend_on(&q, 1.0, target)?);
+                } else if !kv.dense {
+                    return Err(anyhow!(
+                        "Gemma4Attention: layer {} cannot attend through the shared paged K/V (seq={seq})",
+                        self.layer_idx
+                    ));
+                }
                 profile::log_layer(
                     "gemma4_attn_kv_reuse",
                     self.layer_idx,
@@ -464,7 +508,7 @@ impl Gemma4Attention {
                     profile,
                 )?;
 
-                let (keys, values) = match cache {
+                let kv = match cache {
                     Some(c) => {
                         let t0 = Instant::now();
                         let lens_owned;
@@ -475,14 +519,19 @@ impl Gemma4Attention {
                                 &lens_owned
                             }
                         };
+                        let mut paged_view = None;
                         let maybe_cached_out = if c.paged().is_some() {
                             // The paged kernel does not read `mask`: a
                             // sliding layer tells it the window instead.
                             let window = (self.layer_kind == Gemma4LayerKind::Sliding)
                                 .then_some(self.sliding_window);
-                            c.try_update_and_attend_decode_window_on(
+                            c.try_update_and_attend_decode_with_view_on(
                                 &q, &k, &v, lens, 1.0, mask, window, target,
                             )?
+                            .map(|(out, view)| {
+                                paged_view = view;
+                                out
+                            })
                         } else if stable_verify_attention
                             && !query_isolated
                             && !segment_stable_sliding
@@ -494,7 +543,15 @@ impl Gemma4Attention {
                         } else {
                             None
                         };
-                        let (keys, values) = if maybe_cached_out.is_some() {
+                        // Copying the pages out costs a graph node per page
+                        // even when nothing reads the result: skip it unless
+                        // the caller wants dense K/V or reusing layers have
+                        // no view to read through.
+                        let view_only =
+                            maybe_cached_out.is_some() && !dense_kv && paged_view.is_some();
+                        let (keys, values) = if view_only {
+                            (k.clone(), v.clone())
+                        } else if maybe_cached_out.is_some() {
                             if c.paged().is_some() {
                                 c.materialize_current_paged_prefix_on(target)?
                             } else {
@@ -519,11 +576,16 @@ impl Gemma4Attention {
                             t0,
                             profile,
                         )?;
-                        (keys, values)
+                        SharedKv {
+                            keys,
+                            values,
+                            paged: paged_view,
+                            dense: !view_only,
+                        }
                     }
-                    None => (k, v),
+                    None => SharedKv::new(k, v),
                 };
-                SharedKv { keys, values }
+                kv
             }
         };
         profile::eval_layer(
@@ -1219,7 +1281,7 @@ fn slice_shared_kv_tail_on(
         &[1_i32, 1, 1, 1][..],
         target,
     )?;
-    Ok(SharedKv { keys, values })
+    Ok(SharedKv::new(keys, values))
 }
 
 fn slice_attention_mask_tail_on(
@@ -1301,7 +1363,7 @@ mod tests {
 
         let out = query_isolated_full_attention_on(
             &queries,
-            &SharedKv { keys, values },
+            &SharedKv::new(keys, values),
             None,
             Some(&[2, 1]),
             &[1, 2],
@@ -1335,10 +1397,7 @@ mod tests {
 
         let out = query_isolated_full_attention_on(
             &queries,
-            &SharedKv {
-                keys: keys.clone(),
-                values: values.clone(),
-            },
+            &SharedKv::new(keys.clone(), values.clone()),
             Some(&mask),
             Some(&[2]),
             &[1],
@@ -1411,10 +1470,7 @@ mod tests {
 
         let cap1 = segment_stable_sliding_attention_on(
             &cap1_queries,
-            &SharedKv {
-                keys: cap1_keys.clone(),
-                values: cap1_keys,
-            },
+            &SharedKv::new(cap1_keys.clone(), cap1_keys),
             None,
             &[511],
             512,
@@ -1423,10 +1479,7 @@ mod tests {
         .unwrap();
         let cap2 = segment_stable_sliding_attention_on(
             &cap2_queries,
-            &SharedKv {
-                keys: cap2_keys.clone(),
-                values: cap2_keys,
-            },
+            &SharedKv::new(cap2_keys.clone(), cap2_keys),
             None,
             &[511],
             512,
@@ -1456,10 +1509,7 @@ mod tests {
         let keys = mlx::ops::shape::concatenate_on(&[&row_keys, &row_keys], 0, ()).unwrap();
         let full = row_isolated_causal_attention_on(
             &queries,
-            &SharedKv {
-                keys: keys.clone(),
-                values: keys.clone(),
-            },
+            &SharedKv::new(keys.clone(), keys.clone()),
             None,
             Some(&[2, 2]),
             &[511, 511],
@@ -1472,10 +1522,7 @@ mod tests {
 
         let padded = row_isolated_causal_attention_on(
             &queries,
-            &SharedKv {
-                keys: keys.clone(),
-                values: keys,
-            },
+            &SharedKv::new(keys.clone(), keys),
             None,
             Some(&[2, 0]),
             &[511, 511],

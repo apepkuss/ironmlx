@@ -148,6 +148,7 @@ impl Gemma4DecoderLayer {
         offsets: &RopeOffsets,
         shared_kv: Option<&SharedKv>,
         cache: Option<&mut LayerCache>,
+        dense_kv: bool,
         target: impl Into<StreamOrDevice>,
         mut stage_trace: Option<&mut Vec<Array>>,
     ) -> Result<(Array, SharedKv)> {
@@ -188,6 +189,7 @@ impl Gemma4DecoderLayer {
             offsets,
             shared_kv,
             kv_cache,
+            dense_kv,
             target,
         )?;
         push_last(&mut stage_trace, &attn, target)?;

@@ -224,6 +224,7 @@ impl Gemma4TextModel {
             per_row_lens,
             image_blocks,
             cache,
+            true,
             target,
             None,
         )
@@ -247,6 +248,7 @@ impl Gemma4TextModel {
                 per_row_lens,
                 image_blocks,
                 cache,
+                false,
                 target,
                 layer_last_trace,
             )?
@@ -261,6 +263,7 @@ impl Gemma4TextModel {
         per_row_lens: Option<&[i32]>,
         image_blocks: Option<&[Vec<(i32, i32)>]>,
         mut cache: Option<&mut [LayerCache]>,
+        keep_shared_kv: bool,
         target: StreamOrDevice,
         mut layer_last_trace: Option<&mut Vec<Array>>,
     ) -> Result<Gemma4TextForwardOutput> {
@@ -404,6 +407,7 @@ impl Gemma4TextModel {
                 &offsets,
                 shared,
                 cache_cell,
+                keep_shared_kv,
                 target,
                 None,
             )?;
@@ -419,7 +423,9 @@ impl Gemma4TextModel {
             if let Some(trace) = layer_last_trace.as_deref_mut() {
                 trace.push(slice_last_token(&x, target)?);
             }
-            shared_kv.insert(layer_kind, kv.clone());
+            if keep_shared_kv {
+                shared_kv.insert(layer_kind, kv.without_paged_view());
+            }
             intermediates[idx] = Some(kv);
         }
         let t0 = Instant::now();
@@ -446,8 +452,18 @@ impl Gemma4TextModel {
             let layer_kind = self.cfg.layer_kind(idx);
             let mask = masks.get(layer_kind);
             let kv = shared_kv.require(layer_kind)?;
-            let (next, _) =
-                layer.forward_on(&x, mask, None, None, &offsets, Some(kv), None, target, None)?;
+            let (next, _) = layer.forward_on(
+                &x,
+                mask,
+                None,
+                None,
+                &offsets,
+                Some(kv),
+                None,
+                true,
+                target,
+                None,
+            )?;
             x = next;
         }
         self.norm.forward_on(&x, target)
@@ -482,8 +498,18 @@ impl Gemma4TextModel {
             let layer_kind = self.cfg.layer_kind(idx);
             let mask = masks.get(layer_kind);
             let kv = shared_kv.require(layer_kind)?;
-            let (next, _) =
-                layer.forward_on(&x, mask, None, None, &offsets, Some(kv), None, target, None)?;
+            let (next, _) = layer.forward_on(
+                &x,
+                mask,
+                None,
+                None,
+                &offsets,
+                Some(kv),
+                None,
+                true,
+                target,
+                None,
+            )?;
             x = next;
         }
         self.norm.forward_on(&x, target)
@@ -567,6 +593,7 @@ impl Gemma4TextModel {
             &offsets,
             None,
             None,
+            true,
             target,
             Some(&mut trace),
         )?;

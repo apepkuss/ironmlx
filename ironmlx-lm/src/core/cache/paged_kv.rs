@@ -1161,18 +1161,17 @@ impl PagedKVCache {
         scale: f32,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
-        let target = target.into();
-        self.validate_decode_inputs(queries, k, v, offsets, per_row_lens)?;
-        self.append_on_inner(k, v, offsets, per_row_lens, target, false)?;
-        if self.needs_hot_cold_streaming(offsets) {
-            if self.try_stage_hot_cold_context_for_paged_decode(offsets, target)? {
-                let out = self.paged_decode_attention_on(queries, offsets, scale, target)?;
-                self.enforce_hot_window_if_over_resident_budget(offsets, target)?;
-                return Ok(out);
-            }
-            return self.streaming_decode_attention_on(queries, offsets, scale, target);
-        }
-        self.paged_decode_attention_on(queries, offsets, scale, target)
+        let (out, _) = self.update_and_attend_decode_with_view_on(
+            queries,
+            k,
+            v,
+            offsets,
+            per_row_lens,
+            None,
+            scale,
+            target,
+        )?;
+        Ok(out)
     }
 
     /// Whether hot/cold tiering is enabled: decode may then stream cold
@@ -1196,29 +1195,72 @@ impl PagedKVCache {
         scale: f32,
         target: impl Into<StreamOrDevice>,
     ) -> Result<Array> {
-        anyhow::ensure!(
-            window > 0 && self.hot_cold.is_none(),
-            "PagedKVCache::update_and_attend_decode_window_on: window={window}, hot/cold tiering={}",
-            self.hot_cold.is_some()
-        );
-        let target = target.into();
-        self.validate_decode_inputs(queries, k, v, offsets, per_row_lens)?;
-        self.append_on_inner(k, v, offsets, per_row_lens, target, false)?;
-        self.windowed_decode_attention_on(queries, offsets, window, scale, target)
+        let (out, _) = self.update_and_attend_decode_with_view_on(
+            queries,
+            k,
+            v,
+            offsets,
+            per_row_lens,
+            Some(window),
+            scale,
+            target,
+        )?;
+        Ok(out)
     }
 
-    /// Attention over each row's last `window` positions. The kernel gets
-    /// only the pages the window touches, in a table of fixed width: its
-    /// cost and its compiled shape then depend on the window, not on how
-    /// much the cache holds.
-    fn windowed_decode_attention_on(
-        &self,
+    /// Appends one position per row and attends to the cache: to every
+    /// position, or with `window` to each row's last `window`. Also returns
+    /// the view the kernel read, so layers that share this layer's K/V can
+    /// attend to the same pages; `None` when hot/cold tiering streamed cold
+    /// pages or may evict them after this step.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_and_attend_decode_with_view_on(
+        &mut self,
         queries: &Array,
-        offsets: &[i32],
-        window: i32,
+        k: &Array,
+        v: &Array,
+        offsets: &mut [i32],
+        per_row_lens: &[i32],
+        window: Option<i32>,
         scale: f32,
-        target: StreamOrDevice,
-    ) -> Result<Array> {
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Array, Option<PagedDecodeView>)> {
+        let target = target.into();
+        if let Some(window) = window {
+            anyhow::ensure!(
+                window > 0 && self.hot_cold.is_none(),
+                "PagedKVCache::update_and_attend_decode_window_on: window={window}, hot/cold tiering={}",
+                self.hot_cold.is_some()
+            );
+        }
+        self.validate_decode_inputs(queries, k, v, offsets, per_row_lens)?;
+        self.append_on_inner(k, v, offsets, per_row_lens, target, false)?;
+        if let Some(window) = window {
+            let view = self.windowed_decode_view(offsets, window)?;
+            let out = view.attend_on(queries, scale, target)?;
+            return Ok((out, Some(view)));
+        }
+        if self.needs_hot_cold_streaming(offsets) {
+            if self.try_stage_hot_cold_context_for_paged_decode(offsets, target)? {
+                let out = self
+                    .full_decode_view(offsets)?
+                    .attend_on(queries, scale, target)?;
+                self.enforce_hot_window_if_over_resident_budget(offsets, target)?;
+                return Ok((out, None));
+            }
+            let out = self.streaming_decode_attention_on(queries, offsets, scale, target)?;
+            return Ok((out, None));
+        }
+        let view = self.full_decode_view(offsets)?;
+        let out = view.attend_on(queries, scale, target)?;
+        let view = self.hot_cold.is_none().then_some(view);
+        Ok((out, view))
+    }
+
+    /// The pages each row's last `window` positions touch, in a table of
+    /// fixed width: the kernel's cost and its compiled shape then depend on
+    /// the window, not on how much the cache holds.
+    fn windowed_decode_view(&self, offsets: &[i32], window: i32) -> Result<PagedDecodeView> {
         let block_size = self.block_size;
         // A window that starts inside a page spills one page over.
         let columns = (ceil_div(window, block_size) + 1) as usize;
@@ -1243,38 +1285,18 @@ impl PagedKVCache {
         let table: Array = (table.as_slice(), &[self.batch, columns as i32][..]).try_into()?;
         let lengths: Array = (lengths.as_slice(), &[self.batch][..]).try_into()?;
         let starts: Array = (starts.as_slice(), &[self.batch][..]).try_into()?;
-        let k_pages = self.k_pages.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "PagedKVCache::update_and_attend_decode_window_on: K pages are unallocated"
-            )
-        })?;
-        let v_pages = self.v_pages.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "PagedKVCache::update_and_attend_decode_window_on: V pages are unallocated"
-            )
-        })?;
-        Ok(
-            mlx::fast::paged_scaled_dot_product_attention_decode_from_on(
-                queries,
-                k_pages,
-                v_pages,
-                &table,
-                &lengths,
-                Some(&starts),
-                scale,
-                block_size,
-                target,
-            )?,
-        )
+        let (k_pages, v_pages) = self.decode_pages("update_and_attend_decode_window_on")?;
+        Ok(PagedDecodeView {
+            k_pages,
+            v_pages,
+            block_table: table,
+            lengths,
+            starts: Some(starts),
+            block_size,
+        })
     }
 
-    fn paged_decode_attention_on(
-        &self,
-        queries: &Array,
-        offsets: &[i32],
-        scale: f32,
-        target: StreamOrDevice,
-    ) -> Result<Array> {
+    fn full_decode_view(&self, offsets: &[i32]) -> Result<PagedDecodeView> {
         let max_blocks = offsets
             .iter()
             .map(|&off| ceil_div(off, self.block_size))
@@ -1286,24 +1308,28 @@ impl PagedKVCache {
         } else {
             self.block_table_array(max_blocks)?
         };
-        let lengths_vec = offsets.to_vec();
-        let lengths: Array = (lengths_vec.as_slice(), &[self.batch][..]).try_into()?;
-        let k_pages = self.k_pages.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("PagedKVCache::update_and_attend_decode_on: K pages are unallocated")
-        })?;
-        let v_pages = self.v_pages.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("PagedKVCache::update_and_attend_decode_on: V pages are unallocated")
-        })?;
-        Ok(mlx::fast::paged_scaled_dot_product_attention_decode_on(
-            queries,
+        let lengths: Array = (offsets, &[self.batch][..]).try_into()?;
+        let (k_pages, v_pages) = self.decode_pages("update_and_attend_decode_on")?;
+        Ok(PagedDecodeView {
             k_pages,
             v_pages,
-            &block_table,
-            &lengths,
-            scale,
-            self.block_size,
-            target,
-        )?)
+            block_table,
+            lengths,
+            starts: None,
+            block_size: self.block_size,
+        })
+    }
+
+    fn decode_pages(&self, caller: &str) -> Result<(Array, Array)> {
+        let k_pages = self
+            .k_pages
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("PagedKVCache::{caller}: K pages are unallocated"))?;
+        let v_pages = self
+            .v_pages
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("PagedKVCache::{caller}: V pages are unallocated"))?;
+        Ok((k_pages.clone(), v_pages.clone()))
     }
 
     fn streaming_prefill_attention_on(
@@ -5555,5 +5581,44 @@ mod tests {
             &expected.to_vec::<f32>().unwrap(),
             1.0e-4,
         );
+    }
+}
+
+/// What one decode step's paged attention read: the pages, the table of the
+/// pages each row attends to, and the rows' lengths (and window starts).
+/// Layers that reuse another layer's K/V attend through it to the same
+/// positions without copying the pages out.
+#[derive(Clone)]
+pub struct PagedDecodeView {
+    k_pages: Array,
+    v_pages: Array,
+    block_table: Array,
+    lengths: Array,
+    starts: Option<Array>,
+    block_size: i32,
+}
+
+impl PagedDecodeView {
+    /// Decode attention of `queries` `[B, Hq, 1, D]` over the viewed
+    /// positions.
+    pub fn attend_on(
+        &self,
+        queries: &Array,
+        scale: f32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        Ok(
+            mlx::fast::paged_scaled_dot_product_attention_decode_from_on(
+                queries,
+                &self.k_pages,
+                &self.v_pages,
+                &self.block_table,
+                &self.lengths,
+                self.starts.as_ref(),
+                scale,
+                self.block_size,
+                target,
+            )?,
+        )
     }
 }
