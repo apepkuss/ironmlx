@@ -3,8 +3,8 @@
 //! Three scenarios (see spec § 5.2):
 //!   A. `b1_p2_3b_1_b2_happy`     — B=2 mixed-length prompts, both same
 //!                                  `max_new_tokens`. Verify each row's
-//!                                  tokens match B=1 baseline argmax
-//!                                  bit-id ≥ 0.95.
+//!                                  tokens match the B=1 baseline (see
+//!                                  `assert_matches_baseline`).
 //!   B. `b1_p2_3b_1_b4_happy`     — B=4 (Task 4).
 //!   C. `b1_p2_3b_1_mixed_finish` — B=2 with unequal `max_new_tokens`
 //!                                  (Task 4).
@@ -17,6 +17,8 @@
 use std::path::Path;
 
 use ironmlx_core::sampler::Sampler;
+use ironmlx_lm::core::model::Model;
+use ironmlx_lm::core::model_input::build_position_ids;
 use ironmlx_lm::core::Loader;
 use ironmlx_lm::core::Message;
 use ironmlx_lm::core::Tokenizer;
@@ -26,23 +28,94 @@ use ironmlx_runtime::core::generation_types::GenerateRequest;
 use ironmlx_runtime::core::scheduler::Phase;
 use ironmlx_runtime::core::scheduler::Scheduler;
 
-// Lowered from 0.95 to 0.80 post-P5a: generic Scheduler<M> + GenerationStream<M>
-// monomorphization changed LLVM IR ordering, causing deterministic bf16 drift
-// at decode positions 13-15 of the longer prompt (row B). Underlying behavior
-// is correct; observed bit_id was 0.8125. Gate kept tight enough to catch
-// real regressions (would expect <0.5 for actual bugs).
-const ARGMAX_BITID_GATE: f64 = 0.80;
+/// A batched row and its B=1 baseline may part at a greedy near-tie: batch
+/// width changes the bf16 arithmetic, and two candidates a spacing or two
+/// apart swap order. Up to this many bf16 spacings (at the logits'
+/// magnitude) between the two tokens counts as a near-tie.
+const NEAR_TIE_BF16_SPACINGS: f32 = 2.0;
 
-/// Argmax bit-id ratio between two token streams. Returns the fraction
-/// of positions where both streams emit the same token, computed over
-/// `min(a.len(), b.len())` positions.
-fn argmax_bit_id_ratio(a: &[u32], b: &[u32]) -> f64 {
-    let n = a.len().min(b.len());
-    if n == 0 {
-        return 0.0;
+/// Distance between neighbouring bf16 values around `x`.
+fn bf16_spacing(x: f32) -> f32 {
+    2_f32.powi(x.abs().max(f32::MIN_POSITIVE).log2().floor() as i32 - 7)
+}
+
+/// B=1 logits for the token after `prompt` + `generated`, computed the way
+/// the baseline decodes: prefill the prompt, then one token at a time.
+fn next_token_logits(model: &Qwen35Model, prompt: &[u32], generated: &[u32]) -> Vec<f32> {
+    let p = i32::try_from(prompt.len()).expect("prompt length");
+    let total = p + i32::try_from(generated.len()).expect("generated length");
+    let mut cache = model
+        .make_cache(1, total + 8, model.cache_dtype())
+        .expect("make_cache");
+    let ids: mlx::Array = (prompt, &[1_i32, p][..]).try_into().expect("prompt ids");
+    let mut logits = model
+        .forward_on(
+            &ids,
+            &build_position_ids(0, p).expect("positions"),
+            Some(&[p]),
+            None,
+            Some(&mut cache),
+            (),
+        )
+        .expect("prefill");
+    for (offset, &token) in generated.iter().enumerate() {
+        let position = p + i32::try_from(offset).expect("offset");
+        let one: mlx::Array = (&[token][..], &[1_i32, 1][..])
+            .try_into()
+            .expect("token id");
+        logits = model
+            .forward_on(
+                &one,
+                &build_position_ids(position, 1).expect("position"),
+                Some(&[1]),
+                None,
+                Some(&mut cache),
+                (),
+            )
+            .expect("decode");
     }
-    let same = a.iter().zip(b.iter()).filter(|(x, y)| x == y).count();
-    same as f64 / n as f64
+    mlx::ops::cast::astype(&logits, mlx::Dtype::Float32)
+        .expect("cast")
+        .to_vec()
+        .expect("logits")
+}
+
+/// The scheduler's tokens for a row must equal the B=1 baseline up to the
+/// shorter stream's end, or up to a first divergence at a near-tie, after
+/// which the two continuations are no longer comparable.
+fn assert_matches_baseline(
+    model: &Qwen35Model,
+    label: &str,
+    prompt: &[u32],
+    got: &[u32],
+    want: &[u32],
+) {
+    assert!(!got.is_empty(), "{label}: scheduler produced no tokens");
+    let Some(k) = got.iter().zip(want).position(|(a, b)| a != b) else {
+        println!(
+            "{label}: identical to the baseline over {} tokens",
+            got.len().min(want.len())
+        );
+        return;
+    };
+    let logits = next_token_logits(model, prompt, &want[..k]);
+    let top = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let gap = (logits[got[k] as usize] - logits[want[k] as usize]).abs();
+    let spacing = bf16_spacing(top);
+    println!(
+        "{label}: diverges at token {k} ({} vs baseline {}): logits {:.4} vs {:.4}, top {top:.4}, \
+         gap {gap:.4} = {:.1} bf16 spacings",
+        got[k],
+        want[k],
+        logits[got[k] as usize],
+        logits[want[k] as usize],
+        gap / spacing
+    );
+    assert!(
+        gap <= NEAR_TIE_BF16_SPACINGS * spacing,
+        "{label}: tokens part at {k} where the candidates are {gap:.4} apart \
+         (more than {NEAR_TIE_BF16_SPACINGS} bf16 spacings of {spacing}); not a near-tie"
+    );
 }
 
 /// Tokenize a prompt with the chat template applied (enable_thinking=false).
@@ -218,31 +291,23 @@ fn b1_p2_3b_1_b2_happy() {
     assert_eq!(sched.phase(), Phase::Finished);
 
     // 3. Compare against baselines.
-    let ratio_a = argmax_bit_id_ratio(&tokens_a, &baseline_a);
-    let ratio_b = argmax_bit_id_ratio(&tokens_b, &baseline_b);
-    println!(
-        "[b2_happy] row_a: scheduler={} baseline={} bit_id={:.4}",
-        tokens_a.len(),
-        baseline_a.len(),
-        ratio_a
-    );
-    println!(
-        "[b2_happy] row_b: scheduler={} baseline={} bit_id={:.4}",
-        tokens_b.len(),
-        baseline_b.len(),
-        ratio_b
-    );
     println!("[b2_happy] scheduler_a tokens={:?}", tokens_a);
     println!("[b2_happy] scheduler_b tokens={:?}", tokens_b);
     println!("[b2_happy] baseline_a  tokens={:?}", baseline_a);
     println!("[b2_happy] baseline_b  tokens={:?}", baseline_b);
-    assert!(
-        ratio_a >= ARGMAX_BITID_GATE,
-        "row A argmax bit-id {ratio_a:.4} below gate {ARGMAX_BITID_GATE}"
+    assert_matches_baseline(
+        &model,
+        "[b2_happy] row A",
+        &prompt_a_ids,
+        &tokens_a,
+        &baseline_a,
     );
-    assert!(
-        ratio_b >= ARGMAX_BITID_GATE,
-        "row B argmax bit-id {ratio_b:.4} below gate {ARGMAX_BITID_GATE}"
+    assert_matches_baseline(
+        &model,
+        "[b2_happy] row B",
+        &prompt_b_ids,
+        &tokens_b,
+        &baseline_b,
     );
 
     // 4. Cache reuse: evict_all → Idle, then admit + prefill again.
@@ -383,19 +448,14 @@ fn b1_p2_3b_1_b4_happy() {
     }
     assert_eq!(sched.phase(), Phase::Finished);
 
-    // 3. Compare per-row bit-id.
+    // 3. Compare each row against its baseline.
     for (i, (got, want)) in tokens.iter().zip(baselines.iter()).enumerate() {
-        let ratio = argmax_bit_id_ratio(got, want);
-        println!(
-            "[b4_happy] row {}: scheduler={} baseline={} bit_id={:.4}",
-            i,
-            got.len(),
-            want.len(),
-            ratio
-        );
-        assert!(
-            ratio >= ARGMAX_BITID_GATE,
-            "row {i} argmax bit-id {ratio:.4} below gate {ARGMAX_BITID_GATE}"
+        assert_matches_baseline(
+            &model,
+            &format!("[b4_happy] row {i}"),
+            &prompt_ids[i],
+            got,
+            want,
         );
     }
 
@@ -413,7 +473,7 @@ fn b1_p2_3b_1_mixed_finish() {
     let tokenizer = Tokenizer::from_loader(&loader).expect("Tokenizer::from_loader");
 
     // Same prompt for both rows to isolate the mixed-finish effect on
-    // emission timing (the bit-id comparison still works per-row).
+    // emission timing (each row is still compared with its own baseline).
     let prompt = "Describe a sunny day.";
     let prompt_ids = tokenize_prompt(&tokenizer, prompt);
 
@@ -548,25 +608,22 @@ fn b1_p2_3b_1_mixed_finish() {
         events_b
     );
 
-    // Per-row bit-id parity (only valid up to whichever ends first).
+    // Each row against its baseline (only valid up to whichever ends first).
     let tokens_a: Vec<u32> = events_a.iter().map(|(t, _)| *t).collect();
     let tokens_b: Vec<u32> = events_b.iter().map(|(t, _)| *t).collect();
-    let ratio_a = argmax_bit_id_ratio(&tokens_a, &baseline_a);
-    let ratio_b = argmax_bit_id_ratio(&tokens_b, &baseline_b);
-    println!(
-        "[mixed_finish] A bit_id={:.4} ({} tokens) B bit_id={:.4} ({} tokens)",
-        ratio_a,
-        tokens_a.len(),
-        ratio_b,
-        tokens_b.len()
+    assert_matches_baseline(
+        &model,
+        "[mixed_finish] row A",
+        &prompt_ids,
+        &tokens_a,
+        &baseline_a,
     );
-    assert!(
-        ratio_a >= ARGMAX_BITID_GATE,
-        "row A bit-id {ratio_a:.4} below gate"
-    );
-    assert!(
-        ratio_b >= ARGMAX_BITID_GATE,
-        "row B bit-id {ratio_b:.4} below gate"
+    assert_matches_baseline(
+        &model,
+        "[mixed_finish] row B",
+        &prompt_ids,
+        &tokens_b,
+        &baseline_b,
     );
 
     sched.evict_all().expect("evict_all");
