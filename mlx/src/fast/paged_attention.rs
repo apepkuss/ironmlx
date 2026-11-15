@@ -1,371 +1,185 @@
-use std::{sync::OnceLock, time::Instant};
+use std::sync::OnceLock;
 
-use crate::ops::unary::softmax_on;
 use crate::{Array, Dtype, Error, Result, Shape, StreamOrDevice};
 
 use super::MetalKernel;
 
 const PAGED_SDPA_DECODE_SIMD_WIDTH: i32 = 32;
 const PAGED_SDPA_DECODE_MAX_VALUES_PER_THREAD: i32 = 32;
-const PAGED_SDPA_PARALLEL_DECODE_SEQ_THRESHOLD: i32 = 128;
-const PAGED_QK_SIMDGROUPS_PER_THREADGROUP: i32 = 4;
-const PAGED_QK_POSITIONS_PER_SIMDGROUP: i32 = 8;
-const PAGED_V_CHUNK_SIZE: i32 = 256;
-const PAGED_V_DIMS_PER_THREADGROUP: i32 = 16;
-const PAGED_V_Q_HEADS_PER_GROUP: i32 = 4;
+/// Query heads one threadgroup serves; even one head per simdgroup stays within 1024 threads.
+const PAGED_SDPA_MAX_HEADS_PER_THREADGROUP: i32 = 32;
+/// Query heads one simdgroup keeps in registers and serves from one load.
+const PAGED_SDPA_MAX_HEADS_PER_SIMDGROUP: i32 = 2;
+/// Fewest positions a split covers.
+const PAGED_SDPA_MIN_SPLIT_LEN: i32 = 32;
+/// Split the sequence until the first pass has about this many threadgroups.
+const PAGED_SDPA_TARGET_THREADGROUPS: i32 = 256;
+/// Simdgroups that share one query head's splits in the second pass.
+const PAGED_SDPA_REDUCE_SIMDGROUPS: i32 = 8;
 
-#[derive(Clone, Copy)]
-struct PagedAttnProfileEvent<'a> {
-    stage: &'a str,
-    elapsed_us: u128,
-    batch: i32,
-    q_heads: i32,
-    kv_heads: i32,
-    seq_len: i32,
-    head_dim: i32,
-    block_size: i32,
-    max_blocks: i32,
-    v_chunks: i32,
-}
-
-fn format_paged_attn_profile_line(event: PagedAttnProfileEvent<'_>) -> String {
-    format!(
-        "{{\"event\":\"paged_attn_stage\",\"stage\":\"{}\",\"elapsed_us\":{},\"batch\":{},\"q_heads\":{},\"kv_heads\":{},\"seq_len\":{},\"head_dim\":{},\"block_size\":{},\"max_blocks\":{},\"v_chunks\":{}}}",
-        event.stage,
-        event.elapsed_us,
-        event.batch,
-        event.q_heads,
-        event.kv_heads,
-        event.seq_len,
-        event.head_dim,
-        event.block_size,
-        event.max_blocks,
-        event.v_chunks,
-    )
-}
-
-#[derive(Clone, Copy)]
-struct PagedAttnProfile {
-    enabled: bool,
-    batch: i32,
-    q_heads: i32,
-    kv_heads: i32,
-    seq_len: i32,
-    head_dim: i32,
-    block_size: i32,
-    max_blocks: i32,
-    v_chunks: i32,
-}
-
-impl PagedAttnProfile {
-    fn for_shape(shape: DecodeShape) -> Self {
-        let seq_len = shape.max_seq_len();
-        let v_chunks = (seq_len + PAGED_V_CHUNK_SIZE - 1) / PAGED_V_CHUNK_SIZE;
-        Self {
-            enabled: std::env::var_os("IRONMLX_PAGED_ATTN_PROFILE").is_some(),
-            batch: shape.batch,
-            q_heads: shape.q_heads,
-            kv_heads: shape.kv_heads,
-            seq_len,
-            head_dim: shape.head_dim,
-            block_size: shape.block_size,
-            max_blocks: shape.max_blocks,
-            v_chunks,
-        }
-    }
-
-    fn start(self) -> Option<Instant> {
-        self.enabled.then(Instant::now)
-    }
-
-    fn eval_stage(
-        self,
-        stage: &'static str,
-        arrays: &[&Array],
-        start: Option<Instant>,
-    ) -> Result<()> {
-        let Some(start) = start else {
-            return Ok(());
-        };
-        crate::transforms::eval(arrays)?;
-        eprintln!(
-            "{}",
-            format_paged_attn_profile_line(PagedAttnProfileEvent {
-                stage,
-                elapsed_us: start.elapsed().as_micros(),
-                batch: self.batch,
-                q_heads: self.q_heads,
-                kv_heads: self.kv_heads,
-                seq_len: self.seq_len,
-                head_dim: self.head_dim,
-                block_size: self.block_size,
-                max_blocks: self.max_blocks,
-                v_chunks: self.v_chunks,
-            })
-        );
-        Ok(())
-    }
-}
-
-const PAGED_SDPA_DECODE_SOURCE: &str = r#"
-uint group_idx = threadgroup_position_in_grid.x;
+/// First pass: each threadgroup reads one KV head's keys and values over one
+/// split of the positions, and each simdgroup keeps `HEADS_PER_SG` query
+/// heads of that KV head in registers, so a key/value row it loads serves all
+/// of them. Every head runs an online softmax; the pass writes the
+/// unnormalized weighted sum with the split's max score and exp-sum.
+const PAGED_SDPA_SPLIT_SOURCE: &str = r#"
+#define DIM_OK(d) (CONTIGUOUS || (d) < uint(HEAD_DIM))
+#define LANE_DIM(lane, i) (CONTIGUOUS ? (lane) * uint(VALUES_PER_THREAD) + (i) : (lane) + (i) * 32)
+uint tg = threadgroup_position_in_grid.x;
+uint sg = simdgroup_index_in_threadgroup;
 uint lane = thread_index_in_simdgroup;
+uint max_blocks = uint(params[0]);
+uint splits = uint(params[1]);
+uint split_len = uint(params[2]);
 
-uint q_head = group_idx % uint(H_Q);
-uint batch = group_idx / uint(H_Q);
-uint q_group = uint(H_Q / H_KV);
-uint kv_head = q_head / q_group;
-uint q_base = ((batch * uint(H_Q) + q_head) * uint(HEAD_DIM));
+uint split = tg % splits;
+uint rest = tg / splits;
+uint head_group = rest % uint(HEAD_GROUPS);
+rest = rest / uint(HEAD_GROUPS);
+uint kv_head = rest % uint(H_KV);
+uint batch = rest / uint(H_KV);
+uint first_row = batch * uint(H_Q) + kv_head * uint(Q_PER_KV)
+    + head_group * uint(HEADS_PER_TG) + sg * uint(HEADS_PER_SG);
 
 int len_i = lengths[batch];
-thread float acc[VALUES_PER_THREAD];
-#pragma clang loop unroll(full)
-for (uint i = 0; i < uint(VALUES_PER_THREAD); ++i) {
-    acc[i] = 0.0f;
-}
-
-if (len_i <= 0) {
-    #pragma clang loop unroll(full)
-    for (uint i = 0; i < uint(VALUES_PER_THREAD); ++i) {
-        uint d = lane + i * uint(SIMD_WIDTH);
-        if (d < uint(HEAD_DIM)) {
-            out[q_base + d] = static_cast<__typeof__(*out)>(0.0f);
-        }
-    }
-    return;
-}
-
-uint len = uint(len_i);
+uint len = len_i > 0 ? uint(len_i) : 0;
 int start_i = starts[batch];
-uint start = start_i > 0 ? min(uint(start_i), len - 1) : 0;
+uint start = (start_i > 0 && len > 0) ? min(uint(start_i), len - 1) : 0;
+uint s0 = max(start, split * split_len);
+uint s1 = min(len, split * split_len + split_len);
+
 float scale = float(scale_arr[0]);
-float max_value = -3.4028234663852886e38f;
-float denom_value = 0.0f;
+thread float q[HEADS_PER_SG][VALUES_PER_THREAD];
+thread float o[HEADS_PER_SG][VALUES_PER_THREAD];
+thread float max_score[HEADS_PER_SG];
+thread float sum_exp[HEADS_PER_SG];
+#pragma clang loop unroll(full)
+for (uint h = 0; h < uint(HEADS_PER_SG); ++h) {
+    #pragma clang loop unroll(full)
+    for (uint i = 0; i < uint(VALUES_PER_THREAD); ++i) {
+        uint d = LANE_DIM(lane, i);
+        q[h][i] = DIM_OK(d)
+            ? scale * float(queries[(first_row + h) * uint(HEAD_DIM) + d])
+            : 0.0f;
+        o[h][i] = 0.0f;
+    }
+    max_score[h] = -3.4028234663852886e38f;
+    sum_exp[h] = 0.0f;
+}
 
-for (uint t = start; t < len; ++t) {
+uint t = s0;
+while (t < s1) {
     uint block_col = t / uint(BLOCK_SIZE);
-    uint in_block = t - block_col * uint(BLOCK_SIZE);
-    int page_i = block_table[batch * uint(MAX_BLOCKS) + block_col];
-    uint page = uint(page_i);
-    uint k_base = (((page * uint(H_KV) + kv_head) * uint(BLOCK_SIZE) + in_block) * uint(HEAD_DIM));
-
-    float dot = 0.0f;
-    #pragma clang loop unroll(full)
-    for (uint i = 0; i < uint(VALUES_PER_THREAD); ++i) {
-        uint d = lane + i * uint(SIMD_WIDTH);
-        if (d < uint(HEAD_DIM)) {
-            dot += float(queries[q_base + d]) * float(k_pages[k_base + d]);
-        }
-    }
-
-    float score = simd_sum(dot) * scale;
-    float old_max = max_value;
-    float new_max = max(old_max, score);
-    float rescale_value = exp(old_max - new_max);
-    float weight_value = exp(score - new_max);
-    denom_value = denom_value * rescale_value + weight_value;
-    max_value = new_max;
-
-    uint v_base = (((page * uint(H_KV) + kv_head) * uint(BLOCK_SIZE) + in_block) * uint(HEAD_DIM));
-    #pragma clang loop unroll(full)
-    for (uint i = 0; i < uint(VALUES_PER_THREAD); ++i) {
-        uint d = lane + i * uint(SIMD_WIDTH);
-        if (d < uint(HEAD_DIM)) {
-            acc[i] = acc[i] * rescale_value + weight_value * float(v_pages[v_base + d]);
-        }
-    }
-}
-
-float safe_denom = denom_value > 1.0e-20f ? denom_value : 1.0f;
-#pragma clang loop unroll(full)
-for (uint i = 0; i < uint(VALUES_PER_THREAD); ++i) {
-    uint d = lane + i * uint(SIMD_WIDTH);
-    if (d < uint(HEAD_DIM)) {
-        out[q_base + d] = static_cast<__typeof__(*out)>(acc[i] / safe_denom);
-    }
-}
-"#;
-
-const PAGED_SDPA_QK_DECODE_SOURCE: &str = r#"
-uint tile_idx = threadgroup_position_in_grid.y;
-uint sgid = simdgroup_index_in_threadgroup;
-uint lane = thread_index_in_simdgroup;
-uint block_idx = tile_idx * uint(QK_SIMDGROUPS) + sgid;
-uint blocks_per_head = (uint(MAX_SEQ_LEN) + uint(QK_POSITIONS_PER_SIMDGROUP) - 1) / uint(QK_POSITIONS_PER_SIMDGROUP);
-uint total_blocks = uint(BATCH) * uint(H_Q) * blocks_per_head;
-if (block_idx >= total_blocks) {
-    return;
-}
-
-uint pos_block = block_idx % blocks_per_head;
-uint q_head = (block_idx / blocks_per_head) % uint(H_Q);
-uint batch = block_idx / (blocks_per_head * uint(H_Q));
-uint q_group = uint(H_Q / H_KV);
-uint kv_head = q_head / q_group;
-uint pos_base = pos_block * uint(QK_POSITIONS_PER_SIMDGROUP);
-uint q_base = (batch * uint(H_Q) + q_head) * uint(HEAD_DIM);
-int len_i = lengths[batch];
-uint len = len_i > 0 ? uint(len_i) : 0;
-int start_i = starts[batch];
-uint start = (start_i > 0 && len > 0) ? min(uint(start_i), len - 1) : 0;
-
-thread float acc[QK_POSITIONS_PER_SIMDGROUP];
-#pragma clang loop unroll(full)
-for (uint i = 0; i < uint(QK_POSITIONS_PER_SIMDGROUP); ++i) {
-    acc[i] = 0.0f;
-}
-
-for (uint dim = lane; dim < uint(HEAD_DIM); dim += 32) {
-    float q_value = float(queries[q_base + dim]);
-    #pragma clang loop unroll(full)
-    for (uint i = 0; i < uint(QK_POSITIONS_PER_SIMDGROUP); ++i) {
-        uint pos = pos_base + i;
-        if (pos >= start && pos < len) {
-            uint block_col = pos / uint(BLOCK_SIZE);
-            uint in_block = pos - block_col * uint(BLOCK_SIZE);
-            int page_i = block_table[batch * uint(MAX_BLOCKS) + block_col];
-            if (page_i >= 0) {
-                uint page = uint(page_i);
-                uint k_base = (((page * uint(H_KV) + kv_head) * uint(BLOCK_SIZE) + in_block) * uint(HEAD_DIM));
-                acc[i] += q_value * float(k_pages[k_base + dim]);
-            }
-        }
-    }
-}
-
-thread float score_acc[QK_POSITIONS_PER_SIMDGROUP];
-#pragma clang loop unroll(full)
-for (uint i = 0; i < uint(QK_POSITIONS_PER_SIMDGROUP); ++i) {
-    score_acc[i] = simd_sum(acc[i]);
-}
-
-if (lane == 0) {
-    float scale = float(scale_arr[0]);
-    #pragma clang loop unroll(full)
-    for (uint i = 0; i < uint(QK_POSITIONS_PER_SIMDGROUP); ++i) {
-        uint pos = pos_base + i;
-        if (pos < uint(MAX_SEQ_LEN)) {
-            float score = -3.4028234663852886e38f;
-            if (pos >= start && pos < len) {
-                score = score_acc[i] * scale;
-            } else if (len_i <= 0 && pos == 0) {
-                score = 0.0f;
-            }
-            uint score_idx = ((batch * uint(H_Q) + q_head) * uint(MAX_SEQ_LEN) + pos);
-            scores[score_idx] = score;
-        }
-    }
-}
-"#;
-
-const PAGED_SDPA_WEIGHTED_V_CHUNK_SOURCE: &str = r#"
-uint group_idx = threadgroup_position_in_grid.x;
-uint lid = thread_index_in_threadgroup;
-uint sgid = simdgroup_index_in_threadgroup;
-uint lane = thread_index_in_simdgroup;
-
-uint dim_group = group_idx % uint(V_DIM_GROUPS);
-uint chunk = (group_idx / uint(V_DIM_GROUPS)) % uint(V_CHUNKS);
-uint q_group = (group_idx / (uint(V_DIM_GROUPS) * uint(V_CHUNKS))) % uint(Q_GROUPS_PER_KV);
-uint kv_head = (group_idx / (uint(V_DIM_GROUPS) * uint(V_CHUNKS) * uint(Q_GROUPS_PER_KV))) % uint(H_KV);
-uint batch = group_idx / (uint(V_DIM_GROUPS) * uint(V_CHUNKS) * uint(Q_GROUPS_PER_KV) * uint(H_KV));
-uint pos = chunk * uint(V_CHUNK_SIZE) + lid;
-uint dim_base = dim_group * uint(V_DIMS_PER_GROUP);
-uint q_base_offset = q_group * uint(V_Q_HEADS_PER_GROUP);
-
-threadgroup float scratch[V_Q_HEADS_PER_GROUP * V_DIMS_PER_GROUP * V_CHUNK_SIMDGROUPS];
-thread float acc[V_Q_HEADS_PER_GROUP * V_DIMS_PER_GROUP];
-#pragma clang loop unroll(full)
-for (uint q = 0; q < uint(V_Q_HEADS_PER_GROUP); ++q) {
-    #pragma clang loop unroll(full)
-    for (uint i = 0; i < uint(V_DIMS_PER_GROUP); ++i) {
-        acc[q * uint(V_DIMS_PER_GROUP) + i] = 0.0f;
-    }
-}
-
-int len_i = lengths[batch];
-uint len = len_i > 0 ? uint(len_i) : 0;
-int start_i = starts[batch];
-uint start = (start_i > 0 && len > 0) ? min(uint(start_i), len - 1) : 0;
-if (pos >= start && pos < len) {
-    uint block_col = pos / uint(BLOCK_SIZE);
-    uint in_block = pos - block_col * uint(BLOCK_SIZE);
-    int page_i = block_table[batch * uint(MAX_BLOCKS) + block_col];
+    uint block_end = min(s1, (block_col + 1) * uint(BLOCK_SIZE));
+    int page_i = block_table[batch * max_blocks + block_col];
     if (page_i >= 0) {
-        uint page = uint(page_i);
-        uint v_base = (((page * uint(H_KV) + kv_head) * uint(BLOCK_SIZE) + in_block) * uint(HEAD_DIM));
-        #pragma clang loop unroll(full)
-        for (uint i = 0; i < uint(V_DIMS_PER_GROUP); ++i) {
-            uint dim = dim_base + i;
-            if (dim < uint(HEAD_DIM)) {
-                float v_value = float(v_pages[v_base + dim]);
+        uint base = ((uint(page_i) * uint(H_KV) + kv_head) * uint(BLOCK_SIZE)
+            + (t - block_col * uint(BLOCK_SIZE))) * uint(HEAD_DIM);
+        for (uint p = t; p < block_end; ++p, base += uint(HEAD_DIM)) {
+            float k_reg[VALUES_PER_THREAD];
+            float v_reg[VALUES_PER_THREAD];
+            #pragma clang loop unroll(full)
+            for (uint i = 0; i < uint(VALUES_PER_THREAD); ++i) {
+                uint d = LANE_DIM(lane, i);
+                k_reg[i] = DIM_OK(d) ? float(k_pages[base + d]) : 0.0f;
+            }
+            #pragma clang loop unroll(full)
+            for (uint i = 0; i < uint(VALUES_PER_THREAD); ++i) {
+                uint d = LANE_DIM(lane, i);
+                v_reg[i] = DIM_OK(d) ? float(v_pages[base + d]) : 0.0f;
+            }
+            #pragma clang loop unroll(full)
+            for (uint h = 0; h < uint(HEADS_PER_SG); ++h) {
+                float dot = 0.0f;
                 #pragma clang loop unroll(full)
-                for (uint q = 0; q < uint(V_Q_HEADS_PER_GROUP); ++q) {
-                    uint q_offset = q_base_offset + q;
-                    if (q_offset < uint(Q_PER_KV)) {
-                        uint q_head = kv_head * uint(Q_PER_KV) + q_offset;
-                        uint weight_idx = ((batch * uint(H_Q) + q_head) * uint(MAX_SEQ_LEN) + pos);
-                        float weight = float(weights[weight_idx]);
-                        acc[q * uint(V_DIMS_PER_GROUP) + i] = weight * v_value;
-                    }
+                for (uint i = 0; i < uint(VALUES_PER_THREAD); ++i) {
+                    dot += q[h][i] * k_reg[i];
+                }
+                float score = simd_sum(dot);
+                float new_max = max(max_score[h], score);
+                float factor = exp(max_score[h] - new_max);
+                float weight = exp(score - new_max);
+                max_score[h] = new_max;
+                sum_exp[h] = sum_exp[h] * factor + weight;
+                #pragma clang loop unroll(full)
+                for (uint i = 0; i < uint(VALUES_PER_THREAD); ++i) {
+                    o[h][i] = o[h][i] * factor + weight * v_reg[i];
                 }
             }
         }
     }
+    t = block_end;
 }
 
 #pragma clang loop unroll(full)
-for (uint q = 0; q < uint(V_Q_HEADS_PER_GROUP); ++q) {
+for (uint h = 0; h < uint(HEADS_PER_SG); ++h) {
+    uint part_row = (first_row + h) * splits + split;
     #pragma clang loop unroll(full)
-    for (uint i = 0; i < uint(V_DIMS_PER_GROUP); ++i) {
-        float simd_acc = simd_sum(acc[q * uint(V_DIMS_PER_GROUP) + i]);
-        if (lane == 0) {
-            uint scratch_idx = ((q * uint(V_DIMS_PER_GROUP) + i) * uint(V_CHUNK_SIMDGROUPS) + sgid);
-            scratch[scratch_idx] = simd_acc;
+    for (uint i = 0; i < uint(VALUES_PER_THREAD); ++i) {
+        uint d = LANE_DIM(lane, i);
+        if (DIM_OK(d)) {
+            partials[part_row * uint(HEAD_DIM) + d] = o[h][i];
         }
     }
+    if (lane == 0) {
+        maxs[part_row] = max_score[h];
+        sums[part_row] = sum_exp[h];
+    }
+}
+"#;
+
+/// Second pass: one threadgroup per query head and 32 dimensions. Each
+/// simdgroup rescales a strided subset of the splits to the global max (one
+/// dimension per lane), then simdgroup 0 adds them up and normalizes. A row
+/// with no positions yields zeros.
+const PAGED_SDPA_REDUCE_SOURCE: &str = r#"
+uint tg = threadgroup_position_in_grid.x;
+uint sg = simdgroup_index_in_threadgroup;
+uint lane = thread_index_in_simdgroup;
+uint splits = uint(params[1]);
+uint dim_groups = (uint(HEAD_DIM) + 31) / 32;
+uint row = tg / dim_groups;
+uint d = (tg % dim_groups) * 32 + lane;
+uint base = row * splits;
+
+float global_max = -3.4028234663852886e38f;
+for (uint s = lane; s < splits; s += 32) {
+    global_max = max(global_max, maxs[base + s]);
+}
+global_max = simd_max(global_max);
+
+float denom = 0.0f;
+float acc = 0.0f;
+for (uint s = sg; s < splits; s += uint(REDUCE_SIMDGROUPS)) {
+    float split_sum = sums[base + s];
+    if (split_sum > 0.0f) {
+        float w = exp(maxs[base + s] - global_max);
+        denom += w * split_sum;
+        if (d < uint(HEAD_DIM)) {
+            acc += w * partials[(base + s) * uint(HEAD_DIM) + d];
+        }
+    }
+}
+
+threadgroup float acc_sh[REDUCE_SIMDGROUPS * 32];
+threadgroup float denom_sh[REDUCE_SIMDGROUPS];
+acc_sh[sg * 32 + lane] = acc;
+if (lane == 0) {
+    denom_sh[sg] = denom;
 }
 threadgroup_barrier(mem_flags::mem_threadgroup);
-
-if (sgid == 0) {
-    #pragma clang loop unroll(full)
-    for (uint q = 0; q < uint(V_Q_HEADS_PER_GROUP); ++q) {
-        uint q_offset = q_base_offset + q;
-        if (q_offset < uint(Q_PER_KV)) {
-            uint q_head = kv_head * uint(Q_PER_KV) + q_offset;
-            #pragma clang loop unroll(full)
-            for (uint i = 0; i < uint(V_DIMS_PER_GROUP); ++i) {
-                uint dim = dim_base + i;
-                if (dim < uint(HEAD_DIM)) {
-                    uint scratch_idx = ((q * uint(V_DIMS_PER_GROUP) + i) * uint(V_CHUNK_SIMDGROUPS) + lane);
-                    float chunk_acc = lane < uint(V_CHUNK_SIMDGROUPS) ? scratch[scratch_idx] : 0.0f;
-                    chunk_acc = simd_sum(chunk_acc);
-                    if (lane == 0) {
-                        uint partial_idx = (((batch * uint(H_Q) + q_head) * uint(V_CHUNKS) + chunk) * uint(HEAD_DIM) + dim);
-                        v_partial[partial_idx] = chunk_acc;
-                    }
-                }
-            }
-        }
+if (sg == 0) {
+    float total = 0.0f;
+    float total_denom = 0.0f;
+    for (uint i = 0; i < uint(REDUCE_SIMDGROUPS); ++i) {
+        total += acc_sh[i * 32 + lane];
+        total_denom += denom_sh[i];
+    }
+    if (d < uint(HEAD_DIM)) {
+        out[row * uint(HEAD_DIM) + d] =
+            static_cast<__typeof__(*out)>(total_denom > 0.0f ? total / total_denom : 0.0f);
     }
 }
-"#;
-
-const PAGED_SDPA_WEIGHTED_V_REDUCE_SOURCE: &str = r#"
-uint group_idx = threadgroup_position_in_grid.x;
-uint lid = thread_index_in_threadgroup;
-
-uint q_head = group_idx % uint(H_Q);
-uint batch = group_idx / uint(H_Q);
-
-float acc = 0.0f;
-for (uint chunk = 0; chunk < uint(V_CHUNKS); ++chunk) {
-    uint partial_idx = (((batch * uint(H_Q) + q_head) * uint(V_CHUNKS) + chunk) * uint(HEAD_DIM) + lid);
-    acc += float(v_partial[partial_idx]);
-}
-
-uint out_base = ((batch * uint(H_Q) + q_head) * uint(HEAD_DIM));
-out[out_base + lid] = static_cast<__typeof__(*out)>(acc);
 "#;
 
 /// Decode-only paged scaled dot-product attention.
@@ -456,22 +270,7 @@ pub fn paged_scaled_dot_product_attention_decode_from_on(
             &zeros
         }
     };
-    let target = target.into();
-    if shape.max_seq_len() >= PAGED_SDPA_PARALLEL_DECODE_SEQ_THRESHOLD {
-        return paged_scaled_dot_product_attention_decode_parallel_on(
-            queries,
-            k_pages,
-            v_pages,
-            block_table,
-            lengths,
-            starts,
-            scale,
-            shape,
-            target,
-        );
-    }
-
-    paged_scaled_dot_product_attention_decode_serial_on(
+    paged_scaled_dot_product_attention_decode_split_on(
         queries,
         k_pages,
         v_pages,
@@ -480,12 +279,12 @@ pub fn paged_scaled_dot_product_attention_decode_from_on(
         starts,
         scale,
         shape,
-        target,
+        target.into(),
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-fn paged_scaled_dot_product_attention_decode_serial_on(
+fn paged_scaled_dot_product_attention_decode_split_on(
     queries: &Array,
     k_pages: &Array,
     v_pages: &Array,
@@ -496,167 +295,169 @@ fn paged_scaled_dot_product_attention_decode_serial_on(
     shape: DecodeShape,
     target: StreamOrDevice,
 ) -> Result<Array> {
-    let profile = PagedAttnProfile::for_shape(shape);
+    let q_per_kv = shape.q_heads / shape.kv_heads;
+    let heads_per_tg = heads_per_threadgroup(q_per_kv);
+    let head_groups = q_per_kv / heads_per_tg;
+    let heads_per_sg = heads_per_simdgroup(heads_per_tg);
+    let simdgroups = heads_per_tg / heads_per_sg;
+    let plan = SplitPlan::new(
+        shape.batch * shape.kv_heads * head_groups,
+        shape.max_seq_len(),
+    );
     let scale_arr: Array = (&[scale][..], (1_i32,)).try_into()?;
-    let kernel = cached_paged_sdpa_decode_kernel()?;
-    let output_shape = Shape::from((shape.batch, shape.q_heads, 1_i32, shape.head_dim));
-    let serial_start = profile.start();
-    let mut outputs = kernel
-        .dispatch_builder()
-        .inputs(&[
-            queries,
-            k_pages,
-            v_pages,
-            block_table,
-            lengths,
-            starts,
-            &scale_arr,
-        ])
-        .output_shapes(&[output_shape])
-        .output_dtypes(&[queries.dtype()])
-        .grid(
-            shape.batch * shape.q_heads * PAGED_SDPA_DECODE_SIMD_WIDTH,
-            1,
-            1,
-        )
-        .threadgroup(PAGED_SDPA_DECODE_SIMD_WIDTH, 1, 1)
-        .template_int("BATCH", shape.batch)
-        .template_int("H_Q", shape.q_heads)
-        .template_int("H_KV", shape.kv_heads)
-        .template_int("HEAD_DIM", shape.head_dim)
-        .template_int("SIMD_WIDTH", PAGED_SDPA_DECODE_SIMD_WIDTH)
-        .template_int("VALUES_PER_THREAD", shape.values_per_thread)
-        .template_int("BLOCK_SIZE", shape.block_size)
-        .template_int("MAX_BLOCKS", shape.max_blocks)
-        .stream(target)
-        .dispatch()?;
+    let params: Array = (
+        &[shape.max_blocks, plan.splits, plan.split_len][..],
+        (3_i32,),
+    )
+        .try_into()?;
+    let rows = shape.batch * shape.q_heads;
+    let threadgroups = shape.batch * shape.kv_heads * head_groups * plan.splits;
 
-    let output = outputs.take_at(0)?;
-    profile.eval_stage("serial", &[&output], serial_start)?;
-    Ok(output)
+    let mut split_outputs = cached_kernel(
+        &SPLIT_KERNEL,
+        "mlx_fast_paged_sdpa_decode_split",
+        &[
+            "queries",
+            "k_pages",
+            "v_pages",
+            "block_table",
+            "lengths",
+            "starts",
+            "scale_arr",
+            "params",
+        ],
+        &["partials", "maxs", "sums"],
+        PAGED_SDPA_SPLIT_SOURCE,
+    )?
+    .dispatch_builder()
+    .inputs(&[
+        queries,
+        k_pages,
+        v_pages,
+        block_table,
+        lengths,
+        starts,
+        &scale_arr,
+        &params,
+    ])
+    .output_shapes(&[
+        Shape::from((rows, plan.splits, shape.head_dim)),
+        Shape::from((rows, plan.splits)),
+        Shape::from((rows, plan.splits)),
+    ])
+    .output_dtypes(&[Dtype::Float32, Dtype::Float32, Dtype::Float32])
+    .grid(threadgroups * PAGED_SDPA_DECODE_SIMD_WIDTH, simdgroups, 1)
+    .threadgroup(PAGED_SDPA_DECODE_SIMD_WIDTH, simdgroups, 1)
+    .template_int("H_Q", shape.q_heads)
+    .template_int("H_KV", shape.kv_heads)
+    .template_int("Q_PER_KV", q_per_kv)
+    .template_int("HEADS_PER_TG", heads_per_tg)
+    .template_int("HEAD_GROUPS", head_groups)
+    .template_int("HEAD_DIM", shape.head_dim)
+    .template_int("VALUES_PER_THREAD", shape.values_per_thread)
+    .template_int("BLOCK_SIZE", shape.block_size)
+    .template_int("HEADS_PER_SG", heads_per_sg)
+    .template_int(
+        "CONTIGUOUS",
+        i32::from(shape.head_dim % PAGED_SDPA_DECODE_SIMD_WIDTH == 0),
+    )
+    .stream(target)
+    .dispatch()?;
+    let partials = split_outputs.take_at(0)?;
+    let maxs = split_outputs.take_at(0)?;
+    let sums = split_outputs.take_at(0)?;
+
+    let dim_groups =
+        (shape.head_dim + PAGED_SDPA_DECODE_SIMD_WIDTH - 1) / PAGED_SDPA_DECODE_SIMD_WIDTH;
+    let mut outputs = cached_kernel(
+        &REDUCE_KERNEL,
+        "mlx_fast_paged_sdpa_decode_reduce",
+        &["partials", "maxs", "sums", "params"],
+        &["out"],
+        PAGED_SDPA_REDUCE_SOURCE,
+    )?
+    .dispatch_builder()
+    .inputs(&[&partials, &maxs, &sums, &params])
+    .output_shapes(&[Shape::from((
+        shape.batch,
+        shape.q_heads,
+        1_i32,
+        shape.head_dim,
+    ))])
+    .output_dtypes(&[queries.dtype()])
+    .grid(
+        rows * dim_groups * PAGED_SDPA_DECODE_SIMD_WIDTH,
+        PAGED_SDPA_REDUCE_SIMDGROUPS,
+        1,
+    )
+    .threadgroup(
+        PAGED_SDPA_DECODE_SIMD_WIDTH,
+        PAGED_SDPA_REDUCE_SIMDGROUPS,
+        1,
+    )
+    .template_int("HEAD_DIM", shape.head_dim)
+    .template_int("REDUCE_SIMDGROUPS", PAGED_SDPA_REDUCE_SIMDGROUPS)
+    .stream(target)
+    .dispatch()?;
+    outputs.take_at(0)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn paged_scaled_dot_product_attention_decode_parallel_on(
-    queries: &Array,
-    k_pages: &Array,
-    v_pages: &Array,
-    block_table: &Array,
-    lengths: &Array,
-    starts: &Array,
-    scale: f32,
-    shape: DecodeShape,
-    target: StreamOrDevice,
-) -> Result<Array> {
-    let max_seq_len = shape.max_seq_len();
-    let profile = PagedAttnProfile::for_shape(shape);
-    let scale_arr: Array = (&[scale][..], (1_i32,)).try_into()?;
-    let scores_shape = Shape::from((shape.batch, shape.q_heads, 1_i32, max_seq_len));
-    let qk_blocks_per_head =
-        (max_seq_len + PAGED_QK_POSITIONS_PER_SIMDGROUP - 1) / PAGED_QK_POSITIONS_PER_SIMDGROUP;
-    let qk_total_blocks = shape.batch * shape.q_heads * qk_blocks_per_head;
-    let qk_block_tiles = (qk_total_blocks + PAGED_QK_SIMDGROUPS_PER_THREADGROUP - 1)
-        / PAGED_QK_SIMDGROUPS_PER_THREADGROUP;
-    let qk_start = profile.start();
-    let mut score_outputs = cached_paged_sdpa_qk_decode_kernel()?
-        .dispatch_builder()
-        .inputs(&[queries, k_pages, block_table, lengths, starts, &scale_arr])
-        .output_shapes(&[scores_shape])
-        .output_dtypes(&[Dtype::Float32])
-        .grid(
-            PAGED_SDPA_DECODE_SIMD_WIDTH,
-            qk_block_tiles * PAGED_QK_SIMDGROUPS_PER_THREADGROUP,
-            1,
-        )
-        .threadgroup(
-            PAGED_SDPA_DECODE_SIMD_WIDTH,
-            PAGED_QK_SIMDGROUPS_PER_THREADGROUP,
-            1,
-        )
-        .template_int("BATCH", shape.batch)
-        .template_int("H_Q", shape.q_heads)
-        .template_int("H_KV", shape.kv_heads)
-        .template_int("HEAD_DIM", shape.head_dim)
-        .template_int("BLOCK_SIZE", shape.block_size)
-        .template_int("MAX_BLOCKS", shape.max_blocks)
-        .template_int("MAX_SEQ_LEN", max_seq_len)
-        .template_int("QK_SIMDGROUPS", PAGED_QK_SIMDGROUPS_PER_THREADGROUP)
-        .template_int(
-            "QK_POSITIONS_PER_SIMDGROUP",
-            PAGED_QK_POSITIONS_PER_SIMDGROUP,
-        )
-        .stream(target)
-        .dispatch()?;
-    let scores = score_outputs.take_at(0)?;
-    profile.eval_stage("qk", &[&scores], qk_start)?;
+/// Query heads one simdgroup keeps in registers: the most that divide the
+/// threadgroup's heads, up to the cap.
+fn heads_per_simdgroup(heads_per_tg: i32) -> i32 {
+    (1..=heads_per_tg.min(PAGED_SDPA_MAX_HEADS_PER_SIMDGROUP))
+        .rev()
+        .find(|h| heads_per_tg % h == 0)
+        .unwrap_or(1)
+}
 
-    let softmax_start = profile.start();
-    let weights = softmax_on(&scores, &[-1_i32][..], false, target)?;
-    profile.eval_stage("softmax", &[&weights], softmax_start)?;
+/// Largest divisor of `q_per_kv` that fits one threadgroup.
+fn heads_per_threadgroup(q_per_kv: i32) -> i32 {
+    (1..=q_per_kv.min(PAGED_SDPA_MAX_HEADS_PER_THREADGROUP))
+        .rev()
+        .find(|h| q_per_kv % h == 0)
+        .unwrap_or(1)
+}
 
-    let v_chunks = (max_seq_len + PAGED_V_CHUNK_SIZE - 1) / PAGED_V_CHUNK_SIZE;
-    let v_dim_groups =
-        (shape.head_dim + PAGED_V_DIMS_PER_THREADGROUP - 1) / PAGED_V_DIMS_PER_THREADGROUP;
-    let q_per_kv = shape.q_heads / shape.kv_heads;
-    let v_q_groups_per_kv = (q_per_kv + PAGED_V_Q_HEADS_PER_GROUP - 1) / PAGED_V_Q_HEADS_PER_GROUP;
-    let partial_shape = Shape::from((shape.batch, shape.q_heads, v_chunks, shape.head_dim));
-    let weighted_v_chunk_start = profile.start();
-    let mut partial_outputs = cached_paged_sdpa_weighted_v_chunk_kernel()?
-        .dispatch_builder()
-        .inputs(&[&weights, v_pages, block_table, lengths, starts])
-        .output_shapes(&[partial_shape])
-        .output_dtypes(&[Dtype::Float32])
-        .grid(
-            shape.batch
-                * shape.kv_heads
-                * v_q_groups_per_kv
-                * v_chunks
-                * v_dim_groups
-                * PAGED_V_CHUNK_SIZE,
-            1,
-            1,
-        )
-        .threadgroup(PAGED_V_CHUNK_SIZE, 1, 1)
-        .template_int("H_Q", shape.q_heads)
-        .template_int("H_KV", shape.kv_heads)
-        .template_int("Q_PER_KV", q_per_kv)
-        .template_int("HEAD_DIM", shape.head_dim)
-        .template_int("BLOCK_SIZE", shape.block_size)
-        .template_int("MAX_BLOCKS", shape.max_blocks)
-        .template_int("MAX_SEQ_LEN", max_seq_len)
-        .template_int("V_CHUNKS", v_chunks)
-        .template_int("V_CHUNK_SIZE", PAGED_V_CHUNK_SIZE)
-        .template_int(
-            "V_CHUNK_SIMDGROUPS",
-            PAGED_V_CHUNK_SIZE / PAGED_SDPA_DECODE_SIMD_WIDTH,
-        )
-        .template_int("V_DIM_GROUPS", v_dim_groups)
-        .template_int("V_DIMS_PER_GROUP", PAGED_V_DIMS_PER_THREADGROUP)
-        .template_int("Q_GROUPS_PER_KV", v_q_groups_per_kv)
-        .template_int("V_Q_HEADS_PER_GROUP", PAGED_V_Q_HEADS_PER_GROUP)
-        .stream(target)
-        .dispatch()?;
-    let v_partial = partial_outputs.take_at(0)?;
-    profile.eval_stage("weighted_v_chunk", &[&v_partial], weighted_v_chunk_start)?;
+/// How the table's positions are cut into splits. Positions past a row's
+/// length leave their splits empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SplitPlan {
+    splits: i32,
+    split_len: i32,
+}
 
-    let output_shape = Shape::from((shape.batch, shape.q_heads, 1_i32, shape.head_dim));
-    let weighted_v_reduce_start = profile.start();
-    let mut outputs = cached_paged_sdpa_weighted_v_reduce_kernel()?
-        .dispatch_builder()
-        .inputs(&[&v_partial])
-        .output_shapes(&[output_shape])
-        .output_dtypes(&[queries.dtype()])
-        .grid(shape.batch * shape.q_heads * shape.head_dim, 1, 1)
-        .threadgroup(shape.head_dim, 1, 1)
-        .template_int("H_Q", shape.q_heads)
-        .template_int("HEAD_DIM", shape.head_dim)
-        .template_int("V_CHUNKS", v_chunks)
-        .stream(target)
-        .dispatch()?;
+impl SplitPlan {
+    fn new(base_threadgroups: i32, max_seq_len: i32) -> Self {
+        let max_seq_len = max_seq_len.max(1);
+        let wanted = (PAGED_SDPA_TARGET_THREADGROUPS + base_threadgroups - 1) / base_threadgroups;
+        let split_len = ((max_seq_len + wanted - 1) / wanted).max(PAGED_SDPA_MIN_SPLIT_LEN);
+        let splits = (max_seq_len + split_len - 1) / split_len;
+        Self { splits, split_len }
+    }
+}
 
-    let output = outputs.take_at(0)?;
-    profile.eval_stage("weighted_v_reduce", &[&output], weighted_v_reduce_start)?;
-    Ok(output)
+static SPLIT_KERNEL: OnceLock<MetalKernel> = OnceLock::new();
+static REDUCE_KERNEL: OnceLock<MetalKernel> = OnceLock::new();
+
+fn cached_kernel(
+    cell: &'static OnceLock<MetalKernel>,
+    name: &str,
+    inputs: &[&str],
+    outputs: &[&str],
+    source: &str,
+) -> Result<&'static MetalKernel> {
+    if let Some(kernel) = cell.get() {
+        return Ok(kernel);
+    }
+    let kernel = MetalKernel::builder(name)
+        .inputs(inputs)
+        .outputs(outputs)
+        .source(source)
+        .ensure_row_contiguous(true)
+        .atomic_outputs(false)
+        .build()?;
+    Ok(cell.get_or_init(|| kernel))
 }
 
 #[derive(Clone, Copy)]
@@ -813,83 +614,4 @@ fn values_per_thread_i32(head_dim: i32) -> Result<i32> {
         )));
     }
     Ok(value)
-}
-
-fn cached_paged_sdpa_decode_kernel() -> Result<&'static MetalKernel> {
-    static CELL: OnceLock<MetalKernel> = OnceLock::new();
-    if let Some(kernel) = CELL.get() {
-        return Ok(kernel);
-    }
-
-    let kernel = MetalKernel::builder("mlx_fast_paged_sdpa_decode")
-        .inputs(&[
-            "queries",
-            "k_pages",
-            "v_pages",
-            "block_table",
-            "lengths",
-            "starts",
-            "scale_arr",
-        ])
-        .outputs(&["out"])
-        .source(PAGED_SDPA_DECODE_SOURCE)
-        .ensure_row_contiguous(true)
-        .atomic_outputs(false)
-        .build()?;
-    Ok(CELL.get_or_init(|| kernel))
-}
-
-fn cached_paged_sdpa_qk_decode_kernel() -> Result<&'static MetalKernel> {
-    static CELL: OnceLock<MetalKernel> = OnceLock::new();
-    if let Some(kernel) = CELL.get() {
-        return Ok(kernel);
-    }
-
-    let kernel = MetalKernel::builder("mlx_fast_paged_sdpa_qk_decode")
-        .inputs(&[
-            "queries",
-            "k_pages",
-            "block_table",
-            "lengths",
-            "starts",
-            "scale_arr",
-        ])
-        .outputs(&["scores"])
-        .source(PAGED_SDPA_QK_DECODE_SOURCE)
-        .ensure_row_contiguous(true)
-        .atomic_outputs(false)
-        .build()?;
-    Ok(CELL.get_or_init(|| kernel))
-}
-
-fn cached_paged_sdpa_weighted_v_chunk_kernel() -> Result<&'static MetalKernel> {
-    static CELL: OnceLock<MetalKernel> = OnceLock::new();
-    if let Some(kernel) = CELL.get() {
-        return Ok(kernel);
-    }
-
-    let kernel = MetalKernel::builder("mlx_fast_paged_sdpa_weighted_v_chunk")
-        .inputs(&["weights", "v_pages", "block_table", "lengths", "starts"])
-        .outputs(&["v_partial"])
-        .source(PAGED_SDPA_WEIGHTED_V_CHUNK_SOURCE)
-        .ensure_row_contiguous(true)
-        .atomic_outputs(false)
-        .build()?;
-    Ok(CELL.get_or_init(|| kernel))
-}
-
-fn cached_paged_sdpa_weighted_v_reduce_kernel() -> Result<&'static MetalKernel> {
-    static CELL: OnceLock<MetalKernel> = OnceLock::new();
-    if let Some(kernel) = CELL.get() {
-        return Ok(kernel);
-    }
-
-    let kernel = MetalKernel::builder("mlx_fast_paged_sdpa_weighted_v_reduce")
-        .inputs(&["v_partial"])
-        .outputs(&["out"])
-        .source(PAGED_SDPA_WEIGHTED_V_REDUCE_SOURCE)
-        .ensure_row_contiguous(true)
-        .atomic_outputs(false)
-        .build()?;
-    Ok(CELL.get_or_init(|| kernel))
 }

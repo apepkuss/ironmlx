@@ -105,8 +105,7 @@ fn assert_close(got: &[f32], expected: &[f32]) {
 }
 
 /// Rows that attend to a window of their cache, as a sliding-window layer
-/// does: one short enough for the single-pass kernel, one long enough for
-/// the parallel kernels (128 positions and up).
+/// does: one inside a single split, one spread over many.
 #[test]
 fn paged_decode_from_a_start_position_matches_reference() {
     for (seq_len, starts) in [(11_usize, [0_i32, 4]), (300, [173, 0])] {
@@ -183,6 +182,83 @@ fn paged_decode_from_a_start_position_matches_reference() {
             .iter()
             .zip(&expected)
             .any(|(a, b)| (a - b).abs() > 1e-3));
+    }
+}
+
+/// Many query heads per KV head (one threadgroup cannot hold 48, so they
+/// split into groups), pages out of order, a window start, rows that end
+/// mid-page, and an empty row that must come out as zeros.
+#[test]
+fn paged_decode_grouped_heads_shuffled_pages_match_reference() {
+    for (q_heads, kv_heads) in [(16_usize, 1_usize), (48, 1), (8, 4)] {
+        let shape = RefShape {
+            batch: 3,
+            q_heads,
+            kv_heads,
+            head_dim: 40,
+            block_size: 16,
+            max_blocks: 70,
+            scale: 0.2,
+        };
+        let pages = shape.batch * shape.max_blocks + 5;
+        let wave =
+            |n: usize, step: f32| -> Vec<f32> { (0..n).map(|i| (i as f32 * step).sin()).collect() };
+        let q_data = wave(shape.batch * shape.q_heads * shape.head_dim, 0.37);
+        let page_values = pages * shape.kv_heads * shape.block_size * shape.head_dim;
+        let k_data = wave(page_values, 0.0113);
+        let v_data = wave(page_values, 0.0237);
+        let table_data: Vec<i32> = (0..shape.batch * shape.max_blocks)
+            .map(|i| ((i * 37 + 11) % pages) as i32)
+            .collect();
+        let lengths_data = [1117_i32, 0, 455];
+        let starts = [0_i32, 0, 201];
+
+        let dims =
+            |a: usize, b: usize, c: usize, d: usize| [a as i32, b as i32, c as i32, d as i32];
+        let q: Array = (
+            &q_data[..],
+            &dims(shape.batch, shape.q_heads, 1, shape.head_dim)[..],
+        )
+            .try_into()
+            .unwrap();
+        let page_dims = dims(pages, shape.kv_heads, shape.block_size, shape.head_dim);
+        let k_pages: Array = (&k_data[..], &page_dims[..]).try_into().unwrap();
+        let v_pages: Array = (&v_data[..], &page_dims[..]).try_into().unwrap();
+        let block_table: Array = (
+            &table_data[..],
+            &[shape.batch as i32, shape.max_blocks as i32][..],
+        )
+            .try_into()
+            .unwrap();
+        let lengths: Array = (&lengths_data[..], &[3_i32][..]).try_into().unwrap();
+        let starts_arr: Array = (&starts[..], &[3_i32][..]).try_into().unwrap();
+
+        let got: Vec<f32> = fast::paged_scaled_dot_product_attention_decode_from_on(
+            &q,
+            &k_pages,
+            &v_pages,
+            &block_table,
+            &lengths,
+            Some(&starts_arr),
+            shape.scale,
+            shape.block_size as i32,
+            (),
+        )
+        .expect("paged decode")
+        .to_vec()
+        .expect("to_vec");
+        let expected = reference_decode_from(
+            &q_data,
+            &k_data,
+            &v_data,
+            &table_data,
+            &lengths_data,
+            Some(&starts),
+            shape,
+        );
+        assert_close(&got, &expected);
+        let row = shape.q_heads * shape.head_dim;
+        assert!(got[row..2 * row].iter().all(|&x| x == 0.0));
     }
 }
 
