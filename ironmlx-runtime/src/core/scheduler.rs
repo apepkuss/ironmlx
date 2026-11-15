@@ -20296,6 +20296,10 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
             &verify_lens,
             max_verify_len,
         );
+        // Sequential Q1 verify replays ordinary [B, 1] decode, whose Q/K/V and
+        // O projections run batched: row-isolated projections would round
+        // differently from the decode they must reproduce.
+        let stable_k3v4_verify = stable_k3v4_verify && !sequential_q1_verify;
         let verified = {
             let _stable_qmm =
                 stable_k3v4_verify.then(ironmlx_lm::nn::batch_stable_qmm_context_scope);
