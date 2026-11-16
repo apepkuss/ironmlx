@@ -1950,6 +1950,76 @@ impl PagedKVCache {
         }
     }
 
+    /// `row`'s pages `[first_block, end_block)` as evaluated arrays in
+    /// their own buffer (never a view of the page pool or of another export).
+    pub fn owned_pages_for_row_on(
+        &self,
+        offsets: &[i32],
+        row: usize,
+        first_block: i32,
+        end_block: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Array, Array)> {
+        let target = target.into();
+        self.validate_offsets_allocated(offsets)?;
+        if row >= self.batch as usize {
+            anyhow::bail!(
+                "PagedKVCache::owned_pages_for_row_on: row {row} >= batch {}",
+                self.batch
+            );
+        }
+        let row_blocks = ceil_div(offsets[row], self.block_size);
+        if first_block < 0 || first_block > end_block || end_block > row_blocks {
+            anyhow::bail!(
+                "PagedKVCache::owned_pages_for_row_on: blocks [{first_block}, {end_block}) outside row {row}'s {row_blocks}"
+            );
+        }
+        let (k, v) = if first_block == end_block {
+            (
+                Array::zeros_on(
+                    (0_i32, self.n_kv_heads, self.block_size, self.head_dim),
+                    self.dtype,
+                    target,
+                )?,
+                Array::zeros_on(
+                    (0_i32, self.n_kv_heads, self.block_size, self.v_head_dim),
+                    self.dtype,
+                    target,
+                )?,
+            )
+        } else {
+            let mut k_parts = Vec::with_capacity((end_block - first_block) as usize);
+            let mut v_parts = Vec::with_capacity((end_block - first_block) as usize);
+            for block_col in first_block..end_block {
+                let page = self.block_tables[row][block_col as usize];
+                if page < 0 {
+                    anyhow::bail!(
+                        "PagedKVCache::owned_pages_for_row_on: missing page row {row} block {block_col}"
+                    );
+                }
+                let (k_page, v_page) = self.page_slice_on(page, self.block_size, target)?;
+                k_parts.push(k_page);
+                v_parts.push(v_page);
+            }
+            if k_parts.len() == 1 {
+                // A single-input concatenate may return the page itself.
+                (
+                    owned_copy_on(&k_parts[0], target)?,
+                    owned_copy_on(&v_parts[0], target)?,
+                )
+            } else {
+                let k_refs = k_parts.iter().collect::<Vec<_>>();
+                let v_refs = v_parts.iter().collect::<Vec<_>>();
+                (
+                    concatenate_on(&k_refs, 0, target)?,
+                    concatenate_on(&v_refs, 0, target)?,
+                )
+            }
+        };
+        mlx::transforms::eval(&[&k, &v])?;
+        Ok((k, v))
+    }
+
     pub fn restore_prefix_pages_for_row_on(
         &mut self,
         k_pages_src: &Array,
@@ -5621,4 +5691,20 @@ impl PagedDecodeView {
             )?,
         )
     }
+}
+
+/// Bit-exact copy into freshly allocated storage. `copy`, `contiguous`, a
+/// single-input `concatenate` and a `slice_update` covering the whole array
+/// all return (a view of) the source; a concatenation of two inputs always
+/// writes a new buffer, so the source is concatenated with an empty array.
+pub(crate) fn owned_copy_on(a: &Array, target: impl Into<StreamOrDevice>) -> Result<Array> {
+    let target = target.into();
+    anyhow::ensure!(
+        a.ndim() > 0,
+        "owned_copy_on: scalar arrays are not supported"
+    );
+    let mut empty_shape = a.shape().as_slice().to_vec();
+    empty_shape[0] = 0;
+    let empty = Array::zeros_on(empty_shape.as_slice(), a.dtype(), target)?;
+    Ok(concatenate_on(&[a, &empty], 0, target)?)
 }

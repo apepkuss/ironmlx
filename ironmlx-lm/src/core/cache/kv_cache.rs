@@ -14,6 +14,7 @@ use super::{
     PagedKvImmutableBlockHandle, PagedKvPhysicalStats, PagedPrefixLayer, TurboQuantKVBits,
     TurboQuantKVCache, TurboQuantPrefixLayer,
 };
+use crate::core::cache::prefix_segments::PrefixLineage;
 use crate::Result;
 
 /// Per-layer KV cache for full-attention layers.
@@ -38,6 +39,12 @@ pub struct KVCache {
     dtype: Dtype,
     turboquant: Option<Box<TurboQuantKVCache>>,
     paged: Option<Box<PagedKVCache>>,
+    /// Per row (length == batch): the shared prefix segments this row's K/V
+    /// at positions `[0, covered_len)` came from. `None` means unknown.
+    /// Every path that changes a row's K/V below the recorded length must
+    /// cut or clear the record; a stale record would let a later save
+    /// reference K/V that differs from the row's.
+    prefix_lineage: Vec<Option<PrefixLineage>>,
 }
 
 /// Checkpoint for [`KVCache`] rollback.
@@ -98,6 +105,97 @@ impl KVCache {
             dtype,
             turboquant: None,
             paged: None,
+            prefix_lineage: vec![None; batch as usize],
+        }
+    }
+
+    /// Row `row`'s prefix segment record, if known.
+    pub fn prefix_lineage(&self, row: usize) -> Option<&PrefixLineage> {
+        self.prefix_lineage.get(row).and_then(Option::as_ref)
+    }
+
+    /// Record (or clear) which prefix segments row `row`'s K/V came from.
+    /// The record is cut to the row's current offset; out-of-range rows are
+    /// ignored (no record is the safe answer).
+    pub fn set_prefix_lineage(&mut self, row: usize, lineage: Option<PrefixLineage>) {
+        let Some(&offset) = self.offsets.get(row) else {
+            return;
+        };
+        if self.prefix_lineage.len() != self.offsets.len() {
+            self.prefix_lineage.resize(self.offsets.len(), None);
+        }
+        self.prefix_lineage[row] = lineage.map(|lineage| self.truncate_lineage(&lineage, offset));
+    }
+
+    /// Block size the record is cut at: the page size for paged storage,
+    /// otherwise the greatest common divisor of the record's boundaries.
+    /// Segment boundaries are multiples of the prefix block size, so the
+    /// divisor is too; cutting at it stays block aligned and never keeps a
+    /// reference past `len` (it may drop a little more than necessary).
+    fn lineage_granularity(&self, lineage: &PrefixLineage) -> i32 {
+        if let Some(paged) = &self.paged {
+            return paged.block_size();
+        }
+        fn gcd(a: i32, b: i32) -> i32 {
+            if b == 0 {
+                a
+            } else {
+                gcd(b, a % b)
+            }
+        }
+        lineage
+            .refs
+            .iter()
+            .flat_map(|r| [r.start, r.stop])
+            .fold(0, |acc, boundary| gcd(acc, boundary.abs()))
+    }
+
+    fn truncate_lineage(&self, lineage: &PrefixLineage, len: i32) -> PrefixLineage {
+        lineage.truncated(len, self.lineage_granularity(lineage))
+    }
+
+    /// Forget every row's record and match the record vector to the batch.
+    fn clear_prefix_lineage(&mut self) {
+        self.prefix_lineage.clear();
+        self.prefix_lineage.resize(self.offsets.len(), None);
+    }
+
+    fn clear_row_prefix_lineage(&mut self, row: usize) {
+        if let Some(slot) = self.prefix_lineage.get_mut(row) {
+            *slot = None;
+        }
+    }
+
+    /// Rows bound to `owner` in paged storage.
+    fn paged_rows_of(&self, owner: PagedKvBlockOwner) -> Vec<usize> {
+        self.paged.as_ref().map_or_else(Vec::new, |paged| {
+            paged
+                .execution_owners()
+                .iter()
+                .enumerate()
+                .filter_map(|(row, &bound)| (bound == owner).then_some(row))
+                .collect()
+        })
+    }
+
+    /// Cut each row's record to its current offset (after a rollback that
+    /// keeps the K/V below the new offset).
+    fn truncate_prefix_lineage_to_offsets(&mut self) {
+        if self.prefix_lineage.len() != self.offsets.len() {
+            self.clear_prefix_lineage();
+            return;
+        }
+        for row in 0..self.offsets.len() {
+            let offset = self.offsets[row];
+            let cut = match &self.prefix_lineage[row] {
+                Some(lineage) if lineage.covered_len() > offset => {
+                    Some(self.truncate_lineage(lineage, offset))
+                }
+                _ => None,
+            };
+            if let Some(cut) = cut {
+                self.prefix_lineage[row] = Some(cut);
+            }
         }
     }
 
@@ -162,6 +260,7 @@ impl KVCache {
         self.turboquant = Some(Box::new(turboquant));
         self.keys = None;
         self.values = None;
+        self.clear_prefix_lineage();
         Ok(())
     }
 
@@ -220,6 +319,7 @@ impl KVCache {
         self.paged = Some(Box::new(paged));
         self.keys = None;
         self.values = None;
+        self.clear_prefix_lineage();
         Ok(())
     }
 
@@ -242,14 +342,46 @@ impl KVCache {
         self.paged.as_deref()
     }
 
+    /// Rows keep the record of the owner they are bound to when that owner
+    /// was bound before; owners that were not bound start with no record.
     pub fn bind_paged_execution_rows(&mut self, owners: &[PagedKvBlockOwner]) -> Result<bool> {
         let Some(paged) = self.paged.as_mut() else {
             return Ok(false);
         };
         self.batch = i32::try_from(owners.len())
             .map_err(|_| anyhow::anyhow!("KVCache::bind_paged_execution_rows: batch overflow"))?;
-        paged.bind_execution_rows(owners, &mut self.offsets)?;
+        let previous: Vec<(PagedKvBlockOwner, Option<PrefixLineage>)> = paged
+            .execution_owners()
+            .iter()
+            .copied()
+            .zip(std::mem::take(&mut self.prefix_lineage))
+            .collect();
+        if let Err(error) = paged.bind_execution_rows(owners, &mut self.offsets) {
+            self.clear_prefix_lineage();
+            return Err(error);
+        }
+        self.assign_prefix_lineage_by_owner(&previous, owners);
         Ok(true)
+    }
+
+    /// Give each row the record its owner carried before a rebind (`None`
+    /// for owners that had no bound row), then cut each record to the row's
+    /// committed offset.
+    fn assign_prefix_lineage_by_owner(
+        &mut self,
+        previous: &[(PagedKvBlockOwner, Option<PrefixLineage>)],
+        owners: &[PagedKvBlockOwner],
+    ) {
+        self.prefix_lineage = owners
+            .iter()
+            .map(|owner| {
+                previous
+                    .iter()
+                    .find(|(bound, _)| bound == owner)
+                    .and_then(|(_, lineage)| lineage.clone())
+            })
+            .collect();
+        self.truncate_prefix_lineage_to_offsets();
     }
 
     pub fn reuse_paged_storage_from(
@@ -258,6 +390,36 @@ impl KVCache {
         owners: &[PagedKvBlockOwner],
     ) -> Result<bool> {
         self.validate_paged_storage_reuse_from(src, owners)?;
+        let Some(src_paged) = src.paged.as_ref() else {
+            return Ok(false);
+        };
+        // Pages move with their owner, so a row bound to an owner that was
+        // bound in `src` keeps that owner's record; other rows start empty.
+        // `src` is left with this cache's old pool, so its records are void.
+        let previous: Vec<(PagedKvBlockOwner, Option<PrefixLineage>)> = src_paged
+            .execution_owners()
+            .iter()
+            .copied()
+            .zip(std::mem::take(&mut src.prefix_lineage))
+            .collect();
+        src.clear_prefix_lineage();
+        match self.reuse_paged_storage_from_inner(src, owners) {
+            Ok(reused) => {
+                self.assign_prefix_lineage_by_owner(&previous, owners);
+                Ok(reused)
+            }
+            Err(error) => {
+                self.clear_prefix_lineage();
+                Err(error)
+            }
+        }
+    }
+
+    fn reuse_paged_storage_from_inner(
+        &mut self,
+        src: &mut KVCache,
+        owners: &[PagedKvBlockOwner],
+    ) -> Result<bool> {
         match (&mut self.paged, &mut src.paged) {
             (Some(dst_paged), Some(src_paged)) => {
                 src_paged.commit_execution_rows(&src.offsets)?;
@@ -298,6 +460,9 @@ impl KVCache {
     }
 
     pub fn release_paged_owner(&mut self, owner: PagedKvBlockOwner) -> Result<bool> {
+        for row in self.paged_rows_of(owner) {
+            self.clear_row_prefix_lineage(row);
+        }
         let Some(paged) = self.paged.as_mut() else {
             return Ok(false);
         };
@@ -327,10 +492,18 @@ impl KVCache {
         source: PagedKvBlockOwner,
         destination: PagedKvBlockOwner,
     ) -> bool {
+        let source_lineage = self
+            .paged_rows_of(source)
+            .first()
+            .and_then(|&row| self.prefix_lineage(row).cloned());
+        let destination_rows = self.paged_rows_of(destination);
         let Some(paged) = self.paged.as_mut() else {
             return false;
         };
         paged.fork_owner_prevalidated(source, destination, &mut self.offsets);
+        for row in destination_rows {
+            self.set_prefix_lineage(row, source_lineage.clone());
+        }
         true
     }
 
@@ -377,6 +550,9 @@ impl KVCache {
         destination: PagedKvBlockOwner,
         handles: &[PagedKvImmutableBlockHandle],
     ) -> bool {
+        for row in self.paged_rows_of(destination) {
+            self.clear_row_prefix_lineage(row);
+        }
         let Some(paged) = self.paged.as_mut() else {
             return false;
         };
@@ -526,6 +702,7 @@ impl KVCache {
         prefix_len: i32,
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
+        self.clear_row_prefix_lineage(row);
         let paged = self.paged.as_mut().ok_or_else(|| {
             anyhow::anyhow!(
                 "KVCache::restore_paged_prefix_layer_for_row_on: paged KV is not enabled"
@@ -548,6 +725,9 @@ impl KVCache {
         prefix_len: i32,
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
+        for &row in rows {
+            self.clear_row_prefix_lineage(row);
+        }
         let paged = self.paged.as_mut().ok_or_else(|| {
             anyhow::anyhow!(
                 "KVCache::restore_paged_prefix_layer_for_rows_on: paged KV is not enabled"
@@ -662,6 +842,7 @@ impl KVCache {
         cached_len: i32,
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
+        self.clear_row_prefix_lineage(row);
         let tq = self.turboquant.as_mut().ok_or_else(|| {
             anyhow::anyhow!(
                 "KVCache::restore_turboquant_prefix_layer_for_row_on: TurboQuant is not enabled"
@@ -698,6 +879,7 @@ impl KVCache {
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
         let target = target.into();
+        self.clear_row_prefix_lineage(row);
         if row >= self.batch as usize {
             anyhow::bail!(
                 "KVCache::restore_dense_prefix_segments_for_row_on: row {} >= batch {}",
@@ -898,6 +1080,7 @@ impl KVCache {
         for o in &mut self.offsets {
             *o = 0;
         }
+        self.clear_prefix_lineage();
         if let Some(tq) = &mut self.turboquant {
             tq.clear();
         }
@@ -1012,6 +1195,10 @@ impl KVCache {
     ///
     /// Paged and TurboQuant backends retain their backend-owned data and use
     /// their offset rollback path.
+    ///
+    /// Each row's prefix record is cut to its restored offset. A dense
+    /// snapshot also reverts K/V below that offset, so the records (which may
+    /// have been set after the snapshot) are cleared instead.
     pub fn restore(&mut self, snapshot: &KVCacheSnapshot) -> Result<()> {
         self.restore_offsets(snapshot.offsets())?;
         if snapshot.restores_dense_storage {
@@ -1019,6 +1206,7 @@ impl KVCache {
                 self.turboquant.is_none() && self.paged.is_none(),
                 "KVCache::restore: dense snapshot cannot restore into Paged or TurboQuant storage"
             );
+            self.clear_prefix_lineage();
             self.keys = snapshot.dense_keys.clone();
             self.values = snapshot.dense_values.clone();
         }
@@ -1047,8 +1235,12 @@ impl KVCache {
             }
         }
         if let Some(paged) = &mut self.paged {
-            paged.restore_offsets(&mut self.offsets, offsets)?;
-            return Ok(());
+            let restored = paged.restore_offsets(&mut self.offsets, offsets);
+            match &restored {
+                Ok(()) => self.truncate_prefix_lineage_to_offsets(),
+                Err(_) => self.clear_prefix_lineage(),
+            }
+            return restored;
         }
         let max_off = offsets.iter().copied().max().unwrap_or(0);
         if max_off > 0 {
@@ -1075,6 +1267,7 @@ impl KVCache {
             }
         }
         self.offsets.clone_from_slice(offsets);
+        self.truncate_prefix_lineage_to_offsets();
         Ok(())
     }
 
@@ -1924,7 +2117,24 @@ impl KVCache {
     ///
     /// Errors on shape/dtype mismatch, dst_row >= self.batch,
     /// `src_row >= src.batch`, or `src.offsets[src_row] > self.cap`.
+    ///
+    /// On success `dst_row` takes `src_row`'s prefix record; on failure its
+    /// record is cleared (the row may be partly overwritten).
     pub fn adopt_row_from(&mut self, src: &KVCache, dst_row: usize, src_row: usize) -> Result<()> {
+        self.clear_row_prefix_lineage(dst_row);
+        self.adopt_row_from_inner(src, dst_row, src_row)?;
+        if let Some(slot) = self.prefix_lineage.get_mut(dst_row) {
+            *slot = src.prefix_lineage(src_row).cloned();
+        }
+        Ok(())
+    }
+
+    fn adopt_row_from_inner(
+        &mut self,
+        src: &KVCache,
+        dst_row: usize,
+        src_row: usize,
+    ) -> Result<()> {
         if self.n_kv_heads != src.n_kv_heads
             || self.head_dim != src.head_dim
             || self.v_head_dim != src.v_head_dim
@@ -3847,5 +4057,383 @@ mod tests {
             msg.contains("mismatch") || msg.contains("dtype"),
             "msg should mention dtype mismatch; got: {msg}"
         );
+    }
+
+    mod prefix_lineage {
+        use super::*;
+        use crate::core::cache::prefix_segments::{
+            PrefixLineage, PrefixLineageRef, PrefixSegmentId, PrefixSegmentLayout,
+        };
+        use crate::core::cache::PagedKvBlockOwner;
+
+        fn lineage(stops: &[i32]) -> PrefixLineage {
+            let mut start = 0;
+            let refs = stops
+                .iter()
+                .map(|&stop| {
+                    let r = PrefixLineageRef {
+                        id: PrefixSegmentId::new(),
+                        start,
+                        stop,
+                        segment_stop: stop,
+                    };
+                    start = stop;
+                    r
+                })
+                .collect();
+            PrefixLineage {
+                layout: PrefixSegmentLayout("test-layout".to_owned()),
+                refs,
+            }
+        }
+
+        fn paged(batch: i32, block_size: i32) -> KVCache {
+            KVCache::new(batch, 1, 2, 2, Dtype::Float32, 1024)
+                .with_paged(block_size, 64)
+                .expect("paged cache")
+        }
+
+        fn fill(cache: &mut KVCache, lens: &[i32]) {
+            let batch = lens.len() as i32;
+            let seq = lens.iter().copied().max().unwrap_or(0);
+            let data: Vec<f32> = (0..batch * seq * 2).map(|i| i as f32).collect();
+            let k: Array = (data.as_slice(), (batch, 1_i32, seq, 2_i32))
+                .try_into()
+                .unwrap();
+            cache.update_and_fetch(&k, &k, lens).expect("fill cache");
+        }
+
+        fn covered(cache: &KVCache, row: usize) -> Option<i32> {
+            cache.prefix_lineage(row).map(PrefixLineage::covered_len)
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_set_is_cut_to_row_offset() {
+            let mut c = paged(1, 128);
+            fill(&mut c, &[300]);
+            c.set_prefix_lineage(0, Some(lineage(&[256, 512])));
+            assert_eq!(covered(&c, 0), Some(256));
+            c.set_prefix_lineage(0, None);
+            assert_eq!(covered(&c, 0), None);
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_cleared_on_reset() {
+            let mut c = paged(2, 128);
+            fill(&mut c, &[512, 512]);
+            c.set_prefix_lineage(0, Some(lineage(&[256, 512])));
+            c.set_prefix_lineage(1, Some(lineage(&[512])));
+            c.reset();
+            assert_eq!(covered(&c, 0), None);
+            assert_eq!(covered(&c, 1), None);
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_truncated_on_snapshot_restore() {
+            let mut c = paged(1, 128);
+            fill(&mut c, &[300]);
+            let snapshot = c.snapshot();
+            fill(&mut c, &[212]);
+            assert_eq!(c.offsets(), &[512]);
+            c.set_prefix_lineage(0, Some(lineage(&[256, 512])));
+            assert_eq!(covered(&c, 0), Some(512));
+            c.restore(&snapshot).expect("restore snapshot");
+            assert_eq!(covered(&c, 0), Some(256));
+            assert_eq!(c.prefix_lineage(0).expect("lineage").refs.len(), 1);
+        }
+
+        /// Dense rollback reverts K/V below the snapshot offset as well, so a
+        /// record made after the snapshot cannot be trusted at all.
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_cleared_on_dense_snapshot_restore() {
+            let mut c = KVCache::new(1, 1, 2, 2, Dtype::Float32, 1024);
+            fill(&mut c, &[300]);
+            let snapshot = c.snapshot();
+            assert!(snapshot.restores_dense_storage());
+            fill(&mut c, &[212]);
+            c.set_prefix_lineage(0, Some(lineage(&[256, 512])));
+            c.restore(&snapshot).expect("restore snapshot");
+            assert_eq!(covered(&c, 0), None);
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_truncated_on_restore_offsets() {
+            let mut c = paged(2, 128);
+            fill(&mut c, &[512, 512]);
+            c.set_prefix_lineage(0, Some(lineage(&[256, 512])));
+            c.set_prefix_lineage(1, Some(lineage(&[256, 512])));
+            c.restore_offsets(&[300, 512]).expect("restore offsets");
+            assert_eq!(covered(&c, 0), Some(256));
+            assert_eq!(covered(&c, 1), Some(512));
+        }
+
+        /// TurboQuant caches have no page size; truncation uses the
+        /// lineage's own boundaries, which are multiples of the block size.
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_truncated_on_turboquant_restore_offsets() {
+            let mut c = KVCache::new(1, 2, 8, 8, Dtype::Float32, 16)
+                .with_step(16)
+                .with_turboquant(TurboQuantKVBits::K4V4)
+                .expect("enable turboquant");
+            let data: Vec<f32> = (0..(2 * 12 * 8)).map(|i| (i as f32 * 0.1).sin()).collect();
+            let k: Array = (data.as_slice(), (1_i32, 2_i32, 12_i32, 8_i32))
+                .try_into()
+                .unwrap();
+            c.update_and_fetch(&k, &k, &[12])
+                .expect("turboquant update");
+            c.set_prefix_lineage(0, Some(lineage(&[4, 8, 12])));
+            c.restore_offsets(&[10]).expect("restore offsets");
+            assert_eq!(covered(&c, 0), Some(8));
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_follows_adopted_row() {
+            let mut src = paged(1, 128);
+            fill(&mut src, &[512]);
+            let recorded = lineage(&[256, 512]);
+            src.set_prefix_lineage(0, Some(recorded.clone()));
+            let mut dst = paged(2, 128);
+            fill(&mut dst, &[256, 256]);
+            let kept = lineage(&[256]);
+            dst.set_prefix_lineage(0, Some(kept.clone()));
+            dst.set_prefix_lineage(1, Some(lineage(&[128])));
+            dst.adopt_row_from(&src, 1, 0).expect("adopt row");
+            assert_eq!(dst.prefix_lineage(1), Some(&recorded));
+            assert_eq!(dst.prefix_lineage(0), Some(&kept));
+
+            let empty = paged(1, 128);
+            dst.adopt_row_from(&empty, 0, 0).expect("adopt empty row");
+            assert_eq!(dst.prefix_lineage(0), None);
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_cleared_when_paged_owner_released() {
+            let mut c = paged(2, 128);
+            c.bind_paged_execution_rows(&[
+                PagedKvBlockOwner::Request(1),
+                PagedKvBlockOwner::Request(2),
+            ])
+            .expect("bind owners");
+            fill(&mut c, &[512, 512]);
+            c.set_prefix_lineage(0, Some(lineage(&[512])));
+            c.set_prefix_lineage(1, Some(lineage(&[512])));
+            assert!(c
+                .release_paged_owner(PagedKvBlockOwner::Request(1))
+                .expect("release owner"));
+            assert_eq!(covered(&c, 0), None);
+            assert_eq!(covered(&c, 1), Some(512));
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_moves_with_owner_when_storage_reused() {
+            let owners = [PagedKvBlockOwner::Request(1)];
+            let mut src = paged(1, 128);
+            src.bind_paged_execution_rows(&owners).expect("bind src");
+            fill(&mut src, &[512]);
+            src.set_prefix_lineage(0, Some(lineage(&[512])));
+            let mut dst = paged(1, 128);
+            fill(&mut dst, &[256]);
+            dst.set_prefix_lineage(0, Some(lineage(&[256])));
+            assert!(dst
+                .reuse_paged_storage_from(&mut src, &owners)
+                .expect("reuse storage"));
+            assert_eq!(dst.offsets(), &[512]);
+            // dst's own record described pages it no longer has; the row now
+            // holds owner 1's pages and keeps owner 1's record.
+            assert_eq!(covered(&dst, 0), Some(512));
+            assert_eq!(covered(&src, 0), None);
+        }
+
+        /// Paged row add/remove goes through storage reuse: rows of owners
+        /// that were bound in the source keep their record, new owners start
+        /// empty.
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_kept_for_same_owner_when_storage_reused() {
+            let a = PagedKvBlockOwner::Request(1);
+            let b = PagedKvBlockOwner::Request(2);
+            let new_owner = PagedKvBlockOwner::Request(3);
+            let mut src = paged(2, 128);
+            src.bind_paged_execution_rows(&[a, b]).expect("bind src");
+            fill(&mut src, &[256, 512]);
+            let recorded_a = lineage(&[256]);
+            let recorded_b = lineage(&[256, 512]);
+            src.set_prefix_lineage(0, Some(recorded_a.clone()));
+            src.set_prefix_lineage(1, Some(recorded_b.clone()));
+            let mut dst = paged(1, 128);
+            fill(&mut dst, &[128]);
+            dst.set_prefix_lineage(0, Some(lineage(&[128])));
+
+            assert!(dst
+                .reuse_paged_storage_from(&mut src, &[b, new_owner, a])
+                .expect("reuse storage"));
+            assert_eq!(dst.offsets(), &[512, 0, 256]);
+            assert_eq!(dst.prefix_lineage(0), Some(&recorded_b));
+            assert_eq!(dst.prefix_lineage(1), None);
+            assert_eq!(dst.prefix_lineage(2), Some(&recorded_a));
+            assert_eq!(covered(&src, 0), None);
+            assert_eq!(covered(&src, 1), None);
+        }
+
+        /// A reuse rejected by its preflight moves no pages, so both sides
+        /// keep their records (failures after pages move clear them).
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_unchanged_when_storage_reuse_rejected() {
+            let mut src = paged(1, 128);
+            fill(&mut src, &[256]);
+            src.set_prefix_lineage(0, Some(lineage(&[256])));
+            let mut dst = paged(1, 128);
+            fill(&mut dst, &[128]);
+            dst.set_prefix_lineage(0, Some(lineage(&[128])));
+            let duplicate = PagedKvBlockOwner::Request(9);
+            assert!(dst
+                .reuse_paged_storage_from(&mut src, &[duplicate, duplicate])
+                .is_err());
+            assert_eq!(src.offsets(), &[256]);
+            assert_eq!(dst.offsets(), &[128]);
+            assert_eq!(covered(&src, 0), Some(256));
+            assert_eq!(covered(&dst, 0), Some(128));
+        }
+
+        /// Rebinding moves rows between owners; a row keeps the record of the
+        /// owner it is now bound to, and rows of other owners start empty.
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_follows_owner_on_rebind() {
+            let a = PagedKvBlockOwner::Request(1);
+            let b = PagedKvBlockOwner::Request(2);
+            let c_owner = PagedKvBlockOwner::Request(3);
+            let mut c = paged(2, 128);
+            c.bind_paged_execution_rows(&[a, b]).expect("bind a b");
+            fill(&mut c, &[256, 512]);
+            c.set_prefix_lineage(0, Some(lineage(&[256])));
+            let recorded_b = lineage(&[512]);
+            c.set_prefix_lineage(1, Some(recorded_b.clone()));
+            c.bind_paged_execution_rows(&[b, c_owner, a])
+                .expect("rebind b c a");
+            assert_eq!(c.prefix_lineage(0), Some(&recorded_b));
+            assert_eq!(covered(&c, 1), None);
+            // `a` was bound before the rebind, so it keeps its record.
+            assert_eq!(covered(&c, 2), Some(256));
+            c.bind_paged_execution_rows(&[c_owner])
+                .expect("bind c only");
+            c.bind_paged_execution_rows(&[a, b]).expect("rebind a b");
+            // Unbound owners lose their record; unknown is the safe answer.
+            assert_eq!(covered(&c, 0), None);
+            assert_eq!(covered(&c, 1), None);
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_follows_forked_owner() {
+            let source = PagedKvBlockOwner::Request(1);
+            let destination = PagedKvBlockOwner::Request(2);
+            let mut c = paged(2, 128);
+            c.bind_paged_execution_rows(&[source, destination])
+                .expect("bind owners");
+            fill(&mut c, &[512, 0]);
+            let recorded = lineage(&[256, 512]);
+            c.set_prefix_lineage(0, Some(recorded.clone()));
+            c.set_prefix_lineage(1, Some(lineage(&[])));
+            assert!(c
+                .validate_paged_owner_fork(source, destination)
+                .expect("validate fork"));
+            assert!(c.fork_paged_owner_prevalidated(source, destination));
+            assert_eq!(c.offsets(), &[512, 512]);
+            assert_eq!(c.prefix_lineage(1), Some(&recorded));
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_cleared_when_immutable_prefix_installed() {
+            let source = PagedKvBlockOwner::Request(1);
+            let destination = PagedKvBlockOwner::Request(2);
+            let pin = PagedKvBlockOwner::Immutable(100);
+            let mut c = paged(2, 4);
+            c.bind_paged_execution_rows(&[source, destination])
+                .expect("bind owners");
+            fill(&mut c, &[8, 0]);
+            let handle = c
+                .validate_paged_immutable_block_pin(source, 0, pin)
+                .expect("validate pin")
+                .expect("paged");
+            assert!(c.pin_paged_immutable_block_prevalidated(pin, handle));
+            c.set_prefix_lineage(0, Some(lineage(&[8])));
+            c.set_prefix_lineage(1, Some(lineage(&[])));
+            assert!(c
+                .validate_paged_immutable_prefix_install(destination, &[handle])
+                .expect("validate install"));
+            assert!(c.install_paged_immutable_prefix_prevalidated(destination, &[handle]));
+            assert_eq!(c.offsets(), &[8, 4]);
+            assert_eq!(covered(&c, 0), Some(8));
+            assert_eq!(covered(&c, 1), None);
+        }
+
+        /// Switching storage kind re-encodes (TurboQuant) or re-pages the
+        /// existing K/V, so no earlier record describes it.
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_cleared_when_storage_kind_changes() {
+            let mut c = KVCache::new(1, 1, 2, 2, Dtype::Float32, 1024);
+            fill(&mut c, &[8]);
+            c.set_prefix_lineage(0, Some(lineage(&[8])));
+            c.enable_paged(4, 8).expect("enable paged");
+            assert_eq!(covered(&c, 0), None);
+
+            let mut tq = KVCache::new(1, 2, 8, 8, Dtype::Float32, 16).with_step(16);
+            let data: Vec<f32> = (0..(2 * 8 * 8)).map(|i| (i as f32 * 0.1).cos()).collect();
+            let k: Array = (data.as_slice(), (1_i32, 2_i32, 8_i32, 8_i32))
+                .try_into()
+                .unwrap();
+            tq.update_and_fetch(&k, &k, &[8]).expect("dense fill");
+            tq.set_prefix_lineage(0, Some(lineage(&[8])));
+            tq.enable_turboquant(TurboQuantKVBits::K4V4)
+                .expect("enable turboquant");
+            assert_eq!(covered(&tq, 0), None);
+        }
+
+        /// Restoring a stored prefix replaces the row's K/V; the caller sets
+        /// the new record only after the whole restore succeeded.
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn lineage_cleared_when_prefix_restored() {
+            let mut source = paged(1, 128);
+            fill(&mut source, &[256]);
+            let layer = source.paged_prefix_layer_for_row_on(0, ()).expect("export");
+            let mut c = paged(2, 128);
+            fill(&mut c, &[512, 512]);
+            c.set_prefix_lineage(0, Some(lineage(&[512])));
+            c.set_prefix_lineage(1, Some(lineage(&[512])));
+            c.restore_paged_prefix_layer_for_row_on(&layer, 0, 256, ())
+                .expect("restore row");
+            assert_eq!(covered(&c, 0), None);
+            assert_eq!(covered(&c, 1), Some(512));
+            c.set_prefix_lineage(0, Some(lineage(&[256])));
+            c.restore_paged_prefix_layer_for_rows_on(&layer, &[0, 1], 256, ())
+                .expect("restore rows");
+            assert_eq!(covered(&c, 0), None);
+            assert_eq!(covered(&c, 1), None);
+
+            let mut dense = KVCache::new(1, 1, 2, 2, Dtype::Float32, 1024);
+            fill(&mut dense, &[8]);
+            dense.set_prefix_lineage(0, Some(lineage(&[8])));
+            let (k, v, _) = dense
+                .dense_prefix_layer_for_row_on(0, ())
+                .expect("export dense");
+            dense
+                .restore_dense_prefix_layer_for_row_on(&k, &v, 0, 8, ())
+                .expect("restore dense");
+            assert_eq!(covered(&dense, 0), None);
+        }
     }
 }

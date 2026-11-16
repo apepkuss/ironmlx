@@ -765,15 +765,40 @@ async fn wait_prefix_hits(
     }
 }
 
+/// Entry directories in both on-disk layouts: legacy `<root>/<key>/` dirs that
+/// hold a `meta.json`, and segmented `<root>/wp8/<layout>/entries/<key>/` dirs.
 fn cache_entry_dirs(cache_dir: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     for entry in std::fs::read_dir(cache_dir).expect("read prefix cache dir") {
         let path = entry.expect("cache dir entry").path();
-        if path.is_dir() {
+        let name = entry_name(&path);
+        if !path.is_dir() || name.starts_with(".tmp-") || name == "dflash2" {
+            continue;
+        }
+        if name == "wp8" {
+            for layout in std::fs::read_dir(&path).expect("read wp8 dir") {
+                let entries = layout.expect("wp8 layout entry").path().join("entries");
+                let Ok(read) = std::fs::read_dir(&entries) else {
+                    continue;
+                };
+                for key in read {
+                    let key = key.expect("wp8 entry").path();
+                    if key.is_dir() && !entry_name(&key).starts_with(".tmp-") {
+                        dirs.push(key);
+                    }
+                }
+            }
+        } else if path.join("meta.json").is_file() {
             dirs.push(path);
         }
     }
     dirs
+}
+
+fn entry_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn cache_metadata(cache_dir: &Path) -> Vec<serde_json::Value> {

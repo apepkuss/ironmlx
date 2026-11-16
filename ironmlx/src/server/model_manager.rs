@@ -1609,6 +1609,7 @@ fn aggregate_health(start_time: Instant, snapshots: Vec<HealthSnapshot>) -> Heal
             resident_weights: ironmlx_runtime::core::resident_weights::health(),
             process_governor,
             prefix_store,
+            prefix_lru: ironmlx_runtime::core::cache::prefix_store::process_prefix_lru_health(),
             immutable_prefix_blocks,
         },
         mtp: MtpHealthInfo {
@@ -2623,6 +2624,7 @@ mod tests {
                     ironmlx_runtime::core::process_memory::MemoryGovernorSnapshot::default(),
                 prefix_store:
                     ironmlx_runtime::core::cache::prefix_store::AsyncPrefixStoreStats::default(),
+                prefix_lru: Default::default(),
                 immutable_prefix_blocks:
                     ironmlx_runtime::core::scheduler_actor::ImmutablePrefixBlockHealth::default(),
             },

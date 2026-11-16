@@ -17,5 +17,6 @@ pub mod paged_kv;
 pub use paged_kv::*;
 pub mod prefix_payload;
 pub use prefix_payload::*;
+pub mod prefix_segments;
 pub mod turboquant_kv;
 pub use turboquant_kv::*;

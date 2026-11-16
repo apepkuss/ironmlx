@@ -19,7 +19,22 @@ const SCHEMA_VERSION: u32 = 7;
 const META_FILE: &str = "meta.json";
 const PAYLOAD_FILE: &str = "payload.safetensors";
 
+use ironmlx_lm::core::cache::layer::{
+    export_prefix_segment_for_row, export_prefix_segment_range_for_row, row_prefix_lineage,
+    LayerCache,
+};
 use ironmlx_lm::core::cache::prefix_payload::*;
+use ironmlx_lm::core::cache::prefix_segments::{
+    materialize_prefix_entry, prefix_segment_layout, PrefixKvSegment, PrefixLineage,
+    PrefixLineageRef, PrefixSegmentId, PrefixSegmentLayer, PrefixSegmentLayout, PrefixSegmentRef,
+    SegmentedPrefixEntry,
+};
+
+mod wp8;
+#[cfg(test)]
+mod wp8_tests;
+use wp8::*;
+pub use wp8::{PagedPrefixSegmentedLoadResult, PrefixSegmentLookup};
 
 #[derive(Debug, Clone)]
 pub struct PagedPrefixStore {
@@ -197,27 +212,345 @@ pub enum PrefixLruInsertStatus {
 pub struct PrefixLruInsertResult {
     pub key: String,
     pub status: PrefixLruInsertStatus,
+    /// The entry's logical size (`payload_bytes` counts every token it
+    /// restores, shared or not).
     pub stats: PagedPrefixEntryStats,
+    /// Bytes this insert added to the cache: segments it brought in plus its
+    /// private data. Zero when skipped.
+    pub charged_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
 struct PrefixLruEntry {
     spec: PagedPrefixKeySpec,
-    entry: PagedPrefixEntry,
+    segmented: SegmentedPrefixEntry,
+    private_bytes: usize,
     stats: PagedPrefixEntryStats,
     generation: u64,
+}
+
+/// A segment held by the cache, counted once however many entries use it.
+#[derive(Debug)]
+struct SegmentSlot {
+    segment: Arc<PrefixKvSegment>,
+    entry_refs: usize,
+    bytes: usize,
 }
 
 #[derive(Debug)]
 pub struct PrefixLruCache {
     max_bytes: usize,
+    /// Each held segment once plus each entry's private bytes.
     total_bytes: usize,
     generation: u64,
     entries: HashMap<String, PrefixLruEntry>,
+    segments: HashMap<PrefixSegmentId, SegmentSlot>,
     recency: VecDeque<(String, u64)>,
 }
 
+/// Distinct segment ids an entry uses, in order.
+fn entry_segment_ids(entry: &SegmentedPrefixEntry) -> Vec<PrefixSegmentId> {
+    let mut ids = Vec::with_capacity(entry.segments.len());
+    for r in &entry.segments {
+        if !ids.contains(&r.segment.id) {
+            ids.push(r.segment.id);
+        }
+    }
+    ids
+}
+
 pub type SharedPrefixLruCache = Arc<Mutex<PrefixLruCache>>;
+
+/// What the hot prefix cache holds, as `/healthz` reports it.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct PrefixLruHealth {
+    pub entry_count: usize,
+    pub segment_count: usize,
+    /// Every held segment's bytes, each counted once.
+    pub segment_bytes: usize,
+    /// The entries' logical payload bytes summed, i.e. what charging each
+    /// entry a whole copy would cost.
+    pub logical_bytes: usize,
+}
+
+/// [`PrefixLruCache::health`] of the process-wide hot prefix cache; all zero
+/// when no runtime created one.
+pub fn process_prefix_lru_health() -> PrefixLruHealth {
+    process_prefix_lru_cache()
+        .ok()
+        .flatten()
+        .and_then(|cache| cache.lock().ok().map(|cache| cache.health()))
+        .unwrap_or_default()
+}
+
+/// Most segments one cached entry references. A save that would inherit
+/// more copies the row's whole aligned prefix into one new segment instead,
+/// so restoring never concatenates an unbounded number of pieces.
+pub const MAX_PREFIX_ENTRY_SEGMENTS: usize = 16;
+
+/// The record of which segments `entry` references, in order.
+pub fn segmented_entry_lineage(
+    entry: &SegmentedPrefixEntry,
+    layout: PrefixSegmentLayout,
+) -> PrefixLineage {
+    PrefixLineage {
+        layout,
+        refs: entry
+            .segments
+            .iter()
+            .map(|r| PrefixLineageRef {
+                id: r.segment.id,
+                start: r.segment.start,
+                stop: r.stop,
+                segment_stop: r.segment.stop,
+            })
+            .collect(),
+    }
+}
+
+fn lock_shared_prefix_lru_cache(
+    prefix_lru_cache: &SharedPrefixLruCache,
+) -> Result<std::sync::MutexGuard<'_, PrefixLruCache>> {
+    prefix_lru_cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("prefix LRU cache lock poisoned"))
+}
+
+/// Export row `row` of `caches` as an entry for `spec`. The leading segments
+/// the row's K/V came from (its lineage) that `prefix_lru_cache` still holds
+/// are referenced, not copied; only the rest of the block-aligned prefix
+/// becomes one new segment, and the tail and unshareable layers go to the
+/// private entry. Every exported array is owned and evaluated. Returns the
+/// entry and the row's cached length.
+pub fn export_segmented_prefix_for_row(
+    prefix_lru_cache: Option<&SharedPrefixLruCache>,
+    caches: &[LayerCache],
+    row: usize,
+    spec: &PagedPrefixKeySpec,
+) -> Result<Option<(SegmentedPrefixEntry, i32)>> {
+    let layout = prefix_segment_layout(spec);
+    let block_size = spec.block_size;
+    let mut segments = match row_prefix_lineage(caches, row) {
+        Some(lineage) if lineage.layout == layout => lineage_segments_for_row(
+            prefix_lru_cache,
+            caches,
+            row,
+            &lineage.truncated(spec.cached_len, block_size),
+            block_size,
+        )?,
+        _ => Vec::new(),
+    };
+    if segments.len() >= MAX_PREFIX_ENTRY_SEGMENTS {
+        segments.clear();
+    }
+    let from_len = segments.last().map_or(0, |r| r.stop);
+    let Some((segment, private, cached_len)) =
+        export_prefix_segment_for_row(caches, row, from_len, block_size, layout)?
+    else {
+        return Ok(None);
+    };
+    if let Some(segment) = segment {
+        let stop = segment.stop;
+        segments.push(PrefixSegmentRef {
+            segment: Arc::new(segment),
+            stop,
+        });
+    }
+    let aligned_len = segments.last().map_or(0, |r| r.stop);
+    Ok(Some((
+        SegmentedPrefixEntry {
+            segments,
+            aligned_len,
+            private,
+        },
+        cached_len,
+    )))
+}
+
+/// The segments `lineage` names, in order, as far as they continue each
+/// other. A segment the hot cache holds is reused. One it no longer holds is
+/// copied again from the row under the same id when the row holds its whole
+/// range (the row's K/V there came from it), so the SSD store finds its file
+/// and does not write it again. Stops at the first segment it can do neither
+/// for.
+fn lineage_segments_for_row(
+    prefix_lru_cache: Option<&SharedPrefixLruCache>,
+    caches: &[LayerCache],
+    row: usize,
+    lineage: &PrefixLineage,
+    block_size: i32,
+) -> Result<Vec<PrefixSegmentRef>> {
+    // Short lock: only looks segments up; copies run outside it.
+    let held = match prefix_lru_cache {
+        Some(prefix_lru_cache) => {
+            let cache = lock_shared_prefix_lru_cache(prefix_lru_cache)?;
+            lineage
+                .refs
+                .iter()
+                .map(|r| cache.segment(r.id))
+                .collect::<Vec<_>>()
+        }
+        None => vec![None; lineage.refs.len()],
+    };
+    let mut refs = Vec::with_capacity(lineage.refs.len());
+    let mut pos = 0;
+    for (r, held) in lineage.refs.iter().zip(held) {
+        if r.start != pos || r.stop <= r.start {
+            break;
+        }
+        let segment = match held {
+            Some(segment) => {
+                if segment.start != r.start
+                    || r.stop > segment.stop
+                    || segment.layout != lineage.layout
+                {
+                    break;
+                }
+                segment
+            }
+            None => {
+                if !r.is_whole() {
+                    break;
+                }
+                let Some(segment) = export_prefix_segment_range_for_row(
+                    caches,
+                    row,
+                    r.id,
+                    r.start,
+                    r.stop,
+                    block_size,
+                    lineage.layout.clone(),
+                )?
+                else {
+                    break;
+                };
+                Arc::new(segment)
+            }
+        };
+        refs.push(PrefixSegmentRef {
+            segment,
+            stop: r.stop,
+        });
+        pos = r.stop;
+    }
+    Ok(refs)
+}
+
+/// The lineage to record on a row restored from `entry` (`None` when the
+/// entry references no segment).
+pub fn restored_row_lineage(
+    lineage: &PrefixLineage,
+    cached_len: i32,
+    block_size: i32,
+) -> Option<PrefixLineage> {
+    let lineage = lineage.truncated(cached_len, block_size);
+    (!lineage.refs.is_empty()).then_some(lineage)
+}
+
+/// A hot-cache hit, rebuilt into a whole entry.
+#[derive(Debug)]
+pub struct PrefixLruLoaded {
+    pub key: String,
+    pub entry: PagedPrefixEntry,
+    /// The segments a row restored from `entry` holds (`None`: none).
+    pub lineage: Option<PrefixLineage>,
+    pub stats: PagedPrefixEntryStats,
+}
+
+/// A hot-cache hit for exactly `spec`: the whole entry (rebuilt outside the
+/// cache lock), the lineage a row restored from it gets, and its stats.
+pub fn load_segmented_prefix_entry(
+    prefix_lru_cache: &SharedPrefixLruCache,
+    spec: &PagedPrefixKeySpec,
+) -> Result<Option<PrefixLruLoaded>> {
+    let Some((segmented, lineage)) =
+        lock_shared_prefix_lru_cache(prefix_lru_cache)?.load_segmented(spec)?
+    else {
+        return Ok(None);
+    };
+    let entry = materialize_prefix_entry(&segmented, spec.cached_len, spec.block_size)?;
+    let stats = entry.observability_stats(spec.cached_len);
+    Ok(Some(PrefixLruLoaded {
+        key: PagedPrefixStore::key_for(spec),
+        entry,
+        lineage: restored_row_lineage(&lineage, spec.cached_len, spec.block_size),
+        stats,
+    }))
+}
+
+/// An SSD hit for exactly `spec`.
+#[derive(Debug)]
+pub struct PrefixStoreHit {
+    /// The entry rebuilt whole, for restoring a row.
+    pub entry: PagedPrefixEntry,
+    /// The same entry as segments, for the prefix LRU cache.
+    pub segmented: SegmentedPrefixEntry,
+    /// The segments a row restored from it holds (`None`: none).
+    pub lineage: Option<PrefixLineage>,
+    pub stats: PagedPrefixEntryStats,
+}
+
+/// What an SSD lookup found.
+#[derive(Debug)]
+pub struct PrefixStoreLoaded {
+    pub key: String,
+    pub status: PagedPrefixLoadStatus,
+    pub hit: Option<PrefixStoreHit>,
+}
+
+/// Read `spec` from the SSD store. Segments the prefix LRU cache still
+/// holds are reused instead of read again.
+pub fn load_store_prefix_entry(
+    store: &PagedPrefixStore,
+    prefix_lru_cache: Option<&SharedPrefixLruCache>,
+    spec: &PagedPrefixKeySpec,
+) -> Result<PrefixStoreLoaded> {
+    let lookup = |id: PrefixSegmentId| {
+        prefix_lru_cache
+            .and_then(|cache| cache.lock().ok())
+            .and_then(|cache| cache.segment(id))
+    };
+    let observed = store.load_segmented_observed(spec, Some(&lookup))?;
+    let hit = match (observed.status, observed.entry) {
+        (PagedPrefixLoadStatus::Hit, Some(segmented)) => {
+            // Read from disk here, outside any lock: inserting the hit into
+            // the hot cache evaluates it under the process-wide cache lock,
+            // which is then a no-op. Segments reused from the cache are
+            // evaluated already.
+            for r in &segmented.segments {
+                r.segment.eval()?;
+            }
+            segmented.private.eval()?;
+            let entry = materialize_prefix_entry(&segmented, spec.cached_len, spec.block_size)?;
+            let stats = observed
+                .stats
+                .unwrap_or_else(|| entry.observability_stats(spec.cached_len));
+            let lineage = restored_row_lineage(
+                &segmented_entry_lineage(&segmented, prefix_segment_layout(spec)),
+                spec.cached_len,
+                spec.block_size,
+            );
+            Some(PrefixStoreHit {
+                entry,
+                segmented,
+                lineage,
+                stats,
+            })
+        }
+        _ => None,
+    };
+    Ok(PrefixStoreLoaded {
+        key: observed.key,
+        status: if hit.is_some() {
+            PagedPrefixLoadStatus::Hit
+        } else if observed.status == PagedPrefixLoadStatus::Hit {
+            PagedPrefixLoadStatus::EntryInvalid
+        } else {
+            observed.status
+        },
+        hit,
+    })
+}
 
 static PROCESS_PREFIX_LRU_CACHE: OnceLock<Mutex<Weak<Mutex<PrefixLruCache>>>> = OnceLock::new();
 
@@ -338,12 +671,66 @@ struct AsyncPrefixStoreCounters {
     backpressured_total: AtomicU64,
 }
 
+/// What a queued save writes: an immutable block (or a whole prefix kept as
+/// one private part), or a whole prefix in its segmented form.
+#[derive(Clone)]
+enum AsyncPrefixStorePayload {
+    Whole(PagedPrefixEntry),
+    Segmented(SegmentedPrefixEntry),
+}
+
+impl AsyncPrefixStorePayload {
+    /// The entry's logical bytes: every token it restores, shared or not.
+    fn logical_bytes(&self, spec: &PagedPrefixKeySpec) -> Result<usize> {
+        Ok(match self {
+            Self::Whole(entry) => entry.observability_stats(spec.cached_len).payload_bytes,
+            // Lazy: no array is evaluated.
+            Self::Segmented(entry) => {
+                materialize_prefix_entry(entry, spec.cached_len, spec.block_size)?
+                    .observability_stats(spec.cached_len)
+                    .payload_bytes
+            }
+        })
+    }
+
+    fn eval(&self) -> Result<()> {
+        match self {
+            Self::Whole(entry) => entry.eval()?,
+            Self::Segmented(entry) => {
+                for r in &entry.segments {
+                    r.segment.eval()?;
+                }
+                entry.private.eval()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn segmented(&self) -> SegmentedPrefixEntry {
+        match self {
+            Self::Whole(entry) => SegmentedPrefixEntry {
+                segments: Vec::new(),
+                aligned_len: 0,
+                private: entry.clone(),
+            },
+            Self::Segmented(entry) => entry.clone(),
+        }
+    }
+
+    fn save_if_absent(&self, store: &PagedPrefixStore, spec: &PagedPrefixKeySpec) -> Result<()> {
+        match self {
+            Self::Whole(entry) => store.save_if_absent(spec, entry).map(drop),
+            Self::Segmented(entry) => store.save_segmented_if_absent(spec, entry).map(drop),
+        }
+    }
+}
+
 struct AsyncPrefixStoreJob {
     id: u64,
     pending_key: (PathBuf, String),
     store: PagedPrefixStore,
     spec: PagedPrefixKeySpec,
-    entry: PagedPrefixEntry,
+    entry: AsyncPrefixStorePayload,
     payload_bytes: usize,
     cancellation: AsyncPrefixStoreCancellation,
 }
@@ -352,7 +739,7 @@ struct AsyncPrefixStoreJob {
 struct AsyncPrefixPendingEntry {
     id: u64,
     spec: PagedPrefixKeySpec,
-    entry: Option<PagedPrefixEntry>,
+    entry: Option<AsyncPrefixStorePayload>,
     cancellation: AsyncPrefixStoreCancellation,
 }
 
@@ -415,7 +802,7 @@ impl Drop for AsyncPrefixStorePermit {
 impl AsyncPrefixStorePermit {
     pub fn submit(mut self, entry: PagedPrefixEntry) -> AsyncPrefixStoreSubmit {
         let queue = self.queue.clone();
-        queue.submit_permit(&mut self, entry)
+        queue.submit_permit(&mut self, AsyncPrefixStorePayload::Whole(entry))
     }
 }
 
@@ -466,7 +853,7 @@ impl AsyncPrefixStoreQueue {
                         worker_counters
                             .cancelled_total
                             .fetch_add(1, Ordering::Relaxed);
-                    } else if let Err(error) = job.store.save_if_absent(&job.spec, &job.entry) {
+                    } else if let Err(error) = job.entry.save_if_absent(&job.store, &job.spec) {
                         worker_counters.failed_total.fetch_add(1, Ordering::Relaxed);
                         tracing::warn!(%error, "async paged prefix store write failed");
                     } else {
@@ -614,10 +1001,19 @@ impl AsyncPrefixStoreQueue {
     fn submit_permit(
         &self,
         permit: &mut AsyncPrefixStorePermit,
-        entry: PagedPrefixEntry,
+        entry: AsyncPrefixStorePayload,
     ) -> AsyncPrefixStoreSubmit {
         let spec = permit.spec.take().expect("active permit owns spec");
-        let actual_payload_bytes = entry.observability_stats(spec.cached_len).payload_bytes;
+        // The reservation is the entry's logical size, an upper bound on
+        // what the writer puts on disk (segments already there are skipped).
+        let actual_payload_bytes = match entry.logical_bytes(&spec) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.0.counters.failed_total.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(%error, "async paged prefix store payload does not fit its spec");
+                return AsyncPrefixStoreSubmit::Closed;
+            }
+        };
         if actual_payload_bytes != permit.payload_bytes {
             self.0.counters.failed_total.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
@@ -717,18 +1113,52 @@ impl AsyncPrefixStoreQueue {
     ) -> Option<PagedPrefixLoadResult> {
         let key = PagedPrefixStore::key_for(spec);
         let pending_key = (store.root.clone(), key.clone());
-        let pending = self.0.pending.lock().ok()?;
-        let entry = pending.get(&pending_key)?;
-        if entry.cancellation.is_cancelled() || entry.spec != *spec {
-            return None;
-        }
-        let cached_entry = entry.entry.as_ref()?;
+        let payload = self.pending_payload(&pending_key, spec)?;
+        let cached_entry = match payload {
+            AsyncPrefixStorePayload::Whole(entry) => entry,
+            AsyncPrefixStorePayload::Segmented(entry) => {
+                materialize_prefix_entry(&entry, spec.cached_len, spec.block_size).ok()?
+            }
+        };
         Some(PagedPrefixLoadResult {
             key,
             status: PagedPrefixLoadStatus::Hit,
-            entry: Some(cached_entry.clone()),
             stats: Some(cached_entry.observability_stats(spec.cached_len)),
+            entry: Some(cached_entry),
         })
+    }
+
+    /// A whole prefix waiting to be written, in segmented form.
+    fn load_pending_segmented(
+        &self,
+        store: &PagedPrefixStore,
+        spec: &PagedPrefixKeySpec,
+    ) -> Option<PagedPrefixSegmentedLoadResult> {
+        let key = PagedPrefixStore::key_for(spec);
+        let pending_key = (store.root.clone(), key.clone());
+        let entry = self.pending_payload(&pending_key, spec)?.segmented();
+        let stats = materialize_prefix_entry(&entry, spec.cached_len, spec.block_size)
+            .ok()?
+            .observability_stats(spec.cached_len);
+        Some(PagedPrefixSegmentedLoadResult {
+            key,
+            status: PagedPrefixLoadStatus::Hit,
+            entry: Some(entry),
+            stats: Some(stats),
+        })
+    }
+
+    fn pending_payload(
+        &self,
+        pending_key: &(PathBuf, String),
+        spec: &PagedPrefixKeySpec,
+    ) -> Option<AsyncPrefixStorePayload> {
+        let pending = self.0.pending.lock().ok()?;
+        let entry = pending.get(pending_key)?;
+        if entry.cancellation.is_cancelled() || entry.spec != *spec {
+            return None;
+        }
+        entry.entry.clone()
     }
 
     fn contains_pending(&self, store: &PagedPrefixStore, spec: &PagedPrefixKeySpec) -> bool {
@@ -887,6 +1317,7 @@ impl PrefixLruCache {
             total_bytes: 0,
             generation: 0,
             entries: HashMap::new(),
+            segments: HashMap::new(),
             recency: VecDeque::new(),
         })
     }
@@ -901,6 +1332,20 @@ impl PrefixLruCache {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn health(&self) -> PrefixLruHealth {
+        PrefixLruHealth {
+            entry_count: self.entries.len(),
+            segment_count: self.segments.len(),
+            segment_bytes: self
+                .segments
+                .values()
+                .fold(0usize, |sum, slot| sum.saturating_add(slot.bytes)),
+            logical_bytes: self.entries.values().fold(0usize, |sum, entry| {
+                sum.saturating_add(entry.stats.payload_bytes)
+            }),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -950,7 +1395,8 @@ impl PrefixLruCache {
                 stats: Some(entry.stats),
             });
         }
-        let cached_entry = entry.entry.clone();
+        let cached_entry =
+            materialize_prefix_entry(&entry.segmented, spec.cached_len, spec.block_size)?;
         let stats = entry.stats;
         self.touch(&key);
         Ok(PagedPrefixLoadResult {
@@ -961,40 +1407,187 @@ impl PrefixLruCache {
         })
     }
 
+    /// The cached entry for exactly `spec` and the segments it came from.
+    /// Counts as a use.
+    pub fn load_segmented(
+        &mut self,
+        spec: &PagedPrefixKeySpec,
+    ) -> Result<Option<(SegmentedPrefixEntry, PrefixLineage)>> {
+        let key = PagedPrefixStore::key_for(spec);
+        let Some(entry) = self.entries.get(&key).filter(|entry| entry.spec == *spec) else {
+            return Ok(None);
+        };
+        let segmented = entry.segmented.clone();
+        let lineage = segmented_entry_lineage(&segmented, prefix_segment_layout(spec));
+        self.touch(&key);
+        Ok(Some((segmented, lineage)))
+    }
+
+    /// A segment some cached entry uses.
+    pub fn segment(&self, id: PrefixSegmentId) -> Option<Arc<PrefixKvSegment>> {
+        self.segments.get(&id).map(|slot| slot.segment.clone())
+    }
+
+    /// The head of `lineage` this cache still holds, as segment references:
+    /// stops at the first segment that is gone or does not continue the
+    /// previous one.
+    pub fn lineage_segments(&self, lineage: &PrefixLineage) -> Vec<PrefixSegmentRef> {
+        let mut refs = Vec::with_capacity(lineage.refs.len());
+        let mut pos = 0;
+        for &PrefixLineageRef {
+            id, start, stop, ..
+        } in &lineage.refs
+        {
+            let Some(segment) = self.segment(id) else {
+                break;
+            };
+            if start != pos
+                || segment.start != start
+                || stop <= start
+                || stop > segment.stop
+                || segment.layout != lineage.layout
+            {
+                break;
+            }
+            refs.push(PrefixSegmentRef { segment, stop });
+            pos = stop;
+        }
+        refs
+    }
+
+    /// Insert an unshared entry. It is kept whole as private data: it
+    /// references no segment and nothing shares its buffers, so its bytes are
+    /// exactly what removing it gives back.
     pub fn insert(
         &mut self,
         spec: PagedPrefixKeySpec,
         entry: PagedPrefixEntry,
     ) -> Result<PrefixLruInsertResult> {
+        self.insert_segmented(
+            spec,
+            SegmentedPrefixEntry {
+                segments: vec![],
+                aligned_len: 0,
+                private: entry,
+            },
+        )
+    }
+
+    /// Insert an entry whose head lives in shared segments. Segments already
+    /// cached are not charged again.
+    pub fn insert_segmented(
+        &mut self,
+        spec: PagedPrefixKeySpec,
+        mut entry: SegmentedPrefixEntry,
+    ) -> Result<PrefixLruInsertResult> {
         let validator = PagedPrefixStore::new(Path::new(""));
         validator.validate_spec(&spec)?;
-        validator.validate_entry(&spec, &entry)?;
+        let layout = prefix_segment_layout(&spec);
+        if let Some(r) = entry.segments.iter().find(|r| r.segment.layout != layout) {
+            anyhow::bail!(
+                "PrefixLruCache: segment {} layout does not match the entry",
+                r.segment.id
+            );
+        }
+        // One copy per segment id: an entry that brings its own copy of a
+        // segment this cache (or an earlier ref of the entry) already holds
+        // uses that one instead.
+        let mut seen = HashMap::<PrefixSegmentId, Arc<PrefixKvSegment>>::new();
+        for r in &mut entry.segments {
+            let held = self
+                .segments
+                .get(&r.segment.id)
+                .map(|slot| slot.segment.clone())
+                .or_else(|| seen.get(&r.segment.id).cloned());
+            let Some(held) = held else {
+                seen.insert(r.segment.id, r.segment.clone());
+                continue;
+            };
+            if held.start != r.segment.start
+                || held.stop != r.segment.stop
+                || held.layout != r.segment.layout
+            {
+                anyhow::bail!(
+                    "PrefixLruCache: segment {} does not match the copy already held",
+                    r.segment.id
+                );
+            }
+            r.segment = held;
+        }
+        // Lazy: validates shapes without evaluating anything.
+        let materialized = materialize_prefix_entry(&entry, spec.cached_len, spec.block_size)?;
+        validator.validate_entry(&spec, &materialized)?;
+        let stats = materialized.observability_stats(spec.cached_len);
+        drop(materialized);
 
         let key = PagedPrefixStore::key_for(&spec);
-        let stats = entry.observability_stats(spec.cached_len);
-        if stats.payload_bytes > self.max_bytes {
+        let private_bytes = entry
+            .private
+            .observability_stats(spec.cached_len)
+            .payload_bytes;
+        let ids = entry_segment_ids(&entry);
+        let new_segment_bytes = entry
+            .segments
+            .iter()
+            .filter(|r| !self.segments.contains_key(&r.segment.id))
+            .map(|r| (r.segment.id, r.segment.payload_bytes()))
+            .collect::<HashMap<_, _>>()
+            .into_values()
+            .fold(0usize, usize::saturating_add);
+        let charged_bytes = new_segment_bytes.saturating_add(private_bytes);
+        if charged_bytes > self.max_bytes {
             return Ok(PrefixLruInsertResult {
                 key,
                 status: PrefixLruInsertStatus::SkippedOversized,
                 stats,
+                charged_bytes: 0,
             });
         }
 
-        let status = if let Some(previous) = self.entries.remove(&key) {
-            self.total_bytes = self
-                .total_bytes
-                .saturating_sub(previous.stats.payload_bytes);
+        // Evaluate before the entry becomes visible: cached segments are
+        // shared across threads, which `PrefixKvSegment: Sync` allows only
+        // for evaluated arrays. Callers evaluate first (an SSD hit comes
+        // back evaluated), so this guard normally does no work under the
+        // cache lock.
+        for r in &entry.segments {
+            if !self.segments.contains_key(&r.segment.id) {
+                r.segment.eval()?;
+            }
+        }
+        entry.private.eval()?;
+
+        // Take the new references before dropping a replaced entry's, so a
+        // segment both use is kept.
+        for id in &ids {
+            let Some(r) = entry.segments.iter().find(|r| r.segment.id == *id) else {
+                continue;
+            };
+            let slot = self
+                .segments
+                .entry(r.segment.id)
+                .or_insert_with(|| SegmentSlot {
+                    bytes: r.segment.payload_bytes(),
+                    segment: r.segment.clone(),
+                    entry_refs: 0,
+                });
+            if slot.entry_refs == 0 {
+                self.total_bytes = self.total_bytes.saturating_add(slot.bytes);
+            }
+            slot.entry_refs += 1;
+        }
+        self.total_bytes = self.total_bytes.saturating_add(private_bytes);
+        let status = if self.remove_entry(&key).is_some() {
             PrefixLruInsertStatus::Replaced
         } else {
             PrefixLruInsertStatus::Stored
         };
         let generation = self.next_generation();
-        self.total_bytes = self.total_bytes.saturating_add(stats.payload_bytes);
         self.entries.insert(
             key.clone(),
             PrefixLruEntry {
                 spec,
-                entry,
+                segmented: entry,
+                private_bytes,
                 stats,
                 generation,
             },
@@ -1002,7 +1595,12 @@ impl PrefixLruCache {
         self.recency.push_back((key.clone(), generation));
         self.shrink_to(self.max_bytes);
 
-        Ok(PrefixLruInsertResult { key, status, stats })
+        Ok(PrefixLruInsertResult {
+            key,
+            status,
+            stats,
+            charged_bytes,
+        })
     }
 
     fn next_generation(&mut self) -> u64 {
@@ -1075,10 +1673,53 @@ impl PrefixLruCache {
         covered
     }
 
-    fn remove_entry(&mut self, key: &str) {
-        if let Some(entry) = self.entries.remove(key) {
-            self.total_bytes = self.total_bytes.saturating_sub(entry.stats.payload_bytes);
+    /// Drop exactly this entry (tests evict one entry without the LRU order).
+    #[cfg(test)]
+    pub(crate) fn remove(&mut self, spec: &PagedPrefixKeySpec) -> bool {
+        self.remove_entry(&PagedPrefixStore::key_for(spec))
+            .is_some()
+    }
+
+    /// Remove `key`; returns the bytes this gave back (its private data and
+    /// the segments no other entry uses), `None` if it was not cached.
+    fn remove_entry(&mut self, key: &str) -> Option<usize> {
+        let entry = self.entries.remove(key)?;
+        let mut freed = entry.private_bytes;
+        for id in entry_segment_ids(&entry.segmented) {
+            let Some(slot) = self.segments.get_mut(&id) else {
+                continue;
+            };
+            slot.entry_refs = slot.entry_refs.saturating_sub(1);
+            if slot.entry_refs == 0 {
+                freed = freed.saturating_add(slot.bytes);
+                self.segments.remove(&id);
+            }
         }
+        self.total_bytes = self.total_bytes.saturating_sub(freed);
+        Some(freed)
+    }
+
+    /// Bytes per model: private data plus each segment its entries use, once.
+    fn owner_bytes(&self, skip: impl Fn(&PrefixLruEntry) -> bool) -> HashMap<&str, usize> {
+        let mut owner_bytes = HashMap::<&str, usize>::new();
+        let mut counted = std::collections::HashSet::<(&str, PrefixSegmentId)>::new();
+        for entry in self.entries.values() {
+            if skip(entry) {
+                continue;
+            }
+            let owner = entry.spec.model_id.as_str();
+            let mut bytes = entry.private_bytes;
+            for id in entry_segment_ids(&entry.segmented) {
+                if counted.insert((owner, id)) {
+                    if let Some(slot) = self.segments.get(&id) {
+                        bytes = bytes.saturating_add(slot.bytes);
+                    }
+                }
+            }
+            let total = owner_bytes.entry(owner).or_default();
+            *total = total.saturating_add(bytes);
+        }
+        owner_bytes
     }
 
     fn evict_to(&mut self, target_bytes: usize, spare_model: Option<&str>) -> PrefixLruReclaim {
@@ -1096,14 +1737,7 @@ impl PrefixLruCache {
         while self.total_bytes > target_bytes {
             let spared = |entry: &PrefixLruEntry| spare_model == Some(entry.spec.model_id.as_str());
             let others_remain = self.entries.values().any(|entry| !spared(entry));
-            let mut owner_bytes = HashMap::<&str, usize>::new();
-            for entry in self.entries.values() {
-                if others_remain && spared(entry) {
-                    continue;
-                }
-                let owner_bytes = owner_bytes.entry(entry.spec.model_id.as_str()).or_default();
-                *owner_bytes = owner_bytes.saturating_add(entry.stats.payload_bytes);
-            }
+            let owner_bytes = self.owner_bytes(|entry| others_remain && spared(entry));
             let fair_share = if owner_bytes.is_empty() {
                 target_bytes
             } else {
@@ -1231,7 +1865,29 @@ impl PagedPrefixStore {
         stable_hex_hash(&json)
     }
 
+    /// Save `entry`. A whole prefix is written in the `wp8` format as one
+    /// private part; an immutable block keeps its `<root>/<key>/` directory.
     pub fn save(&self, spec: &PagedPrefixKeySpec, entry: &PagedPrefixEntry) -> Result<String> {
+        if spec.entry_kind == PrefixEntryKind::WholePrefix {
+            return self.save_segmented(
+                spec,
+                &SegmentedPrefixEntry {
+                    segments: Vec::new(),
+                    aligned_len: 0,
+                    private: entry.clone(),
+                },
+            );
+        }
+        self.save_root_entry(spec, entry)
+    }
+
+    /// Write `entry` as `<root>/<key>/`: immutable blocks, and parked
+    /// requests (the active-KV store), which are not cache entries.
+    pub(crate) fn save_root_entry(
+        &self,
+        spec: &PagedPrefixKeySpec,
+        entry: &PagedPrefixEntry,
+    ) -> Result<String> {
         self.validate_spec(spec)?;
         self.validate_entry(spec, entry)?;
 
@@ -1252,6 +1908,12 @@ impl PagedPrefixStore {
             .join(format!(".tmp-{key}-{}", uuid::Uuid::new_v4().simple()));
         fs::create_dir_all(&self.root)
             .with_context(|| format!("create prefix cache root {}", self.root.display()))?;
+        // Immutable blocks come from the single store writer, like `wp8`
+        // entries; the active-KV store writes from scheduler threads and
+        // cleans its own root.
+        if spec.entry_kind == PrefixEntryKind::ImmutableBlock {
+            self.ensure_wp8_startup_cleanup();
+        }
         fs::create_dir_all(&tmp_dir)
             .with_context(|| format!("create temporary prefix cache dir {}", tmp_dir.display()))?;
 
@@ -1333,43 +1995,9 @@ impl PagedPrefixStore {
             .map_or_else(Vec::new, |queue| {
                 queue.pending_cached_lengths(self, max_cached_len)
             });
-        let entries = match fs::read_dir(&self.root) {
-            Ok(entries) => entries,
-            Err(err) if err.kind() == ErrorKind::NotFound => {
-                lengths.sort_unstable_by(|left, right| right.cmp(left));
-                lengths.dedup();
-                return Ok(lengths);
-            }
-            Err(err) => {
-                return Err(err)
-                    .with_context(|| format!("read prefix cache root {}", self.root.display()));
-            }
-        };
-        for entry in entries {
-            let entry =
-                entry.with_context(|| format!("read prefix cache root {}", self.root.display()))?;
-            let entry_path = entry.path();
-            let file_type = entry.file_type().with_context(|| {
-                format!("read prefix cache entry type {}", entry_path.display())
-            })?;
-            if !file_type.is_dir() {
-                continue;
-            }
-            let meta_path = entry_path.join(META_FILE);
-            let Some(metadata) = fs::read(&meta_path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<PrefixMetadata>(&bytes).ok())
-            else {
-                continue;
-            };
-            if metadata.schema_version == SCHEMA_VERSION
-                && metadata.entry_kind == PrefixEntryKind::WholePrefix
-                && metadata.cached_len > 0
-                && metadata.cached_len <= max_cached_len
-            {
-                lengths.push(metadata.cached_len);
-            }
-        }
+        // Whole prefixes live under `wp8/`; `<root>/<key>/` holds immutable
+        // blocks and legacy whole-prefix entries, which are not read.
+        lengths.extend(self.wp8_cached_lengths(max_cached_len)?);
         lengths.sort_unstable_by(|left, right| right.cmp(left));
         lengths.dedup();
         Ok(lengths)
@@ -1397,6 +2025,28 @@ impl PagedPrefixStore {
     }
 
     pub fn load_observed(&self, spec: &PagedPrefixKeySpec) -> Result<PagedPrefixLoadResult> {
+        self.validate_spec(spec)?;
+        if spec.entry_kind == PrefixEntryKind::WholePrefix {
+            let observed = self.load_segmented_observed(spec, None)?;
+            let entry = observed
+                .entry
+                .map(|entry| materialize_prefix_entry(&entry, spec.cached_len, spec.block_size))
+                .transpose()?;
+            return Ok(PagedPrefixLoadResult {
+                key: observed.key,
+                status: observed.status,
+                entry,
+                stats: observed.stats,
+            });
+        }
+        self.load_root_observed(spec)
+    }
+
+    /// Read `<root>/<key>/` (see [`Self::save_root_entry`]).
+    pub(crate) fn load_root_observed(
+        &self,
+        spec: &PagedPrefixKeySpec,
+    ) -> Result<PagedPrefixLoadResult> {
         self.validate_spec(spec)?;
         if let Some(observed) = PROCESS_PREFIX_STORE_QUEUE
             .get()
@@ -1490,6 +2140,9 @@ impl PagedPrefixStore {
     }
 
     fn entry_metadata_matches(&self, spec: &PagedPrefixKeySpec, key: &str) -> Result<bool> {
+        if spec.entry_kind == PrefixEntryKind::WholePrefix {
+            return Ok(self.wp8_entry_matches(spec, key));
+        }
         let entry_dir = self.root.join(key);
         if !entry_dir.is_dir() {
             return Ok(false);
@@ -1507,33 +2160,108 @@ impl PagedPrefixStore {
         Ok(actual_metadata == metadata_for(spec, key)?)
     }
 
+    /// Delete entries until the store holds at most `max_bytes`, sparing
+    /// `keep_key`. Block-pool entries, legacy `<root>/<key>/` directories,
+    /// `wp8` entries and their segment files share the budget. `wp8` entries
+    /// a longer entry covers go first; then the oldest of everything. A
+    /// segment file goes when no `wp8` entry references it any more.
     fn evict_to_disk_capacity(&self, keep_key: &str, max_bytes: usize) -> Result<()> {
-        let mut entries = self.disk_entries()?;
-        let mut total_bytes = entries
-            .iter()
-            .fold(0_u64, |total, entry| total.saturating_add(entry.bytes));
-        if total_bytes <= max_bytes as u64 {
+        let max_bytes = max_bytes as u64;
+        let root_entries = self.disk_entries()?;
+        let wp8_entries = self.wp8_disk_entries()?;
+        let mut segment_files = self.wp8_segment_files()?;
+        let total = |root: &[PrefixDiskEntry],
+                     wp8: &[(PrefixDiskEntry, Wp8DiskEntry)],
+                     segments: &HashMap<PathBuf, HashMap<String, u64>>| {
+            root.iter()
+                .chain(wp8.iter().map(|(entry, _)| entry))
+                .map(|entry| entry.bytes)
+                .chain(segments.values().flat_map(|files| files.values().copied()))
+                .fold(0_u64, u64::saturating_add)
+        };
+        let mut total_bytes = total(&root_entries, &wp8_entries, &segment_files);
+        if total_bytes <= max_bytes {
             return Ok(());
         }
 
-        entries.sort_by(|left, right| {
-            left.modified
-                .cmp(&right.modified)
-                .then_with(|| left.key.cmp(&right.key))
-        });
-        for entry in entries {
+        // Segment references per layout directory.
+        let mut refs = HashMap::<(PathBuf, String), usize>::new();
+        for (_, wp8) in &wp8_entries {
+            for name in wp8_entry_segment_files(wp8) {
+                *refs.entry((wp8.layout_dir.clone(), name)).or_default() += 1;
+            }
+        }
+        // Files no entry references (an entry lost to a failed read).
+        for (layout_dir, files) in &mut segment_files {
+            files.retain(|name, bytes| {
+                let referenced = refs.contains_key(&(layout_dir.clone(), name.clone()));
+                if !referenced {
+                    remove_path(&layout_dir.join(WP8_SEGMENTS_DIR).join(name.as_str()));
+                    total_bytes = total_bytes.saturating_sub(*bytes);
+                }
+                referenced
+            });
+        }
+
+        let covered = covered_wp8_entries(&wp8_entries);
+        enum Victim<'a> {
+            Root(&'a PrefixDiskEntry),
+            Wp8(&'a PrefixDiskEntry, &'a Wp8DiskEntry),
+        }
+        let mut covered_victims = Vec::new();
+        let mut others = Vec::new();
+        for (idx, (entry, wp8)) in wp8_entries.iter().enumerate() {
+            if covered.contains(&idx) {
+                covered_victims.push(Victim::Wp8(entry, wp8));
+            } else {
+                others.push(Victim::Wp8(entry, wp8));
+            }
+        }
+        others.extend(root_entries.iter().map(Victim::Root));
+        let entry_of = |victim: &Victim<'_>| match victim {
+            Victim::Root(entry) | Victim::Wp8(entry, _) => (entry.modified, entry.key.clone()),
+        };
+        covered_victims.sort_by_key(|victim| entry_of(victim));
+        others.sort_by_key(|victim| entry_of(victim));
+
+        for victim in covered_victims.iter().chain(&others) {
+            if total_bytes <= max_bytes {
+                break;
+            }
+            let (entry, wp8) = match victim {
+                Victim::Root(entry) => (*entry, None),
+                Victim::Wp8(entry, wp8) => (*entry, Some(*wp8)),
+            };
             if entry.key == keep_key {
                 continue;
             }
-            fs::remove_dir_all(&entry.path)
-                .with_context(|| format!("evict prefix cache entry {}", entry.path.display()))?;
+            remove_entry_dir(&entry.path)?;
             total_bytes = total_bytes.saturating_sub(entry.bytes);
-            if total_bytes <= max_bytes as u64 {
-                break;
+            let Some(wp8) = wp8 else {
+                continue;
+            };
+            for name in wp8_entry_segment_files(wp8) {
+                let key = (wp8.layout_dir.clone(), name);
+                let Some(count) = refs.get_mut(&key) else {
+                    continue;
+                };
+                *count -= 1;
+                if *count > 0 {
+                    continue;
+                }
+                refs.remove(&key);
+                let (layout_dir, name) = key;
+                if let Some(bytes) = segment_files
+                    .get_mut(&layout_dir)
+                    .and_then(|files| files.remove(&name))
+                {
+                    remove_path(&layout_dir.join(WP8_SEGMENTS_DIR).join(name));
+                    total_bytes = total_bytes.saturating_sub(bytes);
+                }
             }
         }
 
-        if total_bytes > max_bytes as u64 {
+        if total_bytes > max_bytes {
             anyhow::bail!(
                 "PagedPrefixStore: retained entry exceeds max_bytes {max_bytes}; total_bytes={total_bytes}"
             );
@@ -1566,12 +2294,19 @@ impl PagedPrefixStore {
             // own limit.
             if key.starts_with(".tmp-")
                 || key == crate::core::dflash2_prefix_store::DFLASH2_STORE_DIR
+                || key == WP8_DIR
             {
                 continue;
             }
-            let metadata = entry
-                .metadata()
-                .with_context(|| format!("read prefix cache metadata {}", path.display()))?;
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                // A reader removed it meanwhile.
+                Err(err) if err.kind() == ErrorKind::NotFound => continue,
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("read prefix cache metadata {}", path.display()));
+                }
+            };
             let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
             let bytes = directory_disk_bytes(&path)?;
             result.push(PrefixDiskEntry {
@@ -1735,6 +2470,53 @@ impl PagedPrefixStore {
     }
 }
 
+/// Distinct segment files a `wp8` entry references.
+fn wp8_entry_segment_files(entry: &Wp8DiskEntry) -> Vec<String> {
+    let mut names = entry
+        .meta
+        .iter()
+        .flat_map(|meta| meta.segments.iter().map(|segment| segment.file_name()))
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Indices of the `wp8` entries a longer entry continues: same layout and
+/// fingerprint, and its tokens start with theirs.
+fn covered_wp8_entries(
+    entries: &[(PrefixDiskEntry, Wp8DiskEntry)],
+) -> std::collections::HashSet<usize> {
+    let mut groups = HashMap::<(&Path, Option<&str>), Vec<usize>>::new();
+    for (idx, (_, wp8)) in entries.iter().enumerate() {
+        if let Some(meta) = &wp8.meta {
+            groups
+                .entry((
+                    wp8.layout_dir.as_path(),
+                    meta.prefix.fingerprint_hash.as_deref(),
+                ))
+                .or_default()
+                .push(idx);
+        }
+    }
+    let mut covered = std::collections::HashSet::new();
+    for members in groups.values().filter(|members| members.len() > 1) {
+        let tokens = members
+            .iter()
+            .filter_map(|&idx| read_wp8_tokens(&entries[idx].0.path).map(|tokens| (idx, tokens)))
+            .collect::<Vec<_>>();
+        for (idx, shorter) in &tokens {
+            if tokens
+                .iter()
+                .any(|(_, longer)| longer.len() > shorter.len() && longer.starts_with(shorter))
+            {
+                covered.insert(*idx);
+            }
+        }
+    }
+    covered
+}
+
 #[derive(Debug)]
 struct PrefixDiskEntry {
     key: String,
@@ -1743,18 +2525,38 @@ struct PrefixDiskEntry {
     modified: SystemTime,
 }
 
+/// Bytes under `path`. Whatever a concurrent reader removed meanwhile (an
+/// invalid entry it deleted) counts as zero.
 fn directory_disk_bytes(path: &Path) -> Result<u64> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(0),
+        Err(err) => {
+            return Err(err).with_context(|| format!("read prefix cache entry {}", path.display()));
+        }
+    };
     let mut total = 0_u64;
-    for entry in
-        fs::read_dir(path).with_context(|| format!("read prefix cache entry {}", path.display()))?
-    {
-        let entry = entry.with_context(|| format!("read prefix cache entry {}", path.display()))?;
-        let metadata = entry.metadata().with_context(|| {
-            format!(
-                "read prefix cache entry metadata {}",
-                entry.path().display()
-            )
-        })?;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("read prefix cache entry {}", path.display()));
+            }
+        };
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "read prefix cache entry metadata {}",
+                        entry.path().display()
+                    )
+                });
+            }
+        };
         if metadata.is_dir() {
             total = total.saturating_add(directory_disk_bytes(&entry.path())?);
         } else {
@@ -1762,6 +2564,18 @@ fn directory_disk_bytes(path: &Path) -> Result<u64> {
         }
     }
     Ok(total)
+}
+
+/// Remove an evicted entry directory; one a concurrent reader already
+/// removed counts as removed.
+fn remove_entry_dir(path: &Path) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => {
+            Err(err).with_context(|| format!("evict prefix cache entry {}", path.display()))
+        }
+    }
 }
 
 fn validate_layer_spec(
@@ -2852,7 +3666,7 @@ mod tests {
             vec![],
             None,
         );
-        let key = PagedPrefixStore::key_for(&wanted);
+        let entry_dir = PagedPrefixStore::new(&root).wp8_entry_dir(&wanted);
         let queue = AsyncPrefixStoreQueue::new(2, 1024).expect("queue");
         assert_eq!(
             queue.try_enqueue(PagedPrefixStore::new(&root), wanted, entry),
@@ -2863,7 +3677,7 @@ mod tests {
         assert_eq!(stats.pending_jobs, 0);
         assert_eq!(stats.pending_bytes, 0);
         assert_eq!(stats.completed_total, 1);
-        assert!(root.join(key).is_dir());
+        assert!(entry_dir.is_dir());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3006,7 +3820,7 @@ mod tests {
             AsyncPrefixPendingEntry {
                 id: 1,
                 spec: wanted.clone(),
-                entry: Some(entry),
+                entry: Some(AsyncPrefixStorePayload::Whole(entry)),
                 cancellation: cancellation.clone(),
             },
         );
@@ -3152,16 +3966,18 @@ mod tests {
         let spec2 = spec(vec![3, 4], 2, None, entry2.main_layer_specs(), vec![], None);
 
         let unlimited = PagedPrefixStore::new(&root);
-        let key1 = unlimited.save(&spec1, &entry1).expect("save first entry");
-        let first_entry_bytes = directory_size(&root.join(&key1));
+        unlimited.save(&spec1, &entry1).expect("save first entry");
+        let dir1 = unlimited.wp8_entry_dir(&spec1);
+        let dir2 = unlimited.wp8_entry_dir(&spec2);
+        let first_entry_bytes = directory_size(&dir1);
         let limited = PagedPrefixStore::new(&root).with_max_bytes(first_entry_bytes as usize + 1);
-        let key2 = limited.save(&spec2, &entry2).expect("save second entry");
+        limited.save(&spec2, &entry2).expect("save second entry");
 
         assert!(
-            !root.join(&key1).exists(),
+            !dir1.exists(),
             "oldest entry should be evicted when the SSD cache exceeds its limit"
         );
-        assert!(root.join(&key2).exists(), "newly saved entry should remain");
+        assert!(dir2.exists(), "newly saved entry should remain");
         assert!(
             directory_size(&root) <= first_entry_bytes + 1,
             "SSD cache directory should stay within the configured capacity"
@@ -3183,13 +3999,15 @@ mod tests {
         let spec2 = spec(vec![3, 4], 2, None, entry2.main_layer_specs(), vec![], None);
 
         let unlimited = PagedPrefixStore::new(&root);
-        let key1 = unlimited.save(&spec1, &entry1).expect("save first entry");
-        let first_entry_bytes = directory_size(&root.join(&key1));
+        unlimited.save(&spec1, &entry1).expect("save first entry");
+        let dir1 = unlimited.wp8_entry_dir(&spec1);
+        let dir2 = unlimited.wp8_entry_dir(&spec2);
+        let first_entry_bytes = directory_size(&dir1);
         let limited = PagedPrefixStore::new(&root).with_max_bytes(first_entry_bytes as usize + 1);
-        let key2 = limited.save(&spec2, &entry2).expect("save second entry");
+        limited.save(&spec2, &entry2).expect("save second entry");
 
-        assert!(!root.join(&key1).exists(), "the oldest entry is evicted");
-        assert!(root.join(&key2).exists(), "the new entry stays");
+        assert!(!dir1.exists(), "the oldest entry is evicted");
+        assert!(dir2.exists(), "the new entry stays");
         assert!(
             dflash2.join("identity").join("range").exists(),
             "the DFlash2 store is neither evicted nor counted"
@@ -3223,7 +4041,7 @@ mod tests {
         let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
 
         let (first_key, first_saved) = store.save_if_absent(&wanted, &entry).expect("first save");
-        let payload_path = root.join(&first_key).join(PAYLOAD_FILE);
+        let payload_path = store.wp8_entry_dir(&wanted).join("private.safetensors");
         let payload_before = std::fs::read(&payload_path).expect("payload before");
         let (second_key, second_saved) =
             store.save_if_absent(&wanted, &entry).expect("second save");
@@ -3263,7 +4081,7 @@ mod tests {
         };
         let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
         let key = store.save(&wanted, &entry).expect("save");
-        let meta_path = root.join(&key).join(META_FILE);
+        let meta_path = store.wp8_entry_dir(&wanted).join(META_FILE);
         let mut meta: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
         meta["block_size"] = serde_json::json!(4);
@@ -3426,8 +4244,8 @@ mod tests {
             gemma4_drafter_last_hidden: None,
         };
         let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
-        let key = store.save(&wanted, &entry).expect("save");
-        let meta_path = root.join(key).join("meta.json");
+        store.save(&wanted, &entry).expect("save");
+        let meta_path = store.wp8_entry_dir(&wanted).join(META_FILE);
         let mut meta: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&meta_path).unwrap()).unwrap();
         meta["block_size"] = serde_json::json!(4);
@@ -3437,5 +4255,506 @@ mod tests {
 
         assert!(loaded.is_none(), "tampered metadata must miss");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    use ironmlx_lm::core::cache::prefix_segments::{
+        materialize_prefix_entry, prefix_segment_layout, PrefixKvSegment, PrefixSegmentId,
+        PrefixSegmentLayer, PrefixSegmentLayout, PrefixSegmentRef, SegmentedPrefixEntry,
+    };
+
+    const SEG_BLOCK: i32 = 128;
+    const SEG_HEADS: i32 = 8;
+    const SEG_DIM: i32 = 128;
+    const MIB: usize = 1 << 20;
+
+    /// `[pages, H, block, D]` f32: 512 KiB per page.
+    fn seg_pages(pages: i32, evaluated: bool) -> Array {
+        let pages = Array::zeros(&[pages, SEG_HEADS, SEG_BLOCK, SEG_DIM], Dtype::Float32).unwrap();
+        if evaluated {
+            pages.eval().unwrap();
+        }
+        pages
+    }
+
+    /// One paged layer's tail pages plus a linear layer holding
+    /// `private_mib` MiB of recurrent state.
+    fn private_entry(tail_pages: i32, private_mib: i32, evaluated: bool) -> PagedPrefixEntry {
+        let conv_state = Array::zeros(&[1, 4, 8], Dtype::Float32).unwrap();
+        let recurrent_state = Array::zeros(&[1, private_mib, 512, 512], Dtype::Float32).unwrap();
+        if evaluated {
+            conv_state.eval().unwrap();
+            recurrent_state.eval().unwrap();
+        }
+        PagedPrefixEntry {
+            main_layers: vec![
+                PrefixLayerPayload::FullPaged {
+                    k_pages: seg_pages(tail_pages, evaluated),
+                    v_pages: seg_pages(tail_pages, evaluated),
+                },
+                PrefixLayerPayload::Linear {
+                    conv_state,
+                    recurrent_state,
+                },
+            ],
+            mtp_layers: vec![],
+            mtp_last_hidden: None,
+            gemma4_drafter_last_hidden: None,
+        }
+    }
+
+    fn seg_spec(model: &str, tokens: Vec<i32>, entry: &PagedPrefixEntry) -> PagedPrefixKeySpec {
+        let cached_len = tokens.len() as i32;
+        let mut spec = spec(
+            tokens,
+            cached_len,
+            None,
+            entry.main_layer_specs(),
+            vec![],
+            None,
+        );
+        spec.model_id = model.to_owned();
+        spec.block_size = SEG_BLOCK;
+        spec
+    }
+
+    fn seg_layout(model: &str, private_mib: i32) -> PrefixSegmentLayout {
+        prefix_segment_layout(&seg_spec(
+            model,
+            vec![0],
+            &private_entry(1, private_mib, false),
+        ))
+    }
+
+    fn shared_segment(
+        model: &str,
+        tokens: i32,
+        private_mib: i32,
+        evaluated: bool,
+    ) -> Arc<PrefixKvSegment> {
+        let pages = tokens / SEG_BLOCK;
+        Arc::new(PrefixKvSegment {
+            id: PrefixSegmentId::new(),
+            layout: seg_layout(model, private_mib),
+            start: 0,
+            stop: tokens,
+            layers: vec![(
+                0,
+                PrefixSegmentLayer::Paged {
+                    k: seg_pages(pages, evaluated),
+                    v: seg_pages(pages, evaluated),
+                },
+            )],
+        })
+    }
+
+    /// An entry using `[0, stop)` of `segment` plus 5 tail tokens; `salt`
+    /// tells sharers' tails apart.
+    fn sharer(
+        model: &str,
+        segment: &Arc<PrefixKvSegment>,
+        stop: i32,
+        salt: i32,
+        private_mib: i32,
+        evaluated: bool,
+    ) -> (PagedPrefixKeySpec, SegmentedPrefixEntry) {
+        let entry = SegmentedPrefixEntry {
+            segments: vec![PrefixSegmentRef {
+                segment: segment.clone(),
+                stop,
+            }],
+            aligned_len: stop,
+            private: private_entry(1, private_mib, evaluated),
+        };
+        let mut tokens = (0..stop).collect::<Vec<_>>();
+        tokens.extend((0..5).map(|i| -(salt * 100 + i)));
+        let materialized =
+            materialize_prefix_entry(&entry, tokens.len() as i32, SEG_BLOCK).unwrap();
+        (seg_spec(model, tokens, &materialized), entry)
+    }
+
+    fn private_bytes(entry: &SegmentedPrefixEntry) -> usize {
+        entry.private.observability_stats(0).payload_bytes
+    }
+
+    fn big_cache() -> PrefixLruCache {
+        PrefixLruCache::new(PrefixLruCacheConfig::new(1 << 40).unwrap()).unwrap()
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn shared_segment_is_charged_once() {
+        let mut cache = big_cache();
+        let s = shared_segment("m", 1024, 64, false);
+        let (spec_a, a) = sharer("m", &s, 1024, 1, 64, false);
+        let (spec_b, b) = sharer("m", &s, 1024, 2, 64, false);
+        let private = private_bytes(&a);
+        assert!(private >= 64 * MIB);
+
+        let inserted_a = cache.insert_segmented(spec_a, a).unwrap();
+        let inserted_b = cache.insert_segmented(spec_b, b).unwrap();
+
+        assert_eq!(cache.total_bytes(), s.payload_bytes() + 2 * private);
+        assert_eq!(inserted_a.charged_bytes, s.payload_bytes() + private);
+        assert_eq!(inserted_b.charged_bytes, private);
+        // The logical size is the whole entry, as before.
+        assert_eq!(inserted_b.stats.payload_bytes, s.payload_bytes() + private);
+        assert_eq!(
+            cache.segment(s.id).map(|seg| seg.id),
+            Some(s.id),
+            "the cached segment is reachable by id"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn health_reports_prefix_segment_sharing() {
+        let mut cache = big_cache();
+        assert_eq!(cache.health(), PrefixLruHealth::default());
+        let s = shared_segment("m", 1024, 64, false);
+        let (spec_a, a) = sharer("m", &s, 1024, 1, 64, false);
+        let (spec_b, b) = sharer("m", &s, 1024, 2, 64, false);
+        let private = private_bytes(&a);
+        cache.insert_segmented(spec_a, a).unwrap();
+        cache.insert_segmented(spec_b, b).unwrap();
+
+        let health = cache.health();
+        assert_eq!(health.entry_count, 2);
+        assert_eq!(health.segment_count, 1);
+        assert_eq!(health.segment_bytes, s.payload_bytes());
+        assert_eq!(health.logical_bytes, 2 * (s.payload_bytes() + private));
+        // The shared segment is held once, so the whole-copy cost is larger.
+        assert!(health.logical_bytes > health.segment_bytes + 2 * private);
+        assert_eq!(cache.total_bytes(), health.segment_bytes + 2 * private);
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn evicting_one_sharer_keeps_the_segment() {
+        let mut cache = big_cache();
+        let s = shared_segment("m", 1024, 64, false);
+        let (spec_a, a) = sharer("m", &s, 1024, 1, 64, false);
+        let (spec_b, b) = sharer("m", &s, 1024, 2, 64, false);
+        let private = private_bytes(&a);
+        let key_a = cache.insert_segmented(spec_a, a).unwrap().key;
+        let key_b = cache.insert_segmented(spec_b, b).unwrap().key;
+
+        cache.remove_entry(&key_a);
+        assert_eq!(cache.total_bytes(), s.payload_bytes() + private);
+        assert!(cache.segment(s.id).is_some());
+
+        cache.remove_entry(&key_b);
+        assert_eq!(cache.total_bytes(), 0);
+        assert!(cache.segments.is_empty());
+        assert!(cache.segment(s.id).is_none());
+    }
+
+    /// `segment` again under the same id, with fresh arrays of equal data.
+    fn segment_copy(segment: &PrefixKvSegment, stop: i32) -> Arc<PrefixKvSegment> {
+        let pages = (stop - segment.start) / SEG_BLOCK;
+        Arc::new(PrefixKvSegment {
+            id: segment.id,
+            layout: segment.layout.clone(),
+            start: segment.start,
+            stop,
+            layers: vec![(
+                0,
+                PrefixSegmentLayer::Paged {
+                    k: seg_pages(pages, false),
+                    v: seg_pages(pages, false),
+                },
+            )],
+        })
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn insert_reuses_the_cached_copy_of_a_segment() {
+        let mut cache = big_cache();
+        let s = shared_segment("m", 1024, 64, true);
+        let (spec_a, a) = sharer("m", &s, 1024, 1, 64, true);
+        let copy = segment_copy(&s, s.stop);
+        let (spec_b, b) = sharer("m", &copy, 1024, 2, 64, false);
+        assert!(!Arc::ptr_eq(&copy, &s));
+        let private = private_bytes(&a);
+        cache.insert_segmented(spec_a, a).unwrap();
+        let key_b = cache.insert_segmented(spec_b, b).unwrap().key;
+
+        let stored = &cache.entries.get(&key_b).unwrap().segmented.segments[0];
+        assert!(Arc::ptr_eq(&stored.segment, &s));
+        assert_eq!(cache.total_bytes(), s.payload_bytes() + 2 * private);
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn insert_rejects_a_segment_that_contradicts_the_cached_one() {
+        let mut cache = big_cache();
+        let s = shared_segment("m", 1024, 64, true);
+        let (spec_a, a) = sharer("m", &s, 1024, 1, 64, true);
+        let shorter = segment_copy(&s, 512);
+        let (spec_b, b) = sharer("m", &shorter, 512, 2, 64, false);
+        cache.insert_segmented(spec_a, a).unwrap();
+        let before = cache.total_bytes();
+
+        assert!(cache.insert_segmented(spec_b.clone(), b).is_err());
+        assert!(!cache.contains(&spec_b));
+        assert_eq!(cache.total_bytes(), before);
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn reclaim_counts_only_bytes_actually_freed() {
+        let mut cache = big_cache();
+        let s = shared_segment("m", 1024, 64, false);
+        let (spec_a, a) = sharer("m", &s, 1024, 1, 64, false);
+        let (spec_b, b) = sharer("m", &s, 1024, 2, 64, false);
+        let private = private_bytes(&a);
+        cache.insert_segmented(spec_a.clone(), a).unwrap();
+        cache.insert_segmented(spec_b.clone(), b).unwrap();
+
+        // Room for one private payload: the oldest sharer goes first and
+        // frees only its own bytes.
+        let before = cache.total_bytes();
+        let reclaim = cache.reclaim(private, None);
+        assert_eq!(reclaim.bytes, before - cache.total_bytes());
+        assert_eq!(reclaim.bytes, private);
+        assert!(!cache.contains(&spec_a) && cache.contains(&spec_b));
+
+        // The last sharer takes the segment with it.
+        let before = cache.total_bytes();
+        let reclaim = cache.reclaim(private, None);
+        assert_eq!(reclaim.bytes, before - cache.total_bytes());
+        assert_eq!(reclaim.bytes, s.payload_bytes() + private);
+        assert!(cache.is_empty());
+    }
+
+    fn settled_active_bytes() -> usize {
+        mlx::transforms::synchronize().unwrap();
+        mlx::transforms::clear_cache();
+        mlx::memory::snapshot().active_bytes
+    }
+
+    fn assert_close(mlx_freed: isize, counted_freed: isize, what: &str) {
+        assert!(
+            (mlx_freed - counted_freed).unsigned_abs() <= MIB,
+            "{what}: MLX freed {mlx_freed} bytes, the cache counted {counted_freed}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn memory_given_back_matches_mlx() {
+        let mut cache = big_cache();
+        // 32 pages: 32 MiB of K/V. `half` uses its first 16 pages only.
+        let s = shared_segment("m", 4096, 4, true);
+        let segment_bytes = s.payload_bytes();
+        let (spec_half, half) = sharer("m", &s, 2048, 1, 4, true);
+        let (spec_whole, whole) = sharer("m", &s, 4096, 2, 4, true);
+        let key_half = cache.insert_segmented(spec_half, half).unwrap().key;
+        let key_whole = cache.insert_segmented(spec_whole, whole).unwrap().key;
+        drop(s);
+
+        let active = settled_active_bytes();
+        let counted = cache.total_bytes();
+        cache.remove_entry(&key_whole);
+        let mlx_freed = active as isize - settled_active_bytes() as isize;
+        let counted_freed = counted as isize - cache.total_bytes() as isize;
+        assert_close(mlx_freed, counted_freed, "removing the whole-segment entry");
+        // `half` still holds the segment: neither MLX nor the count lets it go.
+        assert!(mlx_freed < segment_bytes as isize, "{mlx_freed}");
+        assert!(counted_freed < segment_bytes as isize, "{counted_freed}");
+
+        let active = settled_active_bytes();
+        let counted = cache.total_bytes();
+        cache.remove_entry(&key_half);
+        let mlx_freed = active as isize - settled_active_bytes() as isize;
+        let counted_freed = counted as isize - cache.total_bytes() as isize;
+        assert_close(mlx_freed, counted_freed, "removing the last sharer");
+        assert!(counted_freed >= segment_bytes as isize);
+        assert_eq!(cache.total_bytes(), 0);
+    }
+
+    /// Two paged layers of `[1, SEG_HEADS, ·, SEG_DIM]` f32 K/V.
+    fn live_paged_caches(tokens: i32) -> Vec<ironmlx_lm::core::cache::LayerCache> {
+        use ironmlx_lm::core::cache::{KVCache, LayerCache};
+        (0..2)
+            .map(|_| {
+                let mut kv = KVCache::new(1, SEG_HEADS, SEG_DIM, SEG_DIM, Dtype::Float32, 4096)
+                    .with_step(SEG_BLOCK)
+                    .with_paged(SEG_BLOCK, 32)
+                    .expect("paged");
+                let kv_tokens =
+                    mlx::ops::ones(&[1, SEG_HEADS, tokens, SEG_DIM], Dtype::Float32).unwrap();
+                kv.update_and_fetch(&kv_tokens, &kv_tokens, &[tokens])
+                    .expect("fill");
+                LayerCache::Full(kv)
+            })
+            .collect()
+    }
+
+    fn extend_live(caches: &mut [ironmlx_lm::core::cache::LayerCache], tokens: i32) {
+        for cache in caches {
+            let ironmlx_lm::core::cache::LayerCache::Full(kv) = cache else {
+                unreachable!()
+            };
+            let kv_tokens =
+                mlx::ops::ones(&[1, SEG_HEADS, tokens, SEG_DIM], Dtype::Float32).unwrap();
+            kv.update_and_fetch(&kv_tokens, &kv_tokens, &[tokens])
+                .expect("extend");
+        }
+    }
+
+    /// Export `[from, aligned)` as a new segment, then key it with the spec
+    /// of `refs` + that segment + the private tail.
+    fn exported_entry(
+        caches: &[ironmlx_lm::core::cache::LayerCache],
+        refs: Vec<PrefixSegmentRef>,
+        from: i32,
+    ) -> (
+        PagedPrefixKeySpec,
+        SegmentedPrefixEntry,
+        Arc<PrefixKvSegment>,
+    ) {
+        let (segment, private, cached_len) =
+            ironmlx_lm::core::cache::export_prefix_segment_for_row(
+                caches,
+                0,
+                from,
+                SEG_BLOCK,
+                PrefixSegmentLayout("placeholder".into()),
+            )
+            .unwrap()
+            .unwrap();
+        let mut segments = refs;
+        let segment = segment.expect("new segment");
+        let stop = segment.stop;
+        segments.push(PrefixSegmentRef {
+            segment: Arc::new(segment),
+            stop,
+        });
+        let mut entry = SegmentedPrefixEntry {
+            segments,
+            aligned_len: stop,
+            private,
+        };
+        let materialized = materialize_prefix_entry(&entry, cached_len, SEG_BLOCK).unwrap();
+        let spec = seg_spec("m", (0..cached_len).collect(), &materialized);
+        drop(materialized);
+        // The layout ignores lengths, so it is known only once a spec exists.
+        let layout = prefix_segment_layout(&spec);
+        let last = entry.segments.pop().unwrap();
+        let fresh = Arc::new(PrefixKvSegment {
+            layout,
+            ..Arc::try_unwrap(last.segment).unwrap()
+        });
+        entry.segments.push(PrefixSegmentRef {
+            segment: fresh.clone(),
+            stop,
+        });
+        (spec, entry, fresh)
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn deleting_the_entry_that_created_a_shared_segment_frees_what_it_counts() {
+        let mut cache = big_cache();
+        let mut caches = live_paged_caches(1024 + 5);
+        // `first` creates S = [0, 1024); `second` references S and adds
+        // [1024, 2048) plus its own tail.
+        let (spec_first, first, s) = exported_entry(&caches, vec![], 0);
+        extend_live(&mut caches, 1024 + 2);
+        let (spec_second, second, _) = exported_entry(
+            &caches,
+            vec![PrefixSegmentRef {
+                segment: s.clone(),
+                stop: 1024,
+            }],
+            1024,
+        );
+        drop(caches);
+        let segment_bytes = s.payload_bytes();
+        drop(s);
+        let key_first = cache.insert_segmented(spec_first, first).unwrap().key;
+        let key_second = cache.insert_segmented(spec_second, second).unwrap().key;
+
+        let active = settled_active_bytes();
+        let counted = cache.total_bytes();
+        cache.remove_entry(&key_first);
+        let mlx_freed = active as isize - settled_active_bytes() as isize;
+        let counted_freed = counted as isize - cache.total_bytes() as isize;
+        assert_close(mlx_freed, counted_freed, "removing the segment's creator");
+        assert!(counted_freed > 0 && counted_freed < segment_bytes as isize);
+
+        let active = settled_active_bytes();
+        let counted = cache.total_bytes();
+        cache.remove_entry(&key_second);
+        let mlx_freed = active as isize - settled_active_bytes() as isize;
+        let counted_freed = counted as isize - cache.total_bytes() as isize;
+        assert_close(mlx_freed, counted_freed, "removing the last sharer");
+        assert!(counted_freed > segment_bytes as isize);
+        assert_eq!(cache.total_bytes(), 0);
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn plain_insert_keeps_the_entry_private() {
+        let mut cache = big_cache();
+        let entry = single_full_paged_entry(1.0);
+        let spec = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
+        let inserted = cache.insert(spec.clone(), entry).unwrap();
+        assert_eq!(inserted.charged_bytes, inserted.stats.payload_bytes);
+        assert!(cache.segments.is_empty());
+        let (_, lineage) = cache.load_segmented(&spec).unwrap().expect("hit");
+        assert!(lineage.refs.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn prefix_exports_own_their_buffers() {
+        use ironmlx_lm::core::cache::{KVCache, LayerCache, TurboQuantKVBits};
+        for kind in ["paged", "turboquant"] {
+            let caches: Vec<LayerCache> = (0..2)
+                .map(|_| {
+                    let base = KVCache::new(1, 32, SEG_DIM, SEG_DIM, Dtype::Float32, 8192)
+                        .with_step(SEG_BLOCK);
+                    let mut kv = match kind {
+                        "paged" => base.with_paged(SEG_BLOCK, 40).expect("paged"),
+                        _ => base
+                            .with_turboquant(TurboQuantKVBits::K3V4)
+                            .expect("turboquant"),
+                    };
+                    let x = mlx::ops::ones(&[1, 32, 4096 + 5, SEG_DIM], Dtype::Float32).unwrap();
+                    kv.update_and_fetch(&x, &x, &[4096 + 5]).expect("fill");
+                    LayerCache::Full(kv)
+                })
+                .collect();
+            let (segment, private, _) = ironmlx_lm::core::cache::export_prefix_segment_for_row(
+                &caches,
+                0,
+                0,
+                SEG_BLOCK,
+                PrefixSegmentLayout("x".into()),
+            )
+            .unwrap()
+            .unwrap();
+            let segment = segment.expect("segment");
+            let private_bytes = private.observability_stats(0).payload_bytes;
+            let segment_bytes = segment.payload_bytes();
+            drop(caches);
+            let active = settled_active_bytes();
+            drop(private);
+            let after_private = settled_active_bytes();
+            drop(segment);
+            let after_segment = settled_active_bytes();
+            assert_close(
+                active as isize - after_private as isize,
+                private_bytes as isize,
+                &format!("{kind} private tail"),
+            );
+            assert_close(
+                after_private as isize - after_segment as isize,
+                segment_bytes as isize,
+                &format!("{kind} segment"),
+            );
+        }
     }
 }

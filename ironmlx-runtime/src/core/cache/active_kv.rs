@@ -226,7 +226,8 @@ impl ActiveKvOffloadStore {
             mtp_last_hidden: entry.mtp_last_hidden_spec(),
             gemma4_drafter_last_hidden: entry.gemma4_drafter_last_hidden_spec(),
         };
-        let key = self.store.save(&spec, entry)?;
+        // A parked request is not a cache entry: it keeps `<root>/<key>/`.
+        let key = self.store.save_root_entry(&spec, entry)?;
         let path = self.root.join(&key);
         let stats = entry.observability_stats(cached_len);
         Ok(ActiveKvStoredPayload {
@@ -242,7 +243,8 @@ impl ActiveKvOffloadStore {
 
     pub fn load(&self, payload: &ActiveKvStoredPayload) -> Result<PagedPrefixEntry> {
         self.store
-            .load(&payload.spec)?
+            .load_root_observed(&payload.spec)?
+            .entry
             .ok_or_else(|| anyhow::anyhow!("active KV payload {} is missing", payload.key))
     }
 

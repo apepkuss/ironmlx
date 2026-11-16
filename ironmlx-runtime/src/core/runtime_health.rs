@@ -82,6 +82,8 @@ pub struct MemoryInfo {
     pub resident_weights: crate::core::resident_weights::ResidentWeightsHealth,
     pub process_governor: crate::core::process_memory::MemoryGovernorSnapshot,
     pub prefix_store: crate::core::cache::AsyncPrefixStoreStats,
+    /// The process-wide hot prefix cache: shared segments counted once.
+    pub prefix_lru: crate::core::cache::PrefixLruHealth,
     pub immutable_prefix_blocks: crate::core::scheduler_actor::ImmutablePrefixBlockHealth,
 }
 
@@ -1403,6 +1405,7 @@ impl SchedulerHealthCollector {
         let process_governor =
             crate::core::process_memory::global_process_memory_governor().sample_process();
         let prefix_store = crate::core::cache::process_async_prefix_store_queue().stats();
+        let prefix_lru = crate::core::cache::prefix_store::process_prefix_lru_health();
 
         let active_kv_offload = self.active_kv_offload.snapshot();
         let prefix_store_backpressured =
@@ -1465,6 +1468,7 @@ impl SchedulerHealthCollector {
                 resident_weights: crate::core::resident_weights::health(),
                 process_governor,
                 prefix_store,
+                prefix_lru,
                 immutable_prefix_blocks: self.immutable_prefix_blocks.snapshot(),
             },
             mtp: self.mtp.snapshot(),
@@ -2412,6 +2416,7 @@ mod tests {
                 resident_weights: Default::default(),
                 process_governor: crate::core::process_memory::MemoryGovernorSnapshot::default(),
                 prefix_store: crate::core::cache::AsyncPrefixStoreStats::default(),
+                prefix_lru: crate::core::cache::PrefixLruHealth::default(),
                 immutable_prefix_blocks:
                     crate::core::scheduler_actor::ImmutablePrefixBlockHealth::default(),
             },

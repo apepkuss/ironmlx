@@ -4,6 +4,9 @@ use crate::core::cache::prefix_payload::{
     PagedPrefixEntry, PagedPrefixKeySpec, PagedPrefixLayer, PrefixLayerKind, PrefixLayerPayload,
     PrefixLayerSpec, PrefixTensorSpec,
 };
+use crate::core::cache::prefix_segments::{
+    PrefixKvSegment, PrefixLineage, PrefixSegmentId, PrefixSegmentLayer, PrefixSegmentLayout,
+};
 use crate::core::cache::{
     GatedDeltaCache, GatedDeltaCacheSnapshot, KVCache, KVCacheSnapshot, PagedKvHotColdConfig,
     TurboQuantKVBits,
@@ -166,6 +169,41 @@ impl LayerCache {
             (LayerCache::Mla(_), _) => {
                 anyhow::bail!("LayerCache::restore: Mla cache received non-Mla snapshot")
             }
+        }
+    }
+}
+
+/// A full-attention layer whose K/V can live in shared prefix segments
+/// (paged or TurboQuant storage).
+fn shareable_full_kv(cache: &LayerCache) -> Option<&KVCache> {
+    match cache {
+        LayerCache::Full(kv) if kv.paged().is_some() || kv.turboquant().is_some() => Some(kv),
+        _ => None,
+    }
+}
+
+/// Row `row`'s prefix segment record, read from the first shareable
+/// full-attention layer (every such layer carries the same record).
+pub fn row_prefix_lineage(caches: &[LayerCache], row: usize) -> Option<PrefixLineage> {
+    caches
+        .iter()
+        .find_map(shareable_full_kv)
+        .and_then(|kv| kv.prefix_lineage(row).cloned())
+}
+
+/// Write row `row`'s prefix segment record on every shareable full-attention
+/// layer. Call after a prefix restore or save has fully succeeded.
+pub fn set_row_prefix_lineage(
+    caches: &mut [LayerCache],
+    row: usize,
+    lineage: Option<PrefixLineage>,
+) {
+    for cache in caches {
+        if shareable_full_kv(cache).is_none() {
+            continue;
+        }
+        if let LayerCache::Full(kv) = cache {
+            kv.set_prefix_lineage(row, lineage.clone());
         }
     }
 }
@@ -408,80 +446,267 @@ pub fn prefix_entry_for_row(
         return Ok(None);
     }
     let mut layers = Vec::with_capacity(caches.len());
-    let mut cached_len: Option<i32> = None;
+    let mut cached_len = LayerLen::default();
     for (idx, cache) in caches.iter().enumerate() {
         let (payload, layer_cached_len) = match cache {
-            LayerCache::Full(kv) => {
-                let layer_cached_len = *kv.offsets().get(row).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "prefix_entry_for_row: full cache row {} out of range for layer {}",
-                        row,
-                        idx
-                    )
-                })?;
-                if kv.paged().is_some() {
-                    let layer = kv.paged_prefix_layer_for_row_on(row, ())?;
-                    (
-                        PrefixLayerPayload::FullPaged {
-                            k_pages: layer.k_pages,
-                            v_pages: layer.v_pages,
-                        },
-                        layer_cached_len,
-                    )
-                } else if kv.turboquant().is_some() {
-                    let (layer, packed_cached_len) =
-                        kv.turboquant_prefix_layer_for_row_on(row, ())?;
-                    (
-                        PrefixLayerPayload::FullTurboQuantPacked {
-                            k_packed: layer.k_packed,
-                            k_norms: layer.k_norms,
-                            v_packed: layer.v_packed,
-                            v_norms: layer.v_norms,
-                        },
-                        packed_cached_len,
-                    )
-                } else {
-                    let (k, v, layer_cached_len) = kv.dense_prefix_layer_for_row_on(row, ())?;
-                    (PrefixLayerPayload::FullDense { k, v }, layer_cached_len)
-                }
-            }
-            LayerCache::Linear(gd) => {
-                let (conv_state, recurrent_state, layer_cached_len) =
-                    gd.prefix_state_for_row_on(row, ())?;
+            LayerCache::Full(kv) if kv.paged().is_some() => {
+                let layer = kv.paged_prefix_layer_for_row_on(row, ())?;
                 (
-                    PrefixLayerPayload::Linear {
-                        conv_state,
-                        recurrent_state,
+                    PrefixLayerPayload::FullPaged {
+                        k_pages: layer.k_pages,
+                        v_pages: layer.v_pages,
                     },
-                    layer_cached_len,
+                    full_row_len(kv, row, idx)?,
                 )
             }
-            LayerCache::Mla(mla) => {
-                let (c_kv, k_pe, layer_cached_len) = mla.prefix_latent_for_row_on(row, ())?;
-                (PrefixLayerPayload::Mla { c_kv, k_pe }, layer_cached_len)
+            LayerCache::Full(kv) if kv.turboquant().is_some() => {
+                let (layer, packed_cached_len) = kv.turboquant_prefix_layer_for_row_on(row, ())?;
+                (
+                    PrefixLayerPayload::FullTurboQuantPacked {
+                        k_packed: layer.k_packed,
+                        k_norms: layer.k_norms,
+                        v_packed: layer.v_packed,
+                        v_norms: layer.v_norms,
+                    },
+                    packed_cached_len,
+                )
             }
+            other => unshared_layer_payload(other, row)?,
         };
-        if let Some(expected) = cached_len {
-            if layer_cached_len != expected {
-                anyhow::bail!(
-                    "prefix_entry_for_row: layer {idx} cached_len {layer_cached_len} != layer0 {expected}"
-                );
-            }
-        } else {
-            cached_len = Some(layer_cached_len);
-        }
+        cached_len.check(idx, layer_cached_len)?;
         layers.push(payload);
     }
+    Ok(Some((entry_from_layers(layers), cached_len.0.unwrap_or(0))))
+}
 
+/// The one cached length every layer of a row must agree on.
+#[derive(Default)]
+struct LayerLen(Option<i32>);
+
+impl LayerLen {
+    fn check(&mut self, idx: usize, len: i32) -> anyhow::Result<()> {
+        match self.0 {
+            Some(expected) if expected != len => anyhow::bail!(
+                "prefix_entry_for_row: layer {idx} cached_len {len} != layer0 {expected}"
+            ),
+            Some(_) => Ok(()),
+            None => {
+                self.0 = Some(len);
+                Ok(())
+            }
+        }
+    }
+}
+
+fn full_row_len(kv: &KVCache, row: usize, idx: usize) -> anyhow::Result<i32> {
+    kv.offsets().get(row).copied().ok_or_else(|| {
+        anyhow::anyhow!("prefix_entry_for_row: full cache row {row} out of range for layer {idx}")
+    })
+}
+
+fn entry_from_layers(main_layers: Vec<PrefixLayerPayload>) -> PagedPrefixEntry {
+    PagedPrefixEntry {
+        main_layers,
+        mtp_layers: vec![],
+        mtp_last_hidden: None,
+        gemma4_drafter_last_hidden: None,
+    }
+}
+
+/// Dense full-attention, linear and MLA layers: never shared, exported whole.
+fn unshared_layer_payload(
+    cache: &LayerCache,
+    row: usize,
+) -> anyhow::Result<(PrefixLayerPayload, i32)> {
+    Ok(match cache {
+        LayerCache::Full(kv) => {
+            let (k, v, len) = kv.dense_prefix_layer_for_row_on(row, ())?;
+            (PrefixLayerPayload::FullDense { k, v }, len)
+        }
+        LayerCache::Linear(gd) => {
+            let (conv_state, recurrent_state, len) = gd.prefix_state_for_row_on(row, ())?;
+            (
+                PrefixLayerPayload::Linear {
+                    conv_state,
+                    recurrent_state,
+                },
+                len,
+            )
+        }
+        LayerCache::Mla(mla) => {
+            let (c_kv, k_pe, len) = mla.prefix_latent_for_row_on(row, ())?;
+            (PrefixLayerPayload::Mla { c_kv, k_pe }, len)
+        }
+    })
+}
+
+/// Export `row` for a save that already references segments covering
+/// `[0, from_len)`: `[from_len, aligned_len)` of every paged and TurboQuant
+/// layer becomes a new segment (`None` when empty), and the private entry
+/// holds those layers' tails `[aligned_len, cached_len)` (paged: the partial
+/// last page; empty when aligned) plus every other layer whole. Segment and
+/// tail arrays are evaluated and each owns its buffer: neither is a view of
+/// the live cache or of the other. `aligned_len = floor(cached_len /
+/// block_size) * block_size`; `from_len` must be block aligned and at most
+/// `aligned_len`; paged layers must use `block_size` pages. Returns
+/// `(segment, private, cached_len)`.
+pub fn export_prefix_segment_for_row(
+    caches: &[LayerCache],
+    row: usize,
+    from_len: i32,
+    block_size: i32,
+    layout: PrefixSegmentLayout,
+) -> anyhow::Result<Option<(Option<PrefixKvSegment>, PagedPrefixEntry, i32)>> {
+    if caches.is_empty() {
+        return Ok(None);
+    }
+    if block_size <= 0 || from_len < 0 || from_len % block_size != 0 {
+        anyhow::bail!(
+            "export_prefix_segment_for_row: from_len {from_len} must be a non-negative multiple of block_size {block_size}"
+        );
+    }
+    let mut private = Vec::with_capacity(caches.len());
+    let mut segment_layers = Vec::new();
+    let mut cached_len = LayerLen::default();
+    let mut aligned_len = from_len;
+    for (idx, cache) in caches.iter().enumerate() {
+        let Some(kv) = shareable_full_kv(cache) else {
+            let (payload, len) = unshared_layer_payload(cache, row)?;
+            cached_len.check(idx, len)?;
+            private.push(payload);
+            continue;
+        };
+        let len = full_row_len(kv, row, idx)?;
+        cached_len.check(idx, len)?;
+        aligned_len = len / block_size * block_size;
+        if from_len > aligned_len {
+            anyhow::bail!(
+                "export_prefix_segment_for_row: from_len {from_len} > aligned_len {aligned_len} (layer {idx})"
+            );
+        }
+        if let Some(paged) = kv.paged() {
+            if paged.block_size() != block_size {
+                anyhow::bail!(
+                    "export_prefix_segment_for_row: layer {idx} page size {} != block_size {block_size}",
+                    paged.block_size()
+                );
+            }
+            let (first, aligned_blocks) = (from_len / block_size, aligned_len / block_size);
+            let row_blocks = (len + block_size - 1) / block_size;
+            if aligned_blocks > first {
+                let (k, v) =
+                    paged.owned_pages_for_row_on(kv.offsets(), row, first, aligned_blocks, ())?;
+                segment_layers.push((idx, PrefixSegmentLayer::Paged { k, v }));
+            }
+            let (k_pages, v_pages) =
+                paged.owned_pages_for_row_on(kv.offsets(), row, aligned_blocks, row_blocks, ())?;
+            private.push(PrefixLayerPayload::FullPaged { k_pages, v_pages });
+        } else if let Some(tq) = kv.turboquant() {
+            if aligned_len > from_len {
+                let seg =
+                    tq.owned_packed_range_for_row_on(kv.offsets(), row, from_len, aligned_len, ())?;
+                segment_layers.push((
+                    idx,
+                    PrefixSegmentLayer::TurboQuant {
+                        k_packed: seg.k_packed,
+                        k_norms: seg.k_norms,
+                        v_packed: seg.v_packed,
+                        v_norms: seg.v_norms,
+                    },
+                ));
+            }
+            let tail = tq.owned_packed_range_for_row_on(kv.offsets(), row, aligned_len, len, ())?;
+            private.push(PrefixLayerPayload::FullTurboQuantPacked {
+                k_packed: tail.k_packed,
+                k_norms: tail.k_norms,
+                v_packed: tail.v_packed,
+                v_norms: tail.v_norms,
+            });
+        }
+    }
+    let segment = (!segment_layers.is_empty()).then(|| PrefixKvSegment {
+        id: PrefixSegmentId::new(),
+        layout,
+        start: from_len,
+        stop: aligned_len,
+        layers: segment_layers,
+    });
     Ok(Some((
-        PagedPrefixEntry {
-            main_layers: layers,
-            mtp_layers: vec![],
-            mtp_last_hidden: None,
-            gemma4_drafter_last_hidden: None,
-        },
-        cached_len.unwrap_or(0),
+        segment,
+        entry_from_layers(private),
+        cached_len.0.unwrap_or(0),
     )))
+}
+
+/// Copy `[start, stop)` of `row`'s shareable layers into a segment named
+/// `id`. Rebuilds a segment the row's lineage names when the cached copy is
+/// gone: the row's K/V over that range came from that segment, so the copy
+/// is the same segment. `None` when no layer is shareable.
+pub fn export_prefix_segment_range_for_row(
+    caches: &[LayerCache],
+    row: usize,
+    id: PrefixSegmentId,
+    start: i32,
+    stop: i32,
+    block_size: i32,
+    layout: PrefixSegmentLayout,
+) -> anyhow::Result<Option<PrefixKvSegment>> {
+    if block_size <= 0
+        || start < 0
+        || stop <= start
+        || start % block_size != 0
+        || stop % block_size != 0
+    {
+        anyhow::bail!(
+            "export_prefix_segment_range_for_row: range [{start}, {stop}) is not block aligned (block_size {block_size})"
+        );
+    }
+    let mut layers = Vec::new();
+    for (idx, cache) in caches.iter().enumerate() {
+        let Some(kv) = shareable_full_kv(cache) else {
+            continue;
+        };
+        let len = full_row_len(kv, row, idx)?;
+        if stop > len {
+            anyhow::bail!(
+                "export_prefix_segment_range_for_row: stop {stop} > row length {len} (layer {idx})"
+            );
+        }
+        if let Some(paged) = kv.paged() {
+            if paged.block_size() != block_size {
+                anyhow::bail!(
+                    "export_prefix_segment_range_for_row: layer {idx} page size {} != block_size {block_size}",
+                    paged.block_size()
+                );
+            }
+            let (k, v) = paged.owned_pages_for_row_on(
+                kv.offsets(),
+                row,
+                start / block_size,
+                stop / block_size,
+                (),
+            )?;
+            layers.push((idx, PrefixSegmentLayer::Paged { k, v }));
+        } else if let Some(tq) = kv.turboquant() {
+            let seg = tq.owned_packed_range_for_row_on(kv.offsets(), row, start, stop, ())?;
+            layers.push((
+                idx,
+                PrefixSegmentLayer::TurboQuant {
+                    k_packed: seg.k_packed,
+                    k_norms: seg.k_norms,
+                    v_packed: seg.v_packed,
+                    v_norms: seg.v_norms,
+                },
+            ));
+        }
+    }
+    Ok((!layers.is_empty()).then(|| PrefixKvSegment {
+        id,
+        layout,
+        start,
+        stop,
+        layers,
+    }))
 }
 
 pub fn restore_prefix_entry_for_row(
@@ -828,5 +1053,84 @@ mod tests {
         };
         assert_eq!(snapshot.offsets(), &[0, 0]);
         assert!(!snapshot.restores_dense_storage());
+    }
+
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn row_lineage_round_trips_across_full_layers_only() {
+        use super::{row_prefix_lineage, set_row_prefix_lineage};
+        use crate::core::cache::prefix_segments::{
+            PrefixLineage, PrefixSegmentId, PrefixSegmentLayout,
+        };
+        use crate::core::cache::GatedDeltaCache;
+        use mlx::Array;
+
+        let paged = || {
+            let mut kv = KVCache::new(2, 1, 2, 2, Dtype::Float32, 64)
+                .with_paged(4, 32)
+                .expect("paged KV");
+            let data: Vec<f32> = (0..2 * 8 * 2).map(|i| i as f32).collect();
+            let k: Array = (data.as_slice(), (2_i32, 1_i32, 8_i32, 2_i32))
+                .try_into()
+                .unwrap();
+            kv.update_and_fetch(&k, &k, &[8, 8]).expect("fill");
+            LayerCache::Full(kv)
+        };
+        let mut turboquant = KVCache::new(2, 2, 8, 8, Dtype::Float32, 16)
+            .with_step(16)
+            .with_turboquant(crate::core::cache::TurboQuantKVBits::K4V4)
+            .expect("TurboQuant KV");
+        let data: Vec<f32> = (0..2 * 2 * 8 * 8).map(|i| (i as f32 * 0.1).sin()).collect();
+        let k: Array = (data.as_slice(), (2_i32, 2_i32, 8_i32, 8_i32))
+            .try_into()
+            .unwrap();
+        turboquant
+            .update_and_fetch(&k, &k, &[8, 8])
+            .expect("fill TQ");
+        let mut caches = vec![
+            LayerCache::Linear(
+                GatedDeltaCache::new_with_cap(2, 4, 8, 1, 4, 4, Dtype::Float32, 16)
+                    .expect("linear cache"),
+            ),
+            LayerCache::Full(KVCache::new(2, 1, 2, 2, Dtype::Float32, 64)),
+            paged(),
+            paged(),
+            LayerCache::Full(turboquant),
+        ];
+        assert_eq!(row_prefix_lineage(&caches, 1), None);
+
+        let lineage = PrefixLineage {
+            layout: PrefixSegmentLayout("test-layout".to_owned()),
+            refs: vec![crate::core::cache::prefix_segments::PrefixLineageRef {
+                id: PrefixSegmentId::new(),
+                start: 0,
+                stop: 8,
+                segment_stop: 8,
+            }],
+        };
+        set_row_prefix_lineage(&mut caches, 1, Some(lineage.clone()));
+        assert_eq!(row_prefix_lineage(&caches, 1), Some(lineage.clone()));
+        assert_eq!(row_prefix_lineage(&caches, 0), None);
+        let per_layer: Vec<_> = caches
+            .iter()
+            .map(|layer| match layer {
+                LayerCache::Full(kv) => Some(kv.prefix_lineage(1).cloned()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            per_layer,
+            vec![
+                None,
+                Some(None),
+                Some(Some(lineage.clone())),
+                Some(Some(lineage.clone())),
+                Some(Some(lineage))
+            ],
+            "only shareable (paged / TurboQuant) full-attention layers carry the record"
+        );
+
+        set_row_prefix_lineage(&mut caches, 1, None);
+        assert_eq!(row_prefix_lineage(&caches, 1), None);
     }
 }

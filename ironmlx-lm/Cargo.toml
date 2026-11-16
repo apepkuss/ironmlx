@@ -30,6 +30,7 @@ thiserror.workspace = true
 smallvec = "1"
 minijinja = { version = "2", default-features = false, features = ["adjacent_loop_items", "builtins", "loader", "macros", "serde"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []
@@ -41,7 +42,6 @@ test-support = []
 ironmlx-core = { path = "../ironmlx-core", features = ["test-support"] }
 approx = "0.5"
 serial_test = { version = "3", default-features = false }
-uuid = { version = "1", features = ["v4"] }
 dirs = "6"
 
 [[bin]]

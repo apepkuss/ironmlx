@@ -10,12 +10,14 @@ pub use active_kv::{
     ActiveKvStoredPayload,
 };
 pub use prefix_store::{
-    cancel_process_async_prefix_store_model, process_async_prefix_store_queue,
+    cancel_process_async_prefix_store_model, export_segmented_prefix_for_row,
+    load_segmented_prefix_entry, load_store_prefix_entry, process_async_prefix_store_queue,
     process_prefix_lru_cache, process_shared_prefix_lru_cache, reclaim_process_prefix_lru_bytes,
-    shutdown_process_async_prefix_store_queue, AsyncPrefixStoreAdmission,
+    segmented_entry_lineage, shutdown_process_async_prefix_store_queue, AsyncPrefixStoreAdmission,
     AsyncPrefixStoreCancellation, AsyncPrefixStorePermit, AsyncPrefixStoreQueue,
     AsyncPrefixStoreStats, AsyncPrefixStoreSubmit, DFlash2PrefixDiskConfig, PagedPrefixCacheConfig,
-    PagedPrefixLoadStatus, PagedPrefixStore, PrefixLruCache, PrefixLruCacheConfig,
-    PrefixLruInsertResult, PrefixLruInsertStatus, PrefixLruReclaim, SharedPrefixLruCache,
-    DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
+    PagedPrefixLoadStatus, PagedPrefixSegmentedLoadResult, PagedPrefixStore, PrefixLruCache,
+    PrefixLruCacheConfig, PrefixLruHealth, PrefixLruInsertResult, PrefixLruInsertStatus,
+    PrefixLruLoaded, PrefixLruReclaim, PrefixSegmentLookup, PrefixStoreHit, PrefixStoreLoaded,
+    SharedPrefixLruCache, DEFAULT_PAGED_PREFIX_CACHE_BLOCK_SIZE,
 };

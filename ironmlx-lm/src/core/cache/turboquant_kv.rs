@@ -1185,6 +1185,92 @@ impl TurboQuantKVCache {
         ))
     }
 
+    /// Packed K/V for tokens `[start, stop)` of `row` as evaluated arrays in
+    /// their own buffers (never a view of the live cache).
+    pub fn owned_packed_range_for_row_on(
+        &self,
+        offsets: &[i32],
+        row: usize,
+        start: i32,
+        stop: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<TurboQuantPrefixLayer> {
+        if offsets.len() != self.batch as usize || row >= self.batch as usize {
+            anyhow::bail!(
+                "TurboQuantKVCache::owned_packed_range_for_row_on: row {row} outside batch {} (offsets {})",
+                self.batch,
+                offsets.len()
+            );
+        }
+        let cached_len = offsets[row];
+        if start < 0 || start > stop || stop > cached_len || cached_len > self.capacity() {
+            anyhow::bail!(
+                "TurboQuantKVCache::owned_packed_range_for_row_on: [{start}, {stop}) outside row {row}'s [0, {cached_len})"
+            );
+        }
+        let target = target.into();
+        let len = stop - start;
+        let layer = if len == 0 {
+            TurboQuantPrefixLayer {
+                k_packed: Array::zeros_on(
+                    (1_i32, self.n_kv_heads, 0_i32, self.packed_head_dim),
+                    Dtype::Uint32,
+                    target,
+                )?,
+                k_norms: Array::zeros_on((1_i32, self.n_kv_heads, 0_i32), Dtype::Float32, target)?,
+                v_packed: Array::zeros_on(
+                    (1_i32, self.n_kv_heads, 0_i32, self.packed_v_head_dim),
+                    Dtype::Uint32,
+                    target,
+                )?,
+                v_norms: Array::zeros_on((1_i32, self.n_kv_heads, 0_i32), Dtype::Float32, target)?,
+            }
+        } else {
+            let missing =
+                || anyhow::anyhow!("TurboQuantKVCache::owned_packed_range_for_row_on: unallocated");
+            let row = row as i32;
+            let packed = |a: &Array, dim: i32| -> Result<Array> {
+                let view = slice_strided_on(
+                    a,
+                    [row, 0, start, 0],
+                    [row + 1, self.n_kv_heads, stop, dim],
+                    [1_i32, 1, 1, 1],
+                    target,
+                )?;
+                super::paged_kv::owned_copy_on(&view, target)
+            };
+            let norms = |a: &Array| -> Result<Array> {
+                let view = slice_strided_on(
+                    a,
+                    [row, 0, start],
+                    [row + 1, self.n_kv_heads, stop],
+                    [1_i32, 1, 1],
+                    target,
+                )?;
+                super::paged_kv::owned_copy_on(&view, target)
+            };
+            TurboQuantPrefixLayer {
+                k_packed: packed(
+                    self.k_packed.as_ref().ok_or_else(missing)?,
+                    self.packed_head_dim,
+                )?,
+                k_norms: norms(self.k_norms.as_ref().ok_or_else(missing)?)?,
+                v_packed: packed(
+                    self.v_packed.as_ref().ok_or_else(missing)?,
+                    self.packed_v_head_dim,
+                )?,
+                v_norms: norms(self.v_norms.as_ref().ok_or_else(missing)?)?,
+            }
+        };
+        mlx::transforms::eval(&[
+            &layer.k_packed,
+            &layer.k_norms,
+            &layer.v_packed,
+            &layer.v_norms,
+        ])?;
+        Ok(layer)
+    }
+
     pub fn restore_packed_prefix_for_row_on(
         &mut self,
         layer: &TurboQuantPrefixLayer,

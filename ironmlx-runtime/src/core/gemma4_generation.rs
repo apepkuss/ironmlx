@@ -23,21 +23,29 @@ use ironmlx_lm::core::model::Model;
 use ironmlx_lm::core::speculative_ops::resolve_speculative_tokens;
 use ironmlx_lm::core::vision::DenseVlMethods;
 use {
+    crate::core::cache::export_segmented_prefix_for_row,
+    crate::core::cache::load_segmented_prefix_entry, crate::core::cache::segmented_entry_lineage,
+    ironmlx_lm::core::cache::prefix_segments::materialize_prefix_entry,
+    ironmlx_lm::core::cache::prefix_segments::prefix_segment_layout,
+    ironmlx_lm::core::cache::prefix_segments::PrefixLineage,
+    ironmlx_lm::core::cache::prefix_segments::SegmentedPrefixEntry,
+};
+use {
     crate::core::cache::ActiveKvOffloadConfig, crate::core::cache::ActiveKvOffloadSharedStats,
     crate::core::cache::ActiveKvResidencySummary, crate::core::cache::AsyncPrefixStoreAdmission,
     crate::core::cache::AsyncPrefixStoreCancellation, crate::core::cache::AsyncPrefixStoreSubmit,
-    crate::core::cache::PagedPrefixCacheConfig, crate::core::cache::PagedPrefixLoadStatus,
-    crate::core::cache::PagedPrefixStore, crate::core::cache::PrefixLruCache,
-    crate::core::cache::PrefixLruCacheConfig, crate::core::cache::PrefixLruInsertStatus,
+    crate::core::cache::PagedPrefixCacheConfig, crate::core::cache::PagedPrefixStore,
+    crate::core::cache::PrefixLruCache, crate::core::cache::PrefixLruCacheConfig,
+    crate::core::cache::PrefixLruInsertStatus,
     ironmlx_lm::core::cache::turboquant_kv::TurboQuantKVBits,
 };
 use {
     ironmlx_lm::core::cache::layer::enable_paged_hot_cold_tiering_caches,
     ironmlx_lm::core::cache::layer::enable_paged_kv_caches,
     ironmlx_lm::core::cache::layer::enable_turboquant_kv_caches,
-    ironmlx_lm::core::cache::layer::prefix_entry_for_row,
     ironmlx_lm::core::cache::layer::prefix_key_spec_for_caches,
     ironmlx_lm::core::cache::layer::restore_prefix_entry_for_row,
+    ironmlx_lm::core::cache::layer::set_row_prefix_lineage,
     ironmlx_lm::core::cache::layer::LayerCache, ironmlx_lm::core::cache::layer::LayerCacheSnapshot,
 };
 use {
@@ -280,13 +288,14 @@ impl Gemma4DrafterPrefixCache {
                 model.config().hidden_size,
             ));
 
-            if let Some((key, entry, stats, load_us)) =
+            if let Some((key, entry, lineage, stats, load_us)) =
                 gemma4_drafter_try_load_prefix_lru_entry(self.prefix_lru_cache(), &spec)?
             {
                 restore_prefix_entry_for_row(cache, &entry, 0, cached_len)?;
                 let last_hidden = entry
                     .gemma4_drafter_last_hidden
                     .ok_or_else(|| anyhow!("Gemma4 drafter prefix LRU hit missing last_hidden"))?;
+                set_row_prefix_lineage(cache, 0, lineage);
                 let shared_kv = gemma4_shared_kv_from_cache_on(model.config(), cache, ())?;
                 log_gemma4_drafter_prefix_hit("prefix LRU hit", &key, restore_len, stats, load_us);
                 return Ok(Some(Gemma4DrafterPrefixRestore {
@@ -301,9 +310,10 @@ impl Gemma4DrafterPrefixCache {
                 continue;
             };
             let load_start = Instant::now();
-            let observed = store.load_observed(&spec)?;
+            let observed =
+                crate::core::cache::load_store_prefix_entry(store, self.prefix_lru_cache(), &spec)?;
             let load_us = load_start.elapsed().as_micros();
-            if observed.status != PagedPrefixLoadStatus::Hit {
+            let Some(hit) = observed.hit else {
                 tracing::trace!(
                     "paged SSD prefix cache Gemma4 drafter miss: tokens={} key={} status={:?} load_us={}",
                     restore_len,
@@ -312,23 +322,20 @@ impl Gemma4DrafterPrefixCache {
                     load_us
                 );
                 continue;
-            }
+            };
             let key = observed.key;
-            let stats = observed
-                .stats
-                .unwrap_or_else(|| gemma4_empty_prefix_stats(cached_len));
-            let entry = observed
-                .entry
-                .ok_or_else(|| anyhow!("paged prefix Gemma4 drafter hit without entry"))?;
-            gemma4_drafter_try_insert_prefix_lru_entry(
-                self.prefix_lru_cache(),
-                spec,
-                entry.clone(),
-            )?;
+            let crate::core::cache::PrefixStoreHit {
+                entry,
+                segmented,
+                lineage,
+                stats,
+            } = hit;
+            gemma4_drafter_try_insert_prefix_lru_entry(self.prefix_lru_cache(), spec, segmented)?;
             restore_prefix_entry_for_row(cache, &entry, 0, cached_len)?;
             let last_hidden = entry
                 .gemma4_drafter_last_hidden
                 .ok_or_else(|| anyhow!("paged prefix Gemma4 drafter hit missing last_hidden"))?;
+            set_row_prefix_lineage(cache, 0, lineage);
             let shared_kv = gemma4_shared_kv_from_cache_on(model.config(), cache, ())?;
             log_gemma4_drafter_prefix_hit("paged SSD hit", &key, restore_len, stats, load_us);
             return Ok(Some(Gemma4DrafterPrefixRestore {
@@ -344,7 +351,7 @@ impl Gemma4DrafterPrefixCache {
     pub(crate) fn try_save(
         &self,
         model: &Gemma4Model,
-        cache: &[LayerCache],
+        cache: &mut [LayerCache],
         last_hidden: &Array,
         prompt_ids: &[u32],
         fingerprint: &crate::core::vl_prefix::PrefixFingerprint,
@@ -427,7 +434,9 @@ impl Gemma4DrafterPrefixCache {
             },
         };
 
-        let Some((mut entry, entry_cached_len)) = prefix_entry_for_row(cache, 0)? else {
+        let Some((mut entry, entry_cached_len)) =
+            export_segmented_prefix_for_row(self.prefix_lru_cache(), cache, 0, &spec)?
+        else {
             return Ok(None);
         };
         if entry_cached_len != cached_len {
@@ -435,23 +444,26 @@ impl Gemma4DrafterPrefixCache {
                 "Gemma4 drafter prefix save: entry cached_len {entry_cached_len} != cache {cached_len}"
             ));
         }
-        entry.gemma4_drafter_last_hidden = Some(last_hidden.clone());
-        spec.gemma4_drafter_last_hidden = entry.gemma4_drafter_last_hidden_spec();
-        let stats = entry.observability_stats(cached_len);
+        entry.private.gemma4_drafter_last_hidden = Some(last_hidden.clone());
 
         gemma4_drafter_try_insert_prefix_lru_entry(
             self.prefix_lru_cache(),
             spec.clone(),
             entry.clone(),
         )?;
+        // Recorded whether or not the hot cache kept it (see the scheduler).
+        let lineage = (!entry.segments.is_empty())
+            .then(|| segmented_entry_lineage(&entry, prefix_segment_layout(&spec)));
+        set_row_prefix_lineage(cache, 0, lineage);
+        // Exported arrays are owned and evaluated: memory-only is done.
         let Some(permit) = permit else {
-            // Held by the prefix LRU cache only: evaluate, as the SSD path
-            // does when it queues the write, so the entry does not keep the
-            // page pool it was sliced from alive.
-            entry.eval()?;
             return Ok(Some(key));
         };
-        match permit.submit(entry) {
+        // Lazy: only reads shapes for the log line.
+        let stats = materialize_prefix_entry(&entry, cached_len, spec.block_size)?
+            .observability_stats(cached_len);
+        // The writer writes the segments not on disk yet, then the entry.
+        match permit.submit_segmented(entry) {
             AsyncPrefixStoreSubmit::Queued => {
                 tracing::debug!(
                     "paged SSD prefix cache Gemma4 drafter queued: key={} tokens={} cached_len={} payload_bytes={} tensors={}",
@@ -489,13 +501,6 @@ fn gemma4_drafter_last_hidden_spec(dtype: Dtype, hidden_size: i32) -> PrefixTens
     PrefixTensorSpec {
         dtype,
         shape: vec![1_i32, 1_i32, hidden_size],
-    }
-}
-
-fn gemma4_empty_prefix_stats(cached_len: i32) -> PagedPrefixEntryStats {
-    PagedPrefixEntryStats {
-        cached_len,
-        ..PagedPrefixEntryStats::default()
     }
 }
 
@@ -542,45 +547,51 @@ fn gemma4_lock_prefix_lru_cache(
         .map_err(|_| anyhow!("Gemma4 drafter prefix LRU cache lock poisoned"))
 }
 
+type Gemma4DrafterPrefixLruHit = (
+    String,
+    PagedPrefixEntry,
+    Option<PrefixLineage>,
+    PagedPrefixEntryStats,
+    u128,
+);
+
 fn gemma4_drafter_try_load_prefix_lru_entry(
     prefix_lru_cache: Option<&Gemma4DrafterPrefixLruHandle>,
     spec: &ironmlx_lm::core::cache::prefix_payload::PagedPrefixKeySpec,
-) -> Result<Option<(String, PagedPrefixEntry, PagedPrefixEntryStats, u128)>> {
+) -> Result<Option<Gemma4DrafterPrefixLruHit>> {
     let Some(prefix_lru_cache) = prefix_lru_cache else {
         return Ok(None);
     };
     let load_start = Instant::now();
-    let observed = gemma4_lock_prefix_lru_cache(prefix_lru_cache)?.load_observed(spec)?;
+    let loaded = load_segmented_prefix_entry(prefix_lru_cache, spec)?;
     let load_us = load_start.elapsed().as_micros();
-    if observed.status != PagedPrefixLoadStatus::Hit {
+    let Some(crate::core::cache::PrefixLruLoaded {
+        key,
+        entry,
+        lineage,
+        stats,
+    }) = loaded
+    else {
         tracing::trace!(
-            "Gemma4 drafter prefix LRU miss: key={} status={:?} load_us={}",
-            observed.key,
-            observed.status,
+            "Gemma4 drafter prefix LRU miss: cached_len={} load_us={}",
+            spec.cached_len,
             load_us
         );
         return Ok(None);
-    }
-    let key = observed.key;
-    let stats = observed
-        .stats
-        .unwrap_or_else(|| gemma4_empty_prefix_stats(spec.cached_len));
-    let entry = observed
-        .entry
-        .ok_or_else(|| anyhow!("Gemma4 drafter prefix LRU observed hit without entry"))?;
-    Ok(Some((key, entry, stats, load_us)))
+    };
+    Ok(Some((key, entry, lineage, stats, load_us)))
 }
 
 fn gemma4_drafter_try_insert_prefix_lru_entry(
     prefix_lru_cache: Option<&Gemma4DrafterPrefixLruHandle>,
     spec: ironmlx_lm::core::cache::prefix_payload::PagedPrefixKeySpec,
-    entry: PagedPrefixEntry,
+    entry: SegmentedPrefixEntry,
 ) -> Result<Option<String>> {
     let Some(prefix_lru_cache) = prefix_lru_cache else {
         return Ok(None);
     };
     let save_start = Instant::now();
-    let result = gemma4_lock_prefix_lru_cache(prefix_lru_cache)?.insert(spec, entry)?;
+    let result = gemma4_lock_prefix_lru_cache(prefix_lru_cache)?.insert_segmented(spec, entry)?;
     let save_us = save_start.elapsed().as_micros();
     match result.status {
         PrefixLruInsertStatus::Stored | PrefixLruInsertStatus::Replaced => {
@@ -876,7 +887,7 @@ impl<'m> Gemma4DrafterGenerationStream<'m> {
             let new_pos = pos + n;
             match prefix_cache.try_save(
                 model,
-                &cache,
+                &mut cache,
                 &chunk_last_hidden,
                 &request.prompt_ids[..new_pos as usize],
                 &prefix_fingerprint,

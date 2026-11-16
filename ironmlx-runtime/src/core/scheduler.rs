@@ -148,6 +148,13 @@ use ironmlx_lm::core::model::Model;
 use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
 use ironmlx_lm::core::speculative_ops::{resolve_speculative_tokens, SpeculativeResolution};
 use {
+    crate::core::cache::export_segmented_prefix_for_row,
+    ironmlx_lm::core::cache::prefix_segments::materialize_prefix_entry,
+    ironmlx_lm::core::cache::prefix_segments::prefix_segment_layout,
+    ironmlx_lm::core::cache::prefix_segments::PrefixLineage,
+    ironmlx_lm::core::cache::prefix_segments::SegmentedPrefixEntry,
+};
+use {
     crate::core::cache::timed, crate::core::cache::ActiveKvOffloadConfig,
     crate::core::cache::ActiveKvOffloadSharedStats, crate::core::cache::ActiveKvOffloadStore,
     crate::core::cache::ActiveKvResidencySummary, crate::core::cache::ActiveKvStoredPayload,
@@ -178,6 +185,7 @@ use {
     ironmlx_lm::core::cache::layer::prefix_key_spec_for_caches,
     ironmlx_lm::core::cache::layer::restore_prefix_entry_for_row,
     ironmlx_lm::core::cache::layer::restore_prefix_entry_for_rows,
+    ironmlx_lm::core::cache::layer::set_row_prefix_lineage,
     ironmlx_lm::core::cache::layer::LayerCache,
 };
 use {
@@ -3291,7 +3299,7 @@ fn whole_prompt_save_is_redundant(
 fn try_save_turn_boundary_prefix(
     config: Option<&PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-    cache: &[LayerCache],
+    cache: &mut [LayerCache],
     row: usize,
     prompt_ids: &[u32],
     fingerprint: &PrefixFingerprint,
@@ -3359,39 +3367,62 @@ fn lock_prefix_lru_cache(
         .map_err(|_| anyhow!("prefix LRU cache lock poisoned"))
 }
 
+/// A prefix LRU cache hit, rebuilt into a whole entry.
+struct PrefixLruHit {
+    key: String,
+    entry: PagedPrefixEntry,
+    /// The segments a row restored from `entry` holds (`None`: none).
+    lineage: Option<PrefixLineage>,
+    stats: PagedPrefixEntryStats,
+    load_us: u128,
+}
+
 fn try_load_prefix_lru_entry(
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
     spec: &ironmlx_lm::core::cache::prefix_payload::PagedPrefixKeySpec,
-) -> Result<Option<(String, PagedPrefixEntry, PagedPrefixEntryStats, u128)>> {
+) -> Result<Option<PrefixLruHit>> {
     let Some(prefix_lru_cache) = prefix_lru_cache else {
         return Ok(None);
     };
     let load_start = Instant::now();
-    let observed = lock_prefix_lru_cache(prefix_lru_cache)?.load_observed(spec)?;
+    let loaded = crate::core::cache::load_segmented_prefix_entry(prefix_lru_cache, spec)?;
     let load_us = load_start.elapsed().as_micros();
-    if observed.status != PagedPrefixLoadStatus::Hit {
+    let Some(crate::core::cache::PrefixLruLoaded {
+        key,
+        entry,
+        lineage,
+        stats,
+    }) = loaded
+    else {
         tracing::trace!(
-            "prefix LRU cache miss: key={} status={:?} load_us={}",
-            observed.key,
-            observed.status,
+            "prefix LRU cache miss: cached_len={} load_us={}",
+            spec.cached_len,
             load_us
         );
         return Ok(None);
-    }
-    let key = observed.key;
-    let stats = observed
-        .stats
-        .unwrap_or_else(|| empty_prefix_stats(spec.cached_len));
-    let entry = observed
-        .entry
-        .ok_or_else(|| anyhow!("prefix LRU observed hit without entry"))?;
-    Ok(Some((key, entry, stats, load_us)))
+    };
+    Ok(Some(PrefixLruHit {
+        key,
+        entry,
+        lineage,
+        stats,
+        load_us,
+    }))
+}
+
+/// The lineage a row saved as `entry` holds afterwards.
+fn saved_row_lineage(
+    entry: &SegmentedPrefixEntry,
+    spec: &PagedPrefixKeySpec,
+) -> Option<PrefixLineage> {
+    (!entry.segments.is_empty())
+        .then(|| crate::core::cache::segmented_entry_lineage(entry, prefix_segment_layout(spec)))
 }
 
 fn try_insert_prefix_lru_entry(
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
     spec: ironmlx_lm::core::cache::prefix_payload::PagedPrefixKeySpec,
-    entry: PagedPrefixEntry,
+    entry: SegmentedPrefixEntry,
     main_row: usize,
     mtp_row: Option<usize>,
 ) -> Result<Option<String>> {
@@ -3399,7 +3430,7 @@ fn try_insert_prefix_lru_entry(
         return Ok(None);
     };
     let save_start = Instant::now();
-    let result = lock_prefix_lru_cache(prefix_lru_cache)?.insert(spec, entry)?;
+    let result = lock_prefix_lru_cache(prefix_lru_cache)?.insert_segmented(spec, entry)?;
     let save_us = save_start.elapsed().as_micros();
     match result.status {
         PrefixLruInsertStatus::Stored | PrefixLruInsertStatus::Replaced => {
@@ -3503,23 +3534,23 @@ fn admit_prefix_save(
 fn submit_prefix_store_entry(
     permit: PrefixSavePermit,
     key: String,
-    entry: PagedPrefixEntry,
-    cached_len: i32,
+    entry: &SegmentedPrefixEntry,
+    spec: &PagedPrefixKeySpec,
     main_row: usize,
     mtp_row: Option<usize>,
 ) -> Result<Option<String>> {
     let permit = match permit {
         PrefixSavePermit::Disk(permit) => *permit,
-        PrefixSavePermit::MemoryOnly => {
-            // The prefix LRU cache holds these same arrays. Left lazy they
-            // would keep the whole page pool they were sliced from alive
-            // (the SSD path evaluates them when it queues the write).
-            entry.eval()?;
-            return Ok(Some(key));
-        }
+        // Exported arrays are owned and evaluated: nothing to do.
+        PrefixSavePermit::MemoryOnly => return Ok(Some(key)),
     };
-    let stats = entry.observability_stats(cached_len);
-    match permit.submit(entry) {
+    let cached_len = spec.cached_len;
+    // Lazy: only reads shapes for the log line.
+    let stats = materialize_prefix_entry(entry, cached_len, spec.block_size)?
+        .observability_stats(cached_len);
+    // The writer writes the segments the entry references that are not on
+    // disk yet, then the entry.
+    match permit.submit_segmented(entry.clone()) {
         AsyncPrefixStoreSubmit::Queued => {
             log_paged_prefix_save("queued", &key, main_row, mtp_row, stats, 0);
             Ok(Some(key))
@@ -3576,11 +3607,18 @@ fn try_restore_paged_prefix_for_prompt_row(
         else {
             return Ok(None);
         };
-        if let Some((key, entry, stats, load_us)) =
-            try_load_prefix_lru_entry(prefix_lru_cache, &spec)?
-        {
-            restore_prefix_entry_for_row(cache, &entry, cache_row, cached_len)?;
-            log_prefix_lru_hit("hit", &key, cache_row, None, restore_len, stats, load_us);
+        if let Some(hit) = try_load_prefix_lru_entry(prefix_lru_cache, &spec)? {
+            restore_prefix_entry_for_row(cache, &hit.entry, cache_row, cached_len)?;
+            set_row_prefix_lineage(cache, cache_row, hit.lineage);
+            log_prefix_lru_hit(
+                "hit",
+                &hit.key,
+                cache_row,
+                None,
+                restore_len,
+                hit.stats,
+                hit.load_us,
+            );
             return Ok(Some(cached_len));
         }
         // In memory only: the LRU lookup above was the whole search.
@@ -3588,9 +3626,9 @@ fn try_restore_paged_prefix_for_prompt_row(
             continue;
         };
         let load_start = Instant::now();
-        let observed = store.load_observed(&spec)?;
+        let observed = crate::core::cache::load_store_prefix_entry(store, prefix_lru_cache, &spec)?;
         let load_us = load_start.elapsed().as_micros();
-        if observed.status != PagedPrefixLoadStatus::Hit {
+        let Some(hit) = observed.hit else {
             tracing::trace!(
                 "paged SSD prefix cache miss: row={} tokens={} key={} status={:?} load_us={}",
                 cache_row,
@@ -3602,15 +3640,18 @@ fn try_restore_paged_prefix_for_prompt_row(
             continue;
         };
         let key = observed.key;
-        let stats = observed
-            .stats
-            .unwrap_or_else(|| empty_prefix_stats(cached_len));
-        let entry = observed
-            .entry
-            .ok_or_else(|| anyhow!("paged prefix observed hit without entry"))?;
-        try_insert_prefix_lru_entry(prefix_lru_cache, spec, entry.clone(), cache_row, None)?;
-        restore_prefix_entry_for_row(cache, &entry, cache_row, cached_len)?;
-        log_paged_prefix_hit("hit", &key, cache_row, None, restore_len, stats, load_us);
+        try_insert_prefix_lru_entry(prefix_lru_cache, spec, hit.segmented, cache_row, None)?;
+        restore_prefix_entry_for_row(cache, &hit.entry, cache_row, cached_len)?;
+        set_row_prefix_lineage(cache, cache_row, hit.lineage);
+        log_paged_prefix_hit(
+            "hit",
+            &key,
+            cache_row,
+            None,
+            restore_len,
+            hit.stats,
+            load_us,
+        );
         return Ok(Some(cached_len));
     }
     Ok(None)
@@ -3665,19 +3706,18 @@ fn try_restore_paged_prefix_for_prompt_rows(
         else {
             return Ok(None);
         };
-        if let Some((key, entry, stats, load_us)) =
-            try_load_prefix_lru_entry(prefix_lru_cache, &spec)?
-        {
-            restore_prefix_entry_for_rows(cache, &entry, cache_rows, cached_len)?;
+        if let Some(hit) = try_load_prefix_lru_entry(prefix_lru_cache, &spec)? {
+            restore_prefix_entry_for_rows(cache, &hit.entry, cache_rows, cached_len)?;
             for (idx, &cache_row) in cache_rows.iter().enumerate() {
-                let row_load_us = if idx == 0 { load_us } else { 0 };
+                set_row_prefix_lineage(cache, cache_row, hit.lineage.clone());
+                let row_load_us = if idx == 0 { hit.load_us } else { 0 };
                 log_prefix_lru_hit(
                     "hit",
-                    &key,
+                    &hit.key,
                     cache_row,
                     None,
                     restore_len,
-                    stats,
+                    hit.stats,
                     row_load_us,
                 );
             }
@@ -3688,9 +3728,9 @@ fn try_restore_paged_prefix_for_prompt_rows(
             continue;
         };
         let load_start = Instant::now();
-        let observed = store.load_observed(&spec)?;
+        let observed = crate::core::cache::load_store_prefix_entry(store, prefix_lru_cache, &spec)?;
         let load_us = load_start.elapsed().as_micros();
-        if observed.status != PagedPrefixLoadStatus::Hit {
+        let Some(hit) = observed.hit else {
             tracing::trace!(
                 "paged SSD prefix cache miss: rows={:?} tokens={} key={} status={:?} load_us={}",
                 cache_rows,
@@ -3702,15 +3742,10 @@ fn try_restore_paged_prefix_for_prompt_rows(
             continue;
         };
         let key = observed.key;
-        let stats = observed
-            .stats
-            .unwrap_or_else(|| empty_prefix_stats(cached_len));
-        let entry = observed
-            .entry
-            .ok_or_else(|| anyhow!("paged prefix observed hit without entry"))?;
-        try_insert_prefix_lru_entry(prefix_lru_cache, spec, entry.clone(), cache_rows[0], None)?;
-        restore_prefix_entry_for_rows(cache, &entry, cache_rows, cached_len)?;
+        try_insert_prefix_lru_entry(prefix_lru_cache, spec, hit.segmented, cache_rows[0], None)?;
+        restore_prefix_entry_for_rows(cache, &hit.entry, cache_rows, cached_len)?;
         for (idx, &cache_row) in cache_rows.iter().enumerate() {
+            set_row_prefix_lineage(cache, cache_row, hit.lineage.clone());
             let row_load_us = if idx == 0 { load_us } else { 0 };
             log_paged_prefix_hit(
                 "hit",
@@ -3718,7 +3753,7 @@ fn try_restore_paged_prefix_for_prompt_rows(
                 cache_row,
                 None,
                 restore_len,
-                stats,
+                hit.stats,
                 row_load_us,
             );
         }
@@ -3730,7 +3765,7 @@ fn try_restore_paged_prefix_for_prompt_rows(
 fn try_save_paged_prefix_for_prompt(
     config: Option<&PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-    cache: &[LayerCache],
+    cache: &mut [LayerCache],
     prompt_ids: &[u32],
     fingerprint: &PrefixFingerprint,
 ) -> Result<Option<String>> {
@@ -3747,7 +3782,7 @@ fn try_save_paged_prefix_for_prompt(
 fn try_save_paged_prefix_for_prompt_row(
     config: Option<&PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-    cache: &[LayerCache],
+    cache: &mut [LayerCache],
     cache_row: usize,
     prompt_ids: &[u32],
     fingerprint: &PrefixFingerprint,
@@ -3793,7 +3828,9 @@ fn try_save_paged_prefix_for_prompt_row(
     let Some(permit) = permit else {
         return Ok(Some(key));
     };
-    let Some((entry, cached_len)) = prefix_entry_for_row(cache, cache_row)? else {
+    let Some((entry, cached_len)) =
+        export_segmented_prefix_for_row(prefix_lru_cache, cache, cache_row, &spec)?
+    else {
         return Ok(None);
     };
     if cached_len == 0 {
@@ -3812,7 +3849,10 @@ fn try_save_paged_prefix_for_prompt_row(
         cache_row,
         None,
     )?;
-    submit_prefix_store_entry(permit, key, entry, cached_len, cache_row, None)
+    // Recorded whether or not the hot cache kept it: a later save rebuilds
+    // a segment the hot cache dropped from the row, under the same id.
+    set_row_prefix_lineage(cache, cache_row, saved_row_lineage(&entry, &spec));
+    submit_prefix_store_entry(permit, key, &entry, &spec, cache_row, None)
 }
 
 fn mtp_layer_specs_for_cache(mtp_cache: &MtpCache, cached_len: i32) -> Vec<PrefixMtpLayerSpec> {
@@ -3901,9 +3941,14 @@ fn try_restore_paged_prefix_for_prompt_with_mtp_row(
         };
         spec.mtp_layers = mtp_layer_specs_for_cache(mtp_cache, cached_len);
         spec.mtp_last_hidden = Some(mtp_last_hidden_spec(hidden_dtype, hidden_size));
-        if let Some((key, entry, stats, load_us)) =
-            try_load_prefix_lru_entry(prefix_lru_cache, &spec)?
-        {
+        if let Some(hit) = try_load_prefix_lru_entry(prefix_lru_cache, &spec)? {
+            let PrefixLruHit {
+                key,
+                entry,
+                lineage,
+                stats,
+                load_us,
+            } = hit;
             restore_prefix_entry_for_row(main_cache, &entry, main_cache_row, cached_len)?;
             mtp_cache.restore_prefix_layers_for_row_on(
                 &entry.mtp_layers,
@@ -3914,6 +3959,7 @@ fn try_restore_paged_prefix_for_prompt_with_mtp_row(
             let last_hidden = entry
                 .mtp_last_hidden
                 .ok_or_else(|| anyhow!("prefix LRU MTP hit missing last_hidden"))?;
+            set_row_prefix_lineage(main_cache, main_cache_row, lineage);
             log_prefix_lru_hit(
                 "MTP hit",
                 &key,
@@ -3930,9 +3976,9 @@ fn try_restore_paged_prefix_for_prompt_with_mtp_row(
             continue;
         };
         let load_start = Instant::now();
-        let observed = store.load_observed(&spec)?;
+        let observed = crate::core::cache::load_store_prefix_entry(store, prefix_lru_cache, &spec)?;
         let load_us = load_start.elapsed().as_micros();
-        if observed.status != PagedPrefixLoadStatus::Hit {
+        let Some(hit) = observed.hit else {
             tracing::trace!(
                 "paged SSD prefix cache MTP miss: main_row={} mtp_row={} tokens={} key={} status={:?} load_us={}",
                 main_cache_row,
@@ -3945,16 +3991,16 @@ fn try_restore_paged_prefix_for_prompt_with_mtp_row(
             continue;
         };
         let key = observed.key;
-        let stats = observed
-            .stats
-            .unwrap_or_else(|| empty_prefix_stats(cached_len));
-        let entry = observed
-            .entry
-            .ok_or_else(|| anyhow!("paged prefix observed MTP hit without entry"))?;
+        let crate::core::cache::PrefixStoreHit {
+            entry,
+            segmented,
+            lineage,
+            stats,
+        } = hit;
         try_insert_prefix_lru_entry(
             prefix_lru_cache,
             spec,
-            entry.clone(),
+            segmented,
             main_cache_row,
             Some(mtp_cache_row),
         )?;
@@ -3968,6 +4014,7 @@ fn try_restore_paged_prefix_for_prompt_with_mtp_row(
         let last_hidden = entry
             .mtp_last_hidden
             .ok_or_else(|| anyhow!("paged prefix MTP hit missing last_hidden"))?;
+        set_row_prefix_lineage(main_cache, main_cache_row, lineage);
         log_paged_prefix_hit(
             "MTP hit",
             &key,
@@ -3985,7 +4032,7 @@ fn try_restore_paged_prefix_for_prompt_with_mtp_row(
 fn try_save_paged_prefix_for_prompt_with_mtp(
     config: Option<&PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-    main_cache: &[LayerCache],
+    main_cache: &mut [LayerCache],
     mtp_cache: &MtpCache,
     last_hidden: &Array,
     prompt_ids: &[u32],
@@ -4008,7 +4055,7 @@ fn try_save_paged_prefix_for_prompt_with_mtp(
 fn try_save_paged_prefix_for_prompt_with_mtp_row(
     config: Option<&PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-    main_cache: &[LayerCache],
+    main_cache: &mut [LayerCache],
     main_cache_row: usize,
     mtp_cache: &MtpCache,
     mtp_cache_row: usize,
@@ -4067,7 +4114,9 @@ fn try_save_paged_prefix_for_prompt_with_mtp_row(
     let Some(permit) = permit else {
         return Ok(Some(key));
     };
-    let Some((mut entry, cached_len)) = prefix_entry_for_row(main_cache, main_cache_row)? else {
+    let Some((mut entry, cached_len)) =
+        export_segmented_prefix_for_row(prefix_lru_cache, main_cache, main_cache_row, &spec)?
+    else {
         return Ok(None);
     };
     if cached_len == 0 {
@@ -4085,11 +4134,17 @@ fn try_save_paged_prefix_for_prompt_with_mtp_row(
             "try_save_paged_prefix_for_prompt_with_mtp: MTP row {mtp_cache_row} cached_len {mtp_cached_len} != main {cached_len}"
         );
     }
-    entry.mtp_layers = mtp_layers;
-    entry.mtp_last_hidden = Some(last_hidden.clone());
+    entry.private.mtp_layers = mtp_layers;
+    entry.private.mtp_last_hidden = Some(last_hidden.clone());
 
-    spec.mtp_layers = entry.mtp_layer_specs();
-    spec.mtp_last_hidden = entry.mtp_last_hidden_spec();
+    let layout = prefix_segment_layout(&spec);
+    spec.mtp_layers = entry.private.mtp_layer_specs();
+    spec.mtp_last_hidden = entry.private.mtp_last_hidden_spec();
+    if prefix_segment_layout(&spec) != layout {
+        anyhow::bail!(
+            "try_save_paged_prefix_for_prompt_with_mtp: MTP payload does not match the MTP cache layout"
+        );
+    }
     try_insert_prefix_lru_entry(
         prefix_lru_cache,
         spec.clone(),
@@ -4097,21 +4152,17 @@ fn try_save_paged_prefix_for_prompt_with_mtp_row(
         main_cache_row,
         Some(mtp_cache_row),
     )?;
+    // Recorded whether or not the hot cache kept it: a later save rebuilds
+    // a segment the hot cache dropped from the row, under the same id.
+    set_row_prefix_lineage(main_cache, main_cache_row, saved_row_lineage(&entry, &spec));
     submit_prefix_store_entry(
         permit,
         key,
-        entry,
-        cached_len,
+        &entry,
+        &spec,
         main_cache_row,
         Some(mtp_cache_row),
     )
-}
-
-fn empty_prefix_stats(cached_len: i32) -> PagedPrefixEntryStats {
-    PagedPrefixEntryStats {
-        cached_len,
-        ..PagedPrefixEntryStats::default()
-    }
 }
 
 fn log_paged_prefix_hit(
@@ -4304,7 +4355,7 @@ fn forward_single_text_suffix<M: Model>(
     split_at: i32,
     end_pos: i32,
     dummy_position_ids: Option<&Array>,
-    on_split: &mut dyn FnMut(&[LayerCache]),
+    on_split: &mut dyn FnMut(&mut [LayerCache]),
 ) -> Result<Array> {
     if start_pos < 0 || start_pos > split_at || split_at >= end_pos {
         anyhow::bail!(
@@ -4532,7 +4583,7 @@ fn forward_batched_text_prefill<M: Model>(
 fn try_save_batched_text_prefix_row(
     prefix_cache_config: Option<&PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-    cache: &[LayerCache],
+    cache: &mut [LayerCache],
     row: usize,
     prompt_ids: &[u32],
     label: &str,
@@ -4957,7 +5008,7 @@ fn batched_vl_last_position_ids(
 fn try_save_batched_vl_prefix_row(
     prefix_cache_config: Option<&PagedPrefixCacheConfig>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
-    cache: &[LayerCache],
+    cache: &mut [LayerCache],
     row: usize,
     prompt_ids: &[u32],
     fingerprint: &PrefixFingerprint,
@@ -5593,7 +5644,7 @@ fn forward_single_vl_suffix<M: Model + DenseVlMethods>(
     model: &M,
     cache: &mut [LayerCache],
     input: SingleVlSuffixInput<'_>,
-    on_split: &mut dyn FnMut(&[LayerCache]),
+    on_split: &mut dyn FnMut(&mut [LayerCache]),
 ) -> Result<Array> {
     let SingleVlSuffixInput {
         prompt_ids,
@@ -12933,7 +12984,7 @@ impl<M: Model> Scheduler<M> {
             let new_pos = pos + n;
             let redundant = new_pos as usize == prompt_ids.len()
                 && whole_prompt_save_is_redundant(self.paged_prefix_cache.as_ref(), &prompt_ids);
-            if let Some(cache) = self.cache.as_ref().filter(|_| !redundant) {
+            if let Some(cache) = self.cache.as_deref_mut().filter(|_| !redundant) {
                 match try_save_paged_prefix_for_prompt_with_mtp(
                     self.paged_prefix_cache.as_ref(),
                     self.prefix_lru_cache.as_ref(),
@@ -16497,7 +16548,7 @@ impl<M: Model> Scheduler<M> {
                 };
                 (state.prompt_ids.clone(), prefix_fingerprint)
             };
-            if let Some(cache) = self.cache.as_ref().filter(|_| {
+            if let Some(cache) = self.cache.as_deref_mut().filter(|_| {
                 !whole_prompt_save_is_redundant(paged_prefix_cache_config.as_ref(), &prompt_ids)
             }) {
                 match try_save_paged_prefix_for_prompt(
@@ -17899,7 +17950,7 @@ impl<M: Model> Scheduler<M> {
             match try_save_paged_prefix_for_prompt(
                 self.paged_prefix_cache.as_ref(),
                 self.prefix_lru_cache.as_ref(),
-                &handle.temp_cache,
+                &mut handle.temp_cache,
                 &handle.prompt_ids[..chunk_end as usize],
                 &handle.prefix_fingerprint,
             ) {
@@ -17941,7 +17992,7 @@ impl<M: Model> Scheduler<M> {
         let AdmitMidHandle {
             request_id: id,
             row_idx,
-            temp_cache,
+            mut temp_cache,
             immutable_in_place,
             prefix_fingerprint,
             last_logits,
@@ -17984,7 +18035,7 @@ impl<M: Model> Scheduler<M> {
                 match try_save_paged_prefix_for_prompt(
                     self.paged_prefix_cache.as_ref(),
                     self.prefix_lru_cache.as_ref(),
-                    &temp_cache,
+                    &mut temp_cache,
                     &prompt_ids,
                     &prefix_fingerprint,
                 ) {
@@ -18505,7 +18556,7 @@ impl<M: Model> Scheduler<M> {
             match try_save_paged_prefix_for_prompt_with_mtp(
                 self.paged_prefix_cache.as_ref(),
                 self.prefix_lru_cache.as_ref(),
-                &handle.temp_cache,
+                &mut handle.temp_cache,
                 &handle.mtp_cache,
                 &chunk_last_hidden,
                 &handle.prompt_ids[..new_pos as usize],
@@ -19130,7 +19181,7 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
         let prefix_cache = self.gemma4_drafter_prefix_cache();
         match prefix_cache.try_save(
             model,
-            &handle.temp_cache,
+            &mut handle.temp_cache,
             &chunk_last_hidden,
             &handle.prompt_ids[..new_pos as usize],
             &handle.prefix_fingerprint,
@@ -20128,7 +20179,7 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
             mlx::transforms::eval(&[&out.hidden, &chunk_last_hidden])?;
             self.commit_governor_admission_after_materialization(id);
             let new_pos = pos + n;
-            if let Some(cache) = self.cache.as_ref() {
+            if let Some(cache) = self.cache.as_deref_mut() {
                 match prefix_cache.try_save(
                     model,
                     cache,
@@ -33364,5 +33415,340 @@ mod tests {
         scheduler.evict(id).expect("evict pipeline owner");
         assert_eq!(scheduler.b1_greedy_pipeline_pending_id(), None);
         assert_eq!(scheduler.active_count(), 0);
+    }
+
+    // Shared prefix segments: saves reference the segments a row's K/V came
+    // from instead of copying its whole prefix again.
+
+    const SEG_BS: i32 = 4;
+
+    fn seg_tokens(n: i32, salt: f32) -> Array {
+        let data: Vec<f32> = (0..(2 * n * 4))
+            .map(|i| ((i as f32) * 0.37 + salt).sin())
+            .collect();
+        (data.as_slice(), (1_i32, 2_i32, n, 4_i32))
+            .try_into()
+            .unwrap()
+    }
+
+    /// A paged full-attention layer plus a linear layer, so text saves go
+    /// through the prefix LRU cache rather than the immutable block pool.
+    fn seg_layers() -> Vec<LayerCache> {
+        vec![
+            LayerCache::Full(
+                KVCache::new(1, 2, 4, 4, Dtype::Float32, 256)
+                    .with_step(16)
+                    .with_paged(SEG_BS, 64)
+                    .expect("paged KV"),
+            ),
+            LayerCache::Linear(
+                ironmlx_lm::core::cache::gated_delta::GatedDeltaCache::new_with_cap(
+                    1,
+                    2,
+                    2,
+                    1,
+                    1,
+                    1,
+                    Dtype::Float32,
+                    256,
+                )
+                .expect("linear cache"),
+            ),
+        ]
+    }
+
+    /// Append `n` tokens of K/V derived from `salt`.
+    fn seg_extend(layers: &mut [LayerCache], n: i32, salt: f32) {
+        for layer in layers {
+            match layer {
+                LayerCache::Full(kv) => {
+                    kv.update_and_fetch(&seg_tokens(n, salt), &seg_tokens(n, salt + 1.5), &[n])
+                        .expect("extend K/V");
+                }
+                LayerCache::Linear(gd) => gd.advance(&[n]).expect("advance linear"),
+                LayerCache::Mla(_) => unreachable!(),
+            }
+        }
+    }
+
+    fn seg_ids(range: std::ops::Range<u32>) -> Vec<u32> {
+        range.collect()
+    }
+
+    struct SegFixture {
+        config: crate::core::cache::PagedPrefixCacheConfig,
+        lru: PrefixLruCacheHandle,
+    }
+
+    impl SegFixture {
+        fn new() -> Self {
+            Self {
+                config: crate::core::cache::PagedPrefixCacheConfig::memory_only(
+                    "seg-test", SEG_BS, 64,
+                )
+                .expect("prefix config"),
+                lru: Arc::new(Mutex::new(
+                    PrefixLruCache::new(PrefixLruCacheConfig::new(64 << 20).expect("L1 config"))
+                        .expect("L1 cache"),
+                )),
+            }
+        }
+
+        fn spec(&self, layers: &[LayerCache], tokens: &[u32]) -> PagedPrefixKeySpec {
+            prefix_key_spec_for_caches(
+                "seg-test",
+                tokens,
+                tokens.len() as i32,
+                None,
+                SEG_BS,
+                layers,
+            )
+            .expect("spec")
+            .expect("paged layers")
+        }
+
+        /// Save row 0 as `tokens`; returns the entry's spec.
+        fn save(&self, layers: &mut [LayerCache], tokens: &[u32]) -> PagedPrefixKeySpec {
+            try_save_paged_prefix_for_prompt_row(
+                Some(&self.config),
+                Some(&self.lru),
+                layers,
+                0,
+                tokens,
+                &PrefixFingerprint::text(),
+            )
+            .expect("save")
+            .expect("saved");
+            self.spec(layers, tokens)
+        }
+
+        /// Restore the longest cached prefix of `prompt` into fresh layers.
+        fn restore(&self, prompt: &[u32]) -> (Vec<LayerCache>, i32) {
+            let mut layers = seg_layers();
+            let restored = try_restore_paged_prefix_for_prompt_row(
+                Some(&self.config),
+                Some(&self.lru),
+                &mut layers,
+                0,
+                prompt,
+                &PrefixFingerprint::text(),
+                0,
+            )
+            .expect("restore")
+            .expect("prefix hit");
+            (layers, restored)
+        }
+
+        fn segments(
+            &self,
+            spec: &PagedPrefixKeySpec,
+        ) -> Vec<(
+            ironmlx_lm::core::cache::prefix_segments::PrefixSegmentId,
+            i32,
+            i32,
+        )> {
+            let refs = self
+                .lru
+                .lock()
+                .unwrap()
+                .load_segmented(spec)
+                .expect("load")
+                .expect("cached")
+                .1
+                .refs;
+            refs.into_iter().map(|r| (r.id, r.start, r.stop)).collect()
+        }
+
+        fn payload_bytes(&self, spec: &PagedPrefixKeySpec) -> usize {
+            self.lru
+                .lock()
+                .unwrap()
+                .load_observed(spec)
+                .expect("load")
+                .stats
+                .expect("stats")
+                .payload_bytes
+        }
+
+        fn total_bytes(&self) -> usize {
+            self.lru.lock().unwrap().total_bytes()
+        }
+    }
+
+    /// Main-layer arrays of a whole-prefix export, evaluated and flattened.
+    fn seg_whole_copy(layers: &[LayerCache]) -> Vec<(Vec<i32>, Vec<f32>)> {
+        let (entry, _) = prefix_entry_for_row(layers, 0)
+            .expect("export")
+            .expect("row");
+        entry
+            .main_layers
+            .iter()
+            .flat_map(|layer| match layer {
+                PrefixLayerPayload::FullPaged { k_pages, v_pages } => {
+                    vec![k_pages.clone(), v_pages.clone()]
+                }
+                _ => vec![],
+            })
+            .map(|a| {
+                a.eval().unwrap();
+                (a.shape().as_slice().to_vec(), a.to_vec::<f32>().unwrap())
+            })
+            .collect()
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn follow_up_turn_shares_the_restored_turns_segments() {
+        let fx = SegFixture::new();
+        let turn1 = seg_ids(1..10);
+        let mut a = seg_layers();
+        seg_extend(&mut a, 9, 0.0);
+        let spec1 = fx.save(&mut a, &turn1);
+        let segs1 = fx.segments(&spec1);
+        assert_eq!(segs1.len(), 1);
+        assert_eq!((segs1[0].1, segs1[0].2), (0, 8));
+
+        let turn2 = seg_ids(1..19);
+        let (mut b, restored) = fx.restore(&turn2);
+        assert_eq!(restored, 9);
+        seg_extend(&mut b, 9, 3.0);
+        let spec2 = fx.save(&mut b, &turn2);
+        let segs2 = fx.segments(&spec2);
+        assert_eq!(segs2.len(), 2, "turn 1's segment plus one new one");
+        assert_eq!(segs2[0], segs1[0], "turn 2 references turn 1's segment");
+        assert_eq!((segs2[1].1, segs2[1].2), (8, 16));
+        assert!(
+            fx.total_bytes() < fx.payload_bytes(&spec1) + fx.payload_bytes(&spec2),
+            "shared head counted once: total {} vs {} + {}",
+            fx.total_bytes(),
+            fx.payload_bytes(&spec1),
+            fx.payload_bytes(&spec2)
+        );
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn two_conversations_restored_from_one_checkpoint_share_its_segments() {
+        let fx = SegFixture::new();
+        let checkpoint = seg_ids(1..9);
+        let mut a = seg_layers();
+        seg_extend(&mut a, 8, 0.0);
+        let spec_a = fx.save(&mut a, &checkpoint);
+        let shared = fx.segments(&spec_a);
+        assert_eq!(shared.len(), 1);
+
+        let mut specs = vec![spec_a.clone()];
+        for (salt, extra) in [(5.0, 100_u32), (9.0, 200_u32)] {
+            let mut prompt = checkpoint.clone();
+            prompt.extend(extra..extra + 6);
+            let (mut row, restored) = fx.restore(&prompt);
+            assert_eq!(restored, 8);
+            seg_extend(&mut row, 6, salt);
+            let spec = fx.save(&mut row, &prompt);
+            let segs = fx.segments(&spec);
+            assert_eq!(
+                segs[0], shared[0],
+                "restored conversations share the checkpoint"
+            );
+            assert_eq!(segs.len(), 2);
+            specs.push(spec);
+        }
+        let logical: usize = specs.iter().map(|spec| fx.payload_bytes(spec)).sum();
+        assert!(fx.total_bytes() < logical);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn independently_computed_prefix_does_not_borrow_segments() {
+        let fx = SegFixture::new();
+        let tokens = seg_ids(1..9);
+        let mut a = seg_layers();
+        seg_extend(&mut a, 8, 0.0);
+        let spec_a = fx.save(&mut a, &tokens);
+        let a_ids: Vec<_> = fx.segments(&spec_a).iter().map(|r| r.0).collect();
+
+        // Same tokens and K/V, computed from scratch rather than restored.
+        let mut b = seg_layers();
+        seg_extend(&mut b, 8, 0.0);
+        seg_extend(&mut b, 4, 2.0);
+        let longer = seg_ids(1..13);
+        let spec_b = fx.save(&mut b, &longer);
+        let b_segs = fx.segments(&spec_b);
+        assert!(!b_segs.is_empty());
+        for (id, _, _) in &b_segs {
+            assert!(!a_ids.contains(id), "B must not reference A's segment {id}");
+        }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn restored_kv_equals_dev_whole_copy() {
+        let fx = SegFixture::new();
+        let turn1 = seg_ids(1..10);
+        let mut a = seg_layers();
+        seg_extend(&mut a, 9, 0.0);
+        fx.save(&mut a, &turn1);
+        let turn2 = seg_ids(1..20);
+        let (mut b, _) = fx.restore(&turn2);
+        seg_extend(&mut b, 10, 4.0);
+        fx.save(&mut b, &turn2);
+        let expected = seg_whole_copy(&b);
+
+        let mut prompt = turn2.clone();
+        prompt.push(99);
+        let (c, restored) = fx.restore(&prompt);
+        assert_eq!(restored, 19);
+        assert_eq!(seg_whole_copy(&c), expected);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn segment_cap_forces_a_full_copy() {
+        let fx = SegFixture::new();
+        let mut row = seg_layers();
+        for round in 1..=17_i32 {
+            seg_extend(&mut row, SEG_BS, round as f32);
+            let tokens = seg_ids(1..(round * SEG_BS) as u32 + 1);
+            let spec = fx.save(&mut row, &tokens);
+            let segs = fx.segments(&spec);
+            let expected = if round <= 16 { round as usize } else { 1 };
+            assert_eq!(segs.len(), expected, "round {round}");
+            if round == 17 {
+                assert_eq!((segs[0].1, segs[0].2), (0, 17 * SEG_BS));
+            }
+        }
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn evicted_lineage_segment_is_rebuilt_under_its_id() {
+        let fx = SegFixture::new();
+        let mut row = seg_layers();
+        seg_extend(&mut row, 8, 0.0);
+        let spec1 = fx.save(&mut row, &seg_ids(1..9));
+        let first = fx.segments(&spec1)[0];
+        seg_extend(&mut row, 8, 1.0);
+        let spec2 = fx.save(&mut row, &seg_ids(1..17));
+        let second = fx.segments(&spec2);
+        assert_eq!(second.len(), 2);
+        let second = second[1];
+        // Dropping turn 2 frees its own segment; turn 1 keeps the first.
+        assert!(fx.lru.lock().unwrap().remove(&spec2));
+
+        seg_extend(&mut row, 9, 2.0);
+        let tokens = seg_ids(1..26);
+        let spec3 = fx.save(&mut row, &tokens);
+        let segs = fx.segments(&spec3);
+        assert_eq!(segs.len(), 3);
+        assert_eq!(segs[0], first, "the surviving segment is still shared");
+        assert_eq!(segs[1], second, "the dropped one comes back under its id");
+        assert_eq!((segs[2].1, segs[2].2), (16, 24), "then the new range");
+
+        let expected = seg_whole_copy(&row);
+        let mut prompt = tokens.clone();
+        prompt.push(99);
+        let (restored, len) = fx.restore(&prompt);
+        assert_eq!(len, 25);
+        assert_eq!(seg_whole_copy(&restored), expected);
     }
 }
