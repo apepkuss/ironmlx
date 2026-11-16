@@ -1360,11 +1360,10 @@ where
         // Keep the loaded target and draft weights GPU-resident: macOS cannot
         // then compress them between requests, and an idle gap does not make
         // the next prefill re-establish residency for everything it touches.
-        // Only the weights are allocated at this point, and this server never
-        // unloads them, so the wired limit covers exactly the weights.
-        use ironmlx_runtime::core::resident_weights::{ResidentDecision, ResidentWeightsMode};
-        let limit = mlx::memory::snapshot().active_bytes;
-        let max_recommended = mlx::memory::snapshot().max_recommended_bytes.unwrap_or(0);
+        // Only the weights are allocated at this point, including the copies
+        // the models derived from them at prewarm, so pinning everything
+        // allocated pins exactly the weights.
+        use ironmlx_runtime::core::resident_weights::ResidentWeightsMode;
         // The M5 profile's setting (or its environment override) asks for
         // resident weights whatever their size, as `on` does.
         let mode = if args.resident_weights == ResidentWeightsMode::Auto
@@ -1374,29 +1373,7 @@ where
         } else {
             args.resident_weights
         };
-        let mut decision =
-            ironmlx_runtime::core::resident_weights::decide(mode, limit, 0, max_recommended);
-        if decision == ResidentDecision::Resident {
-            match mlx::memory::set_wired_limit(limit) {
-                Ok(previous) => tracing::info!(limit, previous, "DFlash2 weights wired"),
-                Err(error) => {
-                    tracing::warn!(limit, %error, "DFlash2 weights not wired");
-                    decision = ResidentDecision::Failed;
-                }
-            }
-        } else {
-            tracing::info!(
-                limit,
-                max_recommended,
-                ?decision,
-                "DFlash2 weights not wired"
-            );
-        }
-        ironmlx_runtime::core::resident_weights::record_wired_limit(
-            &single_model_id(args)?,
-            decision,
-            limit,
-        );
+        ironmlx_runtime::core::resident_weights::pin_all_allocated(mode, &single_model_id(args)?);
     }
 
     let model_id = single_model_id(args)?;

@@ -145,7 +145,9 @@ impl VisionSlot {
     /// Loads a deferred tower from its checkpoint (only its tensors are read)
     /// on the calling thread, whose stream then owns every derived weight.
     /// Returns `true` when this call loaded it, `false` when it was resident.
-    pub fn load_deferred(&self) -> Result<bool> {
+    /// `on_loaded` sees the loader whose tensors the new tower holds, before
+    /// the loader is dropped.
+    pub fn load_deferred(&self, on_loaded: &dyn Fn(&crate::core::Loader)) -> Result<bool> {
         if self.tower.get().is_some() {
             return Ok(false);
         }
@@ -156,7 +158,11 @@ impl VisionSlot {
         let loader = crate::core::Loader::open_vision(model_dir)?;
         let tower = VisionTower::from_loader(&loader, cfg)?;
         // A concurrent load that won keeps its tower; this one is dropped.
-        Ok(self.tower.set(tower).is_ok())
+        let loaded = self.tower.set(tower).is_ok();
+        if loaded {
+            on_loaded(&loader);
+        }
+        Ok(loaded)
     }
 }
 

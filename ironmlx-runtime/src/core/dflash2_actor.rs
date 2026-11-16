@@ -1864,7 +1864,15 @@ where
                     // resident for later requests.
                     let vision_ready = if request.pixel_values.is_some() {
                         let started = std::time::Instant::now();
-                        model.dflash2_load_vision().map(|loaded| {
+                        // Resident like the weights it joins.
+                        let pin = |loader: &ironmlx_lm::core::Loader| {
+                            crate::core::resident_weights::pin_later_weights(
+                                "vision encoder",
+                                loader.loaded_tensors(),
+                                loader.loaded_tensor_bytes(),
+                            );
+                        };
+                        model.dflash2_load_vision(&pin).map(|loaded| {
                             if loaded {
                                 tracing::info!(
                                     target: "ironmlx::dflash2",

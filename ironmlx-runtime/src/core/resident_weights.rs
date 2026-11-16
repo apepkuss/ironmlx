@@ -6,10 +6,11 @@
 //! weights cannot be taken.
 //!
 //! Engines loaded through a [`Loader`](ironmlx_lm::core::Loader) pin exactly
-//! their weight buffers (`mlx::memory::pin_resident`); the pin ends by itself
-//! when a buffer is freed, so unloading a model needs no bookkeeping. The
-//! DFlash2 server, which loads one model for the life of the process, uses the
-//! wired limit instead ([`record_wired_limit`]).
+//! their weight buffers (`mlx::memory::pin_resident`). The DFlash2 server
+//! pins every buffer allocated after its prewarm ([`pin_all_allocated`]):
+//! only the weights are allocated then, including the copies its models
+//! derive from the checkpoint. Either way a pin ends by itself when its
+//! buffer is freed, so unloading a model needs no bookkeeping.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -101,8 +102,6 @@ pub struct ResidentModel {
 pub struct ResidentWeightsHealth {
     /// Bytes pinned right now; falls when a pinned model is unloaded.
     pub pinned_bytes: usize,
-    /// The DFlash2 server's wired limit, 0 elsewhere.
-    pub wired_limit_bytes: usize,
     /// What each model's most recent load decided. A model stays listed
     /// after it is unloaded; `pinned_bytes` is what is resident now.
     pub last_load: BTreeMap<String, ResidentModel>,
@@ -110,7 +109,9 @@ pub struct ResidentWeightsHealth {
 
 #[derive(Default)]
 struct Registry {
-    wired_limit_bytes: usize,
+    /// The mode of the most recent load, which weights loaded later (a
+    /// vision encoder on its first image) follow.
+    mode: Option<ResidentWeightsMode>,
     models: BTreeMap<String, ResidentModel>,
 }
 
@@ -135,20 +136,18 @@ fn start_refresh() {
     );
 }
 
-fn record(model_id: &str, model: ResidentModel) {
+fn record(model_id: &str, mode: ResidentWeightsMode, model: ResidentModel) {
     let mut registry = registry();
+    registry.mode = Some(mode);
     registry.models.insert(model_id.to_owned(), model);
 }
 
-/// Pin the weights a loader has just evaluated, before or after the model is
-/// built from it: the model's layers share these buffers. `model_id` names
-/// the load in [`health`] (a model's draft or MTP head gets a name of its
-/// own).
-pub fn pin_loaded_weights<'a>(
+/// Decide for `weight_bytes` and, when they are to be resident, `pin` them.
+fn pin_with(
     mode: ResidentWeightsMode,
     model_id: &str,
-    weights: impl IntoIterator<Item = &'a mlx::Array>,
     weight_bytes: usize,
+    pin: impl FnOnce() -> mlx::Result<usize>,
 ) -> ResidentDecision {
     let max_recommended_bytes = mlx::memory::snapshot().max_recommended_bytes.unwrap_or(0);
     let mut decision = decide(
@@ -158,9 +157,12 @@ pub fn pin_loaded_weights<'a>(
         max_recommended_bytes,
     );
     let mut resident_bytes = 0;
+    let mut pin_us = 0;
     if decision == ResidentDecision::Resident {
-        let arrays: Vec<&mlx::Array> = weights.into_iter().collect();
-        match mlx::memory::pin_resident(&arrays) {
+        let started = std::time::Instant::now();
+        let pinned = pin();
+        pin_us = started.elapsed().as_micros() as u64;
+        match pinned {
             Ok(bytes) => {
                 resident_bytes = bytes;
                 start_refresh();
@@ -177,10 +179,12 @@ pub fn pin_loaded_weights<'a>(
         weight_bytes,
         resident_bytes,
         max_recommended_bytes,
+        pin_us,
         "resident weights"
     );
     record(
         model_id,
+        mode,
         ResidentModel {
             decision,
             weight_bytes,
@@ -190,33 +194,83 @@ pub fn pin_loaded_weights<'a>(
     decision
 }
 
-/// The DFlash2 server made `limit_bytes` resident through the wired limit
-/// (`decision` says whether it did).
-pub fn record_wired_limit(model_id: &str, decision: ResidentDecision, limit_bytes: usize) {
-    let resident_bytes = if decision == ResidentDecision::Resident {
-        limit_bytes
-    } else {
-        0
-    };
-    registry().wired_limit_bytes = resident_bytes;
-    record(
-        model_id,
-        ResidentModel {
-            decision,
-            weight_bytes: limit_bytes,
-            resident_bytes,
-        },
-    );
-    if decision == ResidentDecision::Resident {
-        start_refresh();
+/// Pin the weights a loader has just evaluated, before or after the model is
+/// built from it: the model's layers share these buffers. `model_id` names
+/// the load in [`health`] (a model's draft or MTP head gets a name of its
+/// own).
+pub fn pin_loaded_weights<'a>(
+    mode: ResidentWeightsMode,
+    model_id: &str,
+    weights: impl IntoIterator<Item = &'a mlx::Array>,
+    weight_bytes: usize,
+) -> ResidentDecision {
+    pin_with(mode, model_id, weight_bytes, || {
+        let arrays: Vec<&mlx::Array> = weights.into_iter().collect();
+        mlx::memory::pin_resident(&arrays)
+    })
+}
+
+/// Pin every buffer allocated now, after releasing the allocator cache: for
+/// a server whose only allocations at this point are its models' weights,
+/// including the copies they derived from the checkpoint at prewarm.
+pub fn pin_all_allocated(mode: ResidentWeightsMode, model_id: &str) -> ResidentDecision {
+    mlx::clear_cache();
+    let weight_bytes = mlx::memory::snapshot().active_bytes;
+    pin_with(mode, model_id, weight_bytes, mlx::memory::pin_all_resident)
+}
+
+/// After a warmup, pin again everything allocated for `model_id` when its
+/// load made it resident: a model may replace weights with layouts it builds
+/// on its first forward (the M5 affine4 tiles), and the pins of the replaced
+/// buffers ended when they were freed. Nothing for a model not recorded as
+/// resident.
+pub fn repin_all_allocated(model_id: &str) {
+    let resident = registry()
+        .models
+        .get(model_id)
+        .is_some_and(|model| model.decision == ResidentDecision::Resident);
+    if !resident {
+        return;
     }
+    mlx::clear_cache();
+    let started = std::time::Instant::now();
+    match mlx::memory::pin_all_resident() {
+        Ok(bytes) => {
+            let pinned_bytes = mlx::memory::pinned_bytes();
+            tracing::info!(
+                model = model_id,
+                newly_pinned_bytes = bytes,
+                pinned_bytes,
+                active_bytes = mlx::memory::snapshot().active_bytes,
+                pin_us = started.elapsed().as_micros() as u64,
+                "resident weights pinned again after warmup"
+            );
+            if let Some(model) = registry().models.get_mut(model_id) {
+                model.resident_bytes = pinned_bytes;
+            }
+        }
+        Err(error) => tracing::warn!(model = model_id, %error, "weights not pinned again"),
+    }
+}
+
+/// Pin weights a model loads after it started serving (a vision encoder on
+/// its first image) under the mode of the most recent load; nothing when no
+/// load has been recorded.
+pub fn pin_later_weights<'a>(
+    model_id: &str,
+    weights: impl IntoIterator<Item = &'a mlx::Array>,
+    weight_bytes: usize,
+) -> ResidentDecision {
+    let Some(mode) = registry().mode else {
+        return ResidentDecision::Off;
+    };
+    pin_loaded_weights(mode, model_id, weights, weight_bytes)
 }
 
 pub fn health() -> ResidentWeightsHealth {
     let registry = registry();
     ResidentWeightsHealth {
         pinned_bytes: mlx::memory::pinned_bytes(),
-        wired_limit_bytes: registry.wired_limit_bytes,
         last_load: registry.models.clone(),
     }
 }

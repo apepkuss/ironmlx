@@ -1202,6 +1202,7 @@ where
     let draft = if crate::core::dflash2::startup_warmup_requested() {
         let model = Arc::clone(&model);
         let tokenizer = Arc::clone(&tokenizer);
+        let pin_model_id = model_id.clone();
         let execution = crate::core::dflash2::DFlash2ExecutionOptions {
             block_size,
             p2: p2_options,
@@ -1215,6 +1216,11 @@ where
                 execution,
                 prefill_chunk_size,
             )?;
+            // The warmup's first forwards may have replaced weights with the
+            // layouts the target builds lazily; keep those resident too, once
+            // the warmup's own buffers are released.
+            mlx::transforms::synchronize()?;
+            crate::core::resident_weights::repin_all_allocated(&pin_model_id);
             Ok(draft)
         })
         .await

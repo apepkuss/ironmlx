@@ -272,8 +272,8 @@ impl Qwen35MoeModel {
 
     /// Loads a vision encoder whose tensors were dropped at load (see
     /// [`VisionSlot::load_deferred`]); `true` when this call loaded it.
-    pub fn load_deferred_vision(&self) -> Result<bool> {
-        self.vision.load_deferred()
+    pub fn load_deferred_vision(&self, on_loaded: &dyn Fn(&crate::core::Loader)) -> Result<bool> {
+        self.vision.load_deferred(on_loaded)
     }
 
     pub fn load_mtp_head(&self, loader: &Loader) -> Result<Qwen35MoeMtp> {

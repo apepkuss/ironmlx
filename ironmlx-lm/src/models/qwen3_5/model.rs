@@ -451,8 +451,8 @@ impl Qwen35Model {
 
     /// Loads a vision encoder whose tensors were dropped at load (see
     /// [`VisionSlot::load_deferred`]); `true` when this call loaded it.
-    pub fn load_deferred_vision(&self) -> Result<bool> {
-        self.vision.load_deferred()
+    pub fn load_deferred_vision(&self, on_loaded: &dyn Fn(&crate::core::Loader)) -> Result<bool> {
+        self.vision.load_deferred(on_loaded)
     }
 
     /// Extract memory-budget-relevant model attributes for Scheduler::new
@@ -1544,8 +1544,8 @@ impl crate::models::dflash2::DFlash2Target for Qwen35Model {
         self.vision_available()
     }
 
-    fn dflash2_load_vision(&self) -> crate::Result<bool> {
-        self.load_deferred_vision()
+    fn dflash2_load_vision(&self, on_loaded: &dyn Fn(&crate::core::Loader)) -> crate::Result<bool> {
+        self.load_deferred_vision(on_loaded)
     }
 
     fn dflash2_vision_embeds_on(

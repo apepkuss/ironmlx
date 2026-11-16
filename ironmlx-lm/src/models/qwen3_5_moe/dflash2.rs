@@ -489,8 +489,8 @@ impl DFlash2Target for Qwen35MoeModel {
         self.vision_available()
     }
 
-    fn dflash2_load_vision(&self) -> Result<bool> {
-        self.load_deferred_vision()
+    fn dflash2_load_vision(&self, on_loaded: &dyn Fn(&crate::core::Loader)) -> Result<bool> {
+        self.load_deferred_vision(on_loaded)
     }
 
     fn dflash2_vision_embeds_on(

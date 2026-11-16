@@ -20,6 +20,7 @@ std::size_t set_wired_limit(std::size_t limit);
 void start_residency_refresh(std::uint32_t interval_ms);
 std::size_t pin_resident(rust::Slice<const MlxArray* const> arrays);
 std::size_t unpin_resident(rust::Slice<const MlxArray* const> arrays);
+std::size_t pin_all_resident();
 std::size_t get_pinned_memory();
 std::size_t get_memory_size();
 std::size_t get_max_recommended_memory();

@@ -102,6 +102,10 @@ std::size_t unpin_resident(rust::Slice<const MlxArray* const> arrays) {
   return mlx::core::unpin_resident(to_vector(arrays));
 }
 
+std::size_t pin_all_resident() {
+  return mlx::core::pin_all_resident();
+}
+
 std::size_t get_pinned_memory() {
   return mlx::core::get_pinned_memory();
 }

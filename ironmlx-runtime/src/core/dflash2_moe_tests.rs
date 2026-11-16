@@ -2402,7 +2402,10 @@ fn image_prefix_artifacts_survive_an_appended_image_and_separate_same_grid_image
         eprintln!("skipping: QWEN36_MOE_DFLASH2_TARGET or DFLASH2_MODEL is not set");
         return;
     };
-    assert!(fixture.target.dflash2_load_vision().expect("load vision"));
+    assert!(fixture
+        .target
+        .dflash2_load_vision(&|_| {})
+        .expect("load vision"));
     let target_dir = std::env::var("QWEN36_MOE_DFLASH2_TARGET").expect("target");
     let pixel_bounds =
         image_processor::PixelBounds::for_model(std::path::Path::new(&target_dir), None)

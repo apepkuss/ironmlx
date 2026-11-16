@@ -581,8 +581,9 @@ pub trait DFlash2Target: crate::core::Model {
     }
 
     /// Makes the vision encoder resident if it is not yet, on the calling
-    /// thread; `true` when this call loaded it. It stays resident.
-    fn dflash2_load_vision(&self) -> Result<bool> {
+    /// thread; `true` when this call loaded it, after `on_loaded` saw the
+    /// loader whose tensors it holds. It stays resident.
+    fn dflash2_load_vision(&self, _on_loaded: &dyn Fn(&crate::core::Loader)) -> Result<bool> {
         anyhow::bail!("target does not support image inputs")
     }
 

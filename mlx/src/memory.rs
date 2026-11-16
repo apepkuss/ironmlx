@@ -81,7 +81,14 @@ pub fn unpin_resident(arrays: &[&crate::Array]) -> crate::Result<usize> {
     Ok(unsafe { mlx_sys::memory::ffi::unpin_resident(&raw) }?)
 }
 
-/// Bytes currently pinned by [`pin_resident`].
+/// Release the allocator's buffer cache, then pin every buffer still
+/// allocated, as [`pin_resident`] would; return the bytes newly pinned. Each
+/// pin still ends when its buffer is freed.
+pub fn pin_all_resident() -> crate::Result<usize> {
+    Ok(mlx_sys::memory::ffi::pin_all_resident()?)
+}
+
+/// Bytes currently pinned by [`pin_resident`] and [`pin_all_resident`].
 pub fn pinned_bytes() -> usize {
     mlx_sys::memory::ffi::get_pinned_memory()
 }

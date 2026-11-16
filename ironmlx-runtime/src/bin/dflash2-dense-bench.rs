@@ -50,8 +50,8 @@ struct Args {
     /// Install the M5 Dense profile (as `serve` does on M5 hardware).
     #[arg(long)]
     m5_profile: bool,
-    /// Wire the loaded weights and refresh their residency (as `serve` does
-    /// when the profile sets WIRED_WEIGHTS).
+    /// Pin the loaded weights resident and refresh their residency (as
+    /// `serve` does when the profile sets WIRED_WEIGHTS).
     #[arg(long)]
     wired: bool,
     /// Drafter runtime quantization bits (0 = BF16 checkpoint). The served
@@ -122,9 +122,10 @@ fn main() -> Result<()> {
     let draft_load_s = draft_started.elapsed().as_secs_f64();
     mlx::clear_cache();
     if args.wired {
-        let limit = mlx::memory::snapshot().active_bytes;
-        mlx::memory::set_wired_limit(limit)?;
-        mlx::memory::start_residency_refresh(1000)?;
+        ironmlx_runtime::core::resident_weights::pin_all_allocated(
+            ironmlx_runtime::core::resident_weights::ResidentWeightsMode::On,
+            "dflash2-dense-bench",
+        );
     }
     let capabilities = target.dflash2_verify_capabilities();
     let prompts: Vec<PromptCase> = serde_json::from_reader(std::fs::File::open(&args.prompts)?)?;
