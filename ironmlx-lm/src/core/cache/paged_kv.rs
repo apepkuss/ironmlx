@@ -166,6 +166,71 @@ fn contiguous_page_runs(dst_pages: &[i32]) -> Vec<PageRun> {
     runs
 }
 
+/// A prefix's K or V pages held as consecutive `[pages, heads, block, dim]`
+/// arrays along the page axis: shared segments, then a private tail. A
+/// range is sliced from the parts it falls in, so a restore that copies
+/// pages never joins the whole prefix into one temporary array.
+struct PrefixPageParts<'a> {
+    parts: &'a [Array],
+}
+
+impl PrefixPageParts<'_> {
+    fn total_pages(&self) -> i32 {
+        self.parts
+            .iter()
+            .map(|part| part.shape().as_slice()[0])
+            .sum()
+    }
+
+    /// `(offset within the range, pages)` covering `[start, start + len)`;
+    /// a part fully inside the range is used as is.
+    fn pieces_on(&self, start: i32, len: i32, target: StreamOrDevice) -> Result<Vec<(i32, Array)>> {
+        let end = start + len;
+        let mut pieces = Vec::new();
+        let mut covered = 0;
+        let mut part_start = 0;
+        for part in self.parts {
+            let dims = part.shape().as_slice().to_vec();
+            let part_end = part_start + dims[0];
+            let (lo, hi) = (start.max(part_start), end.min(part_end));
+            if lo < hi {
+                let piece = if lo == part_start && hi == part_end {
+                    part.clone()
+                } else {
+                    slice_strided_on(
+                        part,
+                        [lo - part_start, 0, 0, 0],
+                        [hi - part_start, dims[1], dims[2], dims[3]],
+                        [1_i32, 1, 1, 1],
+                        target,
+                    )?
+                };
+                pieces.push((lo - start, piece));
+                covered += hi - lo;
+            }
+            part_start = part_end;
+        }
+        if start < 0 || covered != len {
+            anyhow::bail!(
+                "PagedKVCache: prefix pages [{start}, {end}) outside the {} source pages",
+                part_start
+            );
+        }
+        Ok(pieces)
+    }
+
+    /// `[start, start + len)` as one array: a part itself, a slice of one,
+    /// or a join across parts.
+    fn range_on(&self, start: i32, len: i32, target: StreamOrDevice) -> Result<Array> {
+        let mut pieces = self.pieces_on(start, len, target)?;
+        if pieces.len() == 1 {
+            return Ok(pieces.remove(0).1);
+        }
+        let refs = pieces.iter().map(|(_, piece)| piece).collect::<Vec<_>>();
+        Ok(concatenate_on(&refs, 0, target)?)
+    }
+}
+
 impl PagedKVCache {
     fn page_store(&self) -> Result<&dyn KvPageStore> {
         self.hot_cold
@@ -2048,6 +2113,29 @@ impl PagedKVCache {
         prefix_len: i32,
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
+        self.restore_prefix_page_parts_for_rows_on(
+            std::slice::from_ref(k_pages_src),
+            std::slice::from_ref(v_pages_src),
+            offsets,
+            rows,
+            prefix_len,
+            target,
+        )
+    }
+
+    /// Restore a prefix whose K/V pages are consecutive parts along the page
+    /// axis (shared segments, then a private tail). Pages are copied part by
+    /// part; only a direct install, whose page tensor is the restored prefix
+    /// itself, joins the parts.
+    pub fn restore_prefix_page_parts_for_rows_on(
+        &mut self,
+        k_parts: &[Array],
+        v_parts: &[Array],
+        offsets: &mut [i32],
+        rows: &[usize],
+        prefix_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
         let target = target.into();
         self.validate_offsets_shape_and_cap(offsets)?;
         if rows.is_empty() {
@@ -2074,10 +2162,26 @@ impl PagedKVCache {
                 self.cap
             );
         }
-        self.validate_prefix_pages("K", k_pages_src, self.head_dim)?;
-        self.validate_prefix_pages("V", v_pages_src, self.v_head_dim)?;
+        if k_parts.len() != v_parts.len() {
+            anyhow::bail!(
+                "PagedKVCache::restore_prefix_pages_for_rows_on: {} K parts != {} V parts",
+                k_parts.len(),
+                v_parts.len()
+            );
+        }
+        for (k_part, v_part) in k_parts.iter().zip(v_parts) {
+            self.validate_prefix_pages("K", k_part, self.head_dim)?;
+            self.validate_prefix_pages("V", v_part, self.v_head_dim)?;
+            if k_part.shape().as_slice()[0] != v_part.shape().as_slice()[0] {
+                anyhow::bail!(
+                    "PagedKVCache::restore_prefix_pages_for_rows_on: K and V parts differ in page count"
+                );
+            }
+        }
+        let k_pages_src = &PrefixPageParts { parts: k_parts };
+        let v_pages_src = &PrefixPageParts { parts: v_parts };
         let needed_blocks = ceil_div(prefix_len, self.block_size);
-        let available_blocks = k_pages_src.shape().as_slice()[0];
+        let available_blocks = k_pages_src.total_pages();
         if needed_blocks > available_blocks {
             anyhow::bail!(
                 "PagedKVCache::restore_prefix_pages_for_rows_on: prefix_len {prefix_len} needs {needed_blocks} pages but source has {available_blocks}"
@@ -2170,8 +2274,8 @@ impl PagedKVCache {
 
     fn install_prefix_pages_direct_on(
         &mut self,
-        k_pages_src: &Array,
-        v_pages_src: &Array,
+        k_pages_src: &PrefixPageParts<'_>,
+        v_pages_src: &PrefixPageParts<'_>,
         rows: &[usize],
         shared_blocks: i32,
         tail_private: bool,
@@ -2190,14 +2294,12 @@ impl PagedKVCache {
             k_pages_src,
             shared_blocks,
             private_tail_pages,
-            self.head_dim,
             target,
         )?);
         self.v_pages = Some(self.build_prefix_page_tensor_on(
             v_pages_src,
             shared_blocks,
             private_tail_pages,
-            self.v_head_dim,
             target,
         )?);
 
@@ -2220,8 +2322,8 @@ impl PagedKVCache {
 
     fn install_prefix_pages_hot_cold_direct_on(
         &mut self,
-        k_pages_src: &Array,
-        v_pages_src: &Array,
+        k_pages_src: &PrefixPageParts<'_>,
+        v_pages_src: &PrefixPageParts<'_>,
         rows: &[usize],
         shared_blocks: i32,
         tail_private: bool,
@@ -2365,35 +2467,17 @@ impl PagedKVCache {
 
     fn build_prefix_page_tensor_on(
         &self,
-        pages_src: &Array,
+        pages_src: &PrefixPageParts<'_>,
         shared_blocks: i32,
         private_tail_pages: i32,
-        dim: i32,
         target: StreamOrDevice,
     ) -> Result<Array> {
         let mut parts = Vec::new();
-        let source_pages = pages_src.shape().as_slice()[0];
         if shared_blocks > 0 {
-            if private_tail_pages == 0 && shared_blocks == source_pages {
-                parts.push(pages_src.clone());
-            } else {
-                parts.push(slice_strided_on(
-                    pages_src,
-                    [0_i32, 0, 0, 0],
-                    [shared_blocks, self.n_kv_heads, self.block_size, dim],
-                    [1_i32, 1, 1, 1],
-                    target,
-                )?);
-            }
+            parts.push(pages_src.range_on(0, shared_blocks, target)?);
         }
         if private_tail_pages > 0 {
-            let tail = slice_strided_on(
-                pages_src,
-                [shared_blocks, 0, 0, 0],
-                [shared_blocks + 1, self.n_kv_heads, self.block_size, dim],
-                [1_i32, 1, 1, 1],
-                target,
-            )?;
+            let tail = pages_src.range_on(shared_blocks, 1, target)?;
             for _ in 0..private_tail_pages {
                 parts.push(tail.clone());
             }
@@ -2409,7 +2493,7 @@ impl PagedKVCache {
 
     fn build_selected_prefix_page_tensor_on(
         &self,
-        pages_src: &Array,
+        pages_src: &PrefixPageParts<'_>,
         page_source: &[i32],
         logical_pages: &[i32],
         dim: i32,
@@ -2432,13 +2516,7 @@ impl PagedKVCache {
                         "PagedKVCache::build_selected_prefix_page_tensor_on: logical page {logical_page} has no source"
                     )
                 })?;
-            parts.push(slice_strided_on(
-                pages_src,
-                [source_page, 0, 0, 0],
-                [source_page + 1, self.n_kv_heads, self.block_size, dim],
-                [1_i32, 1, 1, 1],
-                target,
-            )?);
+            parts.push(pages_src.range_on(source_page, 1, target)?);
         }
         if parts.len() == 1 {
             Ok(parts.remove(0))
@@ -2450,8 +2528,8 @@ impl PagedKVCache {
 
     fn save_hot_cold_direct_offloaded_prefix_runs_on(
         &mut self,
-        k_pages_src: &Array,
-        v_pages_src: &Array,
+        k_pages_src: &PrefixPageParts<'_>,
+        v_pages_src: &PrefixPageParts<'_>,
         page_source: &[i32],
         resident_pages: &[i32],
         target: StreamOrDevice,
@@ -2493,8 +2571,8 @@ impl PagedKVCache {
 
     fn save_hot_cold_direct_offloaded_prefix_run_on(
         &mut self,
-        k_pages_src: &Array,
-        v_pages_src: &Array,
+        k_pages_src: &PrefixPageParts<'_>,
+        v_pages_src: &PrefixPageParts<'_>,
         run_start: i32,
         source_start: i32,
         run_len: i32,
@@ -2505,30 +2583,8 @@ impl PagedKVCache {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("PagedKVCache::save_hot_cold_direct_offloaded_prefix_run_on: hot/cold tiering is disabled"))?
             .segment_path(run_start, run_len);
-        let k_segment = slice_strided_on(
-            k_pages_src,
-            [source_start, 0, 0, 0],
-            [
-                source_start + run_len,
-                self.n_kv_heads,
-                self.block_size,
-                self.head_dim,
-            ],
-            [1_i32, 1, 1, 1],
-            target,
-        )?;
-        let v_segment = slice_strided_on(
-            v_pages_src,
-            [source_start, 0, 0, 0],
-            [
-                source_start + run_len,
-                self.n_kv_heads,
-                self.block_size,
-                self.v_head_dim,
-            ],
-            [1_i32, 1, 1, 1],
-            target,
-        )?;
+        let k_segment = k_pages_src.range_on(source_start, run_len, target)?;
+        let v_segment = v_pages_src.range_on(source_start, run_len, target)?;
         self.page_store()?.save(&path, &k_segment, &v_segment)?;
         let bytes = self.page_store()?.size(&path);
         if let Some(hot_cold) = &mut self.hot_cold {
@@ -2545,8 +2601,8 @@ impl PagedKVCache {
 
     fn copy_prefix_pages_once_for_rows_on(
         &mut self,
-        k_pages_src: &Array,
-        v_pages_src: &Array,
+        k_pages_src: &PrefixPageParts<'_>,
+        v_pages_src: &PrefixPageParts<'_>,
         rows: &[usize],
         shared_blocks: i32,
         tail_private: bool,
@@ -2566,9 +2622,9 @@ impl PagedKVCache {
             for _ in rows {
                 let page = self.allocate_page(target)?;
                 self.copy_single_prefix_page_on(
-                    k_pages_src,
-                    v_pages_src,
-                    shared_blocks,
+                    &k_pages_src.range_on(shared_blocks, 1, target)?,
+                    &v_pages_src.range_on(shared_blocks, 1, target)?,
+                    0,
                     page,
                     target,
                 )?;
@@ -2589,17 +2645,17 @@ impl PagedKVCache {
 
     fn copy_prefix_page_runs_on(
         &mut self,
-        k_pages_src: &Array,
-        v_pages_src: &Array,
+        k_pages_src: &PrefixPageParts<'_>,
+        v_pages_src: &PrefixPageParts<'_>,
         dst_pages: &[i32],
         target: StreamOrDevice,
     ) -> Result<()> {
         if self.hot_cold.is_some() {
             for (src_page, &dst_page) in dst_pages.iter().enumerate() {
                 self.copy_single_prefix_page_on(
-                    k_pages_src,
-                    v_pages_src,
-                    src_page as i32,
+                    &k_pages_src.range_on(src_page as i32, 1, target)?,
+                    &v_pages_src.range_on(src_page as i32, 1, target)?,
+                    0,
                     dst_page,
                     target,
                 )?;
@@ -2607,64 +2663,46 @@ impl PagedKVCache {
             return Ok(());
         }
         for run in contiguous_page_runs(dst_pages) {
-            let k_page_run = slice_strided_on(
-                k_pages_src,
-                [run.src_start, 0, 0, 0],
-                [
-                    run.src_start + run.len,
-                    self.n_kv_heads,
-                    self.block_size,
-                    self.head_dim,
-                ],
-                [1_i32, 1, 1, 1],
-                target,
-            )?;
-            let v_page_run = slice_strided_on(
-                v_pages_src,
-                [run.src_start, 0, 0, 0],
-                [
-                    run.src_start + run.len,
-                    self.n_kv_heads,
-                    self.block_size,
-                    self.v_head_dim,
-                ],
-                [1_i32, 1, 1, 1],
-                target,
-            )?;
-            let dst_k_pages = self
-                .k_pages
-                .as_ref()
-                .expect("copy_prefix_page_runs_on allocated K storage");
-            let dst_v_pages = self
-                .v_pages
-                .as_ref()
-                .expect("copy_prefix_page_runs_on allocated V storage");
-            self.k_pages = Some(slice_update_on(
-                dst_k_pages,
-                &k_page_run,
-                [run.dst_start, 0, 0, 0],
-                [
-                    run.dst_start + run.len,
-                    self.n_kv_heads,
-                    self.block_size,
-                    self.head_dim,
-                ],
-                [1_i32, 1, 1, 1],
-                target,
-            )?);
-            self.v_pages = Some(slice_update_on(
-                dst_v_pages,
-                &v_page_run,
-                [run.dst_start, 0, 0, 0],
-                [
-                    run.dst_start + run.len,
-                    self.n_kv_heads,
-                    self.block_size,
-                    self.v_head_dim,
-                ],
-                [1_i32, 1, 1, 1],
-                target,
-            )?);
+            let k_pieces = k_pages_src.pieces_on(run.src_start, run.len, target)?;
+            let v_pieces = v_pages_src.pieces_on(run.src_start, run.len, target)?;
+            for ((offset, k_piece), (_, v_piece)) in k_pieces.into_iter().zip(v_pieces) {
+                let dst_start = run.dst_start + offset;
+                let len = k_piece.shape().as_slice()[0];
+                let dst_k_pages = self
+                    .k_pages
+                    .as_ref()
+                    .expect("copy_prefix_page_runs_on allocated K storage");
+                let dst_v_pages = self
+                    .v_pages
+                    .as_ref()
+                    .expect("copy_prefix_page_runs_on allocated V storage");
+                self.k_pages = Some(slice_update_on(
+                    dst_k_pages,
+                    &k_piece,
+                    [dst_start, 0, 0, 0],
+                    [
+                        dst_start + len,
+                        self.n_kv_heads,
+                        self.block_size,
+                        self.head_dim,
+                    ],
+                    [1_i32, 1, 1, 1],
+                    target,
+                )?);
+                self.v_pages = Some(slice_update_on(
+                    dst_v_pages,
+                    &v_piece,
+                    [dst_start, 0, 0, 0],
+                    [
+                        dst_start + len,
+                        self.n_kv_heads,
+                        self.block_size,
+                        self.v_head_dim,
+                    ],
+                    [1_i32, 1, 1, 1],
+                    target,
+                )?);
+            }
         }
         Ok(())
     }

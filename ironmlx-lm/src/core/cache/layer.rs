@@ -715,72 +715,16 @@ pub fn restore_prefix_entry_for_row(
     row: usize,
     cached_len: i32,
 ) -> anyhow::Result<()> {
-    if caches.len() != entry.main_layers.len() {
-        anyhow::bail!(
-            "restore_prefix_entry_for_row: cache layer count {} != stored layers {}",
-            caches.len(),
-            entry.main_layers.len()
-        );
-    }
+    check_prefix_restore_target(caches, entry, &[row], "restore_prefix_entry_for_row")?;
     for (idx, (cache, layer)) in caches.iter_mut().zip(entry.main_layers.iter()).enumerate() {
-        match (cache, layer) {
-            (LayerCache::Full(kv), PrefixLayerPayload::FullDense { k, v }) => {
-                kv.restore_dense_prefix_layer_for_row_on(k, v, row, cached_len, ())?;
-            }
-            (LayerCache::Full(kv), PrefixLayerPayload::FullPaged { k_pages, v_pages }) => {
-                let layer = PagedPrefixLayer {
-                    k_pages: k_pages.clone(),
-                    v_pages: v_pages.clone(),
-                };
-                kv.restore_paged_prefix_layer_for_row_on(&layer, row, cached_len, ())?;
-            }
-            (
-                LayerCache::Full(kv),
-                PrefixLayerPayload::FullTurboQuantPacked {
-                    k_packed,
-                    k_norms,
-                    v_packed,
-                    v_norms,
-                },
-            ) => {
-                let layer = crate::core::cache::TurboQuantPrefixLayer {
-                    k_packed: k_packed.clone(),
-                    k_norms: k_norms.clone(),
-                    v_packed: v_packed.clone(),
-                    v_norms: v_norms.clone(),
-                };
-                kv.restore_turboquant_prefix_layer_for_row_on(&layer, row, cached_len, ())?;
-            }
-            (
-                LayerCache::Linear(gd),
-                PrefixLayerPayload::Linear {
-                    conv_state,
-                    recurrent_state,
-                },
-            ) => {
-                gd.restore_prefix_state_for_row_on(
-                    conv_state,
-                    recurrent_state,
-                    row,
-                    cached_len,
-                    (),
-                )?;
-            }
-            (LayerCache::Mla(mla), PrefixLayerPayload::Mla { c_kv, k_pe }) => {
-                mla.restore_prefix_latent_for_row_on(c_kv, k_pe, row, cached_len, ())?;
-            }
-            (LayerCache::Full(_), _) => {
-                anyhow::bail!(
-                    "restore_prefix_entry_for_row: layer {idx} expected FullDense, FullPaged, or FullTurboQuantPacked payload"
-                )
-            }
-            (LayerCache::Linear(_), _) => {
-                anyhow::bail!("restore_prefix_entry_for_row: layer {idx} expected Linear payload")
-            }
-            (LayerCache::Mla(_), _) => {
-                anyhow::bail!("restore_prefix_entry_for_row: layer {idx} expected Mla payload")
-            }
-        }
+        restore_prefix_layer_for_rows(
+            cache,
+            layer,
+            &[row],
+            cached_len,
+            idx,
+            "restore_prefix_entry_for_row",
+        )?;
     }
     Ok(())
 }
@@ -797,84 +741,119 @@ pub fn restore_prefix_entry_for_rows(
     if rows.len() == 1 {
         return restore_prefix_entry_for_row(caches, entry, rows[0], cached_len);
     }
+    check_prefix_restore_target(caches, entry, rows, "restore_prefix_entry_for_rows")?;
+    for (idx, (cache, layer)) in caches.iter_mut().zip(entry.main_layers.iter()).enumerate() {
+        restore_prefix_layer_for_rows(
+            cache,
+            layer,
+            rows,
+            cached_len,
+            idx,
+            "restore_prefix_entry_for_rows",
+        )?;
+    }
+    Ok(())
+}
+
+/// One stored layer per cache layer, and no row twice.
+pub(crate) fn check_prefix_restore_target(
+    caches: &[LayerCache],
+    entry: &PagedPrefixEntry,
+    rows: &[usize],
+    what: &str,
+) -> anyhow::Result<()> {
     if caches.len() != entry.main_layers.len() {
         anyhow::bail!(
-            "restore_prefix_entry_for_rows: cache layer count {} != stored layers {}",
+            "{what}: cache layer count {} != stored layers {}",
             caches.len(),
             entry.main_layers.len()
         );
     }
     for (idx, &row) in rows.iter().enumerate() {
         if rows[..idx].contains(&row) {
-            anyhow::bail!("restore_prefix_entry_for_rows: duplicate row {row}");
+            anyhow::bail!("{what}: duplicate row {row}");
         }
     }
-    for (idx, (cache, layer)) in caches.iter_mut().zip(entry.main_layers.iter()).enumerate() {
-        match (cache, layer) {
-            (LayerCache::Full(kv), PrefixLayerPayload::FullDense { k, v }) => {
-                for &row in rows {
-                    kv.restore_dense_prefix_layer_for_row_on(k, v, row, cached_len, ())?;
-                }
+    Ok(())
+}
+
+/// Restore stored layer `idx` into `rows` of its cache layer.
+pub(crate) fn restore_prefix_layer_for_rows(
+    cache: &mut LayerCache,
+    layer: &PrefixLayerPayload,
+    rows: &[usize],
+    cached_len: i32,
+    idx: usize,
+    what: &str,
+) -> anyhow::Result<()> {
+    match (cache, layer) {
+        (LayerCache::Full(kv), PrefixLayerPayload::FullDense { k, v }) => {
+            for &row in rows {
+                kv.restore_dense_prefix_layer_for_row_on(k, v, row, cached_len, ())?;
             }
-            (LayerCache::Full(kv), PrefixLayerPayload::FullPaged { k_pages, v_pages }) => {
-                let layer = PagedPrefixLayer {
-                    k_pages: k_pages.clone(),
-                    v_pages: v_pages.clone(),
-                };
+        }
+        (LayerCache::Full(kv), PrefixLayerPayload::FullPaged { k_pages, v_pages }) => {
+            let layer = PagedPrefixLayer {
+                k_pages: k_pages.clone(),
+                v_pages: v_pages.clone(),
+            };
+            if let [row] = rows {
+                kv.restore_paged_prefix_layer_for_row_on(&layer, *row, cached_len, ())?;
+            } else {
                 kv.restore_paged_prefix_layer_for_rows_on(&layer, rows, cached_len, ())?;
             }
-            (
-                LayerCache::Full(kv),
-                PrefixLayerPayload::FullTurboQuantPacked {
-                    k_packed,
-                    k_norms,
-                    v_packed,
-                    v_norms,
-                },
-            ) => {
-                let layer = crate::core::cache::TurboQuantPrefixLayer {
-                    k_packed: k_packed.clone(),
-                    k_norms: k_norms.clone(),
-                    v_packed: v_packed.clone(),
-                    v_norms: v_norms.clone(),
-                };
-                for &row in rows {
-                    kv.restore_turboquant_prefix_layer_for_row_on(&layer, row, cached_len, ())?;
-                }
+        }
+        (
+            LayerCache::Full(kv),
+            PrefixLayerPayload::FullTurboQuantPacked {
+                k_packed,
+                k_norms,
+                v_packed,
+                v_norms,
+            },
+        ) => {
+            let layer = crate::core::cache::TurboQuantPrefixLayer {
+                k_packed: k_packed.clone(),
+                k_norms: k_norms.clone(),
+                v_packed: v_packed.clone(),
+                v_norms: v_norms.clone(),
+            };
+            for &row in rows {
+                kv.restore_turboquant_prefix_layer_for_row_on(&layer, row, cached_len, ())?;
             }
-            (
-                LayerCache::Linear(gd),
-                PrefixLayerPayload::Linear {
+        }
+        (
+            LayerCache::Linear(gd),
+            PrefixLayerPayload::Linear {
+                conv_state,
+                recurrent_state,
+            },
+        ) => {
+            for &row in rows {
+                gd.restore_prefix_state_for_row_on(
                     conv_state,
                     recurrent_state,
-                },
-            ) => {
-                for &row in rows {
-                    gd.restore_prefix_state_for_row_on(
-                        conv_state,
-                        recurrent_state,
-                        row,
-                        cached_len,
-                        (),
-                    )?;
-                }
+                    row,
+                    cached_len,
+                    (),
+                )?;
             }
-            (LayerCache::Mla(mla), PrefixLayerPayload::Mla { c_kv, k_pe }) => {
-                for &row in rows {
-                    mla.restore_prefix_latent_for_row_on(c_kv, k_pe, row, cached_len, ())?;
-                }
+        }
+        (LayerCache::Mla(mla), PrefixLayerPayload::Mla { c_kv, k_pe }) => {
+            for &row in rows {
+                mla.restore_prefix_latent_for_row_on(c_kv, k_pe, row, cached_len, ())?;
             }
-            (LayerCache::Full(_), _) => {
-                anyhow::bail!(
-                    "restore_prefix_entry_for_rows: layer {idx} expected FullDense, FullPaged, or FullTurboQuantPacked payload"
-                )
-            }
-            (LayerCache::Linear(_), _) => {
-                anyhow::bail!("restore_prefix_entry_for_rows: layer {idx} expected Linear payload")
-            }
-            (LayerCache::Mla(_), _) => {
-                anyhow::bail!("restore_prefix_entry_for_rows: layer {idx} expected Mla payload")
-            }
+        }
+        (LayerCache::Full(_), _) => {
+            anyhow::bail!(
+                "{what}: layer {idx} expected FullDense, FullPaged, or FullTurboQuantPacked payload"
+            )
+        }
+        (LayerCache::Linear(_), _) => {
+            anyhow::bail!("{what}: layer {idx} expected Linear payload")
+        }
+        (LayerCache::Mla(_), _) => {
+            anyhow::bail!("{what}: layer {idx} expected Mla payload")
         }
     }
     Ok(())

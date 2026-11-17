@@ -24,11 +24,14 @@ use ironmlx_lm::core::speculative_ops::resolve_speculative_tokens;
 use ironmlx_lm::core::vision::DenseVlMethods;
 use {
     crate::core::cache::export_segmented_prefix_for_row,
-    crate::core::cache::load_segmented_prefix_entry, crate::core::cache::segmented_entry_lineage,
-    ironmlx_lm::core::cache::prefix_segments::materialize_prefix_entry,
+    crate::core::cache::load_segmented_prefix_entry,
+    crate::core::cache::segmented_entry_lineage,
     ironmlx_lm::core::cache::prefix_segments::prefix_segment_layout,
     ironmlx_lm::core::cache::prefix_segments::PrefixLineage,
     ironmlx_lm::core::cache::prefix_segments::SegmentedPrefixEntry,
+    ironmlx_lm::core::cache::prefix_segments::{
+        materialize_prefix_entry, restore_segmented_prefix_entry_for_rows,
+    },
 };
 use {
     crate::core::cache::ActiveKvOffloadConfig, crate::core::cache::ActiveKvOffloadSharedStats,
@@ -44,12 +47,10 @@ use {
     ironmlx_lm::core::cache::layer::enable_paged_kv_caches,
     ironmlx_lm::core::cache::layer::enable_turboquant_kv_caches,
     ironmlx_lm::core::cache::layer::prefix_key_spec_for_caches,
-    ironmlx_lm::core::cache::layer::restore_prefix_entry_for_row,
     ironmlx_lm::core::cache::layer::set_row_prefix_lineage,
     ironmlx_lm::core::cache::layer::LayerCache, ironmlx_lm::core::cache::layer::LayerCacheSnapshot,
 };
 use {
-    ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntry,
     ironmlx_lm::core::cache::prefix_payload::PagedPrefixEntryStats,
     ironmlx_lm::core::cache::prefix_payload::PrefixTensorSpec,
 };
@@ -291,8 +292,15 @@ impl Gemma4DrafterPrefixCache {
             if let Some((key, entry, lineage, stats, load_us)) =
                 gemma4_drafter_try_load_prefix_lru_entry(self.prefix_lru_cache(), &spec)?
             {
-                restore_prefix_entry_for_row(cache, &entry, 0, cached_len)?;
+                restore_segmented_prefix_entry_for_rows(
+                    cache,
+                    &entry,
+                    &[0],
+                    cached_len,
+                    config.block_size,
+                )?;
                 let last_hidden = entry
+                    .private
                     .gemma4_drafter_last_hidden
                     .ok_or_else(|| anyhow!("Gemma4 drafter prefix LRU hit missing last_hidden"))?;
                 set_row_prefix_lineage(cache, 0, lineage);
@@ -325,14 +333,24 @@ impl Gemma4DrafterPrefixCache {
             };
             let key = observed.key;
             let crate::core::cache::PrefixStoreHit {
-                entry,
-                segmented,
+                segmented: entry,
                 lineage,
                 stats,
             } = hit;
-            gemma4_drafter_try_insert_prefix_lru_entry(self.prefix_lru_cache(), spec, segmented)?;
-            restore_prefix_entry_for_row(cache, &entry, 0, cached_len)?;
+            gemma4_drafter_try_insert_prefix_lru_entry(
+                self.prefix_lru_cache(),
+                spec,
+                entry.clone(),
+            )?;
+            restore_segmented_prefix_entry_for_rows(
+                cache,
+                &entry,
+                &[0],
+                cached_len,
+                config.block_size,
+            )?;
             let last_hidden = entry
+                .private
                 .gemma4_drafter_last_hidden
                 .ok_or_else(|| anyhow!("paged prefix Gemma4 drafter hit missing last_hidden"))?;
             set_row_prefix_lineage(cache, 0, lineage);
@@ -549,7 +567,7 @@ fn gemma4_lock_prefix_lru_cache(
 
 type Gemma4DrafterPrefixLruHit = (
     String,
-    PagedPrefixEntry,
+    SegmentedPrefixEntry,
     Option<PrefixLineage>,
     PagedPrefixEntryStats,
     u128,

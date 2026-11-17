@@ -447,18 +447,19 @@ pub fn restored_row_lineage(
     (!lineage.refs.is_empty()).then_some(lineage)
 }
 
-/// A hot-cache hit, rebuilt into a whole entry.
+/// A hot-cache hit. Restore it with `restore_segmented_prefix_entry_for_rows`,
+/// which copies the shared segments without joining them first.
 #[derive(Debug)]
 pub struct PrefixLruLoaded {
     pub key: String,
-    pub entry: PagedPrefixEntry,
+    pub entry: SegmentedPrefixEntry,
     /// The segments a row restored from `entry` holds (`None`: none).
     pub lineage: Option<PrefixLineage>,
     pub stats: PagedPrefixEntryStats,
 }
 
-/// A hot-cache hit for exactly `spec`: the whole entry (rebuilt outside the
-/// cache lock), the lineage a row restored from it gets, and its stats.
+/// A hot-cache hit for exactly `spec`: the entry, the lineage a row restored
+/// from it gets, and its stats.
 pub fn load_segmented_prefix_entry(
     prefix_lru_cache: &SharedPrefixLruCache,
     spec: &PagedPrefixKeySpec,
@@ -468,11 +469,12 @@ pub fn load_segmented_prefix_entry(
     else {
         return Ok(None);
     };
-    let entry = materialize_prefix_entry(&segmented, spec.cached_len, spec.block_size)?;
-    let stats = entry.observability_stats(spec.cached_len);
+    // Lazy: only reads shapes.
+    let stats = materialize_prefix_entry(&segmented, spec.cached_len, spec.block_size)?
+        .observability_stats(spec.cached_len);
     Ok(Some(PrefixLruLoaded {
         key: PagedPrefixStore::key_for(spec),
-        entry,
+        entry: segmented,
         lineage: restored_row_lineage(&lineage, spec.cached_len, spec.block_size),
         stats,
     }))
@@ -481,9 +483,7 @@ pub fn load_segmented_prefix_entry(
 /// An SSD hit for exactly `spec`.
 #[derive(Debug)]
 pub struct PrefixStoreHit {
-    /// The entry rebuilt whole, for restoring a row.
-    pub entry: PagedPrefixEntry,
-    /// The same entry as segments, for the prefix LRU cache.
+    /// The entry, for restoring a row and for the prefix LRU cache.
     pub segmented: SegmentedPrefixEntry,
     /// The segments a row restored from it holds (`None`: none).
     pub lineage: Option<PrefixLineage>,
@@ -521,17 +521,18 @@ pub fn load_store_prefix_entry(
                 r.segment.eval()?;
             }
             segmented.private.eval()?;
-            let entry = materialize_prefix_entry(&segmented, spec.cached_len, spec.block_size)?;
-            let stats = observed
-                .stats
-                .unwrap_or_else(|| entry.observability_stats(spec.cached_len));
+            let stats = match observed.stats {
+                Some(stats) => stats,
+                // Lazy: only reads shapes.
+                None => materialize_prefix_entry(&segmented, spec.cached_len, spec.block_size)?
+                    .observability_stats(spec.cached_len),
+            };
             let lineage = restored_row_lineage(
                 &segmented_entry_lineage(&segmented, prefix_segment_layout(spec)),
                 spec.cached_len,
                 spec.block_size,
             );
             Some(PrefixStoreHit {
-                entry,
                 segmented,
                 lineage,
                 stats,

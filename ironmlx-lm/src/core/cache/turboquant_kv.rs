@@ -1279,6 +1279,26 @@ impl TurboQuantKVCache {
         cached_len: i32,
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
+        self.restore_packed_prefix_parts_for_row_on(
+            std::slice::from_ref(layer),
+            offsets,
+            row,
+            cached_len,
+            target,
+        )
+    }
+
+    /// Restore a packed prefix held as consecutive parts along the token
+    /// axis (shared segments, then a private tail). Each part is written at
+    /// its own offset, so the prefix is never joined into one array first.
+    pub fn restore_packed_prefix_parts_for_row_on(
+        &mut self,
+        parts: &[TurboQuantPrefixLayer],
+        offsets: &mut [i32],
+        row: usize,
+        cached_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
         if offsets.len() != self.batch as usize {
             anyhow::bail!(
                 "TurboQuantKVCache::restore_packed_prefix_for_row_on: offsets.len()={} != batch={}",
@@ -1305,7 +1325,24 @@ impl TurboQuantKVCache {
                 self.cap
             );
         }
-        self.validate_prefix_layer(layer, cached_len)?;
+        let mut lens = Vec::with_capacity(parts.len());
+        for part in parts {
+            let len = part
+                .k_norms
+                .shape()
+                .as_slice()
+                .get(2)
+                .copied()
+                .unwrap_or(-1);
+            self.validate_prefix_layer(part, len)?;
+            lens.push(len);
+        }
+        let total: i32 = lens.iter().sum();
+        if total != cached_len {
+            anyhow::bail!(
+                "TurboQuantKVCache::restore_packed_prefix_for_row_on: parts hold {total} tokens != cached_len {cached_len}"
+            );
+        }
         if cached_len == 0 {
             offsets[row] = 0;
             return Ok(());
@@ -1317,20 +1354,27 @@ impl TurboQuantKVCache {
                 ((cached_len + self.step - 1) / self.step * self.step).min(self.cap);
             self.grow_to(target_capacity, offsets, target)?;
         }
-        self.update_key_value_arrays(
-            PackedWrite {
-                k_packed: &layer.k_packed,
-                k_norms: &layer.k_norms,
-                v_packed: &layer.v_packed,
-                v_norms: &layer.v_norms,
-            },
-            PackedWriteRange {
-                row: row as i32,
-                off: 0,
-                end: cached_len,
-            },
-            target,
-        )?;
+        let mut off = 0;
+        for (part, len) in parts.iter().zip(lens) {
+            if len == 0 {
+                continue;
+            }
+            self.update_key_value_arrays(
+                PackedWrite {
+                    k_packed: &part.k_packed,
+                    k_norms: &part.k_norms,
+                    v_packed: &part.v_packed,
+                    v_norms: &part.v_norms,
+                },
+                PackedWriteRange {
+                    row: row as i32,
+                    off,
+                    end: off + len,
+                },
+                target,
+            )?;
+            off += len;
+        }
         offsets[row] = cached_len;
         Ok(())
     }

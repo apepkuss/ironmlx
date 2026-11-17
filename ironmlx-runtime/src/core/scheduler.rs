@@ -149,10 +149,12 @@ use ironmlx_lm::core::speculative_model::MtpSpeculativeModel;
 use ironmlx_lm::core::speculative_ops::{resolve_speculative_tokens, SpeculativeResolution};
 use {
     crate::core::cache::export_segmented_prefix_for_row,
-    ironmlx_lm::core::cache::prefix_segments::materialize_prefix_entry,
     ironmlx_lm::core::cache::prefix_segments::prefix_segment_layout,
     ironmlx_lm::core::cache::prefix_segments::PrefixLineage,
     ironmlx_lm::core::cache::prefix_segments::SegmentedPrefixEntry,
+    ironmlx_lm::core::cache::prefix_segments::{
+        materialize_prefix_entry, restore_segmented_prefix_entry_for_rows,
+    },
 };
 use {
     crate::core::cache::timed, crate::core::cache::ActiveKvOffloadConfig,
@@ -184,7 +186,6 @@ use {
     ironmlx_lm::core::cache::layer::prefix_entry_for_row,
     ironmlx_lm::core::cache::layer::prefix_key_spec_for_caches,
     ironmlx_lm::core::cache::layer::restore_prefix_entry_for_row,
-    ironmlx_lm::core::cache::layer::restore_prefix_entry_for_rows,
     ironmlx_lm::core::cache::layer::set_row_prefix_lineage,
     ironmlx_lm::core::cache::layer::LayerCache,
 };
@@ -3367,10 +3368,10 @@ fn lock_prefix_lru_cache(
         .map_err(|_| anyhow!("prefix LRU cache lock poisoned"))
 }
 
-/// A prefix LRU cache hit, rebuilt into a whole entry.
+/// A prefix LRU cache hit.
 struct PrefixLruHit {
     key: String,
-    entry: PagedPrefixEntry,
+    entry: SegmentedPrefixEntry,
     /// The segments a row restored from `entry` holds (`None`: none).
     lineage: Option<PrefixLineage>,
     stats: PagedPrefixEntryStats,
@@ -3608,7 +3609,13 @@ fn try_restore_paged_prefix_for_prompt_row(
             return Ok(None);
         };
         if let Some(hit) = try_load_prefix_lru_entry(prefix_lru_cache, &spec)? {
-            restore_prefix_entry_for_row(cache, &hit.entry, cache_row, cached_len)?;
+            restore_segmented_prefix_entry_for_rows(
+                cache,
+                &hit.entry,
+                &[cache_row],
+                cached_len,
+                config.block_size,
+            )?;
             set_row_prefix_lineage(cache, cache_row, hit.lineage);
             log_prefix_lru_hit(
                 "hit",
@@ -3640,8 +3647,20 @@ fn try_restore_paged_prefix_for_prompt_row(
             continue;
         };
         let key = observed.key;
-        try_insert_prefix_lru_entry(prefix_lru_cache, spec, hit.segmented, cache_row, None)?;
-        restore_prefix_entry_for_row(cache, &hit.entry, cache_row, cached_len)?;
+        try_insert_prefix_lru_entry(
+            prefix_lru_cache,
+            spec,
+            hit.segmented.clone(),
+            cache_row,
+            None,
+        )?;
+        restore_segmented_prefix_entry_for_rows(
+            cache,
+            &hit.segmented,
+            &[cache_row],
+            cached_len,
+            config.block_size,
+        )?;
         set_row_prefix_lineage(cache, cache_row, hit.lineage);
         log_paged_prefix_hit(
             "hit",
@@ -3707,7 +3726,13 @@ fn try_restore_paged_prefix_for_prompt_rows(
             return Ok(None);
         };
         if let Some(hit) = try_load_prefix_lru_entry(prefix_lru_cache, &spec)? {
-            restore_prefix_entry_for_rows(cache, &hit.entry, cache_rows, cached_len)?;
+            restore_segmented_prefix_entry_for_rows(
+                cache,
+                &hit.entry,
+                cache_rows,
+                cached_len,
+                config.block_size,
+            )?;
             for (idx, &cache_row) in cache_rows.iter().enumerate() {
                 set_row_prefix_lineage(cache, cache_row, hit.lineage.clone());
                 let row_load_us = if idx == 0 { hit.load_us } else { 0 };
@@ -3742,8 +3767,20 @@ fn try_restore_paged_prefix_for_prompt_rows(
             continue;
         };
         let key = observed.key;
-        try_insert_prefix_lru_entry(prefix_lru_cache, spec, hit.segmented, cache_rows[0], None)?;
-        restore_prefix_entry_for_rows(cache, &hit.entry, cache_rows, cached_len)?;
+        try_insert_prefix_lru_entry(
+            prefix_lru_cache,
+            spec,
+            hit.segmented.clone(),
+            cache_rows[0],
+            None,
+        )?;
+        restore_segmented_prefix_entry_for_rows(
+            cache,
+            &hit.segmented,
+            cache_rows,
+            cached_len,
+            config.block_size,
+        )?;
         for (idx, &cache_row) in cache_rows.iter().enumerate() {
             set_row_prefix_lineage(cache, cache_row, hit.lineage.clone());
             let row_load_us = if idx == 0 { load_us } else { 0 };
@@ -3949,14 +3986,21 @@ fn try_restore_paged_prefix_for_prompt_with_mtp_row(
                 stats,
                 load_us,
             } = hit;
-            restore_prefix_entry_for_row(main_cache, &entry, main_cache_row, cached_len)?;
+            restore_segmented_prefix_entry_for_rows(
+                main_cache,
+                &entry,
+                &[main_cache_row],
+                cached_len,
+                config.block_size,
+            )?;
             mtp_cache.restore_prefix_layers_for_row_on(
-                &entry.mtp_layers,
+                &entry.private.mtp_layers,
                 mtp_cache_row,
                 cached_len,
                 (),
             )?;
             let last_hidden = entry
+                .private
                 .mtp_last_hidden
                 .ok_or_else(|| anyhow!("prefix LRU MTP hit missing last_hidden"))?;
             set_row_prefix_lineage(main_cache, main_cache_row, lineage);
@@ -3992,26 +4036,32 @@ fn try_restore_paged_prefix_for_prompt_with_mtp_row(
         };
         let key = observed.key;
         let crate::core::cache::PrefixStoreHit {
-            entry,
-            segmented,
+            segmented: entry,
             lineage,
             stats,
         } = hit;
         try_insert_prefix_lru_entry(
             prefix_lru_cache,
             spec,
-            segmented,
+            entry.clone(),
             main_cache_row,
             Some(mtp_cache_row),
         )?;
-        restore_prefix_entry_for_row(main_cache, &entry, main_cache_row, cached_len)?;
+        restore_segmented_prefix_entry_for_rows(
+            main_cache,
+            &entry,
+            &[main_cache_row],
+            cached_len,
+            config.block_size,
+        )?;
         mtp_cache.restore_prefix_layers_for_row_on(
-            &entry.mtp_layers,
+            &entry.private.mtp_layers,
             mtp_cache_row,
             cached_len,
             (),
         )?;
         let last_hidden = entry
+            .private
             .mtp_last_hidden
             .ok_or_else(|| anyhow!("paged prefix MTP hit missing last_hidden"))?;
         set_row_prefix_lineage(main_cache, main_cache_row, lineage);

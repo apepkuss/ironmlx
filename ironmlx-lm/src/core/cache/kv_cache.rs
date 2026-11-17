@@ -743,6 +743,34 @@ impl KVCache {
         )
     }
 
+    /// [`Self::restore_paged_prefix_layer_for_rows_on`] from K/V pages held
+    /// as consecutive parts (shared segments, then a private tail).
+    pub fn restore_paged_prefix_layer_parts_for_rows_on(
+        &mut self,
+        k_parts: &[Array],
+        v_parts: &[Array],
+        rows: &[usize],
+        prefix_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        for &row in rows {
+            self.clear_row_prefix_lineage(row);
+        }
+        let paged = self.paged.as_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "KVCache::restore_paged_prefix_layer_parts_for_rows_on: paged KV is not enabled"
+            )
+        })?;
+        paged.restore_prefix_page_parts_for_rows_on(
+            k_parts,
+            v_parts,
+            &mut self.offsets,
+            rows,
+            prefix_len,
+            target,
+        )
+    }
+
     pub fn dense_prefix_layer_for_row_on(
         &self,
         row: usize,
@@ -854,6 +882,29 @@ impl KVCache {
             );
         }
         tq.restore_packed_prefix_for_row_on(layer, &mut self.offsets, row, cached_len, target)
+    }
+
+    /// [`Self::restore_turboquant_prefix_layer_for_row_on`] from consecutive
+    /// parts along the token axis (shared segments, then a private tail).
+    pub fn restore_turboquant_prefix_layer_parts_for_row_on(
+        &mut self,
+        parts: &[TurboQuantPrefixLayer],
+        row: usize,
+        cached_len: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<()> {
+        self.clear_row_prefix_lineage(row);
+        let tq = self.turboquant.as_mut().ok_or_else(|| {
+            anyhow::anyhow!(
+                "KVCache::restore_turboquant_prefix_layer_parts_for_row_on: TurboQuant is not enabled"
+            )
+        })?;
+        if self.paged.is_some() {
+            anyhow::bail!(
+                "KVCache::restore_turboquant_prefix_layer_parts_for_row_on: paged KV storage is not compatible with TurboQuant packed prefixes"
+            );
+        }
+        tq.restore_packed_prefix_parts_for_row_on(parts, &mut self.offsets, row, cached_len, target)
     }
 
     pub fn restore_dense_prefix_layer_for_row_on(
