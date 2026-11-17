@@ -119,7 +119,7 @@ draft 精度选项或批处理设置。
 
 M5 profile（`--m5-dflash2-profile`）使用独立的 MoE 设置表，不继承 Qwen3.8 的设置。生效时开启的内容包括：
 M5 tensor-unit affine4 投影与专家 kernel、tiled 预填充 GEMM、符合条件的单图预填充、基于置信度的单请求验证、批量草稿、并发请求的 ragged 线性合批、长提示的 D256 NAX
-注意力（预填充从 2,048 个 key 起，解码与 verify 从 8,193 个 key 起）、affine4 投影按形状选择的 split-K、启动预热和 wired
+注意力（预填充从 2,048 个 key 起，解码与 verify 从 8,193 个 key 起）、affine4 投影按形状选择的 split-K、启动预热和 GPU 驻留
 权重。实际开启了什么，以启动日志的 `effective_settings` 和 `healthz.dflash2.m5_profile.settings` 中的
 非 null 值为准。affine4 投影只用于 affine4 target，结果确定，但与普通 MLX 解码输出不同；执行指纹显示
 `projections=m5-affine4-v1`（其他位宽显示 `product-stable-v2`）。MoE target 没有稠密 MLP，因此从不使用神经引擎（`ane_status` 为
