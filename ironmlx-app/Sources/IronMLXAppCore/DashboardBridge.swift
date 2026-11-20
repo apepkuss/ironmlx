@@ -205,6 +205,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         "generateSchedulerProfile",
         "cancelSchedulerProfileGeneration",
         "refreshSchedulerProfileStatus",
+        "listTunedModels",
         "saveModelParams",
         "startStarterDownload",
         "openChat",
@@ -321,6 +322,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             cancelSchedulerProfileGeneration()
         case "refreshSchedulerProfileStatus":
             sendSchedulerProfileStatus()
+        case "listTunedModels":
+            sendTunedModels()
         case "saveModelParams":
             saveModelParams(json: stringBody(body))
         case "startStarterDownload":
@@ -3712,6 +3715,41 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         let payload = status ?? profileGenerationService.currentStatus()
         let json = (try? Self.jsonString(payload)) ?? "{\"state\":\"failed\",\"success\":false}"
         sendJavaScript("onSchedulerProfileStatus(\(Self.jsStringLiteral(json)))")
+    }
+
+    /// Which local models have a tuning profile for this Mac; answers `listTunedModels`.
+    private func sendTunedModels() {
+        let scanner = scanner
+        let service = profileGenerationService
+        Task {
+            let modelPaths = await Task.detached(priority: .utility) { () -> [String: String] in
+                var paths: [String: String] = [:]
+                for model in scanner.scan(loadedModels: []) {
+                    if let path = scanner.resolveModelPath(for: model.id) {
+                        paths[model.id] = path
+                    }
+                }
+                return paths
+            }.value
+            let payload: String
+            switch await service.listTunedModels(modelPaths: modelPaths) {
+            case .success(let models):
+                payload = (try? Self.jsonString(TunedModelsPayload(models: models, error: nil)))
+                    ?? #"{"models":{},"error":"encoding failed"}"#
+            case .failure(let error):
+                payload = (try? Self.jsonString(
+                    TunedModelsPayload(models: [:], error: error.localizedDescription)
+                )) ?? #"{"models":{},"error":"unknown"}"#
+            }
+            sendJavaScript(
+                "typeof window.onTunedModels === 'function' && window.onTunedModels(\(Self.jsStringLiteral(payload))); void 0;"
+            )
+        }
+    }
+
+    private struct TunedModelsPayload: Encodable {
+        var models: [String: Int64]
+        var error: String?
     }
 
     private func sendSchedulerProfilePreview(_ preview: SchedulerProfileGenerationPreview) {

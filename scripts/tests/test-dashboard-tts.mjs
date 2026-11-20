@@ -35,9 +35,10 @@ assert.match(source('positionVoiceEditor'), /card\.after\(editor\)/);
 assert.match(source('positionVoiceEditor'), /list\.before\(editor\)/);
 assert.match(source('closeVoiceEditor'), /list\.after\(editor\)/);
 assert.doesNotMatch(html, /id="voice-preview-player"/);
-for (const name of ['modelReadiness', 'isModelLoadable', 'modelReadinessTitle', 'modelIntegrityStatus',
+for (const name of ['modelReadiness', 'isModelLoadable', 'modelLoadVariants', 'modelReadinessTitle', 'modelIntegrityStatus',
   'formatIntegrityTime', 'modelStatusPresentation', 'onModelIntegrityStatus', 'formatVersionBytes',
-  'normalizedWeightDtype', 'weightDtypeLabel', 'quantDisplayLabel', 'hideQuantizationTooltip', 'showQuantizationTooltip', 'renderQuantBadge',
+  'normalizedWeightDtype', 'weightDtypeLabel', 'quantDisplayLabel', 'hideModelTableTooltip', 'showModelTableTooltip',
+  'hideQuantizationTooltip', 'showQuantizationTooltip', 'modelQuantTooltip', 'renderQuantBadge',
   'modelTypeLabel', 'renderModelType', 'openTTSDetails', 'closeTTSDetails',
   'ttsExecutionControls', 'renderTTSExecutionSettings',
   'openDecisionDetails', 'saveDecisionParams', 'closeDecisionDetails', 'openParamsModal', 'renderModelLoadActions', 'escapeAttr',
@@ -155,11 +156,11 @@ const quantTarget = element();
 quantTarget.hidden = false;
 quantTarget.dataset.quantTooltip = '未量化；dtype=fp16';
 context.showQuantizationTooltip(quantTarget);
-assert.equal(elements.get('quantization-tooltip').hidden, false);
-assert.equal(elements.get('quantization-tooltip').textContent, '未量化；dtype=fp16');
-assert.equal(quantTarget.getAttribute('aria-describedby'), 'quantization-tooltip');
+assert.equal(elements.get('model-table-tooltip').hidden, false);
+assert.equal(elements.get('model-table-tooltip').textContent, '未量化；dtype=fp16');
+assert.equal(quantTarget.getAttribute('aria-describedby'), 'model-table-tooltip');
 context.hideQuantizationTooltip();
-assert.equal(elements.get('quantization-tooltip').hidden, true);
+assert.equal(elements.get('model-table-tooltip').hidden, true);
 assert.equal(quantTarget.getAttribute('aria-describedby'), undefined);
 const tts = { id: 'org/tts', type: 'tts', readiness: { status: 'unsupported', reason_code: 'unsupported_model_type' },
   integrity: { state: 'verified', verified_at: '2026-09-09T00:00:00Z' }, download_info: {

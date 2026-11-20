@@ -44,11 +44,13 @@ import WebKit
         integrity:{state:'verified'}};
       onLocalModelsScanned(JSON.stringify([model]));
       switchToTab('models-manage');
-      const row = document.querySelector('#tab-models-manage tbody tr');
-      check(row.querySelector('.action-load').disabled, 'loading stays disabled after integrity verification');
-      check(row.querySelector('input[name="default-model"]').disabled, 'default-model selection stays disabled');
-      check(row.querySelector('.model-status-text').textContent === '已下载 · 当前不支持运行', 'local model status');
+      const row = document.querySelector('#models-list .ds-model-row');
+      const primary = row.querySelector('[data-model-primary]');
+      check(primary && primary.dataset.kind === 'unavailable' && primary.getAttribute('aria-disabled') === 'true' && !primary.onclick,
+        'load button stays unavailable after integrity verification');
+      check(row.querySelector('.ds-model-detail').textContent.includes('已下载 · 当前不支持运行'), 'local model status');
       row.querySelector('.model-more').click();
+      check(!document.querySelector('.model-more-menu .model-more-default'), 'cannot be set as the default model');
       const files = [...document.querySelectorAll('.model-more-menu button')].find(button => button.textContent === '查看模型文件');
       check(!!files, 'file access remains available');
       files.click(); check(requests.at(-1).path === '/admin/api/models/reveal', 'reveal request');

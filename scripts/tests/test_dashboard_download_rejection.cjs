@@ -88,6 +88,19 @@ for (const lang of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
   });
 }
 
+test('task_row_shows_error_inline', () => {
+  const p = page();
+  const output = p.render([JSON.parse(JSON.stringify(rejection))]);
+  const error = output.match(/<div class="download-task-error">([^<]*)<\/div>/);
+  assert.ok(error, 'error is rendered in .download-task-error');
+  assert.match(error[1], /embedding_gemma2/);
+  assert.ok(output.indexOf('download-task-error') < output.indexOf('data-download-action='));
+  assert.ok(output.indexOf('download-task-status') < output.indexOf('download-task-error'));
+  const active = p.render([{ ...rejection, status: 'downloading', progress_pct: 38, total_bytes: 2000, remaining_bytes: 1240 }]);
+  assert.match(active, /760 \/ 2000/);
+  assert.match(active, /ds-progress-fill" style="width:38%"/);
+});
+
 test('other metadata failures and disk rejection keep retry and use distinct reasons', () => {
   const p = page();
   const metadata = p.render([{ ...rejection, can_continue_download: false, error: 'Unsupported quantization mode: future_mode' }]);

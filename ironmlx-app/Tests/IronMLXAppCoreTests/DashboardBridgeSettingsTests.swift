@@ -1315,7 +1315,7 @@ func dashboardRejectsModelQueryAcrossBackendRestart(restartFinished: Bool) async
         if (try? await web.evaluateJavaScript("typeof togglePin === 'function'")) as? Bool == true { break }
         try await Task.sleep(for: .milliseconds(50))
     }
-    let selector = "document.querySelector('#model-table .pin-btn[data-model=\"\(targetID)\"]')"
+    let selector = "document.querySelector('.ds-model-row [data-model-pin][data-model=\"\(targetID)\"]')"
     func pinButton() async throws -> [String: Any]? {
         try await web.evaluateJavaScript("""
             (() => { const b = \(selector); return b ? {pinned: b.classList.contains('pinned'),

@@ -352,24 +352,25 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
         encoding: .utf8
     )
 
-    #expect(dashboardHTML(html, contains: "mtp_badge_available"))
     #expect(dashboardHTML(html, contains: "mtp_badge_enabled"))
     #expect(!dashboardHTML(html, contains: "mtp_badge_incompatible"))
     #expect(!dashboardHTML(html, contains: "badge-mtp-warning"))
     #expect(!dashboardHTML(html, contains: "MTP 不兼容"))
-    #expect(dashboardHTML(html, contains: #"mtp_badge_available: "MTP""#))
     #expect(dashboardHTML(html, contains: #"mtp_badge_enabled: "MTP""#))
     #expect(dashboardHTML(html, contains: "action_load_mtp"))
     #expect(dashboardHTML(html, contains: "action_load_model_only"))
     #expect(dashboardHTML(html, contains: #"action_load_model_only: "仅模型""#))
     #expect(dashboardHTML(html, contains: #"action_load_mtp: "模型+MTP""#))
     #expect(dashboardHTML(html, contains: "handleModelLoadChoice"))
-    #expect(dashboardHTML(html, contains: "action-load-select"))
-    #expect(dashboardHTML(html, contains: "-webkit-appearance: none"))
-    #expect(dashboardHTML(html, contains: "text-align-last: center"))
-    #expect(dashboardHTML(html, contains: #"<option value="" selected disabled hidden>"#))
+    // Load choices come from a split button, not a select element.
+    #expect(dashboardHTML(html, contains: #"'<span class="ds-split">'"#))
+    #expect(dashboardHTML(html, contains: #"class="action-btn action-load ds-split-toggle""#))
+    #expect(dashboardHTML(html, contains: "function toggleModelLoadChoices(modelId, trigger, event)"))
+    #expect(dashboardHTML(html, contains: "  .ds-split .ds-split-toggle {"))
+    #expect(!dashboardHTML(html, contains: "action-load-select"))
+    #expect(!dashboardHTML(html, contains: #"<option value="" selected disabled hidden>"#))
     #expect(dashboardHTML(html, contains: "loadModelWithMtp"))
-    #expect(dashboardHTML(html, contains: "renderMtpBadge"))
+    #expect(dashboardHTML(html, contains: "} else if (model.mtp && model.mtp.enabled) {"))
     #expect(dashboardHTML(html, contains: "renderModelMoreActions"))
     #expect(dashboardHTML(html, contains: "verifyModelIntegrity"))
     #expect(dashboardHTML(html, contains: "onModelIntegrityStatus"))
@@ -414,42 +415,34 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "updateModelStatusForAction(btn, 'model-busy', dict.status_unloading"))
 }
 
-@Test func dashboardModelTablePrioritizesModelColumnWidth() throws {
+@Test func dashboardModelListRowsKeepLongNamesOnOneLine() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
         encoding: .utf8
     )
 
-    #expect(dashboardHTML(html, contains: #"class="col-model" style="width:32%;""#))
-    #expect(dashboardHTML(html, contains: #"class="col-type" style="width:8%;""#))
-    #expect(dashboardHTML(html, contains: #"class="col-quant" style="width:8%;""#))
-    #expect(dashboardHTML(html, contains: #"class="col-default" style="width:6%;""#))
-    #expect(dashboardHTML(html, contains: #"class="col-params" style="width:6%;""#))
-    #expect(!dashboardHTML(html, contains: #"class="col-select""#))
+    // "My models" is a grouped list of rows, not a table with fixed columns.
+    #expect(dashboardHTML(html, contains: #"<div class="ds-models-list" id="models-list"></div>"#))
+    #expect(!dashboardHTML(html, contains: #"id="model-table""#))
+    #expect(!dashboardHTML(html, contains: #"class="col-model""#))
+    #expect(dashboardHTML(html, contains: #"'<section class="ds-model-group" data-group="' + group + '">'"#))
+    #expect(dashboardHTML(html, contains: #"'<div class="ds-model-row" data-model-id="' + escaped + '">'"#))
+    #expect(dashboardHTML(html, contains: #"'<div class="ds-model-detail'"#))
+    #expect(dashboardHTML(html, contains: #"data-model-primary data-kind="unload""#))
+    // The name column shrinks and truncates; the full id is in the tooltip.
     #expect(dashboardHTML(html, contains: #"""
-  .data-table th {
-    text-align: center;
+  .ds-model-row {
+    display: grid;
+    grid-template-columns: 8px minmax(0, 1fr) auto;
 """#))
-    #expect(dashboardHTML(html, contains: #".data-table th:first-child {"#))
-    #expect(dashboardHTML(html, contains: #"text-align: left;"#))
-    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(2),"#))
-    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(2),"#))
-    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(3),"#))
-    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(3),"#))
-    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(4),"#))
-    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(4),"#))
-    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(5),"#))
-    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(5),"#))
-    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(6),"#))
-    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(6),"#))
-    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(7),"#))
-    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(7),"#))
-    #expect(dashboardHTML(html, contains: #".data-table th:nth-child(8),"#))
-    #expect(dashboardHTML(html, contains: #".data-table td:nth-child(8)"#))
-    #expect(dashboardHTML(html, contains: #"text-align: center;"#))
-    #expect(dashboardHTML(html, contains: #".data-table .model-name-text"#))
-    #expect(dashboardHTML(html, contains: #"min-width: 0;"#))
+    #expect(dashboardHTML(html, contains: #"""
+  .ds-model-name {
+    flex: 0 1 auto;
+    min-width: 0;
+"""#))
     #expect(dashboardHTML(html, contains: #"text-overflow: ellipsis;"#))
+    #expect(dashboardHTML(html, contains: #"'<span class="ds-model-name" title="' + escaped + '">'"#))
+    #expect(dashboardHTML(html, contains: #"  .ds-model-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; white-space: nowrap; }"#))
     #expect(!dashboardHTML(html, contains: #"id="select-all-models""#))
     #expect(!dashboardHTML(html, contains: #"class="model-checkbox""#))
     #expect(!dashboardHTML(html, contains: #"id="batch-action-bar""#))
@@ -470,7 +463,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     ))
     #expect(dashboardHTML(html, contains: #".content.page-scroll-managed {"#))
     #expect(dashboardHTML(html, contains: #"#page-models.active,"#))
-    #expect(dashboardHTML(html, contains: #"#page-models > .tab-bar {"#))
+    #expect(dashboardHTML(html, contains: #"#page-models > .models-page-tabs,"#))
     #expect(dashboardHTML(html, contains: #"overflow-y: hidden;"#))
     #expect(dashboardHTML(html, contains: #"overflow-y: auto;"#))
     #expect(dashboardHTML(
@@ -616,10 +609,17 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
 
     #expect(dashboardHTML(
         html,
-        contains: #"data-tab="models-scheduler" data-i18n="scheduler_profile_tab""#
+        contains: #"data-tab="models-scheduler" data-value="models-scheduler" data-i18n="models_tab_tuning""#
     ))
+    #expect(dashboardHTML(html, contains: #"role="tablist""#))
+    let myTab = try #require(html.range(of: #"data-tab="models-manage""#))
+    let downloadTab = try #require(html.range(of: #"data-tab="models-download""#))
+    let tuningTab = try #require(html.range(of: #"data-tab="models-scheduler""#))
+    #expect(myTab.lowerBound < downloadTab.lowerBound)
+    #expect(downloadTab.lowerBound < tuningTab.lowerBound)
+    #expect(dashboardHTML(html, contains: #"dsSegSelect(tablist, tabName)"#))
     #expect(dashboardHTML(html, contains: #"id="tab-models-scheduler""#))
-    #expect(dashboardHTML(html, contains: #"scheduler_profile_tab: "调度配置""#))
+    #expect(dashboardHTML(html, contains: #"models_tab_tuning: "性能调优""#))
 
     let managerPanel = try #require(html.range(of: #"id="tab-models-manage""#))
     let schedulerPanel = try #require(html.range(of: #"id="tab-models-scheduler""#))
@@ -631,7 +631,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(profileCard.lowerBound < downloadPanel.lowerBound)
 }
 
-@Test func dashboardModelManagerKeepsTableHeaderAboveIndependentRowScroller() throws {
+@Test func dashboardModelManagerKeepsFilterAboveIndependentRowScroller() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
         encoding: .utf8
@@ -643,10 +643,14 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     ))
     #expect(dashboardHTML(html, contains: #".models-page-scroll.model-manager-active {"#))
     #expect(dashboardHTML(html, contains: #"#tab-models-manage.active {"#))
-    #expect(dashboardHTML(html, contains: #"#tab-models-manage > .card {"#))
-    #expect(dashboardHTML(html, contains: #"#tab-models-manage .data-table-wrapper {"#))
-    #expect(dashboardHTML(html, contains: #"#tab-models-manage .data-table thead th {"#))
-    #expect(dashboardHTML(html, contains: #"position: sticky;"#))
+    #expect(dashboardHTML(html, contains: #"""
+  #tab-models-manage .ds-models-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+"""#))
+    #expect(dashboardHTML(html, contains: #"<div class="ds-models-filter" id="models-filter""#))
+    #expect(!dashboardHTML(html, contains: #"#tab-models-manage .data-table"#))
     #expect(dashboardHTML(html, contains: #"scrollContainer.classList.toggle('model-manager-active', tabName === 'models-manage')"#))
     #expect(dashboardHTML(
         html,
@@ -975,7 +979,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "reranker: 'Reranker'"))
     #expect(dashboardHTML(html, contains: "asr: 'ASR'"))
     #expect(dashboardHTML(html, contains: "tts: 'TTS'"))
-    #expect(dashboardHTML(html, contains: "renderModelType(m)"))
+    #expect(dashboardHTML(html, contains: "category === 'other' ? modelTypeLabel(model)"))
     #expect(dashboardHTML(html, contains: "function modelTypeLabel(model)"))
     #expect(dashboardHTML(html, contains: "decision: 'DECISION'"))
     #expect(dashboardHTML(html, contains: #"id="modal-model-type" readonly"#))
@@ -1075,7 +1079,8 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "function updateAccelerationExclusivity"))
     #expect(dashboardHTML(html, contains: "loadModelWithDFlash2"))
     #expect(dashboardHTML(html, contains: "action_load_dflash2"))
-    #expect(dashboardHTML(html, contains: "renderDFlash2Badge"))
+    #expect(dashboardHTML(html, contains: "if (model.dflash2 && model.dflash2.enabled) {"))
+    #expect(dashboardHTML(html, contains: "model_dflash2_unload_hint"))
     #expect(dashboardHTML(html, contains: "dflash2_help_exclusive"))
     #expect(dashboardHTML(html, contains: "runtime_dflash2_acceptance"))
     #expect(dashboardHTML(html, contains: "exact_residual_corrections"))

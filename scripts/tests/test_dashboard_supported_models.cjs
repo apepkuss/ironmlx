@@ -7,7 +7,6 @@ const resourceRoot = path.join(__dirname, '../../ironmlx-app/Sources/IronMLXAppC
 const html = fs.readFileSync(path.join(resourceRoot, 'dashboard2.html'), 'utf8');
 const catalog = JSON.parse(fs.readFileSync(path.join(resourceRoot, 'supported-models.json'), 'utf8'));
 const modelCount = new Set(catalog.entries.map(entry => entry.modelId || entry.id)).size;
-const catalogSummary = `${modelCount} 个模型 · ${catalog.entries.length} 个版本`;
 function slice(start, end) { return html.slice(html.indexOf(start), html.indexOf(end, html.indexOf(start))); }
 const translations = slice('  const I18N =', '  const LANG_MAP =');
 const sourceTabs = slice('  function switchDlSource(', '  const ACTIVE_DOWNLOAD_PHASES');
@@ -20,7 +19,9 @@ function page(lang = 'zh-Hans') {
   function element(id) {
     if (!elements.has(id)) {
       let content = '';
+      const classes = new Set();
       const el = { id, value: '', textContent: '', style: {}, dataset: {}, attributes: {}, events: {},
+        classList: { toggle: (name, on) => { on ? classes.add(name) : classes.delete(name); }, contains: name => classes.has(name) },
         setAttribute(key, value) { this.attributes[key] = value; },
         addEventListener(key, fn) { this.events[key] = fn; },
         focus() { this.focused = true; },
@@ -70,6 +71,7 @@ function page(lang = 'zh-Hans') {
     choose: (modelId, entryId) => {
       context.renderSupportedModels();
       const select = element('variant-' + modelId);
+      if (!select.events.change) return; // single-variant models have no selector
       select.value = entryId; select.events.change();
     },
     queue: tasks => { context.tasksForTest = tasks; vm.runInContext('downloadQueueSnapshot.tasks = tasksForTest;', context); } };
@@ -89,10 +91,46 @@ test('default tab is the catalogue and keyboard navigation selects one panel', (
   assert.equal(p.element('dl-tab-ms').focused, true);
 });
 
+test('catalogue has no duplicate heading or machine-wide runnable summary', () => {
+  // Each card states whether its weights fit; the page no longer repeats it as a count.
+  assert.doesNotMatch(html, /id="catalog-summary"|catalogRunnableCount|catalogSummaryText|catalog_runnable_summary|catalog_summary:/);
+  assert.doesNotMatch(html, /class="ds-catalog-head"/);
+  const p = page(); p.render();
+  assert.equal(p.element('catalog-model-list').buttons.length, modelCount);
+});
+
+test('catalog_cards_keep_hooks', () => {
+  const p = page(); p.render();
+  const html = p.element('catalog-model-list').innerHTML;
+  const cards = html.match(/<article[\s\S]*?<\/article>/g);
+  assert.equal(cards.length, modelCount);
+  assert.ok(cards.every(card => card.startsWith('<article class="catalog-row"')
+    && card.includes('catalog-action') && card.includes('data-entry-id=') && card.includes('data-provider=') && card.includes('data-repo-id=')));
+  const single = cards.find(card => card.includes('data-model-id="laya"'));
+  assert.ok(!single.includes('<select'));
+  assert.ok(single.includes('FP16'));
+  assert.ok(single.includes('data-entry-id="laya"'));
+  const multi = cards.find(card => card.includes('data-model-id="qwen35-2b"'));
+  assert.ok(multi.includes('<select data-model-id="qwen35-2b"'));
+});
+
+test('source_switch_is_a_small_segmented_control', () => {
+  assert.match(html, /<div class="dl-source-tabs ds-seg" role="tablist"/);
+  assert.match(html, /<div class="dl-source-tabs ds-seg"[^>]*>\s*<span class="ds-seg-thumb"/);
+  for (const value of ['catalog', 'hf', 'ms']) assert.match(html, new RegExp('data-value="' + value + '" id="dl-tab-' + value + '"'));
+  assert.doesNotMatch(html, /dl-source-tab ds-chip/);
+  const p = page();
+  p.context.switchDlSource('hf');
+  assert.equal(p.element('dl-tab-hf').attributes['aria-selected'], 'true');
+  assert.equal(p.element('dl-tab-catalog').attributes['aria-selected'], 'false');
+  assert.equal(p.element('catalog-help').hidden, true, 'the catalogue help only shows with the catalogue');
+  p.context.switchDlSource('catalog');
+  assert.equal(p.element('catalog-help').hidden, false);
+});
+
 test('catalogue lists all models without presenting assistants as chat models', () => {
   const p = page(); p.render();
   assert.equal(p.element('catalog-model-list').buttons.length, modelCount);
-  assert.ok(p.element('catalog-summary').textContent.includes(catalogSummary));
   p.choose('gemma4-e2b-4bit', 'gemma4-e2b-4bit');
   assert.match(p.element('catalog-model-list').innerHTML, /架构兼容 · 待运行验证/);
   p.choose('dflash2-qwen38', 'dflash2-qwen38');
@@ -109,20 +147,22 @@ test('every model requires a quantization choice, including single FP16 and BF16
   assert.deepEqual(qwen38.options.map(option => option.label), ['选择量化版本', 'Affine · 4 bit', 'Affine · 8 bit']);
   assert.equal(qwen38.value, '');
   const buttons = p.element('catalog-model-list').buttons;
-  assert.ok(buttons.every(button => button.disabled && !button.dataset.entryId));
+  const unchosen = buttons.filter(button => !button.dataset.entryId);
+  assert.ok(unchosen.length > 0 && unchosen.every(button => button.disabled));
+  assert.ok(buttons.filter(button => button.dataset.entryId).every(button => !button.disabled));
   p.context.refreshSupportedModelActions();
   assert.ok(buttons.filter(button => !button.dataset.entryId).every(button => button.disabled));
   p.context.downloadSupportedModel('qwen35-2b-4bit', 'huggingface');
   p.context.downloadSupportedModel('qwen38-27b-8bit', 'modelscope');
-  p.context.downloadSupportedModel('laya', 'huggingface');
+  p.context.downloadSupportedModel('qwen35-2b-5bit', 'huggingface');
   assert.equal(p.requests.length, 0);
   const firstRow = p.element('catalog-model-list').innerHTML.split('</article>')[0];
   assert.doesNotMatch(firstRow, /class="catalog-repo"|预计下载|权重预算|架构兼容/);
   assert.doesNotMatch(firstRow, /请先选择量化版本/);
-  assert.equal(p.element('catalog-model-list').selects.length, modelCount);
-  assert.deepEqual(p.element('variant-laya').options.map(option => option.label), ['选择量化版本', 'FP16']);
-  assert.deepEqual(p.element('variant-dflash2-qwen38').options.map(option => option.label), ['选择量化版本', 'BF16']);
-  p.choose('laya', 'laya');
+  const singleCount = new Set(catalog.entries.filter(e => catalog.entries.filter(o => o.modelId === e.modelId).length === 1).map(e => e.modelId)).size;
+  assert.equal(p.element('catalog-model-list').selects.length, modelCount - singleCount);
+  assert.equal(p.element('variant-laya').events.change, undefined);
+  assert.match(p.element('catalog-model-list').innerHTML, /catalog-variant-single">FP16</);
   const layaButton = p.element('catalog-model-list').buttons.find(button => button.dataset.entryId === 'laya');
   assert.equal(layaButton.disabled, false);
   layaButton.events.click();
@@ -169,7 +209,6 @@ test('same-bit formats stay distinct and selection survives rerenders, tabs and 
   assert.match(p.element('catalog-model-list').innerHTML, /采用 4\/8-bit 混合精度/);
   p.render();
   assert.equal(p.element('variant-qwen35-2b').value, 'qwen35-2b-optiq-4bit');
-  assert.ok(p.element('catalog-summary').textContent.includes(catalogSummary));
   p.context.switchDlSource('hf'); p.context.switchDlSource('catalog');
   p.context.refreshSupportedModelActions();
   assert.equal(p.element('variant-qwen35-2b').value, 'qwen35-2b-optiq-4bit');
@@ -177,7 +216,7 @@ test('same-bit formats stay distinct and selection survives rerenders, tabs and 
   assert.equal(p.requests[0][1].repo_id, 'mlx-community/Qwen3.5-2B-OptiQ-4bit');
 });
 
-test('both Qwen3-ASR sizes require variant selection and download as speech recognition models', () => {
+test('both Qwen3-ASR sizes download as speech recognition models', () => {
   for (const [modelId, size] of [['qwen3-asr-06b', '0.6B'], ['qwen3-asr-17b', '1.7B']]) {
     const p = page(); p.render();
     const entryId = `${modelId}-8bit`;
@@ -185,7 +224,6 @@ test('both Qwen3-ASR sizes require variant selection and download as speech reco
     assert.ok(entry, `${size} catalogue entry`);
     assert.equal(entry.category, 'stt');
     assert.deepEqual(entry.capabilities, ['stt']);
-    assert.equal(p.element(`variant-${modelId}`).value, '');
     p.choose(modelId, entryId);
     const row = p.element('catalog-model-list').innerHTML.split('</article>')
       .find(value => value.includes(`data-model-id="${modelId}"`));
@@ -285,7 +323,6 @@ test('memory hints distinguish unknown and excessive weight budgets', () => {
 for (const lang of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
   test(`catalogue and its dynamic labels are translated in ${lang}`, () => {
     const p = page(lang); p.render();
-    assert.ok(p.element('catalog-summary').textContent.includes(catalog.updatedAt));
     assert.doesNotMatch(p.element('catalog-model-list').innerHTML, /catalog_[a-z_]+/);
     assert.ok(p.element('catalog-model-list').buttons.every(button => button.textContent));
     if (lang !== 'en') assert.doesNotMatch(p.element('catalog-model-list').innerHTML, /Runtime verified|Approx\. download/);
@@ -358,4 +395,15 @@ test('mirror token consent is required before dispatch and remembered only for t
   p.element('search-hf-token').value = 'hf_different';
   p.context.startDownload('org/third-model');
   assert.equal(confirmations, 3);
+});
+
+test('catalogue sections are separated by a hairline and titled the same way', () => {
+  assert.match(html, /\.catalog-section \+ \.catalog-section \{[^}]*border-top:1px solid var\(--ds-border\)/);
+  const dict = vm.runInNewContext(translations + '\nI18N');
+  for (const lang of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
+    for (const key of ['catalog_type_llm', 'catalog_type_audio', 'catalog_type_image', 'catalog_type_embedding',
+      'catalog_type_decision', 'catalog_type_drafter']) {
+      assert.match(dict[lang][key], / · /, lang + ' ' + key);
+    }
+  }
 });

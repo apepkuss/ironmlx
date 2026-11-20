@@ -24,7 +24,14 @@ import Testing
     #expect(profileCard.lowerBound < benchmarkPage.lowerBound)
     #expect(html.contains(#"id="profile-model-select""#))
     #expect(html.contains("profile-generate-btn"))
-    #expect(html.contains("profile-level-select"))
+    #expect(html.contains(#"id="profile-level-options""#))
+    #expect(html.contains(#"id="profile-selection-options""#))
+    #expect(html.contains(#"name="profile-selection""#))
+    #expect(html.contains(#"name="profile-level""#))
+    #expect(!html.contains("profile-level-select"))
+    #expect(!html.contains("profile-selection-select"))
+    #expect(html.contains("listTunedModels"))
+    #expect(html.contains("function onTunedModels("))
     #expect(html.contains("profile-cancel-btn"))
     #expect(html.contains("requestSchedulerProfilePreview"))
     #expect(html.contains("onSchedulerProfilePreview"))
@@ -494,4 +501,59 @@ private func containsFlagValue(_ arguments: [String], flag: String, value: Strin
 
     // A cap the load sends wins over the launch value, as in the backend.
     #expect(ModelLoadParameters.calibrationMaxCacheCap(loadCap: 8_192, launchOptions: launch) == 8_192)
+}
+
+private func tuningListJSON(schemaVersion: Int = 1, records: [(hardware: String, path: String, updated: Int64, exists: Bool)]) -> Data {
+    let items = records.map { record in
+        """
+        {"model_name":"m","model_path":"\(record.path)","hardware_label":"\(record.hardware)",\
+        "runtime_context_fingerprint":"f","updated_at_unix_ms":\(record.updated),\
+        "profile_exists":\(record.exists)}
+        """
+    }.joined(separator: ",")
+    return Data(
+        """
+        {"schema_version":\(schemaVersion),"current_hardware_label":"M5 Max 128GB","profiles":[\(items)]}
+        """.utf8
+    )
+}
+
+@Test func tuningSummaryMatchesCurrentHardwareAndPath() throws {
+    let data = tuningListJSON(records: [
+        ("M5 Max 128GB", "/tmp/m/a", 100, true),
+        ("M5 Max 128GB", "/tmp/m/a", 200, true),
+        ("M1 Pro 32GB", "/tmp/m/b", 300, true),
+        ("M5 Max 128GB", "/tmp/m/b", 400, false),
+    ])
+
+    let tuned = try SchedulerProfileTuningSummary.tunedAt(
+        listJSON: data,
+        modelPaths: ["a": "/tmp/m/a", "b": "/tmp/m/b", "c": "/tmp/m/c"]
+    )
+
+    #expect(tuned == ["a": 200])
+}
+
+@Test func tuningSummaryComparesResolvedPaths() throws {
+    let data = tuningListJSON(records: [("M5 Max 128GB", "/tmp/link/a", 100, true)])
+
+    let tuned = try SchedulerProfileTuningSummary.tunedAt(
+        listJSON: data,
+        modelPaths: ["a": "/tmp/link/../link/a"]
+    )
+
+    #expect(tuned == ["a": 100])
+}
+
+@Test func tuningSummaryRejectsUnknownSchema() {
+    let data = tuningListJSON(schemaVersion: 2, records: [])
+
+    #expect(throws: (any Error).self) {
+        try SchedulerProfileTuningSummary.tunedAt(listJSON: data, modelPaths: [:])
+    }
+}
+
+@MainActor
+@Test func dashboardBridgeRegistersTunedModelsHandler() {
+    #expect(DashboardBridge.handlerNames.contains("listTunedModels"))
 }

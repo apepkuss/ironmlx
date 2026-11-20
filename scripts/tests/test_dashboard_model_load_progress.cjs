@@ -64,7 +64,7 @@ class FakeElement {
     if (name === 'class') return [...this.classes].join(' ');
     return this.attributes.has(name) ? this.attributes.get(name) : null;
   }
-  removeAttribute(name) { this.attributes.delete(name); }
+  removeAttribute(name) { this.attributes.delete(name); if (name === 'disabled') this.disabled = false; }
   addEventListener() {}
   focus() {}
   appendChild(node) { node.parentNode = this; this.childNodes.push(node); return node; }
@@ -130,7 +130,6 @@ function page(lang = 'zh-Hans') {
   const elements = new Map();
   const posted = [];
   const toasts = [];
-  const rows = [];
   const navigation = [];
   let syncs = 0;
   const doc = {};
@@ -147,7 +146,6 @@ function page(lang = 'zh-Hans') {
     }
     return elements.get(id);
   }
-  const tbody = { innerHTML: '', appendChild(row) { rows.push(row); } };
   let unloads = 0;
   const handler = type => ({ postMessage(body) { posted.push({ type, body }); } });
   const context = {
@@ -156,6 +154,7 @@ function page(lang = 'zh-Hans') {
     window: {
       __MODEL_INTEGRITY_STATUS__: {},
       __LOCAL_MODELS__: {},
+      addEventListener() {},
       webkit: { messageHandlers: {
         cancelModelLoad: handler('cancelModelLoad'),
         openModelLoadPanel: handler('openModelLoadPanel'),
@@ -165,8 +164,8 @@ function page(lang = 'zh-Hans') {
     },
     document: {
       getElementById: element,
-      querySelector: selector => selector === '#tab-models-manage tbody' ? tbody : null,
-      querySelectorAll: selector => selector === '#tab-models-manage tbody tr' ? rows.slice() : [],
+      querySelector: () => null,
+      querySelectorAll: () => [],
       addEventListener() {},
       createElement: tag => new FakeElement(doc, tag),
     },
@@ -184,8 +183,7 @@ function page(lang = 'zh-Hans') {
     escapeHTML: value => String(value).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`),
     closeModelMoreActions() {}, refreshSupportedModelActions() {}, hideModelTableTooltip() {},
     renderProfileModelOptions() {}, syncBenchmarkModels() {},
-    renderMtpBadge: () => '', renderDFlash2Badge: () => '', renderModelType: () => '',
-    renderQuantBadge: () => '', renderModelMoreActions: () => '',
+    renderModelMoreActions: () => '',
     modelColumnTooltipAttributes: () => '', pinTooltip: () => '',
     formatSize: mb => `${mb} MB`,
     showSidebarTooltip() {}, hideSidebarTooltip() {},
@@ -198,16 +196,26 @@ function page(lang = 'zh-Hans') {
     + slice('  function modelReadiness(', '  function updateModelIntegrityRow(')
     + slice('  function renderModelLoadActions(', '  // Called from Rust with local model scan results')
     + extract('onLocalModelsScanned', 'renderProfileModelOptions')
-    + extract('toggleModelLoad', 'markModelActionLoading'), context);
+    + extract('toggleModelLoad', 'markModelActionLoading')
+    + slice('  const STATUS_DASH', '  function formatStatusClock(')
+    + slice('  function idleUnloadText(', '  // Shares of the limit')
+    + slice('  function localizeErrorResult(', '  // ── Model load progress')
+    + slice('  // ── Models page ──', '  // ── End models page ──'), context);
+  // The page tells the App at start that no load panel is open; tests look at later messages.
+  posted.length = 0;
+  const rows = () => element('models-list').querySelectorAll('.ds-model-row');
   return {
-    context, element, posted, toasts, rows, navigation,
+    context, element, posted, toasts, navigation,
+    // The model's row as shown now: a load that moves it between groups
+    // rebuilds it.
+    row(id = MODEL) { return rows().find(row => row.dataset.modelId === id) || null; },
     get syncs() { return syncs; },
     get unloads() { return unloads; },
     push(...loads) { context.onModelLoadsChanged(JSON.stringify({ loads })); },
     tick() { intervals.forEach(fn => fn && fn()); },
     get pendingTimers() { return timeouts.size; },
     runTimers() { const due = timeouts; timeouts = new Map(); due.forEach(fn => fn()); },
-    scan(models) { rows.length = 0; context.onLocalModelsScanned(JSON.stringify(models)); return rows; },
+    scan(models) { context.onLocalModelsScanned(JSON.stringify(models)); return rows(); },
   };
 }
 
@@ -231,23 +239,28 @@ test('row_state_survives_rerender', () => {
   // Switching pages re-renders the model list from the disk scan, where the
   // model is not loaded yet; the row must keep the load state.
   const [row] = p.scan([scannedModel()]);
-  assert.match(row.innerHTML, /model-status-text">加载中<[\s\S]*62%/);
-  assert.match(row.innerHTML, /onclick="cancelModelLoadFromUI\(this\.dataset\.model\)"[^>]*>取消</);
+  assert.match(row.querySelector('.ds-model-detail-text').textContent, /^加载中/);
+  assert.equal(row.querySelector('.ds-progress-pct').textContent, '62%');
+  const cancel = row.querySelector('[data-model-primary]');
+  assert.equal(cancel.dataset.kind, 'cancel');
+  assert.equal(cancel.getAttribute('onclick'), 'cancelModelLoadFromUI(this.dataset.model)');
+  assert.equal(cancel.textContent, '取消');
   assert.doesNotMatch(row.innerHTML, /toggleModelLoad/);
-  assert.match(row.innerHTML, /model-load-rowprogress[\s\S]*width:62%/);
+  assert.match(row.querySelector('.ds-progress-fill').getAttribute('style'), /width:62%/);
 
   // A reload keeps the loaded model's row and says so.
   p.push(activity({ kind: 'reload', startedAt: STARTED + 1, bytesDone: 4 * GB, bytesTotal: 10 * GB }));
   const [reloaded] = p.scan([scannedModel({ loaded: true })]);
-  assert.match(reloaded.innerHTML, /重新加载中<[\s\S]*40%/);
-  assert.match(reloaded.innerHTML, />取消</);
+  assert.match(reloaded.querySelector('.ds-model-detail-text').textContent, /^重新加载中/);
+  assert.equal(reloaded.querySelector('.ds-progress-pct').textContent, '40%');
+  assert.equal(reloaded.querySelector('[data-model-primary]').textContent, '取消');
   assert.doesNotMatch(reloaded.innerHTML, /action-unload/);
 
   // Queued loads show the queue and can be cancelled.
   p.push(activity({ state: 'queued', stage: 'queued', startedAt: Date.now() }));
   const [queued] = p.scan([scannedModel()]);
-  assert.match(queued.innerHTML, /排队中/);
-  assert.match(queued.innerHTML, />取消</);
+  assert.match(queued.querySelector('.ds-model-detail').textContent, /排队中/);
+  assert.equal(queued.querySelector('[data-model-primary]').dataset.kind, 'cancel');
 
   // Once the load is gone the row falls back to the scan.
   p.push();
@@ -262,11 +275,11 @@ test('percentages never decrease within one load', () => {
   p.push(activity({ startedAt, bytesDone: 62 * GB, bytesTotal: 100 * GB }));
   // The draft's exact size arrives late and grows the total.
   p.push(activity({ startedAt, bytesDone: 62 * GB, bytesTotal: 120 * GB }));
-  assert.match(p.scan([scannedModel()])[0].innerHTML, /<span>62%<\/span>/);
+  assert.equal(p.scan([scannedModel()])[0].querySelector('.ds-progress-pct').textContent, '62%');
   assert.match(p.element('model-load-indicator').getAttribute('aria-label'), /62%/);
   // A new load starts from its own progress.
   p.push(activity({ startedAt: startedAt + 5000, bytesDone: 10 * GB, bytesTotal: 100 * GB }));
-  assert.match(p.scan([scannedModel()])[0].innerHTML, /<span>10%<\/span>/);
+  assert.equal(p.scan([scannedModel()])[0].querySelector('.ds-progress-pct').textContent, '10%');
 });
 
 test('cancel button sends the model and shows cancelling at once', () => {
@@ -275,8 +288,9 @@ test('cancel button sends the model and shows cancelling at once', () => {
   p.context.cancelModelLoadFromUI(MODEL);
   assert.deepEqual(p.posted.filter(m => m.type === 'cancelModelLoad'), [{ type: 'cancelModelLoad', body: MODEL }]);
   const [row] = p.scan([scannedModel()]);
-  assert.match(row.innerHTML, /正在取消…/);
-  assert.match(row.innerHTML, /disabled/);
+  const cancel = row.querySelector('[data-model-primary]');
+  assert.equal(cancel.textContent, '正在取消…');
+  assert.equal(cancel.disabled, true);
 });
 
 test('eta_hidden_until_ten_percent_and_three_seconds', () => {
@@ -535,18 +549,23 @@ test('panel_controls_survive_ticks_and_pushes', () => {
 
 test('load_state_rows_wrap_instead_of_truncating', () => {
   const p = page();
-  const cell = row => row.innerHTML.match(/<td class="model-status-cell[^"]*"[\s\S]*?<\/td>/)[0];
+  const detail = row => row.querySelector('.ds-model-detail');
   p.push(activity({ kind: 'reload', bytesDone: 4 * GB, bytesTotal: 10 * GB }));
-  const reload = cell(p.scan([scannedModel({ loaded: true })])[0]);
-  assert.match(reload, /class="model-status-cell is-load-state"/, 'load-state cells may wrap');
-  assert.match(reload, /model-status-text">重新加载中</);
+  const reload = detail(p.scan([scannedModel({ loaded: true })])[0]);
+  assert.match(reload.querySelector('.ds-model-detail-text').textContent, /^重新加载中/);
   p.push(activity({ state: 'failed', stage: 'preparing_memory', cancellable: false, message: 'x' }));
-  const failed = cell(p.scan([scannedModel()])[0]);
-  assert.match(failed, /class="model-status-cell is-load-state"/);
-  assert.match(failed, /model-status-text is-failed">加载失败</, 'a failure reads as a failure, not as loading');
-  assert.doesNotMatch(failed, /status-dot/);
+  const failed = detail(p.scan([scannedModel()])[0]);
+  assert.match(failed.textContent, /^加载失败/, 'a failure reads as a failure, not as loading');
+  assert.equal(failed.getAttribute('data-tone'), 'danger');
+  assert.equal(failed.querySelector('.ds-progress'), null);
   p.push();
-  assert.doesNotMatch(cell(p.scan([scannedModel()])[0]), /is-load-state/);
+  const idle = detail(p.scan([scannedModel()])[0]);
+  assert.doesNotMatch(idle.textContent, /加载失败|重新加载中/);
+  assert.equal(idle.getAttribute('hidden'), '', 'an unloaded row has no second line');
+  // The second line wraps rather than truncates.
+  const rule = html.match(/\n\s*\.ds-model-detail\s*\{([^}]*)\}/);
+  assert.ok(rule);
+  assert.match(rule[1], /overflow-wrap:\s*anywhere/);
 });
 
 test('acknowledged_external_failure_stays_dismissed', () => {
@@ -587,17 +606,18 @@ test('classified_async_failures_show_localized_guidance', () => {
   }
 });
 
-test('row_progress_shrinks_inside_a_narrow_status_cell', () => {
+test('row_progress_shrinks_inside_a_narrow_row', () => {
   const rule = selector => {
     const match = html.match(new RegExp(`\\n\\s*${selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\{([^}]*)\\}`));
     assert.ok(match, `missing ${selector}`);
     return match[1];
   };
   // Every part of the row progress may shrink, so "73%" never leaves the card.
-  assert.match(rule('.model-load-rowprogress'), /min-width:\s*0/);
-  assert.match(rule('.model-load-rowprogress'), /max-width:\s*min\(128px,\s*100%\)/);
-  assert.match(rule('.model-load-rowprogress .model-load-bar'), /min-width:\s*0/);
-  assert.match(rule('.model-load-rowprogress > span'), /flex:\s*none/);
+  assert.match(rule('.ds-progress'), /min-width:\s*0/);
+  assert.match(rule('.ds-progress'), /flex:\s*0 1 160px/);
+  assert.match(rule('.ds-progress'), /max-width:\s*160px/);
+  assert.match(rule('.ds-progress-track'), /min-width:\s*0/);
+  assert.match(rule('.ds-progress-pct'), /flex:\s*none/);
 });
 
 test('row_leaves_the_reload_state_as_soon_as_the_reload_ends', () => {
@@ -605,14 +625,16 @@ test('row_leaves_the_reload_state_as_soon_as_the_reload_ends', () => {
   const [row] = p.scan([scannedModel({ loaded: true })]);
   p.push(activity({ kind: 'reload', bytesDone: 4 * GB, bytesTotal: 10 * GB }));
   assert.match(row.innerHTML, /重新加载中/);
-  const staleCancel = row.querySelector('.action-cancel-load');
-  assert.ok(staleCancel);
+  const staleCancel = row.querySelector('[data-model-primary]');
+  assert.equal(staleCancel.dataset.kind, 'cancel');
   const syncs = p.syncs;
 
   p.push(activity({ kind: 'reload', state: 'loaded', cancellable: false, bytesDone: 10 * GB, bytesTotal: 10 * GB }));
-  // The row shows the loaded model again without waiting for a rescan.
+  // The row shows the loaded model again without waiting for a rescan; a
+  // reload never moves it, so it is the same row element.
+  assert.equal(p.row(), row);
   assert.doesNotMatch(row.innerHTML, /重新加载中|cancelModelLoadFromUI/);
-  assert.match(row.innerHTML, /action-unload/);
+  assert.equal(row.querySelector('[data-model-primary]').dataset.kind, 'unload');
   assert.ok(p.syncs > syncs, 'a rescan still confirms the backend state');
 
   // The cancel button left from the reload never reaches the backend or unloads.
@@ -621,14 +643,14 @@ test('row_leaves_the_reload_state_as_soon_as_the_reload_ends', () => {
   assert.equal(p.unloads, 0);
   // The unload button that replaced "Cancel" shows as disabled while the row
   // settles, so a click aimed at "Cancel" does nothing.
-  const unload = row.querySelector('.action-unload');
+  const unload = row.querySelector('[data-model-primary]');
   assert.equal(unload.disabled, true);
-  assert.match(row.innerHTML, /class="action-btn action-unload"[^>]* disabled>/);
+  assert.match(row.innerHTML, /data-kind="unload"[^>]* disabled>/);
   unload.click();
   assert.equal(p.unloads, 0);
   p.runTimers();
   assert.equal(unload.disabled, false, 'enabled after the settle period');
-  assert.doesNotMatch(row.innerHTML, /action-unload"[^>]* disabled/);
+  assert.doesNotMatch(row.innerHTML, /data-kind="unload"[^>]* disabled/);
   unload.click();
   assert.equal(p.unloads, 1, 'later clicks unload as usual');
 });
@@ -639,13 +661,18 @@ test('settling_unload_button_survives_rescans_and_removed_rows', () => {
   p.push(activity({ kind: 'reload', bytesDone: GB, bytesTotal: 10 * GB }));
   p.push(activity({ kind: 'reload', state: 'loaded', cancellable: false }));
   // A rescan during the settle period keeps the button disabled...
+  const unloadOf = row => {
+    const button = row.querySelector('[data-model-primary]');
+    assert.equal(button.dataset.kind, 'unload');
+    return button;
+  };
   const [rescanned] = p.scan([scannedModel({ loaded: true })]);
-  assert.equal(rescanned.querySelector('.action-unload').disabled, true);
+  assert.equal(unloadOf(rescanned).disabled, true);
   // ...and the end of the period enables the row that shows the model now.
   p.runTimers();
-  assert.equal(rescanned.querySelector('.action-unload').disabled, false);
+  assert.equal(unloadOf(rescanned).disabled, false);
   // Rescans after it render the button enabled.
-  assert.equal(p.scan([scannedModel({ loaded: true })])[0].querySelector('.action-unload').disabled, false);
+  assert.equal(unloadOf(p.scan([scannedModel({ loaded: true })])[0]).disabled, false);
 
   // A row removed during the settle period: the timer finds nothing to do.
   p.push(activity({ kind: 'reload', startedAt: STARTED + 1, bytesDone: GB, bytesTotal: 10 * GB }));
@@ -661,19 +688,19 @@ test('settling_unload_button_survives_rescans_and_removed_rows', () => {
   p.push(activity({ kind: 'reload', startedAt: STARTED + 3, state: 'loaded', cancellable: false }));
   assert.equal(p.pendingTimers, 1);
   p.runTimers();
-  assert.equal(again.querySelector('.action-unload').disabled, false);
+  assert.equal(unloadOf(again).disabled, false);
 });
 
 test('rows_of_ended_loads_return_to_their_own_state', () => {
   const p = page();
-  const [row] = p.scan([scannedModel()]);
+  p.scan([scannedModel()]);
   // A cancelled new load leaves the model unloaded.
   p.push(activity({ bytesDone: GB, bytesTotal: 10 * GB }));
-  assert.match(row.innerHTML, /cancelModelLoadFromUI/);
+  assert.match(p.row().innerHTML, /cancelModelLoadFromUI/);
   p.push(activity({ state: 'cancelled', code: 'load_cancelled', cancellable: false }));
-  assert.doesNotMatch(row.innerHTML, /cancelModelLoadFromUI/);
-  assert.match(row.innerHTML, /action-load/);
-  assert.doesNotMatch(row.innerHTML, /action-unload/);
+  assert.doesNotMatch(p.row().innerHTML, /cancelModelLoadFromUI/);
+  assert.equal(p.row().querySelector('[data-model-primary]').dataset.kind, 'load');
+  assert.doesNotMatch(p.row().innerHTML, /action-unload/);
 
   // A cancelled reload keeps the previous version loaded.
   const [loaded] = p.scan([scannedModel({ loaded: true })]);
@@ -683,12 +710,13 @@ test('rows_of_ended_loads_return_to_their_own_state', () => {
   assert.match(loaded.innerHTML, /action-unload/);
 
   // A load that is no longer listed falls back to the last scan.
-  const [idle] = p.scan([scannedModel()]);
+  p.scan([scannedModel()]);
   p.push(activity({ startedAt: STARTED + 2, bytesDone: GB, bytesTotal: 10 * GB }));
-  const staleCancel = idle.querySelector('.action-cancel-load');
+  const staleCancel = p.row().querySelector('[data-model-primary]');
+  assert.equal(staleCancel.dataset.kind, 'cancel');
   p.push();
-  assert.doesNotMatch(idle.innerHTML, /cancelModelLoadFromUI/);
-  assert.match(idle.innerHTML, /action-load/);
+  assert.doesNotMatch(p.row().innerHTML, /cancelModelLoadFromUI/);
+  assert.equal(p.row().querySelector('[data-model-primary]').dataset.kind, 'load');
   staleCancel.click();
   assert.equal(p.posted.filter(m => m.type === 'cancelModelLoad').length, 0);
   assert.equal(p.unloads, 0);
@@ -696,21 +724,21 @@ test('rows_of_ended_loads_return_to_their_own_state', () => {
 
 test('acknowledging_a_failure_clears_indicator_and_row_at_once', () => {
   const p = page();
-  const [row] = p.scan([scannedModel()]);
+  p.scan([scannedModel()]);
   p.push(activity({ bytesDone: GB, bytesTotal: 10 * GB }));
   p.push(activity({ state: 'failed', stage: 'preparing_memory', cancellable: false,
     message: 'engine pool capacity reached' }));
   const indicator = p.element('model-load-indicator');
   assert.ok(indicator.classList.contains('is-failed'));
-  assert.match(row.innerHTML, /加载失败/);
+  assert.match(p.row().innerHTML, /加载失败/);
   const syncs = p.syncs;
 
   p.context.openModelLoadPanel(MODEL);
   p.element('model-load-panel').querySelector('[data-load-action="ok"]').click();
   // Both clear before any push from the App or rescan arrives.
   assert.equal(indicator.hidden, true);
-  assert.doesNotMatch(row.innerHTML, /加载失败/);
-  assert.match(row.innerHTML, /action-load/);
+  assert.doesNotMatch(p.row().innerHTML, /加载失败/);
+  assert.equal(p.row().querySelector('[data-model-primary]').dataset.kind, 'load');
   assert.ok(p.syncs > syncs, 'a rescan still confirms the backend state');
 });
 
@@ -762,6 +790,7 @@ test('unrecognized_failures_show_a_localized_message_with_the_raw_detail', () =>
     const dict = vm.runInContext('I18N', p.context)[lang];
     assert.ok(dict.err_load_failed, `${lang} err_load_failed`);
     if (lang !== 'en') assert.notEqual(dict.err_load_failed, vm.runInContext('I18N', p.context).en.err_load_failed);
+    p.scan([scannedModel()]);
     for (const code of ['load_failed', 'some_future_code', undefined]) {
       const failed = activity({ state: 'failed', stage: 'reading_weights', cancellable: false, code, message: raw });
       const panel = p.context.renderModelLoadPanel(failed);
@@ -774,9 +803,11 @@ test('unrecognized_failures_show_a_localized_message_with_the_raw_detail', () =>
       assert.doesNotMatch(panel, /<b>disk/);
 
       p.push(failed);
-      const row = p.context.modelLoadRowState(MODEL);
-      assert.ok(row.title.startsWith(dict.err_load_failed), `${lang} ${code} row tooltip`);
-      assert.ok(row.title.includes(raw), `${lang} ${code} row tooltip keeps the detail`);
+      // The row says it in words; the backend's text is only its tooltip.
+      const rowDetail = p.row().querySelector('.ds-model-detail');
+      assert.ok(rowDetail.textContent.includes(dict.err_load_failed), `${lang} ${code} row text`);
+      assert.ok(!rowDetail.textContent.includes('disk'), `${lang} ${code} row text has no raw detail`);
+      assert.equal(decode(rowDetail.getAttribute('title')), raw, `${lang} ${code} row tooltip keeps the detail`);
 
       p.toasts.length = 0;
       p.context.onModelLoaded(JSON.stringify({ success: false, status: 'error', code, error: raw }));
@@ -810,9 +841,11 @@ test('recognized_failures_without_their_own_string_keep_the_backend_reason', () 
     assert.equal(primary && primary[1], p.context.escapeAttr(dict.recovery_reason_config), `${lang} primary`);
     const detail = panel.match(/<div class="model-load-error-detail">([\s\S]*?)<\/div>/);
     assert.equal(detail && detail[1], raw, `${lang} detail names the setting to remove`);
+    p.scan([scannedModel()]);
     p.push(failed);
-    const row = p.context.modelLoadRowState(MODEL);
-    assert.equal(row.title, `${dict.recovery_reason_config}\n${raw}`, `${lang} row tooltip`);
+    const rowDetail = p.row().querySelector('.ds-model-detail');
+    assert.ok(rowDetail.textContent.includes(dict.recovery_reason_config), `${lang} row text`);
+    assert.equal(decode(rowDetail.getAttribute('title')), raw, `${lang} row tooltip`);
   }
 });
 
@@ -830,5 +863,21 @@ test('model_task_mismatch_has_its_own_message', () => {
       message: 'Embedding models do not accept audio, decision or generation settings.' }));
     assert.match(panel, new RegExp(`<div class="model-load-error">${p.context.escapeAttr(dict.err_model_task_mismatch)}</div>`), lang);
     assert.doesNotMatch(panel, /model-load-error-detail/, lang);
+  }
+});
+
+test('close_panel_and_shared_ack_do_the_same', () => {
+  const failed = () => activity({ state: 'failed', cancellable: false, message: 'nope' });
+  const a = page();
+  a.push(failed());
+  a.context.openModelLoadPanel(MODEL);
+  a.context.closeModelLoadPanel();
+  const b = page();
+  b.push(failed());
+  b.context.acknowledgeModelLoadFailureRecord(b.context.modelLoadActivityFor(MODEL));
+  for (const p of [a, b]) {
+    assert.deepEqual(p.posted.filter(m => m.type === 'acknowledgeModelLoadFailure'),
+      [{ type: 'acknowledgeModelLoadFailure', body: MODEL }]);
+    assert.equal(p.context.modelLoadActivityFor(MODEL), null);
   }
 });

@@ -105,7 +105,7 @@ pub struct SchedulerAutotuneProfileArgs {
 #[derive(Subcommand, Debug)]
 pub enum SchedulerAutotuneProfileAction {
     /// List persisted scheduler profiles in the data root (~/.ironmlx by default).
-    List,
+    List(SchedulerAutotuneProfileListArgs),
     /// Print one persisted scheduler profile as JSON.
     Show(SchedulerAutotuneProfileShowArgs),
     /// Diagnose the matching local scheduler profile for one model.
@@ -114,6 +114,13 @@ pub enum SchedulerAutotuneProfileAction {
     Remove(SchedulerAutotuneProfileRemoveArgs),
     /// Import one runtime scheduler profile into the data root for one model path.
     Import(SchedulerAutotuneProfileImportArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct SchedulerAutotuneProfileListArgs {
+    /// Print machine-readable JSON instead of the text table.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args, Debug)]
@@ -203,7 +210,7 @@ pub fn run(args: SchedulerAutotuneArgs) -> Result<()> {
 fn run_profile(args: SchedulerAutotuneProfileArgs) -> Result<()> {
     let store = SchedulerProfileStore::open_default()?;
     match args.action {
-        SchedulerAutotuneProfileAction::List => run_profile_list(&store),
+        SchedulerAutotuneProfileAction::List(list) => run_profile_list(&store, list),
         SchedulerAutotuneProfileAction::Show(show) => run_profile_show(&store, show),
         SchedulerAutotuneProfileAction::Doctor(doctor) => run_profile_doctor(&store, *doctor),
         SchedulerAutotuneProfileAction::Remove(remove) => run_profile_remove(&store, remove),
@@ -211,7 +218,40 @@ fn run_profile(args: SchedulerAutotuneProfileArgs) -> Result<()> {
     }
 }
 
-fn run_profile_list(store: &SchedulerProfileStore) -> Result<()> {
+fn profile_list_json(
+    store: &SchedulerProfileStore,
+    current_hardware_label: &str,
+) -> Result<serde_json::Value> {
+    let profiles: Vec<serde_json::Value> = store
+        .list_profiles()?
+        .into_iter()
+        .map(|record| {
+            serde_json::json!({
+                "model_name": record.model_name,
+                "model_path": record.model_path,
+                "hardware_label": record.hardware_label,
+                "runtime_context_fingerprint": record.runtime_context_fingerprint,
+                "updated_at_unix_ms": record.updated_at_unix_ms,
+                "profile_exists": record.profile_exists,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "schema_version": 1,
+        "current_hardware_label": current_hardware_label,
+        "profiles": profiles,
+    }))
+}
+
+fn run_profile_list(
+    store: &SchedulerProfileStore,
+    args: SchedulerAutotuneProfileListArgs,
+) -> Result<()> {
+    if args.json {
+        let value = profile_list_json(store, &detect_scheduler_profile_hardware_label())?;
+        println!("{}", serde_json::to_string(&value)?);
+        return Ok(());
+    }
     let records = store.list_profiles()?;
     println!("store: {}", store.root().display());
     println!("profiles: {}", records.len());
@@ -460,7 +500,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{import_profile, SchedulerAutotuneProfileImportArgs};
+    use super::{import_profile, profile_list_json, SchedulerAutotuneProfileImportArgs};
     use ironmlx_runtime::core::scheduler_profile_store::SchedulerProfileStore;
     use {
         ironmlx_runtime::core::scheduler_autotune::SchedulerAutotuneProfileConfig,
@@ -508,6 +548,49 @@ mod tests {
             .expect("find profile")
             .expect("profile should exist");
         assert_eq!(loaded_path, stored);
+
+        std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn profile_list_json_reports_current_hardware_and_records() {
+        let temp_dir = unique_temp_dir("scheduler-profile-list-json");
+        let store = SchedulerProfileStore::from_root(temp_dir.join("store"));
+        for (name, label) in [("a", "M5 Max 128GB"), ("b", "M1 Pro 32GB")] {
+            let model_dir = temp_dir.join(name);
+            std::fs::create_dir_all(&model_dir).expect("create model dir");
+            let mut profile = runtime_profile();
+            profile.hardware_label = label.to_string();
+            store
+                .persist_profile(&model_dir, &profile)
+                .expect("persist profile");
+        }
+
+        let value = profile_list_json(&store, "M5 Max 128GB").expect("list json");
+
+        assert_eq!(value["schema_version"], 1);
+        assert_eq!(value["current_hardware_label"], "M5 Max 128GB");
+        let profiles = value["profiles"].as_array().expect("profiles array");
+        assert_eq!(profiles.len(), 2);
+        for item in profiles {
+            for key in [
+                "model_name",
+                "model_path",
+                "hardware_label",
+                "runtime_context_fingerprint",
+                "updated_at_unix_ms",
+                "profile_exists",
+            ] {
+                assert!(item.get(key).is_some(), "missing key {key}");
+            }
+            assert_eq!(item["profile_exists"], true);
+        }
+        let mut labels: Vec<&str> = profiles
+            .iter()
+            .map(|item| item["hardware_label"].as_str().expect("label"))
+            .collect();
+        labels.sort();
+        assert_eq!(labels, ["M1 Pro 32GB", "M5 Max 128GB"]);
 
         std::fs::remove_dir_all(temp_dir).expect("cleanup temp dir");
     }

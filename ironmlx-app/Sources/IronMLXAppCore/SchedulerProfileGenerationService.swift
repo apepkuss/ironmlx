@@ -600,6 +600,73 @@ private struct SchedulerProfileRunOrderJob: Decodable {
     }
 }
 
+/// Which models have a stored scheduler profile for this Mac, from
+/// `scheduler-autotune profile list --json`.
+public enum SchedulerProfileTuningSummary {
+    public enum Error: LocalizedError, Equatable {
+        case unsupportedSchema(Int)
+
+        public var errorDescription: String? {
+            switch self {
+            case .unsupportedSchema(let version):
+                return "Unsupported scheduler profile list schema: \(version)"
+            }
+        }
+    }
+
+    private struct List: Decodable {
+        var schemaVersion: Int
+        var currentHardwareLabel: String
+        var profiles: [Record]
+
+        enum CodingKeys: String, CodingKey {
+            case schemaVersion = "schema_version"
+            case currentHardwareLabel = "current_hardware_label"
+            case profiles
+        }
+    }
+
+    private struct Record: Decodable {
+        var modelPath: String
+        var hardwareLabel: String
+        var updatedAtUnixMs: Int64
+        var profileExists: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case modelPath = "model_path"
+            case hardwareLabel = "hardware_label"
+            case updatedAtUnixMs = "updated_at_unix_ms"
+            case profileExists = "profile_exists"
+        }
+    }
+
+    /// `modelPaths` maps model id to its current snapshot path. Returns model id
+    /// to the latest update time of a profile for this Mac's hardware and that path.
+    public static func tunedAt(listJSON: Data, modelPaths: [String: String]) throws -> [String: Int64] {
+        let list = try JSONDecoder().decode(List.self, from: listJSON)
+        guard list.schemaVersion == 1 else {
+            throw Error.unsupportedSchema(list.schemaVersion)
+        }
+        var latestByPath: [String: Int64] = [:]
+        for record in list.profiles
+        where record.profileExists && record.hardwareLabel == list.currentHardwareLabel {
+            let path = normalizedPath(record.modelPath)
+            latestByPath[path] = max(latestByPath[path] ?? record.updatedAtUnixMs, record.updatedAtUnixMs)
+        }
+        var result: [String: Int64] = [:]
+        for (id, path) in modelPaths {
+            if let updated = latestByPath[normalizedPath(path)] {
+                result[id] = updated
+            }
+        }
+        return result
+    }
+
+    private static func normalizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+    }
+}
+
 public final class SchedulerProfileGenerationService: @unchecked Sendable {
     private let outputRootURL: URL
     private let lock = NSLock()
@@ -625,6 +692,74 @@ public final class SchedulerProfileGenerationService: @unchecked Sendable {
             snapshot.refreshProgress(logTail: tail)
         }
         return snapshot
+    }
+
+    /// Runs `scheduler-autotune profile list --json` off the calling thread and
+    /// reduces it to model id -> latest tuning time for this Mac.
+    /// How long `profile list --json` may run before it is terminated.
+    static let profileListTimeoutSeconds: TimeInterval = 30
+
+    public func listTunedModels(
+        modelPaths: [String: String],
+        executableURL: URL = BackendBinaryResolver.resolve(),
+        dataRootURL: URL = IronMLXDataRoot.url
+    ) async -> Result<[String: Int64], Swift.Error> {
+        await Task.detached(priority: .utility) { () -> Result<[String: Int64], Swift.Error> in
+            Result {
+                try BackendBinaryResolver.validateBundledRuntimeIfNeeded(for: executableURL)
+                let process = Process()
+                let standardOutput = Pipe()
+                let standardError = Pipe()
+                process.executableURL = executableURL
+                process.arguments = BackendBinaryResolver.helperArguments(
+                    [
+                        "--data-root", dataRootURL.path,
+                        "scheduler-autotune", "profile", "list", "--json",
+                    ],
+                    executableURL: executableURL
+                )
+                process.environment = BundledChildProcessEnvironment.sanitized()
+                process.standardOutput = standardOutput
+                process.standardError = standardError
+                let exited = DispatchSemaphore(value: 0)
+                process.terminationHandler = { _ in exited.signal() }
+                try process.run()
+                // Both pipes drain concurrently so a full stderr pipe cannot
+                // block the child while this thread waits on stdout.
+                let group = DispatchGroup()
+                let collected = PipeCollection()
+                group.enter()
+                DispatchQueue.global(qos: .utility).async {
+                    let data = standardOutput.fileHandleForReading.readDataToEndOfFile()
+                    collected.setOutput(data)
+                    group.leave()
+                }
+                group.enter()
+                DispatchQueue.global(qos: .utility).async {
+                    let data = standardError.fileHandleForReading.readDataToEndOfFile()
+                    collected.setError(data)
+                    group.leave()
+                }
+                if exited.wait(timeout: .now() + Self.profileListTimeoutSeconds) == .timedOut {
+                    process.terminate()
+                    _ = exited.wait(timeout: .now() + 5)
+                    _ = group.wait(timeout: .now() + 5)
+                    throw SchedulerProfileListError.failed(
+                        "scheduler-autotune profile list timed out after \(Int(Self.profileListTimeoutSeconds)) seconds"
+                    )
+                }
+                group.wait()
+                let (output, errorOutput) = collected.snapshot()
+                guard process.terminationStatus == 0 else {
+                    let detail = String(data: errorOutput, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    throw SchedulerProfileListError.failed(
+                        detail?.isEmpty == false ? detail! : "scheduler-autotune profile list exited with code \(process.terminationStatus)"
+                    )
+                }
+                return try SchedulerProfileTuningSummary.tunedAt(listJSON: output, modelPaths: modelPaths)
+            }
+        }.value
     }
 
     public func cancel() -> SchedulerProfileGenerationStatus {
@@ -780,5 +915,26 @@ public final class SchedulerProfileGenerationService: @unchecked Sendable {
         try? handle.seek(toOffset: offset)
         let data = (try? handle.readToEnd()) ?? Data()
         return String(data: data, encoding: .utf8) ?? ""
+    }
+}
+
+private final class PipeCollection: @unchecked Sendable {
+    private let lock = NSLock()
+    private var output = Data()
+    private var error = Data()
+
+    func setOutput(_ data: Data) { lock.withLock { output = data } }
+    func setError(_ data: Data) { lock.withLock { error = data } }
+    func snapshot() -> (Data, Data) { lock.withLock { (output, error) } }
+}
+
+private enum SchedulerProfileListError: LocalizedError {
+    case failed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .failed(let detail):
+            return detail
+        }
     }
 }

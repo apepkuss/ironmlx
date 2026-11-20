@@ -11,6 +11,8 @@ const blockEnd = html.indexOf('  // ── End runtime status page ──');
 const block = blockStart >= 0 && blockEnd > blockStart ? html.slice(blockStart, blockEnd) : '';
 const i18nStart = html.indexOf('  const I18N =');
 const translations = html.slice(i18nStart, html.indexOf('\n  };', i18nStart) + 5);
+// The status page's retry lands on the Models page rows.
+const modelsBlock = html.slice(html.indexOf('  // ── Models page ──'), html.indexOf('  // ── End models page ──'));
 
 function page(lang = 'en', extra = {}) {
   const context = Object.assign({ currentLang: lang }, extra);
@@ -394,23 +396,26 @@ test('retry opens the model page load action for the failed model', () => {
   assert.equal(views.statusModelView(failed, 'en', 0).action.kind, 'retry');
   assert.equal(views.statusModelView(Object.assign({}, failed, { mode: 'dflash2' }), 'en', 0).action.kind, 'logs');
 
-  const control = { focused: 0, focus() { this.focused += 1; } };
+  // The row on "My models" and its main button (retry, or the load action).
+  const control = { focused: 0, disabled: false, focus() { this.focused += 1; } };
   const row = fakeElement({
     dataset: { modelId: 'org/Broken' },
     offsetWidth: 1,
     scrollIntoView() { this.scrolled = true; },
-    querySelector: selector => (selector.includes('.action-load') ? control : null),
+    querySelector: selector => (selector === '[data-model-primary]' ? control : null),
   });
   const other = fakeElement({ dataset: { modelId: 'org/Other' }, querySelector: () => null });
+  const list = { querySelectorAll: selector => (selector === '.ds-model-row' ? [other, row] : []) };
   const calls = [];
   const timers = [];
   const p = page('en', {
     document: {
-      getElementById: () => null,
-      querySelectorAll: selector => (selector === '#tab-models-manage tbody tr' ? [other, row] : []),
+      getElementById: id => (id === 'models-list' ? list : null),
+      querySelectorAll: () => [],
     },
     setTimeout: (fn, ms) => { timers.push([fn, ms]); return timers.length; },
   });
+  vm.runInContext(modelsBlock, p);
   p.navigateTo = target => calls.push(['navigateTo', target]);
   p.switchToTab = tab => calls.push(['switchToTab', tab]);
   p.openModelLoadPanel = id => calls.push(['openModelLoadPanel', id]);
