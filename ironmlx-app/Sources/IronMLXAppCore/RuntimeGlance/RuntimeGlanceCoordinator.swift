@@ -24,6 +24,8 @@ public final class RuntimeGlanceCoordinator: RuntimeGlanceControlling {
 
     public let store: RuntimeMetricsStore
     public let preferences: GlancePreferences
+    /// The runtime events for the Dashboard page, fed by the one metrics client.
+    public let relay: RuntimeEventRelay
     private let client: RuntimeMetricsClient
     private let notificationCenter: NotificationCenter
     private let language: @MainActor () -> String
@@ -41,6 +43,16 @@ public final class RuntimeGlanceCoordinator: RuntimeGlanceControlling {
     /// Deliveries of ⌃⌥⌘H closer together than this count as one press, in case one press ever
     /// reaches both the Carbon hotkey and the open menu's key equivalent.
     static let hotKeyRepeatWindow: TimeInterval = 0.3
+
+    /// The backend state the glance surfaces and the Dashboard show. The supervisor marks the
+    /// backend failed when restoring every model failed, although its process keeps serving;
+    /// that reads as degraded, as a partial restore does, so live metrics keep flowing.
+    public nonisolated static func observedBackendState(
+        _ state: BackendProcessState,
+        processRunning: Bool
+    ) -> BackendProcessState {
+        state == .failed && processRunning ? .degraded : state
+    }
 
     /// `language` is read at start and whenever the menu language changes, never per update.
     public convenience init(
@@ -85,12 +97,15 @@ public final class RuntimeGlanceCoordinator: RuntimeGlanceControlling {
         self.language = language
         self.hotKeyFactory = hotKeyFactory
         self.hudFactory = hudFactory
+        let relay = RuntimeEventRelay()
+        self.relay = relay
         self.client = RuntimeMetricsClient(
             store: store,
             streaming: streaming,
             endpoint: endpoint,
             backendState: backendState,
-            notificationCenter: notificationCenter
+            notificationCenter: notificationCenter,
+            relay: relay
         )
     }
 

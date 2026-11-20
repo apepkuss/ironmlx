@@ -1818,7 +1818,7 @@ where
             )
         }
     };
-    let mut performance = state.record_request_started(input_tokens, started_at);
+    let mut performance = state.record_request_started(input_tokens, started_at, "/v1/messages");
     let mut output = ParsedToolOutput {
         content: String::new(),
         reasoning: String::new(),
@@ -1913,7 +1913,7 @@ where
     let native_output = context.native_output;
     let output_format = context.output_format.clone();
     let constraint_options = context.constraint_options;
-    let mut performance = state.record_request_started(input_tokens, started_at);
+    let mut performance = state.record_request_started(input_tokens, started_at, "/v1/messages");
     let tokenizer = state.tokenizer.clone();
     let message_id = gen_msg_id();
     let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
@@ -2075,7 +2075,7 @@ where
         Ok(reply) => reply,
         Err(response) => return response,
     };
-    let mut performance = state.record_request_started(input_tokens, started_at);
+    let mut performance = state.record_request_started(input_tokens, started_at, "/v1/messages");
 
     // 2. Spawn forwarder that emits the 6-event SSE sequence.
     let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
@@ -2211,7 +2211,7 @@ where
         Ok(reply) => reply,
         Err(response) => return response,
     };
-    let mut performance = state.record_request_started(input_tokens, started_at);
+    let mut performance = state.record_request_started(input_tokens, started_at, "/v1/messages");
 
     // 2. Drain committed tokens through the protocol-neutral decoder.
     let mut decoder =

@@ -167,6 +167,8 @@ public final class DashboardWindowController {
     var activation: AppWindowActivation = .shared
     private let downloadService: ModelDownloadService?
     private let loadActivity: ModelLoadActivityCenter
+    /// Handed to the bridge when it is created; events reach the page only while it is open.
+    private var runtimeRelay: RuntimeEventRelay?
     /// Handed to the bridge for the onboarding page; set by the App.
     weak var chatEntry: (any ChatEntryHandling)? {
         didSet { bridge?.chatEntry = chatEntry }
@@ -185,10 +187,17 @@ public final class DashboardWindowController {
         self.loadActivity = loadActivity ?? ModelLoadActivityCenter(configStore: configStore)
     }
 
+    /// Delivers the runtime events to the Dashboard page whenever it is open.
+    public func attachRuntimeRelay(_ relay: RuntimeEventRelay) {
+        runtimeRelay = relay
+        bridge?.attachRuntimeRelay(relay)
+    }
+
     public func show(route: DashboardInitialRoute = .status, agentGuide: AgentGuideID? = nil) {
         loadActivity.setDashboardVisible(true)
         if let window {
             windowDelegate?.cancelPendingHideAfterFullScreenExit()
+            bridge?.setDashboardWindowVisible(true)
             activation.shown(.dashboard)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -222,6 +231,11 @@ public final class DashboardWindowController {
             loadActivity: loadActivity
         )
         bridge.chatEntry = chatEntry
+        webView.navigationDelegate = bridge
+        if let runtimeRelay {
+            bridge.attachRuntimeRelay(runtimeRelay)
+        }
+        bridge.setDashboardWindowVisible(true)
         DashboardBridge.handlerNames.forEach {
             userContentController.add(bridge, name: $0)
         }
@@ -248,6 +262,7 @@ public final class DashboardWindowController {
             },
             hideWindow: { [weak window, weak bridge, loadActivity] in
                 bridge?.cancelDiagnosticExport()
+                bridge?.setDashboardWindowVisible(false)
                 window?.orderOut(nil)
                 loadActivity.setDashboardVisible(false)
             },

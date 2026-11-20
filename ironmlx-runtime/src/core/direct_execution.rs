@@ -56,8 +56,10 @@ impl<'a, M: Model + DenseVlMethods + Send + 'static> DirectGeneration<'a, M> {
         &self,
         input_tokens: u32,
         started_at: Instant,
+        endpoint: &'static str,
     ) -> ModelRuntimeRequestTracker {
-        self.state.record_request_started(input_tokens, started_at)
+        self.state
+            .record_request_started(input_tokens, started_at, endpoint)
     }
 }
 

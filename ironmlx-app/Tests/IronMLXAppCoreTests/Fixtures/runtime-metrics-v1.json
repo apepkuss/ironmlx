@@ -31,7 +31,10 @@
       "active_requests": 2,
       "queued_requests": 1,
       "queue_capacity": 2,
-      "live_decode_tokens_per_second": 42.8
+      "live_decode_tokens_per_second": 42.8,
+      "weight_bytes": 20000000000,
+      "kv_cache_bytes": 10300000000,
+      "idle_unload_unix_ms": null
     },
     {
       "id": "Qwen3-ASR-1.7B",
@@ -40,7 +43,10 @@
       "last_error": "model weights not found",
       "is_default": false,
       "active_requests": 0,
-      "queued_requests": 0
+      "queued_requests": 0,
+      "weight_bytes": null,
+      "kv_cache_bytes": 0,
+      "idle_unload_unix_ms": null
     }
   ]
 }

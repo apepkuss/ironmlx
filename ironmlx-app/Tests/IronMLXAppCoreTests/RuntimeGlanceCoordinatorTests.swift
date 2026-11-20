@@ -11,7 +11,7 @@ private final class OpenStreamCounter: RuntimeMetricsStreaming {
     var opened: Int { counts.withLock { $0.opened } }
     var closed: Int { counts.withLock { $0.closed } }
 
-    func snapshots(from url: URL) -> AsyncThrowingStream<RuntimeMetricsSnapshot, Error> {
+    func events(from url: URL) -> AsyncThrowingStream<RuntimeMetricsStreamEvent, Error> {
         counts.withLock { $0.opened += 1 }
         return AsyncThrowingStream { continuation in
             continuation.onTermination = { [self] _ in
@@ -132,4 +132,33 @@ func releasingCoordinatorClosesConnection() async throws {
 
     #expect(released == nil)
     try await waitFor { streaming.closed == 1 }
+}
+
+@Test
+func failedBackendWithLiveProcessReadsAsDegraded() {
+    // Restoring every model can fail while the backend process itself stays healthy.
+    #expect(RuntimeGlanceCoordinator.observedBackendState(.failed, processRunning: true) == .degraded)
+    #expect(RuntimeGlanceCoordinator.observedBackendState(.failed, processRunning: false) == .failed)
+    #expect(RuntimeGlanceCoordinator.observedBackendState(.running, processRunning: true) == .running)
+    #expect(RuntimeGlanceCoordinator.observedBackendState(.stopped, processRunning: false) == .stopped)
+}
+
+@Test @MainActor
+func failedRestoreWithLiveProcessStillStreamsMetrics() async throws {
+    let (preferences, cleanup) = try inMemoryPreferences()
+    defer { cleanup() }
+    let streams = OpenStreamCounter()
+    let coordinator = RuntimeGlanceCoordinator(
+        preferences: preferences,
+        streaming: streams,
+        endpoint: { URL(string: "http://127.0.0.1:1/admin/api/metrics/stream") },
+        backendState: { RuntimeGlanceCoordinator.observedBackendState(.failed, processRunning: true) },
+        notificationCenter: NotificationCenter(),
+        hotKeyFactory: { _ in nil },
+        hudFactory: { _, _, _ in HeadlessHUD() }
+    )
+    coordinator.start()
+    try await waitFor { streams.opened == 1 }
+    #expect(coordinator.store.backendState == .degraded)
+    coordinator.stop()
 }

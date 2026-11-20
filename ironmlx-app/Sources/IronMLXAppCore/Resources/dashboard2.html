@@ -4,11 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>IronMLX Dashboard</title>
-<script>
-  try {
-    document.documentElement.classList.toggle('sidebar-collapsed', localStorage.getItem('ironmlx.sidebar.collapsed') === 'true');
-  } catch (_) {}
-</script>
 <style>
   /* Curated model catalogue: readable rows with provider actions. */
   .dl-source-tabs { display:flex; flex-wrap:wrap; gap:0; margin-bottom:16px; border-bottom:1px solid var(--border); }
@@ -75,7 +70,6 @@
     --tooltip-surface-border: rgba(0, 0, 0, 0.12);
     --tooltip-compact-shadow: 0 4px 14px rgba(0, 0, 0, 0.24);
     --tooltip-surface-shadow: 0 12px 28px rgba(0, 0, 0, 0.16);
-    --sidebar-w: 200px;
     --radius: 10px;
     --load-track: #ececf0;
     --load-veil: rgba(0, 0, 0, 0.22);
@@ -116,6 +110,402 @@
     }
   }
 
+  /* ── Design system (ds-) ──
+     Tokens and components for redesigned pages. Pages not yet migrated keep
+     the variables above; nothing here overrides them. The dark values follow
+     the window appearance (Settings > Theme sets it on the web view). */
+  :root {
+    --ds-surface-0: #f5f5f7;
+    --ds-surface-1: #ffffff;
+    --ds-surface-2: #f2f2f4;
+    --ds-text-1: #1d1d1f;
+    --ds-text-2: #6e6e73;
+    --ds-text-3: #8e8e93;
+    --ds-border: rgba(0, 0, 0, 0.1);
+    --ds-border-strong: rgba(0, 0, 0, 0.2);
+    --ds-control-selected: #ffffff;
+    --ds-green: #34C759;
+    --ds-blue: #007AFF;
+    --ds-amber: #FF9500;
+    --ds-red: #FF3B30;
+    --ds-gray: #8E8E93;
+    --ds-data-decode: #007AFF;
+    --ds-data-prefill: #AF52DE;
+    --ds-data-kv: #AF52DE;
+    --ds-data-cache: rgba(0, 0, 0, 0.35);
+    --ds-radius-card: 12px;
+    --ds-radius-control: 8px;
+    --ds-font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+    --ds-sidebar-w: 64px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ds-surface-0: #1e1f27;
+      --ds-surface-1: #28293a;
+      --ds-surface-2: #313346;
+      --ds-text-1: #f5f5f7;
+      --ds-text-2: #a1a1a6;
+      --ds-text-3: #7c7c85;
+      --ds-border: rgba(255, 255, 255, 0.1);
+      --ds-border-strong: rgba(255, 255, 255, 0.2);
+      --ds-control-selected: #4a4c62;
+      --ds-green: #30D158;
+      --ds-blue: #0A84FF;
+      --ds-amber: #FF9F0A;
+      --ds-red: #FF453A;
+      --ds-gray: #8E8E93;
+      --ds-data-decode: #0A84FF;
+      --ds-data-prefill: #BF5AF2;
+      --ds-data-kv: #BF5AF2;
+      --ds-data-cache: rgba(255, 255, 255, 0.35);
+    }
+  }
+
+  .ds-num { font-variant-numeric: tabular-nums; }
+
+  .ds-card {
+    min-width: 0;
+    padding: 16px 18px;
+    border: 0.5px solid var(--ds-border);
+    border-radius: var(--ds-radius-card);
+    background: var(--ds-surface-1);
+    color: var(--ds-text-1);
+  }
+  .ds-card-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 0 0 12px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ds-text-1);
+  }
+
+  .ds-tile {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    padding: 14px 16px;
+    border: 0.5px solid var(--ds-border);
+    border-radius: var(--ds-radius-card);
+    background: var(--ds-surface-1);
+  }
+  .ds-tile-label { font-size: 12px; color: var(--ds-text-2); }
+  .ds-tile-value {
+    overflow: hidden;
+    font-family: var(--ds-font-mono);
+    font-size: 22px;
+    font-weight: 600;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+    color: var(--ds-text-1);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .ds-tile-sub {
+    overflow: hidden;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ds-text-3);
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .ds-dot {
+    display: inline-block;
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--ds-gray);
+  }
+  .ds-dot--green { background: var(--ds-green); }
+  .ds-dot--blue { background: var(--ds-blue); }
+  .ds-dot--amber { background: var(--ds-amber); }
+  .ds-dot--red { background: var(--ds-red); }
+  .ds-dot--gray { background: var(--ds-gray); }
+
+  /* The pill draws its own leading dot in the tone colour. */
+  .ds-pill {
+    --ds-tone: var(--ds-gray);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--ds-tone) 14%, transparent);
+    color: var(--ds-text-1);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.4;
+    white-space: nowrap;
+  }
+  .ds-pill::before {
+    content: '';
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--ds-tone);
+  }
+  .ds-pill--green { --ds-tone: var(--ds-green); }
+  .ds-pill--blue { --ds-tone: var(--ds-blue); }
+  .ds-pill--amber { --ds-tone: var(--ds-amber); }
+  .ds-pill--red { --ds-tone: var(--ds-red); }
+  .ds-pill--gray { --ds-tone: var(--ds-gray); }
+
+  .ds-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    padding: 9px 0;
+    font-size: 13px;
+    color: var(--ds-text-1);
+  }
+  .ds-row + .ds-row { border-top: 0.5px solid var(--ds-border); }
+
+  .ds-seg {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    border-radius: var(--ds-radius-control);
+    background: var(--ds-surface-2);
+  }
+  .ds-seg button {
+    padding: 3px 10px;
+    border: 0;
+    border-radius: calc(var(--ds-radius-control) - 2px);
+    background: transparent;
+    color: var(--ds-text-2);
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.5;
+    cursor: pointer;
+  }
+  .ds-seg button:hover { color: var(--ds-text-1); }
+  .ds-seg button[aria-pressed="true"] {
+    background: var(--ds-control-selected);
+    color: var(--ds-text-1);
+    box-shadow: 0 0 0 0.5px var(--ds-border), 0 1px 2px rgba(0, 0, 0, 0.08);
+  }
+
+  .ds-icon-btn {
+    display: inline-grid;
+    place-items: center;
+    flex: none;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--ds-radius-control);
+    background: transparent;
+    color: var(--ds-text-2);
+    font: inherit;
+    cursor: pointer;
+  }
+  .ds-icon-btn:hover { background: var(--ds-surface-2); color: var(--ds-text-1); }
+  .ds-icon-btn:disabled { opacity: 0.45; cursor: default; }
+  .ds-icon-btn svg { display: block; width: 16px; height: 16px; }
+  .ds-seg button:focus-visible,
+  .ds-icon-btn:focus-visible { outline: 2px solid var(--ds-blue); outline-offset: 1px; }
+
+  /* Segment widths are set inline as percentages of the limit. */
+  .ds-membar {
+    display: flex;
+    overflow: hidden;
+    height: 8px;
+    border-radius: 4px;
+    background: var(--ds-surface-2);
+  }
+  .ds-membar-seg { flex: none; height: 100%; min-width: 0; }
+  .ds-membar-seg--model { background: var(--ds-data-decode); }
+  .ds-membar-seg--kv { background: var(--ds-data-kv); }
+  .ds-membar-seg--cache { background: var(--ds-data-cache); }
+
+  /* ── Status page ── */
+  .ds-status-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    padding-bottom: 20px;
+  }
+  .ds-status-headline { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .ds-status-headline .page-title { margin-bottom: 0; }
+  .ds-status-meta {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--ds-text-2);
+  }
+  .ds-status-meta-text { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; min-width: 0; }
+  .ds-status-sep { color: var(--ds-text-3); }
+  .ds-status-address {
+    padding: 1px 4px;
+    margin: 0 -2px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--ds-text-1);
+    font: inherit;
+    font-family: var(--ds-font-mono);
+    font-size: 12px;
+    cursor: copy;
+  }
+  .ds-status-address:hover { background: var(--ds-surface-2); }
+  .ds-status-address:focus-visible { outline: 2px solid var(--ds-blue); outline-offset: 1px; }
+  .ds-status-endpoints-toggle svg { transition: transform 0.15s ease; }
+  .ds-status-endpoints-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+  .ds-status-body { display: flex; flex-direction: column; gap: 16px; padding-bottom: 8px; }
+  .ds-status-body [hidden] { display: none; }
+  .ds-status-endpoint-list { display: flex; flex-direction: column; gap: 8px; }
+  .ds-status-endpoint-hint { margin-top: 10px; font-size: 12px; line-height: 1.6; color: var(--ds-text-2); }
+  .ds-status-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .ds-status-unit {
+    margin-left: 5px;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ds-text-2);
+  }
+  .ds-status-tile-text { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif; font-size: 18px; line-height: 1.5; }
+  .ds-status-title-group { display: inline-flex; align-items: center; gap: 12px; }
+  .ds-status-trend .ds-seg { font-weight: 400; }
+  .ds-status-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+    margin: -2px 0 8px;
+    font-size: 11px;
+    color: var(--ds-text-2);
+  }
+  .ds-status-legend-item { display: inline-flex; align-items: center; gap: 6px; }
+  .ds-status-swatch { display: inline-block; width: 12px; height: 2px; border-radius: 1px; }
+  .ds-status-swatch--dashed { height: 0; border-top: 2px dashed; border-radius: 0; background: transparent; }
+  .ds-status-chart { position: relative; height: 200px; }
+  .ds-status-chart canvas { display: block; width: 100%; height: 100%; }
+  .ds-status-tooltip {
+    position: absolute;
+    top: 4px;
+    z-index: 2;
+    min-width: 120px;
+    padding: 6px 9px;
+    border: 0.5px solid var(--ds-border-strong);
+    border-radius: var(--ds-radius-control);
+    background: var(--ds-surface-1);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+    color: var(--ds-text-1);
+    font-size: 11px;
+    line-height: 1.6;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+  .ds-status-tooltip-time { color: var(--ds-text-2); }
+  .ds-status-tooltip-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .ds-status-tooltip-row > span:first-child { display: inline-flex; align-items: center; gap: 6px; color: var(--ds-text-2); }
+  .ds-status-note { margin-top: 6px; font-size: 11px; color: var(--ds-text-3); }
+  .ds-status-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; align-items: start; }
+  .ds-status-model { align-items: flex-start; }
+  .ds-status-model > .ds-dot { margin-top: 6px; }
+  .ds-status-model-main { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
+  .ds-status-model-name { display: flex; align-items: center; gap: 8px; min-width: 0; font-weight: 500; }
+  .ds-status-ellipsis { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ds-status-badge {
+    flex: none;
+    padding: 0 6px;
+    border: 0.5px solid var(--ds-border-strong);
+    border-radius: 4px;
+    color: var(--ds-text-2);
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 16px;
+  }
+  .ds-status-model-sub { font-size: 12px; color: var(--ds-text-2); overflow-wrap: anywhere; }
+  .ds-status-model-sub--error { color: var(--ds-red); }
+  .ds-status-model-speed { flex: none; padding-top: 1px; font-family: var(--ds-font-mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .ds-status-action {
+    flex: none;
+    padding: 2px 10px;
+    border: 0.5px solid var(--ds-border-strong);
+    border-radius: var(--ds-radius-control);
+    background: var(--ds-surface-1);
+    color: var(--ds-text-1);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .ds-status-action:hover { background: var(--ds-surface-2); }
+  .ds-status-action:disabled { opacity: 0.5; cursor: default; }
+  .ds-status-link {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ds-blue);
+    font: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .ds-status-link:hover { text-decoration: underline; }
+  .ds-status-empty { padding: 10px 0 4px; font-size: 12px; color: var(--ds-text-2); }
+  .ds-status-mem-total {
+    margin-bottom: 8px;
+    font-family: var(--ds-font-mono);
+    font-size: 15px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+  .ds-status-mem-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 8px 0 4px; font-size: 11px; color: var(--ds-text-2); }
+  .ds-status-mem-key { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
+  .ds-status-key { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 2px; }
+  .ds-status-pair { justify-content: space-between; }
+  .ds-status-pair > span:first-child { color: var(--ds-text-2); }
+  .ds-status-value { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+  .ds-row.ds-status-request {
+    display: grid;
+    grid-template-columns: 62px minmax(0, 1.3fr) minmax(0, 1fr) 96px 60px 78px 44px;
+    gap: 10px;
+    font-size: 12px;
+  }
+  .ds-status-request-time { font-family: var(--ds-font-mono); color: var(--ds-text-2); font-variant-numeric: tabular-nums; }
+  .ds-status-num { text-align: right; font-family: var(--ds-font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .ds-status-request--aborted { color: var(--ds-text-3); }
+  .ds-status-request--aborted .ds-status-request-time { color: var(--ds-text-3); }
+  .ds-status-tag { justify-self: end; color: var(--ds-text-3); font-size: 11px; }
+  .ds-status-disclosure {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    width: 100%;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--ds-text-1);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+  }
+  .ds-status-disclosure svg { flex: none; width: 16px; height: 16px; color: var(--ds-text-2); transition: transform 0.15s ease; }
+  .ds-status-disclosure[aria-expanded="true"] svg { transform: rotate(180deg); }
+  .ds-status-disclosure:focus-visible { outline: 2px solid var(--ds-blue); outline-offset: 2px; border-radius: 4px; }
+  .ds-status-details-body { margin-top: 14px; }
+  @media (max-width: 960px) {
+    .ds-status-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .ds-status-grid { grid-template-columns: minmax(0, 1fr); }
+    .ds-row.ds-status-request { grid-template-columns: 62px minmax(0, 1fr) minmax(0, 1fr) 96px 60px 44px; }
+    .ds-status-request-speed { display: none; }
+  }
+
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
   .visually-hidden {
@@ -140,22 +530,21 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  /* ── Sidebar ── */
+  /* ── Sidebar: fixed narrow icon rail; names show as hover tooltips ── */
   .sidebar {
-    width: var(--sidebar-w);
+    width: var(--ds-sidebar-w);
     background: var(--sidebar-bg);
     border-right: 0.5px solid var(--border);
     display: flex;
     flex-direction: column;
-    padding: 20px 12px;
+    padding: 20px 10px;
     flex-shrink: 0;
   }
 
   .sidebar-logo {
     display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 0 8px 20px;
+    justify-content: center;
+    padding: 0 0 20px;
   }
 
   .sidebar-logo .icon {
@@ -172,87 +561,25 @@
     font-size: 16px;
   }
 
-  .sidebar-logo span {
-    font-weight: 600;
-    font-size: 21px;
-  }
-
   .nav-item {
+    position: relative;
+    isolation: isolate;
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 8px 12px;
+    justify-content: center;
+    padding: 8px 0;
     border-radius: 8px;
     cursor: pointer;
-    font-size: 15px;
     color: var(--text-secondary);
-    transition: all 0.15s;
+    transition: color 0.15s;
     user-select: none;
   }
 
   .nav-item[hidden] { display: none; }
+  .nav-item > [data-i18n] { display: none; }
 
-  .nav-item:hover {
-    background: var(--border);
-  }
-
-  .nav-item.locked {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-
-  .nav-item.locked:hover {
-    background: transparent;
-  }
-
-  .nav-item.active {
-    background: var(--accent);
-    color: white;
-  }
-
-  .nav-item .nav-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    flex-shrink: 0;
-  }
-  .nav-item .nav-icon svg { display: block; width: 22px; height: 22px; }
-
-  .sidebar-toggle {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    align-self: flex-start;
-    width: 40px;
-    height: 40px;
-    margin-top: auto;
-    padding: 10px;
-    border: 0;
-    border-radius: 8px;
-    background: transparent;
-    color: var(--text-secondary);
-    font: inherit;
-    font-size: 12px;
-    cursor: pointer;
-  }
-  .sidebar-toggle:hover { color: var(--text); background: var(--border); }
-  .sidebar-toggle svg { flex-shrink: 0; }
-  .sidebar-toggle:focus-visible, .nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .sidebar-collapsed .sidebar { width: 64px; padding-left: 10px; padding-right: 10px; }
-  .sidebar-collapsed .sidebar-logo { justify-content: center; padding-left: 0; padding-right: 0; }
-  .sidebar-collapsed .sidebar-logo > span,
-  .sidebar-collapsed .sidebar .nav-item > [data-i18n] { display: none; }
-  .sidebar-collapsed .sidebar .nav-item,
-  .sidebar-collapsed .sidebar-toggle { justify-content: center; padding-left: 0; padding-right: 0; gap: 0; }
-  .sidebar-collapsed .sidebar-toggle { align-self: center; }
-  .sidebar-collapsed .sidebar .nav-item {
-    position: relative;
-    isolation: isolate;
-    background: transparent;
-  }
-  .sidebar-collapsed .sidebar .nav-item::before {
+  /* The highlight is a 32px tile behind the icon, not the whole row. */
+  .nav-item::before {
     content: '';
     position: absolute;
     width: 32px;
@@ -265,9 +592,29 @@
     pointer-events: none;
     transition: background 0.15s;
   }
-  .sidebar-collapsed .sidebar .nav-item:hover::before { background: var(--border); }
-  .sidebar-collapsed .sidebar .nav-item.locked:hover::before { background: transparent; }
-  .sidebar-collapsed .sidebar .nav-item.active::before { background: var(--accent); }
+  .nav-item:hover::before { background: var(--border); }
+
+  .nav-item.locked {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .nav-item.locked:hover::before { background: transparent; }
+
+  .nav-item.active { color: white; }
+  .nav-item.active::before { background: var(--accent); }
+
+  .nav-item .nav-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+  }
+  .nav-item .nav-icon svg { display: block; width: 22px; height: 22px; }
+
+  .nav-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
   .sidebar-tooltip,
   .model-table-tooltip {
@@ -463,9 +810,9 @@
     .model-import-dialog .modal-footer { padding:14px 20px; }
     .model-import-identity { align-items:flex-start; flex-direction:column; gap:8px; }
   }
-  #model-table tr.model-just-imported { outline:2px solid var(--accent); outline-offset:-2px; animation:model-import-highlight 4s ease-out forwards; }
+  #model-table tr.model-just-imported, #model-table tr.model-load-focus { outline:2px solid var(--accent); outline-offset:-2px; animation:model-import-highlight 4s ease-out forwards; }
   @keyframes model-import-highlight { 0%, 72% { outline-color:var(--accent); } 100% { outline-color:transparent; } }
-  @media (prefers-reduced-motion:reduce) { #model-table tr.model-just-imported { animation:none; } }
+  @media (prefers-reduced-motion:reduce) { #model-table tr.model-just-imported, #model-table tr.model-load-focus { animation:none; } }
 
   #tab-models-manage .data-table-wrapper {
     flex: 1 1 auto;
@@ -1905,45 +2252,6 @@
     transform: translateX(18px);
   }
 
-  /* ── Service overview ── */
-  .service-overview-summary {
-    display: flex;
-    align-items: center;
-    justify-content: flex-start;
-    flex-wrap: wrap;
-    gap: 12px 24px;
-    padding-bottom: 14px;
-    margin-bottom: 12px;
-    border-bottom: 0.5px solid var(--border);
-  }
-
-  .service-overview-status,
-  .service-overview-uptime {
-    display: flex;
-    align-items: center;
-    flex: 0 0 auto;
-    gap: 8px;
-    white-space: nowrap;
-  }
-
-  .service-status-dot {
-    width: 8px;
-    height: 8px;
-    flex: 0 0 auto;
-    border-radius: 50%;
-    background: var(--text-tertiary);
-  }
-
-  .service-overview-label {
-    font-size: 11px;
-    color: var(--text-secondary);
-  }
-
-  .service-overview-value {
-    font-size: 13px;
-    font-weight: 600;
-  }
-
   /* ── Separator ── */
   .sep {
     height: 0.5px;
@@ -3152,110 +3460,6 @@
     line-height: 1.4;
   }
 
-  /* ── GPU chart ── */
-  .gpu-chart-container {
-    background: var(--card-bg);
-    border: 0.5px solid var(--border);
-    border-radius: var(--radius);
-    padding: 16px;
-    margin-top: 16px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-  }
-
-  .gpu-chart-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 12px;
-  }
-
-  .gpu-chart-header .chart-title {
-    font-size: 13px;
-    font-weight: 600;
-  }
-
-  .gpu-chart-legend {
-    display: flex;
-    gap: 16px;
-    font-size: 11px;
-    color: var(--text-secondary);
-  }
-
-  .gpu-chart-actions {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 14px;
-    flex-wrap: wrap;
-  }
-
-  .gpu-window-toggle {
-    display: flex;
-    align-items: center;
-    border: 0.5px solid var(--border);
-    border-radius: 6px;
-    overflow: hidden;
-    background: var(--bg);
-  }
-
-  .gpu-window-btn {
-    width: 34px;
-    height: 24px;
-    border: 0;
-    border-right: 0.5px solid var(--border);
-    background: transparent;
-    color: var(--text-secondary);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-  }
-
-  .gpu-window-btn:last-child {
-    border-right: 0;
-  }
-
-  .gpu-window-btn:hover {
-    color: var(--text);
-    background: rgba(0,122,255,0.06);
-  }
-
-  .gpu-window-btn.active {
-    color: var(--accent);
-    background: rgba(0,122,255,0.12);
-  }
-
-  .gpu-chart-legend span {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-  }
-
-  .legend-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    display: inline-block;
-  }
-
-  .gpu-chart-canvas {
-    width: 100%;
-    height: 200px;
-    display: block;
-  }
-
-  .gpu-chart-stats {
-    display: flex;
-    gap: 24px;
-    margin-top: 10px;
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
-
-  .gpu-chart-stats strong {
-    color: var(--text);
-  }
-
   /* ── Log viewer ── */
   .log-filter-row {
     display: flex;
@@ -3769,11 +3973,10 @@
   .action-btn.action-cancel-load:hover:not(:disabled) { background: var(--bg); }
 
   .model-load-overlay {
-    position: fixed; top: 0; right: 0; bottom: 0; left: var(--sidebar-w); z-index: 90;
+    position: fixed; top: 0; right: 0; bottom: 0; left: var(--ds-sidebar-w); z-index: 90;
     display: flex; justify-content: center; align-items: flex-start;
     padding: 58px 16px 16px; overflow-y: auto; background: var(--load-veil);
   }
-  .sidebar-collapsed .model-load-overlay { left: 64px; }
   .model-load-overlay[hidden] { display: none; }
   .model-load-panel {
     position: relative; width: 440px; max-width: 100%; padding: 20px 22px 18px;
@@ -3830,43 +4033,26 @@
   .model-load-actions .model-load-cancel { color: var(--destructive); }
   .model-load-actions button:disabled { opacity: 0.45; cursor: default; }
 
+  /* Sidebar load indicator: a progress ring; its text is the hover tooltip. */
   .model-load-indicator {
-    display: block; width: 100%; margin: auto 0 8px; padding: 9px 10px 10px;
+    display: grid; place-items: center; align-self: center; width: 44px; height: 44px; margin: auto 0 8px; padding: 0;
     border: 0.5px solid var(--border); border-radius: 10px; background: var(--card-bg);
-    color: var(--text); font: inherit; text-align: left; cursor: pointer;
+    color: var(--text); font: inherit; cursor: pointer;
   }
   .model-load-indicator[hidden] { display: none !important; }
-  .model-load-indicator:not([hidden]) ~ .sidebar-toggle { margin-top: 0; }
   .model-load-indicator:hover { background: var(--bg); }
   .model-load-indicator:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .model-load-indicator-body { display: block; min-width: 0; }
-  .model-load-indicator-title { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; }
-  .model-load-indicator-title > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .model-load-spinner {
-    flex: none; width: 11px; height: 11px; box-sizing: border-box; border-radius: 50%;
-    border: 2px solid var(--load-track); border-top-color: var(--accent); animation: spin 0.9s linear infinite;
-  }
-  .model-load-indicator.is-queued .model-load-spinner { border-top-color: var(--text-tertiary); }
-  .model-load-indicator-detail { display: flex; margin: 3px 0 7px; font-size: 11px; color: var(--text-secondary); white-space: nowrap; }
-  .model-load-indicator-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .model-load-indicator-meta { flex: none; }
-  .model-load-indicator.is-failed .model-load-indicator-detail,
-  .model-load-indicator.is-queued .model-load-indicator-detail { margin-bottom: 0; }
   .model-load-indicator.is-failed { border-color: var(--settings-error-border); }
-  .model-load-indicator.is-failed .model-load-indicator-title { color: var(--settings-error-text); }
-  .model-load-ring { display: none; }
-  .sidebar-collapsed .model-load-indicator { display: grid; place-items: center; width: 44px; height: 44px; padding: 0; align-self: center; }
-  .sidebar-collapsed .model-load-indicator-body { display: none; }
-  .sidebar-collapsed .model-load-ring {
+  .model-load-ring {
     display: block; width: 24px; height: 24px; border-radius: 50%;
     background: conic-gradient(var(--accent) calc(var(--model-load-pct, 0) * 1%), var(--load-track) 0);
     -webkit-mask: radial-gradient(circle, transparent 7.5px, #000 8px);
     mask: radial-gradient(circle, transparent 7.5px, #000 8px);
   }
-  .sidebar-collapsed .model-load-ring.is-muted { background: conic-gradient(var(--text-tertiary) calc(var(--model-load-pct, 0) * 1%), var(--load-track) 0); }
-  .sidebar-collapsed .model-load-ring.is-indeterminate { background: conic-gradient(var(--accent) 25%, var(--load-track) 0); animation: spin 0.9s linear infinite; }
-  .sidebar-collapsed .model-load-ring.is-indeterminate.is-muted { background: conic-gradient(var(--text-tertiary) 25%, var(--load-track) 0); }
-  .sidebar-collapsed .model-load-ring.is-failed {
+  .model-load-ring.is-muted { background: conic-gradient(var(--text-tertiary) calc(var(--model-load-pct, 0) * 1%), var(--load-track) 0); }
+  .model-load-ring.is-indeterminate { background: conic-gradient(var(--accent) 25%, var(--load-track) 0); animation: spin 0.9s linear infinite; }
+  .model-load-ring.is-indeterminate.is-muted { background: conic-gradient(var(--text-tertiary) 25%, var(--load-track) 0); }
+  .model-load-ring.is-failed {
     display: grid; place-items: center; width: 20px; height: 20px;
     background: var(--destructive); color: #fff; font-size: 12px; font-weight: 700;
     -webkit-mask: none; mask: none;
@@ -3874,7 +4060,7 @@
   @media (prefers-reduced-motion: reduce) {
     .model-load-bar > i { transition: none; }
     .model-load-bar.is-indeterminate > i { width: 100%; opacity: 0.35; animation: none; }
-    .model-load-spinner, .model-load-step.is-current .model-load-step-mark, .sidebar-collapsed .model-load-ring.is-indeterminate { animation: none; }
+    .model-load-step.is-current .model-load-step-mark, .model-load-ring.is-indeterminate { animation: none; }
   }
 </style>
 </head>
@@ -3884,7 +4070,6 @@
 <div class="sidebar" id="dashboard-sidebar">
   <div class="sidebar-logo">
     <div class="icon">Fe</div>
-    <span>IronMLX</span>
   </div>
 
   <div class="nav-item active" data-page="status">
@@ -3914,9 +4099,6 @@
     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="4" r="2.5" stroke="currentColor" stroke-width="1.3"/><circle cx="4" cy="14" r="2.5" stroke="currentColor" stroke-width="1.3"/><circle cx="14" cy="14" r="2.5" stroke="currentColor" stroke-width="1.3"/><line x1="9" y1="6.5" x2="4" y2="11.5" stroke="currentColor" stroke-width="1.2"/><line x1="9" y1="6.5" x2="14" y2="11.5" stroke="currentColor" stroke-width="1.2"/></svg></span> <span data-i18n="nav_cluster">Cluster (Experimental)</span>
   </div>
   <button class="model-load-indicator" id="model-load-indicator" type="button" hidden onclick="openModelLoadPanel(this.dataset.model)"></button>
-  <button class="sidebar-toggle" id="sidebar-toggle" type="button" onclick="toggleSidebar()" aria-controls="dashboard-sidebar" aria-expanded="true" aria-label="Collapse sidebar">
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="2"/><path d="M7.5 3.5v13"/></svg>
-  </button>
 </div>
 
 <div class="sidebar-tooltip" id="sidebar-tooltip" role="tooltip" hidden></div>
@@ -3970,71 +4152,105 @@
 
   <div class="page active" id="page-status">
     <div class="status-page-header">
-      <div class="page-title" data-i18n="nav_status">Status</div>
-      <div class="page-subtitle" data-i18n="status_subtitle">Server status and resource usage overview.</div>
+      <div class="ds-status-header">
+        <div class="ds-status-headline">
+          <div class="page-title" data-i18n="nav_status">Status</div>
+          <span class="ds-pill ds-pill--gray" id="status-pill">&mdash;</span>
+        </div>
+        <div class="ds-status-meta ds-num">
+          <span class="ds-status-meta-text" id="status-meta"></span>
+          <button type="button" class="ds-icon-btn ds-status-endpoints-toggle" id="status-endpoints-toggle" onclick="toggleStatusEndpoints()" aria-expanded="false" aria-controls="server-endpoints-card" data-i18n-aria-label="status_endpoints">
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+      </div>
     </div>
 
     <div class="status-page-scroll page-body-scroll">
+      <div class="ds-status-body">
+        <div class="ds-card ds-status-endpoints" id="server-endpoints-card" hidden>
+          <div class="ds-card-title"><span data-i18n="status_endpoints">Endpoints</span></div>
+          <div id="endpoints-list" class="ds-status-endpoint-list"></div>
+          <div id="endpoints-hint" class="ds-status-endpoint-hint"></div>
+        </div>
 
-    <!-- Server Endpoints -->
-    <div class="card-settings" id="server-endpoints-card" style="margin-bottom:16px;">
-      <div class="card-header">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M8 1v6M8 9v6M1 8h6M9 8h6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/></svg>
-        <span data-i18n="service_overview">Service Overview</span>
-      </div>
-      <div style="padding:14px 20px;">
-        <div class="service-overview-summary">
-          <div class="service-overview-status">
-            <span class="service-status-dot" id="server-status-dot"></span>
-            <span class="service-overview-label" data-i18n="server_status">Server Status</span>
-            <span class="service-overview-value" id="stat-server-status">&mdash;</span>
+        <div class="ds-status-tiles">
+          <div class="ds-tile">
+            <span class="ds-tile-label" data-i18n="status_tile_decode">Decode</span>
+            <span class="ds-tile-value"><span id="status-tile-decode">&mdash;</span><span class="ds-status-unit">tok/s</span></span>
           </div>
-          <div class="service-overview-uptime">
-            <span class="service-overview-label" data-i18n="uptime">Uptime</span>
-            <span class="service-overview-value" id="stat-uptime">&mdash;</span>
+          <div class="ds-tile">
+            <span class="ds-tile-label" data-i18n="status_tile_prefill">Prefill</span>
+            <span class="ds-tile-value"><span id="status-tile-prefill">&mdash;</span><span class="ds-status-unit">tok/s</span></span>
+          </div>
+          <div class="ds-tile">
+            <span class="ds-tile-label" data-i18n="status_tile_ttft">Time to first token</span>
+            <span class="ds-tile-value"><span id="status-tile-ttft">&mdash;</span><span class="ds-status-unit">ms</span></span>
+          </div>
+          <div class="ds-tile">
+            <span class="ds-tile-label" data-i18n="status_tile_requests">Requests</span>
+            <span class="ds-tile-value ds-status-tile-text" id="status-tile-requests">&mdash;</span>
           </div>
         </div>
-        <div id="endpoints-list" style="display:flex;flex-direction:column;gap:8px;"></div>
-        <div id="endpoints-hint" style="margin-top:10px;font-size:12px;color:var(--text-secondary);line-height:1.6;"></div>
-      </div>
-    </div>
 
-    <div class="card" id="runtime-model-health-card" style="margin-bottom:16px;">
-      <div class="card-header">
-        <span class="card-title" data-i18n="runtime_models">Model Runtime Status</span>
-      </div>
-      <div id="runtime-model-health" style="display:grid;gap:8px;">
-        <div style="padding:18px 12px;text-align:center;border:1px dashed var(--border);border-radius:8px;background:var(--bg);">
-          <div data-i18n="runtime_empty_title" style="font-size:12px;font-weight:600;color:var(--text-secondary);">No models are currently running</div>
-          <div data-i18n="runtime_empty_description" style="font-size:11px;color:var(--text-tertiary);margin-top:4px;">Load a model to see request queues and cumulative usage here.</div>
+        <div class="ds-card ds-status-trend">
+          <div class="ds-card-title">
+            <span class="ds-status-title-group">
+              <span data-i18n="status_trend">Trend</span>
+              <span class="ds-seg" role="group" data-i18n-aria-label="status_trend">
+                <button type="button" data-trend-mode="throughput" aria-pressed="true" onclick="setStatusTrendMode('throughput')" data-i18n="status_trend_throughput">Throughput</button>
+                <button type="button" data-trend-mode="memory" aria-pressed="false" onclick="setStatusTrendMode('memory')" data-i18n="status_trend_memory">Memory</button>
+              </span>
+            </span>
+            <span class="ds-seg" role="group">
+              <button type="button" data-trend-window="10m" aria-pressed="true" onclick="setStatusTrendWindow('10m')" data-i18n="status_window_10m">10m</button>
+              <button type="button" data-trend-window="1h" aria-pressed="false" onclick="setStatusTrendWindow('1h')" data-i18n="status_window_1h">1h</button>
+              <button type="button" data-trend-window="24h" aria-pressed="false" onclick="setStatusTrendWindow('24h')" data-i18n="status_window_24h">24h</button>
+            </span>
+          </div>
+          <div class="ds-status-legend" id="status-trend-legend"></div>
+          <div class="ds-status-chart" id="status-trend-chart">
+            <canvas id="status-trend-canvas"></canvas>
+            <div class="ds-status-tooltip ds-num" id="status-trend-tooltip" hidden></div>
+          </div>
+          <div class="ds-status-note" id="status-trend-note" hidden></div>
+        </div>
+
+        <div class="ds-status-grid">
+          <div class="ds-card">
+            <div class="ds-card-title"><span data-i18n="status_models">Models</span></div>
+            <div id="status-models"></div>
+          </div>
+          <div class="ds-card">
+            <div class="ds-card-title"><span data-i18n="status_memory">Memory</span></div>
+            <div id="status-memory"></div>
+          </div>
+        </div>
+
+        <div class="ds-card">
+          <div class="ds-card-title">
+            <span data-i18n="status_recent">Recent requests</span>
+            <button type="button" class="ds-status-link" onclick="navigateTo('logs')"><span data-i18n="status_view_logs">View logs</span> &rarr;</button>
+          </div>
+          <div id="status-recent"></div>
+        </div>
+
+        <!-- Detailed per-model runtime status (renderRuntimeModels), collapsed by default. -->
+        <div class="ds-card ds-status-details" id="runtime-model-health-card">
+          <button type="button" class="ds-status-disclosure" id="status-details-toggle" onclick="toggleStatusDetails()" aria-expanded="false" aria-controls="status-details-body">
+            <span data-i18n="status_runtime_details">Runtime details</span>
+            <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div class="ds-status-details-body" id="status-details-body" hidden>
+            <div id="runtime-model-health" style="display:grid;gap:8px;">
+              <div style="padding:18px 12px;text-align:center;border:1px dashed var(--border);border-radius:8px;background:var(--bg);">
+                <div data-i18n="runtime_empty_title" style="font-size:12px;font-weight:600;color:var(--text-secondary);">No models are currently running</div>
+                <div data-i18n="runtime_empty_description" style="font-size:11px;color:var(--text-tertiary);margin-top:4px;">Load a model to see request queues and cumulative usage here.</div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
-    </div>
-
-    <!-- GPU Memory Chart -->
-    <div class="gpu-chart-container">
-      <div class="gpu-chart-header">
-        <span class="chart-title"><span data-i18n="gpu_memory">GPU Memory</span><span id="gpu-total-label" style="font-weight:400;color:var(--text-secondary);margin-left:6px;font-size:12px;"></span><span id="gpu-device-info" style="font-weight:400;color:var(--text-tertiary);margin-left:8px;font-size:11px;"></span></span>
-        <div class="gpu-chart-actions">
-          <div class="gpu-window-toggle" role="group" aria-label="GPU history window">
-            <button class="gpu-window-btn" type="button" data-gpu-window="5">5m</button>
-            <button class="gpu-window-btn active" type="button" data-gpu-window="15">15m</button>
-            <button class="gpu-window-btn" type="button" data-gpu-window="30">30m</button>
-            <button class="gpu-window-btn" type="button" data-gpu-window="60">1h</button>
-          </div>
-          <div class="gpu-chart-legend">
-            <span><span class="legend-dot" style="background:#007aff;"></span> <span data-i18n="active_mem">Active</span></span>
-            <span><span class="legend-dot" style="background:#ff3b30;"></span> <span data-i18n="peak_mem">Peak</span></span>
-          </div>
-        </div>
-      </div>
-      <canvas id="gpu-chart" class="gpu-chart-canvas"></canvas>
-      <div class="gpu-chart-stats">
-        <span><span data-i18n="active_mem">Active</span>: <strong id="gpu-active-val">-- MB</strong></span>
-        <span><span data-i18n="peak_mem">Peak</span>: <strong id="gpu-peak-val">-- MB</strong></span>
-        <span><span data-i18n="cache_mem">Cache</span>: <strong id="gpu-cache-val">-- MB</strong></span>
-      </div>
-    </div>
     </div>
   </div>
 
@@ -6259,7 +6475,6 @@
       voice_fields_required: "Voice ID and voice name are required.", voice_file_too_large: "Reference audio exceeds 16 MiB.", voice_file_read_failed: "Could not read the reference audio.", voice_delete_confirm: "Delete voice \"{id}\"?",
 
       nav_status: "Status", nav_models: "Models", nav_voices: "Voices", nav_benchmark: "Benchmark", nav_logs: "Logs", nav_chat: "Agent", nav_settings: "Settings",
-      sidebar_expand: "Expand sidebar", sidebar_collapse: "Collapse sidebar",
       chat_subtitle: "Configure external agents to use IronMLX as their inference provider.",
       agent_client_terminal: "Terminal app",
       agent_client_terminal_desktop: "Terminal · Desktop",
@@ -6502,6 +6717,13 @@
       confirm_delete_single: 'Delete model "{name}"? This cannot be undone.',
       col_actions: "Actions", status_loaded: "Loaded", action_load: "Load", action_unload: "Unload",
       status_loading: "Loading...", status_unloading: "Unloading...",
+      status_generating: "Generating", status_prefilling: "Prefilling", status_idle: "Idle", status_starting: "Starting", status_recovering: "Recovering", status_stopping: "Stopping", status_degraded: "Degraded", status_stopped: "Stopped", status_failed: "Failed", status_reconnecting: "Reconnecting", status_memory_emergency: "Memory emergency", status_model_failed: "Model failed to load",
+      status_uptime: "Up {duration}", status_duration_minutes: "{m} min", status_duration_hours: "{h} h {m} min", status_duration_days: "{d} d {h} h", status_scope_local: "This Mac only", status_scope_lan: "LAN", status_endpoints: "Endpoints",
+      status_tile_decode: "Decode", status_tile_prefill: "Prefill", status_tile_ttft: "Time to first token", status_tile_requests: "Requests", status_requests_value: "{active} active · {queued} queued",
+      status_trend: "Trend", status_trend_throughput: "Throughput", status_trend_memory: "Memory", status_trend_process: "Process", status_trend_ceiling: "Limit", status_window_10m: "10m", status_window_1h: "1h", status_window_24h: "24h", status_chart_empty: "No data yet.",
+      status_models: "Models", status_memory: "Memory", status_memory_model: "Models and other", status_memory_kv: "KV", status_memory_cache: "MLX cache", status_pressure: "Pressure", status_pressure_normal: "Normal", status_pressure_soft: "Elevated", status_pressure_hard: "High", status_pressure_emergency: "Critical", status_prefix_hit: "Prefix cache hits (cumulative)",
+      status_recent: "Recent requests", status_view_logs: "View logs", status_aborted: "Aborted", status_idle_unload: "Idle, unloads in {minutes} min", status_unload_soon: "Unloading soon", status_retry: "Retry", status_unload: "Unload", status_load_failed: "Failed to load: {reason}", status_model_memory: "Weights {weights} · KV {kv}", status_no_models: "No model loaded yet.", status_open_models: "Go to Models", status_no_requests: "No requests yet.", status_last_updated: "Last updated {time}",
+      status_runtime_details: "Runtime details", status_backend_stopped: "The server is not running.", status_backend_starting: "The server is starting…",
       status_verifying: "Verifying integrity… {pct}%", status_verified: "Verified {time}", status_verified_label: "Verified", status_corrupt: "Corrupt",
       verify_integrity: "Verify model integrity", delete_model: "Delete model", more_actions: "More actions", manage_versions: "Manage versions", copy_model_id: "Copy model ID", model_id_copied: "Model ID copied.",
       model_versions_loading: "Loading versions…", model_versions_count: "{n} versions", reclaimable_space: "{size} reclaimable", current_version: "Current", loaded_version: "Loaded", verified_version: "Verified", unverified_version: "Unverified", corrupt_version: "Corrupt",
@@ -7030,7 +7252,6 @@
       voice_fields_required: "声音 ID 和声音名称为必填项。", voice_file_too_large: "参考音频不能超过 16 MiB。", voice_file_read_failed: "无法读取参考音频。", voice_delete_confirm: "删除声音“{id}”？",
 
       nav_status: "状态", nav_models: "模型", nav_voices: "声音", nav_benchmark: "基准测试", nav_logs: "日志", nav_chat: "Agent", nav_settings: "设置",
-      sidebar_expand: "展开侧栏", sidebar_collapse: "收起侧栏",
       chat_subtitle: "配置外部 Agent 使用 IronMLX 作为推理 Provider。",
       agent_client_terminal: "终端应用",
       agent_client_terminal_desktop: "终端 · 桌面",
@@ -7273,6 +7494,13 @@
       confirm_delete_single: '确定删除模型 "{name}"？此操作不可恢复。',
       col_actions: "操作", status_loaded: "已加载", action_load: "加载", action_unload: "卸载",
       status_loading: "加载中...", status_unloading: "卸载中...",
+      status_generating: "正在生成", status_prefilling: "预填充中", status_idle: "空闲", status_starting: "启动中", status_recovering: "恢复中", status_stopping: "正在停止", status_degraded: "降级", status_stopped: "已停止", status_failed: "已失败", status_reconnecting: "重新连接中", status_memory_emergency: "内存紧急", status_model_failed: "模型加载失败",
+      status_uptime: "运行 {duration}", status_duration_minutes: "{m} 分钟", status_duration_hours: "{h} 小时 {m} 分", status_duration_days: "{d} 天 {h} 小时", status_scope_local: "仅本机", status_scope_lan: "局域网", status_endpoints: "接口详情",
+      status_tile_decode: "解码", status_tile_prefill: "预填充", status_tile_ttft: "首字延迟", status_tile_requests: "请求", status_requests_value: "{active} 进行中 · {queued} 排队",
+      status_trend: "走势", status_trend_throughput: "吞吐", status_trend_memory: "内存", status_trend_process: "进程占用", status_trend_ceiling: "上限", status_window_10m: "10 分", status_window_1h: "1 时", status_window_24h: "24 时", status_chart_empty: "还没有数据。",
+      status_models: "模型", status_memory: "内存", status_memory_model: "模型与其他", status_memory_kv: "KV", status_memory_cache: "MLX 缓存", status_pressure: "压力", status_pressure_normal: "正常", status_pressure_soft: "偏高", status_pressure_hard: "高", status_pressure_emergency: "紧急", status_prefix_hit: "前缀缓存命中（累计）",
+      status_recent: "最近请求", status_view_logs: "查看日志", status_aborted: "中断", status_idle_unload: "空闲，{minutes} 分钟后卸载", status_unload_soon: "即将卸载", status_retry: "重试", status_unload: "卸载", status_load_failed: "加载失败：{reason}", status_model_memory: "权重 {weights} · KV {kv}", status_no_models: "还没有加载模型。", status_open_models: "去模型页", status_no_requests: "还没有请求。", status_last_updated: "最后更新 {time}",
+      status_runtime_details: "运行详情", status_backend_stopped: "后端未运行。", status_backend_starting: "后端正在启动…",
       status_verifying: "正在验证完整性… {pct}%", status_verified: "已验证 {time}", status_verified_label: "已验证", status_corrupt: "已损坏",
       verify_integrity: "验证模型完整性", delete_model: "删除模型", more_actions: "更多操作", manage_versions: "管理版本", copy_model_id: "复制模型 ID", model_id_copied: "已复制模型 ID。",
       model_versions_loading: "正在加载版本…", model_versions_count: "共 {n} 个版本", reclaimable_space: "可释放 {size}", current_version: "当前版本", loaded_version: "已加载", verified_version: "已验证", unverified_version: "未验证", corrupt_version: "已损坏",
@@ -7801,7 +8029,6 @@
       voice_fields_required: "聲音 ID 和聲音名稱為必填欄位。", voice_file_too_large: "參考音訊不可超過 16 MiB。", voice_file_read_failed: "無法讀取參考音訊。", voice_delete_confirm: "刪除聲音「{id}」？",
 
       nav_status: "狀態", nav_models: "模型", nav_voices: "聲音", nav_benchmark: "基準測試", nav_logs: "日誌", nav_chat: "Agent", nav_settings: "設定",
-      sidebar_expand: "展開側欄", sidebar_collapse: "收起側欄",
       chat_subtitle: "設定外部 Agent 使用 IronMLX 作為推理 Provider。",
       agent_client_terminal: "終端應用程式",
       agent_client_terminal_desktop: "終端 · 桌面",
@@ -8044,6 +8271,13 @@
       confirm_delete_single: '確定刪除模型 "{name}"？此操作不可復原。',
       col_actions: "操作", status_loaded: "已載入", action_load: "載入", action_unload: "卸載",
       status_loading: "載入中...", status_unloading: "卸載中...",
+      status_generating: "正在生成", status_prefilling: "預填充中", status_idle: "閒置", status_starting: "啟動中", status_recovering: "恢復中", status_stopping: "正在停止", status_degraded: "降級", status_stopped: "已停止", status_failed: "已失敗", status_reconnecting: "重新連線中", status_memory_emergency: "記憶體緊急", status_model_failed: "模型載入失敗",
+      status_uptime: "執行 {duration}", status_duration_minutes: "{m} 分鐘", status_duration_hours: "{h} 小時 {m} 分", status_duration_days: "{d} 天 {h} 小時", status_scope_local: "僅本機", status_scope_lan: "區域網路", status_endpoints: "端點詳情",
+      status_tile_decode: "解碼", status_tile_prefill: "預填充", status_tile_ttft: "首字延遲", status_tile_requests: "請求", status_requests_value: "{active} 進行中 · {queued} 排隊",
+      status_trend: "走勢", status_trend_throughput: "吞吐", status_trend_memory: "記憶體", status_trend_process: "行程佔用", status_trend_ceiling: "上限", status_window_10m: "10 分", status_window_1h: "1 時", status_window_24h: "24 時", status_chart_empty: "還沒有資料。",
+      status_models: "模型", status_memory: "記憶體", status_memory_model: "模型與其他", status_memory_kv: "KV", status_memory_cache: "MLX 快取", status_pressure: "壓力", status_pressure_normal: "正常", status_pressure_soft: "偏高", status_pressure_hard: "高", status_pressure_emergency: "緊急", status_prefix_hit: "前綴快取命中（累計）",
+      status_recent: "最近請求", status_view_logs: "檢視日誌", status_aborted: "中斷", status_idle_unload: "閒置，{minutes} 分鐘後卸載", status_unload_soon: "即將卸載", status_retry: "重試", status_unload: "卸載", status_load_failed: "載入失敗：{reason}", status_model_memory: "權重 {weights} · KV {kv}", status_no_models: "還沒有載入模型。", status_open_models: "前往模型頁", status_no_requests: "還沒有請求。", status_last_updated: "最後更新 {time}",
+      status_runtime_details: "執行詳情", status_backend_stopped: "後端未執行。", status_backend_starting: "後端正在啟動…",
       status_verifying: "正在驗證完整性… {pct}%", status_verified: "已驗證 {time}", status_verified_label: "已驗證", status_corrupt: "已損壞",
       verify_integrity: "驗證模型完整性", delete_model: "刪除模型", more_actions: "更多操作", manage_versions: "管理版本", copy_model_id: "複製模型 ID", model_id_copied: "已複製模型 ID。",
       model_versions_loading: "正在載入版本…", model_versions_count: "共 {n} 個版本", reclaimable_space: "可釋放 {size}", current_version: "目前版本", loaded_version: "已載入", verified_version: "已驗證", unverified_version: "未驗證", corrupt_version: "已損壞",
@@ -8575,7 +8809,6 @@
       voice_fields_required: "音声 ID と音声名は必須です。", voice_file_too_large: "参照音声は 16 MiB 以下にしてください。", voice_file_read_failed: "参照音声を読み込めませんでした。", voice_delete_confirm: "音声「{id}」を削除しますか？",
 
       nav_status: "ステータス", nav_models: "モデル", nav_voices: "音声", nav_benchmark: "ベンチマーク", nav_logs: "ログ", nav_chat: "AI エージェント", nav_settings: "設定",
-      sidebar_expand: "サイドバーを展開", sidebar_collapse: "サイドバーを折りたたむ",
       chat_subtitle: "外部エージェントが IronMLX を推論プロバイダーとして使用できるように設定します。",
       agent_client_terminal: "ターミナルアプリ",
       agent_client_terminal_desktop: "ターミナル · デスクトップ",
@@ -8818,6 +9051,13 @@
       confirm_delete_single: 'モデル "{name}" を削除しますか？この操作は元に戻せません。',
       col_actions: "アクション", status_loaded: "ロード済み", action_load: "ロード", action_unload: "アンロード",
       status_loading: "ロード中...", status_unloading: "アンロード中...",
+      status_generating: "生成中", status_prefilling: "プリフィル中", status_idle: "アイドル", status_starting: "起動中", status_recovering: "復旧中", status_stopping: "停止中", status_degraded: "低下", status_stopped: "停止", status_failed: "失敗", status_reconnecting: "再接続中", status_memory_emergency: "メモリ緊急", status_model_failed: "モデルの読み込みに失敗",
+      status_uptime: "稼働 {duration}", status_duration_minutes: "{m} 分", status_duration_hours: "{h} 時間 {m} 分", status_duration_days: "{d} 日 {h} 時間", status_scope_local: "この Mac のみ", status_scope_lan: "LAN", status_endpoints: "エンドポイント",
+      status_tile_decode: "デコード", status_tile_prefill: "プリフィル", status_tile_ttft: "初回トークン遅延", status_tile_requests: "リクエスト", status_requests_value: "処理中 {active} · 待機 {queued}",
+      status_trend: "推移", status_trend_throughput: "スループット", status_trend_memory: "メモリ", status_trend_process: "プロセス使用量", status_trend_ceiling: "上限", status_window_10m: "10 分", status_window_1h: "1 時間", status_window_24h: "24 時間", status_chart_empty: "まだデータがありません。",
+      status_models: "モデル", status_memory: "メモリ", status_memory_model: "モデルとその他", status_memory_kv: "KV", status_memory_cache: "MLX キャッシュ", status_pressure: "メモリ負荷", status_pressure_normal: "通常", status_pressure_soft: "やや高い", status_pressure_hard: "高い", status_pressure_emergency: "緊急", status_prefix_hit: "プレフィックスキャッシュヒット（累計）",
+      status_recent: "最近のリクエスト", status_view_logs: "ログを表示", status_aborted: "中断", status_idle_unload: "アイドル、{minutes} 分後にアンロード", status_unload_soon: "まもなくアンロード", status_retry: "再試行", status_unload: "アンロード", status_load_failed: "読み込み失敗：{reason}", status_model_memory: "重み {weights} · KV {kv}", status_no_models: "まだモデルが読み込まれていません。", status_open_models: "モデルへ", status_no_requests: "まだリクエストはありません。", status_last_updated: "最終更新 {time}",
+      status_runtime_details: "実行の詳細", status_backend_stopped: "サーバーは起動していません。", status_backend_starting: "サーバーを起動しています…",
       status_verifying: "整合性を検証中… {pct}%", status_verified: "検証済み {time}", status_verified_label: "検証済み", status_corrupt: "破損",
       verify_integrity: "モデルの整合性を検証", delete_model: "モデルを削除", more_actions: "その他の操作", manage_versions: "バージョン管理", copy_model_id: "モデル ID をコピー", model_id_copied: "モデル ID をコピーしました。",
       model_versions_loading: "バージョンを読み込み中…", model_versions_count: "{n} バージョン", reclaimable_space: "{size} 解放可能", current_version: "現在", loaded_version: "ロード済み", verified_version: "検証済み", unverified_version: "未検証", corrupt_version: "破損",
@@ -9349,7 +9589,6 @@
       voice_fields_required: "음성 ID와 음성 이름은 필수입니다.", voice_file_too_large: "참조 오디오는 16 MiB 이하여야 합니다.", voice_file_read_failed: "참조 오디오를 읽을 수 없습니다.", voice_delete_confirm: "음성 \"{id}\"을(를) 삭제하시겠습니까?",
 
       nav_status: "상태", nav_models: "모델", nav_voices: "음성", nav_benchmark: "벤치마크", nav_logs: "로그", nav_chat: "AI 에이전트", nav_settings: "설정",
-      sidebar_expand: "사이드바 펼치기", sidebar_collapse: "사이드바 접기",
       chat_subtitle: "외부 에이전트가 IronMLX를 추론 프로바이더로 사용하도록 구성하세요.",
       agent_client_terminal: "터미널 앱",
       agent_client_terminal_desktop: "터미널 · 데스크톱",
@@ -9592,6 +9831,13 @@
       confirm_delete_single: '모델 "{name}"을(를) 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.',
       col_actions: "작업", status_loaded: "로드됨", action_load: "로드", action_unload: "언로드",
       status_loading: "로딩 중...", status_unloading: "언로드 중...",
+      status_generating: "생성 중", status_prefilling: "프리필 중", status_idle: "유휴", status_starting: "시작 중", status_recovering: "복구 중", status_stopping: "중지 중", status_degraded: "저하됨", status_stopped: "중지됨", status_failed: "실패", status_reconnecting: "다시 연결 중", status_memory_emergency: "메모리 긴급", status_model_failed: "모델 로드 실패",
+      status_uptime: "가동 {duration}", status_duration_minutes: "{m}분", status_duration_hours: "{h}시간 {m}분", status_duration_days: "{d}일 {h}시간", status_scope_local: "이 Mac만", status_scope_lan: "LAN", status_endpoints: "엔드포인트",
+      status_tile_decode: "디코드", status_tile_prefill: "프리필", status_tile_ttft: "첫 토큰 지연", status_tile_requests: "요청", status_requests_value: "처리 중 {active} · 대기 {queued}",
+      status_trend: "추이", status_trend_throughput: "처리량", status_trend_memory: "메모리", status_trend_process: "프로세스 사용량", status_trend_ceiling: "한도", status_window_10m: "10분", status_window_1h: "1시간", status_window_24h: "24시간", status_chart_empty: "아직 데이터가 없습니다.",
+      status_models: "모델", status_memory: "메모리", status_memory_model: "모델 및 기타", status_memory_kv: "KV", status_memory_cache: "MLX 캐시", status_pressure: "메모리 압력", status_pressure_normal: "정상", status_pressure_soft: "높음", status_pressure_hard: "매우 높음", status_pressure_emergency: "긴급", status_prefix_hit: "프리픽스 캐시 적중(누적)",
+      status_recent: "최근 요청", status_view_logs: "로그 보기", status_aborted: "중단됨", status_idle_unload: "유휴, {minutes}분 후 언로드", status_unload_soon: "곧 언로드", status_retry: "다시 시도", status_unload: "언로드", status_load_failed: "로드 실패: {reason}", status_model_memory: "가중치 {weights} · KV {kv}", status_no_models: "아직 로드된 모델이 없습니다.", status_open_models: "모델로 이동", status_no_requests: "아직 요청이 없습니다.", status_last_updated: "마지막 업데이트 {time}",
+      status_runtime_details: "실행 세부 정보", status_backend_stopped: "서버가 실행되고 있지 않습니다.", status_backend_starting: "서버를 시작하는 중…",
       status_verifying: "무결성 확인 중… {pct}%", status_verified: "확인됨 {time}", status_verified_label: "확인됨", status_corrupt: "손상됨",
       verify_integrity: "모델 무결성 확인", delete_model: "모델 삭제", more_actions: "추가 작업", manage_versions: "버전 관리", copy_model_id: "모델 ID 복사", model_id_copied: "모델 ID를 복사했습니다.",
       model_versions_loading: "버전을 불러오는 중…", model_versions_count: "{n}개 버전", reclaimable_space: "{size} 확보 가능", current_version: "현재", loaded_version: "로드됨", verified_version: "검증됨", unverified_version: "미검증", corrupt_version: "손상됨",
@@ -9995,7 +10241,7 @@
       if (dict[key]) el.setAttribute('aria-label', dict[key]);
     });
     refreshAgentCopyButtonLabels();
-    updateSidebarControls(dict);
+    updateSidebarControls();
     // Settings subtitle with inline badge
     const sub = document.getElementById('settings-subtitle');
     if (sub && dict.settings_subtitle_html) {
@@ -10030,6 +10276,7 @@
     // Re-render model list to update action buttons text
     syncModelList();
     renderRuntimeModels(window.__RUNTIME_MODELS__ || []);
+    renderStatusPage();
     refreshOpenParamsSchedulerProfile();
     renderVoiceProfiles({ data: voiceProfiles });
     if (incidentSummaries.length) renderIncidentHistory({ incidents: incidentSummaries });
@@ -10426,6 +10673,7 @@
     const pageScroll = pageEl && pageEl.querySelector('.page-body-scroll');
     if (pageScroll) pageScroll.scrollTop = 0;
     updateStatusPollingInterval();
+    if (page === 'status') statusPageShown();
     // Re-sync loaded models when navigating to models page
     if (page === 'models') syncLoadedModels();
     if (page === 'chat') {
@@ -10958,6 +11206,7 @@
       const dict = I18N[currentLang] || I18N.en;
       showToast(dict.err_callback_malformed || 'Internal error: callback payload could not be parsed. The button has been reset.', 'warn');
       syncModelList();
+      statusUnloadFailed(null);
       return;
     }
     if (result.success) {
@@ -10967,6 +11216,7 @@
     } else if (result.error) {
       showToast(localizeErrorResult(result), 'warn');
       syncModelList();
+      statusUnloadFailed(result);
     }
   }
 
@@ -11405,6 +11655,19 @@
     return modelLoadFailureExplained(activity) ? '' : String(activity.message || '').trim();
   }
 
+  // The sidebar tooltip shows the indicator's aria-label; keep a shown
+  // tooltip in step with each update and drop it when the indicator hides.
+  function syncModelLoadIndicatorTooltip(indicator) {
+    const tooltip = document.getElementById('sidebar-tooltip');
+    if (!indicator || !tooltip || tooltip.__target !== indicator) return;
+    if (indicator.hidden) {
+      hideSidebarTooltip();
+    } else {
+      indicator.dataset.sidebarTooltip = indicator.getAttribute('aria-label') || '';
+      showSidebarTooltip(indicator);
+    }
+  }
+
   function renderModelLoadIndicator(activities) {
     const active = activities.filter(activity => !MODEL_LOAD_TERMINAL_STATES.includes(activity.state));
     const failed = activities.filter(activity => activity.state === 'failed');
@@ -11415,8 +11678,9 @@
         indicator.hidden = true;
         indicator.innerHTML = '';
         indicator.__loadSource = '';
+        syncModelLoadIndicatorTooltip(indicator);
       }
-      return '';
+      return;
     }
     const state = modelLoadState(primary);
     const name = modelLoadDisplayName(primary.model);
@@ -11441,45 +11705,25 @@
     } else {
       title = t(reload ? 'model_load_indicator_reloading' : 'model_load_indicator_loading').replace('{pct}', percent);
     }
-    const showBar = state === 'loading' || state === 'cancelling';
-    // Structure only; the texts, bar width and ring value are written in
-    // place so the spinner keeps turning across updates.
-    const structure = '<span class="model-load-indicator-body">'
-      + '<span class="model-load-indicator-title">' + (state === 'failed' ? '' : '<span class="model-load-spinner" aria-hidden="true"></span>')
-      + '<span class="model-load-indicator-text"></span></span>'
-      + '<span class="model-load-indicator-detail"><span class="model-load-indicator-name"></span>'
-      + (meta ? '<span class="model-load-indicator-meta"></span>' : '') + '</span>'
-      + (showBar ? modelLoadBarHTML(percent, state === 'cancelling', '').replace(/ style="[^"]*"/, '') : '')
-      + '</span>'
-      + '<span class="model-load-ring' + (state === 'failed' ? ' is-failed' : percent === null ? ' is-indeterminate' : '')
+    // The ring is the only visible part; its text is the aria-label (and the
+    // hover tooltip). The ring value is written in place so an indeterminate
+    // ring keeps turning across updates.
+    const structure = '<span class="model-load-ring' + (state === 'failed' ? ' is-failed' : percent === null ? ' is-indeterminate' : '')
       + (state === 'cancelling' || state === 'queued' ? ' is-muted' : '') + '" aria-hidden="true">'
       + (state === 'failed' ? '!' : '') + '</span>';
     if (indicator) {
       indicator.hidden = false;
       indicator.dataset.model = primary.model;
       indicator.classList.toggle('is-failed', state === 'failed');
-      indicator.classList.toggle('is-queued', state === 'queued');
       indicator.setAttribute('aria-label', title + ' · ' + name + meta.replace(/\u00a0/g, ' '));
       if (indicator.__loadSource !== structure) {
         indicator.__loadSource = structure;
         indicator.innerHTML = structure;
       }
-      const write = (selector, text) => {
-        const target = indicator.querySelector(selector);
-        if (target && target.textContent !== text) target.textContent = text;
-      };
-      write('.model-load-indicator-text', title);
-      write('.model-load-indicator-name', name);
-      write('.model-load-indicator-meta', meta);
-      const fill = indicator.querySelector('.model-load-fill');
-      if (fill) fill.style.width = percent === null ? '' : percent + '%';
       const ring = indicator.querySelector('.model-load-ring');
       if (ring && ring.style.setProperty) ring.style.setProperty('--model-load-pct', percent === null ? '0' : String(percent));
+      syncModelLoadIndicatorTooltip(indicator);
     }
-    return structure
-      .replace('<span class="model-load-indicator-text"></span>', '<span class="model-load-indicator-text">' + escapeAttr(title) + '</span>')
-      .replace('<span class="model-load-indicator-name"></span>', '<span class="model-load-indicator-name">' + escapeAttr(name) + '</span>')
-      .replace('<span class="model-load-indicator-meta"></span>', '<span class="model-load-indicator-meta">' + escapeAttr(meta) + '</span>');
   }
 
   // What a model row shows while a load is listed, or null to show the row
@@ -11611,8 +11855,7 @@
     const indicator = document.getElementById('model-load-indicator');
     if (!indicator || !indicator.addEventListener) return;
     const show = function() {
-      const collapsed = document.documentElement.classList.contains('sidebar-collapsed');
-      indicator.dataset.sidebarTooltip = collapsed ? (indicator.getAttribute('aria-label') || '') : '';
+      indicator.dataset.sidebarTooltip = indicator.getAttribute('aria-label') || '';
       showSidebarTooltip(indicator);
     };
     indicator.addEventListener('mouseenter', show);
@@ -13484,18 +13727,13 @@
     btn.addEventListener('click', () => setTheme(btn.dataset.value));
   });
 
-  function updateSidebarControls(dict = I18N[currentLang] || I18N.en) {
-    const collapsed = document.documentElement.classList.contains('sidebar-collapsed');
-    const label = collapsed ? dict.sidebar_expand : dict.sidebar_collapse;
-    const toggle = document.getElementById('sidebar-toggle');
-    toggle.removeAttribute('title');
-    toggle.dataset.sidebarTooltip = label;
-    toggle.setAttribute('aria-label', label);
-    toggle.setAttribute('aria-expanded', String(!collapsed));
+  // The rail shows icons only: each item's localized name (written by
+  // applyI18n) becomes its tooltip and accessible name.
+  function updateSidebarControls() {
     document.querySelectorAll('.sidebar .nav-item').forEach(item => {
       const name = item.querySelector('[data-i18n]')?.textContent || '';
       item.removeAttribute('title');
-      item.dataset.sidebarTooltip = collapsed ? name : '';
+      item.dataset.sidebarTooltip = name;
       item.setAttribute('aria-label', name);
     });
     const target = document.getElementById('sidebar-tooltip').__target;
@@ -13517,18 +13755,12 @@
     tooltip.textContent = label;
     tooltip.hidden = false;
     tooltip.__target = target;
-    target.setAttribute('aria-describedby', tooltip.id);
+    // A tooltip that repeats the accessible name would be read twice.
+    if (label !== target.getAttribute('aria-label')) target.setAttribute('aria-describedby', tooltip.id);
     const rect = target.getBoundingClientRect();
     const size = tooltip.getBoundingClientRect();
     tooltip.style.left = Math.max(8, Math.min(rect.right + 10, window.innerWidth - size.width - 8)) + 'px';
     tooltip.style.top = Math.max(8, Math.min(rect.top + (rect.height - size.height) / 2, window.innerHeight - size.height - 8)) + 'px';
-  }
-
-  function toggleSidebar() {
-    const collapsed = document.documentElement.classList.toggle('sidebar-collapsed');
-    try { localStorage.setItem('ironmlx.sidebar.collapsed', String(collapsed)); } catch (_) {}
-    updateSidebarControls();
-    window.dispatchEvent(new Event('resize'));
   }
 
   // Navigation
@@ -13546,7 +13778,7 @@
     });
   });
   updateSidebarControls();
-  document.querySelectorAll('.sidebar .nav-item, #sidebar-toggle').forEach(target => {
+  document.querySelectorAll('.sidebar .nav-item').forEach(target => {
     target.addEventListener('mouseenter', () => showSidebarTooltip(target));
     target.addEventListener('mouseleave', hideSidebarTooltip);
     target.addEventListener('focus', () => showSidebarTooltip(target));
@@ -16797,195 +17029,1267 @@
     pollStatus();
   }
 
-  // ── GPU Memory Chart ──
-  const gpuCanvas = document.getElementById('gpu-chart');
-  const gpuCtx = gpuCanvas.getContext('2d');
-  const GPU_ACTIVE_POLL_MS = 500;
-  const GPU_IDLE_POLL_MS = 1000;
+  // ── Status polling ──
+  // /health keeps the model list, settingsBackendRunning and the offline banner in
+  // sync on a fixed cadence; the Status page itself renders from pushed runtime metrics.
+  const STATUS_POLL_MS = 2000;
   const DECISION_RECENT_ACTIVITY_MS = 2500;
-  const GPU_HISTORY_LIMIT_MS = 60 * 60 * 1000;
-  const gpuHistory = []; // [{time, active, peak, cache}]
-  let gpuMaxMB = 8192; // auto-scale, start at 8GB
-  let gpuTotalMB = 0;  // actual GPU total from /health API
   let statusPollTimer = null;
-  let statusPollIntervalMs = 0;
-  let gpuWindowMs = 15 * 60 * 1000;
   let lastEndpointRefreshAt = 0;
 
-  function formatMB(mb) {
-    if (mb >= 1024) return (mb / 1024).toFixed(1) + ' GB';
-    return mb.toFixed(0) + ' MB';
+  // ── Runtime status page ──
+  // Pure helpers come first; the node tests run them without a DOM. DOM access stays
+  // inside functions so this block can be evaluated on its own.
+  const STATUS_WINDOW_TIERS = { '10m': '5s', '1h': '30s', '24h': '5m' };
+  const STATUS_TIER_MS = { '5s': 5000, '30s': 30000, '5m': 300000 };
+  const STATUS_TIER_CAPACITY = { '5s': 120, '30s': 120, '5m': 288 };
+  const STATUS_RECENT_CAPACITY = 100;
+  const STATUS_RECENT_VISIBLE = 8;
+  const STATUS_DASH = '—';
+  const STATUS_BYTES_PER_GB = 1073741824;
+  const STATUS_NUMBER_LOCALES = { en: 'en-US', 'zh-Hans': 'zh-CN', 'zh-Hant': 'zh-TW', ja: 'ja-JP', ko: 'ko-KR' };
+  const STATUS_FETCH_PATHS = { history: '/admin/api/metrics/history', recent: '/admin/api/requests/recent' };
+
+  function statusLang(lang) {
+    if (typeof lang === 'string' && lang) return lang;
+    return typeof currentLang === 'string' && currentLang ? currentLang : 'en';
   }
 
-  function formatUptime(startedAt) {
-    if (!startedAt) return '--';
-    const secs = Math.floor(Date.now() / 1000 - startedAt);
-    if (secs < 0) return '--';
-    const h = Math.floor(secs / 3600);
-    const m = Math.floor((secs % 3600) / 60);
-    const s = secs % 60;
-    return (h > 0 ? h + 'h ' : '') + (m > 0 ? m + 'm ' : '') + s + 's';
+  function statusText(key, lang, vars) {
+    const table = typeof I18N === 'object' && I18N ? I18N : {};
+    const dict = table[statusLang(lang)] || {};
+    let text = dict[key] || (table.en && table.en[key]) || key;
+    if (vars) {
+      Object.keys(vars).forEach(name => { text = text.split('{' + name + '}').join(String(vars[name])); });
+    }
+    return text;
   }
 
-  function isStatusPageActive() {
-    const statusPage = document.getElementById('page-status');
-    return !!statusPage && statusPage.classList.contains('active') && !document.hidden;
+  function statusNumber(value) {
+    if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
   }
 
-  function pruneGpuHistory(now) {
-    const cutoff = now - GPU_HISTORY_LIMIT_MS;
-    while (gpuHistory.length > 0 && gpuHistory[0].time < cutoff) {
-      gpuHistory.shift();
+  function statusObject(value) {
+    return value && typeof value === 'object' ? value : {};
+  }
+
+  function formatStatusInteger(value, lang) {
+    const number = statusNumber(value);
+    if (number === null) return STATUS_DASH;
+    const rounded = Math.round(number);
+    try {
+      return new Intl.NumberFormat(STATUS_NUMBER_LOCALES[statusLang(lang)] || 'en-US',
+        { maximumFractionDigits: 0 }).format(rounded);
+    } catch (error) {
+      return String(rounded);
     }
   }
 
-  function visibleGpuHistory() {
-    const cutoff = Date.now() - gpuWindowMs;
-    return gpuHistory.filter(d => d.time >= cutoff);
+  function formatStatusDecimal(value) {
+    const number = statusNumber(value);
+    return number === null ? STATUS_DASH : number.toFixed(1);
   }
 
-  function setGpuWindow(minutes) {
-    const parsed = Number(minutes);
-    if (![5, 15, 30, 60].includes(parsed)) return;
-    gpuWindowMs = parsed * 60 * 1000;
-    document.querySelectorAll('[data-gpu-window]').forEach(btn => {
-      btn.classList.toggle('active', Number(btn.dataset.gpuWindow) === parsed);
+  function formatStatusGB(bytes) {
+    const number = statusNumber(bytes);
+    return number === null ? STATUS_DASH : (Math.max(0, number) / STATUS_BYTES_PER_GB).toFixed(1);
+  }
+
+  function formatStatusClock(unixMs, withSeconds) {
+    const number = statusNumber(unixMs);
+    if (number === null) return STATUS_DASH;
+    const date = new Date(number);
+    if (Number.isNaN(date.getTime())) return STATUS_DASH;
+    const pad = value => String(value).padStart(2, '0');
+    const clock = pad(date.getHours()) + ':' + pad(date.getMinutes());
+    return withSeconds === false ? clock : clock + ':' + pad(date.getSeconds());
+  }
+
+  function formatStatusDuration(ms, lang) {
+    const totalMinutes = Math.max(0, Math.floor((statusNumber(ms) || 0) / 60000));
+    const days = Math.floor(totalMinutes / 1440);
+    const hours = Math.floor((totalMinutes % 1440) / 60);
+    const minutes = totalMinutes % 60;
+    if (days > 0) return statusText('status_duration_days', lang, { d: days, h: hours });
+    if (hours > 0) return statusText('status_duration_hours', lang, { h: hours, m: minutes });
+    return statusText('status_duration_minutes', lang, { m: minutes });
+  }
+
+  // Same rules as RuntimeMetricsStore.indicator: the App-side backend state decides
+  // first; the snapshot only matters while the backend runs and the stream is live.
+  function statusIndicator(backend, snapshot) {
+    const state = backend && typeof backend === 'object' && typeof backend.state === 'string' ? backend.state : '';
+    switch (state) {
+      case 'stopped': return { tone: 'red', labelKey: 'status_stopped' };
+      case 'failed': return { tone: 'red', labelKey: 'status_failed' };
+      case 'starting': return { tone: 'blue', labelKey: 'status_starting' };
+      case 'recovering': return { tone: 'blue', labelKey: 'status_recovering' };
+      case 'stopping': return { tone: 'gray', labelKey: 'status_stopping' };
+      case 'degraded': return { tone: 'amber', labelKey: 'status_degraded' };
+      default: break;
+    }
+    if (state === 'running' && backend.connected === false) {
+      return { tone: 'gray', labelKey: 'status_reconnecting' };
+    }
+    if (!snapshot || typeof snapshot !== 'object') {
+      return { tone: 'gray', labelKey: state === 'running' ? 'status_idle' : 'status_reconnecting' };
+    }
+    const health = statusObject(snapshot.health);
+    const reasons = Array.isArray(health.degraded_reasons) ? health.degraded_reasons : [];
+    if (health.status === 'down') return { tone: 'red', labelKey: 'status_failed' };
+    if (reasons.includes('process_memory_emergency')) return { tone: 'red', labelKey: 'status_memory_emergency' };
+    if (reasons.includes('model_failed')) return { tone: 'red', labelKey: 'status_model_failed' };
+    if (health.status === 'degraded') return { tone: 'amber', labelKey: 'status_degraded' };
+    const activity = statusObject(snapshot.activity).state;
+    if (activity === 'loading') return { tone: 'blue', labelKey: 'status_loading' };
+    if (activity === 'generating') return { tone: 'green', labelKey: 'status_generating' };
+    if (activity === 'prefilling') return { tone: 'green', labelKey: 'status_prefilling' };
+    return { tone: 'gray', labelKey: 'status_idle' };
+  }
+
+  function statusTiles(snapshot, lang) {
+    if (!snapshot || typeof snapshot !== 'object') {
+      return { decode: STATUS_DASH, prefill: STATUS_DASH, ttft: STATUS_DASH, requests: STATUS_DASH };
+    }
+    const performance = statusObject(snapshot.performance);
+    const activity = statusObject(snapshot.activity);
+    const live = statusNumber(performance.live_decode_tokens_per_second);
+    const decode = activity.state === 'generating' && live !== null
+      ? live
+      : statusNumber(performance.decode_tokens_per_second);
+    return {
+      decode: formatStatusDecimal(decode),
+      prefill: formatStatusInteger(performance.prefill_tokens_per_second, lang),
+      ttft: formatStatusInteger(performance.ttft_ms, lang),
+      requests: statusText('status_requests_value', lang, {
+        active: statusNumber(activity.active_requests) || 0,
+        queued: statusNumber(activity.queued_requests) || 0,
+      }),
+    };
+  }
+
+  // Entries are {t, v}; a null entry breaks the line where the history has a hole
+  // longer than two buckets (backend stopped or the machine slept).
+  function trendSeries(points, mode, bucketMs) {
+    const fields = mode === 'memory'
+      ? { process: 'process_bytes', kv: 'kv_cache_bytes', cache: 'mlx_cache_bytes', ceiling: 'ceiling_bytes' }
+      : { decode: 'decode_tps', prefill: 'prefill_tps' };
+    const series = {};
+    Object.keys(fields).forEach(key => { series[key] = []; });
+    const step = statusNumber(bucketMs) || STATUS_TIER_MS['5s'];
+    let previous = null;
+    (Array.isArray(points) ? points : []).forEach(point => {
+      const t = point && typeof point === 'object' ? statusNumber(point.t) : null;
+      if (t === null) return;
+      if (previous !== null && t - previous > 2 * step) {
+        Object.keys(series).forEach(key => series[key].push(null));
+      }
+      Object.keys(fields).forEach(key => series[key].push({ t, v: statusNumber(point[fields[key]]) }));
+      previous = t;
     });
-    if (gpuHistory.length > 0) drawGpuChart();
+    return series;
   }
 
-  function bindGpuWindowControls() {
-    document.querySelectorAll('[data-gpu-window]').forEach(btn => {
-      if (btn.__gpuWindowBound) return;
-      btn.addEventListener('click', () => setGpuWindow(btn.dataset.gpuWindow));
-      btn.__gpuWindowBound = true;
+  function createHistoryState() {
+    return { points: { '5s': [], '30s': [], '5m': [] }, pending: { '30s': [], '5m': [] } };
+  }
+
+  function statusWindowStart(t, windowMs) {
+    return Math.floor(t / windowMs) * windowMs;
+  }
+
+  function statusAppend(list, item, capacity) {
+    list.push(item);
+    while (list.length > capacity) list.shift();
+  }
+
+  // Mirrors the backend roll-up: throughput re-divides token totals by the window,
+  // TTFT and prefill are weighted by first tokens, counts add up, gauges take the max.
+  function statusAggregate(t, windowMs, children) {
+    const point = {
+      t, decode_tps: 0, prefill_tps: null, ttft_ms: null, output_tokens: 0, first_tokens: 0,
+      requests_started: 0, requests_finished: 0, active_max: 0, queued_max: 0,
+      process_bytes: 0, kv_cache_bytes: 0, mlx_cache_bytes: 0, ceiling_bytes: 0,
+    };
+    let ttftSum = 0;
+    let prefillInput = 0;
+    children.forEach(child => {
+      const firstTokens = statusNumber(child.first_tokens) || 0;
+      const ttft = statusNumber(child.ttft_ms);
+      const prefill = statusNumber(child.prefill_tps);
+      const childTtftSum = ttft !== null && firstTokens > 0 ? ttft * firstTokens : 0;
+      point.output_tokens += statusNumber(child.output_tokens) || 0;
+      point.first_tokens += firstTokens;
+      point.requests_started += statusNumber(child.requests_started) || 0;
+      point.requests_finished += statusNumber(child.requests_finished) || 0;
+      ['active_max', 'queued_max', 'process_bytes', 'kv_cache_bytes', 'mlx_cache_bytes'].forEach(key => {
+        point[key] = Math.max(point[key], statusNumber(child[key]) || 0);
+      });
+      point.ceiling_bytes = statusNumber(child.ceiling_bytes) || 0;
+      ttftSum += childTtftSum;
+      if (prefill !== null && childTtftSum > 0) prefillInput += prefill * childTtftSum / 1000;
+    });
+    point.decode_tps = point.output_tokens / (windowMs / 1000);
+    if (point.first_tokens > 0) {
+      point.ttft_ms = ttftSum / point.first_tokens;
+      point.prefill_tps = ttftSum > 0 ? prefillInput / (ttftSum / 1000) : null;
+    }
+    return point;
+  }
+
+  function statusRollUp(state, tier) {
+    const pending = state.pending[tier];
+    const windowMs = STATUS_TIER_MS[tier];
+    const point = statusAggregate(statusWindowStart(pending[0].t, windowMs), windowMs, pending);
+    state.pending[tier] = [];
+    statusAppend(state.points[tier], point, STATUS_TIER_CAPACITY[tier]);
+    return point;
+  }
+
+  // Emits the previous window when the child opens a new one, and the current window
+  // when the child fills its last slot, exactly like the backend tier.
+  function statusPushChild(state, tier, child) {
+    const windowMs = STATUS_TIER_MS[tier];
+    const childMs = tier === '30s' ? STATUS_TIER_MS['5s'] : STATUS_TIER_MS['30s'];
+    const window = statusWindowStart(child.t, windowMs);
+    const emitted = [];
+    const pending = state.pending[tier];
+    if (pending.length && statusWindowStart(pending[0].t, windowMs) !== window) {
+      emitted.push(statusRollUp(state, tier));
+    }
+    state.pending[tier].push(child);
+    if (child.t + childMs >= window + windowMs) emitted.push(statusRollUp(state, tier));
+    return emitted;
+  }
+
+  function mergeHistoryPoint(state, point) {
+    const t = point && typeof point === 'object' ? statusNumber(point.t) : null;
+    if (!state || !state.points || t === null) return { refetch: false, changed: false };
+    const fine = state.points['5s'];
+    const last = fine[fine.length - 1];
+    if (last && t <= last.t) return { refetch: false, changed: false };
+    // A missed bucket means the stream dropped events; keep the point and refetch.
+    const refetch = !!last && t > last.t + STATUS_TIER_MS['5s'];
+    const copy = Object.assign({}, point, { t });
+    statusAppend(fine, copy, STATUS_TIER_CAPACITY['5s']);
+    statusPushChild(state, '30s', copy).forEach(coarse => statusPushChild(state, '5m', coarse));
+    return { refetch, changed: true };
+  }
+
+  // The backend keeps the open coarse window's children unreported; rebuild it from
+  // the finer tier so later pushes roll it up the same way.
+  function statusResumeWindow(state, tier, childTier) {
+    const children = state.points[childTier];
+    if (!children.length) return;
+    const windowMs = STATUS_TIER_MS[tier];
+    const open = statusWindowStart(children[children.length - 1].t, windowMs);
+    const coarse = state.points[tier];
+    if (coarse.length && coarse[coarse.length - 1].t >= open) return;
+    state.pending[tier] = children.filter(child => statusWindowStart(child.t, windowMs) === open);
+  }
+
+  function historyStateFromResponse(response) {
+    const state = createHistoryState();
+    const source = statusObject(statusObject(response).points);
+    Object.keys(STATUS_TIER_MS).forEach(tier => {
+      state.points[tier] = (Array.isArray(source[tier]) ? source[tier] : [])
+        .filter(point => point && typeof point === 'object' && statusNumber(point.t) !== null)
+        .map(point => Object.assign({}, point, { t: statusNumber(point.t) }))
+        .sort((a, b) => a.t - b.t)
+        .slice(-STATUS_TIER_CAPACITY[tier]);
+    });
+    statusResumeWindow(state, '30s', '5s');
+    statusResumeWindow(state, '5m', '30s');
+    return state;
+  }
+
+  function mergeRecentRequest(list, request) {
+    const id = request && typeof request === 'object' ? statusNumber(request.id) : null;
+    if (!Array.isArray(list) || id === null) return { refetch: false, changed: false };
+    const firstId = list.length ? statusNumber(list[0].id) : null;
+    if (firstId !== null && id === firstId) return { refetch: false, changed: false };
+    // Ids only grow within one backend process; a smaller id means a restart or a race.
+    if (firstId !== null && id < firstId) return { refetch: true, changed: false };
+    const refetch = firstId !== null && id > firstId + 1;
+    list.unshift(request);
+    if (list.length > STATUS_RECENT_CAPACITY) list.length = STATUS_RECENT_CAPACITY;
+    return { refetch, changed: true };
+  }
+
+  function recentRequestRow(request, lang) {
+    const item = statusObject(request);
+    const modelId = typeof item.model === 'string' ? item.model : '';
+    const ttft = statusNumber(item.ttft_ms);
+    const speed = statusNumber(item.decode_tps);
+    const aborted = item.outcome === 'aborted';
+    return {
+      time: formatStatusClock(item.finished_unix_ms),
+      endpoint: typeof item.endpoint === 'string' && item.endpoint ? item.endpoint : STATUS_DASH,
+      model: modelId ? (modelId.split('/').pop() || modelId) : STATUS_DASH,
+      modelId,
+      tokens: formatStatusInteger(item.input_tokens, lang) + '→' + formatStatusInteger(item.output_tokens, lang),
+      ttft: ttft === null ? STATUS_DASH : formatStatusInteger(ttft, lang) + ' ms',
+      speed: speed === null ? STATUS_DASH : speed.toFixed(1) + ' tok/s',
+      aborted,
+      outcomeLabel: aborted ? statusText('status_aborted', lang) : '',
+    };
+  }
+
+  function idleUnloadText(model, nowMs, lang) {
+    const unloadAt = model && typeof model === 'object' ? statusNumber(model.idle_unload_unix_ms) : null;
+    if (unloadAt === null) return null;
+    const remaining = unloadAt - (statusNumber(nowMs) || 0);
+    if (remaining <= 0) return statusText('status_unload_soon', lang);
+    return statusText('status_idle_unload', lang, { minutes: Math.ceil(remaining / 60000) });
+  }
+
+  // Shares of the limit: models and other = process - KV - MLX cache (never negative).
+  function memorySegments(memory) {
+    if (!memory || typeof memory !== 'object') return null;
+    const processBytes = Math.max(0, statusNumber(memory.process_bytes) || 0);
+    const kvBytes = Math.max(0, statusNumber(memory.kv_cache_bytes) || 0);
+    const cacheBytes = Math.max(0, statusNumber(memory.mlx_cache_bytes) || 0);
+    const ceilingBytes = Math.max(0, statusNumber(memory.ceiling_bytes) || 0);
+    const modelBytes = Math.max(0, processBytes - kvBytes - cacheBytes);
+    const scale = ceilingBytes > 0 ? ceilingBytes : modelBytes + kvBytes + cacheBytes;
+    let shares = [modelBytes, kvBytes, cacheBytes].map(bytes => (scale > 0 ? bytes / scale : 0));
+    const total = shares[0] + shares[1] + shares[2];
+    if (total > 1) shares = shares.map(share => share / total);
+    return {
+      model: shares[0], kv: shares[1], cache: shares[2],
+      modelBytes, kvBytes, cacheBytes, processBytes, ceilingBytes,
+    };
+  }
+
+  function prefixHitRate(prefix) {
+    if (!prefix || typeof prefix !== 'object') return null;
+    const eligible = statusNumber(prefix.eligible_tokens);
+    if (eligible === null || eligible <= 0) return null;
+    return Math.round((statusNumber(prefix.hit_tokens) || 0) / eligible * 100);
+  }
+
+  // DOM layer. Every entry point swallows its own errors: the native bridge calls these
+  // every second and logs each exception it sees.
+  const statusPageState = {
+    backend: null,
+    snapshot: null,
+    lastSnapshot: null,
+    lastUpdatedMs: 0,
+    history: createHistoryState(),
+    recent: [],
+    endpoints: null,
+    endpointsOpen: false,
+    trendMode: 'throughput',
+    trendWindow: '10m',
+    hoverX: null,
+    trendFrame: null,
+    trendLive: false,
+    unloading: {},
+    fetchedAt: { history: 0, recent: 0 },
+    initialized: false,
+  };
+
+  function statusEl(id) {
+    return typeof document === 'undefined' ? null : document.getElementById(id);
+  }
+
+  function statusEscape(value) {
+    return String(value === null || value === undefined ? '' : value).replace(/[&<>"']/g, character => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[character]);
+  }
+
+  function statusSetHTML(element, html) {
+    if (!element || element.__statusHTML === html) return;
+    element.innerHTML = html;
+    element.__statusHTML = html;
+  }
+
+  function statusParse(value) {
+    if (typeof value === 'string') {
+      try { return statusParse(JSON.parse(value)); } catch (error) { return null; }
+    }
+    return value && typeof value === 'object' ? value : null;
+  }
+
+  function statusRefetch(kind, force) {
+    const now = Date.now();
+    if (!force && now - statusPageState.fetchedAt[kind] < 1000) return;
+    statusPageState.fetchedAt[kind] = now;
+    if (typeof apiFetch === 'function') apiFetch(STATUS_FETCH_PATHS[kind]);
+  }
+
+  function statusRefreshData(force) {
+    statusRefetch('history', force);
+    statusRefetch('recent', force);
+  }
+
+  // The snapshot the numbers come from: only while the backend runs and the stream is live.
+  function statusLiveSnapshot() {
+    const backend = statusPageState.backend;
+    if (backend && (!backend.connected || (backend.state !== 'running' && backend.state !== 'degraded'))) {
+      return null;
+    }
+    return statusPageState.snapshot;
+  }
+
+  // The snapshot the cards keep showing: the last one while reconnecting, none once stopped.
+  function statusDisplaySnapshot() {
+    const live = statusLiveSnapshot();
+    if (live) return live;
+    const state = statusPageState.backend ? statusPageState.backend.state : '';
+    return !state || state === 'running' || state === 'degraded' ? statusPageState.lastSnapshot : null;
+  }
+
+  function onRuntimeMetrics(snapshot) {
+    try {
+      const data = statusParse(snapshot);
+      if (data) {
+        const previous = statusPageState.lastSnapshot;
+        const started = data.backend ? statusNumber(data.backend.started_unix_ms) : null;
+        const previousStarted = previous && previous.backend ? statusNumber(previous.backend.started_unix_ms) : null;
+        if (started !== null && previousStarted !== null && started !== previousStarted) {
+          // A new backend process: its history and request ids start over.
+          statusPageState.history = createHistoryState();
+          statusPageState.recent = [];
+          statusRefreshData(true);
+        }
+        statusPageState.snapshot = data;
+        statusPageState.lastSnapshot = data;
+        statusPageState.lastUpdatedMs = statusNumber(data.unix_ms) || Date.now();
+      } else {
+        statusPageState.snapshot = null;
+      }
+      renderStatusCards();
+      // History points change the trend every 5 s; a snapshot only matters to it
+      // when the page goes live or offline (the last-updated note).
+      if (!!statusLiveSnapshot() !== statusPageState.trendLive) renderStatusTrend();
+    } catch (error) {
+      // Never throw back into the native bridge.
+    }
+  }
+
+  function onRuntimeBackendState(state) {
+    try {
+      const data = statusParse(state) || {};
+      const previous = statusPageState.backend;
+      const next = { state: typeof data.state === 'string' ? data.state : '', connected: data.connected === true };
+      statusPageState.backend = next;
+      if (next.connected && !(previous && previous.connected)) statusRefreshData(true);
+      renderStatusPage();
+    } catch (error) {
+      // Never throw back into the native bridge.
+    }
+  }
+
+  function onRuntimeHistoryPoint(point) {
+    try {
+      const data = statusParse(point);
+      if (!data) return;
+      const result = mergeHistoryPoint(statusPageState.history, data);
+      if (result.refetch) statusRefetch('history');
+      if (result.changed) renderStatusTrend();
+    } catch (error) {
+      // Never throw back into the native bridge.
+    }
+  }
+
+  function onRuntimeRequest(request) {
+    try {
+      const data = statusParse(request);
+      if (!data) return;
+      const result = mergeRecentRequest(statusPageState.recent, data);
+      if (result.refetch) statusRefetch('recent');
+      if (result.changed) renderStatusRecent();
+    } catch (error) {
+      // Never throw back into the native bridge.
+    }
+  }
+
+  function statusHistoryLoaded(jsonStr) {
+    try {
+      const data = statusParse(jsonStr);
+      if (!data || !data.points || typeof data.points !== 'object') return;
+      statusPageState.history = historyStateFromResponse(data);
+      renderStatusTrend();
+    } catch (error) {
+      // Keep the history already on screen.
+    }
+  }
+
+  function statusRecentLoaded(jsonStr) {
+    try {
+      const data = statusParse(jsonStr);
+      if (!data || !Array.isArray(data.requests)) return;
+      statusPageState.recent = data.requests
+        .filter(item => item && typeof item === 'object' && statusNumber(item.id) !== null)
+        .sort((a, b) => statusNumber(b.id) - statusNumber(a.id))
+        .slice(0, STATUS_RECENT_CAPACITY);
+      renderStatusRecent();
+    } catch (error) {
+      // Keep the list already on screen.
+    }
+  }
+
+  function statusEndpointsLoaded(jsonStr) {
+    try {
+      statusPageState.endpoints = statusParse(jsonStr);
+      renderStatusHeader();
+    } catch (error) {
+      // The header simply omits the address.
+    }
+  }
+
+  function renderStatusCards() {
+    [renderStatusHeader, renderStatusTiles, renderStatusModels, renderStatusMemory, renderStatusRecent]
+      .forEach(render => {
+        try { render(); } catch (error) { /* one card failing must not blank the others */ }
+      });
+  }
+
+  function renderStatusPage() {
+    renderStatusCards();
+    try { renderStatusTrend(); } catch (error) { /* redrawn on the next history point */ }
+  }
+
+  function renderStatusHeader() {
+    const lang = statusLang();
+    const indicator = statusIndicator(statusPageState.backend, statusLiveSnapshot());
+    const lastBackend = statusObject(statusObject(statusPageState.lastSnapshot).backend);
+    const device = typeof lastBackend.device_name === 'string' ? lastBackend.device_name : '';
+    const pill = statusEl('status-pill');
+    if (pill) {
+      const className = 'ds-pill ds-pill--' + indicator.tone;
+      if (pill.className !== className) pill.className = className;
+      const label = statusText(indicator.labelKey, lang);
+      if (pill.textContent !== label) pill.textContent = label;
+      pill.title = device;
+    }
+    const meta = statusEl('status-meta');
+    if (!meta) return;
+    const parts = [];
+    const shownBackend = statusObject(statusObject(statusDisplaySnapshot()).backend);
+    const started = statusNumber(shownBackend.started_unix_ms);
+    if (started !== null && started > 0) {
+      parts.push('<span>' + statusEscape(statusText('status_uptime', lang,
+        { duration: formatStatusDuration(Date.now() - started, lang) })) + '</span>');
+    }
+    const endpoints = statusPageState.endpoints;
+    if (endpoints && typeof endpoints.endpoint_address === 'string' && endpoints.endpoint_address) {
+      const address = endpoints.endpoint_address.replace(/^[a-z]+:\/\//i, '').replace(/\/v1\/?$/, '');
+      const scope = statusText(endpoints.network_mode === 'lan' ? 'status_scope_lan' : 'status_scope_local', lang);
+      const copyLabel = statusText('copy_endpoint', lang);
+      parts.push('<span><button type="button" class="ds-status-address" onclick="copyStatusAddress()" title="'
+        + statusEscape(copyLabel) + '" aria-label="' + statusEscape(copyLabel) + '">' + statusEscape(address)
+        + '</button> ' + statusEscape(scope) + '</span>');
+    }
+    const version = typeof lastBackend.version === 'string' ? lastBackend.version.replace(/^v/i, '') : '';
+    if (version) parts.push('<span>v' + statusEscape(version) + '</span>');
+    statusSetHTML(meta, parts.join('<span class="ds-status-sep" aria-hidden="true">·</span>'));
+    meta.title = device;
+  }
+
+  function renderStatusTiles() {
+    const tiles = statusTiles(statusLiveSnapshot(), statusLang());
+    [['status-tile-decode', tiles.decode], ['status-tile-prefill', tiles.prefill],
+      ['status-tile-ttft', tiles.ttft], ['status-tile-requests', tiles.requests]].forEach(([id, value]) => {
+      const element = statusEl(id);
+      if (!element) return;
+      if (element.textContent !== value) element.textContent = value;
+      const unit = element.nextElementSibling;
+      if (unit && unit.classList && unit.classList.contains('ds-status-unit')) unit.hidden = value === STATUS_DASH;
     });
   }
 
-  function drawGpuChart() {
-    const history = visibleGpuHistory();
-    const dpr = window.devicePixelRatio || 1;
-    const rect = gpuCanvas.getBoundingClientRect();
-    gpuCanvas.width = rect.width * dpr;
-    gpuCanvas.height = rect.height * dpr;
-    gpuCtx.scale(dpr, dpr);
-    const W = rect.width;
-    const H = rect.height;
-    const pad = { top: 16, right: 60, bottom: 24, left: 50 };
-    const cw = W - pad.left - pad.right;
-    const ch = H - pad.top - pad.bottom;
+  function statusIsUnloading(modelId, nowMs) {
+    const since = statusPageState.unloading[modelId];
+    if (!since) return false;
+    if (nowMs - since > 60000) {
+      delete statusPageState.unloading[modelId];
+      return false;
+    }
+    return true;
+  }
 
-    // Clear
-    gpuCtx.clearRect(0, 0, W, H);
-
-    // Auto-scale Y axis
-    if (gpuTotalMB > 0) {
-      gpuMaxMB = gpuTotalMB;
+  // One model row's display fields. Rows are rebuilt only when this structure changes,
+  // so the per-second speed updates never replace the action buttons under the pointer.
+  function statusModelView(model, lang, nowMs) {
+    const id = typeof model.id === 'string' ? model.id : '';
+    const dflash2 = model.mode === 'dflash2';
+    const active = statusNumber(model.active_requests) || 0;
+    const queued = statusNumber(model.queued_requests) || 0;
+    let tone = 'gray';
+    if (model.state === 'failed') tone = 'red';
+    else if (model.state === 'loading') tone = 'blue';
+    else if (active > 0) tone = 'green';
+    const live = statusNumber(model.live_decode_tokens_per_second);
+    let detail = '';
+    if (model.state === 'failed') {
+      detail = statusText('status_load_failed', lang, { reason: model.last_error || STATUS_DASH });
+    } else if (model.state === 'loading') {
+      detail = statusText('status_loading', lang);
     } else {
-      let maxVal = 1024;
-      history.forEach(d => { maxVal = Math.max(maxVal, d.active, d.peak); });
-      gpuMaxMB = Math.ceil(maxVal / 1024) * 1024;
-      if (gpuMaxMB < 1024) gpuMaxMB = 1024;
-    }
-
-    // Dashed grid lines
-    const ySteps = 4;
-    gpuCtx.font = '10px -apple-system, sans-serif';
-    gpuCtx.fillStyle = '#999';
-    gpuCtx.textAlign = 'right';
-    for (let i = 0; i <= ySteps; i++) {
-      const y = pad.top + ch - (i / ySteps) * ch;
-      gpuCtx.beginPath();
-      gpuCtx.strokeStyle = 'rgba(128,128,128,0.12)';
-      gpuCtx.lineWidth = 0.5;
-      gpuCtx.setLineDash([3, 3]);
-      gpuCtx.moveTo(pad.left, y);
-      gpuCtx.lineTo(pad.left + cw, y);
-      gpuCtx.stroke();
-      gpuCtx.setLineDash([]);
-      const val = (i / ySteps) * gpuMaxMB;
-      gpuCtx.fillText(formatMB(val), pad.left - 6, y + 3);
-    }
-
-    // X axis time labels
-    gpuCtx.textAlign = 'center';
-    gpuCtx.fillStyle = '#999';
-    if (history.length > 1) {
-      const xSteps = Math.min(5, history.length - 1);
-      for (let i = 0; i <= xSteps; i++) {
-        const idx = Math.floor(i / xSteps * (history.length - 1));
-        const x = pad.left + (idx / (history.length - 1)) * cw;
-        const t = new Date(history[idx].time);
-        gpuCtx.fillText(t.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'}), x, H - 4);
+      const parts = [];
+      if (statusNumber(model.weight_bytes) !== null) {
+        parts.push(statusText('status_model_memory', lang, {
+          weights: formatStatusGB(model.weight_bytes) + ' GB',
+          kv: formatStatusGB(statusNumber(model.kv_cache_bytes) || 0) + ' GB',
+        }));
       }
-    }
-
-    if (history.length < 2) return;
-
-    // Helper: get x/y for data point
-    function ptX(i) { return pad.left + (i / (history.length - 1)) * cw; }
-    function ptY(key, i) { return pad.top + ch - (history[i][key] / gpuMaxMB) * ch; }
-
-    // Smooth bezier curve through points
-    function drawSmoothLine(key, color, alpha, width) {
-      gpuCtx.beginPath();
-      gpuCtx.strokeStyle = color;
-      gpuCtx.lineWidth = width;
-      gpuCtx.lineJoin = 'round';
-      gpuCtx.lineCap = 'round';
-      gpuCtx.globalAlpha = alpha;
-      gpuCtx.moveTo(ptX(0), ptY(key, 0));
-      for (let i = 1; i < history.length; i++) {
-        const cpx = (ptX(i - 1) + ptX(i)) / 2;
-        gpuCtx.bezierCurveTo(cpx, ptY(key, i - 1), cpx, ptY(key, i), ptX(i), ptY(key, i));
+      if (active > 0 || queued > 0) {
+        parts.push(statusText('status_requests_value', lang, { active, queued }));
+      } else {
+        const idle = idleUnloadText(model, nowMs, lang);
+        if (idle) parts.push(idle);
       }
-      gpuCtx.stroke();
-      gpuCtx.globalAlpha = 1;
+      detail = parts.join(' \u00b7 ');
     }
-
-    // Gradient fill under active line
-    gpuCtx.beginPath();
-    gpuCtx.moveTo(ptX(0), ptY('active', 0));
-    for (let i = 1; i < history.length; i++) {
-      const cpx = (ptX(i - 1) + ptX(i)) / 2;
-      gpuCtx.bezierCurveTo(cpx, ptY('active', i - 1), cpx, ptY('active', i), ptX(i), ptY('active', i));
+    let action = { kind: '', label: '', disabled: false };
+    if (dflash2) {
+      // The DFlash2 model is the whole backend: no unload, and a failure is a startup failure.
+      if (model.state === 'failed') action = { kind: 'logs', label: statusText('status_view_logs', lang), disabled: false };
+    } else if (model.state === 'failed') {
+      action = { kind: 'retry', label: statusText('status_retry', lang), disabled: false };
+    } else if (model.state === 'loaded') {
+      const unloading = statusIsUnloading(id, nowMs);
+      action = { kind: 'unload', label: statusText(unloading ? 'status_unloading' : 'status_unload', lang), disabled: unloading };
     }
-    gpuCtx.lineTo(ptX(history.length - 1), pad.top + ch);
-    gpuCtx.lineTo(ptX(0), pad.top + ch);
-    gpuCtx.closePath();
-    const grad = gpuCtx.createLinearGradient(0, pad.top, 0, pad.top + ch);
-    grad.addColorStop(0, 'rgba(0,122,255,0.25)');
-    grad.addColorStop(1, 'rgba(0,122,255,0.02)');
-    gpuCtx.fillStyle = grad;
-    gpuCtx.fill();
+    return {
+      id,
+      name: id.split('/').pop() || id || STATUS_DASH,
+      tone,
+      badge: dflash2 ? 'DFlash2' : model.mode === 'mtp' ? 'MTP' : '',
+      speed: model.state === 'loaded' && active > 0 && live !== null ? live.toFixed(1) + ' tok/s' : '',
+      detail,
+      detailError: model.state === 'failed',
+      action,
+    };
+  }
 
-    // Draw lines: peak first (behind), then active (front)
-    drawSmoothLine('peak', '#ff3b30', 0.5, 1.5);
-    drawSmoothLine('active', '#007aff', 1, 1.5);
+  function statusModelStructure(view) {
+    return [view.id, view.name, view.badge, view.detailError, view.action.kind, view.action.label, view.action.disabled]
+      .join('\u0001');
+  }
 
-    // Current value labels on right
-    if (history.length > 0) {
-      const last = history[history.length - 1];
-      const activeY = pad.top + ch - (last.active / gpuMaxMB) * ch;
-      const peakY = pad.top + ch - (last.peak / gpuMaxMB) * ch;
-      gpuCtx.font = '10px -apple-system, sans-serif';
-      gpuCtx.textAlign = 'left';
-      gpuCtx.fillStyle = '#007aff';
-      gpuCtx.fillText(formatMB(last.active), pad.left + cw + 6, activeY + 3);
-      gpuCtx.fillStyle = '#ff3b30';
-      gpuCtx.fillText(formatMB(last.peak), pad.left + cw + 6, peakY + 3);
+  function statusModelRowHTML(view) {
+    const action = view.action;
+    let button = '';
+    if (action.kind === 'logs') {
+      button = '<button type="button" class="ds-status-action" onclick="navigateTo(\'logs\')">'
+        + statusEscape(action.label) + '</button>';
+    } else if (action.kind) {
+      button = '<button type="button" class="ds-status-action" data-model-id="' + statusEscape(view.id)
+        + '" onclick="' + (action.kind === 'retry' ? 'statusRetryModel(this)' : 'statusUnloadModel(this)') + '"'
+        + (action.disabled ? ' disabled' : '') + '>' + statusEscape(action.label) + '</button>';
+    }
+    return '<div class="ds-row ds-status-model" data-status-model="' + statusEscape(view.id) + '">'
+      + '<span class="ds-dot ds-dot--' + view.tone + '"></span>'
+      + '<div class="ds-status-model-main">'
+      + '<div class="ds-status-model-name"><span class="ds-status-ellipsis" title="' + statusEscape(view.id) + '">'
+      + statusEscape(view.name) + '</span>'
+      + (view.badge ? '<span class="ds-status-badge">' + view.badge + '</span>' : '') + '</div>'
+      + '<div class="ds-status-model-sub' + (view.detailError ? ' ds-status-model-sub--error' : '') + '"'
+      + (view.detail ? '' : ' hidden') + '>' + statusEscape(view.detail) + '</div>'
+      + '</div>'
+      + '<span class="ds-status-model-speed"' + (view.speed ? '' : ' hidden') + '>' + statusEscape(view.speed) + '</span>'
+      + button
+      + '</div>';
+  }
+
+  function statusSetModelsMessage(container, html) {
+    container.__statusStructure = null;
+    statusSetHTML(container, html);
+  }
+
+  function renderStatusModels() {
+    const container = statusEl('status-models');
+    if (!container) return;
+    const lang = statusLang();
+    const now = Date.now();
+    const snapshot = statusDisplaySnapshot();
+    const models = snapshot && Array.isArray(snapshot.models)
+      ? snapshot.models.filter(model => model && typeof model === 'object')
+      : [];
+    const present = new Set(models.map(model => model.state === 'loaded' ? model.id : null));
+    Object.keys(statusPageState.unloading).forEach(id => {
+      if (!present.has(id)) delete statusPageState.unloading[id];
+    });
+    if (!models.length) {
+      const backendState = statusPageState.backend ? statusPageState.backend.state : '';
+      if (backendState === 'stopped' || backendState === 'failed' || backendState === 'stopping') {
+        statusSetModelsMessage(container, '<div class="ds-status-empty">'
+          + statusEscape(statusText('status_backend_stopped', lang)) + '</div>');
+        return;
+      }
+      if (backendState === 'starting' || backendState === 'recovering') {
+        statusSetModelsMessage(container, '<div class="ds-status-empty">'
+          + statusEscape(statusText('status_backend_starting', lang)) + '</div>');
+        return;
+      }
+      statusSetModelsMessage(container, '<div class="ds-status-empty">' + statusEscape(statusText('status_no_models', lang))
+        + ' <button type="button" class="ds-status-link" onclick="navigateTo(\'models\')">'
+        + statusEscape(statusText('status_open_models', lang)) + ' \u2192</button></div>');
+      return;
+    }
+    const views = models.map(model => statusModelView(model, lang, now));
+    const structure = views.map(statusModelStructure).join('\u0002');
+    const rows = container.__statusStructure === structure ? container.querySelectorAll('[data-status-model]') : [];
+    if (rows.length === views.length) {
+      views.forEach((view, index) => {
+        const row = rows[index];
+        const dot = row.querySelector('.ds-dot');
+        const className = 'ds-dot ds-dot--' + view.tone;
+        if (dot && dot.className !== className) dot.className = className;
+        [['.ds-status-model-speed', view.speed], ['.ds-status-model-sub', view.detail]].forEach(([selector, text]) => {
+          const element = row.querySelector(selector);
+          if (!element) return;
+          if (element.textContent !== text) element.textContent = text;
+          element.hidden = !text;
+        });
+      });
+      return;
+    }
+    container.innerHTML = views.map(statusModelRowHTML).join('');
+    container.__statusStructure = structure;
+    container.__statusHTML = null;
+  }
+
+  function statusUnloadFailed(result) {
+    try {
+      const modelId = result && (typeof result.model_id === 'string' ? result.model_id
+        : typeof result.model === 'string' ? result.model : '');
+      if (modelId) delete statusPageState.unloading[modelId];
+      else statusPageState.unloading = {};
+      renderStatusModels();
+    } catch (error) {
+      // The row resets on its own after 60 seconds.
     }
   }
+
+  const STATUS_DETAILS_STORAGE_KEY = 'ironmlx.status.runtimeDetailsOpen';
+
+  function setStatusDetailsOpen(open, remember) {
+    const body = statusEl('status-details-body');
+    const toggle = statusEl('status-details-toggle');
+    if (body) body.hidden = !open;
+    if (toggle) toggle.setAttribute('aria-expanded', String(!!open));
+    if (remember === false) return;
+    try { localStorage.setItem(STATUS_DETAILS_STORAGE_KEY, open ? '1' : '0'); } catch (error) { /* per-viewer convenience only */ }
+  }
+
+  function toggleStatusDetails() {
+    const body = statusEl('status-details-body');
+    setStatusDetailsOpen(!!(body && body.hidden));
+  }
+
+  function statusDetailsRemembered() {
+    try { return localStorage.getItem(STATUS_DETAILS_STORAGE_KEY) === '1'; } catch (error) { return false; }
+  }
+
+  function statusUnloadModel(button) {
+    try {
+      const modelId = button && button.dataset ? button.dataset.modelId : '';
+      if (!modelId) return;
+      statusPageState.unloading[modelId] = Date.now();
+      if (typeof unloadModel === 'function') unloadModel(modelId, button);
+      renderStatusModels();
+    } catch (error) {
+      // The model page offers the same action.
+    }
+  }
+
+  // Highlights the model's row on the Models page and focuses its load control, where the
+  // user picks the load mode. Returns whether the row was there.
+  function statusFocusModelLoad(modelId) {
+    if (typeof document === 'undefined') return false;
+    const row = Array.from(document.querySelectorAll('#tab-models-manage tbody tr'))
+      .find(tr => tr.dataset.modelId === modelId);
+    if (!row) return false;
+    row.classList.remove('model-load-focus');
+    void row.offsetWidth;
+    row.classList.add('model-load-focus');
+    row.scrollIntoView({ block: 'nearest' });
+    const control = row.querySelector('.model-action-cell .action-load:not([disabled])');
+    if (control && typeof control.focus === 'function') control.focus({ preventScroll: true });
+    setTimeout(() => row.classList.remove('model-load-focus'), 4000);
+    return true;
+  }
+
+  // A failed load is retried through the Models page load action, so the user confirms
+  // the load mode and parameters the same way as any other load.
+  function statusRetryModel(button) {
+    try {
+      const modelId = button && button.dataset ? button.dataset.modelId : '';
+      if (!modelId) return;
+      navigateTo('models');
+      if (typeof switchToTab === 'function') switchToTab('models-manage');
+      statusFocusModelLoad(modelId);
+      // Opening the page re-syncs the model list, which rebuilds the rows; point at it again.
+      setTimeout(() => {
+        try { statusFocusModelLoad(modelId); } catch (error) { /* the row is still on the page */ }
+      }, 500);
+    } catch (error) {
+      // The model page offers the same action.
+    }
+  }
+
+  function renderStatusMemory() {
+    const container = statusEl('status-memory');
+    if (!container) return;
+    const lang = statusLang();
+    const snapshot = statusDisplaySnapshot();
+    const memory = snapshot ? snapshot.memory : null;
+    const segments = memorySegments(memory);
+    const share = value => (Math.round(value * 10000) / 100) + '%';
+    let html = '<div class="ds-status-mem-total">';
+    if (segments) {
+      html += statusEscape(formatStatusGB(segments.processBytes)
+        + (segments.ceilingBytes > 0 ? ' / ' + formatStatusGB(segments.ceilingBytes) : '') + ' GB');
+    } else {
+      html += STATUS_DASH;
+    }
+    html += '</div><div class="ds-membar">';
+    if (segments) {
+      html += '<div class="ds-membar-seg ds-membar-seg--model" style="width:' + share(segments.model) + '"></div>'
+        + '<div class="ds-membar-seg ds-membar-seg--kv" style="width:' + share(segments.kv) + '"></div>'
+        + '<div class="ds-membar-seg ds-membar-seg--cache" style="width:' + share(segments.cache) + '"></div>';
+    }
+    html += '</div><div class="ds-status-mem-legend">';
+    [['model', 'status_memory_model', segments && segments.modelBytes],
+      ['kv', 'status_memory_kv', segments && segments.kvBytes],
+      ['cache', 'status_memory_cache', segments && segments.cacheBytes]].forEach(([kind, key, bytes]) => {
+      html += '<span class="ds-status-mem-key"><i class="ds-status-key ds-membar-seg--' + kind + '"></i>'
+        + statusEscape(statusText(key, lang)) + ' '
+        + statusEscape(segments ? formatStatusGB(bytes) + ' GB' : STATUS_DASH) + '</span>';
+    });
+    html += '</div>';
+    const level = memory && typeof memory.pressure_level === 'string' ? memory.pressure_level : '';
+    const levelTone = { normal: 'green', soft: 'amber', hard: 'amber', emergency: 'red' }[level];
+    const levelText = levelTone ? statusText('status_pressure_' + level, lang) : STATUS_DASH;
+    html += '<div class="ds-row ds-status-pair"><span>' + statusEscape(statusText('status_pressure', lang))
+      + '</span><span class="ds-status-value">'
+      + (levelTone ? '<span class="ds-dot ds-dot--' + levelTone + '"></span>' : '')
+      + statusEscape(levelText) + '</span></div>';
+    const rate = prefixHitRate(snapshot ? snapshot.prefix_cache : null);
+    html += '<div class="ds-row ds-status-pair"><span>' + statusEscape(statusText('status_prefix_hit', lang))
+      + '</span><span class="ds-status-value">' + (rate === null ? STATUS_DASH : rate + '%') + '</span></div>';
+    statusSetHTML(container, html);
+  }
+
+  function renderStatusRecent() {
+    const container = statusEl('status-recent');
+    if (!container) return;
+    const lang = statusLang();
+    const rows = statusPageState.recent.slice(0, STATUS_RECENT_VISIBLE).map(request => recentRequestRow(request, lang));
+    if (!rows.length) {
+      statusSetHTML(container, '<div class="ds-status-empty">' + statusEscape(statusText('status_no_requests', lang)) + '</div>');
+      return;
+    }
+    statusSetHTML(container, rows.map(row => '<div class="ds-row ds-status-request'
+      + (row.aborted ? ' ds-status-request--aborted' : '') + '">'
+      + '<span class="ds-status-request-time">' + statusEscape(row.time) + '</span>'
+      + '<span class="ds-status-ellipsis" title="' + statusEscape(row.endpoint) + '">' + statusEscape(row.endpoint) + '</span>'
+      + '<span class="ds-status-ellipsis" title="' + statusEscape(row.modelId) + '">' + statusEscape(row.model) + '</span>'
+      + '<span class="ds-status-num">' + statusEscape(row.tokens) + '</span>'
+      + '<span class="ds-status-num">' + statusEscape(row.ttft) + '</span>'
+      + '<span class="ds-status-num ds-status-request-speed">' + statusEscape(row.speed) + '</span>'
+      + '<span class="ds-status-tag">' + statusEscape(row.outcomeLabel) + '</span>'
+      + '</div>').join(''));
+  }
+
+  function statusTrendDefs(mode) {
+    return mode === 'memory'
+      ? [
+        { key: 'process', labelKey: 'status_trend_process', color: '--ds-data-decode' },
+        { key: 'kv', labelKey: 'status_memory_kv', color: '--ds-data-kv' },
+        { key: 'cache', labelKey: 'status_memory_cache', color: '--ds-data-cache' },
+        { key: 'ceiling', labelKey: 'status_trend_ceiling', color: '--ds-text-3', dashed: true },
+      ]
+      : [
+        { key: 'decode', labelKey: 'status_tile_decode', color: '--ds-data-decode' },
+        { key: 'prefill', labelKey: 'status_tile_prefill', color: '--ds-data-prefill' },
+      ];
+  }
+
+  function statusCssValue(name, fallback) {
+    try {
+      const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      return value || fallback;
+    } catch (error) {
+      return fallback;
+    }
+  }
+
+  function statusNiceCeiling(value) {
+    if (!(value > 0)) return 1;
+    const magnitude = Math.pow(10, Math.floor(Math.log10(value)));
+    const fraction = value / magnitude;
+    const nice = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].find(step => fraction <= step) || 10;
+    return nice * magnitude;
+  }
+
+  function statusAxisLabel(value, mode) {
+    if (mode === 'memory') {
+      const gb = value / STATUS_BYTES_PER_GB;
+      return (gb > 0 && gb < 10 ? gb.toFixed(1) : Math.round(gb)) + ' GB';
+    }
+    if (value >= 1000) return (Math.round(value / 100) / 10) + 'k';
+    return value > 0 && value < 10 && !Number.isInteger(value) ? value.toFixed(1) : String(Math.round(value));
+  }
+
+  // Draws the trend into the canvas at device resolution and returns the layout used
+  // (for the hover tooltip), or null when the canvas is not visible.
+  function drawStatusTrend(canvas, series, mode, windowKey) {
+    if (!canvas || typeof canvas.getContext !== 'function') return null;
+    const rect = canvas.getBoundingClientRect();
+    if (!rect || rect.width < 40 || rect.height < 60) return null;
+    const ratio = window.devicePixelRatio || 1;
+    const pixelWidth = Math.round(rect.width * ratio);
+    const pixelHeight = Math.round(rect.height * ratio);
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    const tier = STATUS_WINDOW_TIERS[windowKey] || '5s';
+    const bucketMs = STATUS_TIER_MS[tier];
+    const spanMs = bucketMs * STATUS_TIER_CAPACITY[tier];
+    const defs = statusTrendDefs(mode);
+    const colors = {};
+    defs.forEach(def => { colors[def.key] = statusCssValue(def.color, '#8e8e93'); });
+    const textColor = statusCssValue('--ds-text-3', '#8e8e93');
+    const gridColor = statusCssValue('--ds-border', 'rgba(128,128,128,0.2)');
+    const guideColor = statusCssValue('--ds-border-strong', 'rgba(128,128,128,0.4)');
+
+    let lastT = null;
+    defs.forEach(def => (series[def.key] || []).forEach(entry => {
+      if (entry && (lastT === null || entry.t > lastT)) lastT = entry.t;
+    }));
+    const end = lastT === null ? Date.now() : lastT + bucketMs;
+    const start = end - spanMs;
+    const pad = { left: 44, right: 8, top: 6, bottom: 20 };
+    const plotWidth = rect.width - pad.left - pad.right;
+    const plotHeight = rect.height - pad.top - pad.bottom;
+    const xOf = t => pad.left + (t + bucketMs - start) / spanMs * plotWidth;
+    const laneGap = 14;
+    const lanes = mode === 'memory'
+      ? [{ keys: defs.map(def => def.key), top: pad.top, height: plotHeight }]
+      : [
+        { keys: ['decode'], top: pad.top, height: Math.round((plotHeight - laneGap) * 0.55) },
+        { keys: ['prefill'], top: 0, height: 0 },
+      ];
+    if (lanes.length === 2) {
+      lanes[1].top = pad.top + lanes[0].height + laneGap;
+      lanes[1].height = plotHeight - lanes[0].height - laneGap;
+    }
+
+    ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.lineWidth = 1;
+    let hasData = false;
+    lanes.forEach(lane => {
+      let max = 0;
+      lane.keys.forEach(key => (series[key] || []).forEach(entry => {
+        if (entry && entry.v !== null && entry.t + bucketMs >= start) {
+          max = Math.max(max, entry.v);
+          hasData = true;
+        }
+      }));
+      // Memory scales in GB so the limit lands on a round number of gigabytes.
+      lane.max = mode === 'memory'
+        ? statusNiceCeiling(max * 1.08 / STATUS_BYTES_PER_GB) * STATUS_BYTES_PER_GB
+        : statusNiceCeiling(max * 1.08);
+      lane.yOf = value => lane.top + lane.height - Math.min(Math.max(value, 0), lane.max) / lane.max * lane.height;
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      [0, 0.5, 1].forEach(fraction => {
+        const y = Math.round(lane.top + lane.height * (1 - fraction)) + 0.5;
+        ctx.strokeStyle = gridColor;
+        ctx.setLineDash(fraction === 0 ? [] : [2, 3]);
+        ctx.beginPath();
+        ctx.moveTo(pad.left, y);
+        ctx.lineTo(pad.left + plotWidth, y);
+        ctx.stroke();
+        ctx.fillStyle = textColor;
+        ctx.fillText(statusAxisLabel(lane.max * fraction, mode), pad.left - 6, y);
+      });
+      ctx.setLineDash([]);
+    });
+
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = textColor;
+    for (let index = 0; index <= 4; index++) {
+      const t = start + spanMs * index / 4;
+      ctx.textAlign = index === 0 ? 'left' : index === 4 ? 'right' : 'center';
+      ctx.fillText(formatStatusClock(t, false), pad.left + plotWidth * index / 4, rect.height - 4);
+    }
+
+    if (!hasData) {
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(statusText('status_chart_empty'), pad.left + plotWidth / 2, pad.top + plotHeight / 2);
+      return { start, end, bucketMs, pad, plotWidth, hoverT: null, hoverX: null };
+    }
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(pad.left, 0, plotWidth + 1, rect.height);
+    ctx.clip();
+    lanes.forEach(lane => lane.keys.forEach(key => {
+      const def = defs.find(item => item.key === key);
+      ctx.strokeStyle = colors[key];
+      ctx.fillStyle = colors[key];
+      ctx.lineWidth = 1.5;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.setLineDash(def && def.dashed ? [4, 4] : []);
+      let run = [];
+      const flush = () => {
+        if (run.length === 1) {
+          ctx.beginPath();
+          ctx.arc(run[0][0], run[0][1], 2, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (run.length > 1) {
+          ctx.beginPath();
+          ctx.moveTo(run[0][0], run[0][1]);
+          for (let index = 1; index < run.length; index++) ctx.lineTo(run[index][0], run[index][1]);
+          ctx.stroke();
+        }
+        run = [];
+      };
+      (series[key] || []).forEach(entry => {
+        if (!entry || entry.v === null || entry.t + bucketMs < start) {
+          flush();
+          return;
+        }
+        run.push([xOf(entry.t), lane.yOf(entry.v)]);
+      });
+      flush();
+      ctx.setLineDash([]);
+    }));
+    ctx.restore();
+
+    let hoverT = null;
+    const hoverX = statusPageState.hoverX;
+    if (hoverX !== null && hoverX >= pad.left && hoverX <= pad.left + plotWidth) {
+      const target = start + (hoverX - pad.left) / plotWidth * spanMs - bucketMs;
+      let best = null;
+      (series[defs[0].key] || []).forEach(entry => {
+        if (!entry || entry.t + bucketMs < start) return;
+        if (best === null || Math.abs(entry.t - target) < Math.abs(best - target)) best = entry.t;
+      });
+      if (best !== null && Math.abs(best - target) <= bucketMs * 1.5) hoverT = best;
+    }
+    if (hoverT !== null) {
+      const x = Math.round(xOf(hoverT)) + 0.5;
+      ctx.strokeStyle = guideColor;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, pad.top);
+      ctx.lineTo(x, pad.top + plotHeight);
+      ctx.stroke();
+      lanes.forEach(lane => lane.keys.forEach(key => {
+        const entry = (series[key] || []).find(item => item && item.t === hoverT);
+        if (!entry || entry.v === null) return;
+        ctx.fillStyle = colors[key];
+        ctx.beginPath();
+        ctx.arc(x, lane.yOf(entry.v), 3, 0, Math.PI * 2);
+        ctx.fill();
+      }));
+    }
+    return { start, end, bucketMs, pad, plotWidth, hoverT, hoverX: hoverT === null ? null : xOf(hoverT) };
+  }
+
+  function renderStatusTrendLegend(lang) {
+    const legend = statusEl('status-trend-legend');
+    if (!legend) return;
+    const mode = statusPageState.trendMode;
+    const items = statusTrendDefs(mode).map(def => '<span class="ds-status-legend-item"><i class="ds-status-swatch'
+      + (def.dashed ? ' ds-status-swatch--dashed" style="border-color:var(' + def.color + ')' : '" style="background:var(' + def.color + ')')
+      + '"></i>' + statusEscape(statusText(def.labelKey, lang)) + '</span>');
+    items.push('<span>' + (mode === 'memory' ? 'GB' : 'tok/s') + '</span>');
+    statusSetHTML(legend, items.join(''));
+  }
+
+  function renderStatusTrendTooltip(layout, points, lang) {
+    const tooltip = statusEl('status-trend-tooltip');
+    if (!tooltip) return;
+    const point = layout && layout.hoverT !== null
+      ? points.find(item => item && item.t === layout.hoverT)
+      : null;
+    if (!point) {
+      tooltip.hidden = true;
+      return;
+    }
+    const tier = STATUS_WINDOW_TIERS[statusPageState.trendWindow] || '5s';
+    const memoryMode = statusPageState.trendMode === 'memory';
+    const rows = memoryMode
+      ? [
+        ['--ds-data-decode', 'status_trend_process', formatStatusGB(point.process_bytes) + ' GB'],
+        ['--ds-data-kv', 'status_memory_kv', formatStatusGB(point.kv_cache_bytes) + ' GB'],
+        ['--ds-data-cache', 'status_memory_cache', formatStatusGB(point.mlx_cache_bytes) + ' GB'],
+        ['--ds-text-3', 'status_trend_ceiling', formatStatusGB(point.ceiling_bytes) + ' GB'],
+      ]
+      : [
+        ['--ds-data-decode', 'status_tile_decode', formatStatusDecimal(point.decode_tps) + ' tok/s'],
+        ['--ds-data-prefill', 'status_tile_prefill', statusNumber(point.prefill_tps) === null
+          ? STATUS_DASH : formatStatusInteger(point.prefill_tps, lang) + ' tok/s'],
+        ['', 'status_tile_ttft', statusNumber(point.ttft_ms) === null
+          ? STATUS_DASH : formatStatusInteger(point.ttft_ms, lang) + ' ms'],
+      ];
+    statusSetHTML(tooltip, '<div class="ds-status-tooltip-time">'
+      + statusEscape(formatStatusClock(point.t, tier === '5s')) + '</div>'
+      + rows.map(([color, key, value]) => '<div class="ds-status-tooltip-row"><span>'
+        + (color ? '<i class="ds-status-swatch" style="background:var(' + color + ')"></i>' : '')
+        + statusEscape(statusText(key, lang)) + '</span><span>' + statusEscape(value) + '</span></div>').join(''));
+    tooltip.hidden = false;
+    const chart = tooltip.parentElement;
+    const chartWidth = chart ? chart.clientWidth : 0;
+    let left = layout.hoverX + 12;
+    if (left + tooltip.offsetWidth > chartWidth) left = Math.max(0, layout.hoverX - tooltip.offsetWidth - 12);
+    tooltip.style.left = Math.round(left) + 'px';
+  }
+
+  function renderStatusTrend() {
+    statusPageState.trendLive = !!statusLiveSnapshot();
+    const canvas = statusEl('status-trend-canvas');
+    if (!canvas) return;
+    const lang = statusLang();
+    const tier = STATUS_WINDOW_TIERS[statusPageState.trendWindow] || '5s';
+    const points = statusPageState.history.points[tier] || [];
+    document.querySelectorAll('[data-trend-mode]').forEach(button => {
+      button.setAttribute('aria-pressed', String(button.dataset.trendMode === statusPageState.trendMode));
+    });
+    document.querySelectorAll('[data-trend-window]').forEach(button => {
+      button.setAttribute('aria-pressed', String(button.dataset.trendWindow === statusPageState.trendWindow));
+    });
+    renderStatusTrendLegend(lang);
+    const series = trendSeries(points, statusPageState.trendMode, STATUS_TIER_MS[tier]);
+    const layout = drawStatusTrend(canvas, series, statusPageState.trendMode, statusPageState.trendWindow);
+    renderStatusTrendTooltip(layout, points, lang);
+    const note = statusEl('status-trend-note');
+    if (note) {
+      const stale = !statusPageState.trendLive && statusPageState.lastUpdatedMs > 0;
+      note.hidden = !stale;
+      if (stale) {
+        note.textContent = statusText('status_last_updated', lang,
+          { time: formatStatusClock(statusPageState.lastUpdatedMs) });
+      }
+    }
+  }
+
+  function statusScheduleTrend() {
+    if (statusPageState.trendFrame !== null) return;
+    const run = () => {
+      statusPageState.trendFrame = null;
+      try { renderStatusTrend(); } catch (error) { /* redrawn on the next event */ }
+    };
+    statusPageState.trendFrame = typeof requestAnimationFrame === 'function'
+      ? requestAnimationFrame(run)
+      : setTimeout(run, 16);
+  }
+
+  function setStatusTrendMode(mode) {
+    if (mode !== 'throughput' && mode !== 'memory') return;
+    statusPageState.trendMode = mode;
+    statusPageState.hoverX = null;
+    try { renderStatusTrend(); } catch (error) { /* redrawn on the next event */ }
+  }
+
+  function setStatusTrendWindow(windowKey) {
+    if (!STATUS_WINDOW_TIERS[windowKey]) return;
+    statusPageState.trendWindow = windowKey;
+    statusPageState.hoverX = null;
+    try { renderStatusTrend(); } catch (error) { /* redrawn on the next event */ }
+  }
+
+  function toggleStatusEndpoints() {
+    statusPageState.endpointsOpen = !statusPageState.endpointsOpen;
+    const panel = statusEl('server-endpoints-card');
+    const toggle = statusEl('status-endpoints-toggle');
+    if (panel) panel.hidden = !statusPageState.endpointsOpen;
+    if (toggle) toggle.setAttribute('aria-expanded', String(statusPageState.endpointsOpen));
+    if (statusPageState.endpointsOpen && typeof refreshEndpoints === 'function') refreshEndpoints();
+  }
+
+  function copyStatusAddress() {
+    const endpoints = statusPageState.endpoints;
+    if (!endpoints || typeof endpoints.endpoint_address !== 'string' || !endpoints.endpoint_address) return;
+    if (copyToClipboard(endpoints.endpoint_address)) showToast(statusText('agent_copied'), 'success');
+  }
+
+  // Page opened or switched to: fetch history and recent requests once.
+  function statusPageShown() {
+    statusRefreshData(true);
+    renderStatusPage();
+  }
+
+  // The App calls this when the Dashboard window is shown again after being closed: no
+  // events reached the page meanwhile, so history and recent requests are fetched again.
+  function statusWindowReopened() {
+    try {
+      statusPageShown();
+    } catch (error) {
+      // Never throw back into the native bridge.
+    }
+  }
+
+  // The 2 s status poll. Without metrics events (idle backend) nothing else re-renders the
+  // model rows, so the idle unload countdown advances here; unchanged rows only update text.
+  function statusPageTick() {
+    try {
+      const page = statusEl('page-status');
+      if (!page || !page.classList.contains('active')) return;
+      renderStatusModels();
+    } catch (error) {
+      // The next tick tries again.
+    }
+  }
+
+  function initStatusPage() {
+    if (statusPageState.initialized) return;
+    statusPageState.initialized = true;
+    try {
+      const canvas = statusEl('status-trend-canvas');
+      if (canvas) {
+        canvas.addEventListener('mousemove', event => {
+          statusPageState.hoverX = event.clientX - canvas.getBoundingClientRect().left;
+          statusScheduleTrend();
+        });
+        canvas.addEventListener('mouseleave', () => {
+          statusPageState.hoverX = null;
+          statusScheduleTrend();
+        });
+      }
+      const chart = statusEl('status-trend-chart');
+      if (chart && typeof ResizeObserver === 'function') new ResizeObserver(statusScheduleTrend).observe(chart);
+      window.addEventListener('resize', statusScheduleTrend);
+      if (window.matchMedia) {
+        const scheme = window.matchMedia('(prefers-color-scheme: dark)');
+        if (scheme.addEventListener) scheme.addEventListener('change', statusScheduleTrend);
+        else if (scheme.addListener) scheme.addListener(statusScheduleTrend);
+      }
+    } catch (error) {
+      // The chart still redraws on new data.
+    }
+    setStatusDetailsOpen(statusDetailsRemembered(), false);
+    statusPageShown();
+  }
+  // ── End runtime status page ──
 
   function pollStatus() {
     if (!window.__HEALTH_PENDING__) {
       window.__HEALTH_PENDING__ = true;
       apiFetch('/health');
     }
+    statusPageTick();
     // Endpoints and available LAN interfaces are read through the native
     // bridge, even when the backend is stopped. Poll alongside /health on
-    // a slower cadence so the Status page populates on first open
-    // (previously refreshEndpoints only fired on server-restart).
+    // a slower cadence so the Status page header shows the address on first
+    // open and follows host/port changes.
     const now = Date.now();
     if (now - lastEndpointRefreshAt >= 5000) {
       lastEndpointRefreshAt = now;
@@ -16993,42 +18297,31 @@
     }
   }
 
+  // Fixed cadence, independent of the current page: the Status page no longer reads /health.
   function updateStatusPollingInterval() {
-    const nextInterval = isStatusPageActive() ? GPU_ACTIVE_POLL_MS : GPU_IDLE_POLL_MS;
-    if (statusPollTimer && statusPollIntervalMs === nextInterval) return;
-    if (statusPollTimer) clearInterval(statusPollTimer);
-    statusPollIntervalMs = nextInterval;
-    statusPollTimer = setInterval(pollStatus, nextInterval);
+    if (statusPollTimer) return;
+    statusPollTimer = setInterval(pollStatus, STATUS_POLL_MS);
   }
 
-  // Dummy — status error display handled in onApiFetchResult
   function showStatusOffline() {
     settingsBackendRunning = false;
     updateSettingsSaveBar();
     const dict = I18N[currentLang] || I18N.en;
     updateServerStatusVisual(dict.stopped || 'Stopped', 'var(--text-tertiary)');
-    document.getElementById('stat-uptime').textContent = '--';
     renderRuntimeModels([]);
-    document.getElementById('gpu-active-val').textContent = '-- MB';
-    document.getElementById('gpu-peak-val').textContent = '-- MB';
-    document.getElementById('gpu-cache-val').textContent = '-- MB';
   }
 
   function initStatusPolling() {
-    bindGpuWindowControls();
     pollStatus();
     // First endpoint fetch on page open — subsequent refreshes run
     // on the slower tick inside pollStatus.
     refreshEndpoints();
     lastEndpointRefreshAt = Date.now();
     updateStatusPollingInterval();
+    initStatusPage();
     applyPersistedSettingsToInputs();
     bindSettingsDirtyWatcher();
   }
-
-  // Resize chart on window resize
-  window.addEventListener('resize', () => { if (gpuHistory.length > 0) drawGpuChart(); });
-  document.addEventListener('visibilitychange', updateStatusPollingInterval);
 
   // ── API Bridge ──
   function apiFetch(path) {
@@ -17103,14 +18396,11 @@
     if (!banner) {
       banner = document.createElement('div');
       banner.id = 'active-kv-error-banner';
+      // The runtime card now sits collapsed at the bottom of the Status page;
+      // the incident goes to the top, where the card used to be.
       const statusPage = document.getElementById('page-status');
-      const runtimeCard = statusPage && statusPage.querySelector('#runtime-model-health-card');
       const statusBody = statusPage && statusPage.querySelector('.status-page-scroll');
-      if (runtimeCard && runtimeCard.parentElement) {
-        runtimeCard.parentElement.insertBefore(banner, runtimeCard);
-      } else if (statusBody) {
-        statusBody.insertBefore(banner, statusBody.firstChild);
-      }
+      if (statusBody) statusBody.insertBefore(banner, statusBody.firstChild);
     }
     const dict = I18N[currentLang] || I18N.en;
     const modelNames = degradedModels.map(model => String(model.id || model.model || ''));
@@ -17649,7 +18939,6 @@
         settingsBackendRunning = true;
         updateSettingsSaveBar();
         updateServerStatusVisual(dict.running || 'Running', 'var(--green)');
-        document.getElementById('stat-uptime').textContent = formatUptime(data.started_at);
         // Sync loaded model state from health response (supports multiple models)
         if (data.model) {
           const currentIds = data.model.split(',').map(s => s.trim()).filter(s => s);
@@ -17661,30 +18950,10 @@
           }
           renderAgentGuideConfiguration();
         }
-        if (data.memory) {
-          const m = data.memory;
-          if (m.max_mb && m.max_mb > 0) {
-            gpuTotalMB = m.max_mb;
-            document.getElementById('gpu-total-label').textContent = (dict.gpu_max_label || '(Max: {value})').replace('{value}', formatMB(gpuTotalMB));
-          } else if (m.total_mb && m.total_mb > 0) {
-            gpuTotalMB = m.total_mb;
-            document.getElementById('gpu-total-label').textContent = (dict.gpu_max_label || '(Max: {value})').replace('{value}', formatMB(gpuTotalMB));
-          }
-          // Show device info (static, only set once)
-          if (data.device_name) {
-            const el = document.getElementById('gpu-device-info');
-            if (el && !el.textContent) {
-              el.textContent = data.device_name;
-            }
-          }
-          const now = Date.now();
-          gpuHistory.push({ time: now, active: m.active_mb, peak: m.peak_mb, cache: m.cache_mb });
-          pruneGpuHistory(now);
-          document.getElementById('gpu-active-val').textContent = formatMB(m.active_mb);
-          document.getElementById('gpu-peak-val').textContent = formatMB(m.peak_mb);
-          document.getElementById('gpu-cache-val').textContent = formatMB(m.cache_mb);
-          drawGpuChart();
-        }
+      } else if (path === '/admin/api/metrics/history') {
+        statusHistoryLoaded(jsonStr);
+      } else if (path === '/admin/api/requests/recent') {
+        statusRecentLoaded(jsonStr);
       } else if (path === '/admin/api/models/reveal') {
         const result = JSON.parse(jsonStr || '{}');
         if (!result.success) showToast(localizeErrorResult(result), 'warn');
@@ -17707,6 +18976,7 @@
         renderNetworkInterfaces(JSON.parse(jsonStr || 'null'));
       } else if (path === '/admin/api/endpoints') {
         renderEndpoints(jsonStr);
+        statusEndpointsLoaded(jsonStr);
       } else if (['/admin/api/models/update/check', '/admin/api/models/update/download'].includes(path)) {
         onCatalogUpdateResult(path.split('/').pop(), jsonStr);
       } else if (path === '/admin/api/models/ms/download') {

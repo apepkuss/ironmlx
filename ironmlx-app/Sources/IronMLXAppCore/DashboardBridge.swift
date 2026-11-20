@@ -62,6 +62,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     private var pendingModelImport: ModelImportPreview?
     private var modelImportInspectionTask: Task<ModelImportPreview, Error>?
     private var modelImportTask: Task<ModelImportResult, Error>?
+    /// Runtime events reach the page only while the window is open and the page has loaded.
+    private var runtimeRelay: RuntimeEventRelay?
+    private var runtimeRelayToken: RuntimeRelayToken?
+    private var isDashboardWindowVisible = false
+    private var isDashboardPageLoaded = false
     private lazy var diagnosticExportCoordinator = DiagnosticExportCoordinator(
         window: webView?.window,
         service: DiagnosticBundleService(
@@ -358,15 +363,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         }
         switch path {
         case "/v1/models":
-            let config = configStore.load()
-            Task {
-                let client = BackendAPIClient(host: config.host, port: config.port)
-                let data = try? await client.fetchData(path: path)
-                let json = data.flatMap { String(data: $0, encoding: .utf8) } ?? "null"
-                await MainActor.run {
-                    self.sendFetchResult(path: path, jsonString: json)
-                }
-            }
+            forwardBackendFetch(path: path)
+        case "/admin/api/metrics/history", "/admin/api/requests/recent":
+            forwardBackendFetch(path: path)
         case "/admin/api/audio/execution-profile":
             let config = configStore.load()
             Task {
@@ -451,6 +450,19 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 return
             }
             sendFetchResult(path: path, jsonString: emptyPayload(for: path))
+        }
+    }
+
+    /// Passes the backend's JSON for `path` to the page as is, or `null` when the request fails.
+    private func forwardBackendFetch(path: String) {
+        let config = configStore.load()
+        Task {
+            let client = BackendAPIClient(host: config.host, port: config.port)
+            let data = try? await client.fetchData(path: path)
+            let json = data.flatMap { String(data: $0, encoding: .utf8) } ?? "null"
+            await MainActor.run {
+                self.sendFetchResult(path: path, jsonString: json)
+            }
         }
     }
 
@@ -3700,6 +3712,83 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         sendJavaScript("onSchedulerProfilePreview(\(Self.jsStringLiteral(json)))")
     }
 
+    // MARK: Runtime events
+
+    /// Delivers `relay`'s events to the page from now on, while the window is open and the page
+    /// has loaded.
+    public func attachRuntimeRelay(_ relay: RuntimeEventRelay) {
+        guard relay !== runtimeRelay else {
+            return
+        }
+        stopRuntimeRelayDelivery()
+        runtimeRelay = relay
+        updateRuntimeRelayDelivery()
+    }
+
+    /// The window controller reports when the Dashboard is shown and when it is closed (hidden).
+    /// Reopening a loaded page also asks it to fetch history and recent requests again, since no
+    /// events reached it while the window was closed; a fresh page fetches them itself on load.
+    func setDashboardWindowVisible(_ visible: Bool) {
+        guard visible != isDashboardWindowVisible else {
+            return
+        }
+        isDashboardWindowVisible = visible
+        updateRuntimeRelayDelivery()
+        if visible, isDashboardPageLoaded {
+            sendJavaScript(
+                "typeof window.statusWindowReopened === 'function' && window.statusWindowReopened(); void 0;"
+            )
+        }
+    }
+
+    /// Listens while the window is open and the page has loaded; a new listener gets the latest
+    /// backend state and snapshot replayed, so the page starts from current state.
+    private func updateRuntimeRelayDelivery() {
+        guard isDashboardWindowVisible, isDashboardPageLoaded, let runtimeRelay else {
+            stopRuntimeRelayDelivery()
+            return
+        }
+        guard runtimeRelayToken == nil else {
+            return
+        }
+        // Weak: the relay outlives the bridge's interest in it and must not keep the bridge alive.
+        runtimeRelayToken = runtimeRelay.addListener { [weak self] event in
+            self?.sendJavaScript(Self.script(for: event))
+        }
+    }
+
+    private func stopRuntimeRelayDelivery() {
+        if let runtimeRelayToken {
+            runtimeRelay?.removeListener(runtimeRelayToken)
+        }
+        runtimeRelayToken = nil
+    }
+
+    /// The script that hands one event to the page. Raw JSON from the backend is embedded as is,
+    /// as an object literal; a page without the handler skips the event. `void 0` keeps the
+    /// handler's return value from being serialized back.
+    nonisolated static func script(for event: RuntimeRelayEvent) -> String {
+        let function: String
+        let argument: String
+        switch event {
+        case let .metrics(raw):
+            function = "onRuntimeMetrics"
+            argument = raw ?? "null"
+        case let .history(raw):
+            function = "onRuntimeHistoryPoint"
+            argument = raw
+        case let .request(raw):
+            function = "onRuntimeRequest"
+            argument = raw
+        case let .backend(state, connected):
+            function = "onRuntimeBackendState"
+            let object: [String: Any] = ["state": state, "connected": connected]
+            argument = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]))
+                .flatMap { String(data: $0, encoding: .utf8) } ?? "null"
+        }
+        return "typeof window.\(function) === 'function' && window.\(function)(\(argument)); void 0;"
+    }
+
     private func sendFetchResult(path: String, jsonString: String) {
         sendJavaScript(
             "onApiFetchResult(\(Self.jsStringLiteral(path)), \(Self.jsStringLiteral(jsonString)))"
@@ -4369,5 +4458,24 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     nonisolated static func jsStringLiteral(_ value: String) -> String {
         let data = try? JSONEncoder().encode(value)
         return data.flatMap { String(data: $0, encoding: .utf8) } ?? "\"\""
+    }
+}
+
+/// Only tracks page loads for runtime event delivery. Content process termination is left
+/// unimplemented on purpose, so WebKit keeps reloading the page itself after a crash.
+extension DashboardBridge: WKNavigationDelegate {
+    /// A (re)load has begun: the page is not ready for events until it finishes.
+    public func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        isDashboardPageLoaded = false
+        stopRuntimeRelayDelivery()
+    }
+
+    /// Listens again once per load, so the new page gets the current state replayed.
+    public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard !isDashboardPageLoaded else {
+            return
+        }
+        isDashboardPageLoaded = true
+        updateRuntimeRelayDelivery()
     }
 }

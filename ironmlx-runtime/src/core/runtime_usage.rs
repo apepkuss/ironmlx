@@ -4,10 +4,12 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, MutexGuard, OnceLock,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::sync::Notify;
+
+use crate::core::runtime_activity::{FinishedRequest, RequestOutcome, RuntimeActivityRecorder};
 
 use serde::Serialize;
 
@@ -76,6 +78,20 @@ struct ModelRuntimeDecodeState {
     session_decode_duration: Duration,
 }
 
+/// Process-wide recorder these counters feed, with the model they belong to.
+struct ActivityLink {
+    recorder: Arc<RuntimeActivityRecorder>,
+    model_id: Arc<str>,
+}
+
+impl std::fmt::Debug for ActivityLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActivityLink")
+            .field("model_id", &self.model_id)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ModelRuntimeUsageCounters {
     input_tokens: AtomicU64,
@@ -88,6 +104,7 @@ pub struct ModelRuntimeUsageCounters {
     /// a start or settle and momentarily report one decoding request too many.
     decoding_requests: AtomicU64,
     request_waker: OnceLock<Arc<Notify>>,
+    activity: OnceLock<ActivityLink>,
     decode_state: Mutex<ModelRuntimeDecodeState>,
     performance_samples: Mutex<VecDeque<ModelRuntimePerformanceSample>>,
 }
@@ -102,6 +119,7 @@ pub struct ModelRuntimeRequestTracker {
     first_token_at: Option<Instant>,
     output_tokens: u64,
     finished: bool,
+    endpoint: Option<&'static str>,
 }
 
 impl ModelRuntimeUsageCounters {
@@ -111,16 +129,25 @@ impl ModelRuntimeUsageCounters {
 
     pub fn record_output_tokens(&self, tokens: u64) {
         self.output_tokens.fetch_add(tokens, Ordering::Relaxed);
+        if let Some(link) = self.activity.get() {
+            link.recorder.record_output_tokens(tokens);
+        }
     }
 
+    /// `endpoint` is the API path the request came in on, shown in the
+    /// recent-request log.
     pub fn start_request(
         self: &Arc<Self>,
         input_tokens: u64,
         started_at: Instant,
+        endpoint: Option<&'static str>,
     ) -> ModelRuntimeRequestTracker {
         self.record_input_tokens(input_tokens);
         if let Some(waker) = self.request_waker.get() {
             waker.notify_one();
+        }
+        if let Some(link) = self.activity.get() {
+            link.recorder.record_request_started();
         }
         ModelRuntimeRequestTracker {
             counters: self.clone(),
@@ -130,6 +157,7 @@ impl ModelRuntimeUsageCounters {
             first_token_at: None,
             output_tokens: 0,
             finished: false,
+            endpoint,
         }
     }
 
@@ -137,6 +165,13 @@ impl ModelRuntimeUsageCounters {
     /// effect.
     pub fn attach_request_waker(&self, waker: Arc<Notify>) {
         let _ = self.request_waker.set(waker);
+    }
+
+    /// Feeds output tokens, request starts, first tokens and finished
+    /// requests of `model_id` to `recorder`. Only the first attachment takes
+    /// effect.
+    pub fn attach_activity(&self, recorder: Arc<RuntimeActivityRecorder>, model_id: Arc<str>) {
+        let _ = self.activity.set(ActivityLink { recorder, model_id });
     }
 
     /// Requests that have produced their first token and are not finished.
@@ -307,6 +342,12 @@ impl ModelRuntimeRequestTracker {
             self.counters
                 .decoding_requests
                 .fetch_add(1, Ordering::Relaxed);
+            if let Some(link) = self.counters.activity.get() {
+                link.recorder.record_first_token(
+                    self.input_tokens,
+                    now.saturating_duration_since(self.started_at),
+                );
+            }
         }
         let first_token_at = *self.first_token_at.get_or_insert(now);
         self.output_tokens = self.output_tokens.saturating_add(tokens);
@@ -324,6 +365,7 @@ impl ModelRuntimeRequestTracker {
         }
         self.finished = true;
         self.counters.settle_request(self.first_token_at.is_some());
+        self.record_finished(RequestOutcome::Completed, completed_at);
         let Some(first_token_at) = self.first_token_at else {
             self.counters.remove_active_decode_request(self.request_id);
             return;
@@ -344,6 +386,30 @@ impl ModelRuntimeRequestTracker {
                 ttft_ms: ttft.as_secs_f64() * 1_000.0,
             });
     }
+
+    /// Adds this request to the attached recorder's recent-request log.
+    fn record_finished(&self, outcome: RequestOutcome, finished_at: Instant) {
+        let Some(link) = self.counters.activity.get() else {
+            return;
+        };
+        link.recorder.record_finished(
+            FinishedRequest {
+                model: &link.model_id,
+                endpoint: self.endpoint,
+                input_tokens: self.input_tokens,
+                output_tokens: self.output_tokens,
+                ttft: self
+                    .first_token_at
+                    .map(|first| first.saturating_duration_since(self.started_at)),
+                decode_duration: self
+                    .first_token_at
+                    .map(|first| finished_at.saturating_duration_since(first)),
+                duration: finished_at.saturating_duration_since(self.started_at),
+                outcome,
+            },
+            unix_time_ms(),
+        );
+    }
 }
 
 impl Drop for ModelRuntimeRequestTracker {
@@ -351,8 +417,15 @@ impl Drop for ModelRuntimeRequestTracker {
         if !self.finished {
             self.counters.settle_request(self.first_token_at.is_some());
             self.counters.remove_active_decode_request(self.request_id);
+            self.record_finished(RequestOutcome::Aborted, Instant::now());
         }
     }
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn prune_performance_samples(samples: &mut VecDeque<ModelRuntimePerformanceSample>, now: Instant) {
@@ -384,13 +457,88 @@ fn median(values: impl Iterator<Item = f64>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::runtime_activity::{ActivitySample, RequestOutcome, RuntimeActivityRecorder};
+
+    #[test]
+    fn attached_counters_feed_recorder() {
+        let recorder = RuntimeActivityRecorder::new();
+        let counters = Arc::new(ModelRuntimeUsageCounters::default());
+        counters.attach_activity(recorder.clone(), Arc::from("model-a"));
+        // Only the first attachment takes effect.
+        let other = RuntimeActivityRecorder::new();
+        counters.attach_activity(other.clone(), Arc::from("model-b"));
+
+        let mut request = counters.start_request(12, Instant::now(), Some("/v1/messages"));
+        request.record_output_tokens(1);
+        request.record_output_tokens(2);
+        request.complete();
+
+        let point = recorder.close_bucket(0, ActivitySample::default());
+        assert_eq!(point.output_tokens, 3);
+        assert_eq!(point.requests_started, 1);
+        assert_eq!(point.requests_finished, 1);
+        assert_eq!(point.first_tokens, 1);
+        let recent = recorder.recent().requests;
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].model, "model-a");
+        assert_eq!(recent[0].endpoint.as_deref(), Some("/v1/messages"));
+        assert_eq!(recent[0].input_tokens, 12);
+        assert_eq!(recent[0].output_tokens, 3);
+        assert_eq!(recent[0].outcome, RequestOutcome::Completed);
+        assert!(recent[0].ttft_ms.is_some());
+        assert!(other.recent().requests.is_empty());
+    }
+
+    #[test]
+    fn dropped_tracker_records_aborted() {
+        let recorder = RuntimeActivityRecorder::new();
+        let counters = Arc::new(ModelRuntimeUsageCounters::default());
+        counters.attach_activity(recorder.clone(), Arc::from("m"));
+
+        let mut request = counters.start_request(5, Instant::now(), None);
+        request.record_output_tokens(1);
+        drop(request);
+        let silent = counters.start_request(5, Instant::now(), None);
+        drop(silent);
+
+        let recent = recorder.recent().requests;
+        assert_eq!(recent.len(), 2);
+        assert!(recent
+            .iter()
+            .all(|r| r.outcome == RequestOutcome::Aborted && r.endpoint.is_none()));
+        assert_eq!(recent[0].output_tokens, 0);
+        assert_eq!(recent[0].ttft_ms, None);
+        assert_eq!(recent[1].output_tokens, 1);
+        let point = recorder.close_bucket(0, ActivitySample::default());
+        assert_eq!(point.requests_started, 2);
+        assert_eq!(point.requests_finished, 2);
+        assert_eq!(point.output_tokens, 1);
+    }
+
+    #[test]
+    fn unattached_counters_do_not_record() {
+        let recorder = RuntimeActivityRecorder::new();
+        let counters = Arc::new(ModelRuntimeUsageCounters::default());
+        let mut request = counters.start_request(5, Instant::now(), Some("/v1/messages"));
+        request.record_output_tokens(4);
+        request.complete();
+        counters.record_output_tokens(2);
+        drop(counters.start_request(5, Instant::now(), None));
+
+        let point = recorder.close_bucket(0, ActivitySample::default());
+        assert_eq!(point.output_tokens, 0);
+        assert_eq!(point.requests_started, 0);
+        assert_eq!(point.requests_finished, 0);
+        assert!(recorder.recent().requests.is_empty());
+        assert_eq!(counters.snapshot(false).output_tokens, 6);
+    }
 
     #[test]
     fn decoding_requests_counts_requests_after_first_token_only() {
         let counters = Arc::new(ModelRuntimeUsageCounters::default());
         let t0 = Instant::now();
-        let mut a = counters.start_request(10, t0);
-        let b = counters.start_request(10, t0);
+        let mut a = counters.start_request(10, t0, None);
+        let b = counters.start_request(10, t0, None);
         assert_eq!(counters.decoding_requests(), 0);
         a.record_output_tokens(1);
         assert_eq!(counters.decoding_requests(), 1);
@@ -404,7 +552,7 @@ mod tests {
         let counters = Arc::new(ModelRuntimeUsageCounters::default());
         let waker = Arc::new(tokio::sync::Notify::new());
         counters.attach_request_waker(waker.clone());
-        let _r = counters.start_request(1, Instant::now());
+        let _r = counters.start_request(1, Instant::now(), None);
         tokio::time::timeout(Duration::from_millis(50), waker.notified())
             .await
             .expect("woken");
@@ -437,7 +585,7 @@ mod tests {
     fn completed_request_records_deterministic_performance_sample() {
         let counters = Arc::new(ModelRuntimeUsageCounters::default());
         let started_at = Instant::now();
-        let mut request = counters.start_request(100, started_at);
+        let mut request = counters.start_request(100, started_at, None);
         request.record_output_tokens_at(1, started_at + Duration::from_millis(200));
         request.record_output_tokens_at(9, started_at + Duration::from_millis(1_100));
         let live_snapshot = counters.snapshot_at(true, started_at + Duration::from_millis(1_100));
@@ -468,11 +616,11 @@ mod tests {
     fn live_decode_sums_active_model_requests_and_session_average_is_weighted() {
         let counters = Arc::new(ModelRuntimeUsageCounters::default());
         let started_at = Instant::now();
-        let mut first = counters.start_request(10, started_at);
+        let mut first = counters.start_request(10, started_at, None);
         first.record_output_tokens_at(1, started_at + Duration::from_millis(100));
         first.record_output_tokens_at(4, started_at + Duration::from_millis(500));
 
-        let mut second = counters.start_request(10, started_at);
+        let mut second = counters.start_request(10, started_at, None);
         second.record_output_tokens_at(1, started_at + Duration::from_millis(300));
         second.record_output_tokens_at(2, started_at + Duration::from_millis(500));
 
@@ -508,7 +656,7 @@ mod tests {
         let first_model = Arc::new(ModelRuntimeUsageCounters::default());
         let second_model = Arc::new(ModelRuntimeUsageCounters::default());
 
-        let mut first_request = first_model.start_request(10, started_at);
+        let mut first_request = first_model.start_request(10, started_at, None);
         first_request.record_output_tokens_at(1, started_at + Duration::from_millis(100));
         first_request.record_output_tokens_at(4, started_at + Duration::from_millis(500));
 
@@ -547,7 +695,7 @@ mod tests {
     fn incomplete_and_expired_requests_are_excluded() {
         let counters = Arc::new(ModelRuntimeUsageCounters::default());
         let started_at = Instant::now();
-        let mut incomplete = counters.start_request(10, started_at);
+        let mut incomplete = counters.start_request(10, started_at, None);
         incomplete.record_output_tokens_at(1, started_at + Duration::from_millis(10));
         incomplete.record_output_tokens_at(1, started_at + Duration::from_millis(20));
         assert_eq!(
@@ -565,7 +713,7 @@ mod tests {
             ModelRuntimePerformanceSnapshot::default()
         );
 
-        let mut completed = counters.start_request(10, started_at);
+        let mut completed = counters.start_request(10, started_at, None);
         completed.record_output_tokens_at(1, started_at + Duration::from_millis(10));
         completed.record_output_tokens_at(1, started_at + Duration::from_millis(20));
         completed.complete_at(started_at + Duration::from_millis(20));

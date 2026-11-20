@@ -192,8 +192,7 @@ test('decision runtime status uses persistent metrics without increasing poll fr
   assert.match(render, /recent_completed_requests/);
   assert.match(render, /input_tokens_per_second/);
   assert.match(render, /questions_per_second/);
-  assert.match(html, /const GPU_ACTIVE_POLL_MS = 500;/);
-  assert.match(html, /const GPU_IDLE_POLL_MS = 1000;/);
+  assert.match(html, /const STATUS_POLL_MS = 2000;/);
 });
 
 test('embedding parameter save sends the alias without generation settings', () => {

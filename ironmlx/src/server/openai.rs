@@ -1847,7 +1847,8 @@ where
         request_id: _,
         mut event_rx,
     } = reply;
-    let mut performance = state.record_request_started(prompt_tokens, started_at);
+    let mut performance =
+        state.record_request_started(prompt_tokens, started_at, "/v1/chat/completions");
     let tokenizer = state.tokenizer.clone();
     let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     tokio::spawn(async move {
@@ -2045,7 +2046,8 @@ where
         request_id: _,
         mut event_rx,
     } = reply;
-    let mut performance = state.record_request_started(prompt_tokens, started_at);
+    let mut performance =
+        state.record_request_started(prompt_tokens, started_at, "/v1/chat/completions");
     let mut decoder = match GeneratedOutputDecoder::new_with_native(
         &state.tokenizer,
         Some(decoder_config),
@@ -2170,7 +2172,8 @@ where
         request_id: _,
         mut event_rx,
     } = reply;
-    let mut performance = state.record_request_started(prompt_tokens, started_at);
+    let mut performance =
+        state.record_request_started(prompt_tokens, started_at, "/v1/chat/completions");
 
     // Successful admission — proceed to spawn the forwarder using `event_rx`.
 
@@ -2360,7 +2363,8 @@ where
         request_id: _,
         mut event_rx,
     } = reply;
-    let mut performance = state.record_request_started(prompt_tokens, started_at);
+    let mut performance =
+        state.record_request_started(prompt_tokens, started_at, "/v1/chat/completions");
 
     // 2. Collect all committed tokens through the protocol-neutral decoder.
     let mut decoder =

@@ -207,7 +207,7 @@ import Testing
     #expect(dflash2Model.usage.performance.ttftMs == 125.25)
 }
 
-@Test func dashboardStatusPageUsesAdaptiveGpuPollingAndOneHourHistory() throws {
+@Test func dashboardStatusPagePollsHealthAtAFixedCadenceAndChartsBackendHistory() throws {
     let testFile = URL(fileURLWithPath: #filePath)
     let packageRoot = testFile
         .deletingLastPathComponent()
@@ -217,13 +217,14 @@ import Testing
         .appendingPathComponent("Sources/IronMLXAppCore/Resources/dashboard2.html")
     let html = try String(contentsOf: htmlURL, encoding: .utf8)
 
-    #expect(html.contains("const GPU_ACTIVE_POLL_MS = 500;"))
-    #expect(html.contains("const GPU_IDLE_POLL_MS = 1000;"))
-    #expect(html.contains("const GPU_HISTORY_LIMIT_MS = 60 * 60 * 1000;"))
-    #expect(html.contains("data-gpu-window=\"5\""))
-    #expect(html.contains("data-gpu-window=\"15\""))
-    #expect(html.contains("data-gpu-window=\"30\""))
-    #expect(html.contains("data-gpu-window=\"60\""))
+    #expect(html.contains("const STATUS_POLL_MS = 2000;"))
+    #expect(!html.contains("GPU_ACTIVE_POLL_MS"))
+    #expect(!html.contains("data-gpu-window"))
+    #expect(html.contains("const STATUS_WINDOW_TIERS = { '10m': '5s', '1h': '30s', '24h': '5m' };"))
+    #expect(html.contains("data-trend-window=\"10m\""))
+    #expect(html.contains("data-trend-window=\"1h\""))
+    #expect(html.contains("data-trend-window=\"24h\""))
+    #expect(html.contains("apiFetch(STATUS_FETCH_PATHS[kind])"))
     #expect(html.contains("window.__HEALTH_PENDING__"))
 }
 

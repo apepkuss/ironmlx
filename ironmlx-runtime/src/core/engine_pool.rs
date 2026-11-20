@@ -195,6 +195,8 @@ impl EnginePoolInner {
         metrics: Arc<RuntimeMetricsHub>,
     ) -> Self {
         metrics.set_default_model(registry.default_model());
+        metrics.set_model_ttl(runtime.model_ttl);
+        metrics.start_activity_clock();
         Self {
             asr_settings: Mutex::new(HashMap::new()),
             registry: Mutex::new(registry),
@@ -2430,9 +2432,21 @@ impl EngineSlot {
         });
         match state {
             EngineSlotState::Loading { .. } => self.metrics.set_loading(id, kind, mode),
-            EngineSlotState::Loaded { metrics_source, .. } => {
-                self.metrics
-                    .set_loaded(id, kind, mode, metrics_source.clone());
+            EngineSlotState::Loaded {
+                engine,
+                metrics_source,
+                last_used_unix_ms,
+                ..
+            } => {
+                self.metrics.set_loaded(
+                    id,
+                    kind,
+                    mode,
+                    metrics_source.clone(),
+                    Some(engine.model_weight_bytes() as u64),
+                );
+                self.metrics.set_last_used(id, *last_used_unix_ms);
+                self.metrics.set_ttl_unloadable(id, self.ttl_unloadable());
             }
             EngineSlotState::Failed { last_error, .. }
             | EngineSlotState::Unloaded {
@@ -2481,6 +2495,16 @@ impl EngineSlot {
 
     fn set_pinned(&self, pinned: bool) {
         self.pinned.store(pinned, Ordering::SeqCst);
+        if self.metrics_attached.load(Ordering::SeqCst) {
+            self.metrics
+                .set_ttl_unloadable(&self.model.id, self.ttl_unloadable());
+        }
+    }
+
+    /// Whether the idle-unload timer may unload this model; mirrors the
+    /// skips in `unload_expired_model_ttl_once` / `unload_if_ttl_expired`.
+    fn ttl_unloadable(&self) -> bool {
+        self.model.load_policy != EngineLoadPolicy::Preload && !self.is_pinned()
     }
 
     async fn is_loaded_or_loading(&self) -> bool {
@@ -2556,7 +2580,11 @@ impl EngineSlot {
                         ..
                     } => {
                         let active_requests = if trigger == EngineLoadTrigger::Request {
-                            *last_used_unix_ms = unix_time_ms();
+                            let now = unix_time_ms();
+                            *last_used_unix_ms = now;
+                            if self.metrics_attached.load(Ordering::SeqCst) {
+                                self.metrics.set_last_used(&self.model.id, now);
+                            }
                             *request_count = request_count.saturating_add(1);
                             self.active_requests.fetch_add(1, Ordering::SeqCst);
                             Some(self.active_requests.clone())
@@ -3473,6 +3501,16 @@ impl ModelMetricsSource for QueueMetricsSource {
     fn attach_request_waker(&self, waker: &Arc<tokio::sync::Notify>) {
         if let Some((usage, _)) = &self.usage {
             usage.attach_request_waker(waker.clone());
+        }
+    }
+
+    fn attach_activity(
+        &self,
+        recorder: &Arc<crate::core::runtime_activity::RuntimeActivityRecorder>,
+        model_id: &str,
+    ) {
+        if let Some((usage, _)) = &self.usage {
+            usage.attach_activity(recorder.clone(), Arc::from(model_id));
         }
     }
 }
@@ -6631,6 +6669,27 @@ mod tests {
 
             pool.unload_dynamic_model("alpha").await.expect("unload");
             assert!(metrics_model(&pool, "alpha").is_none());
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn metrics_hub_idle_unload_follows_pinning() {
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            pool.metrics_hub()
+                .set_model_ttl(Some(Duration::from_secs(60)));
+            pool.load_model("alpha").await.expect("load alpha");
+            let loaded = metrics_model(&pool, "alpha").expect("listed");
+            assert!(loaded.weight_bytes.is_some());
+            assert!(loaded.idle_unload_unix_ms.is_some());
+
+            pool.set_model_pinned("alpha", true).await.expect("pin");
+            let pinned = metrics_model(&pool, "alpha").expect("listed");
+            assert_eq!(pinned.idle_unload_unix_ms, None);
+
+            pool.set_model_pinned("alpha", false).await.expect("unpin");
+            let unpinned = metrics_model(&pool, "alpha").expect("listed");
+            assert!(unpinned.idle_unload_unix_ms.is_some());
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

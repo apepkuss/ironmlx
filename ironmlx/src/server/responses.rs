@@ -2311,7 +2311,7 @@ where
         Ok(reply) => reply,
         Err(response) => return response,
     };
-    let mut performance = state.record_request_started(input_tokens, started_at);
+    let mut performance = state.record_request_started(input_tokens, started_at, "/v1/responses");
     let mut output = CollectedOutput::new();
     let mut decoder = match GeneratedOutputDecoder::new_with_native(
         &state.tokenizer,
@@ -2447,7 +2447,7 @@ where
         Ok(reply) => reply,
         Err(response) => return response,
     };
-    let mut performance = state.record_request_started(input_tokens, started_at);
+    let mut performance = state.record_request_started(input_tokens, started_at, "/v1/responses");
     let tokenizer = state.tokenizer.clone();
     let (tx, rx, disconnect) = super::api_transport::disconnect_aware_sse_channel(8);
     tokio::spawn(async move {

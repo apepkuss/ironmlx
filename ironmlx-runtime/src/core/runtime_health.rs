@@ -1827,12 +1827,12 @@ mod tests {
         let runtime_usage =
             Arc::new(crate::core::runtime_usage::ModelRuntimeUsageCounters::default());
         runtime_usage.record_prefix_cache_lookup(700, 512);
-        let mut completed = runtime_usage.start_request(768, Instant::now());
+        let mut completed = runtime_usage.start_request(768, Instant::now(), None);
         std::thread::sleep(std::time::Duration::from_millis(1));
         completed.record_output_tokens(256);
         std::thread::sleep(std::time::Duration::from_millis(1));
         completed.complete();
-        let mut active = runtime_usage.start_request(64, Instant::now());
+        let mut active = runtime_usage.start_request(64, Instant::now(), None);
         std::thread::sleep(std::time::Duration::from_millis(1));
         active.record_output_tokens(2);
         std::thread::sleep(std::time::Duration::from_millis(1));

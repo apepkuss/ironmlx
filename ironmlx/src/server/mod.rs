@@ -345,6 +345,7 @@ where
             state.health_collector.clone(),
             state.runtime_usage.clone(),
         )),
+        Some(state.model_weight_bytes as u64),
     );
     Ok(dflash2_router(state, load_registry, metrics))
 }

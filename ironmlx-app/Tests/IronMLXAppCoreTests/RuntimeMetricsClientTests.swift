@@ -9,12 +9,20 @@ private struct FakeStreamFailure: Error {}
 private enum FakeStreamScript: Sendable {
     /// Fail right away, as a refused connection would.
     case fail
-    /// Deliver these snapshots, then drop the connection.
-    case deliverThenFail([RuntimeMetricsSnapshot])
+    /// Deliver these events, then drop the connection.
+    case deliverEventsThenFail([RuntimeMetricsStreamEvent])
     /// Stay open until the consumer cancels.
     case hang
-    /// Deliver these snapshots, then stay open until the consumer cancels.
-    case deliverThenHang([RuntimeMetricsSnapshot])
+    /// Deliver these events, then stay open until the consumer cancels.
+    case deliverEventsThenHang([RuntimeMetricsStreamEvent])
+
+    static func deliverThenFail(_ snapshots: [RuntimeMetricsSnapshot]) -> Self {
+        .deliverEventsThenFail(snapshots.map { .metrics($0, raw: #"{"schema_version":1}"#) })
+    }
+
+    static func deliverThenHang(_ snapshots: [RuntimeMetricsSnapshot]) -> Self {
+        .deliverEventsThenHang(snapshots.map { .metrics($0, raw: #"{"schema_version":1}"#) })
+    }
 }
 
 private final class FakeRuntimeMetricsStreaming: RuntimeMetricsStreaming {
@@ -34,7 +42,7 @@ private final class FakeRuntimeMetricsStreaming: RuntimeMetricsStreaming {
     var requestedURLs: [URL] { state.withLock { $0.requestedURLs } }
     var terminations: Int { state.withLock { $0.terminations } }
 
-    func snapshots(from url: URL) -> AsyncThrowingStream<RuntimeMetricsSnapshot, Error> {
+    func events(from url: URL) -> AsyncThrowingStream<RuntimeMetricsStreamEvent, Error> {
         let step = state.withLock { state -> FakeStreamScript in
             state.requestedURLs.append(url)
             return state.script.isEmpty ? .fail : state.script.removeFirst()
@@ -46,16 +54,16 @@ private final class FakeRuntimeMetricsStreaming: RuntimeMetricsStreaming {
             switch step {
             case .fail:
                 continuation.finish(throwing: FakeStreamFailure())
-            case let .deliverThenFail(snapshots):
-                for snapshot in snapshots {
-                    continuation.yield(snapshot)
+            case let .deliverEventsThenFail(events):
+                for event in events {
+                    continuation.yield(event)
                 }
                 continuation.finish(throwing: FakeStreamFailure())
             case .hang:
                 break
-            case let .deliverThenHang(snapshots):
-                for snapshot in snapshots {
-                    continuation.yield(snapshot)
+            case let .deliverEventsThenHang(events):
+                for event in events {
+                    continuation.yield(event)
                 }
             }
         }
@@ -123,7 +131,8 @@ private func makeClient(
     streaming: FakeRuntimeMetricsStreaming,
     sleeper: SleepRecorder,
     backend: BackendStateBox,
-    notificationCenter: NotificationCenter = NotificationCenter()
+    notificationCenter: NotificationCenter = NotificationCenter(),
+    relay: RuntimeEventRelay = RuntimeEventRelay()
 ) -> (RuntimeMetricsClient, RuntimeMetricsStore) {
     let store = RuntimeMetricsStore()
     let client = RuntimeMetricsClient(
@@ -132,6 +141,7 @@ private func makeClient(
         endpoint: { testEndpoint },
         backendState: { backend.state },
         notificationCenter: notificationCenter,
+        relay: relay,
         sleep: sleeper.sleep
     )
     return (client, store)
@@ -300,4 +310,157 @@ func streamEndpointMatchesBackendClientHost() throws {
         RuntimeMetricsClient.streamURL(host: "127.0.0.1", port: 11435)?.absoluteString
             == "http://127.0.0.1:11435/admin/api/metrics/stream"
     )
+}
+
+@MainActor
+private final class RelayRecorder {
+    var events: [RuntimeRelayEvent] = []
+
+    var backendEvents: [RuntimeRelayEvent] {
+        events.filter {
+            if case .backend = $0 { return true }
+            return false
+        }
+    }
+
+    var dataEvents: [RuntimeRelayEvent] {
+        events.filter {
+            if case .backend = $0 { return false }
+            return true
+        }
+    }
+}
+
+@MainActor
+private final class StoreSampleLog {
+    var samples: [(hasSnapshot: Bool, connection: RuntimeMetricsConnection)] = []
+}
+
+@MainActor
+private func record(_ relay: RuntimeEventRelay) -> RelayRecorder {
+    let recorder = RelayRecorder()
+    relay.addListener { recorder.events.append($0) }
+    recorder.events.removeAll()
+    return recorder
+}
+
+private let rawMetrics = #"{"schema_version":1,"activity":{"state":"generating"}}"#
+private let rawHistory = #"{"t":1763337600000,"decode_tps":41.5}"#
+private let rawRequest = #"{"id":3,"outcome":"completed"}"#
+
+@Test @MainActor
+func clientForwardsRawHistoryAndRequestEvents() async throws {
+    let streaming = FakeRuntimeMetricsStreaming(script: [
+        .deliverEventsThenHang([
+            .history(raw: rawHistory),
+            .request(raw: rawRequest),
+            .metrics(liveSnapshot(), raw: rawMetrics),
+        ]),
+    ])
+    let relay = RuntimeEventRelay()
+    let (client, store) = makeClient(
+        streaming: streaming, sleeper: SleepRecorder(limit: 1), backend: BackendStateBox(.running), relay: relay
+    )
+    // What the store held as each data event reached the relay.
+    let storeAtEvent = StoreSampleLog()
+    let recorder = record(relay)
+    relay.addListener { event in
+        if case .backend = event { return }
+        storeAtEvent.samples.append((store.snapshot != nil, store.connection))
+    }
+    storeAtEvent.samples.removeAll()
+
+    client.start()
+    try await waitUntil { recorder.dataEvents.count == 3 }
+
+    #expect(recorder.dataEvents == [.history(rawHistory), .request(rawRequest), .metrics(rawMetrics)])
+    // History and requests only pass through; the store changes only with the snapshot.
+    #expect(storeAtEvent.samples.map(\.hasSnapshot) == [false, false, true])
+    #expect(storeAtEvent.samples.map(\.connection) == [.reconnecting, .reconnecting, .connected])
+    #expect(store.snapshot == liveSnapshot())
+
+    // Stopping leaves no live snapshot for the page.
+    client.stop()
+    #expect(recorder.dataEvents.last == .metrics(nil))
+}
+
+@Test @MainActor
+func clientSendsNilMetricsWhenConnectionDrops() async throws {
+    let streaming = FakeRuntimeMetricsStreaming(script: [
+        .deliverEventsThenFail([.metrics(liveSnapshot(), raw: rawMetrics)]),
+        .deliverEventsThenHang([.metrics(liveSnapshot(), raw: rawMetrics)]),
+    ])
+    let backend = BackendStateBox(.running)
+    let notificationCenter = NotificationCenter()
+    let relay = RuntimeEventRelay()
+    let recorder = record(relay)
+    let (client, _) = makeClient(
+        streaming: streaming, sleeper: SleepRecorder(limit: 100), backend: backend,
+        notificationCenter: notificationCenter, relay: relay
+    )
+
+    client.start()
+    // The first connection drops after one snapshot; the second one delivers another.
+    try await waitUntil { recorder.dataEvents.count == 3 }
+    #expect(recorder.dataEvents == [.metrics(rawMetrics), .metrics(nil), .metrics(rawMetrics)])
+    #expect(relay.lastMetrics == rawMetrics)
+
+    // A backend that stops leaves no live snapshot either.
+    backend.state = .stopped
+    notificationCenter.post(name: .ironMLXBackendRuntimeDidChange, object: nil)
+    #expect(recorder.dataEvents.last == .metrics(nil))
+    #expect(relay.lastMetrics == nil)
+    #expect(relay.lastBackend == .backend(state: "stopped", connected: false))
+
+    client.stop()
+    #expect(recorder.dataEvents.count == 4)
+}
+
+@Test @MainActor
+func clientSendsBackendStateOnChange() async throws {
+    let streaming = FakeRuntimeMetricsStreaming(script: [.deliverThenHang([liveSnapshot()])])
+    let backend = BackendStateBox(.starting)
+    let notificationCenter = NotificationCenter()
+    let relay = RuntimeEventRelay()
+    let recorder = record(relay)
+    let (client, _) = makeClient(
+        streaming: streaming, sleeper: SleepRecorder(limit: 1), backend: backend,
+        notificationCenter: notificationCenter, relay: relay
+    )
+
+    client.start()
+    #expect(recorder.backendEvents == [.backend(state: "starting", connected: false)])
+    // The same state again is not a change.
+    notificationCenter.post(name: .ironMLXBackendRuntimeDidChange, object: nil)
+    #expect(recorder.backendEvents.count == 1)
+
+    backend.state = .running
+    notificationCenter.post(name: .ironMLXBackendRuntimeDidChange, object: nil)
+    try await waitUntil { recorder.backendEvents.count == 3 }
+    #expect(
+        recorder.backendEvents == [
+            .backend(state: "starting", connected: false),
+            .backend(state: "running", connected: false),
+            .backend(state: "running", connected: true),
+        ]
+    )
+
+    // Every supervisor state maps to its lowercase name.
+    #expect(
+        [BackendProcessState.starting, .running, .degraded, .recovering, .stopping, .stopped, .failed]
+            .map(RuntimeMetricsClient.relayStateName)
+            == ["starting", "running", "degraded", "recovering", "stopping", "stopped", "failed"]
+    )
+
+    client.stop()
+    #expect(recorder.backendEvents.last == .backend(state: "running", connected: false))
+}
+
+@Test
+func streamingPassesOnlyJsonObjectsAsRawEvents() {
+    // The page evaluates the raw text as JavaScript, so only a JSON object may pass.
+    #expect(URLSessionRuntimeMetricsStreaming.isJSONObject(#"{"t":5000,"decode_tps":null}"#))
+    #expect(!URLSessionRuntimeMetricsStreaming.isJSONObject("alert(1)"))
+    #expect(!URLSessionRuntimeMetricsStreaming.isJSONObject("[1]"))
+    #expect(!URLSessionRuntimeMetricsStreaming.isJSONObject(""))
 }

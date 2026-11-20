@@ -199,10 +199,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 let config = configStore.load()
                 return RuntimeMetricsClient.streamURL(host: config.host, port: config.port)
             },
-            backendState: { backend.state },
+            backendState: {
+                RuntimeGlanceCoordinator.observedBackendState(backend.state, processRunning: backend.isRunning)
+            },
             language: { configStore.load().language }
         )
         glance.start()
+        dashboard.attachRuntimeRelay(glance.relay)
         let menu = MenuBarController(
             configStore: configStore,
             backend: backend,

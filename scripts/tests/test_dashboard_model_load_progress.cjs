@@ -263,7 +263,7 @@ test('percentages never decrease within one load', () => {
   // The draft's exact size arrives late and grows the total.
   p.push(activity({ startedAt, bytesDone: 62 * GB, bytesTotal: 120 * GB }));
   assert.match(p.scan([scannedModel()])[0].innerHTML, /<span>62%<\/span>/);
-  assert.match(p.element('model-load-indicator').innerHTML, /62%/);
+  assert.match(p.element('model-load-indicator').getAttribute('aria-label'), /62%/);
   // A new load starts from its own progress.
   p.push(activity({ startedAt: startedAt + 5000, bytesDone: 10 * GB, bytesTotal: 100 * GB }));
   assert.match(p.scan([scannedModel()])[0].innerHTML, /<span>10%<\/span>/);
@@ -358,13 +358,18 @@ test('indicator_shows_queue_count', () => {
   p.push(activity({ bytesDone: 74 * GB, bytesTotal: 100 * GB }),
     activity({ model: 'mlx-community/gemma-4-e4b-it-4bit', state: 'queued', stage: 'queued' }));
   assert.equal(indicator.hidden, false);
-  assert.match(indicator.innerHTML, /正在加载 2 个模型/);
-  assert.match(indicator.innerHTML, /74%/);
-  assert.match(indicator.innerHTML, /另 1 个排队/);
+  // The sidebar shows only a ring; its text is the accessible name and tooltip.
+  const label = () => indicator.getAttribute('aria-label');
+  assert.match(label(), /正在加载 2 个模型/);
+  assert.match(label(), /74%/);
+  assert.match(label(), /另 1 个排队/);
+  assert.match(indicator.innerHTML, /model-load-ring/);
+  assert.doesNotMatch(indicator.innerHTML, /is-indeterminate/);
 
   p.push(activity({ bytesDone: 81 * GB, bytesTotal: 100 * GB }));
-  assert.match(indicator.innerHTML, /正在加载 · 81%/);
-  assert.match(indicator.innerHTML, /Qwen3\.6-35B-A3B-4bit/);
+  assert.match(label(), /正在加载 · 81%/);
+  assert.match(label(), /Qwen3\.6-35B-A3B-4bit/);
+  assert.doesNotMatch(label(), /排队/);
 
   p.push();
   assert.equal(indicator.hidden, true);
@@ -378,7 +383,8 @@ test('indicator_turns_red_on_unacknowledged_failure', () => {
     message: 'not enough memory', completedStages: [{ stage: 'verifying_files', elapsedMs: 14000 }] }));
   assert.equal(indicator.hidden, false);
   assert.ok(indicator.classList.contains('is-failed'));
-  assert.match(indicator.innerHTML, /加载失败/);
+  assert.match(indicator.getAttribute('aria-label'), /加载失败/);
+  assert.match(indicator.innerHTML, /model-load-ring is-failed/);
 
   // It stays red until the user opens it; closing the failure acknowledges it.
   p.push(activity({ state: 'failed', stage: 'preparing_memory', cancellable: false, message: 'not enough memory' }));

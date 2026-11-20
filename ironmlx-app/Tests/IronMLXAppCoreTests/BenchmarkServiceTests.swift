@@ -1142,18 +1142,21 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     #expect(dashboardHTML(html, contains: "renderRuntimeModels(runtimeModels)"))
 }
 
-@Test func dashboardKeepsRuntimeCardVisibleWithoutLoadedModels() throws {
+@Test func dashboardStatusModelsCardShowsEmptyStateWithoutLoadedModels() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
         encoding: .utf8
     )
 
-    #expect(
-        dashboardHTML(
-            html,
-            contains: #"id="runtime-model-health-card" style="margin-bottom:16px;""#
-        )
-    )
+    // The Status page models card says so and links to the model page.
+    #expect(dashboardHTML(html, contains: #"<div id="status-models"></div>"#))
+    #expect(dashboardHTML(html, contains: "statusText('status_no_models', lang)"))
+    #expect(dashboardHTML(html, contains: #"onclick="navigateTo(\'models\')""#))
+    #expect(dashboardHTML(html, contains: #"status_no_models: "还没有加载模型。""#))
+    #expect(dashboardHTML(html, contains: "statusText('status_backend_stopped', lang)"))
+    // renderRuntimeModels keeps its empty state inside the collapsible runtime details card.
+    #expect(dashboardHTML(html, contains: #"<div class="ds-card ds-status-details" id="runtime-model-health-card">"#))
+    #expect(dashboardHTML(html, contains: #"data-i18n="runtime_empty_title""#))
     #expect(dashboardHTML(html, contains: #"runtime_models: "Model Runtime Status""#))
     #expect(dashboardHTML(html, contains: #"runtime_models: "模型运行状态""#))
     #expect(dashboardHTML(html, contains: #"runtime_models: "模型執行狀態""#))
@@ -1207,36 +1210,33 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     )
 }
 
-@Test func dashboardGroupsServiceStatusAndUptimeIntoServiceOverview() throws {
+@Test func dashboardStatusHeaderCarriesServiceStateAddressAndEndpoints() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",
         encoding: .utf8
     )
 
-    #expect(!dashboardHTML(html, contains: #"id="stat-model""#))
-    #expect(!dashboardHTML(html, contains: #"id="stat-total-tokens""#))
-    #expect(!dashboardHTML(html, contains: #"id="stat-cached-tokens""#))
-    #expect(!dashboardHTML(html, contains: #"id="stat-cache-efficiency""#))
-    #expect(dashboardHTML(html, contains: #"id="stat-server-status""#))
-    #expect(dashboardHTML(html, contains: #"id="stat-uptime""#))
+    // The old service overview card and its stat fields are gone; the header carries
+    // the status pill, uptime, address and version, and expands to the endpoint list.
+    #expect(!dashboardHTML(html, contains: #"id="stat-server-status""#))
+    #expect(!dashboardHTML(html, contains: #"id="stat-uptime""#))
+    #expect(!dashboardHTML(html, contains: #"class="service-overview-summary""#))
     #expect(!dashboardHTML(html, contains: #"id="stat-active-kv""#))
-    #expect(dashboardHTML(html, contains: #"id="server-endpoints-card""#))
-    #expect(dashboardHTML(html, contains: #"class="service-overview-summary""#))
-    #expect(dashboardHTML(html, contains: #"id="server-status-dot""#))
-    #expect(dashboardHTML(html, contains: #"justify-content: flex-start;"#))
-    #expect(dashboardHTML(html, contains: #"flex: 0 0 auto;"#))
-    #expect(dashboardHTML(html, contains: #"white-space: nowrap;"#))
-    #expect(dashboardHTML(html, contains: #"id="endpoints-list""#))
-    #expect(dashboardHTML(html, contains: #"id="endpoints-hint""#))
-    #expect(dashboardHTML(html, contains: #"service_overview: "Service Overview""#))
-    #expect(dashboardHTML(html, contains: #"service_overview: "服务概览""#))
-    #expect(dashboardHTML(html, contains: #"service_overview: "服務概覽""#))
-    #expect(dashboardHTML(html, contains: #"service_overview: "サービス概要""#))
-    #expect(dashboardHTML(html, contains: #"service_overview: "서비스 개요""#))
-    #expect(dashboardHTML(html, contains: "function updateServerStatusVisual(text, color)"))
     #expect(!dashboardHTML(html, contains: #"class="stats-grid""#))
     #expect(!dashboardHTML(html, contains: #"class="stat-card""#))
-    #expect(dashboardHTML(html, contains: "statusPage.querySelector('#runtime-model-health-card')"))
+    #expect(dashboardHTML(html, contains: #"id="status-pill""#))
+    #expect(dashboardHTML(html, contains: #"id="status-meta""#))
+    #expect(dashboardHTML(html, contains: #"aria-controls="server-endpoints-card""#))
+    #expect(dashboardHTML(html, contains: #"id="server-endpoints-card" hidden"#))
+    #expect(dashboardHTML(html, contains: #"id="endpoints-list""#))
+    #expect(dashboardHTML(html, contains: #"id="endpoints-hint""#))
+    #expect(dashboardHTML(html, contains: "statusEndpointsLoaded(jsonStr);"))
+    #expect(dashboardHTML(html, contains: "onclick=\"copyStatusAddress()\""))
+    #expect(dashboardHTML(html, contains: "function updateServerStatusVisual(text, color)"))
+    // The detailed runtime card sits collapsed at the bottom; incidents stay at the top.
+    #expect(dashboardHTML(html, contains: #"aria-controls="status-details-body""#))
+    #expect(dashboardHTML(html, contains: #"<div class="ds-status-details-body" id="status-details-body" hidden>"#))
+    #expect(dashboardHTML(html, contains: "if (statusBody) statusBody.insertBefore(banner, statusBody.firstChild);"))
     #expect(!dashboardHTML(html, contains: #"total_tokens: "Total Tokens""#))
     #expect(!dashboardHTML(html, contains: #"cached_tokens: "Cached Tokens""#))
     #expect(!dashboardHTML(html, contains: #"cache_efficiency: "Cache Efficiency""#))

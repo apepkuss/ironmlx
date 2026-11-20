@@ -452,8 +452,16 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
               input_tokens_per_second: 1200, vectors_per_second: 41.2}}]);
           const card = document.getElementById('runtime-model-health');
           const dict = I18N[currentLang];
+          // The card is collapsed under "Runtime details" until the viewer expands it.
+          setStatusDetailsOpen(false);
+          const collapsedHeight = card.getBoundingClientRect().height;
+          document.getElementById('status-details-toggle').click();
+          const expanded = document.getElementById('status-details-toggle').getAttribute('aria-expanded') === 'true';
+          const expandedHeight = card.getBoundingClientRect().height;
+          setStatusDetailsOpen(false);
           return JSON.stringify({
-            visible: document.getElementById('runtime-model-health-card').style.display !== 'none',
+            visible: collapsedHeight === 0 && expanded && expandedHeight > 0
+              && card.querySelectorAll('.runtime-model-card').length === 1,
             audio: card.textContent.includes(dict.catalog_audio_embedding),
             labels: ['performance', 'completed', 'errors', 'latency', 'input_rate', 'vector_rate']
               .every(key => card.textContent.includes(dict['runtime_embedding_' + key])),

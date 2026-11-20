@@ -18,10 +18,18 @@ enum RuntimeMetricsReconnectPolicy {
     }
 }
 
+/// One event from the backend's metrics stream. `raw` is the event's JSON data line as the
+/// backend sent it, for the Dashboard page.
+public enum RuntimeMetricsStreamEvent: Sendable {
+    case metrics(RuntimeMetricsSnapshot, raw: String)
+    case history(raw: String)
+    case request(raw: String)
+}
+
 public protocol RuntimeMetricsStreaming: Sendable {
-    /// Snapshots from one SSE connection. The stream throws or finishes when the connection ends,
+    /// Events from one SSE connection. The stream throws or finishes when the connection ends,
     /// and the connection closes when the consumer stops iterating.
-    func snapshots(from url: URL) -> AsyncThrowingStream<RuntimeMetricsSnapshot, Error>
+    func events(from url: URL) -> AsyncThrowingStream<RuntimeMetricsStreamEvent, Error>
 }
 
 public enum RuntimeMetricsStreamError: Error, Equatable {
@@ -41,7 +49,7 @@ public struct URLSessionRuntimeMetricsStreaming: RuntimeMetricsStreaming {
         self.session = session
     }
 
-    public func snapshots(from url: URL) -> AsyncThrowingStream<RuntimeMetricsSnapshot, Error> {
+    public func events(from url: URL) -> AsyncThrowingStream<RuntimeMetricsStreamEvent, Error> {
         let session = session
         return AsyncThrowingStream { continuation in
             let task = Task {
@@ -65,11 +73,20 @@ public struct URLSessionRuntimeMetricsStreaming: RuntimeMetricsStreaming {
                             }
                             continue
                         }
-                        guard let event = parser.consume(line: line), event.event == "metrics" else {
+                        guard let event = parser.consume(line: line) else {
                             continue
                         }
-                        let snapshot = try decoder.decode(RuntimeMetricsSnapshot.self, from: Data(event.data.utf8))
-                        continuation.yield(snapshot)
+                        switch event.event {
+                        case "metrics":
+                            let snapshot = try decoder.decode(RuntimeMetricsSnapshot.self, from: Data(event.data.utf8))
+                            continuation.yield(.metrics(snapshot, raw: event.data))
+                        case "history" where Self.isJSONObject(event.data):
+                            continuation.yield(.history(raw: event.data))
+                        case "request" where Self.isJSONObject(event.data):
+                            continuation.yield(.request(raw: event.data))
+                        default:
+                            continue
+                        }
                     }
                     continuation.finish()
                 } catch {
@@ -79,15 +96,23 @@ public struct URLSessionRuntimeMetricsStreaming: RuntimeMetricsStreaming {
             continuation.onTermination = { _ in task.cancel() }
         }
     }
+
+    /// The Dashboard evaluates the raw text as a JavaScript expression, so only a JSON object
+    /// may pass; anything else is dropped without ending the stream.
+    static func isJSONObject(_ text: String) -> Bool {
+        (try? JSONSerialization.jsonObject(with: Data(text.utf8))) is [String: Any]
+    }
 }
 
-/// Keeps one SSE connection to the backend's metrics stream while the backend runs, and feeds
-/// every snapshot into a `RuntimeMetricsStore`.
+/// Keeps one SSE connection to the backend's metrics stream while the backend runs, feeds
+/// every snapshot into a `RuntimeMetricsStore`, and passes every event, plus backend state
+/// changes, to a `RuntimeEventRelay` for the Dashboard.
 @MainActor
 public final class RuntimeMetricsClient {
     public nonisolated static let streamPath = "/admin/api/metrics/stream"
 
     private let store: RuntimeMetricsStore
+    private let relay: RuntimeEventRelay
     private let streaming: any RuntimeMetricsStreaming
     private let endpoint: @MainActor () -> URL?
     private let backendState: @MainActor () -> BackendProcessState
@@ -103,9 +128,11 @@ public final class RuntimeMetricsClient {
         endpoint: @escaping @MainActor () -> URL?,
         backendState: @escaping @MainActor () -> BackendProcessState,
         notificationCenter: NotificationCenter,
+        relay: RuntimeEventRelay? = nil,
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
         self.store = store
+        self.relay = relay ?? RuntimeEventRelay()
         self.streaming = streaming
         self.endpoint = endpoint
         self.backendState = backendState
@@ -147,8 +174,7 @@ public final class RuntimeMetricsClient {
         // Same invariant as `reconnect()`: "not running" only when the backend is not
         // running; otherwise the data is merely out of date.
         let state = backendState()
-        store.setBackendState(state)
-        store.setConnection(Self.keepsConnection(in: state) ? .reconnecting : .backendNotRunning)
+        publish(state: state, connection: Self.keepsConnection(in: state) ? .reconnecting : .backendNotRunning)
     }
 
     /// Drops the current connection and starts over from the backend's current state.
@@ -157,12 +183,11 @@ public final class RuntimeMetricsClient {
         connectionTask = nil
 
         let state = backendState()
-        store.setBackendState(state)
         guard Self.keepsConnection(in: state) else {
-            store.setConnection(.backendNotRunning)
+            publish(state: state, connection: .backendNotRunning)
             return
         }
-        store.setConnection(.reconnecting)
+        publish(state: state, connection: .reconnecting)
         connectionTask = Task { [weak self] in
             await self?.run()
         }
@@ -172,18 +197,56 @@ public final class RuntimeMetricsClient {
         state == .running || state == .degraded
     }
 
+    /// The single place backend state and connection change: updates the store and tells the
+    /// relay what changed. Without a connection there is no live snapshot to show.
+    private func publish(state: BackendProcessState, connection: RuntimeMetricsConnection) {
+        store.setBackendState(state)
+        store.setConnection(connection)
+        let backend = RuntimeRelayEvent.backend(
+            state: Self.relayStateName(state),
+            connected: connection == .connected
+        )
+        if relay.lastBackend != backend {
+            relay.send(backend)
+        }
+        if connection != .connected, relay.lastMetrics != nil {
+            relay.send(.metrics(nil))
+        }
+    }
+
+    /// The backend state's name on the Dashboard page.
+    nonisolated static func relayStateName(_ state: BackendProcessState) -> String {
+        switch state {
+        case .starting: "starting"
+        case .running: "running"
+        case .degraded: "degraded"
+        case .recovering: "recovering"
+        case .stopping: "stopping"
+        case .stopped: "stopped"
+        case .failed: "failed"
+        }
+    }
+
     private func run() async {
         var failures = 0
         while !Task.isCancelled {
             if let url = endpoint() {
                 do {
-                    for try await snapshot in streaming.snapshots(from: url) {
+                    for try await event in streaming.events(from: url) {
                         if Task.isCancelled {
                             return
                         }
                         failures = 0
-                        store.apply(snapshot, receivedAt: Date())
-                        store.setConnection(.connected)
+                        switch event {
+                        case let .metrics(snapshot, raw):
+                            store.apply(snapshot, receivedAt: Date())
+                            publish(state: store.backendState, connection: .connected)
+                            relay.send(.metrics(raw))
+                        case let .history(raw):
+                            relay.send(.history(raw))
+                        case let .request(raw):
+                            relay.send(.request(raw))
+                        }
                     }
                 } catch {
                     // Any failure, including a decode error, falls through to the backoff below.
@@ -194,7 +257,7 @@ public final class RuntimeMetricsClient {
             }
             // A stream that ends, cleanly or not, is a lost connection.
             failures += 1
-            store.setConnection(.reconnecting)
+            publish(state: store.backendState, connection: .reconnecting)
             do {
                 try await sleep(RuntimeMetricsReconnectPolicy.delay(afterFailures: failures))
             } catch {

@@ -1131,6 +1131,11 @@ impl DFlash2Startup {
         let metrics = RuntimeMetricsHub::new(MemorySampling::SampleOnTick);
         metrics.set_loading(&model_id, "causal", Some(ModelMode::Dflash2));
         metrics.set_default_model(Some(&model_id));
+        {
+            // The clock task runs on the server runtime for the whole process.
+            let _runtime = runtime.enter();
+            metrics.start_activity_clock();
+        }
         let router = server::startup_status::SwitchableRouter::starting_with_metrics(
             registry.clone(),
             Arc::clone(&metrics),

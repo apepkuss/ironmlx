@@ -4,7 +4,7 @@
 //! Nothing here blocks or shells out: every source reads atomics, the usage
 //! counters, or an already-sampled governor snapshot.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -18,6 +18,7 @@ use crate::core::process_memory::{
     global_process_memory_governor, MemoryGovernorSnapshot, PressureLevel,
     SharedProcessMemoryGovernor,
 };
+use crate::core::runtime_activity::{ActivitySample, RuntimeActivityRecorder, BUCKET_MS};
 use crate::core::runtime_health::{
     classify_process_status, scheduler_degraded_reasons, HealthDegradedReason, HealthStatus,
     SchedulerHealthCollector,
@@ -107,6 +108,13 @@ pub struct ModelView {
     pub queue_capacity: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_decode_tokens_per_second: Option<f64>,
+    /// Weight bytes of a loaded model; `null` otherwise.
+    pub weight_bytes: Option<u64>,
+    pub kv_cache_bytes: u64,
+    /// When the idle-unload timer (`model_ttl`) unloads this model if no
+    /// request arrives: set only for a loaded model with nothing in flight
+    /// or queued.
+    pub idle_unload_unix_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
 }
@@ -144,6 +152,10 @@ pub trait ModelMetricsSource: Send + Sync {
     fn read(&self) -> Option<ModelMetricsReading>;
 
     fn attach_request_waker(&self, _waker: &Arc<Notify>) {}
+
+    /// Feed the model's usage counters (if any) to the process-wide
+    /// activity recorder.
+    fn attach_activity(&self, _recorder: &Arc<RuntimeActivityRecorder>, _model_id: &str) {}
 }
 
 /// Reads a causal-LM scheduler's atomics and usage counters. Never calls
@@ -180,6 +192,11 @@ impl ModelMetricsSource for CausalMetricsSource {
     fn attach_request_waker(&self, waker: &Arc<Notify>) {
         self.usage.attach_request_waker(waker.clone());
     }
+
+    fn attach_activity(&self, recorder: &Arc<RuntimeActivityRecorder>, model_id: &str) {
+        self.usage
+            .attach_activity(recorder.clone(), Arc::from(model_id));
+    }
 }
 
 pub(crate) struct HubEntryView<'a> {
@@ -190,6 +207,9 @@ pub(crate) struct HubEntryView<'a> {
     pub is_default: bool,
     pub last_error: Option<&'a str>,
     pub reading: Option<&'a ModelMetricsReading>,
+    pub weight_bytes: Option<u64>,
+    /// Last use plus the idle-unload timeout, when both are known.
+    pub idle_unload_deadline_unix_ms: Option<u64>,
 }
 
 fn is_language_kind(kind: &str) -> bool {
@@ -280,16 +300,24 @@ pub(crate) fn build_snapshot(
                 active_non_language += reading.active_requests;
             }
         }
+        let model_active = entry.reading.map_or(0, |r| r.active_requests);
+        let model_queued = entry.reading.map_or(0, |r| r.queued_requests);
+        let loaded = entry.state == ModelState::Loaded;
         models.push(ModelView {
             id: entry.id.to_string(),
             kind: entry.kind.to_string(),
             state: entry.state,
             mode: entry.mode,
             is_default: entry.is_default,
-            active_requests: entry.reading.map_or(0, |r| r.active_requests),
-            queued_requests: entry.reading.map_or(0, |r| r.queued_requests),
+            active_requests: model_active,
+            queued_requests: model_queued,
             queue_capacity: entry.reading.and_then(|r| r.queue_capacity),
             live_decode_tokens_per_second: live,
+            weight_bytes: entry.weight_bytes.filter(|_| loaded),
+            kv_cache_bytes: entry.reading.map_or(0, |r| r.kv_cache_bytes),
+            idle_unload_unix_ms: entry
+                .idle_unload_deadline_unix_ms
+                .filter(|_| loaded && model_active == 0 && model_queued == 0),
             last_error: entry.last_error.map(str::to_string),
         });
     }
@@ -408,7 +436,11 @@ pub(crate) fn is_meaningful_change(
             speed(a.live_decode_tokens_per_second.take()),
             speed(b.live_decode_tokens_per_second.take()),
         );
-        la != lb || a != b
+        let kv_changed = bytes_changed(
+            std::mem::take(&mut a.kv_cache_bytes),
+            std::mem::take(&mut b.kv_cache_bytes),
+        );
+        la != lb || kv_changed || a != b
     })
 }
 
@@ -435,6 +467,7 @@ struct HubEntry {
     source: Option<Arc<dyn ModelMetricsSource>>,
     /// Last reading `source` returned, used when the engine is already gone.
     last_reading: Option<ModelMetricsReading>,
+    weight_bytes: Option<u64>,
 }
 
 impl HubEntry {
@@ -446,6 +479,7 @@ impl HubEntry {
             last_error: None,
             source: None,
             last_reading: None,
+            weight_bytes: None,
         }
     }
 
@@ -492,6 +526,14 @@ struct Registry {
     default_model: Option<String>,
     /// Prefix-cache totals of models that were unloaded or reloaded.
     retired_prefix: PrefixCacheUsageSnapshot,
+    /// Idle-unload timeout of the engine pool; `None` when it never unloads
+    /// idle models.
+    model_ttl: Option<Duration>,
+    /// Last request time of each loaded model, published by the engine pool.
+    last_used_unix_ms: HashMap<String, u64>,
+    /// Whether the idle-unload timer may unload each model (not preloaded,
+    /// not pinned). A model without an entry is never shown a countdown.
+    ttl_unloadable: HashMap<String, bool>,
 }
 
 impl Registry {
@@ -525,6 +567,7 @@ impl Registry {
     ) -> RuntimeMetricsSnapshot {
         let readings: Vec<Option<ModelMetricsReading>> =
             self.entries.values_mut().map(HubEntry::read).collect();
+        let ttl_ms = self.model_ttl.map(|ttl| ttl.as_millis() as u64);
         let views: Vec<HubEntryView> = self
             .entries
             .iter()
@@ -537,6 +580,14 @@ impl Registry {
                 is_default: self.default_model.as_deref() == Some(id.as_str()),
                 last_error: entry.last_error.as_deref(),
                 reading: reading.as_ref(),
+                weight_bytes: entry.weight_bytes,
+                idle_unload_deadline_unix_ms: ttl_ms
+                    .filter(|_| self.ttl_unloadable.get(id) == Some(&true))
+                    .and_then(|ttl| {
+                        self.last_used_unix_ms
+                            .get(id)
+                            .map(|last_used| last_used.saturating_add(ttl))
+                    }),
             })
             .collect();
         build_snapshot(
@@ -565,6 +616,9 @@ struct HubSignals {
     /// Bumped every time a sampling task exits. Open streams end on it:
     /// without a task their receivers would keep the last frame forever.
     task_exits: watch::Sender<u64>,
+    /// Signalled when the hub is dropped, so the activity clock exits
+    /// without waiting for its next boundary.
+    clock_stop: Notify,
 }
 
 /// Lives inside the sampling task; its drop runs on every exit path.
@@ -589,7 +643,14 @@ pub struct RuntimeMetricsHub {
     prefix_store_backpressured: fn() -> bool,
     registry: Mutex<Registry>,
     signals: Arc<HubSignals>,
+    /// Process-wide history and recent-request log; outlives every model.
+    activity: Arc<RuntimeActivityRecorder>,
+    /// Unix-ms wall clock the activity clock aligns its buckets to.
+    wall_clock: WallClock,
+    activity_clock_started: AtomicBool,
 }
+
+type WallClock = Arc<dyn Fn() -> u64 + Send + Sync>;
 
 fn now_unix_ms() -> u64 {
     SystemTime::now()
@@ -625,6 +686,22 @@ impl RuntimeMetricsHub {
         prefix_store_backpressured: fn() -> bool,
         device_name: Option<String>,
     ) -> Arc<Self> {
+        Self::with_wall_clock(
+            memory,
+            governor,
+            prefix_store_backpressured,
+            device_name,
+            Arc::new(now_unix_ms),
+        )
+    }
+
+    fn with_wall_clock(
+        memory: MemorySampling,
+        governor: SharedProcessMemoryGovernor,
+        prefix_store_backpressured: fn() -> bool,
+        device_name: Option<String>,
+        wall_clock: WallClock,
+    ) -> Arc<Self> {
         let backend = BackendInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             started_unix_ms: now_unix_ms(),
@@ -645,8 +722,38 @@ impl RuntimeMetricsHub {
                 sender,
                 task_running: AtomicBool::new(false),
                 task_exits: watch::Sender::new(0),
+                clock_stop: Notify::new(),
             }),
+            activity: RuntimeActivityRecorder::new(),
+            wall_clock,
+            activity_clock_started: AtomicBool::new(false),
         })
+    }
+
+    /// The process-wide activity recorder (history and recent requests).
+    pub fn activity(&self) -> &Arc<RuntimeActivityRecorder> {
+        &self.activity
+    }
+
+    /// Starts the task that closes one activity bucket on every
+    /// `BUCKET_MS` wall-clock boundary, whether or not anyone subscribes.
+    /// Idempotent; does nothing outside a tokio runtime. The task exits when
+    /// the hub is dropped.
+    pub fn start_activity_clock(self: &Arc<Self>) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                "runtime activity clock not started: no tokio runtime; history will not advance"
+            );
+            return;
+        };
+        if self.activity_clock_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        runtime.spawn(run_activity_clock(
+            Arc::downgrade(self),
+            Arc::clone(&self.signals),
+            Arc::clone(&self.wall_clock),
+        ));
     }
 
     fn registry(&self) -> MutexGuard<'_, Registry> {
@@ -671,10 +778,13 @@ impl RuntimeMetricsHub {
         kind: &'static str,
         mode: Option<ModelMode>,
         source: Arc<dyn ModelMetricsSource>,
+        weight_bytes: Option<u64>,
     ) {
         source.attach_request_waker(&self.signals.waker);
+        source.attach_activity(&self.activity, id);
         let mut entry = HubEntry::new(kind, ModelState::Loaded, mode);
         entry.source = Some(source);
+        entry.weight_bytes = weight_bytes;
         self.registry().replace(id, entry);
         self.wake();
     }
@@ -690,6 +800,8 @@ impl RuntimeMetricsHub {
     pub fn remove(&self, id: &str) {
         {
             let mut registry = self.registry();
+            registry.last_used_unix_ms.remove(id);
+            registry.ttl_unloadable.remove(id);
             if let Some(entry) = registry.entries.remove(id) {
                 registry.retire(entry);
             }
@@ -699,6 +811,29 @@ impl RuntimeMetricsHub {
 
     pub fn set_default_model(&self, id: Option<&str>) {
         self.registry().default_model = id.map(str::to_string);
+        self.wake();
+    }
+
+    /// The engine pool's idle-unload timeout (`model_ttl`).
+    pub fn set_model_ttl(&self, ttl: Option<Duration>) {
+        self.registry().model_ttl = ttl;
+        self.wake();
+    }
+
+    /// Whether the idle-unload timer may unload model `id`; only such a
+    /// model reports `idle_unload_unix_ms`.
+    pub fn set_ttl_unloadable(&self, id: &str, unloadable: bool) {
+        self.registry()
+            .ttl_unloadable
+            .insert(id.to_string(), unloadable);
+        self.wake();
+    }
+
+    /// Last request time of model `id`, as the engine pool recorded it.
+    pub fn set_last_used(&self, id: &str, unix_ms: u64) {
+        self.registry()
+            .last_used_unix_ms
+            .insert(id.to_string(), unix_ms);
         self.wake();
     }
 
@@ -753,6 +888,7 @@ impl RuntimeMetricsHub {
     /// runtime is busy (requests in flight or a model loading).
     fn refresh(&self) -> bool {
         let next = self.compute();
+        self.activity.observe(activity_sample(&next));
         let busy = next.activity.state != ActivityState::Idle;
         let mut next = Some(next);
         self.signals.sender.send_if_modified(|current| {
@@ -776,6 +912,55 @@ impl Drop for RuntimeMetricsHub {
         // gone and exits (dropping the sender closes every receiver).
         self.signals.subscribers.notify_one();
         self.signals.waker.notify_one();
+        self.signals.clock_stop.notify_one();
+    }
+}
+
+fn activity_sample(snapshot: &RuntimeMetricsSnapshot) -> ActivitySample {
+    ActivitySample {
+        active: snapshot.activity.active_requests,
+        queued: snapshot.activity.queued_requests,
+        process_bytes: snapshot.memory.process_bytes,
+        kv_cache_bytes: snapshot.memory.kv_cache_bytes,
+        mlx_cache_bytes: snapshot.memory.mlx_cache_bytes,
+        ceiling_bytes: snapshot.memory.ceiling_bytes,
+    }
+}
+
+/// Closes the activity bucket that ended at each `BUCKET_MS` wall-clock
+/// boundary. After a long stall (machine sleep) it closes only the bucket
+/// before the current boundary, leaving a gap instead of empty points.
+async fn run_activity_clock(
+    hub: Weak<RuntimeMetricsHub>,
+    signals: Arc<HubSignals>,
+    wall_clock: WallClock,
+) {
+    let mut last_closed: Option<u64> = None;
+    loop {
+        if hub.strong_count() == 0 {
+            return;
+        }
+        let now = wall_clock();
+        let target = (now / BUCKET_MS + 1) * BUCKET_MS;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(target - now)) => {}
+            _ = signals.clock_stop.notified() => return,
+        }
+        // A timer that fires a little before the wall-clock boundary still
+        // closes the bucket that boundary ends.
+        let boundary = (wall_clock() / BUCKET_MS * BUCKET_MS).max(target);
+        let start = boundary - BUCKET_MS;
+        if last_closed.is_some_and(|last| start <= last) {
+            continue;
+        }
+        let Some(strong) = hub.upgrade() else {
+            return;
+        };
+        let snapshot = strong.compute();
+        strong
+            .activity
+            .close_bucket(start, activity_sample(&snapshot));
+        last_closed = Some(start);
     }
 }
 
@@ -862,6 +1047,8 @@ mod tests {
             is_default: false,
             last_error: None,
             reading,
+            weight_bytes: None,
+            idle_unload_deadline_unix_ms: None,
         }
     }
 
@@ -1094,6 +1281,16 @@ mod tests {
         next.memory.pressure_level = PressureLevel::Soft;
         assert!(is_meaningful_change(&prev, &next));
 
+        // A model's KV bytes use the same threshold as the process total.
+        let mut next = prev.clone();
+        next.models[0].kv_cache_bytes += 63 * MIB;
+        assert!(!is_meaningful_change(&prev, &next));
+        next.models[0].kv_cache_bytes = prev.models[0].kv_cache_bytes + 65 * MIB;
+        assert!(is_meaningful_change(&prev, &next));
+        let mut next = prev.clone();
+        next.models[0].idle_unload_unix_ms = Some(1);
+        assert!(is_meaningful_change(&prev, &next));
+
         // The ceiling follows free system memory: only a move beyond 5% of
         // the last pushed ceiling (and at least 64 MiB) counts.
         let gib = 1024 * MIB;
@@ -1180,6 +1377,9 @@ mod tests {
                     queued_requests: 1,
                     queue_capacity: Some(2),
                     live_decode_tokens_per_second: Some(42.8),
+                    weight_bytes: Some(20_000_000_000),
+                    kv_cache_bytes: 10_300_000_000,
+                    idle_unload_unix_ms: None,
                     last_error: None,
                 },
                 ModelView {
@@ -1192,6 +1392,9 @@ mod tests {
                     queued_requests: 0,
                     queue_capacity: None,
                     live_decode_tokens_per_second: None,
+                    weight_bytes: None,
+                    kv_cache_bytes: 0,
+                    idle_unload_unix_ms: None,
                     last_error: Some("boom".into()),
                 },
             ],
@@ -1307,7 +1510,7 @@ mod hub_tests {
     fn loaded_hub(reading: ModelMetricsReading) -> (Arc<RuntimeMetricsHub>, Arc<FakeSource>) {
         let hub = test_hub(MemorySampling::Cached);
         let source = FakeSource::new(reading);
-        hub.set_loaded("m", "causal", Some(ModelMode::Normal), source.clone());
+        hub.set_loaded("m", "causal", Some(ModelMode::Normal), source.clone(), None);
         (hub, source)
     }
 
@@ -1339,6 +1542,7 @@ mod hub_tests {
             "causal",
             Some(ModelMode::Normal),
             FakeSource::new(idle_reading()),
+            None,
         );
         let snap = hub.snapshot_now();
         assert_eq!(snap.models[0].state, ModelState::Loaded);
@@ -1379,6 +1583,7 @@ mod hub_tests {
             "causal",
             Some(ModelMode::Normal),
             FakeSource::new(prefix_reading(1, 2)),
+            None,
         );
         assert_eq!(hub.snapshot_now().prefix_cache, expected(8, 11));
 
@@ -1536,6 +1741,168 @@ mod hub_tests {
         drop(hub);
         settle().await;
         assert!(rx.changed().await.is_err());
+    }
+
+    /// A source backed by real usage counters, so requests reach the hub's
+    /// activity recorder once attached.
+    struct UsageSource(Arc<ModelRuntimeUsageCounters>);
+
+    impl ModelMetricsSource for UsageSource {
+        fn read(&self) -> Option<ModelMetricsReading> {
+            Some(ModelMetricsReading {
+                usage: Some(self.0.snapshot(true)),
+                ..Default::default()
+            })
+        }
+
+        fn attach_activity(&self, recorder: &Arc<RuntimeActivityRecorder>, model_id: &str) {
+            self.0
+                .attach_activity(recorder.clone(), Arc::from(model_id));
+        }
+    }
+
+    fn run_request(counters: &Arc<ModelRuntimeUsageCounters>, tokens: u64) {
+        let mut request =
+            counters.start_request(10, std::time::Instant::now(), Some("/v1/chat/completions"));
+        request.record_output_tokens(tokens);
+        request.complete();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn history_survives_model_reload() {
+        let hub = test_hub(MemorySampling::Cached);
+        let first = Arc::new(ModelRuntimeUsageCounters::default());
+        hub.set_loaded(
+            "m",
+            "causal",
+            Some(ModelMode::Normal),
+            Arc::new(UsageSource(first.clone())),
+            Some(1),
+        );
+        run_request(&first, 4);
+        hub.activity().close_bucket(0, ActivitySample::default());
+        hub.remove("m");
+
+        let second = Arc::new(ModelRuntimeUsageCounters::default());
+        hub.set_loaded(
+            "m",
+            "causal",
+            Some(ModelMode::Normal),
+            Arc::new(UsageSource(second.clone())),
+            Some(1),
+        );
+        run_request(&second, 6);
+        hub.activity().close_bucket(5000, ActivitySample::default());
+
+        let s5 = hub.activity().history().points.s5;
+        let tokens: Vec<u64> = s5.iter().map(|p| p.output_tokens).collect();
+        assert_eq!(tokens, vec![4, 6]);
+        let finished: Vec<u64> = s5.iter().map(|p| p.requests_finished).collect();
+        assert_eq!(finished, vec![1, 1]);
+        let recent = hub.activity().recent().requests;
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].output_tokens, 6);
+        assert_eq!(recent[1].output_tokens, 4);
+        assert!(recent.iter().all(|r| r.model == "m"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn model_view_reports_weights_kv_and_idle_unload() {
+        let hub = test_hub(MemorySampling::Cached);
+        hub.set_model_ttl(Some(Duration::from_secs(30 * 60)));
+        let idle = ModelMetricsReading {
+            kv_cache_bytes: 77,
+            ..idle_reading()
+        };
+        let source = FakeSource::new(idle.clone());
+        hub.set_loaded(
+            "m",
+            "causal",
+            Some(ModelMode::Normal),
+            source.clone(),
+            Some(5_000),
+        );
+        hub.set_last_used("m", 1000);
+        // Not yet known to be unloadable by the timer: no countdown.
+        assert_eq!(hub.snapshot_now().models[0].idle_unload_unix_ms, None);
+        hub.set_ttl_unloadable("m", true);
+        let model = hub.snapshot_now().models[0].clone();
+        assert_eq!(model.weight_bytes, Some(5_000));
+        assert_eq!(model.kv_cache_bytes, 77);
+        assert_eq!(model.idle_unload_unix_ms, Some(1000 + 1_800_000));
+
+        source.set(active_reading());
+        assert_eq!(hub.snapshot_now().models[0].idle_unload_unix_ms, None);
+        source.set(ModelMetricsReading {
+            queued_requests: 1,
+            ..idle_reading()
+        });
+        assert_eq!(hub.snapshot_now().models[0].idle_unload_unix_ms, None);
+
+        source.set(idle);
+        // Pinned or preloaded models are never unloaded by the timer.
+        hub.set_ttl_unloadable("m", false);
+        assert_eq!(hub.snapshot_now().models[0].idle_unload_unix_ms, None);
+        hub.set_ttl_unloadable("m", true);
+        assert_eq!(
+            hub.snapshot_now().models[0].idle_unload_unix_ms,
+            Some(1000 + 1_800_000)
+        );
+
+        hub.set_model_ttl(None);
+        assert_eq!(hub.snapshot_now().models[0].idle_unload_unix_ms, None);
+
+        hub.set_model_ttl(Some(Duration::from_secs(30 * 60)));
+        hub.set_loading("m", "causal", Some(ModelMode::Normal));
+        let loading = hub.snapshot_now().models[0].clone();
+        assert_eq!(loading.weight_bytes, None);
+        assert_eq!(loading.idle_unload_unix_ms, None);
+        let json = serde_json::to_value(&loading).unwrap();
+        assert!(json["weight_bytes"].is_null());
+        assert!(json["idle_unload_unix_ms"].is_null());
+        assert_eq!(json["kv_cache_bytes"], 0);
+    }
+
+    /// A hub whose wall clock follows tokio's (paused) clock.
+    fn clocked_hub() -> Arc<RuntimeMetricsHub> {
+        let governor =
+            Arc::new(ProcessMemoryGovernor::new(MemoryGovernorConfig::default()).unwrap());
+        let start = tokio::time::Instant::now();
+        RuntimeMetricsHub::with_wall_clock(
+            MemorySampling::Cached,
+            governor,
+            || false,
+            None,
+            Arc::new(move || 1_000_000_000_000 + start.elapsed().as_millis() as u64),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn activity_clock_closes_buckets_without_subscribers() {
+        let hub = clocked_hub();
+        hub.start_activity_clock();
+        hub.start_activity_clock();
+        settle().await;
+        for _ in 0..10 {
+            advance(Duration::from_secs(1)).await;
+        }
+        let s5 = hub.activity().history().points.s5;
+        assert!(s5.len() >= 2, "{} points", s5.len());
+        assert!(s5.iter().all(|p| p.t % BUCKET_MS == 0));
+        assert_eq!(s5[0].t, 1_000_000_000_000);
+        assert_eq!(s5[1].t, 1_000_000_005_000);
+        assert_eq!(hub.signals.sender.receiver_count(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn activity_clock_exits_when_hub_drops() {
+        let hub = clocked_hub();
+        hub.start_activity_clock();
+        settle().await;
+        let signals = Arc::clone(&hub.signals);
+        drop(hub);
+        settle().await;
+        assert_eq!(Arc::strong_count(&signals), 1);
     }
 
     #[tokio::test(start_paused = true)]
