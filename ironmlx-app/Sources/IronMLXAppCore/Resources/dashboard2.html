@@ -1283,65 +1283,6 @@
     visibility: visible;
   }
 
-  .incident-filter-header {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .incident-history-toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    justify-content: flex-end;
-    gap: 16px;
-    margin-bottom: 12px;
-  }
-
-  .incident-history-export-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    max-width: 100%;
-  }
-
-  .incident-history-toolbar button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    height: 34px;
-    font-family: inherit;
-    line-height: 1;
-  }
-
-  .incident-history-toolbar #incident-clear-btn {
-    border: 1px solid transparent;
-    background-clip: padding-box;
-  }
-
-  .incident-filter-actions {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    gap: 8px;
-  }
-
-  @media (max-width: 760px) {
-    .incident-filter-header {
-      flex-direction: column;
-      align-items: stretch;
-    }
-
-    .incident-filter-actions {
-      justify-content: flex-start;
-    }
-
-    .incident-history-toolbar {
-      justify-content: flex-start;
-    }
-  }
-
   /* ── Card ── */
   .card {
     background: var(--card-bg);
@@ -3754,35 +3695,6 @@
   }
 
   /* ── Log viewer ── */
-  .log-filter-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 14px 20px;
-    flex-wrap: wrap;
-  }
-
-  .log-filter-row label {
-    font-size: 12px;
-    color: var(--text-secondary);
-    white-space: nowrap;
-  }
-
-  .log-filter-row input[type="number"] {
-    width: 70px;
-  }
-
-  .log-filter-row select {
-    min-width: 0;
-    width: auto;
-  }
-
-  .log-filter-row .hint {
-    font-size: 11px;
-    color: var(--text-tertiary);
-    white-space: nowrap;
-  }
-
   .btn-dark {
     background: #1d1d1f;
     color: white;
@@ -3803,126 +3715,155 @@
     .btn-dark { background: #f5f5f7; color: #1d1d1f; }
   }
 
-  .log-terminal {
-    background: #1a1a2e;
-    border-radius: 8px;
-    border: 0.5px solid #2a2a3e;
-    overflow: hidden;
-    margin-top: 16px;
-  }
-
-  .log-terminal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 14px;
-    font-size: 11px;
-    color: #888;
-    border-bottom: 0.5px solid #2a2a3e;
-  }
-
-  .log-terminal-header a {
-    color: var(--accent);
-    text-decoration: none;
-    font-size: 11px;
-    cursor: pointer;
-  }
-
-  .log-terminal-header a:hover {
-    text-decoration: underline;
-  }
-
-  .log-terminal-body {
-    padding: 12px 14px;
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: 11px;
-    line-height: 1.6;
-    color: #30d158;
-    max-height: 420px;
-    overflow-y: auto;
-    white-space: pre-wrap;
-    word-break: break-all;
-  }
-
-  .log-terminal-footer {
-    padding: 6px 14px;
-    font-size: 10px;
-    color: #666;
-    border-top: 0.5px solid #2a2a3e;
-  }
-
-  .auto-refresh-badge {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 12px;
-    font-weight: 500;
-    color: var(--green);
-  }
-
-  .auto-refresh-badge::before {
-    content: '';
-    width: 7px;
-    height: 7px;
-    background: var(--green);
-    border-radius: 50%;
-  }
-
-  .log-tab-bar {
+  /* ── Logs page ── */
+  .logs-page-scroll { display: flex; flex-direction: column; }
+  .logs-page-scroll > * { flex-shrink: 0; }
+  .logs-tabs {
     position: sticky;
     top: 0;
     z-index: 10;
-    display: flex;
-    gap: 0;
-    margin-bottom: 16px;
-    border-bottom: 1px solid var(--border);
+    padding-bottom: 14px;
     background: var(--bg);
   }
-
-  .log-tab {
-    padding: 9px 18px;
-    background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
-    color: var(--text-secondary);
+  #log-tab-content-runtime {
+    flex: 1 1 auto;
+    min-height: 360px;
+    display: flex;
+    flex-direction: column;
+  }
+  #log-tab-content-runtime[hidden] { display: none; }
+  .logs-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .logs-level-chips { display: inline-flex; gap: 6px; }
+  .logs-search {
+    flex: 1 1 160px;
+    min-width: 140px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
+    border: 0.5px solid var(--ds-border);
+    border-radius: var(--ds-radius-control);
+    background: var(--ds-surface-1);
+    color: var(--ds-text-2);
+  }
+  .logs-search:focus-within { border-color: var(--ds-blue); }
+  .logs-search input {
+    flex: 1;
+    min-width: 0;
+    padding: 5px 0;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--ds-text-1);
     font: inherit;
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 12px;
+  }
+  .logs-tool-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border: 0.5px solid var(--ds-border);
+    border-radius: var(--ds-radius-control);
+    background: var(--ds-surface-1);
+    color: var(--ds-text-1);
+    font: inherit;
+    font-size: 12px;
+    white-space: nowrap;
     cursor: pointer;
   }
-
-  .log-tab.active {
-    color: var(--text);
-    border-bottom-color: var(--accent);
+  .logs-tool-btn:hover { background: var(--ds-control-track); }
+  .logs-tool-btn:focus-visible,
+  .logs-output:focus-visible { outline: 2px solid var(--ds-blue); outline-offset: 1px; }
+  .logs-tool-btn svg[hidden] { display: none; }
+  .logs-card {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    padding: 0;
+    overflow: hidden;
   }
+  .logs-output {
+    flex: 1;
+    min-width: 0;
+    overflow: auto;
+    padding: 8px 0;
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: 11.5px;
+    line-height: 1.7;
+    color: var(--ds-text-1);
+  }
+  .logs-footer {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--ds-text-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .ds-log-line {
+    display: flex;
+    gap: 10px;
+    min-width: max-content;
+    padding: 0 14px;
+    white-space: pre;
+  }
+  .ds-log-time { flex: none; color: var(--ds-text-2); min-width: 12ch; }
+  .ds-log-level { flex: none; width: 5ch; color: var(--ds-text-2); }
+  .ds-log-module { flex: none; color: var(--ds-text-2); }
+  .ds-log-msg { flex: none; }
+  .ds-log-cont { padding-left: calc(14px + 12ch + 5ch + 20px); }
+  .ds-log-cont .ds-log-msg { color: var(--ds-text-1); }
+  .ds-log-line--warn { background: color-mix(in srgb, var(--ds-amber) 10%, transparent); }
+  .ds-log-line--warn .ds-log-level { color: var(--ds-amber); }
+  .ds-log-line--error { background: color-mix(in srgb, var(--ds-red) 10%, transparent); }
+  .ds-log-line--error .ds-log-level { color: var(--ds-red); }
+  /* Rows with no level (launch banners and what follows them) start at the left edge. */
+  .ds-log-line--plain > .ds-log-time,
+  .ds-log-line--plain > .ds-log-level,
+  .ds-log-line--plain > .ds-log-module { display: none; }
+  .ds-log-line--plain.ds-log-cont { padding-left: 14px; }
+  .ds-log-line--plain .ds-log-msg { color: var(--ds-text-2); }
+  .ds-log-empty { padding: 8px 14px; color: var(--ds-text-2); white-space: pre-line; }
 
   .incident-unread-badge {
     display: none;
-    min-width: 18px;
-    margin-left: 5px;
-    padding: 1px 5px;
-    border-radius: 10px;
-    background: #ff3b30;
-    color: white;
-    font-size: 10px;
+    min-width: 16px;
+    padding: 0 5px;
+    border-radius: 8px;
+    background: var(--ds-red);
+    color: #fff;
+    font-size: 11px;
     line-height: 16px;
     text-align: center;
+    font-variant-numeric: tabular-nums;
   }
 
-  .incident-filter-grid {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(150px, 1fr));
-    gap: 12px;
-    padding: 14px;
-  }
-
-  .incident-filter-grid label {
+  .incident-history-toolbar {
     display: flex;
-    flex-direction: column;
-    gap: 5px;
-    color: var(--text-secondary);
-    font-size: 11px;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
   }
+  .incident-toolbar-spacer { flex: 1 1 0; min-width: 0; }
+  .incident-history-toolbar .incident-select { width: auto; min-width: 0; font-size: 12px; padding: 5px 28px 5px 10px; }
+  .incident-more-btn { padding: 5px 8px; }
+  .incident-custom-range {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .incident-custom-range[hidden] { display: none; }
+  .incident-custom-range .incident-datetime-field { flex: 0 1 260px; }
 
   .incident-datetime-field {
     min-width: 0;
@@ -4000,53 +3941,84 @@
     opacity: 1;
   }
 
-  .incident-filter-grid input,
-  .incident-filter-grid select {
-    min-width: 0;
-  }
-
-  .incident-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    margin-top: 14px;
-  }
-
-  .incident-row {
-    border: 1px solid var(--border);
-    border-radius: 9px;
-    background: var(--card-bg);
-    overflow: hidden;
-  }
-
-  .incident-row-summary {
+  .ds-incident-list { margin-top: 14px; }
+  .ds-incident-list:empty { display: none; }
+  .ds-incident-empty { margin-top: 14px; padding: 28px 18px; text-align: center; color: var(--ds-text-2); }
+  .ds-incident-empty[hidden] { display: none; }
+  .ds-incident-list.ds-card { padding: 0; overflow: hidden; }
+  .ds-incident-item + .ds-incident-item { border-top: 0.5px solid var(--ds-border); }
+  .ds-incident-row {
     display: grid;
-    grid-template-columns: 150px 1fr 1.4fr 135px 70px auto;
+    grid-template-columns: 130px minmax(0, 1fr) auto 16px;
     gap: 10px;
     align-items: center;
-    padding: 12px 14px;
+    padding: 12px 16px;
     font-size: 12px;
+    cursor: pointer;
+  }
+  .ds-incident-row:hover { background: var(--ds-surface-2); }
+  .ds-incident-row:focus-visible { outline: 2px solid var(--ds-blue); outline-offset: -2px; }
+  .ds-incident-time { color: var(--ds-text-2); white-space: nowrap; }
+  .ds-incident-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ds-text-1); }
+  .ds-incident-chevron { color: var(--ds-text-3); transition: transform 0.15s ease; }
+  .ds-incident-row[aria-expanded="true"] .ds-incident-chevron { transform: rotate(90deg); }
+  .ds-incident-detail { display: none; padding: 2px 16px 14px 16px; font-size: 12px; line-height: 1.6; color: var(--ds-text-2); }
+  .ds-incident-detail.open { display: block; }
+  .ds-incident-line { overflow-wrap: anywhere; }
+  .ds-incident-line--sub { color: var(--text-secondary); }
+  .ds-incident-section { margin-top: 8px; }
+  .ds-incident-section > summary { cursor: pointer; color: var(--ds-text-2); font-weight: 500; }
+  .ds-incident-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 18px; margin-top: 6px; }
+  .ds-incident-field { display: flex; flex-direction: column; min-width: 0; }
+  .ds-incident-field-label { color: var(--ds-text-3); font-size: 11px; }
+  .ds-incident-field-value { overflow-wrap: anywhere; color: var(--ds-text-1); user-select: text; }
+  .ds-incident-log {
+    margin: 6px 0 0;
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    padding: 10px;
+    border: 0.5px solid var(--ds-border);
+    border-radius: var(--ds-radius-control);
+    background: var(--ds-surface-2);
+    color: var(--ds-text-1);
+    font: 11px/1.55 'SF Mono', 'Menlo', monospace;
+    user-select: text;
   }
 
-  .incident-row-detail {
-    display: none;
-    padding: 14px;
-    border-top: 1px solid var(--border);
-    background: var(--bg);
-    font-size: 12px;
-    line-height: 1.55;
+  .ds-menu-anchor { position: relative; display: inline-flex; }
+  .ds-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    z-index: 20;
+    min-width: 160px;
+    padding: 4px;
+    border: 0.5px solid var(--ds-border-strong);
+    border-radius: 8px;
+    background: var(--ds-surface-1);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
   }
-
-  .incident-row-detail.open { display: block; }
-  .incident-detail-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 18px; }
-  .incident-detail-label { color:var(--text-secondary);font-size:11px; }
-  .incident-detail-value { overflow-wrap:anywhere; }
-  .incident-log-tail { max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#1a1a2e;color:#30d158;border-radius:7px;padding:10px;font:11px/1.55 'SF Mono','Menlo',monospace; }
+  .ds-menu[hidden] { display: none; }
+  .ds-menu-item {
+    display: block;
+    width: 100%;
+    padding: 7px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ds-text-1);
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .ds-menu-item:hover, .ds-menu-item:focus-visible { background: var(--ds-surface-2); outline: none; }
+  .ds-menu-item--danger { color: var(--ds-red); }
 
   @media (max-width: 900px) {
-    .incident-filter-grid { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
-    .incident-row-summary { grid-template-columns: 135px 1fr 1fr auto; }
-    .incident-row-summary .incident-secondary { display: none; }
+    .ds-incident-row { grid-template-columns: 110px minmax(0, 1fr) auto 16px; }
   }
 
   /* ── Segmented control ── */
@@ -4993,154 +4965,137 @@
 
     <div class="logs-page-scroll page-body-scroll">
 
-    <div class="log-tab-bar" role="tablist">
-      <button class="log-tab active" id="log-tab-runtime" role="tab" aria-selected="true" onclick="switchLogTab('runtime')"><span data-i18n="runtime_logs">Runtime Logs</span></button>
-      <button class="log-tab" id="log-tab-incidents" role="tab" aria-selected="false" onclick="switchLogTab('incidents')"><span data-i18n="incident_history">Incident History</span><span class="incident-unread-badge" id="incident-unread-badge">0</span></button>
+    <div class="logs-tabs">
+      <div class="ds-seg ds-seg-lg" role="tablist" id="logs-tabs" data-i18n-aria-label="nav_logs" aria-label="Logs">
+        <span class="ds-seg-thumb" aria-hidden="true"></span>
+        <button type="button" id="log-tab-runtime" role="tab" aria-selected="true" data-value="runtime" onclick="switchLogTab('runtime')" data-i18n="runtime_logs">Runtime Logs</button>
+        <button type="button" id="log-tab-incidents" role="tab" aria-selected="false" tabindex="-1" data-value="incidents" onclick="switchLogTab('incidents')"><span data-i18n="incident_history">Incident History</span><span class="incident-unread-badge" id="incident-unread-badge">0</span></button>
+      </div>
     </div>
 
     <div id="log-tab-content-runtime">
-
-    <!-- Log filter -->
-    <div class="card-settings">
-      <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
-        <span style="display:flex;align-items:center;gap:8px;">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M2 3h12M4 6h8M6 9h4M7 12h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
-          <span data-i18n="log_viewer">Log Viewer</span>
-        </span>
-        <span class="auto-refresh-badge" data-i18n="auto_refresh">Auto Refresh</span>
-      </div>
-      <div class="log-filter-row">
-        <label data-i18n="log_lines">Lines:</label>
-        <input type="number" value="500" style="width:70px;">
-        <label data-i18n="log_interval">Interval:</label>
-        <input type="number" value="5" style="width:60px;">
-        <span class="hint" data-i18n="log_interval_hint">sec (0=off)</span>
-        <label data-i18n="log_file">File:</label>
-        <select id="log-file-select" style="min-width:0;">
-          <option value="server">ironmlx-server</option>
-          <option value="app">ironmlx-app</option>
-        </select>
-        <label data-i18n="log_level_filter">Level:</label>
-        <select id="log-level-filter" style="min-width:0;">
-          <option value="ALL" data-i18n="log_level_all">ALL</option>
-          <option value="DEBUG">DEBUG</option>
-          <option value="INFO">INFO</option>
-          <option value="WARNING">WARNING</option>
-          <option value="ERROR">ERROR</option>
-        </select>
-        <button class="btn-accent" id="log-refresh-btn" data-i18n="refresh">Refresh</button>
-        <label style="font-size:12px;color:var(--text-secondary);white-space:nowrap;display:flex;align-items:center;gap:5px;margin-left:4px;cursor:pointer;">
-          <input type="checkbox" checked style="accent-color:var(--accent);width:15px;height:15px;" id="log-auto-scroll-cb">
-          <span data-i18n="auto_scroll">Auto Scroll</span>
+      <div class="logs-toolbar">
+        <div class="ds-seg" id="log-source-seg">
+          <span class="ds-seg-thumb" aria-hidden="true"></span>
+          <button type="button" data-value="server" aria-pressed="true" data-i18n="logs_source_backend">Backend</button>
+          <button type="button" data-value="app" aria-pressed="false" data-i18n="logs_source_app">App</button>
+        </div>
+        <div class="logs-level-chips" id="log-level-chips" role="group">
+          <button type="button" class="ds-chip is-on" data-level="all" aria-pressed="true" data-i18n="logs_level_all">All</button>
+          <button type="button" class="ds-chip" data-level="warn" aria-pressed="false" data-i18n="logs_level_warn">Warnings</button>
+          <button type="button" class="ds-chip" data-level="error" aria-pressed="false" data-i18n="logs_level_error">Errors</button>
+        </div>
+        <label class="logs-search">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          <input type="search" id="log-search-input" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-i18n-placeholder="logs_search_placeholder" data-i18n-aria-label="logs_search_placeholder" placeholder="Search logs" aria-label="Search logs">
         </label>
+        <button type="button" class="logs-tool-btn" id="log-pause-btn" aria-pressed="false" data-i18n-aria-label="logs_pause" aria-label="Pause refresh">
+          <svg class="logs-pause-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="4" y="3" width="3" height="10" rx="1"/><rect x="9" y="3" width="3" height="10" rx="1"/></svg>
+          <svg class="logs-play-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" hidden><path d="M5 3.2v9.6a.6.6 0 0 0 .9.5l7.6-4.8a.6.6 0 0 0 0-1L5.900 2.700a.6.6 0 0 0-.9.5z"/></svg>
+          <span id="log-pause-label" data-i18n="logs_refreshing">Refreshing every 5 s</span>
+        </button>
+        <button type="button" class="logs-tool-btn" id="log-export-btn">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2v8M4.800 7.200L8 10.400l3.200-3.200M3 13h10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span data-i18n="logs_export">Export</span>
+        </button>
       </div>
-      <div class="log-filter-row" style="padding-top:0;">
-        <label data-i18n="log_search">Search:</label>
-        <input type="text" id="log-search-input" placeholder="" style="flex:1;min-width:120px;" oninput="applyLogFilters()">
+
+      <div class="ds-card logs-card">
+        <div class="logs-output" id="log-output" role="log" tabindex="0" aria-live="off"></div>
+      </div>
+      <div class="logs-footer">
+        <span id="log-count"></span>
+        <span id="log-timestamp"></span>
       </div>
     </div>
 
-    <!-- Log terminal -->
-    <div class="log-terminal">
-      <div class="log-terminal-header">
-        <span><span data-i18n="log_showing">Showing</span> 500 / 56 <span data-i18n="log_lines_unit">lines</span></span>
-        <a href="#" id="log-export-link" data-i18n="export_log">Export Log</a>
-      </div>
-      <div class="log-terminal-body" id="log-output">2026-03-20 15:29:31,773 - https - INFO - [-] -- HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/mlx-community/Qwen3-0.6B-4bit/resolve/73e3e830f8138bc5943c7c016e0eb4834f0a8 "HTTP/1.1 200 OK"
-2026-03-20 15:29:31,908 - https - INFO - [-] -- HTTP Request: HEAD https://huggingface.co/mlx-community/Qwen3-0.6B-4bit/resolve/73e3e830f8138bc5943c7c01 tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
-2026-03-20 15:29:32,015 - https - INFO - [-] -- HTTP Request: HEAD https://huggingface.co/mlx-community/Qwen3-0.6B-4bit/resolve/73e3e830f813 "HTTP/1.1 200 OK"
-2026-03-20 15:29:32,125 - https - INFO - [-] -- HTTP Request: GET https://huggingface.co/api/resolve-cache/models/mlx-community/Qwen3-0.6B-4bit "HTTP/1.1 200 OK"
-2026-03-20 15:29:32,275 - omlx.model_discovery - INFO - [-] -- Discovered model: Qwen3-0.6B-4bit (type: llm, engine: batched, size: 0.35G)
-2026-03-20 15:29:32,918 - omlx.engine_pool - INFO - [-] -- Discovered 1 model, max memory: 23.04GB
-2026-03-20 15:29:32,918 - omlx.server - INFO - [-] -- Model pool refreshed after download completion</div>
-      <div class="log-terminal-footer">Last updated: <span id="log-timestamp">--:--:-- --</span></div>
-    </div>
-    </div>
-
-    <div id="log-tab-content-incidents" style="display:none;">
+    <div id="log-tab-content-incidents" hidden>
       <div class="incident-history-toolbar" role="toolbar" aria-label="Incident history actions"
         data-i18n-aria-label="incident_history_actions_accessible_label">
-        <div class="incident-history-export-actions">
-          <span class="diagnostic-export-help">
-            <button class="btn-secondary" type="button" id="incident-export-btn"
-              aria-describedby="incident-export-tooltip"
-              aria-label="Export Incident Records"
-              data-i18n="incident_export"
-              data-i18n-aria-label="incident_export_accessible_label">Export Incident Records</button>
-            <span class="diagnostic-export-tooltip" id="incident-export-tooltip" role="tooltip"
-              data-i18n="incident_export_tooltip">Export incidents matching the current filters as JSON.</span>
-          </span>
-          <span class="diagnostic-export-help">
-            <button class="btn-secondary" type="button" id="diagnostic-export-btn"
-              aria-describedby="diagnostic-export-tooltip"
-              aria-label="Export Diagnostics"
-              data-i18n="diagnostic_export"
-              data-i18n-aria-label="diagnostic_export_accessible_label">Export Diagnostics</button>
-            <span class="diagnostic-export-tooltip" id="diagnostic-export-tooltip" role="tooltip"
-              data-i18n="diagnostic_export_tooltip">Export system, version, model, runtime status, incidents, and redacted logs for troubleshooting.</span>
-          </span>
+        <div class="logs-level-chips" id="incident-range-chips" role="group">
+          <button type="button" class="ds-chip is-on" data-range="all" aria-pressed="true" data-i18n="incident_range_all">All</button>
+          <button type="button" class="ds-chip" data-range="24h" aria-pressed="false" data-i18n="incident_range_24h">24 hours</button>
+          <button type="button" class="ds-chip" data-range="7d" aria-pressed="false" data-i18n="incident_range_7d">7 days</button>
+          <button type="button" class="ds-chip" data-range="30d" aria-pressed="false" data-i18n="incident_range_30d">30 days</button>
+          <button type="button" class="ds-chip" data-range="custom" aria-pressed="false" data-i18n="incident_range_custom">Custom…</button>
         </div>
-        <button class="btn-danger" type="button" id="incident-clear-btn" data-i18n="incident_clear">Clear All Records</button>
+        <select class="ds-tuning-select incident-select" id="incident-filter-status" aria-label="Status" data-i18n-aria-label="incident_status">
+          <option value="" data-i18n="incident_status_all">All statuses</option>
+          <option value="recovery_pending" data-i18n="incident_status_pending">Recovery pending</option>
+          <option value="recovered" data-i18n="incident_status_recovered">Recovered</option>
+          <option value="partially_recovered" data-i18n="incident_status_partial">Partially recovered</option>
+          <option value="recovery_failed" data-i18n="incident_status_failed">Recovery failed</option>
+          <option value="automatic_recovery_stopped" data-i18n="incident_status_stopped">Automatic recovery stopped</option>
+          <option value="recovering" data-i18n="incident_status_recovering">Recovering</option>
+        </select>
+        <select class="ds-tuning-select incident-select" id="incident-filter-reason" aria-label="Failure reason" data-i18n-aria-label="incident_reason">
+          <option value="" data-i18n="incident_reason_all">All reasons</option>
+          <option value="memory_insufficient" data-i18n="recovery_reason_memory">Not enough memory</option>
+          <option value="model_limit_reached" data-i18n="recovery_reason_capacity">Model limit reached</option>
+          <option value="model_files_missing" data-i18n="recovery_reason_missing">Model files missing</option>
+          <option value="model_snapshot_invalid" data-i18n="recovery_reason_corrupt">Model snapshot invalid</option>
+          <option value="incompatible_configuration" data-i18n="recovery_reason_config">Incompatible configuration</option>
+          <option value="unknown_model_load_failure" data-i18n="recovery_reason_unknown">Unknown load failure</option>
+          <option value="crash_loop_breaker" data-i18n="recovery_reason_breaker">Crash-loop breaker</option>
+        </select>
+        <span class="incident-toolbar-spacer" aria-hidden="true"></span>
+        <span class="diagnostic-export-help">
+          <button class="logs-tool-btn" type="button" id="incident-export-btn"
+            aria-describedby="incident-export-tooltip"
+            aria-label="Export Incident Records"
+            data-i18n-aria-label="incident_export_accessible_label">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2v8M4.800 7.200L8 10.400l3.200-3.200M3 13h10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span data-i18n="incident_export_short">Export records</span>
+          </button>
+          <span class="diagnostic-export-tooltip" id="incident-export-tooltip" role="tooltip"
+            data-i18n="incident_export_tooltip">Export incidents matching the current filters as JSON.</span>
+        </span>
+        <span class="diagnostic-export-help">
+          <button class="logs-tool-btn" type="button" id="diagnostic-export-btn"
+            aria-describedby="diagnostic-export-tooltip"
+            aria-label="Export Diagnostics"
+            data-i18n="diagnostic_export"
+            data-i18n-aria-label="diagnostic_export_accessible_label">Export diagnostics</button>
+          <span class="diagnostic-export-tooltip" id="diagnostic-export-tooltip" role="tooltip"
+            data-i18n="diagnostic_export_tooltip">Export system, version, model, runtime status, incidents, and redacted logs for troubleshooting.</span>
+        </span>
+        <span class="ds-menu-anchor">
+        <button class="logs-tool-btn incident-more-btn" type="button" id="incident-more-btn"
+          aria-haspopup="menu" aria-expanded="false" aria-controls="incident-more-menu"
+          aria-label="More" data-i18n-aria-label="incident_more">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="3.500" cy="8" r="1.300"/><circle cx="8" cy="8" r="1.300"/><circle cx="12.500" cy="8" r="1.300"/></svg>
+        </button>
+        <div class="ds-menu" id="incident-more-menu" role="menu" hidden>
+          <button type="button" role="menuitem" class="ds-menu-item ds-menu-item--danger" id="incident-clear-btn" data-i18n="incident_clear">Clear All Records</button>
+        </div>
+        </span>
       </div>
-      <div class="card-settings">
-        <div class="card-header incident-filter-header">
-          <span data-i18n="incident_filters">Incident Filters</span>
-          <div class="incident-filter-actions">
-            <button class="btn-accent" type="button" id="incident-refresh-btn"
-              data-i18n="incident_query">Query</button>
+      <div class="incident-custom-range" id="incident-custom-range" hidden>
+        <fieldset class="incident-datetime-field">
+          <legend data-i18n="incident_from">From</legend>
+          <div class="incident-datetime-control">
+            <input type="date" id="incident-filter-from-date" required aria-label="Start date"
+              data-i18n-aria-label="incident_from_date_accessible_label">
+            <span class="incident-datetime-divider" aria-hidden="true"></span>
+            <input class="incident-time-input" type="text" id="incident-filter-from-time"
+              inputmode="numeric" maxlength="5" value="00:00" placeholder="HH:mm" autocomplete="off" spellcheck="false"
+              aria-label="Start time, 24-hour clock" data-i18n-aria-label="incident_from_time_accessible_label">
           </div>
-        </div>
-        <div class="incident-filter-grid">
-          <fieldset class="incident-datetime-field">
-            <legend data-i18n="incident_from">From</legend>
-            <div class="incident-datetime-control">
-              <input type="date" id="incident-filter-from-date" required aria-label="Start date"
-                data-i18n-aria-label="incident_from_date_accessible_label">
-              <span class="incident-datetime-divider" aria-hidden="true"></span>
-              <input class="incident-time-input" type="text" id="incident-filter-from-time"
-                inputmode="numeric" maxlength="5" value="00:00" placeholder="HH:mm" autocomplete="off" spellcheck="false"
-                aria-label="Start time, 24-hour clock" data-i18n-aria-label="incident_from_time_accessible_label">
-            </div>
-          </fieldset>
-          <fieldset class="incident-datetime-field">
-            <legend data-i18n="incident_to">To</legend>
-            <div class="incident-datetime-control">
-              <input type="date" id="incident-filter-to-date" required aria-label="End date"
-                data-i18n-aria-label="incident_to_date_accessible_label">
-              <span class="incident-datetime-divider" aria-hidden="true"></span>
-              <input class="incident-time-input" type="text" id="incident-filter-to-time"
-                inputmode="numeric" maxlength="5" value="23:59" placeholder="HH:mm" autocomplete="off" spellcheck="false"
-                aria-label="End time, 24-hour clock" data-i18n-aria-label="incident_to_time_accessible_label">
-            </div>
-          </fieldset>
-          <label><span data-i18n="incident_status">Status</span>
-            <select id="incident-filter-status">
-              <option value="" data-i18n="incident_all">All</option>
-              <option value="recovery_pending" data-i18n="incident_status_pending">Recovery pending</option>
-              <option value="recovered" data-i18n="incident_status_recovered">Recovered</option>
-              <option value="partially_recovered" data-i18n="incident_status_partial">Partially recovered</option>
-              <option value="recovery_failed" data-i18n="incident_status_failed">Recovery failed</option>
-              <option value="automatic_recovery_stopped" data-i18n="incident_status_stopped">Automatic recovery stopped</option>
-              <option value="recovering" data-i18n="incident_status_recovering">Recovering</option>
-            </select>
-          </label>
-          <label><span data-i18n="incident_model">Model</span><input type="text" id="incident-filter-model" data-i18n-placeholder="incident_model_placeholder" placeholder="Model name"></label>
-          <label><span data-i18n="incident_reason">Failure reason</span>
-            <select id="incident-filter-reason">
-              <option value="" data-i18n="incident_all">All</option>
-              <option value="memory_insufficient" data-i18n="recovery_reason_memory">Not enough memory</option>
-              <option value="model_limit_reached" data-i18n="recovery_reason_capacity">Model limit reached</option>
-              <option value="model_files_missing" data-i18n="recovery_reason_missing">Model files missing</option>
-              <option value="model_snapshot_invalid" data-i18n="recovery_reason_corrupt">Model snapshot invalid</option>
-              <option value="incompatible_configuration" data-i18n="recovery_reason_config">Incompatible configuration</option>
-              <option value="unknown_model_load_failure" data-i18n="recovery_reason_unknown">Unknown load failure</option>
-              <option value="crash_loop_breaker" data-i18n="recovery_reason_breaker">Crash-loop breaker</option>
-            </select>
-          </label>
-        </div>
+        </fieldset>
+        <fieldset class="incident-datetime-field">
+          <legend data-i18n="incident_to">To</legend>
+          <div class="incident-datetime-control">
+            <input type="date" id="incident-filter-to-date" required aria-label="End date"
+              data-i18n-aria-label="incident_to_date_accessible_label">
+            <span class="incident-datetime-divider" aria-hidden="true"></span>
+            <input class="incident-time-input" type="text" id="incident-filter-to-time"
+              inputmode="numeric" maxlength="5" value="23:59" placeholder="HH:mm" autocomplete="off" spellcheck="false"
+              aria-label="End time, 24-hour clock" data-i18n-aria-label="incident_to_time_accessible_label">
+          </div>
+        </fieldset>
       </div>
-      <div class="incident-list" id="incident-list"></div>
-      <div id="incident-empty" class="card-settings" style="display:none;margin-top:14px;padding:28px;text-align:center;color:var(--text-secondary);" data-i18n="incident_empty">No incidents match the current filters.</div>
+      <div class="ds-incident-list" id="incident-list"></div>
+      <div id="incident-empty" class="ds-card ds-incident-empty" hidden data-i18n="incident_empty">No incidents match the current filters.</div>
     </div>
     </div>
   </div>
@@ -6945,15 +6900,15 @@
       recovery_action_config: "Review settings",
       recovery_action_runtime_settings: "Open runtime settings",
       recovery_action_retry: "Retry", recovery_action_view_logs: "View logs", recovery_reason_breaker: "Consecutive crashes triggered the automatic recovery breaker.",
-      runtime_logs: "Runtime Logs", incident_history: "Incident History", incident_filters: "Incident Filters", incident_query: "Query", incident_export: "Export Incident Records", incident_clear: "Clear All Records", incident_history_actions_accessible_label: "Incident history actions",
-      diagnostic_export: "Export Diagnostics", diagnostic_export_collecting: "Collecting…", diagnostic_export_tooltip: "Export system, version, model, runtime status, incidents, and redacted logs for troubleshooting.", diagnostic_export_accessible_label: "Export diagnostic information", diagnostic_exported: "Diagnostic information exported.", diagnostic_export_failed: "Diagnostic export failed.",
+      runtime_logs: "Runtime Logs", incident_history: "Incident History", incident_range_all: "All", incident_range_24h: "24 hours", incident_range_7d: "7 days", incident_range_30d: "30 days", incident_range_custom: "Custom…", incident_status_all: "All statuses", incident_reason_all: "All reasons", incident_export_short: "Export records", incident_more: "More", incident_export: "Export Incident Records", incident_clear: "Clear All Records", incident_history_actions_accessible_label: "Incident history actions",
+      diagnostic_export: "Export diagnostics", diagnostic_export_collecting: "Collecting…", diagnostic_export_tooltip: "Export system, version, model, runtime status, incidents, and redacted logs for troubleshooting.", diagnostic_export_accessible_label: "Export diagnostic information", diagnostic_exported: "Diagnostic information exported.", diagnostic_export_failed: "Diagnostic export failed.",
       incident_export_tooltip: "Export incident records from the most recent query as a JSON file.", incident_export_accessible_label: "Export queried incident records",
-      incident_export_all_title: "Export all incident records?", incident_export_all_message: "No filters are currently applied. This will export all incident records currently retained by the system.", incident_export_unapplied_message: "You changed the filter conditions but have not queried them. Those changes will not be used for this export.", incident_export_all_confirm: "Export All Records", incident_export_current_title: "Export current results?", incident_export_current_message: "This export will use the filters applied to the incident list currently displayed.", incident_export_current_confirm: "Export Current Results", incident_return_to_filters: "Return to Filters",
-      incident_from: "From", incident_to: "To", incident_status: "Status", incident_all: "All", incident_model: "Model", incident_model_placeholder: "Model name", incident_reason: "Failure reason",
+      incident_export_all_title: "Export all incident records?", incident_export_all_message: "No filters are currently applied. This will export all incident records currently retained by the system.", incident_export_all_confirm: "Export All Records",
+      incident_from: "From", incident_to: "To", incident_status: "Status", incident_reason: "Failure reason",
       incident_from_date_accessible_label: "Start date", incident_from_time_accessible_label: "Start time, 24-hour clock", incident_to_date_accessible_label: "End date", incident_to_time_accessible_label: "End time, 24-hour clock", incident_time_invalid: "Use 24-hour time HH:mm (00:00–23:59).",
       incident_status_pending: "Recovery pending", incident_status_recovering: "Recovering", incident_status_recovered: "Recovered", incident_status_partial: "Partially recovered", incident_status_failed: "Recovery failed", incident_status_stopped: "Automatic recovery stopped",
-      incident_empty: "No incidents match the current filters.", incident_type_backend_exit: "Unexpected backend exit", incident_view_details: "Details", incident_no_models: "No models",
-      incident_id: "Incident ID", incident_occurred_at: "Occurred at", incident_launch_id: "Backend launch ID", incident_process: "Process", incident_exit_reason: "Exit reason", incident_models_before: "Models before incident", incident_recovered_models: "Recovered models", incident_failed_models: "Failed models", incident_attempts: "Automatic recovery attempts", incident_final_status: "Final recovery status", incident_failures: "Structured failures", incident_actions: "Recovery actions", incident_log_tail: "Sanitized log tail",
+      incident_empty: "No incidents match the current filters.", incident_type_backend_exit: "Unexpected backend exit", incident_label_value: "{label}: {value}", incident_status_attempts: "{status} · {count} attempts", incident_status_attempts_one: "{status} · {count} attempt", incident_process_section: "Process and exit info", incident_suggestion: "Suggestion", incident_recovery_steps: "Recovery steps", incident_no_models: "No models",
+      incident_id: "Incident ID", incident_occurred_at: "Occurred at", incident_launch_id: "Backend launch ID", incident_process: "Process", incident_exit_reason: "Exit reason", incident_models_before: "Models before incident", incident_recovered_models: "Recovered models", incident_failed_models: "Failed models", incident_attempts: "Automatic recovery attempts", incident_final_status: "Final recovery status", incident_log_tail: "Log excerpt",
       incident_step_restart: "Automatic backend restart started", incident_step_readiness: "Backend readiness check passed", incident_step_restore: "Confirmed model restore started", incident_step_stable: "Stability observation window started", incident_step_stopped: "Automatic recovery stopped",
       incident_clear_title: "Clear all incident records?", incident_clear_confirm: "This permanently deletes all incident records and cannot be undone. Runtime logs are not affected.", incident_cleared: "All incident records cleared.", incident_clear_failed: "Could not clear incident history.", incident_exported: "Incident information exported.", incident_export_failed: "Incident export failed.", incident_load_failed: "Could not load incident history.",
       runtime_models: "Model Runtime Status",
@@ -7235,8 +7190,9 @@
       pp_tps_req_label: "(Per-request Prompt TPS)", pp_tps_req_desc: "Prompt processing throughput divided by batch size. Shows per-request prefill speed under batch load.",
       logs_subtitle: "View runtime logs and incident history to understand service status and troubleshoot issues.",
       log_exported: "Log exported.", log_export_failed: "Could not export the log. Check the destination and available disk space.",
-      log_viewer: "Log Viewer", auto_refresh: "Auto Refresh", log_lines: "Lines:", log_interval: "Interval:", log_interval_hint: "sec (0=off)", log_file: "File:", log_level_filter: "Level:", log_level_all: "ALL", log_search: "Search:", refresh: "Refresh", auto_scroll: "Auto Scroll", log_showing: "Showing", log_lines_unit: "lines", export_log: "Export Log",
+      log_level_all: "ALL",
       log_server_offline: "Backend is not running", log_start_hint: "Load a local model from Models to start it and view logs.", log_no_entries: "No log entries", log_no_app_logs: "No app log entries",
+      logs_source_backend: "Backend", logs_source_app: "App", logs_level_all: "All", logs_level_warn: "Warnings", logs_level_error: "Errors", logs_search_placeholder: "Search logs", logs_refreshing: "Refreshing every 5 s", logs_paused: "Paused", logs_pause: "Pause refresh", logs_resume: "Resume refresh", logs_export: "Export", log_count: "Showing {shown} / {total}", logs_updated_at: "Updated {time}",
       settings_title: "Settings", settings_header_hint: "Settings marked {tag} restart the backend when saved",
       settings_restart_tag: "Restart required", settings_experimental_tag: "Experimental", settings_applies_now: "Applies immediately",
       settings_group_general: "General", settings_group_server: "Server", settings_group_models: "Models and memory", settings_group_cache: "Cache", settings_group_acceleration: "Acceleration",
@@ -7750,15 +7706,15 @@
       recovery_action_config: "检查设置",
       recovery_action_runtime_settings: "打开运行设置",
       recovery_action_retry: "重试", recovery_action_view_logs: "查看日志", recovery_reason_breaker: "连续崩溃已触发自动恢复熔断。",
-      runtime_logs: "运行日志", incident_history: "故障历史", incident_filters: "故障筛选", incident_query: "查询", incident_export: "导出故障记录", incident_clear: "清除全部记录", incident_history_actions_accessible_label: "故障历史操作",
+      runtime_logs: "运行日志", incident_history: "故障历史", incident_range_all: "全部", incident_range_24h: "24 小时", incident_range_7d: "7 天", incident_range_30d: "30 天", incident_range_custom: "自定义…", incident_status_all: "全部状态", incident_reason_all: "全部原因", incident_export_short: "导出记录", incident_more: "更多", incident_export: "导出故障记录", incident_clear: "清除全部记录", incident_history_actions_accessible_label: "故障历史操作",
       diagnostic_export: "导出诊断信息", diagnostic_export_collecting: "正在收集……", diagnostic_export_tooltip: "导出系统、版本、模型、运行状态、故障记录及脱敏日志，用于问题诊断。", diagnostic_export_accessible_label: "导出诊断信息", diagnostic_exported: "诊断信息已导出。", diagnostic_export_failed: "诊断信息导出失败。",
       incident_export_tooltip: "将最近一次查询结果中的故障记录导出为 JSON 文件。", incident_export_accessible_label: "导出最近一次查询的故障记录",
-      incident_export_all_title: "导出全部故障记录？", incident_export_all_message: "当前未应用任何筛选条件。本次操作将导出系统当前保留的全部故障记录。", incident_export_unapplied_message: "你已修改筛选条件，但尚未点击查询；这些修改不会用于本次导出。", incident_export_all_confirm: "导出全部记录", incident_export_current_title: "导出当前结果？", incident_export_current_message: "本次导出将使用当前故障列表已经应用的筛选条件。", incident_export_current_confirm: "导出当前结果", incident_return_to_filters: "返回筛选",
-      incident_from: "开始时间", incident_to: "结束时间", incident_status: "状态", incident_all: "全部", incident_model: "模型", incident_model_placeholder: "模型名称", incident_reason: "失败原因",
+      incident_export_all_title: "导出全部故障记录？", incident_export_all_message: "当前未应用任何筛选条件。本次操作将导出系统当前保留的全部故障记录。", incident_export_all_confirm: "导出全部记录",
+      incident_from: "开始时间", incident_to: "结束时间", incident_status: "状态", incident_reason: "失败原因",
       incident_from_date_accessible_label: "开始日期", incident_from_time_accessible_label: "开始时间，24 小时制", incident_to_date_accessible_label: "结束日期", incident_to_time_accessible_label: "结束时间，24 小时制", incident_time_invalid: "请输入 24 小时制时间 HH:mm（00:00–23:59）。",
       incident_status_pending: "等待恢复", incident_status_recovering: "正在恢复", incident_status_recovered: "已恢复", incident_status_partial: "部分恢复", incident_status_failed: "恢复失败", incident_status_stopped: "自动恢复已停止",
-      incident_empty: "没有符合当前筛选条件的故障。", incident_type_backend_exit: "后端异常退出", incident_view_details: "查看详情", incident_no_models: "无受影响模型",
-      incident_id: "事故 ID", incident_occurred_at: "发生时间", incident_launch_id: "后端启动 ID", incident_process: "进程信息", incident_exit_reason: "退出原因", incident_models_before: "故障前模型", incident_recovered_models: "成功恢复模型", incident_failed_models: "恢复失败模型", incident_attempts: "自动恢复尝试次数", incident_final_status: "最终恢复结果", incident_failures: "结构化失败", incident_actions: "已执行恢复动作", incident_log_tail: "脱敏日志尾部",
+      incident_empty: "没有符合当前筛选条件的故障。", incident_type_backend_exit: "后端异常退出", incident_label_value: "{label}：{value}", incident_status_attempts: "{status} · {count} 次", incident_status_attempts_one: "{status} · {count} 次", incident_process_section: "进程与退出信息", incident_suggestion: "建议", incident_recovery_steps: "恢复过程", incident_no_models: "无受影响模型",
+      incident_id: "事故 ID", incident_occurred_at: "发生时间", incident_launch_id: "后端启动 ID", incident_process: "进程信息", incident_exit_reason: "退出原因", incident_models_before: "故障前模型", incident_recovered_models: "成功恢复模型", incident_failed_models: "恢复失败模型", incident_attempts: "自动恢复尝试次数", incident_final_status: "最终恢复结果", incident_log_tail: "日志片段",
       incident_step_restart: "开始自动重启后端", incident_step_readiness: "后端健康检查通过", incident_step_restore: "开始恢复已确认模型", incident_step_stable: "开始稳定性观察窗口", incident_step_stopped: "停止自动恢复",
       incident_clear_title: "清除全部故障记录？", incident_clear_confirm: "此操作将永久删除所有故障历史记录，删除后无法恢复。运行日志不会受到影响。", incident_cleared: "全部故障记录已清除。", incident_clear_failed: "无法清除故障历史。", incident_exported: "故障信息已导出。", incident_export_failed: "故障信息导出失败。", incident_load_failed: "无法加载故障历史。",
       runtime_models: "模型运行状态",
@@ -8040,8 +7996,9 @@
       pp_tps_req_label: "（每请求提示词处理 TPS）", pp_tps_req_desc: "提示词处理吞吐量除以批量大小。显示批量负载下每个请求的预填充速度。",
       logs_subtitle: "查看运行日志与故障历史，帮助了解服务状态并排查问题。",
       log_exported: "日志已导出。", log_export_failed: "无法导出日志，请检查保存位置和可用磁盘空间。",
-      log_viewer: "日志查看器", auto_refresh: "自动刷新", log_lines: "行数：", log_interval: "刷新间隔：", log_interval_hint: "秒（0=关闭）", log_file: "文件：", log_level_filter: "级别：", log_level_all: "全部", log_search: "搜索：", refresh: "刷新", auto_scroll: "自动滚动", log_showing: "显示", log_lines_unit: "行", export_log: "导出日志",
+      log_level_all: "全部",
       log_server_offline: "后端未运行", log_start_hint: "请在模型管理中加载本地模型以启动后端并查看日志。", log_no_entries: "暂无日志", log_no_app_logs: "暂无应用日志",
+      logs_source_backend: "后端", logs_source_app: "App", logs_level_all: "全部", logs_level_warn: "警告", logs_level_error: "错误", logs_search_placeholder: "搜索日志", logs_refreshing: "每 5 秒刷新", logs_paused: "已暂停", logs_pause: "暂停刷新", logs_resume: "继续刷新", logs_export: "导出", log_count: "显示 {shown} / {total} 条", logs_updated_at: "{time} 更新",
       settings_title: "设置", settings_header_hint: "标有 {tag} 的设置保存后会重启后端",
       settings_restart_tag: "需重启", settings_experimental_tag: "实验", settings_applies_now: "立即生效",
       settings_group_general: "通用", settings_group_server: "服务器", settings_group_models: "模型与内存", settings_group_cache: "缓存", settings_group_acceleration: "加速",
@@ -8555,15 +8512,15 @@
       recovery_action_config: "檢查設定",
       recovery_action_runtime_settings: "開啟執行設定",
       recovery_action_retry: "重試", recovery_action_view_logs: "檢視日誌", recovery_reason_breaker: "連續崩潰已觸發自動恢復熔斷。",
-      runtime_logs: "執行日誌", incident_history: "故障歷史", incident_filters: "故障篩選", incident_query: "查詢", incident_export: "匯出故障記錄", incident_clear: "清除全部記錄", incident_history_actions_accessible_label: "故障歷史操作",
+      runtime_logs: "執行日誌", incident_history: "故障歷史", incident_range_all: "全部", incident_range_24h: "24 小時", incident_range_7d: "7 天", incident_range_30d: "30 天", incident_range_custom: "自訂…", incident_status_all: "全部狀態", incident_reason_all: "全部原因", incident_export_short: "匯出記錄", incident_more: "更多", incident_export: "匯出故障記錄", incident_clear: "清除全部記錄", incident_history_actions_accessible_label: "故障歷史操作",
       diagnostic_export: "匯出診斷資訊", diagnostic_export_collecting: "正在收集……", diagnostic_export_tooltip: "匯出系統、版本、模型、執行狀態、故障記錄及脫敏日誌，用於問題診斷。", diagnostic_export_accessible_label: "匯出診斷資訊", diagnostic_exported: "診斷資訊已匯出。", diagnostic_export_failed: "診斷資訊匯出失敗。",
       incident_export_tooltip: "將最近一次查詢結果中的故障記錄匯出為 JSON 檔案。", incident_export_accessible_label: "匯出最近一次查詢的故障記錄",
-      incident_export_all_title: "匯出全部故障記錄？", incident_export_all_message: "目前未套用任何篩選條件。本次操作將匯出系統目前保留的全部故障記錄。", incident_export_unapplied_message: "你已修改篩選條件，但尚未查詢；這些修改不會用於本次匯出。", incident_export_all_confirm: "匯出全部記錄", incident_export_current_title: "匯出目前結果？", incident_export_current_message: "本次匯出將使用目前故障清單已套用的篩選條件。", incident_export_current_confirm: "匯出目前結果", incident_return_to_filters: "返回篩選",
-      incident_from: "開始時間", incident_to: "結束時間", incident_status: "狀態", incident_all: "全部", incident_model: "模型", incident_model_placeholder: "模型名稱", incident_reason: "失敗原因",
+      incident_export_all_title: "匯出全部故障記錄？", incident_export_all_message: "目前未套用任何篩選條件。本次操作將匯出系統目前保留的全部故障記錄。", incident_export_all_confirm: "匯出全部記錄",
+      incident_from: "開始時間", incident_to: "結束時間", incident_status: "狀態", incident_reason: "失敗原因",
       incident_from_date_accessible_label: "開始日期", incident_from_time_accessible_label: "開始時間，24 小時制", incident_to_date_accessible_label: "結束日期", incident_to_time_accessible_label: "結束時間，24 小時制", incident_time_invalid: "請輸入 24 小時制時間 HH:mm（00:00–23:59）。",
       incident_status_pending: "等待恢復", incident_status_recovering: "正在恢復", incident_status_recovered: "已恢復", incident_status_partial: "部分恢復", incident_status_failed: "恢復失敗", incident_status_stopped: "自動恢復已停止",
-      incident_empty: "沒有符合目前篩選條件的故障。", incident_type_backend_exit: "後端異常退出", incident_view_details: "檢視詳情", incident_no_models: "無受影響模型",
-      incident_id: "事故 ID", incident_occurred_at: "發生時間", incident_launch_id: "後端啟動 ID", incident_process: "程序資訊", incident_exit_reason: "退出原因", incident_models_before: "故障前模型", incident_recovered_models: "成功恢復模型", incident_failed_models: "恢復失敗模型", incident_attempts: "自動恢復嘗試次數", incident_final_status: "最終恢復結果", incident_failures: "結構化失敗", incident_actions: "已執行恢復動作", incident_log_tail: "脫敏日誌尾部",
+      incident_empty: "沒有符合目前篩選條件的故障。", incident_type_backend_exit: "後端異常退出", incident_label_value: "{label}：{value}", incident_status_attempts: "{status} · {count} 次", incident_status_attempts_one: "{status} · {count} 次", incident_process_section: "程序與退出資訊", incident_suggestion: "建議", incident_recovery_steps: "恢復過程", incident_no_models: "無受影響模型",
+      incident_id: "事故 ID", incident_occurred_at: "發生時間", incident_launch_id: "後端啟動 ID", incident_process: "程序資訊", incident_exit_reason: "退出原因", incident_models_before: "故障前模型", incident_recovered_models: "成功恢復模型", incident_failed_models: "恢復失敗模型", incident_attempts: "自動恢復嘗試次數", incident_final_status: "最終恢復結果", incident_log_tail: "日誌片段",
       incident_step_restart: "開始自動重新啟動後端", incident_step_readiness: "後端健康檢查通過", incident_step_restore: "開始恢復已確認模型", incident_step_stable: "開始穩定性觀察視窗", incident_step_stopped: "停止自動恢復",
       incident_clear_title: "清除全部故障記錄？", incident_clear_confirm: "此操作將永久刪除所有故障歷史記錄，刪除後無法復原。執行日誌不會受到影響。", incident_cleared: "全部故障記錄已清除。", incident_clear_failed: "無法清除故障歷史。", incident_exported: "故障資訊已匯出。", incident_export_failed: "故障資訊匯出失敗。", incident_load_failed: "無法載入故障歷史。",
       runtime_models: "模型執行狀態",
@@ -8848,8 +8805,9 @@
       pp_tps_req_label: "（每請求提示詞處理 TPS）", pp_tps_req_desc: "提示詞處理吞吐量除以批次大小。顯示批次負載下每個請求的預填充速度。",
       logs_subtitle: "查看執行日誌與故障歷史，協助了解服務狀態並排查問題。",
       log_exported: "日誌已匯出。", log_export_failed: "無法匯出日誌，請檢查儲存位置和可用磁碟空間。",
-      log_viewer: "日誌檢視器", auto_refresh: "自動重新整理", log_lines: "行數：", log_interval: "重新整理間隔：", log_interval_hint: "秒（0=關閉）", log_file: "檔案：", log_level_filter: "級別：", log_level_all: "全部", log_search: "搜尋：", refresh: "重新整理", auto_scroll: "自動捲動", log_showing: "顯示", log_lines_unit: "行", export_log: "匯出日誌",
+      log_level_all: "全部",
       log_server_offline: "後端未執行", log_start_hint: "請在模型管理中載入本地模型以啟動後端並檢視日誌。", log_no_entries: "暫無日誌", log_no_app_logs: "暫無應用日誌",
+      logs_source_backend: "後端", logs_source_app: "App", logs_level_all: "全部", logs_level_warn: "警告", logs_level_error: "錯誤", logs_search_placeholder: "搜尋日誌", logs_refreshing: "每 5 秒重新整理", logs_paused: "已暫停", logs_pause: "暫停重新整理", logs_resume: "繼續重新整理", logs_export: "匯出", log_count: "顯示 {shown} / {total} 筆", logs_updated_at: "{time} 更新",
       settings_title: "設定", settings_header_hint: "標有 {tag} 的設定儲存後會重新啟動後端",
       settings_restart_tag: "需重新啟動", settings_experimental_tag: "實驗", settings_applies_now: "立即生效",
       settings_group_general: "一般", settings_group_server: "伺服器", settings_group_models: "模型與記憶體", settings_group_cache: "快取", settings_group_acceleration: "加速",
@@ -9363,15 +9321,15 @@
       recovery_action_config: "設定を確認",
       recovery_action_runtime_settings: "ランタイム設定を開く",
       recovery_action_retry: "再試行", recovery_action_view_logs: "ログを表示", recovery_reason_breaker: "連続クラッシュにより自動復旧ブレーカーが作動しました。",
-      runtime_logs: "実行ログ", incident_history: "障害履歴", incident_filters: "障害フィルター", incident_query: "検索", incident_export: "障害記録をエクスポート", incident_clear: "すべての記録を消去", incident_history_actions_accessible_label: "障害履歴の操作",
+      runtime_logs: "実行ログ", incident_history: "障害履歴", incident_range_all: "すべて", incident_range_24h: "24 時間", incident_range_7d: "7 日", incident_range_30d: "30 日", incident_range_custom: "カスタム…", incident_status_all: "すべての状態", incident_reason_all: "すべての原因", incident_export_short: "記録をエクスポート", incident_more: "その他", incident_export: "障害記録をエクスポート", incident_clear: "すべての記録を消去", incident_history_actions_accessible_label: "障害履歴の操作",
       diagnostic_export: "診断情報をエクスポート", diagnostic_export_collecting: "収集中…", diagnostic_export_tooltip: "トラブルシューティング用に、システム、バージョン、モデル、実行状態、障害記録、匿名化ログをエクスポートします。", diagnostic_export_accessible_label: "診断情報をエクスポート", diagnostic_exported: "診断情報をエクスポートしました。", diagnostic_export_failed: "診断情報のエクスポートに失敗しました。",
       incident_export_tooltip: "直近の検索結果の障害記録を JSON ファイルとしてエクスポートします。", incident_export_accessible_label: "直近の検索結果の障害記録をエクスポート",
-      incident_export_all_title: "すべての障害記録をエクスポートしますか？", incident_export_all_message: "現在、フィルターは適用されていません。システムが現在保持しているすべての障害記録をエクスポートします。", incident_export_unapplied_message: "フィルター条件は変更されていますが、まだ検索されていません。その変更は今回のエクスポートには使用されません。", incident_export_all_confirm: "すべての記録をエクスポート", incident_export_current_title: "現在の結果をエクスポートしますか？", incident_export_current_message: "現在表示されている障害リストに適用済みのフィルター条件を使用します。", incident_export_current_confirm: "現在の結果をエクスポート", incident_return_to_filters: "フィルターに戻る",
-      incident_from: "開始", incident_to: "終了", incident_status: "状態", incident_all: "すべて", incident_model: "モデル", incident_model_placeholder: "モデル名", incident_reason: "失敗理由",
+      incident_export_all_title: "すべての障害記録をエクスポートしますか？", incident_export_all_message: "現在、フィルターは適用されていません。システムが現在保持しているすべての障害記録をエクスポートします。", incident_export_all_confirm: "すべての記録をエクスポート",
+      incident_from: "開始", incident_to: "終了", incident_status: "状態", incident_reason: "失敗理由",
       incident_from_date_accessible_label: "開始日", incident_from_time_accessible_label: "開始時刻、24 時間制", incident_to_date_accessible_label: "終了日", incident_to_time_accessible_label: "終了時刻、24 時間制", incident_time_invalid: "24 時間制の HH:mm（00:00〜23:59）で入力してください。",
       incident_status_pending: "復旧待ち", incident_status_recovering: "復旧中", incident_status_recovered: "復旧済み", incident_status_partial: "一部復旧", incident_status_failed: "復旧失敗", incident_status_stopped: "自動復旧停止",
-      incident_empty: "現在のフィルターに一致する障害はありません。", incident_type_backend_exit: "バックエンドの予期しない終了", incident_view_details: "詳細", incident_no_models: "影響モデルなし",
-      incident_id: "障害 ID", incident_occurred_at: "発生日時", incident_launch_id: "バックエンド起動 ID", incident_process: "プロセス情報", incident_exit_reason: "終了理由", incident_models_before: "障害前のモデル", incident_recovered_models: "復旧したモデル", incident_failed_models: "復旧失敗モデル", incident_attempts: "自動復旧試行回数", incident_final_status: "最終復旧結果", incident_failures: "構造化された失敗", incident_actions: "実行した復旧操作", incident_log_tail: "秘匿化済みログ末尾",
+      incident_empty: "現在のフィルターに一致する障害はありません。", incident_type_backend_exit: "バックエンドの予期しない終了", incident_label_value: "{label}：{value}", incident_status_attempts: "{status} · {count} 回", incident_status_attempts_one: "{status} · {count} 回", incident_process_section: "プロセスと終了情報", incident_suggestion: "推奨", incident_recovery_steps: "復旧の流れ", incident_no_models: "影響モデルなし",
+      incident_id: "障害 ID", incident_occurred_at: "発生日時", incident_launch_id: "バックエンド起動 ID", incident_process: "プロセス情報", incident_exit_reason: "終了理由", incident_models_before: "障害前のモデル", incident_recovered_models: "復旧したモデル", incident_failed_models: "復旧失敗モデル", incident_attempts: "自動復旧試行回数", incident_final_status: "最終復旧結果", incident_log_tail: "ログ抜粋",
       incident_step_restart: "バックエンドの自動再起動を開始", incident_step_readiness: "バックエンドの正常性確認に成功", incident_step_restore: "確認済みモデルの復元を開始", incident_step_stable: "安定性監視を開始", incident_step_stopped: "自動復旧を停止",
       incident_clear_title: "すべての障害記録を消去しますか？", incident_clear_confirm: "この操作により、すべての障害履歴が完全に削除され、元に戻すことはできません。実行ログには影響しません。", incident_cleared: "すべての障害記録を消去しました。", incident_clear_failed: "障害履歴を消去できませんでした。", incident_exported: "障害情報をエクスポートしました。", incident_export_failed: "障害情報のエクスポートに失敗しました。", incident_load_failed: "障害履歴を読み込めませんでした。",
       runtime_models: "モデル実行状況",
@@ -9656,8 +9614,9 @@
       pp_tps_req_label: "（リクエストあたりプロンプトTPS）", pp_tps_req_desc: "プロンプト処理スループットをバッチサイズで割った値。バッチ負荷下のリクエストあたりのプリフィル速度を表示。",
       logs_subtitle: "実行ログと障害履歴を確認し、サービスの状態把握と問題の調査に役立てます。",
       log_exported: "ログをエクスポートしました。", log_export_failed: "ログをエクスポートできません。保存先と空き容量を確認してください。",
-      log_viewer: "ログビューア", auto_refresh: "自動更新", log_lines: "行数：", log_interval: "更新間隔：", log_interval_hint: "秒（0=オフ）", log_file: "ファイル：", log_level_filter: "レベル：", log_level_all: "すべて", log_search: "検索：", refresh: "更新", auto_scroll: "自動スクロール", log_showing: "表示", log_lines_unit: "行", export_log: "ログエクスポート",
+      log_level_all: "すべて",
       log_server_offline: "バックエンドが実行されていません", log_start_hint: "Models でローカルモデルを読み込むと起動し、ログを表示できます。", log_no_entries: "ログエントリなし", log_no_app_logs: "アプリログエントリなし",
+      logs_source_backend: "バックエンド", logs_source_app: "アプリ", logs_level_all: "すべて", logs_level_warn: "警告", logs_level_error: "エラー", logs_search_placeholder: "ログを検索", logs_refreshing: "5 秒ごとに更新", logs_paused: "一時停止中", logs_pause: "更新を一時停止", logs_resume: "更新を再開", logs_export: "エクスポート", log_count: "{shown} / {total} 件を表示", logs_updated_at: "{time} 更新",
       settings_title: "設定", settings_header_hint: "{tag} の付いた設定は保存するとバックエンドが再起動します",
       settings_restart_tag: "再起動が必要", settings_experimental_tag: "実験的", settings_applies_now: "即時反映",
       settings_group_general: "一般", settings_group_server: "サーバー", settings_group_models: "モデルとメモリ", settings_group_cache: "キャッシュ", settings_group_acceleration: "高速化",
@@ -10171,15 +10130,15 @@
       recovery_action_config: "설정 확인",
       recovery_action_runtime_settings: "런타임 설정 열기",
       recovery_action_retry: "다시 시도", recovery_action_view_logs: "로그 보기", recovery_reason_breaker: "연속 충돌로 자동 복구 차단기가 작동했습니다.",
-      runtime_logs: "실행 로그", incident_history: "장애 기록", incident_filters: "장애 필터", incident_query: "조회", incident_export: "장애 기록 내보내기", incident_clear: "모든 기록 지우기", incident_history_actions_accessible_label: "장애 기록 작업",
+      runtime_logs: "실행 로그", incident_history: "장애 기록", incident_range_all: "전체", incident_range_24h: "24시간", incident_range_7d: "7일", incident_range_30d: "30일", incident_range_custom: "사용자 지정…", incident_status_all: "모든 상태", incident_reason_all: "모든 원인", incident_export_short: "기록 내보내기", incident_more: "더 보기", incident_export: "장애 기록 내보내기", incident_clear: "모든 기록 지우기", incident_history_actions_accessible_label: "장애 기록 작업",
       diagnostic_export: "진단 정보 내보내기", diagnostic_export_collecting: "수집 중…", diagnostic_export_tooltip: "문제 진단을 위해 시스템, 버전, 모델, 실행 상태, 장애 기록 및 비식별화된 로그를 내보냅니다.", diagnostic_export_accessible_label: "진단 정보 내보내기", diagnostic_exported: "진단 정보를 내보냈습니다.", diagnostic_export_failed: "진단 정보 내보내기에 실패했습니다.",
       incident_export_tooltip: "가장 최근 조회 결과의 장애 기록을 JSON 파일로 내보냅니다.", incident_export_accessible_label: "가장 최근 조회 결과의 장애 기록 내보내기",
-      incident_export_all_title: "모든 장애 기록을 내보내시겠습니까?", incident_export_all_message: "현재 적용된 필터가 없습니다. 시스템에 현재 보관된 모든 장애 기록을 내보냅니다.", incident_export_unapplied_message: "필터 조건을 변경했지만 아직 조회하지 않았습니다. 변경 사항은 이번 내보내기에 사용되지 않습니다.", incident_export_all_confirm: "모든 기록 내보내기", incident_export_current_title: "현재 결과를 내보내시겠습니까?", incident_export_current_message: "현재 표시된 장애 목록에 적용된 필터 조건을 사용합니다.", incident_export_current_confirm: "현재 결과 내보내기", incident_return_to_filters: "필터로 돌아가기",
-      incident_from: "시작", incident_to: "종료", incident_status: "상태", incident_all: "전체", incident_model: "모델", incident_model_placeholder: "모델 이름", incident_reason: "실패 원인",
+      incident_export_all_title: "모든 장애 기록을 내보내시겠습니까?", incident_export_all_message: "현재 적용된 필터가 없습니다. 시스템에 현재 보관된 모든 장애 기록을 내보냅니다.", incident_export_all_confirm: "모든 기록 내보내기",
+      incident_from: "시작", incident_to: "종료", incident_status: "상태", incident_reason: "실패 원인",
       incident_from_date_accessible_label: "시작 날짜", incident_from_time_accessible_label: "시작 시각, 24시간제", incident_to_date_accessible_label: "종료 날짜", incident_to_time_accessible_label: "종료 시각, 24시간제", incident_time_invalid: "24시간제 HH:mm(00:00~23:59) 형식으로 입력하세요.",
       incident_status_pending: "복구 대기", incident_status_recovering: "복구 중", incident_status_recovered: "복구됨", incident_status_partial: "부분 복구", incident_status_failed: "복구 실패", incident_status_stopped: "자동 복구 중지",
-      incident_empty: "현재 필터와 일치하는 장애가 없습니다.", incident_type_backend_exit: "백엔드 비정상 종료", incident_view_details: "세부 정보", incident_no_models: "영향받은 모델 없음",
-      incident_id: "장애 ID", incident_occurred_at: "발생 시간", incident_launch_id: "백엔드 시작 ID", incident_process: "프로세스 정보", incident_exit_reason: "종료 원인", incident_models_before: "장애 전 모델", incident_recovered_models: "복구된 모델", incident_failed_models: "복구 실패 모델", incident_attempts: "자동 복구 시도 횟수", incident_final_status: "최종 복구 결과", incident_failures: "구조화된 실패", incident_actions: "실행된 복구 작업", incident_log_tail: "민감정보 제거 로그 끝부분",
+      incident_empty: "현재 필터와 일치하는 장애가 없습니다.", incident_type_backend_exit: "백엔드 비정상 종료", incident_label_value: "{label}: {value}", incident_status_attempts: "{status} · {count}회", incident_status_attempts_one: "{status} · {count}회", incident_process_section: "프로세스 및 종료 정보", incident_suggestion: "권장 조치", incident_recovery_steps: "복구 과정", incident_no_models: "영향받은 모델 없음",
+      incident_id: "장애 ID", incident_occurred_at: "발생 시간", incident_launch_id: "백엔드 시작 ID", incident_process: "프로세스 정보", incident_exit_reason: "종료 원인", incident_models_before: "장애 전 모델", incident_recovered_models: "복구된 모델", incident_failed_models: "복구 실패 모델", incident_attempts: "자동 복구 시도 횟수", incident_final_status: "최종 복구 결과", incident_log_tail: "로그 발췌",
       incident_step_restart: "백엔드 자동 재시작 시작", incident_step_readiness: "백엔드 상태 확인 통과", incident_step_restore: "확인된 모델 복원 시작", incident_step_stable: "안정성 관찰 시작", incident_step_stopped: "자동 복구 중지",
       incident_clear_title: "모든 장애 기록을 지우시겠습니까?", incident_clear_confirm: "이 작업은 모든 장애 기록을 영구적으로 삭제하며 되돌릴 수 없습니다. 실행 로그에는 영향을 주지 않습니다.", incident_cleared: "모든 장애 기록을 지웠습니다.", incident_clear_failed: "장애 기록을 지울 수 없습니다.", incident_exported: "장애 정보를 내보냈습니다.", incident_export_failed: "장애 정보 내보내기에 실패했습니다.", incident_load_failed: "장애 기록을 불러올 수 없습니다.",
       runtime_models: "모델 실행 상태",
@@ -10464,8 +10423,9 @@
       pp_tps_req_label: "(요청당 프롬프트 TPS)", pp_tps_req_desc: "프롬프트 처리 처리량을 배치 크기로 나눈 값. 배치 부하에서 요청당 프리필 속도 표시.",
       logs_subtitle: "실행 로그와 장애 기록을 확인하여 서비스 상태를 파악하고 문제를 해결합니다.",
       log_exported: "로그를 내보냈습니다.", log_export_failed: "로그를 내보낼 수 없습니다. 저장 위치와 디스크 여유 공간을 확인하세요.",
-      log_viewer: "로그 뷰어", auto_refresh: "자동 새로고침", log_lines: "줄 수:", log_interval: "새로고침 간격:", log_interval_hint: "초 (0=끄기)", log_file: "파일:", log_level_filter: "레벨:", log_level_all: "전체", log_search: "검색:", refresh: "새로고침", auto_scroll: "자동 스크롤", log_showing: "표시", log_lines_unit: "줄", export_log: "로그 내보내기",
+      log_level_all: "전체",
       log_server_offline: "백엔드가 실행되고 있지 않습니다", log_start_hint: "Models에서 로컬 모델을 로드하면 시작되고 로그를 볼 수 있습니다.", log_no_entries: "로그 항목 없음", log_no_app_logs: "앱 로그 항목 없음",
+      logs_source_backend: "백엔드", logs_source_app: "앱", logs_level_all: "전체", logs_level_warn: "경고", logs_level_error: "오류", logs_search_placeholder: "로그 검색", logs_refreshing: "5초마다 새로고침", logs_paused: "일시정지됨", logs_pause: "새로고침 일시정지", logs_resume: "새로고침 재개", logs_export: "내보내기", log_count: "{shown} / {total}개 표시", logs_updated_at: "{time} 업데이트",
       settings_title: "설정", settings_header_hint: "{tag} 표시가 있는 설정은 저장하면 백엔드가 다시 시작됩니다",
       settings_restart_tag: "재시작 필요", settings_experimental_tag: "실험적", settings_applies_now: "즉시 적용",
       settings_group_general: "일반", settings_group_server: "서버", settings_group_models: "모델 및 메모리", settings_group_cache: "캐시", settings_group_acceleration: "가속",
@@ -10734,6 +10694,7 @@
     renderHermesSetupResult();
     updateSettingsSaveBar();
     updateLogLevelControls();
+    relabelLogsPage();
     // Re-render model list to update action buttons text
     syncModelList();
     renderRuntimeModels(window.__RUNTIME_MODELS__ || []);
@@ -14252,80 +14213,206 @@
   });
 
   // ── Log system ──
-  let logRefreshTimer = null;
-  let logAutoScroll = true;
-  let logRawLines = []; // store all fetched lines before filtering
-  const logOutput = document.getElementById('log-output');
-  const logTimestamp = document.getElementById('log-timestamp');
-  const logFileSelect = document.getElementById('log-file-select');
-  const logLinesInput = document.querySelector('#page-logs .log-filter-row input[type="number"]');
-  const logIntervalInput = document.querySelectorAll('#page-logs .log-filter-row input[type="number"]')[1];
-  const logRefreshBtn = document.getElementById('log-refresh-btn');
-  const logAutoScrollToggle = document.getElementById('log-auto-scroll-cb');
-  const logLevelFilter = document.getElementById('log-level-filter');
-  const logSearchInput = document.getElementById('log-search-input');
-  const logExportLink = document.getElementById('log-export-link');
+  // ── Runtime log parsing ──
+  const LOG_ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
+  const LOG_RECORD_RE = /^(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\s+(TRACE|DEBUG|INFO|WARN|WARNING|ERROR)\s+([^\s:]+(?:::[^\s:]+)*):\s?(.*)$/;
+  // Launch banners such as "===== IronMLX Backend started at … =====" start their own row with no level.
+  const LOG_BANNER_RE = /^={3,}\s.*\s={3,}\s*$/;
 
-  function formatLogTimestamp() {
-    return new Date().toLocaleTimeString();
+  function stripLogAnsi(text) {
+    return String(text).replace(LOG_ANSI_RE, '');
   }
 
+  function parseLogRecords(lines) {
+    const records = [];
+    for (const raw of lines) {
+      const line = stripLogAnsi(raw);
+      if (line === '') continue;
+      const m = LOG_RECORD_RE.exec(line);
+      if (m) {
+        records.push({
+          time: m[1],
+          level: m[2] === 'WARNING' ? 'WARN' : m[2],
+          module: m[3],
+          message: m[4],
+          lines: [line],
+        });
+      } else if (records.length && !LOG_BANNER_RE.test(line)) {
+        records[records.length - 1].lines.push(line);
+      } else {
+        // Not a log line and nothing to attach it to (a banner, or the cut-off head of the tail).
+        records.push({ time: null, level: 'PLAIN', module: '', message: line, lines: [line] });
+      }
+    }
+    return records;
+  }
+
+  function logModuleShort(module) {
+    const i = module.lastIndexOf('::');
+    return i < 0 ? module : module.slice(i + 2);
+  }
+
+  function filterLogRecords(records, level, search) {
+    const needle = search.trim().toLowerCase();
+    return records.filter(r => {
+      if (level === 'warn' && r.level !== 'WARN' && r.level !== 'ERROR') return false;
+      if (level === 'error' && r.level !== 'ERROR') return false;
+      return !needle || r.lines.some(l => l.toLowerCase().includes(needle));
+    });
+  }
+
+  function formatLogClock(iso) {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    const p = (n, w = 2) => String(n).padStart(w, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+  }
+
+  function formatLogDateTime(iso) {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${formatLogClock(iso)}`;
+  }
+  function renderLogRecordsHTML(records) {
+    const parts = [];
+    for (const r of records) {
+      const level = r.level.toLowerCase();
+      const lineClass = 'ds-log-line ds-log-line--' + level;
+      const titleAttr = r.time === null ? '' : ' title="' + escapeHTML(formatLogDateTime(r.time)) + '"';
+      const moduleTitle = r.module ? ' title="' + escapeHTML(r.module) + '"' : '';
+      parts.push('<div class="' + lineClass + '"' + titleAttr + '>'
+        + '<span class="ds-log-time">' + (r.time === null ? '' : escapeHTML(formatLogClock(r.time))) + '</span>'
+        + '<span class="ds-log-level">' + (r.level === 'PLAIN' ? '' : escapeHTML(r.level)) + '</span>'
+        + '<span class="ds-log-module"' + moduleTitle + '>' + escapeHTML(logModuleShort(r.module)) + '</span>'
+        + '<span class="ds-log-msg">' + escapeHTML(r.message) + '</span></div>');
+      for (let i = 1; i < r.lines.length; i++) {
+        parts.push('<div class="' + lineClass + ' ds-log-cont"><span class="ds-log-msg">'
+          + escapeHTML(r.lines[i]) + '</span></div>');
+      }
+    }
+    return parts.join('');
+  }
+  // ── End runtime log parsing ──
+
+  let logRefreshTimer = null;
+  let logRawLines = []; // raw lines of the last fetch (ANSI codes kept), before parsing and filtering
+  const logViewState = {
+    source: 'server', level: 'all', paused: false,
+    lastRenderKey: null,
+    placeholder: 'loading', count: null, updatedAt: null,
+  };
+  const logOutput = document.getElementById('log-output');
+  const logTimestamp = document.getElementById('log-timestamp');
+  const logCount = document.getElementById('log-count');
+  const logSearchInput = document.getElementById('log-search-input');
+  const logSourceSeg = document.getElementById('log-source-seg');
+  const logLevelChips = document.getElementById('log-level-chips');
+  const logPauseBtn = document.getElementById('log-pause-btn');
+  const logExportBtn = document.getElementById('log-export-btn');
+
+  function formatLogTimestamp() {
+    const d = new Date();
+    const p = n => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+
+  function renderLogCount() {
+    const dict = I18N[currentLang] || I18N.en;
+    const count = logViewState.count;
+    logCount.textContent = count
+      ? (dict.log_count || I18N.en.log_count).replace('{shown}', count.shown).replace('{total}', count.total)
+      : '';
+  }
+
+  function updateLogCount(shown, total) {
+    logViewState.count = { shown, total };
+    renderLogCount();
+  }
+
+  function renderLogUpdated() {
+    const dict = I18N[currentLang] || I18N.en;
+    logTimestamp.textContent = logViewState.updatedAt
+      ? (dict.logs_updated_at || I18N.en.logs_updated_at).replace('{time}', logViewState.updatedAt)
+      : '';
+  }
+
+  function markLogUpdated() {
+    logViewState.updatedAt = formatLogTimestamp();
+    renderLogUpdated();
+  }
+
+  // The card shows one plain message before the first fetch and while the backend is down.
+  function showLogPlaceholder(kind) {
+    const dict = I18N[currentLang] || I18N.en;
+    logViewState.placeholder = kind;
+    logViewState.lastRenderKey = null;
+    logRawLines = [];
+    if (kind === 'empty-app') {
+      logOutput.textContent = dict.log_no_app_logs || 'No app log entries';
+      updateLogCount(0, 0);
+    } else if (kind === 'offline') {
+      logOutput.textContent = (dict.log_server_offline || 'Backend is not running') + '\n'
+        + (dict.log_start_hint || 'Load a local model from Models to start it and view logs.');
+      updateLogCount(0, 0);
+    } else {
+      logOutput.textContent = dict.status_loading || 'Loading...';
+      logViewState.count = null;
+      renderLogCount();
+    }
+  }
 
   function fetchAppLogs() {
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.getAppLogs) {
       window.webkit.messageHandlers.getAppLogs.postMessage('request');
     } else {
-      const dict = I18N[currentLang] || I18N.en;
-      logOutput.textContent = dict.log_no_app_logs || '[ No app log entries ]';
-      logTimestamp.textContent = formatLogTimestamp();
+      receiveAppLogs('');
     }
   }
 
   // Called from Rust via evaluateJavaScript
   function receiveAppLogs(text) {
-    logRawLines = text ? text.split('\\n') : [];
-    applyLogFilters();
+    if (logViewState.source !== 'app') return;
+    receiveLogText(text, 'app');
   }
 
-  function updateLogCount(showing, total) {
-    const header = document.querySelector('.log-terminal-header span');
-    if (header) {
-      const dict = I18N[currentLang] || I18N.en;
-      header.textContent = (dict.log_showing || 'Showing') + ' ' + showing + ' / ' + total + ' ' + (dict.log_lines_unit || 'lines');
+  // Both sources land here; a reply that arrives after the source changed is dropped by its caller.
+  function receiveLogText(text, source) {
+    if (!text || text === 'null') {
+      showLogPlaceholder(source === 'app' ? 'empty-app' : 'offline');
+    } else {
+      logViewState.placeholder = null;
+      logRawLines = text.split('\n');
+      applyLogFilters();
     }
+    markLogUpdated();
+  }
+
+  function logShouldFollow(el) {
+    return el.scrollHeight - el.scrollTop - el.clientHeight <= 24;
   }
 
   function applyLogFilters() {
-    const maxLines = parseInt(logLinesInput.value) || 500;
-    const level = logLevelFilter.value;
-    const search = logSearchInput.value.trim().toLowerCase();
-    let filtered = logRawLines;
-    if (level !== 'ALL') {
-      const levelAliases = {
-        'DEBUG': ['DEBUG'],
-        'INFO': ['INFO'],
-        'WARNING': ['WARNING', 'WARN'],
-        'ERROR': ['ERROR']
-      };
-      const aliases = levelAliases[level] || [level];
-      filtered = filtered.filter(line => {
-        const upper = line.toUpperCase();
-        return aliases.some(alias => upper.includes(' - ' + alias + ' - ') || upper.includes(' ' + alias + ' '));
-      });
-    }
-    if (search) {
-      filtered = filtered.filter(line => line.toLowerCase().includes(search));
-    }
-    const limited = filtered.slice(-maxLines);
-    updateLogCount(limited.length, filtered.length);
+    if (logViewState.placeholder) return;
+    const rawText = logRawLines.join('\n');
+    const level = logViewState.level;
+    const search = logSearchInput.value;
+    const renderKey = rawText + '\u0000' + level + '\u0000' + search;
+    if (renderKey === logViewState.lastRenderKey) return;
+    const follow = logViewState.lastRenderKey === null || logShouldFollow(logOutput);
+    const records = parseLogRecords(logRawLines);
+    const shown = filterLogRecords(records, level, search);
     const dict = I18N[currentLang] || I18N.en;
-    logOutput.textContent = limited.join('\n') || (dict.log_no_entries || 'No log entries');
-    if (logAutoScroll) logOutput.scrollTop = logOutput.scrollHeight;
+    logOutput.innerHTML = shown.length
+      ? renderLogRecordsHTML(shown)
+      : '<div class="ds-log-empty">' + escapeHTML(dict.log_no_entries || 'No log entries') + '</div>';
+    logViewState.lastRenderKey = renderKey;
+    updateLogCount(shown.length, records.length);
+    if (follow) logOutput.scrollTop = logOutput.scrollHeight;
   }
 
   function refreshLogs() {
-    const source = logFileSelect.value;
-    if (source === 'server') {
+    if (logViewState.source === 'server') {
       apiFetch('/admin/api/logs');
     } else {
       fetchAppLogs();
@@ -14334,10 +14421,8 @@
 
   function startLogAutoRefresh() {
     stopLogAutoRefresh();
-    const interval = parseInt(logIntervalInput.value) || 0;
-    if (interval > 0) {
-      logRefreshTimer = setInterval(refreshLogs, interval * 1000);
-    }
+    if (logViewState.paused) return;
+    logRefreshTimer = setInterval(refreshLogs, 5000);
   }
 
   function stopLogAutoRefresh() {
@@ -14347,11 +14432,67 @@
     }
   }
 
+  function selectLogSource(source) {
+    if (logViewState.source === source) return;
+    logViewState.source = source;
+    dsSegSelect(logSourceSeg, source);
+    showLogPlaceholder('loading');
+    refreshLogs();
+    startLogAutoRefresh();
+  }
+
+  function selectLogFilterLevel(level) {
+    logViewState.level = level;
+    logLevelChips.querySelectorAll('[data-level]').forEach(chip => {
+      const on = chip.dataset.level === level;
+      chip.classList.toggle('is-on', on);
+      chip.setAttribute('aria-pressed', String(on));
+    });
+    applyLogFilters();
+  }
+
+  function renderLogPauseButton() {
+    const paused = logViewState.paused;
+    logPauseBtn.setAttribute('aria-pressed', String(paused));
+    logPauseBtn.dataset.i18nAriaLabel = paused ? 'logs_resume' : 'logs_pause';
+    const label = document.getElementById('log-pause-label');
+    label.dataset.i18n = paused ? 'logs_paused' : 'logs_refreshing';
+    const dict = I18N[currentLang] || I18N.en;
+    label.textContent = dict[label.dataset.i18n] || I18N.en[label.dataset.i18n];
+    logPauseBtn.setAttribute('aria-label', dict[logPauseBtn.dataset.i18nAriaLabel] || I18N.en[logPauseBtn.dataset.i18nAriaLabel]);
+    logPauseBtn.querySelector('.logs-pause-icon').hidden = paused;
+    logPauseBtn.querySelector('.logs-play-icon').hidden = !paused;
+  }
+
+  function toggleLogPause() {
+    logViewState.paused = !logViewState.paused;
+    renderLogPauseButton();
+    if (logViewState.paused) {
+      stopLogAutoRefresh();
+    } else {
+      refreshLogs();
+      startLogAutoRefresh();
+    }
+  }
+
+  // Re-render the text built in script after a language change.
+  function relabelLogsPage() {
+    renderLogPauseButton();
+    renderLogCount();
+    renderLogUpdated();
+    if (logViewState.placeholder) {
+      showLogPlaceholder(logViewState.placeholder);
+    } else {
+      logViewState.lastRenderKey = null;
+      applyLogFilters();
+    }
+  }
+
   function exportCurrentLog() {
     const event = arguments[0];
     if (event) event.preventDefault();
-    const source = logFileSelect.value === 'app' ? 'ironmlx-app' : 'ironmlx-server';
-    const content = (logRawLines.length ? logRawLines.join('\n') : logOutput.textContent) + '\n';
+    const source = logViewState.source === 'app' ? 'ironmlx-app' : 'ironmlx-server';
+    const content = stripLogAnsi(logRawLines.length ? logRawLines.join('\n') : logOutput.textContent) + '\n';
     const handler = window.webkit && window.webkit.messageHandlers
       && window.webkit.messageHandlers.exportRuntimeLog;
     if (!handler) {
@@ -14370,31 +14511,63 @@
 
   let activeLogTab = 'runtime';
   let incidentSummaries = [];
-  let incidentDateDefaultsInitialized = false;
   const incidentDateFilterTouched = { from: false, to: false };
   const incidentSeenStorageKey = 'ironmlx.incidents.last-seen.v1';
-  let incidentDefaultFilterSignature = null;
-  let incidentFilterChangeGeneration = 0;
-  let appliedIncidentFilterGeneration = 0;
   let appliedIncidentExportPath = '/admin/api/incidents/export';
   let appliedIncidentFilterIsAll = true;
-  const pendingIncidentQueries = new Map();
+  let incidentTimeRange = 'all';
+  let incidentOldestRetainedAt = null;
+  let lastIncidentListPath = null;
 
-  function incidentFilterSignature() {
-    return JSON.stringify({
-      fromDate: document.getElementById('incident-filter-from-date').value,
-      fromTime: document.getElementById('incident-filter-from-time').value,
-      toDate: document.getElementById('incident-filter-to-date').value,
-      toTime: document.getElementById('incident-filter-to-time').value,
-      status: document.getElementById('incident-filter-status').value,
-      model: document.getElementById('incident-filter-model').value.trim(),
-      reason: document.getElementById('incident-filter-reason').value
-    });
+  // ── Incident filter helpers ──
+  const INCIDENT_RANGE_HOURS = { '24h': 24, '7d': 7 * 24, '30d': 30 * 24 };
+
+  function incidentRangeParams(range, nowMs, custom) {
+    if (range === 'custom') return custom ? { from: custom.from, to: custom.to } : {};
+    const hours = INCIDENT_RANGE_HOURS[range];
+    if (!hours) return {};
+    return { from: new Date(nowMs - hours * 3600000).toISOString() };
   }
 
-  function markIncidentFiltersChanged() {
-    incidentFilterChangeGeneration += 1;
+  const INCIDENT_STATUS_TONES = {
+    recovered: 'green',
+    recovering: 'blue',
+    recovery_pending: 'blue',
+    partially_recovered: 'amber',
+    recovery_failed: 'red',
+    automatic_recovery_stopped: 'red'
+  };
+
+  function incidentStatusTone(status) {
+    return Object.prototype.hasOwnProperty.call(INCIDENT_STATUS_TONES, status)
+      ? INCIDENT_STATUS_TONES[status] : 'gray';
   }
+
+  function incidentTwoDigits(number) {
+    return String(number).padStart(2, '0');
+  }
+
+  function incidentShortTime(value) {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return incidentTwoDigits(date.getMonth() + 1) + '-' + incidentTwoDigits(date.getDate()) + ' '
+      + incidentTwoDigits(date.getHours()) + ':' + incidentTwoDigits(date.getMinutes()) + ':'
+      + incidentTwoDigits(date.getSeconds());
+  }
+
+  function incidentClockTime(value) {
+    if (!value) return '—';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return incidentTwoDigits(date.getHours()) + ':' + incidentTwoDigits(date.getMinutes()) + ':'
+      + incidentTwoDigits(date.getSeconds());
+  }
+  function incidentLabelValue(dict, label, value) {
+    return (dict.incident_label_value || '{label}: {value}')
+      .replace('{label}', () => label).replace('{value}', () => value);
+  }
+  // ── End incident filter helpers ──
 
   function setIncidentTimeValidity(input, isValid) {
     input.setCustomValidity(isValid ? '' : t(
@@ -14422,27 +14595,47 @@
     return input.value;
   }
 
+  function commitIncidentTimeInput(input) {
+    if (!input.value) return;
+    const normalized = normalizeIncidentTimeInput(input);
+    if (!normalized || incidentTimeRange !== 'custom') return;
+    if (input.dataset.committed === normalized) return;
+    input.dataset.committed = normalized;
+    refreshIncidentHistory(true);
+  }
+
+  function commitIncidentDateInput(input) {
+    if (!input.value || incidentTimeRange !== 'custom') return;
+    if (input.dataset.committed === input.value) return;
+    input.dataset.committed = input.value;
+    refreshIncidentHistory(true);
+  }
+
   function initializeIncidentDateTimeFilter(kind, defaultTime) {
     const dateInput = document.getElementById('incident-filter-' + kind + '-date');
     const timeInput = document.getElementById('incident-filter-' + kind + '-time');
     if (!timeInput.value) timeInput.value = defaultTime;
     dateInput.addEventListener('input', function() {
       incidentDateFilterTouched[kind] = true;
-      markIncidentFiltersChanged();
     });
     dateInput.addEventListener('change', function() {
       incidentDateFilterTouched[kind] = true;
-      markIncidentFiltersChanged();
+    });
+    dateInput.addEventListener('blur', function() {
+      commitIncidentDateInput(dateInput);
+    });
+    dateInput.addEventListener('keydown', function(event) {
+      if (event.key === 'Enter') commitIncidentDateInput(dateInput);
     });
     timeInput.addEventListener('input', function() {
-      markIncidentFiltersChanged();
+      incidentDateFilterTouched[kind] = true;
       setIncidentTimeValidity(timeInput, true);
     });
     timeInput.addEventListener('blur', function() {
-      if (timeInput.value) normalizeIncidentTimeInput(timeInput);
+      commitIncidentTimeInput(timeInput);
     });
     timeInput.addEventListener('keydown', function(event) {
-      if (event.key === 'Enter') refreshIncidentHistory(true);
+      if (event.key === 'Enter') commitIncidentTimeInput(timeInput);
     });
   }
 
@@ -14461,32 +14654,41 @@
   }
 
   function initializeIncidentDateDefaults(payload) {
-    if (incidentDateDefaultsInitialized) return;
-    const today = incidentDateInputValue(null);
-    const oldest = incidentDateInputValue(payload.oldest_retained_occurred_at || null);
-    if (!incidentDateFilterTouched.from) {
-      document.getElementById('incident-filter-from-date').value = oldest;
-    }
-    if (!incidentDateFilterTouched.to) {
-      document.getElementById('incident-filter-to-date').value = today;
-    }
-    incidentDateDefaultsInitialized = true;
-    incidentDefaultFilterSignature = JSON.stringify({
-      fromDate: oldest,
-      fromTime: '00:00',
-      toDate: today,
-      toTime: '23:59',
-      status: '',
-      model: '',
-      reason: ''
+    incidentOldestRetainedAt = (payload && payload.oldest_retained_occurred_at) || null;
+  }
+
+  // Start = oldest retained day (else today) 00:00, end = today 23:59; both are the committed baseline.
+  function fillIncidentCustomDefaults() {
+    const values = {
+      'from-date': incidentDateInputValue(incidentOldestRetainedAt),
+      'to-date': incidentDateInputValue(null),
+      'from-time': '00:00',
+      'to-time': '23:59'
+    };
+    Object.keys(values).forEach(key => {
+      const input = document.getElementById('incident-filter-' + key);
+      input.value = values[key];
+      input.dataset.committed = values[key];
     });
+  }
+
+  function selectIncidentRange(range) {
+    const previousRange = incidentTimeRange;
+    incidentTimeRange = range;
+    document.querySelectorAll('#incident-range-chips [data-range]').forEach(chip => {
+      const on = chip.dataset.range === range;
+      chip.classList.toggle('is-on', on);
+      chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    document.getElementById('incident-custom-range').hidden = range !== 'custom';
+    if (range === 'custom' && previousRange !== 'custom' && !incidentDateFilterTouched.from && !incidentDateFilterTouched.to) fillIncidentCustomDefaults();
+    refreshIncidentHistory(true);
   }
 
   function incidentFilterDateTimeValue(kind) {
     const dateInput = document.getElementById('incident-filter-' + kind + '-date');
     const dateValue = dateInput.value;
     if (!dateValue) {
-      if (!incidentDateDefaultsInitialized) return '';
       dateInput.reportValidity();
       dateInput.focus();
       return null;
@@ -14510,21 +14712,15 @@
 
   function switchLogTab(tab) {
     activeLogTab = tab === 'incidents' ? 'incidents' : 'runtime';
-    const runtimeButton = document.getElementById('log-tab-runtime');
-    const incidentButton = document.getElementById('log-tab-incidents');
-    const runtimeContent = document.getElementById('log-tab-content-runtime');
-    const incidentContent = document.getElementById('log-tab-content-incidents');
     const showIncidents = activeLogTab === 'incidents';
-    runtimeButton.classList.toggle('active', !showIncidents);
-    runtimeButton.setAttribute('aria-selected', showIncidents ? 'false' : 'true');
-    incidentButton.classList.toggle('active', showIncidents);
-    incidentButton.setAttribute('aria-selected', showIncidents ? 'true' : 'false');
-    runtimeContent.style.display = showIncidents ? 'none' : '';
-    incidentContent.style.display = showIncidents ? '' : 'none';
+    dsSegSelect(document.getElementById('logs-tabs'), activeLogTab);
+    document.getElementById('log-tab-content-runtime').hidden = showIncidents;
+    document.getElementById('log-tab-content-incidents').hidden = !showIncidents;
     if (showIncidents) {
       stopLogAutoRefresh();
       refreshIncidentHistory(true);
     } else {
+      refreshLogs();
       startLogAutoRefresh();
     }
   }
@@ -14532,16 +14728,19 @@
   function incidentFilterPath(endpoint) {
     const params = new URLSearchParams();
     const status = document.getElementById('incident-filter-status').value;
-    const model = document.getElementById('incident-filter-model').value.trim();
     const reason = document.getElementById('incident-filter-reason').value;
-    const fromValue = incidentFilterDateTimeValue('from');
-    const toValue = incidentFilterDateTimeValue('to');
-    if (fromValue === null || toValue === null) return null;
+    let custom = null;
+    if (incidentTimeRange === 'custom') {
+      const fromValue = incidentFilterDateTimeValue('from');
+      const toValue = incidentFilterDateTimeValue('to');
+      if (fromValue === null || toValue === null) return null;
+      custom = { from: fromValue, to: toValue };
+    }
+    const range = incidentRangeParams(incidentTimeRange, Date.now(), custom);
     if (status) params.set('status', status);
-    if (model) params.set('model', model);
     if (reason) params.set('reason', reason);
-    if (fromValue) params.set('from', fromValue);
-    if (toValue) params.set('to', toValue);
+    if (range.from) params.set('from', range.from);
+    if (range.to) params.set('to', range.to);
     params.set('limit', '20');
     const query = params.toString();
     return endpoint + (query ? '?' + query : '');
@@ -14555,15 +14754,18 @@
     return '/admin/api/incidents/export' + (query ? '?' + query : '');
   }
 
+  // The applied export state always comes from the path of the response being rendered.
+  function applyIncidentQueryPath(path) {
+    const queryStart = path.indexOf('?');
+    const params = new URLSearchParams(queryStart >= 0 ? path.slice(queryStart + 1) : '');
+    appliedIncidentExportPath = incidentExportPathForQuery(path);
+    appliedIncidentFilterIsAll = !['status', 'reason', 'from', 'to'].some(key => params.has(key));
+  }
+
   function refreshIncidentHistory(markSeen) {
     const path = incidentFilterPath('/admin/api/incidents');
     if (!path) return;
-    const signature = incidentFilterSignature();
-    pendingIncidentQueries.set(path, {
-      exportPath: incidentExportPathForQuery(path),
-      generation: incidentFilterChangeGeneration,
-      isAll: incidentDefaultFilterSignature === null || signature === incidentDefaultFilterSignature
-    });
+    lastIncidentListPath = path;
     apiFetch(path);
     apiFetch('/admin/api/incidents?limit=20&unread=1&mark_seen=' + (markSeen ? '1' : '0'));
   }
@@ -14627,22 +14829,26 @@
     const dict = I18N[currentLang] || I18N.en;
     initializeIncidentDateDefaults(payload);
     incidentSummaries = Array.isArray(payload.incidents) ? payload.incidents : [];
-    empty.style.display = incidentSummaries.length ? 'none' : '';
+    empty.hidden = incidentSummaries.length > 0;
+    list.classList.toggle('ds-card', incidentSummaries.length > 0);
     list.innerHTML = incidentSummaries.map(item => {
+      const id = escapeHTML(String(item.id));
       const models = Array.isArray(item.affected_models) && item.affected_models.length
         ? item.affected_models.join(', ') : (dict.incident_no_models || 'No models');
-      const reason = item.primary_failure_reason
-        ? incidentReasonLabel(item.primary_failure_reason) : '—';
-      return '<div class="incident-row" id="incident-row-' + escapeHTML(String(item.id)) + '">'
-        + '<div class="incident-row-summary">'
-        + '<span>' + escapeHTML(incidentDate(item.occurred_at)) + '</span>'
-        + '<span>' + escapeHTML(dict.incident_type_backend_exit || 'Unexpected backend exit') + '</span>'
-        + '<span title="' + escapeHTML(models) + '">' + escapeHTML(models) + '</span>'
-        + '<span>' + escapeHTML(incidentStatusLabel(item.recovery_status)) + '</span>'
-        + '<span class="incident-secondary">' + Number(item.recovery_attempt || 0) + '</span>'
-        + '<button class="btn-secondary" onclick="toggleIncidentDetails(\'' + String(item.id) + '\')">'
-        + escapeHTML(dict.incident_view_details || 'Details') + '</button>'
-        + '</div><div class="incident-row-detail" id="incident-detail-' + escapeHTML(String(item.id)) + '" data-reason="' + escapeHTML(reason) + '"></div></div>';
+      const title = (dict.incident_type_backend_exit || 'Unexpected backend exit') + ' · ' + models;
+      const tone = incidentStatusTone(item.recovery_status);
+      const attempts = Number(item.recovery_attempt || 0);
+      const pillKey = attempts === 1 && dict.incident_status_attempts_one ? 'incident_status_attempts_one' : 'incident_status_attempts';
+      const pill = (dict[pillKey] || '{status} · {count}')
+        .replace('{status}', incidentStatusLabel(item.recovery_status))
+        .replace('{count}', String(attempts));
+      return '<div class="ds-incident-item">'
+        + '<div class="ds-incident-row" role="button" tabindex="0" aria-expanded="false" data-incident-id="' + id + '" aria-controls="incident-detail-' + id + '">'
+        + '<span class="ds-incident-time ds-num" title="' + escapeHTML(incidentDate(item.occurred_at)) + '">' + escapeHTML(incidentShortTime(item.occurred_at)) + '</span>'
+        + '<span class="ds-incident-title" title="' + escapeHTML(title) + '">' + escapeHTML(title) + '</span>'
+        + '<span class="ds-pill ds-pill--' + tone + '">' + escapeHTML(pill) + '</span>'
+        + '<svg class="ds-incident-chevron" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.500L10.500 8L6 12.500" stroke="currentColor" stroke-width="1.500" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+        + '</div><div class="ds-incident-detail" id="incident-detail-' + id + '"></div></div>';
     }).join('');
   }
 
@@ -14663,19 +14869,18 @@
   function toggleIncidentDetails(id) {
     const detail = document.getElementById('incident-detail-' + id);
     if (!detail) return;
-    if (detail.classList.contains('open')) {
-      detail.classList.remove('open');
-      return;
-    }
-    detail.classList.add('open');
-    if (detail.dataset.loaded === 'true') return;
+    const row = detail.previousElementSibling;
+    const opening = !detail.classList.contains('open');
+    detail.classList.toggle('open', opening);
+    if (row) row.setAttribute('aria-expanded', opening ? 'true' : 'false');
+    if (!opening || detail.dataset.loaded === 'true') return;
     detail.textContent = (I18N[currentLang] || I18N.en).loading || 'Loading...';
     apiFetch('/admin/api/incidents/' + encodeURIComponent(id));
   }
 
   function incidentDetailField(label, value) {
-    return '<div><div class="incident-detail-label">' + escapeHTML(label) + '</div>'
-      + '<div class="incident-detail-value">' + escapeHTML(value == null || value === '' ? '—' : String(value)) + '</div></div>';
+    return '<div class="ds-incident-field"><span class="ds-incident-field-label">' + escapeHTML(label) + '</span>'
+      + '<span class="ds-incident-field-value">' + escapeHTML(value == null || value === '' ? '—' : String(value)) + '</span></div>';
   }
 
   function renderIncidentDetail(incident) {
@@ -14684,20 +14889,29 @@
     const dict = I18N[currentLang] || I18N.en;
     const failures = Array.isArray(incident.failures) ? incident.failures : [];
     const steps = Array.isArray(incident.recovery_steps) ? incident.recovery_steps : [];
-    const failureHTML = failures.length ? failures.map(failure =>
-      '<div style="margin-top:8px;padding:9px;border:1px solid var(--border);border-radius:7px;">'
-      + '<strong>' + escapeHTML(String(failure.model || '')) + '</strong> · '
-      + escapeHTML(incidentReasonLabel(failure.reason)) + '<br>'
-      + '<span class="incident-detail-label">' + escapeHTML(String(failure.code || '')) + ' · '
-      + escapeHTML(incidentActionLabel(failure.action)) + '</span><br>'
-      + escapeHTML(String(failure.message || '')) + '</div>'
-    ).join('') : '<div>—</div>';
-    const stepHTML = steps.length ? '<ol style="margin:6px 0 0 18px;">' + steps.map(step =>
-      '<li>' + escapeHTML(incidentStepLabel(step.action)) + ' · ' + escapeHTML(incidentDate(step.occurred_at)) + '</li>'
-    ).join('') + '</ol>' : '<div>—</div>';
-    detail.innerHTML = '<div class="incident-detail-grid">'
+    const reasonLabel = dict.incident_reason || 'Failure reason';
+    const suggestionLabel = dict.incident_suggestion || 'Suggestion';
+    let html = '';
+    const reasonCode = incident.primary_failure_reason || (failures.length ? failures[0].reason : '');
+    if (reasonCode) {
+      html += '<div class="ds-incident-line">' + escapeHTML(incidentLabelValue(dict, reasonLabel, incidentReasonLabel(reasonCode))) + '</div>';
+    }
+    html += failures.map(failure => {
+      const technical = [failure.code, failure.message].filter(part => part != null && String(part) !== '').map(String).join(' · ');
+      return '<div class="ds-incident-line">'
+        + escapeHTML(String(failure.model || '—')) + ' · '
+        + escapeHTML(incidentReasonLabel(failure.reason)) + ' · '
+        + escapeHTML(incidentLabelValue(dict, suggestionLabel, incidentActionLabel(failure.action))) + '</div>'
+        + (technical ? '<div class="ds-incident-line ds-incident-line--sub">' + escapeHTML(technical) + '</div>' : '');
+    }).join('');
+    if (steps.length) {
+      const stepText = steps.map(step => incidentStepLabel(step.action) + ' ' + incidentClockTime(step.occurred_at)).join(' → ');
+      html += '<div class="ds-incident-line">' + escapeHTML(incidentLabelValue(dict, dict.incident_recovery_steps || 'Recovery steps', stepText)) + '</div>';
+    }
+    if (!reasonCode && !failures.length && !steps.length) html += '<div class="ds-incident-line">—</div>';
+    html += '<details class="ds-incident-section"><summary>' + escapeHTML(dict.incident_process_section || 'Process and exit info') + '</summary>'
+      + '<div class="ds-incident-fields">'
       + incidentDetailField(dict.incident_id || 'Incident ID', incident.id)
-      + incidentDetailField(dict.incident_occurred_at || 'Occurred at', incidentDate(incident.occurred_at))
       + incidentDetailField(dict.incident_launch_id || 'Backend launch ID', incident.launch_id)
       + incidentDetailField(dict.incident_process || 'Process', 'PID ' + incident.pid + ' · generation ' + incident.generation)
       + incidentDetailField(dict.incident_exit_reason || 'Exit reason', incident.termination_reason + ' (' + incident.termination_status + ')')
@@ -14705,12 +14919,30 @@
       + incidentDetailField(dict.incident_recovered_models || 'Recovered models', (incident.recovered_models || []).join(', '))
       + incidentDetailField(dict.incident_failed_models || 'Failed models', (incident.failed_models || []).join(', '))
       + incidentDetailField(dict.incident_attempts || 'Automatic recovery attempts', incident.recovery_attempt)
+      + incidentDetailField(dict.incident_occurred_at || 'Occurred at', incidentDate(incident.occurred_at))
       + incidentDetailField(dict.incident_final_status || 'Final recovery status', incidentStatusLabel(incident.recovery_status))
-      + '</div>'
-      + '<div style="margin-top:14px;"><div class="incident-detail-label">' + escapeHTML(dict.incident_failures || 'Structured failures') + '</div>' + failureHTML + '</div>'
-      + '<div style="margin-top:14px;"><div class="incident-detail-label">' + escapeHTML(dict.incident_actions || 'Recovery actions') + '</div>' + stepHTML + '</div>'
-      + '<div style="margin-top:14px;"><div class="incident-detail-label">' + escapeHTML(dict.incident_log_tail || 'Sanitized log tail') + '</div><div class="incident-log-tail">' + escapeHTML(String(incident.log_tail || '')) + '</div></div>';
+      + '</div></details>'
+      + '<details class="ds-incident-section"><summary>' + escapeHTML(dict.incident_log_tail || 'Log excerpt') + '</summary>'
+      + '<pre class="ds-incident-log">' + escapeHTML(stripLogAnsi(String(incident.log_tail || ''))) + '</pre></details>';
+    detail.innerHTML = html;
     detail.dataset.loaded = 'true';
+  }
+
+  function toggleIncidentFromEvent(event) {
+    const row = event.target.closest ? event.target.closest('.ds-incident-row') : null;
+    if (!row) return;
+    if (event.type === 'keydown') {
+      if (event.target !== row || (event.key !== 'Enter' && event.key !== ' ')) return;
+      event.preventDefault();
+    }
+    toggleIncidentDetails(row.dataset.incidentId);
+  }
+
+  function setIncidentMoreMenu(open) {
+    const button = document.getElementById('incident-more-btn');
+    const menu = document.getElementById('incident-more-menu');
+    menu.hidden = !open;
+    button.setAttribute('aria-expanded', open ? 'true' : 'false');
   }
 
   function clearIncidentHistory() {
@@ -14727,49 +14959,22 @@
     });
   }
 
-  function focusIncidentFilters() {
-    const filterCard = document.querySelector('#log-tab-content-incidents .card-settings');
-    if (filterCard) filterCard.scrollIntoView({ block: 'nearest' });
-    document.getElementById('incident-filter-from-date').focus();
-  }
-
   function exportIncidentHistory() {
     if (!appliedIncidentExportPath) return;
-    const dict = I18N[currentLang] || I18N.en;
-    const hasUnappliedChanges = incidentFilterChangeGeneration !== appliedIncidentFilterGeneration;
-    let title = '';
-    let message = '';
-    let confirmText = '';
-    if (appliedIncidentFilterIsAll) {
-      title = dict.incident_export_all_title || 'Export all incident records?';
-      message = dict.incident_export_all_message
-        || 'No filters are currently applied. This will export all incident records currently retained by the system.';
-      confirmText = dict.incident_export_all_confirm || 'Export All Records';
-      if (hasUnappliedChanges) {
-        message += '\n\n' + (dict.incident_export_unapplied_message
-          || 'You changed the filter conditions but have not queried them. Those changes will not be used for this export.');
-      }
-    } else if (hasUnappliedChanges) {
-      title = dict.incident_export_current_title || 'Export current results?';
-      message = (dict.incident_export_unapplied_message
-        || 'You changed the filter conditions but have not queried them. Those changes will not be used for this export.')
-        + '\n\n' + (dict.incident_export_current_message
-          || 'This export will use the filters applied to the incident list currently displayed.');
-      confirmText = dict.incident_export_current_confirm || 'Export Current Results';
-    } else {
+    if (!appliedIncidentFilterIsAll) {
       apiFetch(appliedIncidentExportPath);
       return;
     }
-    showConfirmDialog(message, {
-      title: title,
-      confirmText: confirmText,
-      cancelText: dict.incident_return_to_filters || 'Return to Filters'
-    }).then(function(confirmed) {
-      if (confirmed) {
-        apiFetch(appliedIncidentExportPath);
-      } else {
-        focusIncidentFilters();
+    const dict = I18N[currentLang] || I18N.en;
+    showConfirmDialog(
+      dict.incident_export_all_message
+        || 'No filters are currently applied. This will export all incident records currently retained by the system.',
+      {
+        title: dict.incident_export_all_title || 'Export all incident records?',
+        confirmText: dict.incident_export_all_confirm || 'Export All Records'
       }
+    ).then(function(confirmed) {
+      if (confirmed) apiFetch(appliedIncidentExportPath);
     });
   }
 
@@ -20303,7 +20508,7 @@
         const result = JSON.parse(jsonStr || '{}');
         if (result.success) {
           localStorage.setItem(incidentSeenStorageKey, String(Date.now()));
-          renderIncidentHistory({ incidents: [] });
+          renderIncidentHistory({ incidents: [], oldest_retained_occurred_at: null });
           showToast(dict.incident_cleared || 'Incident history cleared.', 'success');
         } else {
           showToast(localizeErrorResult(result, 'incident_clear_failed'), 'warn');
@@ -20320,18 +20525,11 @@
         if (result.success) {
           if (path.includes('unread=1')) {
             updateIncidentUnreadBadge(result.incidents || [], path.includes('mark_seen=1'));
-          } else {
-            const pendingQuery = pendingIncidentQueries.get(path);
-            pendingIncidentQueries.delete(path);
+          } else if (path === lastIncidentListPath) {
             renderIncidentHistory(result);
-            if (pendingQuery) {
-              appliedIncidentExportPath = pendingQuery.exportPath;
-              appliedIncidentFilterGeneration = pendingQuery.generation;
-              appliedIncidentFilterIsAll = pendingQuery.isAll;
-            }
+            applyIncidentQueryPath(path);
           }
         } else {
-          pendingIncidentQueries.delete(path);
           showToast(localizeErrorResult(result, 'incident_load_failed'), 'warn');
         }
       } else if (path === '/health') {
@@ -20418,24 +20616,7 @@
       } else if (path === '/admin/api/benchmark/restore') {
         onBenchmarkRestoreResult(jsonStr);
       } else if (path === '/admin/api/logs') {
-        if (!jsonStr || jsonStr === 'null' || jsonStr === '') {
-          logRawLines = [];
-          updateLogCount(0, 0);
-          logOutput.textContent = (dict.log_server_offline || 'Backend is not running') + '\n' + (dict.log_start_hint || 'Load a local model from Models to start it and view logs.');
-        } else {
-          try {
-            const entries = JSON.parse(jsonStr);
-            logRawLines = entries.map(e => {
-              const d = new Date(e.timestamp * 1000);
-              const ts = d.toISOString().replace('T', ' ').replace('Z', '');
-              return ts + ' - ' + e.level + ' - ' + e.message;
-            });
-          } catch(e) {
-            logRawLines = jsonStr.split('\n');
-          }
-          applyLogFilters();
-        }
-        logTimestamp.textContent = formatLogTimestamp();
+        if (logViewState.source === 'server') receiveLogText(jsonStr, 'server');
       } else if (path === '/admin/api/cluster/status') {
         onClusterStatusResult(jsonStr);
       } else if (path === '/admin/api/cluster/discovered') {
@@ -20474,29 +20655,49 @@
 
   function initLogs() {
     switchLogTab('runtime');
-    refreshLogs();
-    startLogAutoRefresh();
     refreshIncidentHistory(false);
   }
 
   // Event bindings
-  logFileSelect.addEventListener('change', () => { refreshLogs(); startLogAutoRefresh(); });
-  logRefreshBtn.addEventListener('click', refreshLogs);
-  logLinesInput.addEventListener('input', applyLogFilters);
-  logLinesInput.addEventListener('change', applyLogFilters);
-  logIntervalInput.addEventListener('change', startLogAutoRefresh);
-  logAutoScrollToggle.addEventListener('change', function() { logAutoScroll = this.checked; });
-  logLevelFilter.addEventListener('change', applyLogFilters);
-  logExportLink.addEventListener('click', exportCurrentLog);
-  document.getElementById('incident-refresh-btn').addEventListener('click', () => refreshIncidentHistory(true));
+  logSourceSeg.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', () => selectLogSource(btn.dataset.value));
+    btn.addEventListener('keydown', dsSegKeydown);
+  });
+  logLevelChips.querySelectorAll('[data-level]').forEach(chip => {
+    chip.addEventListener('click', () => selectLogFilterLevel(chip.dataset.level));
+  });
+  document.querySelectorAll('#logs-tabs [role="tab"]').forEach(btn => btn.addEventListener('keydown', dsSegKeydown));
+  logSearchInput.addEventListener('input', applyLogFilters);
+  logPauseBtn.addEventListener('click', toggleLogPause);
+  logExportBtn.addEventListener('click', exportCurrentLog);
+  renderLogPauseButton();
+  showLogPlaceholder('loading');
   document.getElementById('diagnostic-export-btn').addEventListener('click', exportDiagnosticBundle);
   document.getElementById('incident-export-btn').addEventListener('click', exportIncidentHistory);
-  document.getElementById('incident-clear-btn').addEventListener('click', clearIncidentHistory);
-  document.getElementById('incident-filter-status').addEventListener('change', markIncidentFiltersChanged);
-  document.getElementById('incident-filter-model').addEventListener('input', markIncidentFiltersChanged);
-  document.getElementById('incident-filter-reason').addEventListener('change', markIncidentFiltersChanged);
-  document.getElementById('incident-filter-model').addEventListener('keydown', event => {
-    if (event.key === 'Enter') refreshIncidentHistory(true);
+  document.getElementById('incident-clear-btn').addEventListener('click', () => {
+    setIncidentMoreMenu(false);
+    clearIncidentHistory();
+  });
+  document.getElementById('incident-more-btn').addEventListener('click', () => {
+    setIncidentMoreMenu(document.getElementById('incident-more-menu').hidden);
+  });
+  document.addEventListener('click', event => {
+    const menu = document.getElementById('incident-more-menu');
+    if (menu.hidden || event.target.closest('.ds-menu-anchor')) return;
+    setIncidentMoreMenu(false);
+  });
+  document.addEventListener('keydown', event => {
+    const menu = document.getElementById('incident-more-menu');
+    if (event.key !== 'Escape' || menu.hidden) return;
+    setIncidentMoreMenu(false);
+    document.getElementById('incident-more-btn').focus();
+  });
+  document.getElementById('incident-list').addEventListener('click', toggleIncidentFromEvent);
+  document.getElementById('incident-list').addEventListener('keydown', toggleIncidentFromEvent);
+  document.getElementById('incident-filter-status').addEventListener('change', () => refreshIncidentHistory(true));
+  document.getElementById('incident-filter-reason').addEventListener('change', () => refreshIncidentHistory(true));
+  document.querySelectorAll('#incident-range-chips [data-range]').forEach(chip => {
+    chip.addEventListener('click', () => selectIncidentRange(chip.dataset.range));
   });
 
   // ── Memory slider interactions ──

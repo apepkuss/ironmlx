@@ -515,7 +515,7 @@ private func dashboardHTML(_ html: String, contains needle: String) -> Bool {
     ))
     #expect(dashboardHTML(html, contains: #"logOutput.scrollTop = logOutput.scrollHeight"#))
 
-    let tabBarStart = try #require(html.range(of: ".log-tab-bar {"))
+    let tabBarStart = try #require(html.range(of: ".logs-tabs {"))
     let tabBarEnd = try #require(html[tabBarStart.upperBound...].firstIndex(of: "}"))
     let tabBarRule = String(html[tabBarStart.lowerBound...tabBarEnd])
     #expect(tabBarRule.contains("position: sticky;"))

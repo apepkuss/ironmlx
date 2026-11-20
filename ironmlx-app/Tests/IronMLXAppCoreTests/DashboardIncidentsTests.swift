@@ -46,8 +46,9 @@ func dashboardSeparatesFullDiagnosticsFromFilteredIncidentExport() throws {
     #expect(html.contains("function incidentExportPathForQuery(path)"))
     #expect(html.contains("params.delete('limit')"))
     #expect(html.contains("appliedIncidentExportPath"))
-    #expect(html.contains("pendingIncidentQueries"))
-    #expect(html.contains("incidentFilterChangeGeneration !== appliedIncidentFilterGeneration"))
+    #expect(html.contains("function applyIncidentQueryPath(path)"))
+    #expect(!html.contains("pendingIncidentQueries"))
+    #expect(!html.contains("incidentFilterChangeGeneration"))
     #expect(!html.contains("incidentFilterPath('/admin/api/incidents/export')"))
     #expect(!html.contains("exportDiagnosticBundle(incidentFilterPath"))
     #expect(html.contains(#"aria-describedby="diagnostic-export-tooltip""#))
@@ -56,35 +57,20 @@ func dashboardSeparatesFullDiagnosticsFromFilteredIncidentExport() throws {
     #expect(html.contains("diagnosticExportBusy"))
     #expect(html.contains("button.disabled = diagnosticExportBusy"))
     #expect(html.contains(#"class="incident-history-toolbar" role="toolbar""#))
-    #expect(html.contains(#"class="incident-history-export-actions""#))
-    #expect(html.contains(#"class="card-header incident-filter-header""#))
-    #expect(html.contains(#"class="incident-filter-actions""#))
-    #expect(html.contains("flex-wrap: wrap"))
+    #expect(html.contains(#"id="incident-range-chips""#))
+    #expect(html.contains(#"data-range="custom""#))
+    #expect(html.contains(#"id="incident-custom-range""#))
+    #expect(html.contains(#"id="incident-more-btn""#))
+    #expect(html.contains(#"aria-haspopup="menu""#))
+    #expect(!html.contains(#"id="incident-filter-model""#))
+    #expect(!html.contains(#"id="incident-refresh-btn""#))
+    #expect(!html.contains("incident_query"))
 
-    let toolbarStyleStart = try #require(html.range(of: ".incident-history-toolbar {"))
-    let filterActionsStyleStart = try #require(
-        html.range(of: ".incident-filter-actions {", range: toolbarStyleStart.upperBound ..< html.endIndex)
-    )
-    let toolbarStyles = String(html[toolbarStyleStart.lowerBound ..< filterActionsStyleStart.lowerBound])
-    #expect(toolbarStyles.contains("gap: 16px"))
-    #expect(toolbarStyles.contains(".incident-history-export-actions"))
-    #expect(toolbarStyles.contains("gap: 8px"))
-    #expect(toolbarStyles.contains(".incident-history-toolbar button"))
-    #expect(toolbarStyles.contains("height: 34px"))
-    #expect(toolbarStyles.contains("align-items: center"))
-    #expect(toolbarStyles.contains(".incident-history-toolbar #incident-clear-btn"))
-    #expect(toolbarStyles.contains("border: 1px solid transparent"))
-    #expect(toolbarStyles.contains("background-clip: padding-box"))
-
-    let queryIndex = try #require(html.range(of: #"id="incident-refresh-btn""#))
     let incidentExportIndex = try #require(html.range(of: #"id="incident-export-btn""#))
     let diagnosticExportIndex = try #require(html.range(of: #"id="diagnostic-export-btn""#))
     let clearHistoryIndex = try #require(html.range(of: #"id="incident-clear-btn""#))
     #expect(incidentExportIndex.lowerBound < diagnosticExportIndex.lowerBound)
     #expect(diagnosticExportIndex.lowerBound < clearHistoryIndex.lowerBound)
-    #expect(clearHistoryIndex.lowerBound < queryIndex.lowerBound)
-    #expect(html.components(separatedBy: #"id="incident-refresh-btn""#).count - 1 == 1)
-    #expect(html.contains(#"data-i18n="incident_query">Query</button>"#))
     #expect(html.contains(#"incident_export: "Export Incident Records""#))
     #expect(html.contains(#"incident_export: "导出故障记录""#))
     #expect(html.contains(#"incident_export: "匯出故障記錄""#))
@@ -99,9 +85,10 @@ func dashboardSeparatesFullDiagnosticsFromFilteredIncidentExport() throws {
         "incident_export_tooltip:", "incident_export_accessible_label:",
         "incident_history_actions_accessible_label:",
         "incident_export_all_title:", "incident_export_all_message:",
-        "incident_export_unapplied_message:", "incident_export_all_confirm:",
-        "incident_export_current_title:", "incident_export_current_message:",
-        "incident_export_current_confirm:", "incident_return_to_filters:",
+        "incident_export_all_confirm:",
+        "incident_range_all:", "incident_range_24h:", "incident_range_7d:",
+        "incident_range_30d:", "incident_range_custom:", "incident_status_all:",
+        "incident_reason_all:", "incident_export_short:", "incident_more:",
         "incident_clear_title:",
     ] {
         #expect(html.components(separatedBy: key).count - 1 == 5, "missing locale for \(key)")
@@ -148,12 +135,10 @@ func dashboardIncidentTimesUseExplicit24HourControlsAndFormatting() throws {
     #expect(html.contains("initializeIncidentDateTimeFilter('from', '00:00')"))
     #expect(html.contains("initializeIncidentDateTimeFilter('to', '23:59')"))
     #expect(html.contains("function initializeIncidentDateDefaults(payload)"))
-    #expect(html.contains("payload.oldest_retained_occurred_at || null"))
-    #expect(html.contains("if (incidentDateDefaultsInitialized) return"))
-    #expect(html.contains("if (!incidentDateFilterTouched.from)"))
-    #expect(html.contains("if (!incidentDateFilterTouched.to)"))
+    #expect(html.contains("payload.oldest_retained_occurred_at) || null"))
+    #expect(html.contains("function fillIncidentCustomDefaults()"))
+    #expect(html.contains("previousRange !== 'custom' && !incidentDateFilterTouched.from"))
     #expect(html.contains("initializeIncidentDateDefaults(payload)"))
-    #expect(html.contains("if (!incidentDateDefaultsInitialized) return ''"))
     #expect(html.contains("dateInput.reportValidity()"))
     #expect(html.contains("const fromValue = incidentFilterDateTimeValue('from')"))
     #expect(html.contains("const toValue = incidentFilterDateTimeValue('to')"))
@@ -245,7 +230,6 @@ func dashboardIncidentPayloadUsesStableVersionedJSONKeys() throws {
     for key in [
         "runtime_logs:",
         "incident_history:",
-        "incident_query:",
         "incident_status_stopped:",
         "recovery_reason_breaker:",
         "incident_clear_confirm:",

@@ -5,10 +5,11 @@ const path = require('node:path');
 const vm = require('node:vm');
 const html = fs.readFileSync(path.join(__dirname,
   '../../ironmlx-app/Sources/IronMLXAppCore/Resources/dashboard2.html'), 'utf8');
+const parsing = html.slice(html.indexOf('  // ── Runtime log parsing ──'), html.indexOf('  // ── End runtime log parsing ──'));
 const source = html.slice(html.indexOf('  function exportCurrentLog()'), html.indexOf('  let activeLogTab'));
 function page(file, lines, native = true) {
   const messages = [], toasts = [];
-  const context = { logFileSelect: { value: file }, logRawLines: lines,
+  const context = { logViewState: { source: file }, logRawLines: lines,
     logOutput: { textContent: 'fallback' }, I18N: { en: {
       log_exported: 'saved', log_export_failed: 'failed',
     } }, currentLang: 'en', showToast: (...args) => toasts.push(args),
@@ -16,7 +17,7 @@ function page(file, lines, native = true) {
       postMessage: value => messages.push(JSON.parse(value)),
     } } } } : {},
   };
-  vm.createContext(context); vm.runInContext(source, context);
+  vm.createContext(context); vm.runInContext(parsing, context); vm.runInContext(source, context);
   return { context, messages, toasts };
 }
 for (const file of ['app', 'server']) {
@@ -27,6 +28,11 @@ for (const file of ['app', 'server']) {
     assert.deepEqual(p.messages, [{ source: `ironmlx-${file}`, content: '中文\nline 2\n' }]);
   });
 }
+test('export_strips_ansi', () => {
+  const p = page('server', ['\x1b[32mINFO\x1b[0m x']);
+  p.context.exportCurrentLog();
+  assert.equal(p.messages[0].content, 'INFO x\n');
+});
 test('export reports completion and failure but not cancellation', () => {
   const p = page('app', []);
   p.context.onRuntimeLogExported('cancelled');
