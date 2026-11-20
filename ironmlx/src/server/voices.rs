@@ -27,6 +27,8 @@ const STORE_VERSION: u32 = 1;
 pub(crate) struct VoiceStore {
     root: Arc<PathBuf>,
     document: Arc<RwLock<VoiceDocument>>,
+    /// Why the stored profiles could not be used; voices stay unavailable but the server still runs.
+    unavailable: Option<Arc<str>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -199,33 +201,59 @@ impl VoiceStore {
             .join("voices"))
     }
 
+    /// Opens the store without letting bad profile data stop the server: invalid entries are
+    /// skipped (the original file is backed up first), and an unreadable or unknown-version file
+    /// leaves voices unavailable while the file itself is kept untouched.
     pub(crate) fn open(root: PathBuf) -> crate::Result<Self> {
         std::fs::create_dir_all(root.join("files"))?;
         restrict_permissions(&root, 0o700)?;
         restrict_permissions(&root.join("files"), 0o700)?;
         let path = root.join("profiles.json");
-        let document = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<VoiceDocument>(&bytes)
-                .map_err(|error| anyhow::anyhow!("parsing {}: {error}", path.display()))?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => VoiceDocument {
-                version: STORE_VERSION,
-                voices: Vec::new(),
+        let (document, unavailable) = match std::fs::read(&path) {
+            Ok(bytes) => match parse_document(&bytes) {
+                Ok(document) => {
+                    let (document, skipped) = drop_invalid_profiles(document);
+                    if !skipped.is_empty() {
+                        let backup = back_up_profiles(&root, &bytes);
+                        tracing::warn!(
+                            skipped = ?skipped,
+                            backup = ?backup.as_ref().map(|path| path.display().to_string()),
+                            "skipped invalid voice profiles in {}; the other voices are loaded",
+                            path.display()
+                        );
+                    }
+                    (document, None)
+                }
+                Err(reason) => (empty_document(), Some(reason)),
             },
-            Err(error) => return Err(error.into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::write(&path, serde_json::to_vec_pretty(&empty_document())?)?;
+                (empty_document(), None)
+            }
+            Err(error) => (empty_document(), Some(format!("reading profiles: {error}"))),
         };
-        validate_document(&document)?;
-        if !path.exists() {
-            let bytes = serde_json::to_vec_pretty(&VoiceDocument {
-                version: STORE_VERSION,
-                voices: Vec::new(),
-            })?;
-            std::fs::write(path, bytes)?;
+        if let Some(reason) = &unavailable {
+            tracing::error!(
+                "voice profiles in {} are unavailable and were left unchanged: {reason}",
+                path.display()
+            );
+        } else {
+            restrict_permissions(&path, 0o600)?;
         }
-        restrict_permissions(&root.join("profiles.json"), 0o600)?;
         Ok(Self {
             root: Arc::new(root),
             document: Arc::new(RwLock::new(document)),
+            unavailable: unavailable.map(Arc::from),
         })
+    }
+
+    fn ensure_available(&self) -> Result<(), VoiceStoreError> {
+        match &self.unavailable {
+            Some(reason) => Err(VoiceStoreError::Resource(format!(
+                "voice profiles could not be loaded: {reason}"
+            ))),
+            None => Ok(()),
+        }
     }
 
     async fn list(&self, include_disabled: bool) -> Vec<VoiceProfile> {
@@ -239,6 +267,7 @@ impl VoiceStore {
     }
 
     pub(crate) async fn reference_bytes(&self, id: &str) -> Result<Vec<u8>, VoiceStoreError> {
+        self.ensure_available()?;
         let (file, expected_sha256) = {
             let document = self.document.read().await;
             let voice = document
@@ -259,6 +288,7 @@ impl VoiceStore {
     }
 
     async fn create(&self, request: CreateVoiceRequest) -> Result<VoiceProfile, VoiceStoreError> {
+        self.ensure_available()?;
         validate_id(&request.id)?;
         let name = validate_name(request.name)?;
         let language = validate_language(request.language)?;
@@ -301,6 +331,7 @@ impl VoiceStore {
         id: &str,
         request: UpdateVoiceRequest,
     ) -> Result<VoiceProfile, VoiceStoreError> {
+        self.ensure_available()?;
         validate_id(id)?;
         if request.name.is_none()
             && request.language.is_none()
@@ -367,6 +398,7 @@ impl VoiceStore {
     }
 
     async fn delete(&self, id: &str) -> Result<VoiceProfile, VoiceStoreError> {
+        self.ensure_available()?;
         validate_id(id)?;
         let mut document = self.document.write().await;
         let index = document
@@ -384,6 +416,7 @@ impl VoiceStore {
     }
 
     async fn preview(&self, id: &str) -> Result<(StoredVoiceProfile, Vec<u8>), VoiceStoreError> {
+        self.ensure_available()?;
         let voice = {
             let document = self.document.read().await;
             document
@@ -447,27 +480,92 @@ fn restrict_permissions(_path: &FilePath, _mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-fn validate_document(document: &VoiceDocument) -> crate::Result<()> {
+fn empty_document() -> VoiceDocument {
+    VoiceDocument {
+        version: STORE_VERSION,
+        voices: Vec::new(),
+    }
+}
+
+/// Parses the whole store file; any error here means the file cannot be used as a whole.
+fn parse_document(bytes: &[u8]) -> Result<VoiceDocument, String> {
+    let document = serde_json::from_slice::<VoiceDocument>(bytes)
+        .map_err(|error| format!("parsing profiles: {error}"))?;
     if document.version != STORE_VERSION {
-        anyhow::bail!(
+        return Err(format!(
             "unsupported voice profile store version {}",
             document.version
-        );
+        ));
     }
+    Ok(document)
+}
+
+/// Keeps the usable profiles and describes each one left out (first occurrence of an id wins).
+fn drop_invalid_profiles(document: VoiceDocument) -> (VoiceDocument, Vec<String>) {
     let mut ids = HashSet::new();
-    for voice in &document.voices {
-        validate_id(&voice.id).map_err(|error| anyhow::anyhow!(error.to_string()))?;
-        if !ids.insert(&voice.id) {
-            anyhow::bail!("duplicate voice profile id '{}'", voice.id);
-        }
+    let mut kept = Vec::with_capacity(document.voices.len());
+    let mut skipped = Vec::new();
+    for voice in document.voices {
         let path = FilePath::new(&voice.reference_file);
-        if path.components().count() != 1
+        let problem = if let Err(error) = validate_id(&voice.id) {
+            Some(error.to_string())
+        } else if ids.contains(&voice.id) {
+            Some("duplicate voice profile id".to_owned())
+        } else if path.components().count() != 1
             || !matches!(path.components().next(), Some(Component::Normal(_)))
         {
-            anyhow::bail!("invalid voice reference file '{}'.", voice.reference_file);
+            Some(format!("invalid reference file '{}'", voice.reference_file))
+        } else {
+            None
+        };
+        match problem {
+            Some(problem) => skipped.push(format!("{:?}: {problem}", voice.id)),
+            None => {
+                ids.insert(voice.id.clone());
+                kept.push(voice);
+            }
         }
     }
-    Ok(())
+    (
+        VoiceDocument {
+            version: document.version,
+            voices: kept,
+        },
+        skipped,
+    )
+}
+
+/// Copies the original profile file aside before the next save drops the skipped entries.
+/// Returns the backup path; an identical earlier backup is reused instead of writing another.
+fn back_up_profiles(root: &FilePath, bytes: &[u8]) -> Option<PathBuf> {
+    const PREFIX: &str = "profiles.json.invalid-";
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_backup = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(PREFIX));
+            if is_backup && std::fs::read(&path).is_ok_and(|existing| existing == bytes) {
+                return Some(path);
+            }
+        }
+    }
+    let backup = root.join(format!(
+        "{PREFIX}{}-{}.bak",
+        unix_seconds(),
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    ));
+    match std::fs::write(&backup, bytes).and_then(|()| restrict_permissions(&backup, 0o600)) {
+        Ok(()) => Some(backup),
+        Err(error) => {
+            tracing::warn!(
+                "could not back up voice profiles to {}: {error}",
+                backup.display()
+            );
+            None
+        }
+    }
 }
 
 fn validate_id(value: &str) -> Result<(), VoiceStoreError> {
@@ -709,6 +807,106 @@ mod tests {
         assert_eq!(reference_format(b"fLaC"), Some("flac"));
         assert_eq!(reference_format(b"ID3abc"), Some("mp3"));
         assert_eq!(reference_format(b"not audio"), None);
+    }
+
+    fn stored_profile(id: &str, reference_file: &str, wav: &[u8]) -> Value {
+        json!({
+            "id": id,
+            "name": id,
+            "enabled": true,
+            "reference_file": reference_file,
+            "reference_format": "wav",
+            "reference_sha256": format!("{:x}", Sha256::digest(wav)),
+            "sample_rate": 16_000,
+            "channels": 1,
+            "duration_ms": 100,
+            "created_at": 1,
+            "updated_at": 1
+        })
+    }
+
+    fn temp_voice_root(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("ironmlx-{label}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("files")).expect("voice files dir");
+        root
+    }
+
+    fn backups(root: &FilePath) -> Vec<PathBuf> {
+        std::fs::read_dir(root)
+            .expect("read voice root")
+            .map(|entry| entry.expect("dir entry").path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("profiles.json.invalid-"))
+            })
+            .collect()
+    }
+
+    // One bad entry (hand edit, older build, disk damage) must not stop the backend from starting.
+    #[tokio::test]
+    async fn open_skips_invalid_profiles_and_keeps_valid_ones() {
+        let root = temp_voice_root("voices-invalid-entry");
+        let wav = reference_wav();
+        std::fs::write(root.join("files").join("speaker_a-1.wav"), &wav).expect("reference");
+        let too_long = "a".repeat(65);
+        let original = serde_json::to_vec_pretty(&json!({
+            "version": STORE_VERSION,
+            "voices": [
+                stored_profile("speaker_a", "speaker_a-1.wav", &wav),
+                stored_profile(&too_long, "long-1.wav", &wav),
+                stored_profile("speaker_a", "speaker_a-2.wav", &wav),
+                stored_profile("escape", "../outside.wav", &wav)
+            ]
+        }))
+        .unwrap();
+        std::fs::write(root.join("profiles.json"), &original).expect("profiles");
+
+        let store = VoiceStore::open(root.clone()).expect("open with invalid entries");
+        let voices = store.list(true).await;
+        assert_eq!(voices.len(), 1);
+        assert_eq!(voices[0].id, "speaker_a");
+        assert_eq!(store.reference_bytes("speaker_a").await.unwrap(), wav);
+        // The file is left as it was, and the skipped entries survive in a backup.
+        assert_eq!(std::fs::read(root.join("profiles.json")).unwrap(), original);
+        let backups = backups(&root);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(std::fs::read(&backups[0]).unwrap(), original);
+        // Restarting on the same file reuses that backup instead of adding one per launch.
+        VoiceStore::open(root.clone()).expect("reopen with invalid entries");
+        assert_eq!(self::tests::backups(&root).len(), 1);
+        std::fs::remove_dir_all(root).expect("remove temp voice store");
+    }
+
+    // An unreadable or unknown-version store keeps the backend up, refuses voice changes, and leaves the file alone.
+    #[tokio::test]
+    async fn open_keeps_backend_up_when_profile_file_is_unusable() {
+        let wav = reference_wav();
+        let newer_version =
+            serde_json::to_vec(&json!({ "version": STORE_VERSION + 1, "voices": [] })).unwrap();
+        for contents in [b"{not json".to_vec(), newer_version] {
+            let root = temp_voice_root("voices-unusable");
+            std::fs::write(root.join("profiles.json"), &contents).expect("profiles");
+
+            let store = VoiceStore::open(root.clone()).expect("open with unusable profile file");
+            assert!(store.list(true).await.is_empty());
+            let created = store
+                .create(CreateVoiceRequest {
+                    id: "speaker_a".into(),
+                    name: "Speaker A".into(),
+                    language: None,
+                    enabled: true,
+                    ref_audio: STANDARD.encode(&wav),
+                })
+                .await;
+            assert!(matches!(created, Err(VoiceStoreError::Resource(_))));
+            assert!(matches!(
+                store.reference_bytes("speaker_a").await,
+                Err(VoiceStoreError::Resource(_))
+            ));
+            assert_eq!(std::fs::read(root.join("profiles.json")).unwrap(), contents);
+            std::fs::remove_dir_all(root).expect("remove temp voice store");
+        }
     }
 
     #[tokio::test]
