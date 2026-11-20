@@ -3615,7 +3615,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    color: var(--text-secondary);
+    color: var(--ds-text-2);
   }
 
   .onboarding-language-icon {
@@ -3625,13 +3625,21 @@
   }
 
   .onboarding-language select {
+    box-sizing: border-box;
     width: auto;
     min-width: 138px;
+    padding: 5px 28px 5px 10px;
+    border: 0.5px solid var(--ds-border-strong);
+    border-radius: var(--ds-radius-control);
+    background-color: var(--ds-surface-1);
+    color: var(--ds-text-1);
+    font: inherit;
+    font-size: 13px;
   }
 
-  .onboarding-language select:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.14);
+  .onboarding-language select:focus-visible {
+    outline: 2px solid var(--ds-blue);
+    outline-offset: 0;
   }
 
   .onboarding {
@@ -3645,35 +3653,36 @@
   }
 
   .onboarding-logo {
-    width: 64px;
-    height: 64px;
-    background: var(--accent);
-    border-radius: 16px;
+    width: 52px;
+    height: 52px;
+    background: var(--ds-blue);
+    border-radius: var(--ds-radius-card);
     display: flex;
     align-items: center;
     justify-content: center;
     color: white;
-    font-weight: 700;
-    font-size: 24px;
-    margin-bottom: 20px;
+    font-weight: 600;
+    font-size: 20px;
+    margin-bottom: 14px;
   }
 
   .onboarding h1 {
-    font-size: 22px;
-    font-weight: 700;
-    margin-bottom: 8px;
+    margin: 0 0 4px;
+    color: var(--ds-text-1);
+    font-size: 20px;
+    font-weight: 500;
   }
 
   .onboarding .subtitle {
-    font-size: 14px;
-    color: var(--text-secondary);
-    margin-bottom: 36px;
+    margin-bottom: 20px;
+    color: var(--ds-text-2);
+    font-size: 13px;
   }
 
   .onboarding-steps {
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 8px;
     width: 100%;
     max-width: 440px;
     text-align: left;
@@ -3681,49 +3690,72 @@
 
   .onboarding-step {
     display: flex;
-    gap: 14px;
-    align-items: flex-start;
-    background: var(--card-bg);
-    border: 0.5px solid var(--border);
-    border-radius: 10px;
-    padding: 16px;
+    gap: 12px;
+    align-items: center;
+    width: 100%;
+    padding: 12px 14px;
+    border: 0.5px solid var(--ds-border);
+    border-radius: var(--ds-radius-card);
+    background: var(--ds-surface-1);
+    color: var(--ds-text-1);
+    font: inherit;
+    text-align: left;
     cursor: pointer;
-    transition: border-color 0.15s, box-shadow 0.15s;
+    transition: background 0.15s;
   }
 
   .onboarding-step:hover {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent);
+    background: var(--ds-surface-2);
+  }
+
+  .onboarding-step:focus-visible {
+    outline: 2px solid var(--ds-blue);
+    outline-offset: 2px;
   }
 
   .step-num {
-    width: 28px;
-    height: 28px;
-    background: var(--accent);
-    color: white;
-    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 13px;
-    font-weight: 700;
-    flex-shrink: 0;
+    border-radius: 50%;
+    background: var(--ds-surface-2);
+    color: var(--ds-text-2);
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .onboarding-step:hover .step-num {
+    background: var(--ds-surface-1);
   }
 
   .step-content {
     flex: 1;
+    min-width: 0;
   }
 
   .step-content .step-title {
-    font-size: 14px;
-    font-weight: 600;
-    margin-bottom: 3px;
+    display: block;
+    color: var(--ds-text-1);
+    font-size: 13px;
+    font-weight: 500;
   }
 
   .step-content .step-desc {
+    display: block;
+    margin-top: 2px;
+    color: var(--ds-text-2);
     font-size: 12px;
-    color: var(--text-secondary);
-    line-height: 1.4;
+    line-height: 1.45;
+  }
+
+  .onboarding-step-arrow {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+    color: var(--ds-text-3);
   }
 
   /* ── Log viewer ── */
@@ -4468,20 +4500,22 @@
       <h1 data-i18n="welcome_title">Welcome to IronMLX</h1>
       <div class="subtitle" data-i18n="welcome_subtitle">Two steps to your first chat</div>
       <div class="onboarding-steps">
-        <div class="onboarding-step" onclick="window.webkit?.messageHandlers?.startStarterDownload?.postMessage('')">
-          <div class="step-num">1</div>
-          <div class="step-content">
-            <div class="step-title" data-i18n="onboarding_download_title">Download the Recommended Model</div>
-            <div class="step-desc" data-i18n="onboarding_download_desc">One click picks a model that suits this Mac, downloads it and sets it as the default.</div>
-          </div>
-        </div>
-        <div class="onboarding-step" onclick="window.webkit?.messageHandlers?.openChat?.postMessage('')">
-          <div class="step-num">2</div>
-          <div class="step-content">
-            <div class="step-title" data-i18n="onboarding_chat_title">Start Chatting</div>
-            <div class="step-desc" data-i18n="onboarding_chat_desc">If the download window stays open, chat opens when the model is ready; if you close it, you'll be notified. You can also choose Chat in the menu bar.</div>
-          </div>
-        </div>
+        <button type="button" class="onboarding-step" onclick="window.webkit?.messageHandlers?.startStarterDownload?.postMessage('')">
+          <span class="step-num" aria-hidden="true">1</span>
+          <span class="step-content">
+            <span class="step-title" data-i18n="onboarding_download_title">Download the Recommended Model</span>
+            <span class="step-desc" data-i18n="onboarding_download_desc">One click picks a model that suits this Mac, downloads it and sets it as the default.</span>
+          </span>
+          <svg class="onboarding-step-arrow" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <button type="button" class="onboarding-step" onclick="window.webkit?.messageHandlers?.openChat?.postMessage('')">
+          <span class="step-num" aria-hidden="true">2</span>
+          <span class="step-content">
+            <span class="step-title" data-i18n="onboarding_chat_title">Start Chatting</span>
+            <span class="step-desc" data-i18n="onboarding_chat_desc">If the download window stays open, chat opens when the model is ready; if you close it, you'll be notified. You can also choose Chat in the menu bar.</span>
+          </span>
+          <svg class="onboarding-step-arrow" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
       </div>
     </div>
   </div>
