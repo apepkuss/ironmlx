@@ -245,7 +245,6 @@ test('failure_union', () => {
   const snap = { state: 'failed', mode: 'dflash2', last_error: 'x' };
   const f = p.modelFailure(mdl(), ctxOf(null, snap));
   assert.deepEqual({ ...f }, { kind: 'load', source: 'snapshot', variant: 'dflash2', text: f.text, rawDetail: 'x' });
-    assert.equal(f.rawDetail, 'x');
   assert.equal(p.modelFailure(mdl(), ctxOf(null, { state: 'failed', mode: 'normal' })).variant, 'plain');
   assert.equal(p.modelFailure(mdl(), ctxOf(null, { state: 'failed', mode: 'mtp' })).variant, 'mtp');
   const both = p.modelFailure(mdl(), ctxOf(act({ state: 'failed', variant: 'mtp', message: 'boom' }), snap));
@@ -347,10 +346,10 @@ test('row_generating', () => {
     weight_bytes: 19.8 * GB, kv_cache_bytes: 2.1 * GB };
   const r = p.modelRowPresentation(mdl({ loaded: true }), ctxOf(null, view), 'en', 0);
   assert.equal(r.dot, 'green');
-  assert.match(r.detail, /142/);
-  assert.match(r.detail, /19\.8/);
-  assert.match(r.detail, /2\.1/);
-  assert.match(r.detail, /2/);
+  assert.match(r.detail, /\b142 tok\/s\b/);
+  assert.match(r.detail, /\b2 queued\b/);
+  assert.match(r.detail, /Weights 19\.8 GB/);
+  assert.match(r.detail, /KV 2\.1 GB/);
   assert.equal(r.primary.kind, 'unload');
   assert.equal(r.pinned, false);
 });
@@ -1017,6 +1016,21 @@ test('group_memory_follows_the_snapshot', () => {
     { id: 'org/b', state: 'loaded', weight_bytes: GB, kv_cache_bytes: 0 }]);
   assert.equal(memory.hasAttribute('hidden'), false);
   assert.match(memory.textContent, /4\.0/);
+});
+
+// The loaded total reports everything that holds memory, whatever the filter shows.
+test('group_memory_counts_every_loaded_model_under_a_filter', () => {
+  const p = domPage();
+  p.scan([local({ id: 'org/text', loaded: true }), local({ id: 'org/vision', type: 'vlm', loaded: true })]);
+  p.snapshot([{ id: 'org/text', state: 'loaded', weight_bytes: GB, kv_cache_bytes: 0 },
+    { id: 'org/vision', state: 'loaded', weight_bytes: 2 * GB, kv_cache_bytes: 0 }]);
+  p.element('models-filter').querySelectorAll('.ds-chip').find(c => c.dataset.category === 'text').click();
+  assert.equal(p.list.querySelectorAll('.ds-model-row').length, 1);
+  const memory = p.list.querySelector('.ds-model-group-memory');
+  assert.match(memory.textContent, /3\.0/);
+  p.snapshot([{ id: 'org/text', state: 'loaded', weight_bytes: GB, kv_cache_bytes: GB },
+    { id: 'org/vision', state: 'loaded', weight_bytes: 2 * GB, kv_cache_bytes: 0 }]);
+  assert.match(p.list.querySelector('.ds-model-group-memory').textContent, /4\.0/);
 });
 
 test('app_failure_detail_opens_the_load_panel', () => {

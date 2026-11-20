@@ -886,7 +886,7 @@ private actor CountingDFlash2HealthClient: DashboardModelStatusFetching {
     #expect(html.contains(".visually-hidden {"))
     #expect(html.contains(".onboarding-language {\n    position: absolute;"))
     #expect(html.contains("gap: 6px;"))
-    #expect(html.contains(".onboarding-language select:focus"))
+    #expect(html.contains(".onboarding-language select:focus-visible {"))
 }
 
 @Test func dashboardConfigurationRecoveryCodesAreLocalizedWithoutNewVisibleUI() throws {

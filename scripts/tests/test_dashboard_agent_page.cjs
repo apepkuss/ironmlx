@@ -70,7 +70,7 @@ test('manual_paths_for_three_agents', () => {
 
 // setLanguage rewrites textContent of every [data-i18n] element, so the path must sit outside them.
 test('language_switch_keeps_manual_paths', () => {
-  const re = /<(span|summary|div|p|h3|label)\b[^>]*data-i18n="[^"]+"[^>]*>/g;
+  const re = /<([a-z][a-z0-9]*)\b[^>]*data-i18n="[^"]+"[^>]*>/g;
   let match;
   while ((match = re.exec(agentPage))) {
     const close = agentPage.indexOf('</' + match[1] + '>', match.index);
@@ -123,7 +123,7 @@ test('connection_tiles_are_gray_and_endpoint_is_mono', () => {
 // Every .agent-* / .dsh-* rule body (logo tiles keep their fixed brand backgrounds).
 function agentRules() {
   const out = [];
-  const re = /\n  ((?:\.agent-|\.dsh-)[^{}]*)\{([^}]*)\}/g;
+  const re = /\n\s+((?:\.agent-|\.dsh-)[^{}]*)\{([^}]*)\}/g;
   let match;
   while ((match = re.exec(html))) {
     if (/\.agent-guide-mark/.test(match[1])) continue;
@@ -138,7 +138,7 @@ test('agent_css_has_no_hardcoded_colors', () => {
   for (const { selector, body } of rules) {
     assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(body), selector + ' uses a hex color');
     assert.ok(!/\brgba?\(/.test(body), selector + ' uses an rgb color');
-    assert.ok(!/var\(--(accent|card-bg|bg|text|text-secondary|text-primary|border|green|orange|settings-[a-z-]+)[,)]/.test(body),
+    assert.ok(!/var\(--(?!ds-)/.test(body),
       selector + ' uses a pre-design-system variable');
   }
 });
@@ -187,4 +187,32 @@ test('shared_rules_untouched', () => {
   assert.ok(html.includes('  .ds-tuning-select { box-sizing: border-box; width: 100%; min-width: 0; padding: 6px 10px; border: 0.5px solid var(--ds-border-strong); border-radius: var(--ds-radius-control); background-color: var(--ds-surface-1); color: var(--ds-text-1); font: inherit; font-size: 13px; }'));
 });
 
-module.exports = { cssRule };
+
+// Inline paths in section text use the same mono font as the manual-configuration paths.
+test('inline_code_uses_ds_mono', () => {
+  const rule = cssRule('.agent-guide-section-desc code,\n  .agent-guide-description code');
+  assert.ok(rule.includes('var(--ds-font-mono)'));
+  assert.ok(rule.includes('font-size: 11.5px'));
+});
+
+// The "Supported agents" caption repeated the page title; the list keeps its accessible name instead.
+test('agent_list_has_no_visible_caption', () => {
+  assert.ok(!agentPage.includes('agent-guide-nav-label'));
+  assert.ok(!html.includes('agent-guide-nav-label'));
+  assert.ok(!html.includes('agent_supported:'));
+  assert.ok(agentPage.includes('<nav class="agent-guide-nav" aria-label="Supported agents" data-i18n-aria-label="agent_supported_label">'));
+  // Without the caption, the first item sits at the top edge and needs no divider above it.
+  assert.ok(cssRule('.agent-guide-nav-item:first-of-type').includes('border-top: 0'));
+});
+
+// The sidebar icon is an "A" with one sparkle (the robot read as "chat with a bot").
+test('agent_nav_icon_is_a_with_sparkle', () => {
+  const icon = html.match(/<svg data-nav-icon="agent"[^>]*>([\s\S]*?)<\/svg>/);
+  assert.ok(icon);
+  assert.ok(icon[1].includes('d="M3 14.5 7 4l4 10.5M4.4 10.8h5.2"'));
+  // A filled four-point sparkle with curved sides (a plain cross read as "A+").
+  assert.ok(icon[1].includes('<path d="M13.8 1.4C14.05 3.35 14.65 3.95 16.6 4.2C14.65 4.45 14.05 5.05 13.8 7C13.55 5.05 12.95 4.45 11 4.2C12.95 3.95 13.55 3.35 13.8 1.4Z" fill="currentColor"/>'));
+  assert.doesNotMatch(icon[1], /v4M11\.8 4\.2h4/);
+  assert.equal((icon[1].match(/<path /g) || []).length, 2, 'only the letter and one sparkle');
+  assert.doesNotMatch(icon[1], /<rect|<circle/);
+});

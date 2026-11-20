@@ -416,7 +416,6 @@ test('incident_i18n_keys_exist_once_per_language_with_real_tables', () => {
   const separators = { en: ': ', 'zh-Hans': '：', 'zh-Hant': '：', ja: '：', ko: ': ' };
   const keys = ['incident_label_value', 'incident_status_attempts', 'incident_process_section',
     'incident_suggestion', 'incident_recovery_steps', 'incident_more', 'incident_log_tail'];
-  const langKeys = { en: 'en', 'zh-Hans': '"zh-Hans"', 'zh-Hant': '"zh-Hant"', ja: 'ja', ko: 'ko' };
   for (const lang of Object.keys(separators)) {
     const dict = ctx.I18N[lang];
     assert.ok(dict, lang);
@@ -450,7 +449,8 @@ test('logs_page_strings_exist_in_every_language', () => {
     'incident_range_all', 'incident_range_24h', 'incident_range_7d', 'incident_range_30d',
     'incident_range_custom', 'incident_status_all', 'incident_reason_all', 'incident_export_short',
     'incident_more', 'incident_label_value', 'incident_status_attempts', 'incident_process_section',
-    'incident_suggestion', 'incident_recovery_steps', 'incident_status_attempts_one'];
+    'incident_suggestion', 'incident_recovery_steps', 'incident_status_attempts_one',
+    'logs_source_label', 'logs_level_label', 'incident_range_label'];
   for (const lang of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
     for (const k of keys) {
       assert.equal(typeof I18N[lang][k], 'string', `${lang}.${k}`);
@@ -606,4 +606,17 @@ test('stale_incident_list_response_is_ignored', () => {
   assert.notEqual(context.last(), first);
   assert.equal(context.last(), fetched[2]);
   assert.ok(fetched[3].includes('unread=1'));
+});
+
+// Screen readers announce what each control group is for.
+test('control_groups_have_accessible_names', () => {
+  for (const [id, key] of [['log-source-seg', 'logs_source_label'], ['log-level-chips', 'logs_level_label'],
+    ['incident-range-chips', 'incident_range_label']]) {
+    const tag = html.match(new RegExp('<div[^>]*id="' + id + '"[^>]*>'));
+    assert.ok(tag, id);
+    assert.match(tag[0], /role="group"/, id);
+    assert.ok(tag[0].includes('data-i18n-aria-label="' + key + '"'), id);
+  }
+  // The pause button's label already flips between pause and resume, so it is not also a toggle.
+  assert.doesNotMatch(html.match(/<button[^>]*id="log-pause-btn"[^>]*>/)[0], /aria-pressed/);
 });

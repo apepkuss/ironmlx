@@ -94,7 +94,6 @@ test('onboarding styles use design-system tokens only', () => {
   const rules = pageRules();
   assert.ok(rules.length >= 10);
   for (const { selector, body } of rules) {
-    if (selector === '.onboarding-logo') continue; // white "Fe" on the brand tile
     assert.doesNotMatch(body, /#[0-9a-fA-F]{3,8}\b|\brgba?\(|box-shadow/, selector);
     assert.doesNotMatch(body, /var\(--(?!ds-)/, selector);
   }
@@ -103,4 +102,17 @@ test('onboarding styles use design-system tokens only', () => {
   const number = rule('.step-num');
   assert.ok(number.includes('var(--ds-surface-2)'));
   assert.doesNotMatch(number, /--ds-blue/);
+});
+
+// The <button> must drop its native look to read like the old card.
+test('step buttons reset native button styles', () => {
+  const step = rule('.onboarding-step');
+  for (const token of ['width: 100%', 'font: inherit', 'text-align: left', 'color: var(--ds-text-1)', 'background: var(--ds-surface-1)']) {
+    assert.ok(step.includes(token), token);
+  }
+});
+
+// Screen readers announce the step number together with the title.
+test('step numbers are read aloud', () => {
+  for (const step of steps()) assert.doesNotMatch(step.body, /class="step-num"[^>]*aria-hidden/);
 });

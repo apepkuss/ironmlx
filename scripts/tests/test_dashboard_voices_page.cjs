@@ -57,7 +57,8 @@ function render(voices, lang = 'zh-Hans') {
     'voicePlayerIcon', 'releaseVoicePlayers', 'positionVoiceEditor', 'renderVoiceProfiles']) {
     vm.runInContext(fnSource(name), context);
   }
-  vm.runInContext('renderVoiceProfiles(' + JSON.stringify({ data: voices }) + ')', context);
+  vm.runInContext('renderVoiceProfiles(' + JSON.stringify(Array.isArray(voices) ? { data: voices } : voices) + ')', context);
+  render.addButton = element('voice-add-btn');
   return element('voices-list').innerHTML;
 }
 
@@ -147,7 +148,10 @@ test('rows_are_aligned', () => {
 });
 
 test('disabled_info_is_dimmed', () => {
-  assert.ok(cssRule('.voice-card[data-enabled="false"] .voice-card-main').includes('opacity: 0.55'));
+  // Dim the name, ID and details, but keep the "Disabled" pill at full strength so it stays readable.
+  const rule = '.voice-card[data-enabled="false"] .voice-card-name,\n  .voice-card[data-enabled="false"] .voice-card-title-id,\n  .voice-card[data-enabled="false"] .voice-card-meta';
+  assert.ok(cssRule(rule).includes('opacity: 0.55'));
+  assert.ok(!html.includes('.voice-card[data-enabled="false"] .voice-card-main {'));
   assert.ok(cssRule('.voice-status-pill').includes('var(--ds-surface-2)'));
 });
 
@@ -198,13 +202,45 @@ test('inline_editor_has_no_own_card_border', () => {
 
 test('editor_inputs_match_ds_select', () => {
   const rule = cssRule('.voice-editor input[type="text"], .voice-editor select');
-  for (const token of ['var(--ds-border-strong)', 'var(--ds-radius-control)', 'padding: 6px 28px 6px 10px']) {
+  for (const token of ['var(--ds-border-strong)', 'var(--ds-radius-control)', 'padding: 6px 10px']) {
     assert.ok(rule.includes(token), token);
   }
+  // Only the select needs room for its arrow.
+  assert.ok(cssRule('.voice-editor select').includes('padding-right: 28px'));
+});
+
+// The row after an open inline editor keeps its divider.
+test('row_after_inline_editor_has_divider', () => {
+  assert.ok(cssRule('.voice-editor[data-position="inline"] + .voice-card').includes('border-top: 0.5px solid var(--ds-border)'));
+  assert.ok(!html.includes('.voice-editor[data-position="create"] { margin: 0 0 10px; }'));
 });
 
 test('editor_hidden_actions_rule_kept', () => {
   assert.match(html, /\.voice-editor-actions\s*>\s*\[hidden\]\s*\{\s*display\s*:\s*none/);
+});
+
+// A broken profile file must read as a problem, not as "no voices yet", and adding must be blocked.
+test('unavailable_store_is_explained', () => {
+  const out = render({ data: [], unavailable: 'parsing profiles: key <must> be a string' });
+  assert.ok(out.includes('class="voice-store-unavailable"'));
+  assert.ok(out.includes('声音配置文件无法读取'));
+  assert.ok(out.includes('parsing profiles: key &lt;must&gt; be a string'));
+  assert.ok(!out.includes('尚未配置声音'));
+  assert.equal(render.addButton.disabled, true);
+  render(VOICES);
+  assert.equal(render.addButton.disabled, false);
+});
+
+test('add_button_has_stable_id', () => {
+  assert.ok(html.includes('<button id="voice-add-btn" class="btn-accent" type="button" onclick="openVoiceEditor()" data-i18n="voice_add">'));
+});
+
+test('unavailable_message_in_five_languages', () => {
+  const I18N = realI18N();
+  for (const lang of LANGS) {
+    assert.equal(typeof I18N[lang].voice_store_unavailable, 'string', lang);
+    assert.ok(I18N[lang].voice_store_unavailable.length > 0, lang);
+  }
 });
 
 module.exports = { cssRule };

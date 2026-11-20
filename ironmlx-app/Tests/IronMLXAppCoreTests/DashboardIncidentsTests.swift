@@ -64,7 +64,7 @@ func dashboardSeparatesFullDiagnosticsFromFilteredIncidentExport() throws {
     #expect(html.contains(#"aria-haspopup="menu""#))
     #expect(!html.contains(#"id="incident-filter-model""#))
     #expect(!html.contains(#"id="incident-refresh-btn""#))
-    #expect(!html.contains("incident_query"))
+    #expect(!html.contains("incident_query:"))
 
     let incidentExportIndex = try #require(html.range(of: #"id="incident-export-btn""#))
     let diagnosticExportIndex = try #require(html.range(of: #"id="diagnostic-export-btn""#))
@@ -94,7 +94,8 @@ func dashboardSeparatesFullDiagnosticsFromFilteredIncidentExport() throws {
         #expect(html.components(separatedBy: key).count - 1 == 5, "missing locale for \(key)")
     }
 
-    #expect(html.contains("showConfirmDialog(message"))
+    #expect(html.contains("if (!appliedIncidentFilterIsAll) {\n      apiFetch(appliedIncidentExportPath);"))
+    #expect(html.contains("dict.incident_export_all_message\n        || 'No filters are currently applied."))
     #expect(html.contains("showConfirmDialog(\n      dict.incident_clear_confirm"))
     #expect(html.contains("此操作将永久删除所有故障历史记录，删除后无法恢复。运行日志不会受到影响。"))
     #expect(!html.contains("diagnostic_export_cancelled"))

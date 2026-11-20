@@ -916,7 +916,9 @@
   .voice-card + .voice-card { border-top: 0.5px solid var(--ds-border); }
   .voice-card-header { display: grid; grid-template-columns: minmax(0, 1fr) 300px auto; align-items: center; gap: 14px; }
   .voice-card-main { min-width: 0; }
-  .voice-card[data-enabled="false"] .voice-card-main { opacity: 0.55; }
+  .voice-card[data-enabled="false"] .voice-card-name,
+  .voice-card[data-enabled="false"] .voice-card-title-id,
+  .voice-card[data-enabled="false"] .voice-card-meta { opacity: 0.55; }
   .voice-card-title { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
   .voice-card-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ds-text-1); font-size: 13px; font-weight: 500; }
   .voice-card-title-id { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ds-text-3); font-family: var(--ds-font-mono); font-size: 11px; }
@@ -939,21 +941,26 @@
   .voice-player-progress:disabled::-webkit-slider-thumb { background: var(--ds-text-3); cursor: default; }
   .voice-player-audio { display: none; }
   .voice-empty { padding: 28px; text-align: center; color: var(--ds-text-2); font-size: 13px; }
+  .voice-store-unavailable { padding: 20px 18px; text-align: center; }
+  .voice-store-unavailable-title { color: var(--ds-text-1); font-size: 13px; }
+  .voice-store-unavailable-reason { margin-top: 6px; color: var(--ds-text-2); font-family: var(--ds-font-mono); font-size: 11px; overflow-wrap: anywhere; }
+  #page-voices .voices-toolbar .btn-accent:disabled { opacity: 0.5; cursor: default; }
   @media (max-width: 760px) {
     .voice-card-header { grid-template-columns: minmax(0, 1fr) auto; }
     .voice-card-main { grid-column: 1 / -1; }
     .voice-editor-grid { grid-template-columns: 1fr; }
   }
   .voice-editor { margin: 0 0 10px; padding: 12px 14px; border: 0.5px solid var(--ds-border); border-radius: var(--ds-radius-card); background: var(--ds-surface-1); }
-  .voice-editor[data-position="create"] { margin: 0 0 10px; }
   .voice-editor[data-position="inline"] { margin: 0; border: 0; border-radius: 0; border-top: 0.5px solid var(--ds-border); background: var(--ds-surface-2); }
   .voice-editor[data-position="inline"]:last-child { border-radius: 0 0 var(--ds-radius-card) var(--ds-radius-card); }
+  .voice-editor[data-position="inline"] + .voice-card { border-top: 0.5px solid var(--ds-border); }
   .voice-editor-title { margin-bottom: 10px; color: var(--ds-text-1); font-size: 13px; font-weight: 500; }
   .voice-editor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
   .voice-editor-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 13px; }
   .voice-editor-field .field-label-with-help { color: var(--ds-text-2); font-size: 11px; }
   .voice-editor-field.voice-file { grid-column: 1 / -1; }
-  .voice-editor input[type="text"], .voice-editor select { box-sizing: border-box; width: 100%; min-width: 0; min-height: 32px; padding: 6px 28px 6px 10px; border: 0.5px solid var(--ds-border-strong); border-radius: var(--ds-radius-control); background-color: var(--ds-surface-1); color: var(--ds-text-1); font: inherit; font-size: 13px; }
+  .voice-editor input[type="text"], .voice-editor select { box-sizing: border-box; width: 100%; min-width: 0; min-height: 32px; padding: 6px 10px; border: 0.5px solid var(--ds-border-strong); border-radius: var(--ds-radius-control); background-color: var(--ds-surface-1); color: var(--ds-text-1); font: inherit; font-size: 13px; }
+  .voice-editor select { padding-right: 28px; }
   .voice-editor input[type="text"]:focus-visible, .voice-editor select:focus-visible { outline: 2px solid var(--ds-blue); outline-offset: 0; }
   .voice-editor input[type="text"]:disabled { color: var(--ds-text-2); background-color: var(--ds-surface-2); }
   .voice-editor .profile-help-tooltip { left:0; transform:translateY(-4px); text-align:left; }
@@ -1987,12 +1994,6 @@
     border-radius: var(--ds-radius-card);
     background: var(--ds-surface-1);
   }
-  .agent-guide-nav-label {
-    padding: 10px 12px 6px;
-    color: var(--ds-text-3);
-    font-size: 11px;
-    font-weight: 500;
-  }
   .agent-guide-nav-item {
     width: 100%;
     display: grid;
@@ -2009,6 +2010,9 @@
     text-align: left;
     cursor: pointer;
     transition: background 0.15s;
+  }
+  .agent-guide-nav-item:first-of-type {
+    border-top: 0;
   }
   .agent-guide-nav-item:hover {
     background: color-mix(in srgb, var(--ds-surface-2) 60%, transparent);
@@ -2272,6 +2276,11 @@
     color: var(--ds-text-2);
     font-size: 12px;
     line-height: 1.55;
+  }
+  .agent-guide-section-desc code,
+  .agent-guide-description code {
+    font-family: var(--ds-font-mono);
+    font-size: 11.5px;
   }
   .agent-profile-options {
     display: grid;
@@ -2554,8 +2563,8 @@
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
-    .agent-guide-nav-label {
-      grid-column: 1 / -1;
+    .agent-guide-nav-item:nth-of-type(2) {
+      border-top: 0;
     }
     .agent-runtime-grid,
     .agent-profile-options,
@@ -2572,6 +2581,9 @@
   @media (max-width: 520px) {
     .agent-guide-nav {
       grid-template-columns: 1fr;
+    }
+    .agent-guide-nav-item:nth-of-type(2) {
+      border-top: 0.5px solid var(--ds-border);
     }
   }
 
@@ -4450,7 +4462,7 @@
     <span class="nav-icon"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M3 7v4M6 4v10M9 2v14M12 5v8M15 7v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span> <span data-i18n="nav_voices">Voices</span>
   </div>
   <div class="nav-item" data-page="chat">
-    <span class="nav-icon"><svg data-nav-icon="agent" width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M9 1.5V4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="9" cy="1.5" r="0.75" fill="currentColor"/><rect x="2.5" y="4" width="13" height="11" rx="2.5" stroke="currentColor" stroke-width="1.4"/><circle cx="6.5" cy="8.25" r="1" fill="currentColor"/><circle cx="11.5" cy="8.25" r="1" fill="currentColor"/><path d="M6.5 11.5h5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span> <span data-i18n="nav_chat">Agent</span>
+    <span class="nav-icon"><svg data-nav-icon="agent" width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true"><path d="M3 14.5 7 4l4 10.5M4.4 10.8h5.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.8 1.4C14.05 3.35 14.65 3.95 16.6 4.2C14.65 4.45 14.05 5.05 13.8 7C13.55 5.05 12.95 4.45 11 4.2C12.95 3.95 13.55 3.35 13.8 1.4Z" fill="currentColor"/></svg></span> <span data-i18n="nav_chat">Agent</span>
   </div>
   <!-- Deferred beyond v0.1.0. Keep the page and its implementation; restore this entry when ready. -->
   <div class="nav-item" data-page="benchmark" hidden>
@@ -4501,7 +4513,7 @@
       <div class="subtitle" data-i18n="welcome_subtitle">Two steps to your first chat</div>
       <div class="onboarding-steps">
         <button type="button" class="onboarding-step" onclick="window.webkit?.messageHandlers?.startStarterDownload?.postMessage('')">
-          <span class="step-num" aria-hidden="true">1</span>
+          <span class="step-num">1</span>
           <span class="step-content">
             <span class="step-title" data-i18n="onboarding_download_title">Download the Recommended Model</span>
             <span class="step-desc" data-i18n="onboarding_download_desc">One click picks a model that suits this Mac, downloads it and sets it as the default.</span>
@@ -4509,7 +4521,7 @@
           <svg class="onboarding-step-arrow" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
         <button type="button" class="onboarding-step" onclick="window.webkit?.messageHandlers?.openChat?.postMessage('')">
-          <span class="step-num" aria-hidden="true">2</span>
+          <span class="step-num">2</span>
           <span class="step-content">
             <span class="step-title" data-i18n="onboarding_chat_title">Start Chatting</span>
             <span class="step-desc" data-i18n="onboarding_chat_desc">If the download window stays open, chat opens when the model is ready; if you close it, you'll be notified. You can also choose Chat in the menu bar.</span>
@@ -5041,12 +5053,12 @@
 
     <div id="log-tab-content-runtime">
       <div class="logs-toolbar">
-        <div class="ds-seg" id="log-source-seg">
+        <div class="ds-seg" id="log-source-seg" role="group" data-i18n-aria-label="logs_source_label" aria-label="Log source">
           <span class="ds-seg-thumb" aria-hidden="true"></span>
           <button type="button" data-value="server" aria-pressed="true" data-i18n="logs_source_backend">Backend</button>
           <button type="button" data-value="app" aria-pressed="false" data-i18n="logs_source_app">App</button>
         </div>
-        <div class="logs-level-chips" id="log-level-chips" role="group">
+        <div class="logs-level-chips" id="log-level-chips" role="group" data-i18n-aria-label="logs_level_label" aria-label="Log level">
           <button type="button" class="ds-chip is-on" data-level="all" aria-pressed="true" data-i18n="logs_level_all">All</button>
           <button type="button" class="ds-chip" data-level="warn" aria-pressed="false" data-i18n="logs_level_warn">Warnings</button>
           <button type="button" class="ds-chip" data-level="error" aria-pressed="false" data-i18n="logs_level_error">Errors</button>
@@ -5055,13 +5067,13 @@
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 10.5L14 14" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
           <input type="search" id="log-search-input" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-i18n-placeholder="logs_search_placeholder" data-i18n-aria-label="logs_search_placeholder" placeholder="Search logs" aria-label="Search logs">
         </label>
-        <button type="button" class="logs-tool-btn" id="log-pause-btn" aria-pressed="false" data-i18n-aria-label="logs_pause" aria-label="Pause refresh">
+        <button type="button" class="logs-tool-btn" id="log-pause-btn" data-i18n-aria-label="logs_pause" aria-label="Pause refresh">
           <svg class="logs-pause-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><rect x="4" y="3" width="3" height="10" rx="1"/><rect x="9" y="3" width="3" height="10" rx="1"/></svg>
-          <svg class="logs-play-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" hidden><path d="M5 3.2v9.6a.6.6 0 0 0 .9.5l7.6-4.8a.6.6 0 0 0 0-1L5.900 2.700a.6.6 0 0 0-.9.5z"/></svg>
+          <svg class="logs-play-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" hidden><path d="M5 3.2v9.6a.6.6 0 0 0 .9.5l7.6-4.8a.6.6 0 0 0 0-1L5.9 2.7a.6.6 0 0 0-.9.5z"/></svg>
           <span id="log-pause-label" data-i18n="logs_refreshing">Refreshing every 5 s</span>
         </button>
         <button type="button" class="logs-tool-btn" id="log-export-btn">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2v8M4.800 7.200L8 10.400l3.200-3.200M3 13h10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2v8M4.8 7.2L8 10.4l3.2-3.2M3 13h10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span data-i18n="logs_export">Export</span>
         </button>
       </div>
@@ -5078,7 +5090,7 @@
     <div id="log-tab-content-incidents" hidden>
       <div class="incident-history-toolbar" role="toolbar" aria-label="Incident history actions"
         data-i18n-aria-label="incident_history_actions_accessible_label">
-        <div class="logs-level-chips" id="incident-range-chips" role="group">
+        <div class="logs-level-chips" id="incident-range-chips" role="group" data-i18n-aria-label="incident_range_label" aria-label="Time range">
           <button type="button" class="ds-chip is-on" data-range="all" aria-pressed="true" data-i18n="incident_range_all">All</button>
           <button type="button" class="ds-chip" data-range="24h" aria-pressed="false" data-i18n="incident_range_24h">24 hours</button>
           <button type="button" class="ds-chip" data-range="7d" aria-pressed="false" data-i18n="incident_range_7d">7 days</button>
@@ -5110,7 +5122,7 @@
             aria-describedby="incident-export-tooltip"
             aria-label="Export Incident Records"
             data-i18n-aria-label="incident_export_accessible_label">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2v8M4.800 7.200L8 10.400l3.200-3.200M3 13h10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M8 2v8M4.8 7.2L8 10.4l3.2-3.2M3 13h10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
             <span data-i18n="incident_export_short">Export records</span>
           </button>
           <span class="diagnostic-export-tooltip" id="incident-export-tooltip" role="tooltip"
@@ -5174,7 +5186,6 @@
     <div class="agent-guide-scroll page-body-scroll">
       <div class="agent-guide-shell">
         <nav class="agent-guide-nav" aria-label="Supported agents" data-i18n-aria-label="agent_supported_label">
-          <div class="agent-guide-nav-label" data-i18n="agent_supported">Supported agents</div>
           <button class="agent-guide-nav-item active" type="button" data-agent-guide="omp" aria-selected="true" aria-controls="agent-guide-omp" onclick="selectAgentGuide('omp')">
             <span class="agent-guide-mark agent-guide-mark-omp" aria-hidden="true">
               <img class="agent-guide-logo" data-agent-logo="omp" src="oh-my-pi-logo.svg" alt="">
@@ -5844,7 +5855,7 @@
         <div class="page-title" data-i18n="voices_title">Voices</div>
         <div class="page-subtitle" data-i18n="voices_subtitle">Manage stable voice IDs and their reference audio.</div>
       </div>
-      <button class="btn-accent" type="button" onclick="openVoiceEditor()" data-i18n="voice_add">Add Voice</button>
+      <button id="voice-add-btn" class="btn-accent" type="button" onclick="openVoiceEditor()" data-i18n="voice_add">Add Voice</button>
     </div>
     <div class="page-body-scroll">
       <div id="voices-list" class="voices-list"></div>
@@ -6796,7 +6807,7 @@
       voice_language: "Reference language", voice_language_unspecified: "Automatic / unspecified", voice_language_zh: "Chinese", voice_language_en: "English", voice_language_ja: "Japanese", voice_language_es: "Spanish", voice_language_ar: "Arabic", voice_language_help_label: "About reference language", voice_language_help_title: "About reference language", voice_language_help: "Labels the reference recording for identification; it does not restrict the synthesis text language.",
       voice_reference_audio: "Reference audio (WAV, FLAC or MP3)", voice_choose_file: "Choose audio file", voice_no_file_selected: "No file selected", voice_file_unchanged: "Keep current reference audio", voice_reference_help_label: "About reference audio", voice_reference_help_title: "Reference audio requirements", voice_reference_help: "Use a clear, single-speaker recording between 1 and 60 seconds, up to 16 MiB.", voice_save_only: "Save only", voice_save_and_enable: "Save and enable",
       voice_player_label: "Reference audio player for {name}", voice_play: "Play reference audio", voice_pause: "Pause reference audio", voice_seek: "Reference audio position", voice_mute: "Mute reference audio", voice_unmute: "Unmute reference audio", voice_loading: "Loading reference audio", voice_preview_failed: "Could not play the reference audio.",
-      voice_status_disabled: "Disabled", voice_empty: "No voice profiles configured.", voice_preview: "Preview reference", voice_enable_action: "Enable", voice_disable_action: "Disable", voice_edit_action: "Edit", voice_delete: "Delete",
+      voice_status_disabled: "Disabled", voice_store_unavailable: "The voice profile file can't be read, so voices are unavailable. Check the backend log, then fix or move the file and restart IronMLX.", voice_empty: "No voice profiles configured.", voice_preview: "Preview reference", voice_enable_action: "Enable", voice_disable_action: "Disable", voice_edit_action: "Edit", voice_delete: "Delete",
       voice_audio_required: "Choose a reference audio file.", voice_saved: "Voice profile saved.", voice_deleted: "Voice profile deleted.",
       voice_fields_required: "Voice ID and voice name are required.", voice_file_too_large: "Reference audio exceeds 16 MiB.", voice_file_read_failed: "Could not read the reference audio.", voice_delete_confirm: "Delete voice \"{id}\"?",
 
@@ -6806,7 +6817,7 @@
       agent_client_terminal_desktop: "Terminal · Desktop",
       agent_client_community_desktop: "Community desktop",
       agent_client_official_desktop_cli: "Official desktop · CLI",
-      agent_supported: "Supported agents", agent_supported_label: "Supported agents",
+      agent_supported_label: "Supported agents",
       agent_applicable_version: "Applicable version",
       agent_current_connection: "Current IronMLX connection",
       agent_current_connection_desc: "Start IronMLX and load a model before validating the generated configuration.",
@@ -7253,7 +7264,7 @@
       log_exported: "Log exported.", log_export_failed: "Could not export the log. Check the destination and available disk space.",
       log_level_all: "ALL",
       log_server_offline: "Backend is not running", log_start_hint: "Load a local model from Models to start it and view logs.", log_no_entries: "No log entries", log_no_app_logs: "No app log entries",
-      logs_source_backend: "Backend", logs_source_app: "App", logs_level_all: "All", logs_level_warn: "Warnings", logs_level_error: "Errors", logs_search_placeholder: "Search logs", logs_refreshing: "Refreshing every 5 s", logs_paused: "Paused", logs_pause: "Pause refresh", logs_resume: "Resume refresh", logs_export: "Export", log_count: "Showing {shown} / {total}", logs_updated_at: "Updated {time}",
+      logs_source_label: "Log source", logs_level_label: "Log level", incident_range_label: "Time range", logs_source_backend: "Backend", logs_source_app: "App", logs_level_all: "All", logs_level_warn: "Warnings", logs_level_error: "Errors", logs_search_placeholder: "Search logs", logs_refreshing: "Refreshing every 5 s", logs_paused: "Paused", logs_pause: "Pause refresh", logs_resume: "Resume refresh", logs_export: "Export", log_count: "Showing {shown} / {total}", logs_updated_at: "Updated {time}",
       settings_title: "Settings", settings_header_hint: "Settings marked {tag} restart the backend when saved",
       settings_restart_tag: "Restart required", settings_experimental_tag: "Experimental", settings_applies_now: "Applies immediately",
       settings_group_general: "General", settings_group_server: "Server", settings_group_models: "Models and memory", settings_group_cache: "Cache", settings_group_acceleration: "Acceleration",
@@ -7602,7 +7613,7 @@
       voice_language: "参考音频语言", voice_language_unspecified: "自动识别 / 未指定", voice_language_zh: "中文", voice_language_en: "英语", voice_language_ja: "日语", voice_language_es: "西班牙语", voice_language_ar: "阿拉伯语", voice_language_help_label: "参考音频语言说明", voice_language_help_title: "参考音频语言的用途", voice_language_help: "用于标注参考录音，方便辨识；不会限制合成文本的语言。",
       voice_reference_audio: "参考音频（WAV、FLAC 或 MP3）", voice_choose_file: "选择音频文件", voice_no_file_selected: "未选择文件", voice_file_unchanged: "保留当前参考音频", voice_reference_help_label: "参考音频说明", voice_reference_help_title: "参考音频要求", voice_reference_help: "请选择 1–60 秒、单人清晰且不超过 16 MiB 的录音。", voice_save_only: "仅保存", voice_save_and_enable: "保存并启用",
       voice_player_label: "{name} 的参考音频播放器", voice_play: "播放参考音频", voice_pause: "暂停参考音频", voice_seek: "参考音频播放进度", voice_mute: "静音", voice_unmute: "取消静音", voice_loading: "正在加载参考音频", voice_preview_failed: "无法播放参考音频。",
-      voice_status_disabled: "已停用", voice_empty: "尚未配置声音。", voice_preview: "试听参考音频", voice_enable_action: "启用", voice_disable_action: "停用", voice_edit_action: "编辑", voice_delete: "删除",
+      voice_status_disabled: "已停用", voice_store_unavailable: "声音配置文件无法读取，声音功能暂不可用。请查看后端日志，修复或移走配置文件后重启 IronMLX。", voice_empty: "尚未配置声音。", voice_preview: "试听参考音频", voice_enable_action: "启用", voice_disable_action: "停用", voice_edit_action: "编辑", voice_delete: "删除",
       voice_audio_required: "请选择参考音频文件。", voice_saved: "声音配置已保存。", voice_deleted: "声音配置已删除。",
       voice_fields_required: "声音 ID 和声音名称为必填项。", voice_file_too_large: "参考音频不能超过 16 MiB。", voice_file_read_failed: "无法读取参考音频。", voice_delete_confirm: "删除声音“{id}”？",
 
@@ -7612,7 +7623,7 @@
       agent_client_terminal_desktop: "终端 · 桌面",
       agent_client_community_desktop: "社区桌面版",
       agent_client_official_desktop_cli: "官方桌面版 · CLI",
-      agent_supported: "支持的 Agent", agent_supported_label: "支持的 Agent",
+      agent_supported_label: "支持的 Agent",
       agent_applicable_version: "适用版本",
       agent_current_connection: "当前 IronMLX 连接",
       agent_current_connection_desc: "验证生成的配置前，请先启动 IronMLX 并加载模型。",
@@ -8059,7 +8070,7 @@
       log_exported: "日志已导出。", log_export_failed: "无法导出日志，请检查保存位置和可用磁盘空间。",
       log_level_all: "全部",
       log_server_offline: "后端未运行", log_start_hint: "请在模型管理中加载本地模型以启动后端并查看日志。", log_no_entries: "暂无日志", log_no_app_logs: "暂无应用日志",
-      logs_source_backend: "后端", logs_source_app: "App", logs_level_all: "全部", logs_level_warn: "警告", logs_level_error: "错误", logs_search_placeholder: "搜索日志", logs_refreshing: "每 5 秒刷新", logs_paused: "已暂停", logs_pause: "暂停刷新", logs_resume: "继续刷新", logs_export: "导出", log_count: "显示 {shown} / {total} 条", logs_updated_at: "{time} 更新",
+      logs_source_label: "日志来源", logs_level_label: "日志级别", incident_range_label: "时间范围", logs_source_backend: "后端", logs_source_app: "App", logs_level_all: "全部", logs_level_warn: "警告", logs_level_error: "错误", logs_search_placeholder: "搜索日志", logs_refreshing: "每 5 秒刷新", logs_paused: "已暂停", logs_pause: "暂停刷新", logs_resume: "继续刷新", logs_export: "导出", log_count: "显示 {shown} / {total} 条", logs_updated_at: "{time} 更新",
       settings_title: "设置", settings_header_hint: "标有 {tag} 的设置保存后会重启后端",
       settings_restart_tag: "需重启", settings_experimental_tag: "实验", settings_applies_now: "立即生效",
       settings_group_general: "通用", settings_group_server: "服务器", settings_group_models: "模型与内存", settings_group_cache: "缓存", settings_group_acceleration: "加速",
@@ -8408,7 +8419,7 @@
       voice_language: "參考音訊語言", voice_language_unspecified: "自動辨識 / 未指定", voice_language_zh: "中文", voice_language_en: "英文", voice_language_ja: "日文", voice_language_es: "西班牙文", voice_language_ar: "阿拉伯文", voice_language_help_label: "參考音訊語言說明", voice_language_help_title: "參考音訊語言的用途", voice_language_help: "用於標記參考錄音，方便辨識；不會限制合成文字的語言。",
       voice_reference_audio: "參考音訊（WAV、FLAC 或 MP3）", voice_choose_file: "選擇音訊檔案", voice_no_file_selected: "尚未選擇檔案", voice_file_unchanged: "保留目前的參考音訊", voice_reference_help_label: "參考音訊說明", voice_reference_help_title: "參考音訊要求", voice_reference_help: "請選擇 1–60 秒、單人清晰且不超過 16 MiB 的錄音。", voice_save_only: "僅儲存", voice_save_and_enable: "儲存並啟用",
       voice_player_label: "{name} 的參考音訊播放器", voice_play: "播放參考音訊", voice_pause: "暫停參考音訊", voice_seek: "參考音訊播放進度", voice_mute: "靜音", voice_unmute: "取消靜音", voice_loading: "正在載入參考音訊", voice_preview_failed: "無法播放參考音訊。",
-      voice_status_disabled: "已停用", voice_empty: "尚未設定聲音。", voice_preview: "試聽參考音訊", voice_enable_action: "啟用", voice_disable_action: "停用", voice_edit_action: "編輯", voice_delete: "刪除",
+      voice_status_disabled: "已停用", voice_store_unavailable: "聲音設定檔無法讀取，聲音功能暫時無法使用。請查看後端日誌，修復或移走設定檔後重新啟動 IronMLX。", voice_empty: "尚未設定聲音。", voice_preview: "試聽參考音訊", voice_enable_action: "啟用", voice_disable_action: "停用", voice_edit_action: "編輯", voice_delete: "刪除",
       voice_audio_required: "請選擇參考音訊檔案。", voice_saved: "聲音設定已儲存。", voice_deleted: "聲音設定已刪除。",
       voice_fields_required: "聲音 ID 和聲音名稱為必填欄位。", voice_file_too_large: "參考音訊不可超過 16 MiB。", voice_file_read_failed: "無法讀取參考音訊。", voice_delete_confirm: "刪除聲音「{id}」？",
 
@@ -8418,7 +8429,7 @@
       agent_client_terminal_desktop: "終端 · 桌面",
       agent_client_community_desktop: "社群桌面版",
       agent_client_official_desktop_cli: "官方桌面版 · CLI",
-      agent_supported: "支援的 Agent", agent_supported_label: "支援的 Agent",
+      agent_supported_label: "支援的 Agent",
       agent_applicable_version: "適用版本",
       agent_current_connection: "目前 IronMLX 連線",
       agent_current_connection_desc: "驗證產生的設定前，請先啟動 IronMLX 並載入模型。",
@@ -8868,7 +8879,7 @@
       log_exported: "日誌已匯出。", log_export_failed: "無法匯出日誌，請檢查儲存位置和可用磁碟空間。",
       log_level_all: "全部",
       log_server_offline: "後端未執行", log_start_hint: "請在模型管理中載入本地模型以啟動後端並檢視日誌。", log_no_entries: "暫無日誌", log_no_app_logs: "暫無應用日誌",
-      logs_source_backend: "後端", logs_source_app: "App", logs_level_all: "全部", logs_level_warn: "警告", logs_level_error: "錯誤", logs_search_placeholder: "搜尋日誌", logs_refreshing: "每 5 秒重新整理", logs_paused: "已暫停", logs_pause: "暫停重新整理", logs_resume: "繼續重新整理", logs_export: "匯出", log_count: "顯示 {shown} / {total} 筆", logs_updated_at: "{time} 更新",
+      logs_source_label: "日誌來源", logs_level_label: "日誌級別", incident_range_label: "時間範圍", logs_source_backend: "後端", logs_source_app: "App", logs_level_all: "全部", logs_level_warn: "警告", logs_level_error: "錯誤", logs_search_placeholder: "搜尋日誌", logs_refreshing: "每 5 秒重新整理", logs_paused: "已暫停", logs_pause: "暫停重新整理", logs_resume: "繼續重新整理", logs_export: "匯出", log_count: "顯示 {shown} / {total} 筆", logs_updated_at: "{time} 更新",
       settings_title: "設定", settings_header_hint: "標有 {tag} 的設定儲存後會重新啟動後端",
       settings_restart_tag: "需重新啟動", settings_experimental_tag: "實驗", settings_applies_now: "立即生效",
       settings_group_general: "一般", settings_group_server: "伺服器", settings_group_models: "模型與記憶體", settings_group_cache: "快取", settings_group_acceleration: "加速",
@@ -9217,7 +9228,7 @@
       voice_language: "参照音声の言語", voice_language_unspecified: "自動判定 / 未指定", voice_language_zh: "中国語", voice_language_en: "英語", voice_language_ja: "日本語", voice_language_es: "スペイン語", voice_language_ar: "アラビア語", voice_language_help_label: "参照音声の言語の説明", voice_language_help_title: "参照音声の言語について", voice_language_help: "参照録音を識別するための情報です。合成テキストの言語は制限しません。",
       voice_reference_audio: "参照音声（WAV、FLAC、MP3）", voice_choose_file: "音声ファイルを選択", voice_no_file_selected: "ファイルが選択されていません", voice_file_unchanged: "現在の参照音声を保持", voice_reference_help_label: "参照音声の説明", voice_reference_help_title: "参照音声の要件", voice_reference_help: "1〜60 秒の明瞭な一人の音声（16 MiB 以下）を選択してください。", voice_save_only: "保存のみ", voice_save_and_enable: "保存して有効化",
       voice_player_label: "{name} の参照音声プレーヤー", voice_play: "参照音声を再生", voice_pause: "参照音声を一時停止", voice_seek: "参照音声の再生位置", voice_mute: "ミュート", voice_unmute: "ミュート解除", voice_loading: "参照音声を読み込み中", voice_preview_failed: "参照音声を再生できません。",
-      voice_status_disabled: "無効", voice_empty: "音声プロファイルはありません。", voice_preview: "参照音声を試聴", voice_enable_action: "有効にする", voice_disable_action: "無効にする", voice_edit_action: "編集", voice_delete: "削除",
+      voice_status_disabled: "無効", voice_store_unavailable: "音声プロファイルのファイルを読み込めないため、音声機能は使用できません。バックエンドのログを確認し、ファイルを修正または移動してから IronMLX を再起動してください。", voice_empty: "音声プロファイルはありません。", voice_preview: "参照音声を試聴", voice_enable_action: "有効にする", voice_disable_action: "無効にする", voice_edit_action: "編集", voice_delete: "削除",
       voice_audio_required: "参照音声ファイルを選択してください。", voice_saved: "音声プロファイルを保存しました。", voice_deleted: "音声プロファイルを削除しました。",
       voice_fields_required: "音声 ID と音声名は必須です。", voice_file_too_large: "参照音声は 16 MiB 以下にしてください。", voice_file_read_failed: "参照音声を読み込めませんでした。", voice_delete_confirm: "音声「{id}」を削除しますか？",
 
@@ -9227,7 +9238,7 @@
       agent_client_terminal_desktop: "ターミナル · デスクトップ",
       agent_client_community_desktop: "コミュニティ版デスクトップ",
       agent_client_official_desktop_cli: "公式デスクトップ · CLI",
-      agent_supported: "対応エージェント", agent_supported_label: "対応しているエージェント",
+      agent_supported_label: "対応しているエージェント",
       agent_applicable_version: "対応バージョン",
       agent_current_connection: "現在の IronMLX 接続",
       agent_current_connection_desc: "生成した設定を検証する前に、IronMLX を起動してモデルを読み込んでください。",
@@ -9677,7 +9688,7 @@
       log_exported: "ログをエクスポートしました。", log_export_failed: "ログをエクスポートできません。保存先と空き容量を確認してください。",
       log_level_all: "すべて",
       log_server_offline: "バックエンドが実行されていません", log_start_hint: "Models でローカルモデルを読み込むと起動し、ログを表示できます。", log_no_entries: "ログエントリなし", log_no_app_logs: "アプリログエントリなし",
-      logs_source_backend: "バックエンド", logs_source_app: "アプリ", logs_level_all: "すべて", logs_level_warn: "警告", logs_level_error: "エラー", logs_search_placeholder: "ログを検索", logs_refreshing: "5 秒ごとに更新", logs_paused: "一時停止中", logs_pause: "更新を一時停止", logs_resume: "更新を再開", logs_export: "エクスポート", log_count: "{shown} / {total} 件を表示", logs_updated_at: "{time} 更新",
+      logs_source_label: "ログの取得元", logs_level_label: "ログレベル", incident_range_label: "期間", logs_source_backend: "バックエンド", logs_source_app: "アプリ", logs_level_all: "すべて", logs_level_warn: "警告", logs_level_error: "エラー", logs_search_placeholder: "ログを検索", logs_refreshing: "5 秒ごとに更新", logs_paused: "一時停止中", logs_pause: "更新を一時停止", logs_resume: "更新を再開", logs_export: "エクスポート", log_count: "{shown} / {total} 件を表示", logs_updated_at: "{time} 更新",
       settings_title: "設定", settings_header_hint: "{tag} の付いた設定は保存するとバックエンドが再起動します",
       settings_restart_tag: "再起動が必要", settings_experimental_tag: "実験的", settings_applies_now: "即時反映",
       settings_group_general: "一般", settings_group_server: "サーバー", settings_group_models: "モデルとメモリ", settings_group_cache: "キャッシュ", settings_group_acceleration: "高速化",
@@ -10026,7 +10037,7 @@
       voice_language: "참조 오디오 언어", voice_language_unspecified: "자동 감지 / 지정 안 함", voice_language_zh: "중국어", voice_language_en: "영어", voice_language_ja: "일본어", voice_language_es: "스페인어", voice_language_ar: "아랍어", voice_language_help_label: "참조 오디오 언어 설명", voice_language_help_title: "참조 오디오 언어 정보", voice_language_help: "참조 녹음을 식별하기 위한 정보이며 합성 텍스트의 언어를 제한하지 않습니다.",
       voice_reference_audio: "참조 오디오(WAV, FLAC 또는 MP3)", voice_choose_file: "오디오 파일 선택", voice_no_file_selected: "선택한 파일 없음", voice_file_unchanged: "현재 참조 오디오 유지", voice_reference_help_label: "참조 오디오 설명", voice_reference_help_title: "참조 오디오 요구 사항", voice_reference_help: "1~60초의 선명한 1인 음성 녹음(16 MiB 이하)을 선택하세요.", voice_save_only: "저장만", voice_save_and_enable: "저장 후 활성화",
       voice_player_label: "{name} 참조 오디오 플레이어", voice_play: "참조 오디오 재생", voice_pause: "참조 오디오 일시 정지", voice_seek: "참조 오디오 재생 위치", voice_mute: "음소거", voice_unmute: "음소거 해제", voice_loading: "참조 오디오 로드 중", voice_preview_failed: "참조 오디오를 재생할 수 없습니다.",
-      voice_status_disabled: "비활성", voice_empty: "구성된 음성 프로필이 없습니다.", voice_preview: "참조 오디오 미리 듣기", voice_enable_action: "활성화", voice_disable_action: "비활성화", voice_edit_action: "편집", voice_delete: "삭제",
+      voice_status_disabled: "비활성", voice_store_unavailable: "음성 프로필 파일을 읽을 수 없어 음성 기능을 사용할 수 없습니다. 백엔드 로그를 확인한 뒤 파일을 수정하거나 옮기고 IronMLX를 다시 시작하세요.", voice_empty: "구성된 음성 프로필이 없습니다.", voice_preview: "참조 오디오 미리 듣기", voice_enable_action: "활성화", voice_disable_action: "비활성화", voice_edit_action: "편집", voice_delete: "삭제",
       voice_audio_required: "참조 오디오 파일을 선택하세요.", voice_saved: "음성 프로필을 저장했습니다.", voice_deleted: "음성 프로필을 삭제했습니다.",
       voice_fields_required: "음성 ID와 음성 이름은 필수입니다.", voice_file_too_large: "참조 오디오는 16 MiB 이하여야 합니다.", voice_file_read_failed: "참조 오디오를 읽을 수 없습니다.", voice_delete_confirm: "음성 \"{id}\"을(를) 삭제하시겠습니까?",
 
@@ -10036,7 +10047,7 @@
       agent_client_terminal_desktop: "터미널 · 데스크톱",
       agent_client_community_desktop: "커뮤니티 데스크톱",
       agent_client_official_desktop_cli: "공식 데스크톱 · CLI",
-      agent_supported: "지원 에이전트", agent_supported_label: "지원되는 에이전트",
+      agent_supported_label: "지원되는 에이전트",
       agent_applicable_version: "지원 버전",
       agent_current_connection: "현재 IronMLX 연결",
       agent_current_connection_desc: "생성된 설정을 확인하기 전에 IronMLX를 시작하고 모델을 로드하세요.",
@@ -10486,7 +10497,7 @@
       log_exported: "로그를 내보냈습니다.", log_export_failed: "로그를 내보낼 수 없습니다. 저장 위치와 디스크 여유 공간을 확인하세요.",
       log_level_all: "전체",
       log_server_offline: "백엔드가 실행되고 있지 않습니다", log_start_hint: "Models에서 로컬 모델을 로드하면 시작되고 로그를 볼 수 있습니다.", log_no_entries: "로그 항목 없음", log_no_app_logs: "앱 로그 항목 없음",
-      logs_source_backend: "백엔드", logs_source_app: "앱", logs_level_all: "전체", logs_level_warn: "경고", logs_level_error: "오류", logs_search_placeholder: "로그 검색", logs_refreshing: "5초마다 새로고침", logs_paused: "일시정지됨", logs_pause: "새로고침 일시정지", logs_resume: "새로고침 재개", logs_export: "내보내기", log_count: "{shown} / {total}개 표시", logs_updated_at: "{time} 업데이트",
+      logs_source_label: "로그 출처", logs_level_label: "로그 수준", incident_range_label: "기간", logs_source_backend: "백엔드", logs_source_app: "앱", logs_level_all: "전체", logs_level_warn: "경고", logs_level_error: "오류", logs_search_placeholder: "로그 검색", logs_refreshing: "5초마다 새로고침", logs_paused: "일시정지됨", logs_pause: "새로고침 일시정지", logs_resume: "새로고침 재개", logs_export: "내보내기", log_count: "{shown} / {total}개 표시", logs_updated_at: "{time} 업데이트",
       settings_title: "설정", settings_header_hint: "{tag} 표시가 있는 설정은 저장하면 백엔드가 다시 시작됩니다",
       settings_restart_tag: "재시작 필요", settings_experimental_tag: "실험적", settings_applies_now: "즉시 적용",
       settings_group_general: "일반", settings_group_server: "서버", settings_group_models: "모델 및 메모리", settings_group_cache: "캐시", settings_group_acceleration: "가속",
@@ -10761,7 +10772,7 @@
     renderRuntimeModels(window.__RUNTIME_MODELS__ || []);
     renderStatusPage();
     refreshOpenParamsSchedulerProfile();
-    renderVoiceProfiles({ data: voiceProfiles });
+    renderVoiceProfiles({ data: voiceProfiles, unavailable: voiceStoreUnavailable });
     if (incidentSummaries.length) renderIncidentHistory({ incidents: incidentSummaries });
     if (typeof renderDownloadQueue === 'function') renderDownloadQueue(downloadQueueSnapshot);
     renderSupportedModels();
@@ -10788,6 +10799,7 @@
   // Model params modal
   // Set default model via Rust bridge
   let voiceProfiles = [];
+  let voiceStoreUnavailable = '';
   let editingVoiceId = null;
   let voiceReferenceBase64 = null;
   let pendingVoiceDeleteId = null;
@@ -10799,6 +10811,10 @@
 
   function renderVoiceProfiles(payload) {
     voiceProfiles = payload && Array.isArray(payload.data) ? payload.data : [];
+    // Set by the backend when profiles.json cannot be used; voices are then unavailable, not absent.
+    voiceStoreUnavailable = payload && typeof payload.unavailable === 'string' ? payload.unavailable : '';
+    const addButton = document.getElementById('voice-add-btn');
+    if (addButton) addButton.disabled = !!voiceStoreUnavailable;
     const list = document.getElementById('voices-list');
     if (!list) return;
     const editor = document.getElementById('voice-editor');
@@ -10808,7 +10824,11 @@
     releaseVoicePlayers();
     const dict = I18N[currentLang] || I18N.en;
     if (!voiceProfiles.length) {
-      list.innerHTML = '<div class="voice-empty">' + escapeAttr(dict.voice_empty || 'No voice profiles configured.') + '</div>';
+      list.innerHTML = voiceStoreUnavailable
+        ? '<div class="voice-store-unavailable" role="status"><div class="voice-store-unavailable-title">'
+          + escapeAttr(dict.voice_store_unavailable || "The voice profile file can't be read, so voices are unavailable.")
+          + '</div><div class="voice-store-unavailable-reason">' + escapeAttr(voiceStoreUnavailable) + '</div></div>'
+        : '<div class="voice-empty">' + escapeAttr(dict.voice_empty || 'No voice profiles configured.') + '</div>';
       if (editorWasOpen) positionVoiceEditor(editorVoiceId);
       return;
     }
@@ -14517,7 +14537,6 @@
 
   function renderLogPauseButton() {
     const paused = logViewState.paused;
-    logPauseBtn.setAttribute('aria-pressed', String(paused));
     logPauseBtn.dataset.i18nAriaLabel = paused ? 'logs_resume' : 'logs_pause';
     const label = document.getElementById('log-pause-label');
     label.dataset.i18n = paused ? 'logs_paused' : 'logs_refreshing';
@@ -14911,7 +14930,7 @@
         + '<span class="ds-incident-time ds-num" title="' + escapeHTML(incidentDate(item.occurred_at)) + '">' + escapeHTML(incidentShortTime(item.occurred_at)) + '</span>'
         + '<span class="ds-incident-title" title="' + escapeHTML(title) + '">' + escapeHTML(title) + '</span>'
         + '<span class="ds-pill ds-pill--' + tone + '">' + escapeHTML(pill) + '</span>'
-        + '<svg class="ds-incident-chevron" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.500L10.500 8L6 12.500" stroke="currentColor" stroke-width="1.500" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+        + '<svg class="ds-incident-chevron" width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5L10.5 8L6 12.5" stroke="currentColor" stroke-width="1.500" stroke-linecap="round" stroke-linejoin="round"/></svg>'
         + '</div><div class="ds-incident-detail" id="incident-detail-' + id + '"></div></div>';
     }).join('');
   }
@@ -19747,7 +19766,9 @@
 
   function modelsGroupHTML(group, models, ctxFor, nowMs, states) {
     if (!models.length) return '';
-    const memory = group === 'loaded' ? modelsGroupMemoryText(models.map(model => model.id)) : '';
+    // The total covers every loaded model, not just the rows the filter shows.
+    const loadedIds = modelsPageView.rendered && modelsPageView.rendered.loadedIds;
+    const memory = group === 'loaded' ? modelsGroupMemoryText(loadedIds || models.map(model => model.id)) : '';
     return '<section class="ds-model-group" data-group="' + group + '">'
       + '<div class="ds-model-group-head"><h3 class="ds-model-group-title">'
       + escapeAttr(t(group === 'loaded' ? 'models_group_loaded' : 'models_group_unloaded')) + '</h3>'
@@ -19779,7 +19800,8 @@
       groups[model.id] = modelsPageGroupKey(model, ctx);
       if (modelFailure(model, ctx)) failures.push(model.id);
     });
-    modelsPageView.rendered = { groups, failures: failures.sort().join('\n'), loadedIds: [] };
+    modelsPageView.rendered = { groups, failures: failures.sort().join('\n'),
+      loadedIds: modelsPageGroups(models, ctxFor).loaded.map(model => model.id) };
     const summary = document.getElementById('models-page-summary');
     if (summary) summary.textContent = modelsSummaryText(models);
     const empty = document.getElementById('model-import-empty');
@@ -19800,7 +19822,6 @@
       return;
     }
     const split = modelsPageGroups(visible, ctxFor);
-    modelsPageView.rendered.loadedIds = split.loaded.map(model => model.id);
     const states = {};
     const nowMs = Date.now();
     list.innerHTML = modelsGroupHTML('loaded', split.loaded, ctxFor, nowMs, states)

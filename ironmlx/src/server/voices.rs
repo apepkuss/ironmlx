@@ -118,6 +118,15 @@ struct VoiceList<T> {
     data: Vec<T>,
 }
 
+/// The App's list: like [`VoiceList`], plus why the stored profiles could not be loaded.
+#[derive(Debug, Serialize)]
+struct AdminVoiceList {
+    object: &'static str,
+    data: Vec<VoiceProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unavailable: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateVoiceRequest {
@@ -686,10 +695,11 @@ async fn list_voices(
     })
 }
 
-async fn list_all_voices(Extension(store): Extension<VoiceStore>) -> Json<VoiceList<VoiceProfile>> {
-    Json(VoiceList {
+async fn list_all_voices(Extension(store): Extension<VoiceStore>) -> Json<AdminVoiceList> {
+    Json(AdminVoiceList {
         object: "list",
         data: store.list(true).await,
+        unavailable: store.unavailable.as_deref().map(str::to_owned),
     })
 }
 
@@ -905,6 +915,25 @@ mod tests {
                 Err(VoiceStoreError::Resource(_))
             ));
             assert_eq!(std::fs::read(root.join("profiles.json")).unwrap(), contents);
+
+            // The App's list tells the page why voices are missing instead of looking empty.
+            let list = router()
+                .layer(Extension(store))
+                .oneshot(
+                    Request::get("/admin/api/audio/voices")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(list.status(), StatusCode::OK);
+            let list: Value =
+                serde_json::from_slice(&to_bytes(list.into_body(), 64 * 1024).await.unwrap())
+                    .unwrap();
+            assert!(list["data"].as_array().unwrap().is_empty());
+            assert!(list["unavailable"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty()));
             std::fs::remove_dir_all(root).expect("remove temp voice store");
         }
     }
@@ -1006,6 +1035,22 @@ mod tests {
             serde_json::from_slice(&to_bytes(list.into_body(), 64 * 1024).await.unwrap()).unwrap();
         assert_eq!(list["data"][0]["id"], "narrator");
         assert!(list["data"][0].get("reference_sha256").is_none());
+        assert!(list.get("unavailable").is_none());
+
+        let admin_list = app
+            .clone()
+            .oneshot(
+                Request::get("/admin/api/audio/voices")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let admin_list: Value =
+            serde_json::from_slice(&to_bytes(admin_list.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(admin_list["data"][0]["id"], "narrator");
+        assert!(admin_list.get("unavailable").is_none());
 
         let preview = app
             .clone()
