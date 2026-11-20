@@ -131,7 +131,7 @@ context.renderVoiceProfiles({ data: [{ id: 'speaker_a', name: '测试声音', la
 const voiceMarkup = elements.get('voices-list').innerHTML;
 assert.match(voiceMarkup, /class="voice-player"/);
 assert.match(voiceMarkup, /aria-label="测试声音 的参考音频播放器"/);
-assert.match(voiceMarkup, /测试声音<span class="voice-card-title-id">\(ID: speaker_a\)<\/span>/);
+assert.match(voiceMarkup, /测试声音<\/span><span class="voice-card-title-id" title="speaker_a">speaker_a<\/span>/);
 assert.doesNotMatch(voiceMarkup, /class="badge">启用/);
 assert.match(voiceMarkup, /voice-player-current">0:00<\/span> \/ <span class="voice-player-duration">0:02/);
 assert.match(voiceMarkup, /中文 · WAV · 2\.1s · 48,000 Hz/);

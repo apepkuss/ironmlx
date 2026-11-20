@@ -908,43 +908,67 @@
     min-height: 0;
   }
 
-  .voices-toolbar { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:18px; }
-  .voices-list { display:grid; gap:10px; }
-  .voice-card { padding:16px; border:1px solid var(--border); border-radius:var(--radius); background:var(--card-bg); }
-  .voice-card-header { display:grid; grid-template-columns:minmax(210px,auto) minmax(260px,1fr) auto; align-items:center; gap:16px; }
-  .voice-card-main { min-width:0; }
-  .voice-card-title { display:flex; align-items:center; gap:8px; min-width:0; font-weight:600; flex-wrap:wrap; }
-  .voice-card-title-id { color:var(--text-secondary); font-size:12px; font-weight:400; overflow-wrap:anywhere; }
-  .voice-card-meta { margin-top:5px; color:var(--text-secondary); font-size:12px; overflow-wrap:anywhere; }
-  .voice-card-actions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
-  .voice-player { display:grid; grid-template-columns:34px auto minmax(100px,1fr) 34px; align-items:center; gap:8px; min-width:0; padding:9px 12px; border-radius:22px; background:var(--bg); }
-  .voice-player-button { display:flex; align-items:center; justify-content:center; width:32px; height:32px; padding:0; border:0; border-radius:50%; background:transparent; color:var(--text); cursor:pointer; font:inherit; }
-  .voice-player-button:hover { background:var(--border); }
-  .voice-player-button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-  .voice-player-button[aria-busy="true"] { color:var(--text-secondary); cursor:progress; }
-  .voice-player-time { color:var(--text-secondary); font-variant-numeric:tabular-nums; font-size:12px; text-align:center; }
-  .voice-player-progress { -webkit-appearance:none; appearance:none; width:100%; height:4px; border-radius:2px; background:var(--border); outline:none; }
-  .voice-player-progress::-webkit-slider-thumb { -webkit-appearance:none; width:14px; height:14px; border-radius:50%; background:var(--text); cursor:pointer; }
-  .voice-player-progress:disabled::-webkit-slider-thumb { background:var(--text-tertiary); cursor:default; }
-  .voice-player-audio { display:none; }
-  .voice-empty { padding:30px; text-align:center; color:var(--text-secondary); border:1px dashed var(--border); border-radius:var(--radius); }
-  .voice-editor { margin-top:18px; }
-  .voice-editor[data-position="create"] { margin:0 0 18px; }
-  .voice-editor[data-position="inline"] { margin:0; }
-  .voice-editor-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; padding:18px 20px; }
-  .voice-editor-field { display:flex; flex-direction:column; gap:6px; font-size:13px; }
-  .voice-editor-field.voice-file { grid-column:1/-1; }
+  .voices-toolbar { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:12px; }
+  #page-voices .voices-toolbar .btn-accent { background: var(--ds-blue); border-radius: var(--ds-radius-control); padding: 6px 14px; font-size: 13px; font-weight: 500; }
+  .voices-list { display: flex; flex-direction: column; border: 0.5px solid var(--ds-border); border-radius: var(--ds-radius-card); background: var(--ds-surface-1); }
+  .voices-list:empty { display: none; }
+  .voice-card { padding: 11px 14px; }
+  .voice-card + .voice-card { border-top: 0.5px solid var(--ds-border); }
+  .voice-card-header { display: grid; grid-template-columns: minmax(0, 1fr) 300px auto; align-items: center; gap: 14px; }
+  .voice-card-main { min-width: 0; }
+  .voice-card[data-enabled="false"] .voice-card-main { opacity: 0.55; }
+  .voice-card-title { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+  .voice-card-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ds-text-1); font-size: 13px; font-weight: 500; }
+  .voice-card-title-id { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ds-text-3); font-family: var(--ds-font-mono); font-size: 11px; }
+  .voice-status-pill { flex: none; align-self: center; padding: 0 7px; border-radius: 999px; background: var(--ds-surface-2); color: var(--ds-text-2); font-size: 11px; line-height: 1.6; }
+  .voice-card-meta { margin-top: 2px; color: var(--ds-text-2); font-size: 11px; overflow-wrap: anywhere; }
+  .voice-card-actions { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
+  #page-voices .voice-card-actions .btn-secondary { padding: 4px 10px; border: 0.5px solid var(--ds-border-strong); border-radius: var(--ds-radius-control); background: transparent; color: var(--ds-text-1); font-size: 12px; }
+  #page-voices .voice-card-actions .btn-secondary:hover { background: var(--ds-surface-2); }
+  .voice-delete-btn { padding: 4px 8px; border: 0; border-radius: var(--ds-radius-control); background: transparent; color: var(--ds-red); font: inherit; font-size: 12px; cursor: pointer; }
+  .voice-delete-btn:hover { background: color-mix(in srgb, var(--ds-red) 10%, transparent); }
+  .voice-delete-btn:focus-visible { outline: 2px solid var(--ds-blue); outline-offset: 1px; }
+  .voice-player { display: grid; grid-template-columns: 28px auto minmax(60px, 1fr) 28px; align-items: center; gap: 6px; min-width: 0; padding: 3px 6px; border-radius: 999px; background: var(--ds-surface-2); }
+  .voice-player-button { display: flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--ds-text-1); cursor: pointer; font: inherit; }
+  .voice-player-button:hover { background: var(--ds-surface-1); }
+  .voice-player-button:focus-visible { outline: 2px solid var(--ds-blue); outline-offset: 2px; }
+  .voice-player-button[aria-busy="true"] { color: var(--ds-text-2); cursor: progress; }
+  .voice-player-time { color: var(--ds-text-2); font-variant-numeric: tabular-nums; font-size: 11px; text-align: center; }
+  .voice-player-progress { -webkit-appearance: none; appearance: none; width: 100%; height: 3px; border-radius: 2px; background: var(--ds-border-strong); outline: none; }
+  .voice-player-progress::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; border-radius: 50%; background: var(--ds-text-1); cursor: pointer; }
+  .voice-player-progress:disabled::-webkit-slider-thumb { background: var(--ds-text-3); cursor: default; }
+  .voice-player-audio { display: none; }
+  .voice-empty { padding: 28px; text-align: center; color: var(--ds-text-2); font-size: 13px; }
+  @media (max-width: 760px) {
+    .voice-card-header { grid-template-columns: minmax(0, 1fr) auto; }
+    .voice-card-main { grid-column: 1 / -1; }
+    .voice-editor-grid { grid-template-columns: 1fr; }
+  }
+  .voice-editor { margin: 0 0 10px; padding: 12px 14px; border: 0.5px solid var(--ds-border); border-radius: var(--ds-radius-card); background: var(--ds-surface-1); }
+  .voice-editor[data-position="create"] { margin: 0 0 10px; }
+  .voice-editor[data-position="inline"] { margin: 0; border: 0; border-radius: 0; border-top: 0.5px solid var(--ds-border); background: var(--ds-surface-2); }
+  .voice-editor[data-position="inline"]:last-child { border-radius: 0 0 var(--ds-radius-card) var(--ds-radius-card); }
+  .voice-editor-title { margin-bottom: 10px; color: var(--ds-text-1); font-size: 13px; font-weight: 500; }
+  .voice-editor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }
+  .voice-editor-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 13px; }
+  .voice-editor-field .field-label-with-help { color: var(--ds-text-2); font-size: 11px; }
+  .voice-editor-field.voice-file { grid-column: 1 / -1; }
+  .voice-editor input[type="text"], .voice-editor select { box-sizing: border-box; width: 100%; min-width: 0; min-height: 32px; padding: 6px 28px 6px 10px; border: 0.5px solid var(--ds-border-strong); border-radius: var(--ds-radius-control); background-color: var(--ds-surface-1); color: var(--ds-text-1); font: inherit; font-size: 13px; }
+  .voice-editor input[type="text"]:focus-visible, .voice-editor select:focus-visible { outline: 2px solid var(--ds-blue); outline-offset: 0; }
+  .voice-editor input[type="text"]:disabled { color: var(--ds-text-2); background-color: var(--ds-surface-2); }
   .voice-editor .profile-help-tooltip { left:0; transform:translateY(-4px); text-align:left; }
   .voice-editor .profile-help:not(.profile-help-fixed):hover .profile-help-tooltip,
   .voice-editor .profile-help:not(.profile-help-fixed):focus-within .profile-help-tooltip { transform:translateY(0); }
-  .voice-file-picker { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .voice-file-picker { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .voice-file-picker input[type="file"] { display:none; }
-  .voice-file-status { color:var(--text-secondary); font-size:12px; overflow-wrap:anywhere; }
-  .voice-editor-actions { display:flex; justify-content:flex-end; gap:8px; padding:0 20px 18px; }
+  .voice-file-status { color: var(--ds-text-2); font-size: 11px; overflow-wrap: anywhere; }
+  #page-voices .voice-file-picker .btn-secondary,
+  #page-voices .voice-editor-actions .btn-secondary { padding: 5px 12px; border: 0.5px solid var(--ds-border-strong); border-radius: var(--ds-radius-control); background: var(--ds-surface-1); color: var(--ds-text-1); font-size: 12px; }
+  #page-voices .voice-file-picker .btn-secondary:hover,
+  #page-voices .voice-editor-actions .btn-secondary:hover { background: var(--ds-surface-2); }
+  #page-voices .voice-editor-actions .btn-accent { padding: 5px 14px; background: var(--ds-blue); border-radius: var(--ds-radius-control); font-size: 12px; font-weight: 500; }
+  .voice-editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
   .voice-editor-actions > [hidden] { display:none; }
-  @media (max-width:900px) { .voice-card-header { grid-template-columns:minmax(0,1fr) auto; align-items:start; } .voice-player { grid-column:1/-1; grid-row:2; } .voice-card-actions { grid-column:2; grid-row:1; } }
-  @media (max-width:760px) { .voice-card-header { grid-template-columns:1fr; } .voice-player, .voice-card-actions { grid-column:1; grid-row:auto; } .voice-card-actions { justify-content:flex-start; } .voice-editor-grid { grid-template-columns:1fr; } }
-  @media (max-width:560px) { .voice-player { grid-template-columns:34px auto minmax(70px,1fr) 34px; gap:5px; padding-inline:8px; } }
 
   #page-chat.active {
     display: flex;
@@ -5790,8 +5814,8 @@
     </div>
     <div class="page-body-scroll">
       <div id="voices-list" class="voices-list"></div>
-      <div id="voice-editor" class="card-settings voice-editor" hidden>
-        <div class="card-header"><span id="voice-editor-title" data-i18n="voice_add">Add Voice</span></div>
+      <div id="voice-editor" class="voice-editor" hidden>
+        <div class="voice-editor-title" id="voice-editor-title" data-i18n="voice_add">Add Voice</div>
         <div class="voice-editor-grid">
           <div class="voice-editor-field"><div class="field-label-with-help"><label for="voice-id" data-i18n="voice_id">Voice ID</label><span class="profile-help"><button type="button" class="profile-help-trigger" aria-describedby="voice-id-help-tooltip" data-i18n-aria-label="voice_id_help_label">?</button><span class="profile-help-tooltip" id="voice-id-help-tooltip" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="voice_id_help_title">How Voice ID is used</span><span class="profile-help-tooltip-body" data-i18n="voice_id_help">API requests and compatible clients use this value. Choose a stable identifier such as speaker_a; it cannot be changed after creation.</span></span></span></div><input id="voice-id" type="text" maxlength="64" placeholder="speaker_a"></div>
           <div class="voice-editor-field"><div class="field-label-with-help"><label for="voice-name" data-i18n="voice_name">Voice name</label><span class="profile-help"><button type="button" class="profile-help-trigger" aria-describedby="voice-name-help-tooltip" data-i18n-aria-label="voice_name_help_label">?</button><span class="profile-help-tooltip" id="voice-name-help-tooltip" role="tooltip"><span class="profile-help-tooltip-title" data-i18n="voice_name_help_title">About voice name</span><span class="profile-help-tooltip-body" data-i18n="voice_name_help">A recognizable name shown in the app.</span></span></span></div><input id="voice-name" type="text" maxlength="128" data-i18n-placeholder="voice_name_placeholder"></div>
@@ -6738,7 +6762,7 @@
       voice_language: "Reference language", voice_language_unspecified: "Automatic / unspecified", voice_language_zh: "Chinese", voice_language_en: "English", voice_language_ja: "Japanese", voice_language_es: "Spanish", voice_language_ar: "Arabic", voice_language_help_label: "About reference language", voice_language_help_title: "About reference language", voice_language_help: "Labels the reference recording for identification; it does not restrict the synthesis text language.",
       voice_reference_audio: "Reference audio (WAV, FLAC or MP3)", voice_choose_file: "Choose audio file", voice_no_file_selected: "No file selected", voice_file_unchanged: "Keep current reference audio", voice_reference_help_label: "About reference audio", voice_reference_help_title: "Reference audio requirements", voice_reference_help: "Use a clear, single-speaker recording between 1 and 60 seconds, up to 16 MiB.", voice_save_only: "Save only", voice_save_and_enable: "Save and enable",
       voice_player_label: "Reference audio player for {name}", voice_play: "Play reference audio", voice_pause: "Pause reference audio", voice_seek: "Reference audio position", voice_mute: "Mute reference audio", voice_unmute: "Unmute reference audio", voice_loading: "Loading reference audio", voice_preview_failed: "Could not play the reference audio.",
-      voice_empty: "No voice profiles configured.", voice_preview: "Preview reference", voice_enable_action: "Enable", voice_disable_action: "Disable", voice_edit_action: "Edit", voice_delete: "Delete",
+      voice_status_disabled: "Disabled", voice_empty: "No voice profiles configured.", voice_preview: "Preview reference", voice_enable_action: "Enable", voice_disable_action: "Disable", voice_edit_action: "Edit", voice_delete: "Delete",
       voice_audio_required: "Choose a reference audio file.", voice_saved: "Voice profile saved.", voice_deleted: "Voice profile deleted.",
       voice_fields_required: "Voice ID and voice name are required.", voice_file_too_large: "Reference audio exceeds 16 MiB.", voice_file_read_failed: "Could not read the reference audio.", voice_delete_confirm: "Delete voice \"{id}\"?",
 
@@ -7544,7 +7568,7 @@
       voice_language: "参考音频语言", voice_language_unspecified: "自动识别 / 未指定", voice_language_zh: "中文", voice_language_en: "英语", voice_language_ja: "日语", voice_language_es: "西班牙语", voice_language_ar: "阿拉伯语", voice_language_help_label: "参考音频语言说明", voice_language_help_title: "参考音频语言的用途", voice_language_help: "用于标注参考录音，方便辨识；不会限制合成文本的语言。",
       voice_reference_audio: "参考音频（WAV、FLAC 或 MP3）", voice_choose_file: "选择音频文件", voice_no_file_selected: "未选择文件", voice_file_unchanged: "保留当前参考音频", voice_reference_help_label: "参考音频说明", voice_reference_help_title: "参考音频要求", voice_reference_help: "请选择 1–60 秒、单人清晰且不超过 16 MiB 的录音。", voice_save_only: "仅保存", voice_save_and_enable: "保存并启用",
       voice_player_label: "{name} 的参考音频播放器", voice_play: "播放参考音频", voice_pause: "暂停参考音频", voice_seek: "参考音频播放进度", voice_mute: "静音", voice_unmute: "取消静音", voice_loading: "正在加载参考音频", voice_preview_failed: "无法播放参考音频。",
-      voice_empty: "尚未配置声音。", voice_preview: "试听参考音频", voice_enable_action: "启用", voice_disable_action: "停用", voice_edit_action: "编辑", voice_delete: "删除",
+      voice_status_disabled: "已停用", voice_empty: "尚未配置声音。", voice_preview: "试听参考音频", voice_enable_action: "启用", voice_disable_action: "停用", voice_edit_action: "编辑", voice_delete: "删除",
       voice_audio_required: "请选择参考音频文件。", voice_saved: "声音配置已保存。", voice_deleted: "声音配置已删除。",
       voice_fields_required: "声音 ID 和声音名称为必填项。", voice_file_too_large: "参考音频不能超过 16 MiB。", voice_file_read_failed: "无法读取参考音频。", voice_delete_confirm: "删除声音“{id}”？",
 
@@ -8350,7 +8374,7 @@
       voice_language: "參考音訊語言", voice_language_unspecified: "自動辨識 / 未指定", voice_language_zh: "中文", voice_language_en: "英文", voice_language_ja: "日文", voice_language_es: "西班牙文", voice_language_ar: "阿拉伯文", voice_language_help_label: "參考音訊語言說明", voice_language_help_title: "參考音訊語言的用途", voice_language_help: "用於標記參考錄音，方便辨識；不會限制合成文字的語言。",
       voice_reference_audio: "參考音訊（WAV、FLAC 或 MP3）", voice_choose_file: "選擇音訊檔案", voice_no_file_selected: "尚未選擇檔案", voice_file_unchanged: "保留目前的參考音訊", voice_reference_help_label: "參考音訊說明", voice_reference_help_title: "參考音訊要求", voice_reference_help: "請選擇 1–60 秒、單人清晰且不超過 16 MiB 的錄音。", voice_save_only: "僅儲存", voice_save_and_enable: "儲存並啟用",
       voice_player_label: "{name} 的參考音訊播放器", voice_play: "播放參考音訊", voice_pause: "暫停參考音訊", voice_seek: "參考音訊播放進度", voice_mute: "靜音", voice_unmute: "取消靜音", voice_loading: "正在載入參考音訊", voice_preview_failed: "無法播放參考音訊。",
-      voice_empty: "尚未設定聲音。", voice_preview: "試聽參考音訊", voice_enable_action: "啟用", voice_disable_action: "停用", voice_edit_action: "編輯", voice_delete: "刪除",
+      voice_status_disabled: "已停用", voice_empty: "尚未設定聲音。", voice_preview: "試聽參考音訊", voice_enable_action: "啟用", voice_disable_action: "停用", voice_edit_action: "編輯", voice_delete: "刪除",
       voice_audio_required: "請選擇參考音訊檔案。", voice_saved: "聲音設定已儲存。", voice_deleted: "聲音設定已刪除。",
       voice_fields_required: "聲音 ID 和聲音名稱為必填欄位。", voice_file_too_large: "參考音訊不可超過 16 MiB。", voice_file_read_failed: "無法讀取參考音訊。", voice_delete_confirm: "刪除聲音「{id}」？",
 
@@ -9159,7 +9183,7 @@
       voice_language: "参照音声の言語", voice_language_unspecified: "自動判定 / 未指定", voice_language_zh: "中国語", voice_language_en: "英語", voice_language_ja: "日本語", voice_language_es: "スペイン語", voice_language_ar: "アラビア語", voice_language_help_label: "参照音声の言語の説明", voice_language_help_title: "参照音声の言語について", voice_language_help: "参照録音を識別するための情報です。合成テキストの言語は制限しません。",
       voice_reference_audio: "参照音声（WAV、FLAC、MP3）", voice_choose_file: "音声ファイルを選択", voice_no_file_selected: "ファイルが選択されていません", voice_file_unchanged: "現在の参照音声を保持", voice_reference_help_label: "参照音声の説明", voice_reference_help_title: "参照音声の要件", voice_reference_help: "1〜60 秒の明瞭な一人の音声（16 MiB 以下）を選択してください。", voice_save_only: "保存のみ", voice_save_and_enable: "保存して有効化",
       voice_player_label: "{name} の参照音声プレーヤー", voice_play: "参照音声を再生", voice_pause: "参照音声を一時停止", voice_seek: "参照音声の再生位置", voice_mute: "ミュート", voice_unmute: "ミュート解除", voice_loading: "参照音声を読み込み中", voice_preview_failed: "参照音声を再生できません。",
-      voice_empty: "音声プロファイルはありません。", voice_preview: "参照音声を試聴", voice_enable_action: "有効にする", voice_disable_action: "無効にする", voice_edit_action: "編集", voice_delete: "削除",
+      voice_status_disabled: "無効", voice_empty: "音声プロファイルはありません。", voice_preview: "参照音声を試聴", voice_enable_action: "有効にする", voice_disable_action: "無効にする", voice_edit_action: "編集", voice_delete: "削除",
       voice_audio_required: "参照音声ファイルを選択してください。", voice_saved: "音声プロファイルを保存しました。", voice_deleted: "音声プロファイルを削除しました。",
       voice_fields_required: "音声 ID と音声名は必須です。", voice_file_too_large: "参照音声は 16 MiB 以下にしてください。", voice_file_read_failed: "参照音声を読み込めませんでした。", voice_delete_confirm: "音声「{id}」を削除しますか？",
 
@@ -9968,7 +9992,7 @@
       voice_language: "참조 오디오 언어", voice_language_unspecified: "자동 감지 / 지정 안 함", voice_language_zh: "중국어", voice_language_en: "영어", voice_language_ja: "일본어", voice_language_es: "스페인어", voice_language_ar: "아랍어", voice_language_help_label: "참조 오디오 언어 설명", voice_language_help_title: "참조 오디오 언어 정보", voice_language_help: "참조 녹음을 식별하기 위한 정보이며 합성 텍스트의 언어를 제한하지 않습니다.",
       voice_reference_audio: "참조 오디오(WAV, FLAC 또는 MP3)", voice_choose_file: "오디오 파일 선택", voice_no_file_selected: "선택한 파일 없음", voice_file_unchanged: "현재 참조 오디오 유지", voice_reference_help_label: "참조 오디오 설명", voice_reference_help_title: "참조 오디오 요구 사항", voice_reference_help: "1~60초의 선명한 1인 음성 녹음(16 MiB 이하)을 선택하세요.", voice_save_only: "저장만", voice_save_and_enable: "저장 후 활성화",
       voice_player_label: "{name} 참조 오디오 플레이어", voice_play: "참조 오디오 재생", voice_pause: "참조 오디오 일시 정지", voice_seek: "참조 오디오 재생 위치", voice_mute: "음소거", voice_unmute: "음소거 해제", voice_loading: "참조 오디오 로드 중", voice_preview_failed: "참조 오디오를 재생할 수 없습니다.",
-      voice_empty: "구성된 음성 프로필이 없습니다.", voice_preview: "참조 오디오 미리 듣기", voice_enable_action: "활성화", voice_disable_action: "비활성화", voice_edit_action: "편집", voice_delete: "삭제",
+      voice_status_disabled: "비활성", voice_empty: "구성된 음성 프로필이 없습니다.", voice_preview: "참조 오디오 미리 듣기", voice_enable_action: "활성화", voice_disable_action: "비활성화", voice_edit_action: "편집", voice_delete: "삭제",
       voice_audio_required: "참조 오디오 파일을 선택하세요.", voice_saved: "음성 프로필을 저장했습니다.", voice_deleted: "음성 프로필을 삭제했습니다.",
       voice_fields_required: "음성 ID와 음성 이름은 필수입니다.", voice_file_too_large: "참조 오디오는 16 MiB 이하여야 합니다.", voice_file_read_failed: "참조 오디오를 읽을 수 없습니다.", voice_delete_confirm: "음성 \"{id}\"을(를) 삭제하시겠습니까?",
 
@@ -10760,9 +10784,12 @@
       const language = voice.language ? escapeAttr(voiceLanguageLabel(voice.language, dict)) : '';
       const duration = Number(voice.duration_ms || 0) / 1000;
       const durationLabel = formatVoicePlayerTime(duration, true);
-      return '<div class="voice-card" data-voice-card-id="' + id + '">'
+      const statusPill = voice.enabled ? ''
+        : '<span class="voice-status-pill">' + escapeAttr(dict.voice_status_disabled || 'Disabled') + '</span>';
+      return '<div class="voice-card" data-voice-card-id="' + id + '" data-enabled="' + (voice.enabled ? 'true' : 'false') + '">'
         + '<div class="voice-card-header"><div class="voice-card-main"><div class="voice-card-title">'
-        + escapeAttr(name) + '<span class="voice-card-title-id">(ID: ' + id + ')</span></div>'
+        + '<span class="voice-card-name" title="' + escapeAttr(name) + '">' + escapeAttr(name) + '</span>'
+        + '<span class="voice-card-title-id" title="' + id + '">' + id + '</span>' + statusPill + '</div>'
         + '<div class="voice-card-meta">' + (language ? language + ' · ' : '')
         + escapeAttr(String(voice.reference_format || '').toUpperCase()) + ' · '
         + duration.toFixed(1) + 's · ' + Number(voice.sample_rate || 0).toLocaleString(HTML_LANG_MAP[currentLang] || 'en') + ' Hz</div></div>'
@@ -10776,7 +10803,7 @@
         + '<div class="voice-card-actions">'
         + '<button class="btn-secondary" data-voice-id="' + id + '" onclick="toggleVoice(this.dataset.voiceId)">' + escapeAttr(voice.enabled ? (dict.voice_disable_action || 'Disable') : (dict.voice_enable_action || 'Enable')) + '</button>'
         + '<button class="btn-secondary" data-voice-id="' + id + '" onclick="openVoiceEditor(this.dataset.voiceId)">' + escapeAttr(dict.voice_edit_action || 'Edit') + '</button>'
-        + '<button class="btn-danger" data-voice-id="' + id + '" onclick="deleteVoice(this.dataset.voiceId)">' + escapeAttr(dict.voice_delete || 'Delete') + '</button>'
+        + '<button class="voice-delete-btn" data-voice-id="' + id + '" onclick="deleteVoice(this.dataset.voiceId)">' + escapeAttr(dict.voice_delete || 'Delete') + '</button>'
         + '</div></div></div>';
     }).join('');
     if (editorWasOpen) positionVoiceEditor(editorVoiceId);
