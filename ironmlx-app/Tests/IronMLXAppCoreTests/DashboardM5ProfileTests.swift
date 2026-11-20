@@ -86,7 +86,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     let state = try #require(result.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] })
     #expect(state["defaultChecked"] as? Bool == true)
     #expect(state["cleanDisabled"] as? Bool == true)
-    #expect(state["label"] as? String == "M5 DFlash2 Profile")
+    #expect(state["label"] as? String == "M5 DFlash2 optimization")
     #expect(state["afterToggleChecked"] as? Bool == false)
     #expect(state["restartField"] as? Bool == true)
     #expect(state["buttonText"] as? String == "Save and restart service")
@@ -134,6 +134,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
           const triggerRect = trigger.getBoundingClientRect();
           const out = {
             cardKey: card.querySelector('.card-header [data-i18n]').dataset.i18n,
+            group: card.dataset.settingsGroup,
             lastRowInCard: rows[rows.length - 1] === row,
             inCacheCard: !!toggle.closest('.card-settings').querySelector('#cfg-cache-enable'),
             label: row.querySelector('[data-i18n="m5_dflash2_profile"]').textContent,
@@ -160,18 +161,19 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
         return try #require(result.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] })
     }
     let en = try await layout(language: "en")
-    #expect(en["cardKey"] as? String == "advanced")
+    #expect(en["cardKey"] as? String == "settings_group_acceleration")
+    #expect(en["group"] as? String == "acceleration")
     // The Neural Engine row that depends on it follows it as the card's last row.
     #expect(en["lastRowInCard"] as? Bool == false)
     #expect(en["inCacheCard"] as? Bool == false)
-    #expect(en["label"] as? String == "M5 DFlash2 Profile")
+    #expect(en["label"] as? String == "M5 DFlash2 optimization")
     #expect(en["desc"] as? String == "Automatically optimizes DFlash2 inference on supported devices.")
     #expect(en["triggerText"] as? String == "?")
     #expect(en["triggerWarning"] as? Bool == false)
     #expect(en["fixed"] as? Bool == true)
-    #expect(en["ariaLabel"] as? String == "M5 DFlash2 Profile help")
+    #expect(en["ariaLabel"] as? String == "M5 DFlash2 optimization help")
     #expect(en["role"] as? String == "tooltip")
-    #expect(en["title"] as? String == "About the M5 DFlash2 Profile")
+    #expect(en["title"] as? String == "About the M5 DFlash2 optimization")
     #expect(en["body"] as? String == "On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings. Qwen 3.6 35B A3B uses its own tuned settings.")
     #expect(en["hiddenOpacity"] as? String == "0")
     #expect(en["focusOpen"] as? Bool == true)
@@ -182,10 +184,10 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     try await snapshot(webView, named: "settings-m5-advanced-help-en")
 
     let zh = try await layout(language: "zh")
-    #expect(zh["label"] as? String == "M5 DFlash2 优化配置")
+    #expect(zh["label"] as? String == "M5 DFlash2 优化")
     #expect(zh["desc"] as? String == "在支持的设备上自动优化 DFlash2 推理。")
-    #expect(zh["ariaLabel"] as? String == "M5 DFlash2 优化配置说明")
-    #expect(zh["title"] as? String == "关于 M5 DFlash2 优化配置")
+    #expect(zh["ariaLabel"] as? String == "M5 DFlash2 优化说明")
+    #expect(zh["title"] as? String == "关于 M5 DFlash2 优化")
     #expect(zh["body"] as? String == "在 Apple M5（GPU 第 17 代）及更新机型上，DFlash2 服务启用针对 M5 调优的内核、树式草稿和负载下的合批；各项不适用时自动回退。关闭后使用通用设置。Qwen 3.6 35B A3B 使用其专属的调优设置。")
     try await snapshot(webView, named: "settings-m5-advanced-help-zh")
 
@@ -321,6 +323,7 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
       const out = {
         defaultChecked: ane.checked, defaultEnabled: !ane.disabled, noteHidden: note.hidden,
         cardKey: card.querySelector('.card-header [data-i18n]').dataset.i18n,
+        group: card.dataset.settingsGroup,
         lastRow: rows[rows.length - 1] === row,
         afterM5: rows[rows.length - 2] === m5.closest('.settings-row'),
         label: row.querySelector('[data-i18n="ane_acceleration"]').textContent,
@@ -349,15 +352,16 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
     #expect(state["defaultChecked"] as? Bool == true)
     #expect(state["defaultEnabled"] as? Bool == true)
     #expect(state["noteHidden"] as? Bool == true)
-    #expect(state["cardKey"] as? String == "advanced")
+    #expect(state["cardKey"] as? String == "settings_group_acceleration")
+    #expect(state["group"] as? String == "acceleration")
     #expect(state["lastRow"] as? Bool == true)
     #expect(state["afterM5"] as? Bool == true)
-    #expect(state["label"] as? String == "Neural Engine (ANE) Acceleration")
+    #expect(state["label"] as? String == "Neural Engine (ANE) acceleration")
     #expect(state["title"] as? String == "About Neural Engine Acceleration")
     #expect(state["restartField"] as? Bool == true)
     #expect(state["disabledWithoutM5"] as? Bool == true)
     #expect(state["noteShownWithoutM5"] as? Bool == true)
-    #expect(state["noteText"] as? String == "Takes effect only with the M5 DFlash2 Profile on.")
+    #expect(state["noteText"] as? String == "Turn on M5 DFlash2 optimization first.")
     #expect(state["checkedKeptWithoutM5"] as? Bool == true)
     #expect(state["enabledAgain"] as? Bool == true)
     #expect(state["afterToggleChecked"] as? Bool == false)
@@ -480,4 +484,154 @@ private func snapshot(_ webView: WKWebView, named name: String) async throws {
         #expect(flags["values"] == true)
         try await snapshot(webView, named: "runtime-embedding-\(language)")
     }
+}
+
+
+@Test func appleGPUGenerationParsesMetalArchitectureNames() {
+    #expect(AppleGPUGeneration.parse(architectureName: "applegpu_g17s") == 17)
+    #expect(AppleGPUGeneration.parse(architectureName: "applegpu_g16g") == 16)
+    #expect(AppleGPUGeneration.parse(architectureName: "AppleGPU_G18P") == 18)
+    #expect(AppleGPUGeneration.parse(architectureName: "amd_gfx") == nil)
+    #expect(AppleGPUGeneration.parse(architectureName: "applegpu_g") == nil)
+    #expect(AppleGPUGeneration.m5ProfileMinimumGeneration == 17)
+}
+
+@MainActor
+@Test func dashboardAccelerationRowsFollowChipAndM5Profile() async throws {
+    let messages = CapturedSettingsMessages()
+    let webView = try await loadedDashboard(config: AppConfig(), messages: messages)
+    defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
+    let result = try await webView.evaluateJavaScript("""
+    (() => {
+      navigateTo('settings'); setLanguage('en');
+      const m5 = document.getElementById('cfg-m5-dflash2-profile');
+      const ane = document.getElementById('cfg-ane');
+      const aneRow = document.getElementById('ane-row');
+      const shown = id => !document.getElementById(id).hidden;
+      const forcedOff = input => input.closest('.toggle').classList.contains('is-forced-off');
+      const out = {};
+      out.subRow = aneRow.classList.contains('ds-sub-row') && aneRow.previousElementSibling === m5.closest('.settings-row');
+      // M1-M4: both off and disabled, one note on the parent, saved values untouched.
+      window.__IRONMLX_GPU_GENERATION__ = 16; syncAneUI();
+      out.oldChip = {
+        m5Disabled: m5.disabled, aneDisabled: ane.disabled, m5Off: forcedOff(m5), aneOff: forcedOff(ane),
+        m5Note: shown('m5-unsupported-note'), m5Desc: shown('m5-dflash2-profile-desc'),
+        aneNote: shown('ane-requires-m5-profile'), aneDesc: shown('ane-acceleration-desc'),
+        savedM5: m5.checked, savedAne: ane.checked,
+        noteText: document.getElementById('m5-unsupported-note').textContent,
+        barClean: document.getElementById('settings-save-bar').dataset.state === 'clean'
+      };
+      // M5 chip with the profile off: ANE shows the requirement instead of its description.
+      window.__IRONMLX_GPU_GENERATION__ = 17; syncAneUI();
+      m5.click();
+      out.m5Off = {
+        m5Disabled: m5.disabled, aneDisabled: ane.disabled, aneOff: forcedOff(ane), inactive: aneRow.classList.contains('is-inactive'),
+        aneNote: shown('ane-requires-m5-profile'), aneDesc: shown('ane-acceleration-desc'), m5Note: shown('m5-unsupported-note'),
+        savedAne: ane.checked
+      };
+      m5.click();
+      out.m5On = {
+        aneDisabled: ane.disabled, aneOff: forcedOff(ane), inactive: aneRow.classList.contains('is-inactive'),
+        aneNote: shown('ane-requires-m5-profile'), aneDesc: shown('ane-acceleration-desc'),
+        barClean: document.getElementById('settings-save-bar').dataset.state === 'clean'
+      };
+      return JSON.stringify(out);
+    })()
+    """) as? String
+    let state = try #require(result.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] })
+    #expect(state["subRow"] as? Bool == true)
+    let oldChip = try #require(state["oldChip"] as? [String: Any])
+    for key in ["m5Disabled", "aneDisabled", "m5Off", "aneOff", "m5Note", "aneDesc", "savedM5", "savedAne", "barClean"] {
+        #expect(oldChip[key] as? Bool == true, "old chip \(key)")
+    }
+    #expect(oldChip["m5Desc"] as? Bool == false)
+    #expect(oldChip["aneNote"] as? Bool == false)
+    #expect(oldChip["noteText"] as? String == "Not supported on this Mac's chip. Requires M5 or newer.")
+    let m5Off = try #require(state["m5Off"] as? [String: Any])
+    for key in ["aneDisabled", "aneOff", "inactive", "aneNote", "savedAne"] {
+        #expect(m5Off[key] as? Bool == true, "m5 off \(key)")
+    }
+    for key in ["m5Disabled", "aneDesc", "m5Note"] {
+        #expect(m5Off[key] as? Bool == false, "m5 off \(key)")
+    }
+    let m5On = try #require(state["m5On"] as? [String: Any])
+    for key in ["aneDisabled", "aneOff", "inactive", "aneNote"] {
+        #expect(m5On[key] as? Bool == false, "m5 on \(key)")
+    }
+    #expect(m5On["aneDesc"] as? Bool == true)
+    #expect(m5On["barClean"] as? Bool == true)
+}
+
+@MainActor
+@Test func dashboardBlankSSDDirectoryTurnsOffOnlyTheSSDCache() async throws {
+    let messages = CapturedSettingsMessages()
+    let webView = try await loadedDashboard(config: AppConfig(), messages: messages)
+    defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
+    let result = try await webView.evaluateJavaScript("""
+    (() => {
+      navigateTo('settings'); setLanguage('en');
+      const cache = document.getElementById('cfg-cache-enable');
+      const dir = document.getElementById('cfg-cache-dir');
+      const cold = document.getElementById('cfg-cold-cache');
+      const shown = id => !document.getElementById(id).hidden;
+      const out = { defaultCache: cache.checked, defaultDir: dir.value, defaultColdEnabled: !cold.disabled,
+        defaultNote: shown('ssd-requires-dir') };
+      dir.value = ''; dir.dispatchEvent(new Event('input'));
+      out.blank = { coldDisabled: cold.disabled, note: shown('ssd-requires-dir'), desc: shown('cold-cache-desc'),
+        inactive: document.getElementById('cold-cache-row').classList.contains('is-inactive'),
+        hotEnabled: !document.getElementById('cfg-hot-cache-auto').disabled, cacheOn: cache.checked };
+      dir.value = '/tmp/ssd'; dir.dispatchEvent(new Event('input'));
+      out.restored = { coldEnabled: !cold.disabled, note: shown('ssd-requires-dir') };
+      dir.value = ''; dir.dispatchEvent(new Event('input'));
+      return JSON.stringify(out);
+    })()
+    """) as? String
+    let state = try #require(result.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] })
+    // Prefix cache and SSD cache are both on by default.
+    #expect(state["defaultCache"] as? Bool == true)
+    #expect((state["defaultDir"] as? String)?.isEmpty == false)
+    #expect(state["defaultColdEnabled"] as? Bool == true)
+    #expect(state["defaultNote"] as? Bool == false)
+    let blank = try #require(state["blank"] as? [String: Any])
+    for key in ["coldDisabled", "note", "inactive", "hotEnabled", "cacheOn"] {
+        #expect(blank[key] as? Bool == true, "blank \(key)")
+    }
+    #expect(blank["desc"] as? Bool == false)
+    let restored = try #require(state["restored"] as? [String: Any])
+    #expect(restored["coldEnabled"] as? Bool == true)
+    #expect(restored["note"] as? Bool == false)
+
+    _ = try await webView.evaluateJavaScript("saveSettings(); void 0")
+    let deadline = Date().addingTimeInterval(5)
+    while messages.bodies.isEmpty && Date() < deadline {
+        try await Task.sleep(for: .milliseconds(50))
+    }
+    let payload = try #require(messages.bodies.last.flatMap {
+        try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any]
+    })
+    #expect(payload["cache_dir"] as? String == "")
+    #expect(payload["cache_enable"] as? Bool == true)
+}
+
+@MainActor
+@Test func dashboardShowsASavedBlankSSDDirectoryAsBlank() async throws {
+    let messages = CapturedSettingsMessages()
+    let webView = try await loadedDashboard(config: AppConfig(cacheEnable: true, cacheDir: ""), messages: messages)
+    defer { webView.configuration.userContentController.removeAllScriptMessageHandlers() }
+    let result = try await webView.evaluateJavaScript("""
+    (() => {
+      navigateTo('settings');
+      return JSON.stringify({
+        dir: document.getElementById('cfg-cache-dir').value,
+        coldDisabled: document.getElementById('cfg-cold-cache').disabled,
+        note: !document.getElementById('ssd-requires-dir').hidden,
+        clean: document.getElementById('settings-save-bar').dataset.state === 'clean'
+      });
+    })()
+    """) as? String
+    let state = try #require(result.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] })
+    #expect(state["dir"] as? String == "")
+    #expect(state["coldDisabled"] as? Bool == true)
+    #expect(state["note"] as? Bool == true)
+    #expect(state["clean"] as? Bool == true)
 }

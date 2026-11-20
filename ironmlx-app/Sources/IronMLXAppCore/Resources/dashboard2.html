@@ -116,7 +116,7 @@
   /* ── Design system (ds-) ──
      Tokens and components for redesigned pages. Pages not yet migrated keep
      the variables above; nothing here overrides them. The dark values follow
-     the window appearance (Settings > Theme sets it on the web view). */
+     the window appearance (the Settings > Appearance theme control sets it on the web view). */
   :root {
     --ds-surface-0: #f5f5f7;
     --ds-surface-1: #ffffff;
@@ -982,7 +982,18 @@
   }
   .settings-save-status { font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
   .settings-save-notice { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 10px 12px; border: 1px solid transparent; border-radius: 8px; }
-  .settings-save-bar[data-state="clean"] .settings-save-notice { display: none; }
+  #settings-save-bar[data-state="clean"] { display: none; }
+  /* Restart-required changes get an amber tint; other changes stay on the plain surface. */
+  #settings-save-bar[data-restart="true"][data-state="pending"] .settings-save-notice {
+    background: color-mix(in srgb, var(--ds-amber) 16%, var(--ds-surface-0));
+    color: var(--ds-text-1);
+    border-color: color-mix(in srgb, var(--ds-amber) 45%, transparent);
+  }
+  #settings-save-bar[data-restart="false"][data-state="pending"] .settings-save-notice {
+    background: var(--ds-surface-0);
+    color: var(--ds-text-1);
+    border-color: var(--ds-border);
+  }
   .settings-save-icon { display: none; width: 20px; height: 20px; flex-shrink: 0; }
   .settings-save-bar[data-state="pending"] .settings-save-notice,
   .settings-save-bar[data-state="saving"] .settings-save-notice {
@@ -1001,6 +1012,157 @@
   @media (max-width: 720px) {
     .settings-save-bar { flex-wrap: wrap; gap: 8px; }
     .settings-save-actions { margin-left: auto; }
+  }
+
+  /* ── Settings page (ds-) ──
+     Each .ds-settings-card is a group: its .card-header reads as a small title
+     above the card, and its .settings-row children draw the card surface, so
+     rows stay direct children. Everything is scoped to #page-settings: the
+     cluster page and others share .card-settings, .settings-row and .toggle. */
+  #page-settings .settings-page-header .page-title { color: var(--ds-text-1); }
+  #page-settings .settings-page-header .page-subtitle { margin-bottom: 18px; color: var(--ds-text-2); }
+  #page-settings .ds-settings-card {
+    margin: 0 0 22px;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    color: var(--ds-text-1);
+  }
+  #page-settings .ds-settings-card > .card-header {
+    margin: 0;
+    padding: 0 4px 6px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ds-text-2);
+  }
+  #page-settings .ds-settings-card > .settings-row {
+    gap: 16px;
+    min-height: 48px;
+    padding: 12px 16px;
+    border: 0.5px solid var(--ds-border);
+    border-bottom: 0;
+    background: var(--ds-surface-1);
+  }
+  #page-settings .ds-settings-card > .card-header + .settings-row {
+    border-top-left-radius: var(--ds-radius-card);
+    border-top-right-radius: var(--ds-radius-card);
+  }
+  #page-settings .ds-settings-card > .settings-row:last-child {
+    border-bottom: 0.5px solid var(--ds-border);
+    border-bottom-left-radius: var(--ds-radius-card);
+    border-bottom-right-radius: var(--ds-radius-card);
+  }
+  #page-settings .settings-row-left { min-width: 0; gap: 3px; }
+  #page-settings .settings-row-label { flex-wrap: wrap; gap: 6px; font-size: 13px; font-weight: 500; color: var(--ds-text-1); }
+  #page-settings .settings-row-desc { font-size: 12px; line-height: 1.45; color: var(--ds-text-2); }
+  /* A conditional note that continues the row description on the same line. */
+  #page-settings .ds-inline-note { margin-left: 4px; }
+  #page-settings span[hidden] + .ds-inline-note { margin-left: 0; }
+  #page-settings .ds-unsupported-note { color: color-mix(in srgb, var(--ds-amber) 72%, var(--ds-text-1)); }
+  /* A dependent setting: indented under its parent with a guide line, no divider between them. */
+  #page-settings .settings-row.ds-sub-row { position: relative; border-top: none; padding-top: 0; }
+  /* The guide line spans the whole sub-row so consecutive sub-options share one continuous line. */
+  #page-settings .settings-row.ds-sub-row::before { content: ""; position: absolute; top: 0; bottom: 0; left: 26px; border-left: 1.5px solid var(--ds-border-strong); }
+  #page-settings .settings-row.ds-sub-row > .settings-row-left { margin-left: 10px; padding-left: 14px; }
+  #page-settings .settings-row.ds-sub-row .settings-row-label > span:first-child { font-weight: 400; }
+  /* Dim the pieces, not the whole column: opacity on the column would trap the help tooltip under the next row. */
+  #page-settings .settings-row.ds-sub-row.is-inactive > .settings-row-left > .settings-row-desc,
+  #page-settings .settings-row.ds-sub-row.is-inactive > .settings-row-left > .settings-row-label > :not(.profile-help),
+  #page-settings .settings-row.ds-sub-row.is-inactive > .settings-row-left .profile-help-trigger { opacity: 0.45; }
+  /* Shown as off while the setting cannot apply; the saved value is kept. */
+  #page-settings .toggle.is-forced-off input:checked + .toggle-slider { background: var(--ds-control-track); }
+  #page-settings .toggle.is-forced-off input:checked + .toggle-slider::before { transform: none; }
+  .ds-restart-tag, .ds-experimental-tag {
+    display: inline-flex; align-items: center; padding: 1px 7px; border-radius: 999px;
+    font-size: 11px; font-weight: 500; line-height: 1.5; white-space: nowrap;
+    background: var(--ds-surface-2); color: var(--ds-text-2);
+  }
+  .ds-experimental-tag {
+    background: color-mix(in srgb, var(--ds-amber) 16%, var(--ds-surface-2));
+    color: color-mix(in srgb, var(--ds-amber) 72%, var(--ds-text-1));
+  }
+  #page-settings .settings-row-right { gap: 8px; margin-left: 0; }
+  #page-settings .settings-row-right > label:not(.toggle),
+  #page-settings .settings-control-main > label { color: var(--ds-text-2); }
+
+  #page-settings .settings-row-right select,
+  #page-settings .settings-row-right input[type="text"],
+  #page-settings .settings-row-right input[type="number"] {
+    box-sizing: border-box;
+    height: 28px;
+    padding: 0 10px;
+    border: 0.5px solid var(--ds-border-strong);
+    border-radius: var(--ds-radius-control);
+    background-color: var(--ds-surface-1);
+    color: var(--ds-text-1);
+    font: inherit;
+    font-size: 13px;
+  }
+  #page-settings .settings-row-right select { padding-right: 28px; }
+  #page-settings .settings-row-right select:focus-visible,
+  #page-settings .settings-row-right input[type="text"]:focus-visible,
+  #page-settings .settings-row-right input[type="number"]:focus-visible {
+    outline: 2px solid var(--ds-blue);
+    outline-offset: 0;
+  }
+  #page-settings .settings-row-right select:disabled,
+  #page-settings .settings-row-right input:disabled { cursor: default; }
+
+  /* Switch: 30×18, on is --ds-blue. The markup stays label.toggle > input + .toggle-slider. */
+  #page-settings .toggle { width: 30px; height: 18px; }
+  #page-settings .toggle-slider {
+    border-radius: 9px;
+    background: var(--ds-control-track);
+    box-shadow: inset 0 0 0 0.5px var(--ds-border);
+  }
+  #page-settings .toggle-slider::before {
+    top: 2px;
+    left: 2px;
+    width: 14px;
+    height: 14px;
+    box-shadow: var(--ds-control-thumb-shadow);
+  }
+  #page-settings .toggle input:checked + .toggle-slider { background: var(--ds-blue); box-shadow: none; }
+  #page-settings .toggle input:checked + .toggle-slider::before { transform: translateX(12px); }
+  #page-settings .toggle input:focus-visible + .toggle-slider { outline: 2px solid var(--ds-blue); outline-offset: 2px; }
+  #page-settings .toggle input:disabled + .toggle-slider { cursor: default; }
+
+  #page-settings .slider-row { gap: 8px; }
+  #page-settings .slider-row input[type="range"] { background: var(--ds-control-track); }
+  #page-settings .slider-row input[type="range"]::-webkit-slider-thumb {
+    background: var(--ds-blue);
+    box-shadow: var(--ds-control-thumb-shadow);
+  }
+  #page-settings .slider-row input[type="range"]:disabled::-webkit-slider-thumb { background: var(--ds-gray); cursor: default; }
+  #page-settings .slider-row input[type="range"]:focus-visible { outline: 2px solid var(--ds-blue); outline-offset: 4px; }
+  #page-settings .slider-value { color: var(--ds-text-2); font-variant-numeric: tabular-nums; }
+  #page-settings .settings-inline-hint { color: var(--ds-text-3); }
+  #page-settings #settings-page-title:focus { outline: none; }
+
+  /* Appearance: #theme-select is a .ds-seg; its buttons keep .seg-btn and .active. */
+  #page-settings #theme-select.ds-seg { overflow: visible; border: 0; border-radius: var(--ds-radius-control); }
+  #page-settings #theme-select .seg-btn,
+  #page-settings #theme-select .seg-btn.active,
+  #page-settings #theme-select .seg-btn:hover {
+    padding: 3px 12px;
+    border: 0;
+    background: transparent;
+    color: var(--ds-text-2);
+    transition: color 0.15s;
+  }
+  #page-settings #theme-select .seg-btn:hover,
+  #page-settings #theme-select .seg-btn.active { color: var(--ds-text-1); }
+  #page-settings #theme-select .seg-btn.active { font-weight: 500; }
+
+  @media (max-width: 720px) {
+    #page-settings .ds-settings-card > .settings-row { flex-wrap: wrap; row-gap: 10px; }
+    #page-settings .settings-row-left { flex-basis: 100%; }
+    #page-settings .settings-row-right { flex-shrink: 1; flex-wrap: wrap; min-width: 0; margin-left: auto; }
   }
 
   .models-page-scroll.model-manager-active {
@@ -1560,19 +1722,6 @@
     border-color: var(--accent);
     color: var(--accent);
     outline: none;
-  }
-
-  .profile-help-trigger.warning {
-    border-color: var(--border);
-    background: var(--bg);
-    color: var(--text-secondary);
-  }
-
-  .profile-help-trigger.warning:hover,
-  .profile-help-trigger.warning:focus {
-    border-color: #ff9500;
-    background: rgba(255, 149, 0, 0.08);
-    color: #ff9500;
   }
 
   .profile-help-tooltip {
@@ -2588,12 +2737,6 @@
     }
   }
 
-  .badge-live {
-    background: #d4edda;
-    color: #155724;
-    border: 1px solid #28a745;
-  }
-
   .badge-mtp {
     margin-left: 4px;
     background: rgba(0, 122, 255, 0.10);
@@ -2644,14 +2787,6 @@
     color: #5856d6;
     border: 1px solid rgba(88, 86, 214, 0.28);
     white-space: nowrap;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    .badge-live {
-      background: #0a3d1a;
-      color: #28a745;
-      border-color: #155724;
-    }
   }
 
   /* ── Toggle switch ── */
@@ -5717,46 +5852,14 @@
   <!-- Settings Page -->
   <div class="page" id="page-settings">
     <div class="settings-page-header">
-      <div class="page-title" data-i18n="settings_title">App Settings</div>
-      <div class="page-subtitle" id="settings-subtitle">Changes that require saving are shown in the bottom bar.</div>
+      <div class="page-title" id="settings-page-title" tabindex="-1" data-i18n="settings_title">Settings</div>
+      <div class="page-subtitle" id="settings-subtitle">Settings marked <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span> restart the backend when saved</div>
     </div>
 
     <div class="settings-page-scroll page-body-scroll">
 
-    <!-- 1. Server -->
-    <div class="card-settings">
-      <div class="card-header">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><rect x="2" y="2" width="12" height="4" rx="1.5" stroke="currentColor" stroke-width="1.2"/><rect x="2" y="10" width="12" height="4" rx="1.5" stroke="currentColor" stroke-width="1.2"/><circle cx="5" cy="4" r="0.8" fill="currentColor"/><circle cx="5" cy="12" r="0.8" fill="currentColor"/></svg>
-        <span data-i18n="server">Server</span>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="network_mode">Network Mode</span></div><div class="settings-row-desc" data-i18n="network_mode_desc">Local only listens on loopback. LAN adds an authenticated HTTPS listener on one selected interface.</div></div>
-        <div class="settings-row-right"><select id="cfg-network-mode" onchange="refreshNetworkSecurityUI()"><option value="local" data-i18n="network_mode_local">Local only</option><option value="lan" data-i18n="network_mode_lan">LAN (HTTPS + API Key)</option></select></div>
-      </div>
-      <div class="settings-row" id="cfg-lan-host-row" style="display:none;">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="lan_interface">LAN Interface</span></div><div class="settings-row-desc" data-i18n="lan_interface_desc">Select one concrete active LAN address. Wildcard listening is not allowed.</div></div>
-        <div class="settings-row-right"><select id="cfg-lan-host"></select></div>
-      </div>
-      <div class="settings-row" id="cfg-lan-security-row" style="display:none;">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="lan_access_credentials">LAN Access Credentials</div><div class="settings-row-desc" data-i18n="lan_access_credentials_desc" style="color:var(--orange,#ff9500);">LAN traffic requires certificate verification and a Bearer API Key. Never place the key in a URL.</div></div>
-        <div class="settings-row-right" style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn-secondary" type="button" onclick="copyLanAPIKey()" data-i18n="copy_api_key">Copy API Key</button><button class="btn-secondary" type="button" onclick="copyLanCACertificate()" data-i18n="copy_ca_certificate">Copy CA Certificate</button><button class="btn-secondary" type="button" onclick="rotateLanSecurity()" data-i18n="rotate_credentials">Rotate</button></div>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="port">Port</span></div></div>
-        <div class="settings-row-right"><input type="number" value="9068" id="cfg-port"></div>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="log_level">Log Level</span> <span class="badge badge-live" data-i18n="badge_live">live</span></div><div class="settings-row-desc" id="log-level-status" role="status" aria-live="polite" data-i18n="log_level_live_desc">Applies immediately to App and backend diagnostics. Saved automatically; no restart required.</div></div>
-        <div class="settings-row-right"><select id="cfg-log-level" onchange="selectLogLevel(this.value)"><option value="ALL" data-i18n="log_level_all">All</option><option value="DEBUG">DEBUG</option><option value="INFO" selected>INFO (default)</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select></div>
-      </div>
-    </div>
-
-    <!-- 2. Appearance -->
-    <div class="card-settings">
-      <div class="card-header">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><circle cx="8" cy="8" r="5.5" stroke="currentColor" stroke-width="1.2"/><path d="M8 2.5V8L11.5 11.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><circle cx="13" cy="3" r="2" stroke="currentColor" stroke-width="1.2"/></svg>
-        <span data-i18n="appearance">Appearance</span>
-      </div>
+    <section class="card-settings ds-settings-card" data-settings-group="general">
+      <div class="card-header" role="heading" aria-level="2"><span data-i18n="settings_group_general">General</span></div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="interface_language">Language</div></div>
         <div class="settings-row-right">
@@ -5770,174 +5873,173 @@
         </div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label" data-i18n="theme_mode">Theme Mode</div></div>
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="theme_mode">Appearance</div></div>
         <div class="settings-row-right">
-          <div class="seg-group" id="theme-select">
-            <button class="seg-btn" data-value="light" data-i18n="theme_light">Light</button>
-            <button class="seg-btn" data-value="dark" data-i18n="theme_dark">Dark</button>
-            <button class="seg-btn active" data-value="system" data-i18n="theme_system">System</button>
+          <div class="ds-seg seg-group" id="theme-select" role="group" aria-label="Appearance" data-i18n-aria-label="theme_mode">
+            <span class="ds-seg-thumb" aria-hidden="true"></span>
+            <button type="button" class="seg-btn" data-value="light" aria-pressed="false" data-i18n="theme_light">Light</button>
+            <button type="button" class="seg-btn" data-value="dark" aria-pressed="false" data-i18n="theme_dark">Dark</button>
+            <button type="button" class="seg-btn active" data-value="system" aria-pressed="true" data-i18n="theme_system">System</button>
           </div>
         </div>
       </div>
-    </div>
+    </section>
 
-    <!-- 3. Model Runtime -->
-    <div class="card-settings">
-      <div class="card-header">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M3 3.5h10v9H3z" stroke="currentColor" stroke-width="1.2"/><path d="M6 1.5v2M10 1.5v2M6 12.5v2M10 12.5v2M1 6h2M13 6h2M1 10h2M13 10h2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-        <span data-i18n="model_runtime">Model Runtime</span>
+    <section class="card-settings ds-settings-card" data-settings-group="server">
+      <div class="card-header" role="heading" aria-level="2"><span data-i18n="settings_group_server">Server</span></div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="network_mode">Network mode</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="network_mode_desc">Local only listens on loopback. LAN adds an authenticated HTTPS listener on one selected interface.</div></div>
+        <div class="settings-row-right"><select id="cfg-network-mode" onchange="refreshNetworkSecurityUI()"><option value="local" data-i18n="network_mode_local">Local only</option><option value="lan" data-i18n="network_mode_lan">LAN (HTTPS + API Key)</option></select></div>
+      </div>
+      <div class="settings-row ds-sub-row" id="cfg-lan-host-row" style="display:none;">
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="lan_interface">LAN interface</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="lan_interface_desc">Select one concrete active LAN address. Wildcard listening is not allowed.</div></div>
+        <div class="settings-row-right"><select id="cfg-lan-host"></select></div>
+      </div>
+      <div class="settings-row ds-sub-row" id="cfg-lan-security-row" style="display:none;">
+        <div class="settings-row-left"><div class="settings-row-label" data-i18n="lan_access_credentials">LAN access credentials</div><div class="settings-row-desc" data-i18n="lan_access_credentials_desc" style="color:var(--ds-amber);">LAN traffic requires certificate verification and a Bearer API Key. Never place the key in a URL.</div></div>
+        <div class="settings-row-right" style="display:flex;gap:8px;flex-wrap:wrap;"><button class="btn-secondary" type="button" onclick="copyLanAPIKey()" data-i18n="copy_api_key">Copy API Key</button><button class="btn-secondary" type="button" onclick="copyLanCACertificate()" data-i18n="copy_ca_certificate">Copy CA Certificate</button><button class="btn-secondary" type="button" onclick="rotateLanSecurity()" data-i18n="rotate_credentials">Rotate</button></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="port">Port</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div></div>
+        <div class="settings-row-right"><input type="number" value="9068" id="cfg-port"></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="log_level">Log level</span></div><div class="settings-row-desc" id="log-level-status" role="status" aria-live="polite" data-i18n="settings_applies_now">Applies immediately</div></div>
+        <div class="settings-row-right"><select id="cfg-log-level" onchange="selectLogLevel(this.value)"><option value="ALL" data-i18n="log_level_all">All</option><option value="DEBUG">DEBUG</option><option value="INFO" selected>INFO (default)</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option></select></div>
+      </div>
+    </section>
+
+    <section class="card-settings ds-settings-card" data-settings-group="models">
+      <div class="card-header" role="heading" aria-level="2"><span data-i18n="settings_group_models">Models and memory</span></div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="max_models">Models loaded at once</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="max_models_desc">Maximum number of models the App keeps loaded at the same time. When the limit is reached, new model loads are rejected; existing loaded models are not automatically replaced. Unload an unused model manually before loading another.</div></div>
+        <div class="settings-row-right"><input type="number" min="1" max="16" value="3" style="min-width:80px;" id="cfg-max-models"></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="model_ttl">Unload when idle</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="model_ttl_desc">Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.</div></div>
+        <div class="settings-row-right"><input type="number" min="0" max="1440" value="30" style="min-width:80px;" id="cfg-model-ttl"> <span style="font-size:12px;color:var(--ds-text-2);" data-i18n="minutes">minutes</span></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="max_sequences">Concurrent requests</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="max_sequences_desc">Maximum number of concurrent parallel requests.</div></div>
+        <div class="settings-row-right"><input type="number" value="1" style="min-width:80px;" id="cfg-max-sequences"></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="mem_limit_total">Total memory limit</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="mem_limit_total_desc">Limits total memory used by the backend service, including models, KV Cache, and runtime overhead. Set 0 for auto.</div></div>
+        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--ds-blue);" id="cfg-mem-total-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="24" id="cfg-mem-total"><span class="slider-value" data-i18n="auto">Auto</span></div></div>
+      </div>
+      <div class="settings-row">
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="mem_limit_model">Model memory limit</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="mem_limit_model_desc">Limits total memory used by loaded model weights. Set 0 for no limit.</div></div>
+        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--ds-blue);" id="cfg-mem-model-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="22" id="cfg-mem-model"><span class="slider-value" data-i18n="auto">Auto</span></div></div>
       </div>
       <div class="settings-row">
         <div class="settings-row-left"><div class="settings-row-label" data-i18n="verify_model_on_load">Full SHA-256 verification on load</div><div class="settings-row-desc" data-i18n="verify_model_on_load_desc">Recompute every snapshot file checksum immediately before each actual model load. Disabled by default.</div></div>
         <div class="settings-row-right"><label class="toggle"><input type="checkbox" id="cfg-verify-model-on-load"><span class="toggle-slider"></span></label></div>
       </div>
-    </div>
+    </section>
 
-    <!-- 4. Resource Management -->
-    <div class="card-settings">
-      <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
-        <span style="display:flex;align-items:center;gap:8px;">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><circle cx="8" cy="8" r="6.5" stroke="currentColor" stroke-width="1.2"/><line x1="8" y1="4" x2="8" y2="8.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><line x1="8" y1="10.5" x2="8" y2="11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-          <span data-i18n="resource_mgmt">Resource Management</span>
-        </span>
-      </div>
+    <section class="card-settings ds-settings-card" data-settings-group="cache">
+      <div class="card-header" role="heading" aria-level="2"><span data-i18n="settings_group_cache">Cache</span></div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="mem_limit_total">Memory Limit (Total)</span></div><div class="settings-row-desc" data-i18n="mem_limit_total_desc">Limits total memory used by the backend service, including models, KV Cache, and runtime overhead. Set 0 for auto.</div></div>
-        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-total-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="24" id="cfg-mem-total"><span class="slider-value" data-i18n="auto">Auto</span></div></div>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="mem_limit_model">Memory Limit (Model Only)</span></div><div class="settings-row-desc" data-i18n="mem_limit_model_desc">Limits total memory used by loaded model weights. Set 0 for no limit.</div></div>
-        <div class="settings-row-right"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-mem-model-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="128" value="22" id="cfg-mem-model"><span class="slider-value" data-i18n="auto">Auto</span></div></div>
-      </div>
-    </div>
-
-    <!-- 5. Cache -->
-    <div class="card-settings">
-      <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
-        <span style="display:flex;align-items:center;gap:8px;">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M3 5C3 3.5 5.2 2 8 2C10.8 2 13 3.5 13 5V11C13 12.5 10.8 14 8 14C5.2 14 3 12.5 3 11V5Z" stroke="currentColor" stroke-width="1.2"/><ellipse cx="8" cy="5" rx="5" ry="2" stroke="currentColor" stroke-width="1.2"/><path d="M3 8C3 9.1 5.2 10 8 10C10.8 10 13 9.1 13 8" stroke="currentColor" stroke-width="1"/></svg>
-          <span data-i18n="cache">Cache</span>
-        </span>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="enable_cache">Enable Cache</span></div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="enable_cache">Prefix cache</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="enable_cache_desc">Reuses shared prompt prefixes across requests to skip repeated prefill.</div></div>
         <div class="settings-row-right"><label class="toggle"><input type="checkbox" checked id="cfg-cache-enable"><span class="toggle-slider"></span></label></div>
       </div>
-      <div class="settings-row">
+      <div class="settings-row ds-sub-row" id="hot-cache-row">
         <div class="settings-row-left">
           <div class="settings-row-label">
-            <span data-i18n="hot_cache">Hot Cache Limit (Memory Cache)</span>
-            <span class="profile-help">
+            <span data-i18n="hot_cache">Memory cache limit</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span>
+            <span class="profile-help profile-help-fixed">
               <button type="button" class="profile-help-trigger" aria-describedby="hot-cache-help-tooltip" aria-label="Hot cache help">?</button>
-              <span class="profile-help-tooltip" id="hot-cache-help-tooltip" role="tooltip">
-                <span class="profile-help-tooltip-title" data-i18n="hot_cache_help_title">How hot cache works</span>
-                <span class="profile-help-tooltip-body" data-i18n="hot_cache_help_body">Caches frequently used prefixes in memory to reduce repeated request work. Auto mode estimates a conservative limit from system unified memory, capped at 8GB; manual mode sets the memory cache limit. It follows the Enable Cache switch. Save settings and restart the service to apply changes.</span>
+              <span class="profile-help-tooltip profile-help-tooltip-fixed" id="hot-cache-help-tooltip" role="tooltip">
+                <span class="profile-help-tooltip-title" data-i18n="hot_cache_help_title">How the memory cache works</span>
+                <span class="profile-help-tooltip-body" data-i18n="hot_cache_help_body">Caches frequently used prefixes in memory to reduce repeated request work. Auto mode estimates a conservative limit from system unified memory, capped at 8GB; manual mode sets the memory cache limit. It follows the Prefix cache switch. Save settings and restart the service to apply changes.</span>
               </span>
             </span>
           </div>
-          <div class="settings-row-desc" data-i18n="hot_cache_desc">In-memory prefix cache for frequent requests.</div>
+          <div class="settings-row-desc" id="hot-cache-desc" data-i18n="hot_cache_desc">In-memory prefix cache for frequent requests.</div>
+          <div class="settings-row-desc" id="cache-requires-prefix" data-i18n="cache_requires_prefix" hidden>Turn on Prefix cache first.</div>
         </div>
-        <div class="settings-row-right"><div class="settings-control-column"><div class="settings-control-main"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--accent);" id="cfg-hot-cache-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="64" value="8" id="cfg-hot-cache"><span class="slider-value" data-i18n="auto">Auto</span></div></div><div class="settings-inline-hint" id="cfg-hot-cache-auto-hint" data-i18n="hot_cache_auto_hint">Current auto estimate: {value} GB</div></div></div>
+        <div class="settings-row-right"><div class="settings-control-column"><div class="settings-control-main"><label style="font-size:12px;display:flex;align-items:center;gap:4px;"><input type="checkbox" checked style="accent-color:var(--ds-blue);" id="cfg-hot-cache-auto"> <span data-i18n="auto">Auto</span></label><div class="slider-row"><input type="range" min="0" max="64" value="8" id="cfg-hot-cache"><span class="slider-value" data-i18n="auto">Auto</span></div></div><div class="settings-inline-hint" id="cfg-hot-cache-auto-hint">Current auto estimate: {value} GB</div></div></div>
       </div>
-      <div class="settings-row">
+      <div class="settings-row ds-sub-row" id="cache-dir-row">
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="ssd_cache_dir">SSD cache directory</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="ssd_cache_dir_desc">Leave empty to keep the prefix cache in memory only.</div></div>
+        <div class="settings-row-right"><input type="text" value="~/.ironmlx/cache/paged_prefix_cache" style="min-width:260px;" id="cfg-cache-dir"></div>
+      </div>
+      <div class="settings-row ds-sub-row" id="cold-cache-row">
         <div class="settings-row-left">
           <div class="settings-row-label">
-            <span data-i18n="cold_cache">Cold Cache Limit (SSD Cache)</span>
-            <span class="profile-help">
+            <span data-i18n="cold_cache">SSD cache limit</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span>
+            <span class="profile-help profile-help-fixed">
               <button type="button" class="profile-help-trigger" aria-describedby="cold-cache-help-tooltip" aria-label="Cold cache help">?</button>
-              <span class="profile-help-tooltip" id="cold-cache-help-tooltip" role="tooltip">
+              <span class="profile-help-tooltip profile-help-tooltip-fixed" id="cold-cache-help-tooltip" role="tooltip">
                 <span class="profile-help-tooltip-title" data-i18n="cold_cache_help_title">How SSD cache works</span>
-                <span class="profile-help-tooltip-body" data-i18n="cold_cache_help_body">Persists Prefix Cache data on local SSD to reduce prefill work for repeated long prefixes. The maximum value is adjusted from available disk space. It follows the Enable Cache switch; turn off Enable Cache to disable it. Save settings and restart the service to apply changes.</span>
+                <span class="profile-help-tooltip-body" data-i18n="cold_cache_help_body">Keeps prefix cache data on local SSD so repeated long prompts skip prefill. The maximum follows the free disk space.</span>
               </span>
             </span>
           </div>
-          <div class="settings-row-desc" data-i18n="cold_cache_desc">Limits SSD Prefix Cache disk usage.</div>
+          <div class="settings-row-desc" id="cold-cache-desc" data-i18n="cold_cache_desc">Limits SSD Prefix Cache disk usage.</div>
+          <div class="settings-row-desc" id="ssd-requires-dir" data-i18n="ssd_requires_dir" hidden>SSD cache is off while the SSD cache directory is empty.</div>
         </div>
         <div class="settings-row-right"><div class="slider-row"><input type="range" min="1" max="10" value="10" id="cfg-cold-cache"><span class="slider-value">10GB</span></div></div>
       </div>
       <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="ssd_cache_dir">SSD Cache Directory</span></div></div>
-        <div class="settings-row-right"><input type="text" value="~/.ironmlx/cache/paged_prefix_cache" style="min-width:260px;" id="cfg-cache-dir"></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="kv_quant">KV cache compression</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="kv_quant_desc">Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.</div></div>
+        <div class="settings-row-right"><select id="cfg-kv-quant" style="min-width:160px;"><option value="none" data-i18n="kv_quant_off">Off</option><option value="turbo3">TurboQuant K3V3</option><option value="turbo4">TurboQuant K4V4</option><option value="k3v4">TurboQuant K3V4</option></select></div>
       </div>
       <div class="settings-row">
         <div class="settings-row-left">
           <div class="settings-row-label" style="display:flex;align-items:center;gap:6px;">
-            <span data-i18n="active_kv_offload">Active KV Cache Offload</span>
+            <span data-i18n="active_kv_offload">Active KV cache offload</span> <span class="ds-experimental-tag" data-i18n="settings_experimental_tag">Experimental</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span>
             <span class="profile-help profile-help-fixed">
-              <button type="button" class="profile-help-trigger warning" id="active-kv-help-trigger" aria-describedby="active-kv-help-tooltip" aria-label="Active KV offload help">!</button>
+              <button type="button" class="profile-help-trigger" id="active-kv-help-trigger" aria-describedby="active-kv-help-tooltip" aria-label="Active KV offload help">?</button>
               <span class="profile-help-tooltip profile-help-tooltip-fixed" id="active-kv-help-tooltip" role="tooltip">
-                <span class="profile-help-tooltip-title" data-i18n="active_kv_offload_help_title">Experimental cache residency</span>
-                <span class="profile-help-tooltip-body" data-i18n="active_kv_offload_help_body">Moves paused active KV cache payloads to local SSD storage so new requests can run when sequence slots are full.</span>
-                <span class="profile-help-tooltip-flow" data-i18n="active_kv_offload_help_trigger">Enabling it does not mean offload happens immediately. The system triggers it automatically when scheduling, KV residency pressure, or request park/restore requires it; it may stay idle when the system is idle or memory pressure is low.</span>
-                <span class="profile-help-tooltip-flow" data-i18n="active_kv_offload_help_applicable">Applicable: Full Attention dense/paged, TurboQuant packed Full Attention, MLA, and GatedDelta/Linear.</span>
-                <span class="profile-help-tooltip-flow" data-i18n="active_kv_offload_help_not_applicable">Not applicable: MTP speculative side cache.</span>
+                <span class="profile-help-tooltip-title" data-i18n="active_kv_offload_help_title">How active KV offload works</span>
+                <span class="profile-help-tooltip-body" data-i18n="active_kv_offload_help_body">When memory runs short or all sequence slots are busy, writes the KV cache of in-progress requests to local SSD and reads it back when needed, allowing longer contexts and more concurrent requests. Generation gets slower, and a paused request stops briefly.</span>
+                <span class="profile-help-tooltip-flow" data-i18n="active_kv_offload_help_not_applicable">Not applicable: DFlash2 models and the MTP speculative cache.</span>
               </span>
             </span>
           </div>
-          <div class="settings-row-desc" data-i18n="active_kv_offload_desc">Experimental. Keep a hot KV window resident and move paused active KV cache payloads to SSD for long logical MAX CONTEXT TOKENS.</div>
+          <div class="settings-row-desc" data-i18n="active_kv_offload_desc">Moves the KV cache of in-progress requests to SSD when memory is tight.</div>
         </div>
         <div class="settings-row-right"><label class="toggle"><input type="checkbox" id="cfg-active-kv-offload"><span class="toggle-slider"></span></label></div>
       </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="kv_quant">KV Cache Compression</span></div><div class="settings-row-desc" data-i18n="kv_quant_desc">Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.</div></div>
-        <div class="settings-row-right"><select id="cfg-kv-quant" style="min-width:160px;"><option value="none" data-i18n="kv_quant_off">Off</option><option value="turbo3">TurboQuant K3V3</option><option value="turbo4">TurboQuant K4V4</option><option value="k3v4">TurboQuant K3V4</option></select></div>
-      </div>
-    </div>
+    </section>
 
-    <!-- 6. Advanced -->
-    <div class="card-settings">
-      <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
-        <span style="display:flex;align-items:center;gap:8px;">
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="opacity:0.55;"><path d="M2 4L8 2L14 4V12L8 14L2 12V4Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M2 4L8 6L14 4" stroke="currentColor" stroke-width="1.2"/><line x1="8" y1="6" x2="8" y2="14" stroke="currentColor" stroke-width="1.2"/></svg>
-          <span data-i18n="advanced">Advanced</span>
-        </span>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="max_sequences">Max Sequences</span></div><div class="settings-row-desc" data-i18n="max_sequences_desc">Maximum number of concurrent parallel requests.</div></div>
-        <div class="settings-row-right"><input type="number" value="1" style="min-width:80px;" id="cfg-max-sequences"></div>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="max_models">Max Concurrent Loaded Models</span></div><div class="settings-row-desc" data-i18n="max_models_desc">Maximum number of models the App keeps loaded at the same time. When the limit is reached, new model loads are rejected; existing loaded models are not automatically replaced. Unload an unused model manually before loading another.</div></div>
-        <div class="settings-row-right"><input type="number" min="1" max="16" value="3" style="min-width:80px;" id="cfg-max-models"></div>
-      </div>
-      <div class="settings-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="model_ttl">Model Auto-Unload (TTL)</span></div><div class="settings-row-desc" data-i18n="model_ttl_desc">Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.</div></div>
-        <div class="settings-row-right"><input type="number" min="0" max="1440" value="30" style="min-width:80px;" id="cfg-model-ttl"> <span style="font-size:12px;color:var(--text-secondary);" data-i18n="minutes">minutes</span></div>
-      </div>
+    <section class="card-settings ds-settings-card" data-settings-group="acceleration">
+      <div class="card-header" role="heading" aria-level="2"><span data-i18n="settings_group_acceleration">Acceleration</span></div>
       <div class="settings-row">
         <div class="settings-row-left">
           <div class="settings-row-label" style="display:flex;align-items:center;gap:6px;">
-            <span data-i18n="m5_dflash2_profile">M5 DFlash2 Profile</span>
+            <span data-i18n="m5_dflash2_profile">M5 DFlash2 optimization</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span>
             <span class="profile-help profile-help-fixed">
-              <button type="button" class="profile-help-trigger" id="m5-dflash2-profile-help-trigger" aria-describedby="m5-dflash2-profile-help-tooltip" aria-label="M5 DFlash2 Profile help" data-i18n-aria-label="m5_dflash2_profile_help_label">?</button>
+              <button type="button" class="profile-help-trigger" id="m5-dflash2-profile-help-trigger" aria-describedby="m5-dflash2-profile-help-tooltip" aria-label="M5 DFlash2 optimization help" data-i18n-aria-label="m5_dflash2_profile_help_label">?</button>
               <span class="profile-help-tooltip profile-help-tooltip-fixed" id="m5-dflash2-profile-help-tooltip" role="tooltip">
-                <span class="profile-help-tooltip-title" data-i18n="m5_dflash2_profile_help_title">About the M5 DFlash2 Profile</span>
+                <span class="profile-help-tooltip-title" data-i18n="m5_dflash2_profile_help_title">About the M5 DFlash2 optimization</span>
                 <span class="profile-help-tooltip-body" data-i18n="m5_dflash2_profile_help_body">On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings. Qwen 3.6 35B A3B uses its own tuned settings.</span>
               </span>
             </span>
           </div>
-          <div class="settings-row-desc" data-i18n="m5_dflash2_profile_desc">Automatically optimizes DFlash2 inference on supported devices.</div>
+          <div class="settings-row-desc" id="m5-dflash2-profile-desc" data-i18n="m5_dflash2_profile_desc">Automatically optimizes DFlash2 inference on supported devices.</div>
+          <div class="settings-row-desc ds-unsupported-note" id="m5-unsupported-note" data-i18n="m5_unsupported_chip" hidden>Not supported on this Mac's chip. Requires M5 or newer.</div>
         </div>
         <div class="settings-row-right"><label class="toggle"><input type="checkbox" id="cfg-m5-dflash2-profile" checked><span class="toggle-slider"></span></label></div>
       </div>
-      <div class="settings-row">
+      <div class="settings-row ds-sub-row" id="ane-row">
         <div class="settings-row-left">
           <div class="settings-row-label" style="display:flex;align-items:center;gap:6px;">
-            <span data-i18n="ane_acceleration">Neural Engine (ANE) Acceleration</span>
+            <span data-i18n="ane_acceleration">Neural Engine (ANE) acceleration</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span>
             <span class="profile-help profile-help-fixed">
               <button type="button" class="profile-help-trigger" id="ane-help-trigger" aria-describedby="ane-help-tooltip" aria-label="Neural Engine Acceleration help" data-i18n-aria-label="ane_help_label">?</button>
               <span class="profile-help-tooltip profile-help-tooltip-fixed" id="ane-help-tooltip" role="tooltip">
                 <span class="profile-help-tooltip-title" data-i18n="ane_help_title">About Neural Engine Acceleration</span>
-                <span class="profile-help-tooltip-body" data-i18n="ane_help_body">When the M5 DFlash2 Profile is active, dense models such as Qwen 3.8 27B hand part of each MLP to the Neural Engine while prefilling prompts of 2,048 tokens or more, shortening the time to first token on long prompts. Short prompts, decoding and MoE models such as Qwen 3.6 35B A3B do not use it. Turn off to keep all computation on the GPU.</span>
+                <span class="profile-help-tooltip-body" data-i18n="ane_help_body">When the M5 DFlash2 optimization is active, dense models such as Qwen 3.8 27B hand part of each MLP to the Neural Engine while prefilling prompts of 2,048 tokens or more, shortening the time to first token on long prompts. Short prompts, decoding and MoE models such as Qwen 3.6 35B A3B do not use it. Turn off to keep all computation on the GPU.</span>
               </span>
             </span>
           </div>
-          <div class="settings-row-desc" data-i18n="ane_acceleration_desc">Shares long-prompt prefill of dense models with the Neural Engine on supported devices.</div>
-          <div class="settings-row-desc" id="ane-requires-m5-profile" data-i18n="ane_requires_m5_profile" hidden>Takes effect only with the M5 DFlash2 Profile on.</div>
+          <div class="settings-row-desc"><span id="ane-acceleration-desc" data-i18n="ane_acceleration_desc">Offloads part of long-prompt prefill for dense models to the Neural Engine.</span><span class="ds-inline-note" id="ane-requires-m5-profile" data-i18n="ane_requires_m5_profile" hidden>Turn on M5 DFlash2 optimization first.</span></div>
         </div>
         <div class="settings-row-right"><label class="toggle"><input type="checkbox" id="cfg-ane" checked><span class="toggle-slider"></span></label></div>
       </div>
-    </div>
+    </section>
 
     </div>
     <div class="settings-save-bar" id="settings-save-bar" data-state="clean">
@@ -6404,7 +6506,7 @@
                 <span class="profile-help-tooltip profile-help-tooltip-fixed" id="dflash2-tensor-batch-help-tooltip" role="tooltip">
                   <span class="profile-help-tooltip-title" data-i18n="dflash2_tensor_batch_help_title">How Tensor Batch Limit is applied</span>
                   <span class="profile-help-tooltip-body" data-i18n="dflash2_tensor_batch_help_body">Limits how many compatible requests can be combined in one MLX tensor batch. Leave blank for Auto (4).</span>
-                  <span class="profile-help-tooltip-flow" data-i18n="dflash2_tensor_batch_help_constraint">The effective width is the minimum of this limit, Settings &gt; Advanced &gt; Max Sequences, and the number of ready compatible requests. Incompatible or divergent requests use B1.</span>
+                  <span class="profile-help-tooltip-flow" data-i18n="dflash2_tensor_batch_help_constraint">The effective width is the minimum of this limit, Settings &gt; Models and memory &gt; Concurrent requests, and the number of ready compatible requests. Incompatible or divergent requests use B1.</span>
                 </span>
               </span>
             </div>
@@ -6957,8 +7059,8 @@
       mtp_status_available: "MTP available", mtp_status_incompatible: "No compatible MTP weights", mtp_status_unavailable: "No compatible MTP weights",
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "This model is running with DFlash2 acceleration.",
       dflash2_acceleration: "DFlash2 Acceleration", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft Precision", dflash2_tensor_batch_max_width: "Tensor Batch Limit", auto_default_4: "Auto (4)",
-      dflash2_tensor_batch_help_label: "About Tensor Batch Limit", dflash2_tensor_batch_help_title: "How Tensor Batch Limit is applied", dflash2_tensor_batch_help_body: "Limits how many compatible requests can be combined in one MLX tensor batch. Leave blank for Auto (4).", dflash2_tensor_batch_help_constraint: "The effective width is the minimum of this limit, Settings > Advanced > Max Sequences, and the number of ready compatible requests. This setting does not increase Max Sequences; incompatible or divergent requests use B1.",
-      dflash2_help_label: "About DFlash2 acceleration", dflash2_help_title: "How DFlash2 acceleration works", dflash2_help_body: "DFlash2 uses a dedicated draft model and an isolated verification actor. Tensor Batch Limit caps compatible requests combined in one tensor operation; the actual width is the minimum of Max Sequences, this limit, and ready compatible requests. Empty uses the certified default 4. Changing this setting restarts the backend in single-target mode.", dflash2_help_exclusive: "DFlash2 cannot run together with MTP or repeated-text acceleration.",
+      dflash2_tensor_batch_help_label: "About Tensor Batch Limit", dflash2_tensor_batch_help_title: "How Tensor Batch Limit is applied", dflash2_tensor_batch_help_body: "Limits how many compatible requests can be combined in one MLX tensor batch. Leave blank for Auto (4).", dflash2_tensor_batch_help_constraint: "The effective width is the minimum of this limit, Settings > Models and memory > Concurrent requests, and the number of ready compatible requests. This setting does not increase concurrent requests; incompatible or divergent requests use B1.",
+      dflash2_help_label: "About DFlash2 acceleration", dflash2_help_title: "How DFlash2 acceleration works", dflash2_help_body: "DFlash2 uses a dedicated draft model and an isolated verification actor. Tensor Batch Limit caps compatible requests combined in one tensor operation; the actual width is the minimum of concurrent requests, this limit, and ready compatible requests. Empty uses the certified default 4. Changing this setting restarts the backend in single-target mode.", dflash2_help_exclusive: "DFlash2 cannot run together with MTP or repeated-text acceleration.",
       dflash2_help_status_available: "Current status: compatible DFlash2 draft detected. Block Size follows the selected draft checkpoint, capped at the qualified Q8 width, and cannot be edited.", dflash2_help_status_incompatible: "Current status: the detected DFlash2 draft is incompatible with this model.", dflash2_help_status_unavailable: "Current status: no compatible DFlash2 draft was found.", dflash2_status_incompatible: "DFlash2 draft is incompatible", dflash2_status_unavailable: "No compatible DFlash2 draft", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch Limit must be a positive integer, or empty for Auto (4).",
       model_exists_locally: "Model \"{name}\" already exists locally.",
       menu_start_needs_model: "No default model is set. Download a model and choose it as the default; IronMLX will start the backend automatically.",
@@ -7035,14 +7137,14 @@
       err_all_models_pinned: "All loaded models are pinned. Unload a pinned model before loading another.",
       err_memory_pressure: "GPU memory is too high to load a new model right now. Unload an existing model or free memory and retry.",
       err_gpu_memory_insufficient: "Not enough available GPU memory to safely load this model. Unload one or more unused loaded models to free GPU memory, then try again.",
-      err_max_loaded_models_reached: "Maximum concurrent loaded models reached. Unload an unused loaded model before loading another model.",
+      err_max_loaded_models_reached: "The “Models loaded at once” limit has been reached. Unload an unused loaded model before loading another model.",
       err_load_result_unknown: "The backend no longer reports this model load, so its result is unknown. Check whether the model is loaded, then try again if needed.",
       err_load_failed: "The model failed to load for a reason that could not be identified. Check the logs for details.",
       err_model_task_mismatch: "This model's type does not support this kind of task or these load settings.",
       err_model_reload_busy: "The model is processing requests. Wait for it to become idle before switching versions.",
-      err_model_memory_limit_exceeded: "Model memory limit reached. Unload one or more loaded models, raise Memory Limit (Model Only), or set it to Auto, then try again.",
-      err_total_memory_limit_exceeded: "Total memory limit reached. Unload one or more loaded models, raise Memory Limit (Total), or set it to Auto, then try again.",
-      err_kv_memory_budget_exceeded: "KV cache memory budget is insufficient. For long-context models, enable Active KV Cache Offload with cache enabled, or lower Max Sequences / MAX CONTEXT TOKENS and retry.",
+      err_model_memory_limit_exceeded: "Model memory limit reached. Unload one or more loaded models, raise the “Model memory limit”, or set it to Auto, then try again.",
+      err_total_memory_limit_exceeded: "Total memory limit reached. Unload one or more loaded models, raise the “Total memory limit”, or set it to Auto, then try again.",
+      err_kv_memory_budget_exceeded: "KV cache memory budget is insufficient. For long-context models, enable “Active KV cache offload” with “Prefix cache” turned on, or lower concurrent requests / MAX CONTEXT TOKENS and retry.",
       err_mtp_model_dir_required: "Select local MTP weights before enabling MTP acceleration.",
       err_mtp_base_model_not_found: "The base model directory does not exist. Re-download the model and try again.",
       err_mtp_model_not_found: "The selected MTP weights are not available locally. Re-download the MTP weights or choose another one.",
@@ -7051,7 +7153,7 @@
       err_mtp_invalid_config: "The MTP weights config is invalid. Re-download the weights or choose another one.",
       err_mtp_invalid_draft_tokens: "MTP Draft Tokens must be a valid positive value.",
       err_mtp_incompatible: "The selected MTP weights are not compatible with this base model. Choose matching MTP weights and try again.",
-      err_memory_budget_exceeded: "KV cache memory budget is insufficient. Current Max Sequences ({max_sequences}) and this model's logical MAX CONTEXT TOKENS ({max_cache_cap}) exceed the resident budget. Enable Active KV Cache Offload with cache enabled for long contexts, or lower Max Sequences / MAX CONTEXT TOKENS and retry.",
+      err_memory_budget_exceeded: "KV cache memory budget is insufficient. The current “Concurrent requests” setting ({max_sequences}) and this model's logical MAX CONTEXT TOKENS ({max_cache_cap}) exceed the resident budget. Enable “Active KV cache offload” with “Prefix cache” turned on for long contexts, or lower concurrent requests / MAX CONTEXT TOKENS and retry.",
       err_cache_init_failed: "Could not initialize the on-disk KV cache: {detail}",
       err_model_path_not_found: "Model not found locally: \"{name}\". Download it first from HuggingFace / ModelScope or check the repo ID.",
       err_hf_api_init_failed: "Could not initialize the HuggingFace downloader: {detail}",
@@ -7135,11 +7237,13 @@
       log_exported: "Log exported.", log_export_failed: "Could not export the log. Check the destination and available disk space.",
       log_viewer: "Log Viewer", auto_refresh: "Auto Refresh", log_lines: "Lines:", log_interval: "Interval:", log_interval_hint: "sec (0=off)", log_file: "File:", log_level_filter: "Level:", log_level_all: "ALL", log_search: "Search:", refresh: "Refresh", auto_scroll: "Auto Scroll", log_showing: "Showing", log_lines_unit: "lines", export_log: "Export Log",
       log_server_offline: "Backend is not running", log_start_hint: "Load a local model from Models to start it and view logs.", log_no_entries: "No log entries", log_no_app_logs: "No app log entries",
-      settings_title: "App Settings", settings_subtitle_html: 'Changes that require saving are shown in the bottom bar.',
-      server: "Server", host: "Host", port: "Port", log_level: "Log Level",
-      network_mode: "Network Mode", network_mode_desc: "Local only listens on loopback. LAN adds an authenticated HTTPS listener on one selected interface.", network_mode_local: "Local only", network_mode_lan: "LAN (HTTPS + API Key)",
-      lan_interface: "LAN Interface", lan_interface_desc: "Select one concrete active LAN address. Wildcard listening is not allowed.",
-      lan_access_credentials: "LAN Access Credentials", lan_access_credentials_desc: "LAN traffic requires certificate verification and a Bearer API Key. Never place the key in a URL.", copy_api_key: "Copy API Key", copy_ca_certificate: "Copy CA Certificate", rotate_credentials: "Rotate",
+      settings_title: "Settings", settings_header_hint: "Settings marked {tag} restart the backend when saved",
+      settings_restart_tag: "Restart required", settings_experimental_tag: "Experimental", settings_applies_now: "Applies immediately",
+      settings_group_general: "General", settings_group_server: "Server", settings_group_models: "Models and memory", settings_group_cache: "Cache", settings_group_acceleration: "Acceleration",
+      server: "Server", host: "Host", port: "Port", log_level: "Log level",
+      network_mode: "Network mode", network_mode_desc: "Local only listens on loopback. LAN adds an authenticated HTTPS listener on one selected interface.", network_mode_local: "Local only", network_mode_lan: "LAN (HTTPS + API Key)",
+      lan_interface: "LAN interface", lan_interface_desc: "Select one concrete active LAN address. Wildcard listening is not allowed.",
+      lan_access_credentials: "LAN access credentials", lan_access_credentials_desc: "LAN traffic requires certificate verification and a Bearer API Key. Never place the key in a URL.", copy_api_key: "Copy API Key", copy_ca_certificate: "Copy CA Certificate", rotate_credentials: "Rotate",
       msg_lan_api_key_copied: "API Key copied. The clipboard will be cleared after 60 seconds if unchanged.", msg_lan_ca_certificate_copied: "CA certificate copied.", msg_lan_security_rotated_and_copied: "LAN credentials rotated. The new API Key was copied.",
       err_lan_address_invalid: "Select a concrete active LAN interface before saving.", err_lan_keychain_unavailable: "IronMLX could not access the macOS Keychain (status {os_status}).", err_lan_security_material_missing: "LAN authentication or TLS material is missing.", err_lan_certificate_generation_failed: "IronMLX could not generate the LAN TLS certificate.", err_lan_mode_required: "Enable LAN mode before managing LAN access credentials.", err_lan_security_rotation_rolled_back: "Credential rotation failed. The previous LAN credential and network configuration were restored.", err_lan_security_rotation_failed: "LAN credential rotation failed.", err_lan_security_action_failed: "The LAN security action failed.", err_network_restart_rolled_back: "The new network configuration could not start. The previous configuration was restored.", err_settings_invalid: "The settings are invalid and were not saved.",
       err_configuration_recovery_required: "Recover the damaged configuration before saving settings.",
@@ -7148,35 +7252,35 @@
       err_configuration_lkg_unavailable: "The last-known-good configuration is unavailable or invalid.",
       err_model_parameters_invalid: "Invalid model parameter: {field}. No changes were saved.",
       err_settings_persist_failed: "IronMLX could not save the application settings. Check file permissions and available disk space.",
-      badge_restart: "restart", badge_live: "live", requires_restart: "requires restart",
-      appearance: "Appearance", interface_language: "Language", theme_mode: "Theme Mode", theme_light: "Light", theme_dark: "Dark", theme_system: "System",
-      model_runtime: "Model Runtime", verify_model_on_load: "Full SHA-256 verification on load", verify_model_on_load_desc: "Recompute every snapshot file checksum immediately before each actual model load. Disabled by default.",
-      resource_mgmt: "Resource Management",
-      mem_limit_total: "Memory Limit (Total)", mem_limit_total_desc: "Limits total memory used by the backend service, including models, KV Cache, and runtime overhead. Set 0 for auto.",
-      mem_limit_model: "Memory Limit (Model Only)", mem_limit_model_desc: "Limits total memory used by loaded model weights. Set 0 for no limit.",
-      hot_cache: "Hot Cache Limit (Memory Cache)", hot_cache_desc: "In-memory prefix cache for frequent requests.", hot_cache_help_title: "How hot cache works", hot_cache_help_body: "Caches frequently used prefixes in memory to reduce repeated request work. Auto mode estimates a conservative limit from system unified memory, capped at 8GB; manual mode sets the memory cache limit. It follows the Enable Cache switch. Save settings and restart the service to apply changes.",
-      cold_cache: "Cold Cache Limit (SSD Cache)", cold_cache_desc: "Limits SSD Prefix Cache disk usage.", cold_cache_help_title: "How SSD cache works", cold_cache_help_body: "Persists Prefix Cache data on local SSD to reduce prefill work for repeated long prefixes. The maximum value is adjusted from available disk space. It follows the Enable Cache switch; turn off Enable Cache to disable it. Save settings and restart the service to apply changes.",
+      badge_restart: "restart", requires_restart: "requires restart",
+      interface_language: "Language", theme_mode: "Appearance", theme_light: "Light", theme_dark: "Dark", theme_system: "System",
+      verify_model_on_load: "Full SHA-256 verification on load", verify_model_on_load_desc: "Recompute every snapshot file checksum immediately before each actual model load. Disabled by default.",
+      mem_limit_total: "Total memory limit", mem_limit_total_desc: "Limits total memory used by the backend service, including models, KV Cache, and runtime overhead. Set 0 for auto.",
+      mem_limit_model: "Model memory limit", mem_limit_model_desc: "Limits total memory used by loaded model weights. Set 0 for no limit.",
+      hot_cache: "Memory cache limit", hot_cache_desc: "In-memory prefix cache for frequent requests.", hot_cache_help_title: "How the memory cache works", hot_cache_help_body: "Keeps frequently used prompt prefixes in memory. Auto sizes the limit from system unified memory, up to 8GB; turn Auto off to set your own limit.",
+      cold_cache: "SSD cache limit", cold_cache_desc: "Limits SSD Prefix Cache disk usage.", cold_cache_help_title: "How SSD cache works", cold_cache_help_body: "Keeps prefix cache data on local SSD so repeated long prompts skip prefill. The maximum follows the free disk space.",
       auto: "Auto",
-      cache: "Cache", enable_cache: "Enable Cache", ssd_cache_dir: "SSD Cache Directory",
-      active_kv_offload: "Active KV Cache Offload", active_kv_offload_desc: "Experimental. Keep a hot KV window resident and move paused active KV cache payloads to SSD for long logical MAX CONTEXT TOKENS.", active_kv_offload_help_title: "Experimental cache residency", active_kv_offload_help_body: "Moves paused active KV cache payloads to local SSD storage so new requests can run when sequence slots are full.", active_kv_offload_help_trigger: "Enabling it does not mean offload happens immediately. The system triggers it automatically when scheduling, KV residency pressure, or request park/restore requires it; it may stay idle when the system is idle or memory pressure is low.", active_kv_offload_help_applicable: "Applicable: Full Attention dense/paged, TurboQuant packed Full Attention, MLA, and GatedDelta/Linear.", active_kv_offload_help_not_applicable: "Not applicable: MTP speculative side cache.",
-      m5_dflash2_profile: "M5 DFlash2 Profile", m5_dflash2_profile_desc: "Automatically optimizes DFlash2 inference on supported devices.", m5_dflash2_profile_help_title: "About the M5 DFlash2 Profile", m5_dflash2_profile_help_body: "On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings. Qwen 3.6 35B A3B uses its own tuned settings.", m5_dflash2_profile_help_label: "M5 DFlash2 Profile help",
-      ane_acceleration: "Neural Engine (ANE) Acceleration", ane_acceleration_desc: "Shares long-prompt prefill of dense models with the Neural Engine on supported devices.", ane_help_title: "About Neural Engine Acceleration", ane_help_body: "When the M5 DFlash2 Profile is active, dense models such as Qwen 3.8 27B hand part of each MLP to the Neural Engine while prefilling prompts of 2,048 tokens or more, shortening the time to first token on long prompts. Short prompts, decoding and MoE models such as Qwen 3.6 35B A3B do not use it. Turn off to keep all computation on the GPU.", ane_help_label: "Neural Engine Acceleration help", ane_requires_m5_profile: "Takes effect only with the M5 DFlash2 Profile on.",
-      kv_quant: "KV Cache Compression", kv_quant_desc: "Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.", kv_quant_off: "Off", model_ttl: "Model Auto-Unload (TTL)", model_ttl_desc: "Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.", minutes: "minutes",
+      cache: "Cache", enable_cache: "Prefix cache", cache_requires_prefix: "Turn on Prefix cache first.", enable_cache_desc: "Reuses shared prompt prefixes across requests to skip repeated prefill.", ssd_cache_dir: "SSD cache directory", ssd_cache_dir_desc: "Leave empty to keep the prefix cache in memory only.", ssd_requires_dir: "SSD cache is off while the SSD cache directory is empty.",
+      active_kv_offload: "Active KV cache offload", active_kv_offload_desc: "Moves the KV cache of in-progress requests to SSD when memory is tight.", active_kv_offload_help_title: "How active KV offload works", active_kv_offload_help_body: "When memory runs short or all sequence slots are busy, writes the KV cache of in-progress requests to local SSD and reads it back when needed, allowing longer contexts and more concurrent requests. Generation gets slower, and a paused request stops briefly.", active_kv_offload_help_not_applicable: "Not applicable: DFlash2 models and the MTP speculative cache.",
+      m5_dflash2_profile: "M5 DFlash2 optimization", m5_dflash2_profile_desc: "Automatically optimizes DFlash2 inference on supported devices.", m5_dflash2_profile_help_title: "About the M5 DFlash2 optimization", m5_dflash2_profile_help_body: "On Apple M5 (GPU family 17) and newer, DFlash2 serving uses the tuned M5 kernels, tree drafting and batching under load. Each feature falls back automatically when it does not apply. Turn off to use the generic settings. Qwen 3.6 35B A3B uses its own tuned settings.", m5_dflash2_profile_help_label: "M5 DFlash2 optimization help",
+      ane_acceleration: "Neural Engine (ANE) acceleration", ane_acceleration_desc: "Offloads part of long-prompt prefill for dense models to the Neural Engine.", ane_help_title: "About Neural Engine Acceleration", ane_help_body: "When the M5 DFlash2 optimization is active, dense models such as Qwen 3.8 27B hand part of each MLP to the Neural Engine while prefilling prompts of 2,048 tokens or more, shortening the time to first token on long prompts. Short prompts, decoding and MoE models such as Qwen 3.6 35B A3B do not use it. Turn off to keep all computation on the GPU.", ane_help_label: "Neural Engine Acceleration help", ane_requires_m5_profile: "Turn on M5 DFlash2 optimization first.", m5_unsupported_chip: "Not supported on this Mac's chip. Requires M5 or newer.",
+      kv_quant: "KV cache compression", kv_quant_desc: "Use TurboQuant to reduce runtime KV Cache memory usage for long contexts. K3V3 saves more memory, K4V4 is more conservative, and K3V4 is the recommended balanced option.", kv_quant_off: "Off", model_ttl: "Unload when idle", model_ttl_desc: "Automatically unload loaded models after they stay idle for this many minutes. 0 = disabled. The default model preference is preserved.", minutes: "minutes",
       advanced: "Advanced", batch_processing: "Batch Processing",
-      max_sequences: "Max Sequences", max_sequences_desc: "Maximum number of concurrent parallel requests.",
-      max_models: "Max Concurrent Loaded Models", max_models_desc: "Maximum number of models the App keeps loaded at the same time. When the limit is reached, new model loads are rejected; existing loaded models are not automatically replaced. Unload an unused model manually before loading another.",
+      max_sequences: "Concurrent requests", max_sequences_desc: "Maximum number of concurrent parallel requests.",
+      max_models: "Models loaded at once", max_models_desc: "Maximum number of models the App keeps loaded at the same time. When the limit is reached, new model loads are rejected; existing loaded models are not automatically replaced. Unload an unused model manually before loading another.",
       completion_batch: "Completion Batch Size", completion_batch_desc: "Batch size for the token generation phase.",
       save_settings: "Save Settings",
       settings_saved: "Settings saved successfully.",
       settings_clean: "No unsaved changes",
-      settings_dirty: "You have unsaved changes",
-      settings_restart_pending: "You have unsaved changes. Saving will restart the service.",
+      settings_changes_count: "{n} changes",
+      settings_changes_one: "1 change",
+      settings_changes_cluster: " (of which {m} on the Cluster page)",
+      settings_restart_note: "Saving restarts the backend and interrupts requests in progress",
       settings_next_start: "Changes will apply the next time the service starts",
       save_restart_settings: "Save and restart service",
       settings_saving: "Saving settings…",
       settings_restarting: "Saving and restarting service…",
       settings_save_failed: "Settings were not saved. Review the error and try again.",
-      log_level_live_desc: "Applies immediately to App and backend diagnostics. Saved automatically; no restart required.",
       log_level_applying: "Applying log level…",
       err_log_level_apply_failed: "Could not apply the log level. The previous setting is retained.",
       err_log_level_rollback_failed: "Could not confirm backend rollback. Check service status before retrying.",
@@ -7760,8 +7864,8 @@
       mtp_status_available: "MTP 可用", mtp_status_incompatible: "无兼容 MTP 权重", mtp_status_unavailable: "未发现兼容的 MTP 权重",
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "该模型正在使用 DFlash2 加速。",
       dflash2_acceleration: "DFlash2 加速", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自动（4）",
-      dflash2_tensor_batch_help_label: "了解 Tensor Batch 上限", dflash2_tensor_batch_help_title: "Tensor Batch 上限如何生效", dflash2_tensor_batch_help_body: "限制一次 MLX tensor batch 最多合并的兼容请求数。留空使用自动值 4。", dflash2_tensor_batch_help_constraint: "约束关系：实际宽度取该上限、【设置 → 高级 → 最大序列数】和当前就绪兼容请求数的最小值。该配置不会提高最大序列数；不兼容或发生分叉的请求使用 B1。",
-      dflash2_help_label: "了解 DFlash2 加速", dflash2_help_title: "DFlash2 加速如何工作", dflash2_help_body: "DFlash2 使用独立 Draft 模型和隔离的验证 actor。Tensor Batch 上限控制一次 tensor 操作最多合并多少个兼容请求；实际宽度取 Max Sequences、该上限和当前就绪兼容请求数的最小值。留空使用认证默认值 4。修改此设置后，后端将以单 Target 模式重启。", dflash2_help_exclusive: "DFlash2 不能与 MTP 或重复文本加速同时启用。",
+      dflash2_tensor_batch_help_label: "了解 Tensor Batch 上限", dflash2_tensor_batch_help_title: "Tensor Batch 上限如何生效", dflash2_tensor_batch_help_body: "限制一次 MLX tensor batch 最多合并的兼容请求数。留空使用自动值 4。", dflash2_tensor_batch_help_constraint: "约束关系：实际宽度取该上限、【设置 → 模型与内存 → 并发请求数】和当前就绪兼容请求数的最小值。该配置不会提高并发请求数；不兼容或发生分叉的请求使用 B1。",
+      dflash2_help_label: "了解 DFlash2 加速", dflash2_help_title: "DFlash2 加速如何工作", dflash2_help_body: "DFlash2 使用独立 Draft 模型和隔离的验证 actor。Tensor Batch 上限控制一次 tensor 操作最多合并多少个兼容请求；实际宽度取并发请求数、该上限和当前就绪兼容请求数的最小值。留空使用认证默认值 4。修改此设置后，后端将以单 Target 模式重启。", dflash2_help_exclusive: "DFlash2 不能与 MTP 或重复文本加速同时启用。",
       dflash2_help_status_available: "当前状态：已检测到兼容的 DFlash2 Draft。Block Size 由所选 Draft 的 checkpoint 宽度决定，上限为已资格化的 Q8，不可编辑。", dflash2_help_status_incompatible: "当前状态：检测到的 DFlash2 Draft 与该模型不兼容。", dflash2_help_status_unavailable: "当前状态：未发现兼容的 DFlash2 Draft。", dflash2_status_incompatible: "DFlash2 Draft 不兼容", dflash2_status_unavailable: "未发现兼容的 DFlash2 Draft", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限必须为正整数，或留空使用自动值 4。",
       model_exists_locally: "模型 \"{name}\" 已存在于本地。",
       menu_start_needs_model: "尚未设置默认模型。请先下载一个模型并设为默认模型，IronMLX 会自动启动后端。",
@@ -7838,14 +7942,14 @@
       err_all_models_pinned: "所有已加载的模型都被固定，无法自动释放空间。请先取消固定后再加载。",
       err_memory_pressure: "GPU 显存压力过高，暂时无法加载新模型。请先卸载已加载的模型或释放显存后重试。",
       err_gpu_memory_insufficient: "当前可用 GPU 内存不足，无法安全加载该模型。请先卸载暂不使用的已加载模型，释放显存后再重试。",
-      err_max_loaded_models_reached: "已达到最大同时加载模型数，无法加载新模型。请先卸载暂不使用的已加载模型，再重试。",
+      err_max_loaded_models_reached: "已达到「同时加载的模型数」上限，无法加载新模型。请先卸载暂不使用的已加载模型，再重试。",
       err_load_result_unknown: "后端已不再报告这次模型加载，结果未知。请确认模型是否已加载，必要时重试。",
       err_load_failed: "模型加载失败，原因未能识别。请查看日志了解详情。",
       err_model_task_mismatch: "该模型的类型不支持这类任务或加载设置。",
       err_model_reload_busy: "模型正在处理请求，请等待模型空闲后再切换版本。",
-      err_model_memory_limit_exceeded: "已达到模型内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（仅模型）」/切换为自动后重试。",
-      err_total_memory_limit_exceeded: "已达到总内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「内存限制（总量）」/切换为自动后重试。",
-      err_kv_memory_budget_exceeded: "KV cache 内存预算不足。长上下文模型请在启用缓存的同时开启【活跃 KV Cache 分层卸载】，或调低「最大序列数」/ MAX CONTEXT TOKENS 后重试。",
+      err_model_memory_limit_exceeded: "已达到模型内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「模型内存上限」/切换为自动后重试。",
+      err_total_memory_limit_exceeded: "已达到总内存限制，无法加载新模型。请先卸载暂不使用的已加载模型，或在【设置】中调高「总内存上限」/切换为自动后重试。",
+      err_kv_memory_budget_exceeded: "KV cache 内存预算不足。长上下文模型请在开启【前缀缓存】的同时开启【活跃 KV Cache 分层卸载】，或调低「并发请求数」/ MAX CONTEXT TOKENS 后重试。",
       err_mtp_model_dir_required: "请先选择本地 MTP 权重，再启用 MTP 加速。",
       err_mtp_base_model_not_found: "基础模型目录不存在。请重新下载模型后再试。",
       err_mtp_model_not_found: "选择的 MTP 权重在本地不可用。请重新下载 MTP 权重，或选择其他权重。",
@@ -7854,7 +7958,7 @@
       err_mtp_invalid_config: "MTP 权重的配置文件无效。请重新下载权重，或选择其他权重。",
       err_mtp_invalid_draft_tokens: "MTP Draft Tokens 必须是有效的正数。",
       err_mtp_incompatible: "选择的 MTP 权重与当前基础模型不兼容。请选择匹配的 MTP 权重后重试。",
-      err_memory_budget_exceeded: "KV cache 内存预算不足。当前最大序列数（{max_sequences}）和该模型的逻辑 MAX CONTEXT TOKENS（{max_cache_cap}）会超过驻留预算。长上下文请在启用缓存的同时开启【活跃 KV Cache 分层卸载】，或调低「最大序列数」/ MAX CONTEXT TOKENS 后重试。",
+      err_memory_budget_exceeded: "KV cache 内存预算不足。当前「并发请求数」设置（{max_sequences}）和该模型的逻辑 MAX CONTEXT TOKENS（{max_cache_cap}）会超过驻留预算。长上下文请在开启【前缀缓存】的同时开启【活跃 KV Cache 分层卸载】，或调低「并发请求数」/ MAX CONTEXT TOKENS 后重试。",
       err_cache_init_failed: "本地 KV 缓存初始化失败：{detail}",
       err_model_path_not_found: "本地找不到模型 \"{name}\"，请先从 HuggingFace 或 ModelScope 下载，或检查 Repo ID 是否正确。",
       err_hf_api_init_failed: "HuggingFace 下载器初始化失败：{detail}",
@@ -7938,7 +8042,9 @@
       log_exported: "日志已导出。", log_export_failed: "无法导出日志，请检查保存位置和可用磁盘空间。",
       log_viewer: "日志查看器", auto_refresh: "自动刷新", log_lines: "行数：", log_interval: "刷新间隔：", log_interval_hint: "秒（0=关闭）", log_file: "文件：", log_level_filter: "级别：", log_level_all: "全部", log_search: "搜索：", refresh: "刷新", auto_scroll: "自动滚动", log_showing: "显示", log_lines_unit: "行", export_log: "导出日志",
       log_server_offline: "后端未运行", log_start_hint: "请在模型管理中加载本地模型以启动后端并查看日志。", log_no_entries: "暂无日志", log_no_app_logs: "暂无应用日志",
-      settings_title: "应用设置", settings_subtitle_html: '需要保存的更改会在底部提示。',
+      settings_title: "设置", settings_header_hint: "标有 {tag} 的设置保存后会重启后端",
+      settings_restart_tag: "需重启", settings_experimental_tag: "实验", settings_applies_now: "立即生效",
+      settings_group_general: "通用", settings_group_server: "服务器", settings_group_models: "模型与内存", settings_group_cache: "缓存", settings_group_acceleration: "加速",
       server: "服务器", host: "主机", port: "端口", log_level: "日志级别",
       network_mode: "网络模式", network_mode_desc: "本机模式仅监听回环地址；LAN 模式会在选定接口上增加一个经过认证的 HTTPS 监听端点。", network_mode_local: "仅本机", network_mode_lan: "局域网（HTTPS + API Key）",
       lan_interface: "局域网接口", lan_interface_desc: "请选择一个具体且处于活动状态的局域网地址；不允许监听通配地址。",
@@ -7951,35 +8057,35 @@
       err_configuration_lkg_unavailable: "最后有效配置缺失或无效。",
       err_model_parameters_invalid: "模型参数无效：{field}，未保存更改。",
       err_settings_persist_failed: "IronMLX 无法保存应用设置，请检查文件权限和可用磁盘空间。",
-      badge_restart: "重启", badge_live: "实时", requires_restart: "需要重启",
-      appearance: "外观", interface_language: "界面语言", theme_mode: "主题模式", theme_light: "浅色", theme_dark: "暗色", theme_system: "系统",
-      model_runtime: "模型运行", verify_model_on_load: "加载时完整性校验", verify_model_on_load_desc: "每次实际加载模型前重新计算 snapshot 全部文件的 SHA-256。默认关闭。",
-      resource_mgmt: "资源管理",
-      mem_limit_total: "内存限制（总量）", mem_limit_total_desc: "限制后端服务可使用的总内存，包括模型、KV Cache 和运行时开销。设为 0 表示自动。",
-      mem_limit_model: "内存限制（仅模型）", mem_limit_model_desc: "限制已加载模型权重占用的总内存。设为 0 表示不限制。",
-      hot_cache: "热缓存限制（内存缓存）", hot_cache_desc: "用于频繁访问的前缀缓存。", hot_cache_help_title: "热缓存的作用", hot_cache_help_body: "缓存常用前缀，减少重复请求的处理开销。自动模式会按系统统一内存保守估算容量，上限为 8GB；手动模式可指定内存缓存上限。该缓存受【启用缓存】总开关控制。保存设置并重启服务后生效。",
-      cold_cache: "冷缓存限制（SSD 缓存）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁盘占用。", cold_cache_help_title: "SSD 缓存的作用", cold_cache_help_body: "将 Prefix Cache 数据持久化到本地 SSD，降低重复长前缀请求的预填充成本。最大值会根据当前磁盘可用空间动态调整。该缓存受【启用缓存】总开关控制；如需禁用，请关闭【启用缓存】。保存设置并重启服务后生效。",
+      badge_restart: "重启", requires_restart: "需要重启",
+      interface_language: "界面语言", theme_mode: "外观", theme_light: "浅色", theme_dark: "暗色", theme_system: "系统",
+      verify_model_on_load: "加载时完整性校验", verify_model_on_load_desc: "每次实际加载模型前重新计算 snapshot 全部文件的 SHA-256。默认关闭。",
+      mem_limit_total: "总内存上限", mem_limit_total_desc: "限制后端服务可使用的总内存，包括模型、KV Cache 和运行时开销。设为 0 表示自动。",
+      mem_limit_model: "模型内存上限", mem_limit_model_desc: "限制已加载模型权重占用的总内存。设为 0 表示不限制。",
+      hot_cache: "内存缓存上限", hot_cache_desc: "用于频繁访问的前缀缓存。", hot_cache_help_title: "内存缓存的作用", hot_cache_help_body: "把常用的提示词前缀保存在内存中。自动模式按系统统一内存估算，上限为 8GB；关闭【自动】可自行设定。",
+      cold_cache: "SSD 缓存上限", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁盘占用。", cold_cache_help_title: "SSD 缓存的作用", cold_cache_help_body: "把前缀缓存数据保存到本地 SSD，重复的长提示词可省去预填充。最大值随磁盘可用空间调整。",
       auto: "自动",
-      cache: "缓存", enable_cache: "启用缓存", ssd_cache_dir: "SSD 缓存目录",
-      active_kv_offload: "活跃 KV Cache 分层卸载", active_kv_offload_desc: "实验性能力。为长逻辑 MAX CONTEXT TOKENS 保持热 KV 窗口常驻，并将暂停中的活跃 KV Cache 写入 SSD。", active_kv_offload_help_title: "实验性缓存驻留", active_kv_offload_help_body: "当序列槽位已满时，可将暂停中的活跃 KV Cache 写入本地 SSD，让新的请求先继续运行。", active_kv_offload_help_trigger: "开启后不代表立即发生卸载。系统会在请求调度、KV 驻留压力或请求暂停/恢复需要时自动触发；空闲或内存压力较低时可能保持 idle。", active_kv_offload_help_applicable: "适用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。", active_kv_offload_help_not_applicable: "不适用：MTP speculative side cache。",
-      m5_dflash2_profile: "M5 DFlash2 优化配置", m5_dflash2_profile_desc: "在支持的设备上自动优化 DFlash2 推理。", m5_dflash2_profile_help_title: "关于 M5 DFlash2 优化配置", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新机型上，DFlash2 服务启用针对 M5 调优的内核、树式草稿和负载下的合批；各项不适用时自动回退。关闭后使用通用设置。Qwen 3.6 35B A3B 使用其专属的调优设置。", m5_dflash2_profile_help_label: "M5 DFlash2 优化配置说明",
-      ane_acceleration: "神经引擎（ANE）加速", ane_acceleration_desc: "在支持的设备上，由神经引擎分担 Dense 模型长提示的预填充计算。", ane_help_title: "关于神经引擎加速", ane_help_body: "M5 DFlash2 优化配置生效时，Qwen 3.8 27B 等 Dense 模型在预填充 2048 词元以上的提示时，把每层 MLP 的一部分交给神经引擎计算，缩短长提示的首词元时间。短提示、解码阶段以及 Qwen 3.6 35B A3B 等 MoE 模型不使用神经引擎。关闭后全部计算留在 GPU 上。", ane_help_label: "神经引擎加速说明", ane_requires_m5_profile: "仅在开启 M5 DFlash2 优化配置时生效。",
-      kv_quant: "KV 缓存压缩", kv_quant_desc: "使用 TurboQuant 降低长上下文运行时 KV Cache 的内存占用。K3V3 更省内存，K4V4 更保守，K3V4 为推荐均衡选项。", kv_quant_off: "无压缩", model_ttl: "模型自动卸载 (TTL)", model_ttl_desc: "已加载模型闲置超过指定分钟数后自动卸载。0 = 不启用；默认模型偏好会保留。", minutes: "分钟",
+      cache: "缓存", enable_cache: "前缀缓存", cache_requires_prefix: "需先开启前缀缓存。", enable_cache_desc: "复用请求之间相同的提示词前缀，省去重复的预填充计算。", ssd_cache_dir: "SSD 缓存目录", ssd_cache_dir_desc: "留空则前缀缓存只放在内存中，不写入 SSD。", ssd_requires_dir: "SSD 缓存目录为空，SSD 缓存不启用。",
+      active_kv_offload: "活跃 KV Cache 分层卸载", active_kv_offload_desc: "内存紧张时，把生成中请求的 KV Cache 暂存到 SSD。", active_kv_offload_help_title: "分层卸载的作用", active_kv_offload_help_body: "内存不足或并发位置已满时，把生成中请求的 KV Cache 临时写到本地 SSD，需要时再读回，从而支持更长的上下文和更多并发请求。代价是生成变慢，被暂停的请求会短暂停顿。", active_kv_offload_help_not_applicable: "不适用：DFlash2 模型、MTP 推测解码缓存。",
+      m5_dflash2_profile: "M5 DFlash2 优化", m5_dflash2_profile_desc: "在支持的设备上自动优化 DFlash2 推理。", m5_dflash2_profile_help_title: "关于 M5 DFlash2 优化", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新机型上，DFlash2 服务启用针对 M5 调优的内核、树式草稿和负载下的合批；各项不适用时自动回退。关闭后使用通用设置。Qwen 3.6 35B A3B 使用其专属的调优设置。", m5_dflash2_profile_help_label: "M5 DFlash2 优化说明",
+      ane_acceleration: "神经引擎（ANE）加速", ane_acceleration_desc: "由神经引擎分担 Dense 模型的长提示预填充。", ane_help_title: "关于神经引擎加速", ane_help_body: "M5 DFlash2 优化生效时，Qwen 3.8 27B 等 Dense 模型在预填充 2048 词元以上的提示时，把每层 MLP 的一部分交给神经引擎计算，缩短长提示的首词元时间。短提示、解码阶段以及 Qwen 3.6 35B A3B 等 MoE 模型不使用神经引擎。关闭后全部计算留在 GPU 上。", ane_help_label: "神经引擎加速说明", ane_requires_m5_profile: "需先开启 M5 DFlash2 优化。", m5_unsupported_chip: "本机芯片不支持，需要 M5 或更新的芯片。",
+      kv_quant: "KV 缓存压缩", kv_quant_desc: "使用 TurboQuant 降低长上下文运行时 KV Cache 的内存占用。K3V3 更省内存，K4V4 更保守，K3V4 为推荐均衡选项。", kv_quant_off: "无压缩", model_ttl: "空闲自动卸载", model_ttl_desc: "已加载模型闲置超过指定分钟数后自动卸载。0 = 不启用；默认模型偏好会保留。", minutes: "分钟",
       advanced: "高级", batch_processing: "批处理",
-      max_sequences: "最大序列数", max_sequences_desc: "并行处理的最大并发请求数。",
-      max_models: "最大同时加载模型数", max_models_desc: "App 同时保持加载状态的模型数量上限。达到上限后，新模型不会自动替换旧模型；请先手动卸载暂不使用的模型，再加载新模型。",
+      max_sequences: "并发请求数", max_sequences_desc: "并行处理的最大并发请求数。",
+      max_models: "同时加载的模型数", max_models_desc: "App 同时保持加载状态的模型数量上限。达到上限后，新模型不会自动替换旧模型；请先手动卸载暂不使用的模型，再加载新模型。",
       completion_batch: "补全批大小", completion_batch_desc: "Token 生成阶段的批处理大小。",
       save_settings: "保存设置",
       settings_saved: "设置已保存。",
       settings_clean: "没有未保存的修改",
-      settings_dirty: "有未保存的修改",
-      settings_restart_pending: "有未保存的更改，保存后将重启服务。",
+      settings_changes_count: "{n} 项改动",
+      settings_changes_one: "1 项改动",
+      settings_changes_cluster: "（其中 {m} 项在集群页）",
+      settings_restart_note: "保存后会重启后端，进行中的请求会中断",
       settings_next_start: "修改将在下次启动服务时生效",
       save_restart_settings: "保存并重启服务",
       settings_saving: "正在保存设置…",
       settings_restarting: "正在保存并重启服务…",
       settings_save_failed: "设置未保存，请检查错误后重试。",
-      log_level_live_desc: "立即应用于 App 和后端诊断日志，自动保存，无需重启。",
       log_level_applying: "正在应用日志级别…",
       err_log_level_apply_failed: "日志级别应用失败，已保留原设置。",
       err_log_level_rollback_failed: "无法确认后端日志级别已恢复，请检查服务状态后重试。",
@@ -8563,8 +8669,8 @@
       mtp_status_available: "MTP 可用", mtp_status_incompatible: "無相容 MTP 權重", mtp_status_unavailable: "未發現相容的 MTP 權重",
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "此模型正在使用 DFlash2 加速。",
       dflash2_acceleration: "DFlash2 加速", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自動（4）",
-      dflash2_tensor_batch_help_label: "瞭解 Tensor Batch 上限", dflash2_tensor_batch_help_title: "Tensor Batch 上限如何生效", dflash2_tensor_batch_help_body: "限制一次 MLX tensor batch 最多合併的相容請求數。留空使用自動值 4。", dflash2_tensor_batch_help_constraint: "約束關係：實際寬度取此上限、【設定 → 進階 → 最大序列數】與目前就緒相容請求數的最小值。此設定不會提高最大序列數；不相容或發生分歧的請求使用 B1。",
-      dflash2_help_label: "瞭解 DFlash2 加速", dflash2_help_title: "DFlash2 加速如何運作", dflash2_help_body: "DFlash2 使用獨立 Draft 模型與隔離的驗證 actor。Tensor Batch 上限控制一次 tensor 操作最多合併多少個相容請求；實際寬度取 Max Sequences、該上限與目前就緒相容請求數的最小值。留空使用認證預設值 4。修改此設定後，後端將以單一 Target 模式重新啟動。", dflash2_help_exclusive: "DFlash2 無法與 MTP 或重複文字加速同時啟用。",
+      dflash2_tensor_batch_help_label: "瞭解 Tensor Batch 上限", dflash2_tensor_batch_help_title: "Tensor Batch 上限如何生效", dflash2_tensor_batch_help_body: "限制一次 MLX tensor batch 最多合併的相容請求數。留空使用自動值 4。", dflash2_tensor_batch_help_constraint: "約束關係：實際寬度取此上限、【設定 → 模型與記憶體 → 並行請求數】與目前就緒相容請求數的最小值。此設定不會提高並行請求數；不相容或發生分歧的請求使用 B1。",
+      dflash2_help_label: "瞭解 DFlash2 加速", dflash2_help_title: "DFlash2 加速如何運作", dflash2_help_body: "DFlash2 使用獨立 Draft 模型與隔離的驗證 actor。Tensor Batch 上限控制一次 tensor 操作最多合併多少個相容請求；實際寬度取並行請求數、該上限與目前就緒相容請求數的最小值。留空使用認證預設值 4。修改此設定後，後端將以單一 Target 模式重新啟動。", dflash2_help_exclusive: "DFlash2 無法與 MTP 或重複文字加速同時啟用。",
       dflash2_help_status_available: "目前狀態：已偵測到相容的 DFlash2 Draft。Block Size 由所選 Draft 的 checkpoint 寬度決定，上限為已資格化的 Q8，不可編輯。", dflash2_help_status_incompatible: "目前狀態：偵測到的 DFlash2 Draft 與此模型不相容。", dflash2_help_status_unavailable: "目前狀態：未發現相容的 DFlash2 Draft。", dflash2_status_incompatible: "DFlash2 Draft 不相容", dflash2_status_unavailable: "未發現相容的 DFlash2 Draft", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限必須是正整數，或留空使用自動值 4。",
       model_exists_locally: "模型 \"{name}\" 已存在於本地。",
       menu_start_needs_model: "尚未設定預設模型。請先下載一個模型並設為預設模型，IronMLX 會自動啟動後端。",
@@ -8613,7 +8719,7 @@
       err_benchmark_not_prepared: "獨佔基準測試工作階段尚未準備完成。請從「執行基準測試」按鈕開始。",
       err_benchmark_model_unavailable: "本機沒有可用的基準測試模型。",
       err_benchmark_exclusive_failed: "無法準備獨佔基準測試工作階段：{error}",
-      kv_quant: "KV Cache 壓縮",
+      kv_quant: "KV 快取壓縮",
       kv_quant_desc: "使用 TurboQuant 降低長上下文執行時 KV Cache 的記憶體占用。K3V3 更節省記憶體，K4V4 較保守，K3V4 是建議的平衡選項。",
       kv_quant_off: "不壓縮",
       bench_start: "開始",
@@ -8649,14 +8755,14 @@
       err_all_models_pinned: "所有已載入的模型都被釘選，無法自動釋出空間。請先取消釘選後再載入。",
       err_memory_pressure: "GPU 顯存壓力過高，暫時無法載入新模型。請先卸載已載入的模型或釋出顯存後重試。",
       err_gpu_memory_insufficient: "目前可用 GPU 記憶體不足，無法安全載入此模型。請先卸載暫不使用的已載入模型，釋放顯示記憶體後再重試。",
-      err_max_loaded_models_reached: "已達到最大同時載入模型數，無法載入新模型。請先卸載暫不使用的已載入模型，再重試。",
+      err_max_loaded_models_reached: "已達到「同時載入的模型數」上限，無法載入新模型。請先卸載暫不使用的已載入模型，再重試。",
       err_load_result_unknown: "後端已不再回報這次模型載入，結果未知。請確認模型是否已載入，必要時重試。",
       err_load_failed: "模型載入失敗，原因未能識別。請查看日誌了解詳情。",
       err_model_task_mismatch: "此模型的類型不支援這類任務或載入設定。",
       err_model_reload_busy: "模型正在處理請求，請等待模型閒置後再切換版本。",
-      err_model_memory_limit_exceeded: "已達到模型記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（僅模型）」/切換為自動後重試。",
-      err_total_memory_limit_exceeded: "已達到總記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「記憶體限制（總量）」/切換為自動後重試。",
-      err_kv_memory_budget_exceeded: "KV cache 記憶體預算不足。長上下文模型請在啟用快取的同時開啟【活躍 KV Cache 分層卸載】，或調低「最大序列數」/ MAX CONTEXT TOKENS 後重試。",
+      err_model_memory_limit_exceeded: "已達到模型記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「模型記憶體上限」/切換為自動後重試。",
+      err_total_memory_limit_exceeded: "已達到總記憶體限制，無法載入新模型。請先卸載暫不使用的已載入模型，或在【設定】中調高「總記憶體上限」/切換為自動後重試。",
+      err_kv_memory_budget_exceeded: "KV cache 記憶體預算不足。長上下文模型請在開啟【前綴快取】的同時開啟【活躍 KV Cache 分層卸載】，或調低「並行請求數」/ MAX CONTEXT TOKENS 後重試。",
       err_mtp_model_dir_required: "請先選擇本機 MTP 權重，再啟用 MTP 加速。",
       err_mtp_base_model_not_found: "基礎模型目錄不存在。請重新下載模型後再試。",
       err_mtp_model_not_found: "選擇的 MTP 權重在本機不可用。請重新下載 MTP 權重，或選擇其他權重。",
@@ -8665,7 +8771,7 @@
       err_mtp_invalid_config: "MTP 權重的設定檔無效。請重新下載權重，或選擇其他權重。",
       err_mtp_invalid_draft_tokens: "MTP Draft Tokens 必須是有效的正數。",
       err_mtp_incompatible: "選擇的 MTP 權重與目前基礎模型不相容。請選擇匹配的 MTP 權重後重試。",
-      err_memory_budget_exceeded: "KV cache 記憶體預算不足。目前最大序列數（{max_sequences}）和此模型的邏輯 MAX CONTEXT TOKENS（{max_cache_cap}）會超過駐留預算。長上下文請在啟用快取的同時開啟【活躍 KV Cache 分層卸載】，或調低「最大序列數」/ MAX CONTEXT TOKENS 後重試。",
+      err_memory_budget_exceeded: "KV cache 記憶體預算不足。目前「並行請求數」設定（{max_sequences}）和此模型的邏輯 MAX CONTEXT TOKENS（{max_cache_cap}）會超過駐留預算。長上下文請在開啟【前綴快取】的同時開啟【活躍 KV Cache 分層卸載】，或調低「並行請求數」/ MAX CONTEXT TOKENS 後重試。",
       err_cache_init_failed: "本地 KV 快取初始化失敗：{detail}",
       err_model_path_not_found: "本地找不到模型 \"{name}\"，請先從 HuggingFace 或 ModelScope 下載，或檢查 Repo ID 是否正確。",
       err_hf_api_init_failed: "HuggingFace 下載器初始化失敗：{detail}",
@@ -8744,7 +8850,9 @@
       log_exported: "日誌已匯出。", log_export_failed: "無法匯出日誌，請檢查儲存位置和可用磁碟空間。",
       log_viewer: "日誌檢視器", auto_refresh: "自動重新整理", log_lines: "行數：", log_interval: "重新整理間隔：", log_interval_hint: "秒（0=關閉）", log_file: "檔案：", log_level_filter: "級別：", log_level_all: "全部", log_search: "搜尋：", refresh: "重新整理", auto_scroll: "自動捲動", log_showing: "顯示", log_lines_unit: "行", export_log: "匯出日誌",
       log_server_offline: "後端未執行", log_start_hint: "請在模型管理中載入本地模型以啟動後端並檢視日誌。", log_no_entries: "暫無日誌", log_no_app_logs: "暫無應用日誌",
-      settings_title: "應用設定", settings_subtitle_html: '需要儲存的變更會顯示於底部。',
+      settings_title: "設定", settings_header_hint: "標有 {tag} 的設定儲存後會重新啟動後端",
+      settings_restart_tag: "需重新啟動", settings_experimental_tag: "實驗", settings_applies_now: "立即生效",
+      settings_group_general: "一般", settings_group_server: "伺服器", settings_group_models: "模型與記憶體", settings_group_cache: "快取", settings_group_acceleration: "加速",
       server: "伺服器", host: "主機", port: "連接埠", log_level: "日誌等級",
       network_mode: "網路模式", network_mode_desc: "本機模式僅監聽迴路位址；LAN 模式會在所選介面上新增一個經過驗證的 HTTPS 監聽端點。", network_mode_local: "僅本機", network_mode_lan: "區域網路（HTTPS + API Key）",
       lan_interface: "區域網路介面", lan_interface_desc: "請選擇一個具體且處於使用中的區域網路位址；不允許監聽萬用位址。",
@@ -8757,35 +8865,35 @@
       err_configuration_lkg_unavailable: "最後有效設定遺失或無效。",
       err_model_parameters_invalid: "模型參數無效：{field}，未儲存變更。",
       err_settings_persist_failed: "IronMLX 無法儲存應用設定，請檢查檔案權限和可用磁碟空間。",
-      badge_restart: "重啟", badge_live: "即時", requires_restart: "需要重啟",
-      appearance: "外觀", interface_language: "介面語言", theme_mode: "主題模式", theme_light: "淺色", theme_dark: "暗色", theme_system: "系統",
-      model_runtime: "模型執行", verify_model_on_load: "載入時完整性驗證", verify_model_on_load_desc: "每次實際載入模型前重新計算 snapshot 全部檔案的 SHA-256。預設關閉。",
-      resource_mgmt: "資源管理",
-      mem_limit_total: "記憶體限制（總量）", mem_limit_total_desc: "限制後端服務可使用的總記憶體，包括模型、KV Cache 和執行階段開銷。設為 0 表示自動。",
-      mem_limit_model: "記憶體限制（僅模型）", mem_limit_model_desc: "限制已載入模型權重占用的總記憶體。設為 0 表示不限制。",
-      hot_cache: "熱快取限制（記憶體快取）", hot_cache_desc: "用於頻繁存取的前綴快取。", hot_cache_help_title: "熱快取的作用", hot_cache_help_body: "快取常用前綴，減少重複請求的處理開銷。自動模式會依系統統一記憶體保守估算容量，上限為 8GB；手動模式可指定記憶體快取上限。此快取受【啟用快取】總開關控制。儲存設定並重啟服務後生效。",
-      cold_cache: "冷快取限制（SSD 快取）", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁碟占用。", cold_cache_help_title: "SSD 快取的作用", cold_cache_help_body: "將 Prefix Cache 資料持久化到本地 SSD，降低重複長前綴請求的預填充成本。最大值會根據目前磁碟可用空間動態調整。此快取受【啟用快取】總開關控制；如需停用，請關閉【啟用快取】。儲存設定並重啟服務後生效。",
+      badge_restart: "重啟", requires_restart: "需要重啟",
+      interface_language: "介面語言", theme_mode: "外觀", theme_light: "淺色", theme_dark: "暗色", theme_system: "系統",
+      verify_model_on_load: "載入時完整性驗證", verify_model_on_load_desc: "每次實際載入模型前重新計算 snapshot 全部檔案的 SHA-256。預設關閉。",
+      mem_limit_total: "總記憶體上限", mem_limit_total_desc: "限制後端服務可使用的總記憶體，包括模型、KV Cache 和執行階段開銷。設為 0 表示自動。",
+      mem_limit_model: "模型記憶體上限", mem_limit_model_desc: "限制已載入模型權重占用的總記憶體。設為 0 表示不限制。",
+      hot_cache: "記憶體快取上限", hot_cache_desc: "用於頻繁存取的前綴快取。", hot_cache_help_title: "記憶體快取的作用", hot_cache_help_body: "把常用的提示詞前綴保存在記憶體中。自動模式依系統統一記憶體估算，上限為 8GB；關閉「自動」可自行設定。",
+      cold_cache: "SSD 快取上限", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁碟占用。", cold_cache_help_title: "SSD 快取的作用", cold_cache_help_body: "把前綴快取資料保存到本機 SSD，重複的長提示詞可省去預填充。最大值隨磁碟可用空間調整。",
       auto: "自動",
-      cache: "快取", enable_cache: "啟用快取", ssd_cache_dir: "SSD 快取目錄",
-      active_kv_offload: "活躍 KV Cache 分層卸載", active_kv_offload_desc: "實驗性能力。為長邏輯 MAX CONTEXT TOKENS 保持熱 KV 視窗常駐，並將暫停中的活躍 KV Cache 寫入 SSD。", active_kv_offload_help_title: "實驗性快取駐留", active_kv_offload_help_body: "當序列槽位已滿時，可將暫停中的活躍 KV Cache 寫入本地 SSD，讓新的請求先繼續執行。", active_kv_offload_help_trigger: "開啟後不代表立即發生卸載。系統會在請求調度、KV 駐留壓力或請求暫停/恢復需要時自動觸發；空閒或記憶體壓力較低時可能保持 idle。", active_kv_offload_help_applicable: "適用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。", active_kv_offload_help_not_applicable: "不適用：MTP speculative side cache。",
-      m5_dflash2_profile: "M5 DFlash2 最佳化設定", m5_dflash2_profile_desc: "在支援的裝置上自動最佳化 DFlash2 推論。", m5_dflash2_profile_help_title: "關於 M5 DFlash2 最佳化設定", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新機型上，DFlash2 服務啟用針對 M5 調校的核心、樹狀草稿與負載下的合批；各項不適用時自動回退。關閉後使用通用設定。Qwen 3.6 35B A3B 使用其專屬的調校設定。", m5_dflash2_profile_help_label: "M5 DFlash2 最佳化設定說明",
-      ane_acceleration: "神經引擎（ANE）加速", ane_acceleration_desc: "在支援的裝置上，由神經引擎分擔 Dense 模型長提示的預填充運算。", ane_help_title: "關於神經引擎加速", ane_help_body: "M5 DFlash2 最佳化設定生效時，Qwen 3.8 27B 等 Dense 模型在預填充 2048 個詞元以上的提示時，將每層 MLP 的一部分交給神經引擎運算，縮短長提示的首個詞元時間。短提示、解碼階段以及 Qwen 3.6 35B A3B 等 MoE 模型不使用神經引擎。關閉後所有運算都留在 GPU 上。", ane_help_label: "神經引擎加速說明", ane_requires_m5_profile: "僅在開啟 M5 DFlash2 最佳化設定時生效。",
+      cache: "快取", enable_cache: "前綴快取", cache_requires_prefix: "需先開啟前綴快取。", enable_cache_desc: "重用請求之間相同的提示詞前綴，省去重複的預填充運算。", ssd_cache_dir: "SSD 快取目錄", ssd_cache_dir_desc: "留空則前綴快取只放在記憶體中，不寫入 SSD。", ssd_requires_dir: "SSD 快取目錄為空，SSD 快取不啟用。",
+      active_kv_offload: "活躍 KV Cache 分層卸載", active_kv_offload_desc: "記憶體緊張時，把生成中請求的 KV Cache 暫存到 SSD。", active_kv_offload_help_title: "分層卸載的作用", active_kv_offload_help_body: "記憶體不足或並行位置已滿時，把生成中請求的 KV Cache 暫時寫到本機 SSD，需要時再讀回，從而支援更長的上下文和更多並行請求。代價是生成變慢，被暫停的請求會短暫停頓。", active_kv_offload_help_not_applicable: "不適用：DFlash2 模型、MTP 推測解碼快取。",
+      m5_dflash2_profile: "M5 DFlash2 最佳化", m5_dflash2_profile_desc: "在支援的裝置上自動最佳化 DFlash2 推論。", m5_dflash2_profile_help_title: "關於 M5 DFlash2 最佳化", m5_dflash2_profile_help_body: "在 Apple M5（GPU 第 17 代）及更新機型上，DFlash2 服務啟用針對 M5 調校的核心、樹狀草稿與負載下的合批；各項不適用時自動回退。關閉後使用通用設定。Qwen 3.6 35B A3B 使用其專屬的調校設定。", m5_dflash2_profile_help_label: "M5 DFlash2 最佳化說明",
+      ane_acceleration: "神經引擎（ANE）加速", ane_acceleration_desc: "由神經引擎分擔 Dense 模型的長提示預填充。", ane_help_title: "關於神經引擎加速", ane_help_body: "M5 DFlash2 最佳化生效時，Qwen 3.8 27B 等 Dense 模型在預填充 2048 個詞元以上的提示時，將每層 MLP 的一部分交給神經引擎運算，縮短長提示的首個詞元時間。短提示、解碼階段以及 Qwen 3.6 35B A3B 等 MoE 模型不使用神經引擎。關閉後所有運算都留在 GPU 上。", ane_help_label: "神經引擎加速說明", ane_requires_m5_profile: "需先開啟 M5 DFlash2 最佳化。", m5_unsupported_chip: "本機晶片不支援，需要 M5 或更新的晶片。",
       advanced: "進階", batch_processing: "批次處理",
-      max_sequences: "最大序列數", max_sequences_desc: "平行處理的最大並行請求數。",
-      max_models: "最大同時載入模型數", max_models_desc: "App 同時保持載入狀態的模型數量上限。達到上限後，新模型不會自動替換舊模型；請先手動卸載暫不使用的模型，再載入新模型。",
+      max_sequences: "並行請求數", max_sequences_desc: "平行處理的最大並行請求數。",
+      max_models: "同時載入的模型數", max_models_desc: "App 同時保持載入狀態的模型數量上限。達到上限後，新模型不會自動替換舊模型；請先手動卸載暫不使用的模型，再載入新模型。",
       completion_batch: "補全批次大小", completion_batch_desc: "Token 生成階段的批次處理大小。",
-      model_ttl: "模型自動卸載 (TTL)", model_ttl_desc: "已載入模型閒置超過指定分鐘數後自動卸載。0 = 不啟用；預設模型偏好會保留。", minutes: "分鐘",
+      model_ttl: "閒置自動卸載", model_ttl_desc: "已載入模型閒置超過指定分鐘數後自動卸載。0 = 不啟用；預設模型偏好會保留。", minutes: "分鐘",
       save_settings: "儲存設定",
       settings_saved: "設定已儲存。",
       settings_clean: "沒有未儲存的修改",
-      settings_dirty: "有未儲存的修改",
-      settings_restart_pending: "有未儲存的變更，儲存後將重啟服務。",
+      settings_changes_count: "{n} 項變更",
+      settings_changes_one: "1 項變更",
+      settings_changes_cluster: "（其中 {m} 項在叢集頁）",
+      settings_restart_note: "儲存後會重啟後端，進行中的請求會中斷",
       settings_next_start: "修改將在下次啟動服務時生效",
       save_restart_settings: "儲存並重啟服務",
       settings_saving: "正在儲存設定…",
       settings_restarting: "正在儲存並重新啟動服務…",
       settings_save_failed: "設定未儲存，請檢查錯誤後重試。",
-      log_level_live_desc: "立即套用至 App 和後端診斷日誌，自動儲存，無需重啟。",
       log_level_applying: "正在套用日誌等級…",
       err_log_level_apply_failed: "日誌等級套用失敗，已保留原設定。",
       err_log_level_rollback_failed: "無法確認後端日誌等級已還原，請檢查服務狀態後重試。",
@@ -9369,8 +9477,8 @@
       mtp_status_available: "MTP 利用可", mtp_status_incompatible: "互換 MTP ウェイトなし", mtp_status_unavailable: "互換性のある MTP ウェイトはありません",
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "このモデルは DFlash2 アクセラレーションで実行中です。",
       dflash2_acceleration: "DFlash2 アクセラレーション", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自動（4）",
-      dflash2_tensor_batch_help_label: "Tensor Batch 上限について", dflash2_tensor_batch_help_title: "Tensor Batch 上限の適用方法", dflash2_tensor_batch_help_body: "1 回の MLX tensor batch にまとめる互換リクエスト数を制限します。空欄では自動値 4 を使用します。", dflash2_tensor_batch_help_constraint: "実際の幅は、この上限、［設定 → 詳細 → 最大シーケンス数］、準備済み互換リクエスト数の最小値です。この設定で最大シーケンス数は増えません。非互換または分岐したリクエストは B1 を使用します。",
-      dflash2_help_label: "DFlash2 アクセラレーションについて", dflash2_help_title: "DFlash2 アクセラレーションの仕組み", dflash2_help_body: "DFlash2 は専用 Draft モデルと分離された検証 actor を使用します。Tensor Batch 上限は、1 回の tensor 演算でまとめる互換リクエスト数を制限します。実際の幅は Max Sequences、この上限、準備済み互換リクエスト数の最小値です。空欄では認定済み既定値 4 を使用します。この設定を変更すると、バックエンドは単一 Target モードで再起動します。", dflash2_help_exclusive: "DFlash2 は MTP または繰り返しテキスト高速化と同時に使用できません。",
+      dflash2_tensor_batch_help_label: "Tensor Batch 上限について", dflash2_tensor_batch_help_title: "Tensor Batch 上限の適用方法", dflash2_tensor_batch_help_body: "1 回の MLX tensor batch にまとめる互換リクエスト数を制限します。空欄では自動値 4 を使用します。", dflash2_tensor_batch_help_constraint: "実際の幅は、この上限、［設定 → モデルとメモリ → 同時リクエスト数］、準備済み互換リクエスト数の最小値です。この設定で同時リクエスト数は増えません。非互換または分岐したリクエストは B1 を使用します。",
+      dflash2_help_label: "DFlash2 アクセラレーションについて", dflash2_help_title: "DFlash2 アクセラレーションの仕組み", dflash2_help_body: "DFlash2 は専用 Draft モデルと分離された検証 actor を使用します。Tensor Batch 上限は、1 回の tensor 演算でまとめる互換リクエスト数を制限します。実際の幅は同時リクエスト数、この上限、準備済み互換リクエスト数の最小値です。空欄では認定済み既定値 4 を使用します。この設定を変更すると、バックエンドは単一 Target モードで再起動します。", dflash2_help_exclusive: "DFlash2 は MTP または繰り返しテキスト高速化と同時に使用できません。",
       dflash2_help_status_available: "現在の状態：互換性のある DFlash2 Draft が見つかりました。Block Size は選択した Draft の checkpoint 幅で決まり、認定済み Q8 を上限とします。編集はできません。", dflash2_help_status_incompatible: "現在の状態：検出された DFlash2 Draft はこのモデルと互換性がありません。", dflash2_help_status_unavailable: "現在の状態：互換性のある DFlash2 Draft が見つかりません。", dflash2_status_incompatible: "DFlash2 Draft は非互換です", dflash2_status_unavailable: "互換性のある DFlash2 Draft はありません", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限は正の整数で指定するか、空欄にして自動値 4 を使用してください。",
       model_exists_locally: "モデル \"{name}\" はローカルに既に存在します。",
       menu_start_needs_model: "デフォルトモデルが設定されていません。モデルをダウンロードしてデフォルトに設定すると、IronMLX がバックエンドを自動起動します。",
@@ -9419,7 +9527,7 @@
       err_benchmark_not_prepared: "排他ベンチマークセッションの準備ができていません。「ベンチマークを実行」ボタンから開始してください。",
       err_benchmark_model_unavailable: "ベンチマークモデルをローカルで利用できません。",
       err_benchmark_exclusive_failed: "排他ベンチマークセッションを準備できませんでした：{error}",
-      kv_quant: "KV Cache 圧縮",
+      kv_quant: "KV キャッシュ圧縮",
       kv_quant_desc: "TurboQuant を使用して、長いコンテキストの実行時 KV Cache メモリ使用量を削減します。K3V3 はより省メモリ、K4V4 はより保守的で、K3V4 が推奨されるバランス設定です。",
       kv_quant_off: "圧縮なし",
       bench_start: "開始",
@@ -9455,14 +9563,14 @@
       err_all_models_pinned: "読み込み済みのモデルがすべてピン留めされており、自動で空きを確保できません。先にピンを解除してください。",
       err_memory_pressure: "GPU メモリが逼迫しているため、新しいモデルを読み込めません。既存のモデルを解放するなどしてから再度お試しください。",
       err_gpu_memory_insufficient: "利用可能な GPU メモリが不足しているため、このモデルを安全に読み込めません。使用していない読み込み済みモデルをアンロードして GPU メモリを解放してから再試行してください。",
-      err_max_loaded_models_reached: "最大同時ロードモデル数に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルを手動でアンロードしてから再試行してください。",
+      err_max_loaded_models_reached: "「同時に読み込むモデル数」の上限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルを手動でアンロードしてから再試行してください。",
       err_load_result_unknown: "バックエンドがこのモデル読み込みを報告しなくなったため、結果が不明です。モデルが読み込まれているか確認し、必要に応じて再試行してください。",
       err_load_failed: "モデルの読み込みに失敗しましたが、原因を特定できませんでした。詳細はログを確認してください。",
       err_model_task_mismatch: "このモデルの種類は、この種類のタスクまたは読み込み設定に対応していません。",
       err_model_reload_busy: "モデルはリクエストを処理中です。アイドル状態になってからバージョンを切り替えてください。",
-      err_model_memory_limit_exceeded: "モデルメモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Model Only)」を上げる/Auto にしてから再試行してください。",
-      err_total_memory_limit_exceeded: "総メモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「Memory Limit (Total)」を上げる/Auto にしてから再試行してください。",
-      err_kv_memory_budget_exceeded: "KV cache のメモリ予算が不足しています。長いコンテキストのモデルでは、キャッシュを有効にしたうえで Active KV Cache オフロードを有効にするか、最大シーケンス数 / MAX CONTEXT TOKENS を下げて再試行してください。",
+      err_model_memory_limit_exceeded: "モデルメモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「モデルメモリ上限」を上げる/Auto にしてから再試行してください。",
+      err_total_memory_limit_exceeded: "総メモリ制限に達しました。新しいモデルは読み込めません。使用していない読み込み済みモデルをアンロードするか、設定で「合計メモリ上限」を上げる/Auto にしてから再試行してください。",
+      err_kv_memory_budget_exceeded: "KV cache のメモリ予算が不足しています。長いコンテキストのモデルでは、「プレフィックスキャッシュ」を有効にしたうえで 「アクティブ KV キャッシュのオフロード」を有効にするか、同時リクエスト数 / MAX CONTEXT TOKENS を下げて再試行してください。",
       err_mtp_model_dir_required: "MTP アクセラレーションを有効にする前に、ローカル MTP ウェイトを選択してください。",
       err_mtp_base_model_not_found: "ベースモデルのディレクトリが存在しません。モデルを再ダウンロードしてから再試行してください。",
       err_mtp_model_not_found: "選択した MTP ウェイトはローカルで利用できません。MTP ウェイトを再ダウンロードするか、別のウェイトを選択してください。",
@@ -9471,7 +9579,7 @@
       err_mtp_invalid_config: "MTP ウェイトの config が無効です。再ダウンロードするか、別のウェイトを選択してください。",
       err_mtp_invalid_draft_tokens: "MTP Draft Tokens は有効な正の値にしてください。",
       err_mtp_incompatible: "選択した MTP ウェイトはこのベースモデルと互換性がありません。対応する MTP ウェイトを選択してから再試行してください。",
-      err_memory_budget_exceeded: "KV cache のメモリ予算が不足しています。現在の最大シーケンス数（{max_sequences}）とこのモデルの論理 MAX CONTEXT TOKENS（{max_cache_cap}）が常駐予算を超えます。長いコンテキストでは、キャッシュを有効にしたうえで Active KV Cache オフロードを有効にするか、最大シーケンス数 / MAX CONTEXT TOKENS を下げて再試行してください。",
+      err_memory_budget_exceeded: "KV cache のメモリ予算が不足しています。現在の「同時リクエスト数」設定（{max_sequences}）とこのモデルの論理 MAX CONTEXT TOKENS（{max_cache_cap}）が常駐予算を超えます。長いコンテキストでは、「プレフィックスキャッシュ」を有効にしたうえで 「アクティブ KV キャッシュのオフロード」を有効にするか、同時リクエスト数 / MAX CONTEXT TOKENS を下げて再試行してください。",
       err_cache_init_failed: "ローカル KV キャッシュの初期化に失敗しました：{detail}",
       err_model_path_not_found: "モデル \"{name}\" が見つかりません。HuggingFace または ModelScope からダウンロードするか、Repo ID を確認してください。",
       err_hf_api_init_failed: "HuggingFace ダウンローダーの初期化に失敗しました：{detail}",
@@ -9550,7 +9658,9 @@
       log_exported: "ログをエクスポートしました。", log_export_failed: "ログをエクスポートできません。保存先と空き容量を確認してください。",
       log_viewer: "ログビューア", auto_refresh: "自動更新", log_lines: "行数：", log_interval: "更新間隔：", log_interval_hint: "秒（0=オフ）", log_file: "ファイル：", log_level_filter: "レベル：", log_level_all: "すべて", log_search: "検索：", refresh: "更新", auto_scroll: "自動スクロール", log_showing: "表示", log_lines_unit: "行", export_log: "ログエクスポート",
       log_server_offline: "バックエンドが実行されていません", log_start_hint: "Models でローカルモデルを読み込むと起動し、ログを表示できます。", log_no_entries: "ログエントリなし", log_no_app_logs: "アプリログエントリなし",
-      settings_title: "アプリ設定", settings_subtitle_html: '保存が必要な変更は下部に表示されます。',
+      settings_title: "設定", settings_header_hint: "{tag} の付いた設定は保存するとバックエンドが再起動します",
+      settings_restart_tag: "再起動が必要", settings_experimental_tag: "実験的", settings_applies_now: "即時反映",
+      settings_group_general: "一般", settings_group_server: "サーバー", settings_group_models: "モデルとメモリ", settings_group_cache: "キャッシュ", settings_group_acceleration: "高速化",
       server: "サーバー", host: "ホスト", port: "ポート", log_level: "ログレベル",
       network_mode: "ネットワークモード", network_mode_desc: "ローカルモードはループバックのみで待ち受けます。LAN モードでは、選択したインターフェースに認証付き HTTPS リスナーを追加します。", network_mode_local: "ローカルのみ", network_mode_lan: "LAN（HTTPS + API Key）",
       lan_interface: "LAN インターフェース", lan_interface_desc: "有効な具体的 LAN アドレスを1つ選択してください。ワイルドカードでの待ち受けは許可されません。",
@@ -9563,35 +9673,35 @@
       err_configuration_lkg_unavailable: "最後の有効な設定が見つからないか、無効です。",
       err_model_parameters_invalid: "モデルパラメーターが無効です: {field}。変更は保存されませんでした。",
       err_settings_persist_failed: "アプリ設定を保存できませんでした。ファイル権限と空きディスク容量を確認してください。",
-      badge_restart: "再起動", badge_live: "ライブ", requires_restart: "再起動が必要",
-      appearance: "外観", interface_language: "インターフェース言語", theme_mode: "テーマモード", theme_light: "ライト", theme_dark: "ダーク", theme_system: "システム",
-      model_runtime: "モデルランタイム", verify_model_on_load: "ロード時の完全性検証", verify_model_on_load_desc: "モデルを実際にロードする直前に snapshot 全ファイルの SHA-256 を再計算します。デフォルトはオフです。",
-      resource_mgmt: "リソース管理",
-      mem_limit_total: "メモリ制限（合計）", mem_limit_total_desc: "バックエンドサービスが使用できる総メモリを制限します（モデル、KV Cache、ランタイムオーバーヘッドを含む）。0で自動。",
-      mem_limit_model: "メモリ制限（モデルのみ）", mem_limit_model_desc: "ロード済みモデル重みが使用する総メモリを制限します。0で制限なし。",
-      hot_cache: "ホットキャッシュ制限（メモリキャッシュ）", hot_cache_desc: "頻繁に利用されるプレフィックスキャッシュです。", hot_cache_help_title: "ホットキャッシュの役割", hot_cache_help_body: "よく使われるプレフィックスをメモリに保持し、繰り返しリクエストの処理コストを減らします。自動モードではシステム統合メモリから控えめに容量を見積もり、上限は8GBです。手動モードではメモリキャッシュ上限を指定できます。このキャッシュはキャッシュ有効化スイッチに従います。設定を保存し、サービスを再起動すると反映されます。",
-      cold_cache: "コールドキャッシュ制限（SSDキャッシュ）", cold_cache_desc: "SSD Prefix Cache の最大ディスク使用量です。", cold_cache_help_title: "SSD キャッシュの役割", cold_cache_help_body: "Prefix Cache データをローカル SSD に永続化し、繰り返される長いプレフィックスのプリフィルコストを減らします。最大値は現在のディスク空き容量に応じて調整されます。このキャッシュはキャッシュ有効化スイッチに従います。無効にするにはキャッシュをオフにしてください。設定を保存し、サービスを再起動すると反映されます。",
+      badge_restart: "再起動", requires_restart: "再起動が必要",
+      interface_language: "インターフェース言語", theme_mode: "外観", theme_light: "ライト", theme_dark: "ダーク", theme_system: "システム",
+      verify_model_on_load: "ロード時の完全性検証", verify_model_on_load_desc: "モデルを実際にロードする直前に snapshot 全ファイルの SHA-256 を再計算します。デフォルトはオフです。",
+      mem_limit_total: "合計メモリ上限", mem_limit_total_desc: "バックエンドサービスが使用できる総メモリを制限します（モデル、KV Cache、ランタイムオーバーヘッドを含む）。0で自動。",
+      mem_limit_model: "モデルメモリ上限", mem_limit_model_desc: "ロード済みモデル重みが使用する総メモリを制限します。0で制限なし。",
+      hot_cache: "メモリキャッシュ上限", hot_cache_desc: "頻繁に利用されるプレフィックスキャッシュです。", hot_cache_help_title: "メモリキャッシュの役割", hot_cache_help_body: "よく使うプロンプトの先頭部分をメモリに保持します。自動ではシステム統合メモリから上限を見積もり、最大 8GB です。「自動」をオフにすると自分で設定できます。",
+      cold_cache: "SSDキャッシュ上限", cold_cache_desc: "SSD Prefix Cache の最大ディスク使用量です。", cold_cache_help_title: "SSD キャッシュの役割", cold_cache_help_body: "プレフィックスキャッシュのデータをローカル SSD に保存し、繰り返される長いプロンプトのプレフィルを省きます。最大値はディスクの空き容量に応じて調整されます。",
       auto: "自動",
-      cache: "キャッシュ", enable_cache: "キャッシュを有効化", ssd_cache_dir: "SSDキャッシュディレクトリ",
-      active_kv_offload: "Active KV Cache オフロード", active_kv_offload_desc: "実験的機能。長い論理 MAX CONTEXT TOKENS では熱い KV ウィンドウだけを常駐させ、一時停止中の Active KV Cache を SSD に書き出します。", active_kv_offload_help_title: "実験的キャッシュ常駐管理", active_kv_offload_help_body: "シーケンススロットが満杯の場合、一時停止中の Active KV Cache をローカル SSD に書き出し、新しいリクエストを先に実行できます。", active_kv_offload_help_trigger: "有効にしても、すぐにオフロードが発生するとは限りません。スケジューリング、KV 常駐圧力、またはリクエストの一時停止/復元が必要な場合に自動で発動します。アイドル時やメモリ圧力が低い場合は idle のままになることがあります。", active_kv_offload_help_applicable: "適用: Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。", active_kv_offload_help_not_applicable: "非対象: MTP speculative side cache。",
-      m5_dflash2_profile: "M5 DFlash2 プロファイル", m5_dflash2_profile_desc: "対応デバイスで DFlash2 推論を自動的に最適化します。", m5_dflash2_profile_help_title: "M5 DFlash2 プロファイルについて", m5_dflash2_profile_help_body: "Apple M5（GPU 第 17 世代）以降では、DFlash2 の提供に M5 向けに調整したカーネル、ツリー型ドラフト、負荷時のバッチ処理を使います。適用できない場合は各機能が自動でフォールバックします。オフにすると汎用設定を使います。Qwen 3.6 35B A3B は専用に調整した設定を使います。", m5_dflash2_profile_help_label: "M5 DFlash2 プロファイルのヘルプ",
-      ane_acceleration: "Neural Engine（ANE）アクセラレーション", ane_acceleration_desc: "対応デバイスで、Dense モデルの長いプロンプトのプレフィルを Neural Engine が分担します。", ane_help_title: "Neural Engine アクセラレーションについて", ane_help_body: "M5 DFlash2 プロファイルが有効なとき、Qwen 3.8 27B などの Dense モデルは 2,048 トークン以上のプロンプトのプレフィルで各 MLP の一部を Neural Engine で計算し、長いプロンプトの最初のトークンまでの時間を短縮します。短いプロンプト、デコード、Qwen 3.6 35B A3B などの MoE モデルでは使いません。オフにするとすべての計算を GPU で行います。", ane_help_label: "Neural Engine アクセラレーションのヘルプ", ane_requires_m5_profile: "M5 DFlash2 プロファイルがオンのときのみ有効です。",
+      cache: "キャッシュ", enable_cache: "プレフィックスキャッシュ", cache_requires_prefix: "先に「プレフィックスキャッシュ」をオンにしてください。", enable_cache_desc: "リクエスト間で共通するプロンプトの先頭部分を再利用し、重複するプレフィルを省きます。", ssd_cache_dir: "SSD キャッシュディレクトリ", ssd_cache_dir_desc: "空欄にすると、プレフィックスキャッシュはメモリだけに保持され、SSD には書き込みません。", ssd_requires_dir: "SSD キャッシュディレクトリが空のため、SSD キャッシュは無効です。",
+      active_kv_offload: "アクティブ KV キャッシュのオフロード", active_kv_offload_desc: "メモリが逼迫したとき、生成中のリクエストの KV Cache を SSD に一時退避します。", active_kv_offload_help_title: "オフロードの役割", active_kv_offload_help_body: "メモリ不足時や同時実行枠が埋まったときに、生成中のリクエストの KV Cache をローカル SSD に一時的に書き出し、必要に応じて読み戻します。より長いコンテキストと多くの同時リクエストを扱えますが、生成は遅くなり、一時停止したリクエストは少し止まります。", active_kv_offload_help_not_applicable: "非対象: DFlash2 モデル、MTP 推測デコードのキャッシュ。",
+      m5_dflash2_profile: "M5 DFlash2 最適化", m5_dflash2_profile_desc: "対応デバイスで DFlash2 推論を自動的に最適化します。", m5_dflash2_profile_help_title: "M5 DFlash2 最適化について", m5_dflash2_profile_help_body: "Apple M5（GPU 第 17 世代）以降では、DFlash2 の提供に M5 向けに調整したカーネル、ツリー型ドラフト、負荷時のバッチ処理を使います。適用できない場合は各機能が自動でフォールバックします。オフにすると汎用設定を使います。Qwen 3.6 35B A3B は専用に調整した設定を使います。", m5_dflash2_profile_help_label: "M5 DFlash2 最適化のヘルプ",
+      ane_acceleration: "Neural Engine（ANE）アクセラレーション", ane_acceleration_desc: "Dense モデルの長いプロンプトのプレフィルを Neural Engine が分担します。", ane_help_title: "Neural Engine アクセラレーションについて", ane_help_body: "M5 DFlash2 最適化が有効なとき、Qwen 3.8 27B などの Dense モデルは 2,048 トークン以上のプロンプトのプレフィルで各 MLP の一部を Neural Engine で計算し、長いプロンプトの最初のトークンまでの時間を短縮します。短いプロンプト、デコード、Qwen 3.6 35B A3B などの MoE モデルでは使いません。オフにするとすべての計算を GPU で行います。", ane_help_label: "Neural Engine アクセラレーションのヘルプ", ane_requires_m5_profile: "先に M5 DFlash2 最適化をオンにしてください。", m5_unsupported_chip: "この Mac のチップは非対応です。M5 以降のチップが必要です。",
       advanced: "詳細設定", batch_processing: "バッチ処理",
-      max_sequences: "最大シーケンス数", max_sequences_desc: "並列処理の最大同時リクエスト数。",
-      max_models: "最大同時ロードモデル数", max_models_desc: "App が同時に読み込み済みとして保持するモデル数の上限。上限に達すると新しいモデルの読み込みは拒否され、既存の読み込み済みモデルは自動的に置き換えられません。不要なモデルを手動でアンロードしてから読み込んでください。",
+      max_sequences: "同時リクエスト数", max_sequences_desc: "並列処理の最大同時リクエスト数。",
+      max_models: "同時に読み込むモデル数", max_models_desc: "App が同時に読み込み済みとして保持するモデル数の上限。上限に達すると新しいモデルの読み込みは拒否され、既存の読み込み済みモデルは自動的に置き換えられません。不要なモデルを手動でアンロードしてから読み込んでください。",
       completion_batch: "補完バッチサイズ", completion_batch_desc: "トークン生成フェーズのバッチサイズ。",
-      model_ttl: "モデル自動アンロード (TTL)", model_ttl_desc: "読み込み済みモデルが指定した分数アイドル状態のままなら自動的にアンロードします。0 = 無効。デフォルトモデル設定は保持されます。", minutes: "分",
+      model_ttl: "アイドル時に自動アンロード", model_ttl_desc: "読み込み済みモデルが指定した分数アイドル状態のままなら自動的にアンロードします。0 = 無効。デフォルトモデル設定は保持されます。", minutes: "分",
       save_settings: "設定を保存",
       settings_saved: "設定が保存されました。",
       settings_clean: "未保存の変更はありません",
-      settings_dirty: "未保存の変更があります",
-      settings_restart_pending: "未保存の変更があります。保存するとサービスが再起動します。",
+      settings_changes_count: "{n} 件の変更",
+      settings_changes_one: "1 件の変更",
+      settings_changes_cluster: "（うち {m} 件はクラスターページ）",
+      settings_restart_note: "保存するとバックエンドが再起動し、処理中のリクエストは中断されます",
       settings_next_start: "変更は次回のサービス起動時に適用されます",
       save_restart_settings: "保存してサービスを再起動",
       settings_saving: "設定を保存中…",
       settings_restarting: "保存してサービスを再起動中…",
       settings_save_failed: "設定を保存できませんでした。エラーを確認して再試行してください。",
-      log_level_live_desc: "App とバックエンドの診断ログに即時適用し、自動保存します。再起動は不要です。",
       log_level_applying: "ログレベルを適用中…",
       err_log_level_apply_failed: "ログレベルを適用できませんでした。以前の設定を保持しています。",
       err_log_level_rollback_failed: "バックエンドの復元を確認できません。サービスの状態を確認して再試行してください。",
@@ -10175,8 +10285,8 @@
       mtp_status_available: "MTP 사용 가능", mtp_status_incompatible: "호환 MTP 가중치 없음", mtp_status_unavailable: "호환되는 MTP 가중치 없음",
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "이 모델은 DFlash2 가속으로 실행 중입니다.",
       dflash2_acceleration: "DFlash2 가속", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 정밀도", dflash2_tensor_batch_max_width: "Tensor Batch 제한", auto_default_4: "자동(4)",
-      dflash2_tensor_batch_help_label: "Tensor Batch 제한 정보", dflash2_tensor_batch_help_title: "Tensor Batch 제한 적용 방식", dflash2_tensor_batch_help_body: "한 번의 MLX tensor batch에 결합할 호환 요청 수를 제한합니다. 비워 두면 자동값 4를 사용합니다.", dflash2_tensor_batch_help_constraint: "실제 너비는 이 제한, [설정 → 고급 → 최대 시퀀스 수], 준비된 호환 요청 수 중 최솟값입니다. 이 설정은 최대 시퀀스 수를 늘리지 않으며, 호환되지 않거나 분기된 요청은 B1을 사용합니다.",
-      dflash2_help_label: "DFlash2 가속 정보", dflash2_help_title: "DFlash2 가속 작동 방식", dflash2_help_body: "DFlash2는 전용 Draft 모델과 분리된 검증 actor를 사용합니다. Tensor Batch 제한은 한 번의 tensor 연산에 결합되는 호환 요청 수를 제한합니다. 실제 너비는 Max Sequences, 이 제한, 준비된 호환 요청 수 중 최솟값입니다. 비워 두면 인증된 기본값 4를 사용합니다. 이 설정을 변경하면 백엔드가 단일 Target 모드로 재시작됩니다.", dflash2_help_exclusive: "DFlash2는 MTP 또는 반복 텍스트 가속과 동시에 사용할 수 없습니다.",
+      dflash2_tensor_batch_help_label: "Tensor Batch 제한 정보", dflash2_tensor_batch_help_title: "Tensor Batch 제한 적용 방식", dflash2_tensor_batch_help_body: "한 번의 MLX tensor batch에 결합할 호환 요청 수를 제한합니다. 비워 두면 자동값 4를 사용합니다.", dflash2_tensor_batch_help_constraint: "실제 너비는 이 제한, [설정 → 모델 및 메모리 → 동시 요청 수], 준비된 호환 요청 수 중 최솟값입니다. 이 설정은 동시 요청 수를 늘리지 않으며, 호환되지 않거나 분기된 요청은 B1을 사용합니다.",
+      dflash2_help_label: "DFlash2 가속 정보", dflash2_help_title: "DFlash2 가속 작동 방식", dflash2_help_body: "DFlash2는 전용 Draft 모델과 분리된 검증 actor를 사용합니다. Tensor Batch 제한은 한 번의 tensor 연산에 결합되는 호환 요청 수를 제한합니다. 실제 너비는 동시 요청 수, 이 제한, 준비된 호환 요청 수 중 최솟값입니다. 비워 두면 인증된 기본값 4를 사용합니다. 이 설정을 변경하면 백엔드가 단일 Target 모드로 재시작됩니다.", dflash2_help_exclusive: "DFlash2는 MTP 또는 반복 텍스트 가속과 동시에 사용할 수 없습니다.",
       dflash2_help_status_available: "현재 상태: 호환되는 DFlash2 Draft를 찾았습니다. Block Size는 선택한 Draft의 checkpoint 폭으로 정해지며 검증된 Q8을 상한으로 합니다. 편집할 수 없습니다.", dflash2_help_status_incompatible: "현재 상태: 감지된 DFlash2 Draft가 이 모델과 호환되지 않습니다.", dflash2_help_status_unavailable: "현재 상태: 호환되는 DFlash2 Draft를 찾지 못했습니다.", dflash2_status_incompatible: "DFlash2 Draft가 호환되지 않습니다", dflash2_status_unavailable: "호환되는 DFlash2 Draft 없음", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 제한은 양의 정수이거나 자동값 4를 사용하려면 비워 두어야 합니다.",
       model_exists_locally: "모델 \"{name}\"이(가) 이미 로컬에 존재합니다.",
       menu_start_needs_model: "기본 모델이 설정되어 있지 않습니다. 모델을 다운로드하고 기본값으로 선택하면 IronMLX가 백엔드를 자동으로 시작합니다.",
@@ -10225,7 +10335,7 @@
       err_benchmark_not_prepared: "독점 벤치마크 세션이 준비되지 않았습니다. '벤치마크 실행' 버튼에서 시작하세요.",
       err_benchmark_model_unavailable: "벤치마크 모델을 로컬에서 사용할 수 없습니다.",
       err_benchmark_exclusive_failed: "독점 벤치마크 세션 준비에 실패했습니다: {error}",
-      kv_quant: "KV Cache 압축",
+      kv_quant: "KV 캐시 압축",
       kv_quant_desc: "TurboQuant를 사용하여 긴 컨텍스트 실행 시 KV Cache 메모리 사용량을 줄입니다. K3V3는 메모리를 더 절약하고 K4V4는 더 보수적이며 K3V4가 권장 균형 옵션입니다.",
       kv_quant_off: "압축 없음",
       bench_start: "시작",
@@ -10261,14 +10371,14 @@
       err_all_models_pinned: "로드된 모든 모델이 고정되어 자동으로 공간을 확보할 수 없습니다. 먼저 고정을 해제해 주세요.",
       err_memory_pressure: "GPU 메모리 사용량이 높아 새 모델을 로드할 수 없습니다. 기존 모델을 언로드하거나 메모리를 확보한 후 다시 시도해 주세요.",
       err_gpu_memory_insufficient: "사용 가능한 GPU 메모리가 부족하여 이 모델을 안전하게 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하여 GPU 메모리를 확보한 뒤 다시 시도하세요.",
-      err_max_loaded_models_reached: "최대 동시 로드 모델 수에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 먼저 언로드한 뒤 다시 시도하세요.",
+      err_max_loaded_models_reached: "'동시에 로드하는 모델 수' 상한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 먼저 언로드한 뒤 다시 시도하세요.",
       err_load_result_unknown: "백엔드가 더 이상 이 모델 로드를 보고하지 않아 결과를 알 수 없습니다. 모델이 로드되었는지 확인하고 필요하면 다시 시도하세요.",
       err_load_failed: "모델 로드에 실패했지만 원인을 확인할 수 없습니다. 자세한 내용은 로그를 확인하세요.",
       err_model_task_mismatch: "이 모델 유형은 이런 작업이나 로드 설정을 지원하지 않습니다.",
       err_model_reload_busy: "모델이 요청을 처리 중입니다. 유휴 상태가 된 후 버전을 전환하세요.",
-      err_model_memory_limit_exceeded: "모델 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Model Only)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
-      err_total_memory_limit_exceeded: "총 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 Memory Limit (Total)를 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
-      err_kv_memory_budget_exceeded: "KV cache 메모리 예산이 부족합니다. 긴 컨텍스트 모델은 캐시를 켠 상태에서 Active KV Cache 오프로드를 활성화하거나 Max Sequences / MAX CONTEXT TOKENS를 낮춘 뒤 다시 시도하세요.",
+      err_model_memory_limit_exceeded: "모델 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 '모델 메모리 상한'을 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
+      err_total_memory_limit_exceeded: "총 메모리 제한에 도달했습니다. 새 모델을 로드할 수 없습니다. 사용하지 않는 로드된 모델을 언로드하거나 설정에서 '전체 메모리 상한'을 높이거나 Auto로 전환한 뒤 다시 시도하세요.",
+      err_kv_memory_budget_exceeded: "KV cache 메모리 예산이 부족합니다. 긴 컨텍스트 모델은 '프리픽스 캐시'를 켠 상태에서 '활성 KV 캐시 오프로드'를 활성화하거나 동시 요청 수 / MAX CONTEXT TOKENS를 낮춘 뒤 다시 시도하세요.",
       err_mtp_model_dir_required: "MTP 가속을 켜기 전에 로컬 MTP 가중치를 선택하세요.",
       err_mtp_base_model_not_found: "기본 모델 디렉터리가 존재하지 않습니다. 모델을 다시 다운로드한 뒤 시도하세요.",
       err_mtp_model_not_found: "선택한 MTP 가중치를 로컬에서 사용할 수 없습니다. MTP 가중치를 다시 다운로드하거나 다른 가중치를 선택하세요.",
@@ -10277,7 +10387,7 @@
       err_mtp_invalid_config: "MTP 가중치 config가 유효하지 않습니다. 다시 다운로드하거나 다른 가중치를 선택하세요.",
       err_mtp_invalid_draft_tokens: "MTP Draft Tokens는 유효한 양수여야 합니다.",
       err_mtp_incompatible: "선택한 MTP 가중치는 이 기본 모델과 호환되지 않습니다. 일치하는 MTP 가중치를 선택한 뒤 다시 시도하세요.",
-      err_memory_budget_exceeded: "KV cache 메모리 예산이 부족합니다. 현재 최대 시퀀스 수({max_sequences})와 이 모델의 논리 MAX CONTEXT TOKENS({max_cache_cap})가 상주 예산을 초과합니다. 긴 컨텍스트에서는 캐시를 켠 상태에서 Active KV Cache 오프로드를 활성화하거나 Max Sequences / MAX CONTEXT TOKENS를 낮춘 뒤 다시 시도하세요.",
+      err_memory_budget_exceeded: "KV cache 메모리 예산이 부족합니다. 현재 '동시 요청 수' 설정({max_sequences})과 이 모델의 논리 MAX CONTEXT TOKENS({max_cache_cap})가 상주 예산을 초과합니다. 긴 컨텍스트에서는 '프리픽스 캐시'를 켠 상태에서 '활성 KV 캐시 오프로드'를 활성화하거나 동시 요청 수 / MAX CONTEXT TOKENS를 낮춘 뒤 다시 시도하세요.",
       err_cache_init_failed: "로컬 KV 캐시 초기화에 실패했습니다: {detail}",
       err_model_path_not_found: "모델 \"{name}\"을 찾을 수 없습니다. HuggingFace 또는 ModelScope에서 먼저 다운로드하거나 Repo ID를 확인하세요.",
       err_hf_api_init_failed: "HuggingFace 다운로더 초기화에 실패했습니다: {detail}",
@@ -10356,7 +10466,9 @@
       log_exported: "로그를 내보냈습니다.", log_export_failed: "로그를 내보낼 수 없습니다. 저장 위치와 디스크 여유 공간을 확인하세요.",
       log_viewer: "로그 뷰어", auto_refresh: "자동 새로고침", log_lines: "줄 수:", log_interval: "새로고침 간격:", log_interval_hint: "초 (0=끄기)", log_file: "파일:", log_level_filter: "레벨:", log_level_all: "전체", log_search: "검색:", refresh: "새로고침", auto_scroll: "자동 스크롤", log_showing: "표시", log_lines_unit: "줄", export_log: "로그 내보내기",
       log_server_offline: "백엔드가 실행되고 있지 않습니다", log_start_hint: "Models에서 로컬 모델을 로드하면 시작되고 로그를 볼 수 있습니다.", log_no_entries: "로그 항목 없음", log_no_app_logs: "앱 로그 항목 없음",
-      settings_title: "앱 설정", settings_subtitle_html: '저장이 필요한 변경사항은 하단에 표시됩니다.',
+      settings_title: "설정", settings_header_hint: "{tag} 표시가 있는 설정은 저장하면 백엔드가 다시 시작됩니다",
+      settings_restart_tag: "재시작 필요", settings_experimental_tag: "실험적", settings_applies_now: "즉시 적용",
+      settings_group_general: "일반", settings_group_server: "서버", settings_group_models: "모델 및 메모리", settings_group_cache: "캐시", settings_group_acceleration: "가속",
       server: "서버", host: "호스트", port: "포트", log_level: "로그 수준",
       network_mode: "네트워크 모드", network_mode_desc: "로컬 모드는 루프백에서만 수신합니다. LAN 모드는 선택한 인터페이스에 인증된 HTTPS 리스너를 추가합니다.", network_mode_local: "로컬 전용", network_mode_lan: "LAN (HTTPS + API Key)",
       lan_interface: "LAN 인터페이스", lan_interface_desc: "활성 상태인 구체적인 LAN 주소 하나를 선택하세요. 와일드카드 수신은 허용되지 않습니다.",
@@ -10369,35 +10481,35 @@
       err_configuration_lkg_unavailable: "마지막 유효 설정이 없거나 올바르지 않습니다.",
       err_model_parameters_invalid: "모델 매개변수가 올바르지 않습니다: {field}. 변경 사항을 저장하지 않았습니다.",
       err_settings_persist_failed: "앱 설정을 저장하지 못했습니다. 파일 권한과 사용 가능한 디스크 공간을 확인하세요.",
-      badge_restart: "재시작", badge_live: "실시간", requires_restart: "재시작 필요",
-      appearance: "외관", interface_language: "인터페이스 언어", theme_mode: "테마 모드", theme_light: "라이트", theme_dark: "다크", theme_system: "시스템",
-      model_runtime: "모델 런타임", verify_model_on_load: "로드 시 전체 무결성 확인", verify_model_on_load_desc: "모델을 실제로 로드하기 직전에 snapshot 모든 파일의 SHA-256을 다시 계산합니다. 기본값은 꺼짐입니다.",
-      resource_mgmt: "리소스 관리",
-      mem_limit_total: "메모리 제한 (전체)", mem_limit_total_desc: "백엔드 서비스가 사용할 수 있는 총 메모리를 제한합니다(모델, KV Cache, 런타임 오버헤드 포함). 0은 자동입니다.",
-      mem_limit_model: "메모리 제한 (모델만)", mem_limit_model_desc: "로드된 모델 가중치가 사용하는 총 메모리를 제한합니다. 0은 제한 없음입니다.",
-      hot_cache: "핫 캐시 제한 (메모리 캐시)", hot_cache_desc: "자주 사용하는 프리픽스 캐시입니다.", hot_cache_help_title: "핫 캐시 역할", hot_cache_help_body: "자주 사용하는 프리픽스를 메모리에 캐시해 반복 요청 처리 비용을 줄입니다. 자동 모드는 시스템 통합 메모리를 기준으로 보수적으로 용량을 산정하며 상한은 8GB입니다. 수동 모드에서는 메모리 캐시 한도를 지정할 수 있습니다. 이 캐시는 캐시 활성화 스위치를 따릅니다. 설정을 저장하고 서비스를 재시작하면 적용됩니다.",
-      cold_cache: "콜드 캐시 제한 (SSD 캐시)", cold_cache_desc: "SSD Prefix Cache의 최대 디스크 사용량입니다.", cold_cache_help_title: "SSD 캐시 역할", cold_cache_help_body: "Prefix Cache 데이터를 로컬 SSD에 영구 저장해 반복되는 긴 프리픽스 요청의 프리필 비용을 줄입니다. 최대값은 현재 디스크 여유 공간에 따라 조정됩니다. 이 캐시는 캐시 활성화 스위치를 따르며, 비활성화하려면 캐시 활성화를 끄세요. 설정을 저장하고 서비스를 재시작하면 적용됩니다.",
+      badge_restart: "재시작", requires_restart: "재시작 필요",
+      interface_language: "인터페이스 언어", theme_mode: "외관", theme_light: "라이트", theme_dark: "다크", theme_system: "시스템",
+      verify_model_on_load: "로드 시 전체 무결성 확인", verify_model_on_load_desc: "모델을 실제로 로드하기 직전에 snapshot 모든 파일의 SHA-256을 다시 계산합니다. 기본값은 꺼짐입니다.",
+      mem_limit_total: "전체 메모리 상한", mem_limit_total_desc: "백엔드 서비스가 사용할 수 있는 총 메모리를 제한합니다(모델, KV Cache, 런타임 오버헤드 포함). 0은 자동입니다.",
+      mem_limit_model: "모델 메모리 상한", mem_limit_model_desc: "로드된 모델 가중치가 사용하는 총 메모리를 제한합니다. 0은 제한 없음입니다.",
+      hot_cache: "메모리 캐시 한도", hot_cache_desc: "자주 사용하는 프리픽스 캐시입니다.", hot_cache_help_title: "메모리 캐시 역할", hot_cache_help_body: "자주 쓰는 프롬프트 앞부분을 메모리에 보관합니다. 자동은 시스템 통합 메모리를 기준으로 한도를 정하며 최대 8GB입니다. '자동'을 끄면 직접 설정할 수 있습니다.",
+      cold_cache: "SSD 캐시 한도", cold_cache_desc: "SSD Prefix Cache의 최대 디스크 사용량입니다.", cold_cache_help_title: "SSD 캐시 역할", cold_cache_help_body: "프리픽스 캐시 데이터를 로컬 SSD에 저장해 반복되는 긴 프롬프트의 프리필을 줄입니다. 최대값은 디스크 여유 공간에 맞춰 조정됩니다.",
       auto: "자동",
-      cache: "캐시", enable_cache: "캐시 활성화", ssd_cache_dir: "SSD 캐시 디렉토리",
-      active_kv_offload: "Active KV Cache 오프로드", active_kv_offload_desc: "실험적 기능입니다. 긴 논리 MAX CONTEXT TOKENS에서는 뜨거운 KV 창만 상주시켜 두고, 일시 중지된 Active KV Cache를 SSD에 기록합니다.", active_kv_offload_help_title: "실험적 캐시 상주 관리", active_kv_offload_help_body: "시퀀스 슬롯이 가득 찼을 때 일시 중지된 Active KV Cache를 로컬 SSD에 기록하여 새 요청을 먼저 실행할 수 있습니다.", active_kv_offload_help_trigger: "켜도 즉시 오프로드가 발생하는 것은 아닙니다. 스케줄링, KV 상주 압력 또는 요청 일시 중지/복원이 필요할 때 시스템이 자동으로 트리거합니다. 유휴 상태이거나 메모리 압력이 낮으면 idle 상태로 유지될 수 있습니다.", active_kv_offload_help_applicable: "적용: Full Attention dense/paged, TurboQuant packed Full Attention, MLA, GatedDelta/Linear.", active_kv_offload_help_not_applicable: "비대상: MTP speculative side cache.",
-      m5_dflash2_profile: "M5 DFlash2 프로필", m5_dflash2_profile_desc: "지원되는 기기에서 DFlash2 추론을 자동으로 최적화합니다.", m5_dflash2_profile_help_title: "M5 DFlash2 프로필 안내", m5_dflash2_profile_help_body: "Apple M5(GPU 17세대) 이상에서는 DFlash2 서빙에 M5용으로 조정된 커널, 트리 드래프트, 부하 시 배치를 사용합니다. 적용되지 않으면 각 기능이 자동으로 폴백합니다. 끄면 일반 설정을 사용합니다. Qwen 3.6 35B A3B는 전용으로 조정된 설정을 사용합니다.", m5_dflash2_profile_help_label: "M5 DFlash2 프로필 도움말",
-      ane_acceleration: "Neural Engine(ANE) 가속", ane_acceleration_desc: "지원되는 기기에서 Dense 모델의 긴 프롬프트 프리필을 Neural Engine이 분담합니다.", ane_help_title: "Neural Engine 가속 안내", ane_help_body: "M5 DFlash2 프로필이 활성화되면 Qwen 3.8 27B 같은 Dense 모델은 2,048 토큰 이상의 프롬프트를 프리필할 때 각 MLP의 일부를 Neural Engine에서 계산해 긴 프롬프트의 첫 토큰까지 걸리는 시간을 줄입니다. 짧은 프롬프트, 디코딩, Qwen 3.6 35B A3B 같은 MoE 모델에서는 사용하지 않습니다. 끄면 모든 계산을 GPU에서 수행합니다.", ane_help_label: "Neural Engine 가속 도움말", ane_requires_m5_profile: "M5 DFlash2 프로필이 켜져 있을 때만 적용됩니다.",
+      cache: "캐시", enable_cache: "프리픽스 캐시", cache_requires_prefix: "먼저 '프리픽스 캐시'를 켜세요.", enable_cache_desc: "요청 간에 같은 프롬프트 앞부분을 재사용해 중복 프리필을 줄입니다.", ssd_cache_dir: "SSD 캐시 디렉토리", ssd_cache_dir_desc: "비워 두면 프리픽스 캐시를 메모리에만 두고 SSD에는 쓰지 않습니다.", ssd_requires_dir: "SSD 캐시 디렉토리가 비어 있어 SSD 캐시를 사용하지 않습니다.",
+      active_kv_offload: "활성 KV 캐시 오프로드", active_kv_offload_desc: "메모리가 부족할 때 생성 중인 요청의 KV Cache를 SSD에 임시로 옮깁니다.", active_kv_offload_help_title: "오프로드 역할", active_kv_offload_help_body: "메모리가 부족하거나 동시 실행 슬롯이 가득 차면 생성 중인 요청의 KV Cache를 로컬 SSD에 임시로 기록하고 필요할 때 다시 읽어 옵니다. 더 긴 컨텍스트와 더 많은 동시 요청을 처리할 수 있지만 생성이 느려지고 일시 중지된 요청은 잠시 멈춥니다.", active_kv_offload_help_not_applicable: "비대상: DFlash2 모델, MTP 추측 디코딩 캐시.",
+      m5_dflash2_profile: "M5 DFlash2 최적화", m5_dflash2_profile_desc: "지원되는 기기에서 DFlash2 추론을 자동으로 최적화합니다.", m5_dflash2_profile_help_title: "M5 DFlash2 최적화 안내", m5_dflash2_profile_help_body: "Apple M5(GPU 17세대) 이상에서는 DFlash2 서빙에 M5용으로 조정된 커널, 트리 드래프트, 부하 시 배치를 사용합니다. 적용되지 않으면 각 기능이 자동으로 폴백합니다. 끄면 일반 설정을 사용합니다. Qwen 3.6 35B A3B는 전용으로 조정된 설정을 사용합니다.", m5_dflash2_profile_help_label: "M5 DFlash2 최적화 도움말",
+      ane_acceleration: "Neural Engine(ANE) 가속", ane_acceleration_desc: "Dense 모델의 긴 프롬프트 프리필을 Neural Engine이 분담합니다.", ane_help_title: "Neural Engine 가속 안내", ane_help_body: "M5 DFlash2 최적화가 활성화되면 Qwen 3.8 27B 같은 Dense 모델은 2,048 토큰 이상의 프롬프트를 프리필할 때 각 MLP의 일부를 Neural Engine에서 계산해 긴 프롬프트의 첫 토큰까지 걸리는 시간을 줄입니다. 짧은 프롬프트, 디코딩, Qwen 3.6 35B A3B 같은 MoE 모델에서는 사용하지 않습니다. 끄면 모든 계산을 GPU에서 수행합니다.", ane_help_label: "Neural Engine 가속 도움말", ane_requires_m5_profile: "먼저 M5 DFlash2 최적화를 켜세요.", m5_unsupported_chip: "이 Mac의 칩은 지원되지 않습니다. M5 이상의 칩이 필요합니다.",
       advanced: "고급", batch_processing: "배치 처리",
-      max_sequences: "최대 시퀀스 수", max_sequences_desc: "병렬 처리의 최대 동시 요청 수.",
-      max_models: "최대 동시 로드 모델 수", max_models_desc: "App 이 동시에 로드 상태로 유지하는 모델 수의 상한입니다. 상한에 도달하면 새 모델 로드는 거부되고 기존 로드 모델은 자동으로 교체되지 않습니다. 사용하지 않는 모델을 수동으로 언로드한 뒤 다시 로드하세요.",
+      max_sequences: "동시 요청 수", max_sequences_desc: "병렬 처리의 최대 동시 요청 수.",
+      max_models: "동시에 로드하는 모델 수", max_models_desc: "App 이 동시에 로드 상태로 유지하는 모델 수의 상한입니다. 상한에 도달하면 새 모델 로드는 거부되고 기존 로드 모델은 자동으로 교체되지 않습니다. 사용하지 않는 모델을 수동으로 언로드한 뒤 다시 로드하세요.",
       completion_batch: "완성 배치 크기", completion_batch_desc: "토큰 생성 단계의 배치 크기.",
-      model_ttl: "모델 자동 언로드 (TTL)", model_ttl_desc: "로드된 모델이 지정된 시간(분) 동안 유휴 상태이면 자동으로 언로드합니다. 0 = 비활성화. 기본 모델 설정은 유지됩니다.", minutes: "분",
+      model_ttl: "유휴 시 자동 언로드", model_ttl_desc: "로드된 모델이 지정된 시간(분) 동안 유휴 상태이면 자동으로 언로드합니다. 0 = 비활성화. 기본 모델 설정은 유지됩니다.", minutes: "분",
       save_settings: "설정 저장",
       settings_saved: "설정이 저장되었습니다.",
       settings_clean: "저장되지 않은 변경사항 없음",
-      settings_dirty: "저장되지 않은 변경사항 있음",
-      settings_restart_pending: "저장되지 않은 변경사항이 있습니다. 저장하면 서비스가 다시 시작됩니다.",
+      settings_changes_count: "변경 {n}건",
+      settings_changes_one: "변경 1건",
+      settings_changes_cluster: " (그중 {m}건은 클러스터 페이지)",
+      settings_restart_note: "저장하면 백엔드가 다시 시작되며 진행 중인 요청이 중단됩니다",
       settings_next_start: "다음 서비스 시작 시 변경사항이 적용됩니다",
       save_restart_settings: "저장 및 서비스 재시작",
       settings_saving: "설정 저장 중…",
       settings_restarting: "저장 및 서비스 재시작 중…",
       settings_save_failed: "설정이 저장되지 않았습니다. 오류를 확인하고 다시 시도하세요.",
-      log_level_live_desc: "App 및 백엔드 진단 로그에 즉시 적용하고 자동 저장합니다. 재시작이 필요하지 않습니다.",
       log_level_applying: "로그 수준 적용 중…",
       err_log_level_apply_failed: "로그 수준을 적용하지 못했습니다. 이전 설정을 유지합니다.",
       err_log_level_rollback_failed: "백엔드 복원을 확인하지 못했습니다. 서비스 상태를 확인한 후 다시 시도하세요.",
@@ -10580,17 +10692,24 @@
     });
     refreshAgentCopyButtonLabels();
     updateSidebarControls();
-    // Settings subtitle with inline badge
-    const sub = document.getElementById('settings-subtitle');
-    if (sub && dict.settings_subtitle_html) {
-      sub.innerHTML = dict.settings_subtitle_html;
-    }
+    renderSettingsHeaderHint(dict);
     updateDiagnosticExportButton();
     renderSchedulerProfilePreview();
     refreshProfileModelSuffixes();
     if (schedulerProfileLastStatus) renderSchedulerProfileStatus(schedulerProfileLastStatus);
     renderAgentGuideConfiguration();
     localizeVoiceFileStatus();
+  }
+
+  // The settings header hint shows a sample restart tag where the copy says {tag}.
+  function renderSettingsHeaderHint(dict) {
+    const hint = document.getElementById('settings-subtitle');
+    if (!hint) return;
+    const parts = (dict.settings_header_hint || I18N.en.settings_header_hint || '').split('{tag}');
+    const tag = document.createElement('span');
+    tag.className = 'ds-restart-tag';
+    tag.textContent = dict.settings_restart_tag || I18N.en.settings_restart_tag || 'Restart required';
+    hint.replaceChildren(document.createTextNode(parts[0] || ''), tag, document.createTextNode(parts.slice(1).join('')));
   }
 
   function t(key, fallback) {
@@ -10601,6 +10720,8 @@
     const i18nLang = LANG_MAP[configLang] || configLang;
     currentLang = i18nLang;
     applyI18n(i18nLang);
+    // The auto estimate carries a value, so applyI18n leaves it to its slider.
+    (typeof memSliderUpdaters !== 'undefined' ? memSliderUpdaters : []).forEach(relabel => relabel());
     // Keep the onboarding and Settings language controls in sync.
     ['lang-select', 'onboarding-lang-select'].forEach(function(id) {
       const select = document.getElementById(id);
@@ -11544,7 +11665,7 @@
         text.match(/\bcap=(\d+)/i) ||
         [])[1] || '--';
       return (dict.err_memory_budget_exceeded ||
-        'KV cache memory budget is insufficient. Current Max Sequences ({max_sequences}) and this model\'s logical MAX CONTEXT TOKENS ({max_cache_cap}) exceed the resident budget. Enable Active KV Cache Offload with cache enabled for long contexts, or lower Max Sequences / MAX CONTEXT TOKENS and retry.')
+        'KV cache memory budget is insufficient. The current “Concurrent requests” setting ({max_sequences}) and this model\'s logical MAX CONTEXT TOKENS ({max_cache_cap}) exceed the resident budget. Enable “Active KV cache offload” with “Prefix cache” turned on for long contexts, or lower concurrent requests / MAX CONTEXT TOKENS and retry.')
         .replace('{max_sequences}', maxSequences)
         .replace('{max_cache_cap}', maxCacheCap);
     }
@@ -14045,11 +14166,12 @@
     btn.addEventListener('keydown', dsSegKeydown);
   });
 
-  // Theme segment buttons
+  // Theme segment buttons (a .ds-seg: dsSegSelect sets aria-pressed and moves the thumb)
   function setTheme(value) {
     document.querySelectorAll('#theme-select .seg-btn').forEach(b => {
       b.classList.toggle('active', b.dataset.value === value);
     });
+    dsSegSelect(document.getElementById('theme-select'), value);
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.setTheme) {
       window.webkit.messageHandlers.setTheme.postMessage(value);
     }
@@ -16639,7 +16761,7 @@
     const authentication = data.authentication === 'api_key'
       ? (dict.authentication_status_api_key || 'API Key enabled')
       : (dict.authentication_status_local || 'Local access only; API Key not required');
-    rows.push(buildEndpointStatusRow('↔', dict.network_mode || 'Network Mode', networkMode));
+    rows.push(buildEndpointStatusRow('↔', dict.network_mode || 'Network mode', networkMode));
     rows.push(buildEndpointStatusRow('🔑', dict.authentication_status || 'Authentication', authentication));
     rows.push(buildEndpointStatusRow('🔗', dict.endpoint_address || 'Endpoint', data.endpoint_address, true, dict.copy_endpoint || 'Copy endpoint'));
     list.innerHTML = rows.join('');
@@ -16880,7 +17002,8 @@
   function setTextInput(id, value, fallback) {
     const el = document.getElementById(id);
     if (!el) return;
-    const next = value === undefined || value === null || value === '' ? fallback : value;
+    // An empty string is a saved value (a blank SSD cache directory means memory-only), not "unset".
+    const next = value === undefined || value === null ? fallback : value;
     if (next !== undefined && next !== null) el.value = String(next);
   }
 
@@ -16978,6 +17101,7 @@
     document.querySelectorAll('#theme-select .seg-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.value === next);
     });
+    dsSegSelect(document.getElementById('theme-select'), next);
   }
 
   function refreshSettingsDerivedUI() {
@@ -17093,7 +17217,7 @@
 
   let logLevelPending = false;
   let fullSettingsSavePending = false;
-  let logLevelStatusKey = 'log_level_live_desc';
+  let logLevelStatusKey = 'settings_applies_now';
 
   function normalizeLogLevel(value) {
     const level = String(value || 'INFO').toUpperCase();
@@ -17131,7 +17255,7 @@
     const level = normalizeLogLevel(result.level || config.log_level);
     if (result.success) {
       window.__IRONMLX_APP_CONFIG__ = Object.assign({}, config, {log_level: level});
-      logLevelStatusKey = 'log_level_live_desc';
+      logLevelStatusKey = 'settings_applies_now';
     } else {
       const codes = ['log_level_rollback_failed', 'log_level_busy', 'log_level_persist_failed',
         'log_level_backend_changed', 'log_level_backend_unavailable'];
@@ -17183,6 +17307,7 @@
     };
     window.__IRONMLX_APP_CONFIG__ = Object.assign({}, window.__IRONMLX_APP_CONFIG__ || {}, settings);
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.saveSettings) {
+      settingsFocusInBar = document.getElementById('settings-save-bar').contains(document.activeElement);
       settingsSaving = true;
       settingsSaveFailed = false;
       settingsSaveError = null;
@@ -17205,6 +17330,7 @@
     const dict = I18N[currentLang] || I18N.en;
     settingsSaving = false;
     if (result.status === 'error' || result.code) {
+      settingsFocusInBar = false;
       pendingSettingsBaseline = null;
       pendingSettingsAuxiliary = null;
       settingsSaveFailed = true;
@@ -17220,6 +17346,7 @@
     pendingSettingsAuxiliary = null;
     settingsSaveFailed = false;
     updateSettingsSaveBar();
+    settingsFocusInBar = false;
     if (result.needs_restart) {
       const msg = dict.restart_confirm || 'Some settings require a server restart to take effect. Restart now?';
       showConfirmDialog(msg, { confirmText: dict.restart_now || 'Restart Now' }).then(function(ok) {
@@ -17247,11 +17374,33 @@
     'cfg-distributed-backend', 'cfg-parallel-mode'
   ];
   const SETTINGS_FIELDS = [...RESTART_FIELDS, 'cfg-verify-model-on-load'];
+  // One setting item can span several controls (an Auto switch plus its slider);
+  // the save bar counts items, not control ids.
+  const SETTINGS_ITEM_OF_FIELD = {
+    'cfg-mem-total': 'mem-total', 'cfg-mem-total-auto': 'mem-total',
+    'cfg-mem-model': 'mem-model', 'cfg-mem-model-auto': 'mem-model',
+    'cfg-hot-cache': 'hot-cache', 'cfg-hot-cache-auto': 'hot-cache',
+    'cfg-network-mode': 'network', 'cfg-lan-host': 'network'
+  };
+  // Changes made here that belong to controls on the Cluster page.
+  const SETTINGS_CLUSTER_FIELDS = ['cfg-distributed-backend', 'cfg-parallel-mode'];
+  function settingsChangedItems(changedIds) {
+    const itemOf = id => SETTINGS_ITEM_OF_FIELD[id] || id;
+    const items = new Set(changedIds.map(itemOf));
+    const clusterItems = new Set(changedIds.filter(id => SETTINGS_CLUSTER_FIELDS.includes(id)).map(itemOf));
+    return {
+      count: items.size,
+      clusterCount: clusterItems.size,
+      restart: changedIds.some(id => RESTART_FIELDS.includes(id))
+    };
+  }
   let settingsBaseline = null;
   let pendingSettingsBaseline = null;
   let settingsBaselineAuxiliary = null;
   let pendingSettingsAuxiliary = null;
   let settingsSaving = false;
+  // Save disables the button, which can drop focus before the bar hides; remember where it was.
+  let settingsFocusInBar = false;
   let settingsSaveFailed = false;
   let settingsSaveError = null;
   let settingsRestarting = false;
@@ -17321,7 +17470,7 @@
     const status = document.getElementById('settings-save-status');
     if (!button || !status || !settingsBaseline) return;
     const changed = changedSettingsFields();
-    const restart = changed.some(id => RESTART_FIELDS.includes(id));
+    const { count, clusterCount, restart } = settingsChangedItems(changed);
     const dict = I18N[currentLang] || I18N.en;
     const willRestart = restart && settingsBackendRunning !== false;
     button.textContent = settingsSaving ? (settingsRestarting ? dict.settings_restarting : dict.settings_saving)
@@ -17334,10 +17483,18 @@
     }
     status.textContent = settingsSaving ? (settingsRestarting ? dict.settings_restarting : dict.settings_saving)
       : settingsSaveFailed && changed.length ? dict.settings_save_failed + (settingsSaveError ? " " + localizeErrorResult(settingsSaveError) : "")
-      : restart ? (settingsBackendRunning === false ? dict.settings_next_start : dict.settings_restart_pending)
-      : changed.length ? dict.settings_dirty : '';
+      : !changed.length ? ''
+      : (count === 1 ? dict.settings_changes_one : dict.settings_changes_count.replace('{n}', count))
+        + (clusterCount ? dict.settings_changes_cluster.replace('{m}', clusterCount) : '')
+        + (restart ? ' · ' + (settingsBackendRunning === false ? dict.settings_next_start : dict.settings_restart_note) : '');
     const bar = document.getElementById('settings-save-bar');
     bar.dataset.restart = String(restart);
+    // A hidden bar cannot keep focus; hand it to the page heading instead of letting it fall to body.
+    if (!settingsSaving && !changed.length && bar.dataset.state !== 'clean' && (bar.contains(document.activeElement) || (settingsFocusInBar && (!document.activeElement || document.activeElement === document.body)))) {
+      settingsFocusInBar = false;
+      const heading = document.getElementById('settings-page-title');
+      if (heading) heading.focus({ preventScroll: true });
+    }
     bar.dataset.state = settingsSaving ? 'saving' : !changed.length ? 'clean' : settingsSaveFailed ? 'error' : 'pending';
   }
 
@@ -20343,6 +20500,8 @@
   });
 
   // ── Memory slider interactions ──
+  // setLanguage re-runs these so the auto estimate and slider labels follow the language.
+  var memSliderUpdaters = [];
   function setupMemSlider(sliderId, autoId) {
     const slider = document.getElementById(sliderId);
     const auto = document.getElementById(autoId);
@@ -20372,21 +20531,28 @@
       autoHint.style.display = '';
     }
 
-    function update() {
+    // Label-only part: safe to re-run on language change (never touches value or disabled).
+    function relabel() {
       const dict = I18N[currentLang] || I18N.en;
       if (auto.checked) {
-        if (slider.value !== '0') rememberManualValue();
-        slider.value = '0';
         label.textContent = dict.auto || 'Auto';
         updateAutoHint(true);
-        slider.disabled = true;
       } else {
-        if (usesVisualAutoZero && slider.value === '0') restoreManualValue();
         updateAutoHint(false);
         const v = parseInt(slider.value) || 0;
         label.textContent = v === 0 ? (dict.no_limit || 'No limit') : v + ' GB';
+      }
+    }
+    function update() {
+      if (auto.checked) {
+        if (slider.value !== '0') rememberManualValue();
+        slider.value = '0';
+        slider.disabled = true;
+      } else {
+        if (usesVisualAutoZero && slider.value === '0') restoreManualValue();
         slider.disabled = false;
       }
+      relabel();
     }
     slider.addEventListener('input', function() {
       if (usesVisualAutoZero && !auto.checked) rememberManualValue();
@@ -20394,6 +20560,7 @@
     });
     auto.addEventListener('change', update);
     update();
+    memSliderUpdaters.push(relabel);
   }
   setupMemSlider('cfg-mem-total', 'cfg-mem-total-auto');
   setupMemSlider('cfg-mem-model', 'cfg-mem-model-auto');
@@ -20412,7 +20579,7 @@
   }
   setupCacheSlider('cfg-cold-cache', '1 GB', 'GB');
 
-  // ── UI coupling: Enable Cache toggle ↔ cache sliders/dir ──
+  // ── UI coupling: Prefix cache toggle ↔ cache sliders/dir ──
   const cacheEnableToggle = document.getElementById('cfg-cache-enable');
   const hotCacheSlider = document.getElementById('cfg-hot-cache');
   const hotCacheAuto = document.getElementById('cfg-hot-cache-auto');
@@ -20421,7 +20588,7 @@
   let coldCacheCapacityTimer = null;
 
   function requestColdCacheCapacity() {
-    if (!cacheDirInput) return;
+    if (!cacheDirInput || !cacheDirInput.value.trim()) return;
     apiPost('/admin/api/cache/capacity', { cache_dir: cacheDirInput.value });
   }
 
@@ -20446,6 +20613,25 @@
     const dirEnabled = enabled;
     cacheDirInput.disabled = !dirEnabled;
     cacheDirInput.style.opacity = dirEnabled ? '1' : '0.4';
+    // The three limits are sub-options of the prefix cache: dim them and say why on the first one.
+    ['hot-cache-row', 'cold-cache-row', 'cache-dir-row'].forEach(id => {
+      const row = document.getElementById(id);
+      if (row) row.classList.toggle('is-inactive', !enabled);
+    });
+    // The SSD limit applies only to an SSD store, which needs a directory.
+    const ssdOn = enabled && cacheDirInput.value.trim() !== '';
+    coldCacheSlider.disabled = !ssdOn;
+    coldCacheSlider.parentElement.style.opacity = ssdOn ? '1' : '0.4';
+    const coldRow = document.getElementById('cold-cache-row');
+    if (coldRow) coldRow.classList.toggle('is-inactive', !ssdOn);
+    const ssdNote = document.getElementById('ssd-requires-dir');
+    const coldDesc = document.getElementById('cold-cache-desc');
+    if (ssdNote) ssdNote.hidden = !enabled || ssdOn;
+    if (coldDesc) coldDesc.hidden = enabled && !ssdOn;
+    const requiresPrefix = document.getElementById('cache-requires-prefix');
+    const hotCacheDesc = document.getElementById('hot-cache-desc');
+    if (requiresPrefix) requiresPrefix.hidden = enabled;
+    if (hotCacheDesc) hotCacheDesc.hidden = !enabled;
   }
   cacheEnableToggle.addEventListener('change', function() {
     syncCacheUI();
@@ -20459,6 +20645,7 @@
   cacheDirInput.addEventListener('change', requestColdCacheCapacity);
   cacheDirInput.addEventListener('blur', requestColdCacheCapacity);
   cacheDirInput.addEventListener('input', scheduleColdCacheCapacityRefresh);
+  cacheDirInput.addEventListener('input', syncCacheUI);
   syncCacheUI();
   requestColdCacheCapacity();
 
@@ -20466,11 +20653,31 @@
   // profile off the ANE toggle has no effect, so it is disabled and says why.
   const m5ProfileToggle = document.getElementById('cfg-m5-dflash2-profile');
   const aneToggle = document.getElementById('cfg-ane');
+  // The M5 DFlash2 profile runs only on Apple GPU generation 17+ (M5); unknown means supported.
+  function settingsChipSupportsM5Profile() {
+    const generation = window.__IRONMLX_GPU_GENERATION__;
+    if (generation === null || generation === undefined) return true;
+    const number = Number(generation);
+    return !Number.isFinite(number) || number >= 17;
+  }
+
+  // ANE depends on the M5 profile. A setting that cannot apply is disabled and shown as off;
+  // its saved value is kept, so the save bar does not count it and turning M5 back on restores it.
   function syncAneUI() {
-    const available = m5ProfileToggle.checked;
-    aneToggle.disabled = !available;
-    aneToggle.closest('.settings-row-right').style.opacity = available ? '1' : '0.4';
-    document.getElementById('ane-requires-m5-profile').hidden = available;
+    const supported = settingsChipSupportsM5Profile();
+    const m5On = supported && m5ProfileToggle.checked;
+    m5ProfileToggle.disabled = !supported;
+    m5ProfileToggle.closest('.toggle').classList.toggle('is-forced-off', !supported);
+    m5ProfileToggle.closest('.settings-row-right').style.opacity = supported ? '1' : '0.4';
+    document.getElementById('m5-dflash2-profile-desc').hidden = !supported;
+    document.getElementById('m5-unsupported-note').hidden = supported;
+    aneToggle.disabled = !m5On;
+    aneToggle.closest('.toggle').classList.toggle('is-forced-off', !m5On);
+    aneToggle.closest('.settings-row-right').style.opacity = m5On ? '1' : '0.4';
+    document.getElementById('ane-row').classList.toggle('is-inactive', !m5On);
+    const needsM5 = supported && !m5On;
+    document.getElementById('ane-requires-m5-profile').hidden = !needsM5;
+    document.getElementById('ane-acceleration-desc').hidden = needsM5;
   }
   m5ProfileToggle.addEventListener('change', syncAneUI);
   syncAneUI();

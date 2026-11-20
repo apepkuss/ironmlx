@@ -1111,8 +1111,8 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
     }
 
     private func sendColdCacheCapacity(payload: APIPostPayload) {
-        let directory = payload.body["cache_dir"]?.stringValue
-            ?? payload.body["dir"]?.stringValue
+        let requested = payload.body["cache_dir"]?.stringValue ?? payload.body["dir"]?.stringValue
+        let directory = requested.flatMap { BackendLaunchOptions.ssdPrefixCacheDirectory($0) }
             ?? BackendLaunchOptions.defaultPagedPrefixCacheDirectory
         let capacity = ColdCacheCapacityPolicy.capacity(forDirectoryPath: directory)
         let json = (try? Self.jsonString(capacity)) ?? "{\"min_gb\":1,\"max_gb\":100,\"default_gb\":10,\"reserve_gb\":10}"

@@ -544,3 +544,35 @@ private func dflash2LaunchArguments(config appConfig: AppConfig) -> [String] {
     let decoded = try JSONDecoder().decode(AppConfig.self, from: encoded)
     #expect(decoded.m5Dflash2Profile == false)
 }
+
+
+@Test func blankSSDCacheDirectoryKeepsAMemoryOnlyPrefixCache() {
+    let gib: UInt64 = 1024 * 1024 * 1024
+    // Cleared directory: no SSD store, the in-memory prefix cache stays on.
+    let memoryOnly = BackendLaunchOptions(
+        config: AppConfig(hotCache: 4, coldCache: 20, cacheEnable: true, cacheDir: "  "),
+        physicalMemoryBytes: 128 * gib
+    )
+    #expect(memoryOnly.pagedPrefixCacheDir == nil)
+    #expect(memoryOnly.ssdPrefixCacheMaxGB == nil)
+    #expect(memoryOnly.prefixLruCacheMaxBytes == 4 * Int(gib))
+    let arguments = BackendLaunchConfiguration(
+        executableURL: URL(fileURLWithPath: "/tmp/ironmlx"), host: "127.0.0.1", port: 9068, options: memoryOnly
+    ).arguments
+    #expect(!arguments.contains("--paged-prefix-cache-dir"))
+    #expect(!arguments.contains("--ssd-prefix-cache-max-gb"))
+    #expect(arguments.contains("--prefix-lru-cache-max-bytes"))
+    let dflash2 = dflash2CacheLaunchArguments(
+        config: AppConfig(hotCache: 8, coldCache: 20, cacheEnable: true, cacheDir: "")
+    )
+    #expect(!dflash2.contains("--paged-prefix-cache-dir"))
+    #expect(!dflash2.contains("--ssd-prefix-cache-max-gb"))
+    #expect(dflash2.contains("--prefix-lru-cache-max-bytes"))
+    // Never set: the default directory, as before.
+    let unset = BackendLaunchOptions(config: AppConfig(cacheEnable: true), physicalMemoryBytes: 128 * gib)
+    #expect(unset.pagedPrefixCacheDir == BackendLaunchOptions.defaultPagedPrefixCacheDirectory)
+    #expect(unset.ssdPrefixCacheMaxGB == 10)
+    #expect(BackendLaunchOptions.ssdPrefixCacheDirectory(nil) == BackendLaunchOptions.defaultPagedPrefixCacheDirectory)
+    #expect(BackendLaunchOptions.ssdPrefixCacheDirectory(" /tmp/x ") == "/tmp/x")
+    #expect(BackendLaunchOptions.ssdPrefixCacheDirectory("") == nil)
+}

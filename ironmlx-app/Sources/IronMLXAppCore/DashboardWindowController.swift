@@ -312,7 +312,8 @@ public final class DashboardWindowController {
             physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory
         )
         let coldCacheCapacity = ColdCacheCapacityPolicy.capacity(
-            forDirectoryPath: config.cacheDir ?? BackendLaunchOptions.defaultPagedPrefixCacheDirectory
+            forDirectoryPath: BackendLaunchOptions.ssdPrefixCacheDirectory(config.cacheDir)
+                ?? BackendLaunchOptions.defaultPagedPrefixCacheDirectory
         )
         let coldCacheCapacityData = try encoder.encode(coldCacheCapacity)
         let coldCacheCapacityJSON = String(data: coldCacheCapacityData, encoding: .utf8) ?? "{}"
@@ -330,6 +331,7 @@ public final class DashboardWindowController {
         window.__IRONMLX_COLD_CACHE_CAPACITY__ = \(coldCacheCapacityJSON);
         window.__IRONMLX_DEFAULT_CACHE_DIR__ = \(DashboardBridge.jsStringLiteral(BackendLaunchOptions.defaultPagedPrefixCacheDirectory));
         window.__IRONMLX_NETWORK_INTERFACES__ = \(networkInterfacesJSON);
+        window.__IRONMLX_GPU_GENERATION__ = \(AppleGPUGeneration.current().map(String.init) ?? "null");
         window.__IRONMLX_INITIAL_ROUTE__ = \(DashboardBridge.jsStringLiteral(route.rawValue));
         """
     }

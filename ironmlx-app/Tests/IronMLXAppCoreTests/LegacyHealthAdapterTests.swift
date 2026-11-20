@@ -278,7 +278,7 @@ import Testing
     #expect(!html.contains("Agent 端点"))
 }
 
-@Test func dashboardActiveKVHelpWarningUsesGrayDefaultAndOrangeHover() throws {
+@Test func dashboardActiveKVHelpIsAQuestionMarkThatNamesDFlash2() throws {
     let testFile = URL(fileURLWithPath: #filePath)
     let packageRoot = testFile
         .deletingLastPathComponent()
@@ -288,53 +288,12 @@ import Testing
         .appendingPathComponent("Sources/IronMLXAppCore/Resources/dashboard2.html")
     let html = try String(contentsOf: htmlURL, encoding: .utf8)
 
-    #expect(html.contains(#"class="profile-help-trigger warning" id="active-kv-help-trigger""#))
-    #expect(html.contains("""
-  .profile-help-trigger.warning {
-    border-color: var(--border);
-    background: var(--bg);
-    color: var(--text-secondary);
-  }
-"""))
-    #expect(html.contains("""
-  .profile-help-trigger.warning:hover,
-  .profile-help-trigger.warning:focus {
-    border-color: #ff9500;
-    background: rgba(255, 149, 0, 0.08);
-    color: #ff9500;
-  }
-"""))
-}
-
-@Test func dashboardActiveKVHelpTooltipExplainsAutomaticTriggerConditions() throws {
-    let testFile = URL(fileURLWithPath: #filePath)
-    let packageRoot = testFile
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-    let htmlURL = packageRoot
-        .appendingPathComponent("Sources/IronMLXAppCore/Resources/dashboard2.html")
-    let html = try String(contentsOf: htmlURL, encoding: .utf8)
-
-    #expect(html.contains(#"data-i18n="active_kv_offload_help_trigger""#))
-    #expect(html.contains("开启后不代表立即发生卸载。系统会在请求调度、KV 驻留压力或请求暂停/恢复需要时自动触发；空闲或内存压力较低时可能保持 idle。"))
-}
-
-@Test func dashboardActiveKVHelpTooltipSeparatesApplicableAndNotApplicableCacheKinds() throws {
-    let testFile = URL(fileURLWithPath: #filePath)
-    let packageRoot = testFile
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-    let htmlURL = packageRoot
-        .appendingPathComponent("Sources/IronMLXAppCore/Resources/dashboard2.html")
-    let html = try String(contentsOf: htmlURL, encoding: .utf8)
-
-    #expect(html.contains(#"data-i18n="active_kv_offload_help_applicable""#))
+    #expect(html.contains(#"<button type="button" class="profile-help-trigger" id="active-kv-help-trigger" aria-describedby="active-kv-help-tooltip" aria-label="Active KV offload help">?</button>"#))
+    #expect(!html.contains("profile-help-trigger warning"))
     #expect(html.contains(#"data-i18n="active_kv_offload_help_not_applicable""#))
-    #expect(html.contains("适用：Full Attention dense/paged、TurboQuant packed Full Attention、MLA、GatedDelta/Linear。"))
-    #expect(html.contains("不适用：MTP speculative side cache。"))
-    #expect(!html.contains("支持：Full Attention dense/paged、TurboQuant packed Full Attention、MLA。不适用"))
+    #expect(html.contains("不适用：DFlash2 模型、MTP 推测解码缓存。"))
+    #expect(!html.contains("active_kv_offload_help_trigger"))
+    #expect(!html.contains("active_kv_offload_help_applicable"))
 }
 
 @Test func dashboardActiveKVHelpTooltipUsesFixedPanelForLongCopy() throws {

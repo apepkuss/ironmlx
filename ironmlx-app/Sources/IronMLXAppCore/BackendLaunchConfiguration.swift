@@ -97,13 +97,12 @@ public struct BackendLaunchOptions: Equatable {
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
     ) {
         let cacheEnabled = config.cacheEnable ?? true
-        let prefixCacheDir = cacheEnabled
-            ? (Self.normalizedPath(config.cacheDir) ?? Self.defaultPagedPrefixCacheDirectory)
-            : nil
+        let prefixCacheDir = cacheEnabled ? Self.ssdPrefixCacheDirectory(config.cacheDir) : nil
         let prefixLruCacheMaxBytes = cacheEnabled
             ? Self.hotCacheLimitBytes(hotCacheGigabytes: config.hotCache, physicalMemoryBytes: physicalMemoryBytes)
             : nil
-        let ssdPrefixCacheMaxGB = cacheEnabled
+        // The SSD limit only applies to an SSD store; without a directory the prefix cache is memory-only.
+        let ssdPrefixCacheMaxGB = prefixCacheDir != nil
             ? Self.coldCacheLimitGigabytes(config.coldCache)
             : nil
         self.init(
@@ -177,6 +176,13 @@ public struct BackendLaunchOptions: Equatable {
 
     public var isValid: Bool {
         validationError == nil
+    }
+
+    /// SSD prefix cache directory for a saved setting: never set → the default
+    /// directory; set to blank → no SSD store (memory-only prefix cache); else the path.
+    public static func ssdPrefixCacheDirectory(_ value: String?) -> String? {
+        guard let value else { return defaultPagedPrefixCacheDirectory }
+        return normalizedPath(value)
     }
 
     private static func normalizedPath(_ value: String?) -> String? {
