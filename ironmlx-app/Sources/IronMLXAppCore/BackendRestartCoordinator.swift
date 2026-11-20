@@ -38,11 +38,26 @@ public protocol BackendModelRestoring: Sendable {
     func restore(_ snapshot: BackendRecoverySnapshot) async -> BackendRestartResult
     /// Restores `snapshot` into the backend launch `launchID`.
     func restore(_ snapshot: BackendRecoverySnapshot, launchID: UUID?) async -> BackendRestartResult
+    /// Restores `snapshot` into the backend launch `launchID`; `launchServesDFlash2` says that
+    /// launch is the DFlash2 server, which has no model admin routes.
+    func restore(
+        _ snapshot: BackendRecoverySnapshot,
+        launchID: UUID?,
+        launchServesDFlash2: Bool
+    ) async -> BackendRestartResult
 }
 
 extension BackendModelRestoring {
     public func restore(_ snapshot: BackendRecoverySnapshot, launchID: UUID?) async -> BackendRestartResult {
         await restore(snapshot)
+    }
+
+    public func restore(
+        _ snapshot: BackendRecoverySnapshot,
+        launchID: UUID?,
+        launchServesDFlash2: Bool
+    ) async -> BackendRestartResult {
+        await restore(snapshot, launchID: launchID)
     }
 }
 
@@ -128,12 +143,21 @@ public struct BackendRestartCoordinator: Sendable {
     }
 
     public func restore(_ snapshot: BackendRecoverySnapshot) async -> BackendRestartResult {
-        await restore(snapshot, launchID: nil)
+        await restore(snapshot, launchID: nil, launchServesDFlash2: false)
+    }
+
+    public func restore(_ snapshot: BackendRecoverySnapshot, launchID: UUID?) async -> BackendRestartResult {
+        await restore(snapshot, launchID: launchID, launchServesDFlash2: false)
     }
 
     /// Registers every local model with the launch `launchID`, then loads the
-    /// snapshot's models.
-    public func restore(_ snapshot: BackendRecoverySnapshot, launchID: UUID?) async -> BackendRestartResult {
+    /// snapshot's models. A DFlash2 server launch gets no registrations: it
+    /// serves its one target model and has no model admin routes.
+    public func restore(
+        _ snapshot: BackendRecoverySnapshot,
+        launchID: UUID?,
+        launchServesDFlash2: Bool
+    ) async -> BackendRestartResult {
         let config = snapshot.config
         if let dflash2Model = snapshot.models.first(where: { $0.dflash2ModelDir != nil }) {
             let invalidShape = snapshot.models.count != 1 || !dflash2Model.isDefault
@@ -164,7 +188,7 @@ public struct BackendRestartCoordinator: Sendable {
             pinnedModels: pinnedModels,
             mtpEnabledModels: []
         )
-        let registrationFailures = await LocalModelBackendRegistrar.register(
+        let registrationFailures = launchServesDFlash2 ? [] : await LocalModelBackendRegistrar.register(
             localModels: localModels,
             defaultModel: config.defaultModelReference,
             scanner: scanner,

@@ -66,19 +66,23 @@ public struct BackendProcessLaunchPlan: Sendable {
     public var command: String
     public var standardInputData: Data?
     public var logLevel: AppLogLevel
+    /// The process is the DFlash2 server: it serves one target model and has no model admin routes.
+    public var servesDFlash2: Bool
 
     public init(
         processURL: URL,
         arguments: [String],
         command: String? = nil,
         standardInputData: Data? = nil,
-        logLevel: AppLogLevel = .info
+        logLevel: AppLogLevel = .info,
+        servesDFlash2: Bool = false
     ) {
         self.processURL = processURL
         self.arguments = arguments
         self.command = command ?? ([processURL.path] + arguments).joined(separator: " ")
         self.standardInputData = standardInputData
         self.logLevel = logLevel
+        self.servesDFlash2 = servesDFlash2
     }
 }
 
@@ -174,13 +178,22 @@ public final class BackendProcessManager {
                 processURL: processURL,
                 arguments: arguments,
                 standardInputData: standardInputData,
-                logLevel: .saved(config.logLevel)
+                logLevel: .saved(config.logLevel),
+                servesDFlash2: dflash2Runtime != nil
             )
         }
     }
 
     public var isRunning: Bool {
         currentLaunch?.process.isRunning == true
+    }
+
+    /// Whether the running process was launched as the DFlash2 server.
+    public var currentLaunchServesDFlash2: Bool {
+        guard let currentLaunch, currentLaunch.process.isRunning else {
+            return false
+        }
+        return currentLaunch.servesDFlash2
     }
 
     public var currentProcessIdentifier: Int32? {
@@ -241,7 +254,8 @@ public final class BackendProcessManager {
                 generation: generation,
                 process: process,
                 logHandle: logHandle,
-                logStartOffset: logStartOffset
+                logStartOffset: logStartOffset,
+                servesDFlash2: plan.servesDFlash2
             )
             process.terminationHandler = { [weak self] terminatedProcess in
                 let reason = Self.terminationReasonName(terminatedProcess.terminationReason)
@@ -425,6 +439,7 @@ private final class ManagedBackendLaunch {
     let process: Process
     let logHandle: FileHandle
     let logStartOffset: UInt64
+    let servesDFlash2: Bool
     var stopIntent: BackendStopIntent = .unexpected
     var logClosed = false
 
@@ -433,13 +448,15 @@ private final class ManagedBackendLaunch {
         generation: UInt64,
         process: Process,
         logHandle: FileHandle,
-        logStartOffset: UInt64
+        logStartOffset: UInt64,
+        servesDFlash2: Bool
     ) {
         self.launchID = launchID
         self.generation = generation
         self.process = process
         self.logHandle = logHandle
         self.logStartOffset = logStartOffset
+        self.servesDFlash2 = servesDFlash2
     }
 }
 

@@ -3143,6 +3143,11 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
         if canSyncBackendModelState {
             let launchID = backend.currentLaunchID
             let client = modelStatusClientFactory(config.host, config.port)
+            // The DFlash2 server has no model admin routes; its health names the model it serves.
+            if backend.launchServesDFlash2 {
+                return await recoverDFlash2ModelState(config: config, client: client)
+                    ?? persistedModelState(config: config)
+            }
             do {
                 let models = try await client.fetchLoadedModels()
                 let currentConfig = configStore.load()
@@ -3326,7 +3331,9 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
                 let scanJavaScript = "onLocalModelsScanned(\(Self.jsStringLiteral(json)))"
                 self.sendJavaScript(afterScanJavaScript.map { "\(scanJavaScript);\($0)" } ?? scanJavaScript)
             }
-            if self.canSyncBackendModelState, self.configuredDFlash2Target(in: config) == nil {
+            if self.canSyncBackendModelState,
+               !self.backend.launchServesDFlash2,
+               self.configuredDFlash2Target(in: config) == nil {
                 let client = BackendAPIClient(host: config.host, port: config.port)
                 await self.registerChangedLocalModels(models, config: config, client: client)
             }

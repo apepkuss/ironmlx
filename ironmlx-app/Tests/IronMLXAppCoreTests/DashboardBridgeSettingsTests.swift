@@ -530,6 +530,63 @@ import WebKit
     withExtendedLifetime(bridge) {}
 }
 
+@MainActor
+@Test func dashboardReadsDFlash2LaunchStateFromHealthWithoutAdminModelRoute() async throws {
+    let targetID = "mlx-community/Qwen3.8-27B-4bit"
+    let draftID = "z-lab/Qwen3.8-27B-DFlash2"
+    let root = try dashboardDFlash2ModelRoot(targetID: targetID, draftID: draftID)
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    configStore.save(AppConfig(defaultModel: targetID, loadedModels: []))
+    let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try parameterStore.save(ModelParameters(
+        modelID: targetID,
+        dflash2Enabled: true,
+        dflash2ModelID: draftID
+    ))
+    let client = CountingDFlash2HealthClient(health: dashboardDFlash2HealthSnapshot(modelID: targetID))
+    let backend = TestRuntimeBackend(state: .running, isRunning: true)
+    // The backend was launched as the DFlash2 server, before the config lists its target.
+    backend.launchServesDFlash2 = true
+    let webView = CapturingDashboardWebView()
+    let notificationCenter = NotificationCenter()
+    let bridge = DashboardBridge(
+        webView: webView,
+        configStore: configStore,
+        backend: backend,
+        scanner: LocalModelScanner(rootURL: root),
+        parameterStore: parameterStore,
+        notificationCenter: notificationCenter,
+        modelStatusClientFactory: { _, _ in client }
+    )
+
+    notificationCenter.post(name: .ironMLXLoadedModelsDidChange, object: nil)
+
+    let script = try #require(await webView.script(containing: "onLocalModelsScanned"))
+    let target = try dashboardModel(from: script, id: targetID)
+    #expect(target["loaded"] as? Bool == true)
+    #expect(configStore.load().restoredModelReferences == [targetID])
+    #expect(await client.loadedModelFetches == 0)
+    withExtendedLifetime(bridge) {}
+}
+
+private actor CountingDFlash2HealthClient: DashboardModelStatusFetching {
+    let health: HealthzSnapshot
+    private(set) var loadedModelFetches = 0
+
+    init(health: HealthzSnapshot) {
+        self.health = health
+    }
+
+    func fetchLoadedModels() async throws -> [BackendLoadedModelInfo] {
+        loadedModelFetches += 1
+        throw DashboardModelStatusClientTestError.adminRouteUnavailable
+    }
+
+    func fetchHealthz() async throws -> HealthzSnapshot {
+        health
+    }
+}
+
 @Test func dashboardMtpIncompatibleStatusUsesNoCompatibleWeightsCopy() throws {
     let html = try String(
         contentsOfFile: "Sources/IronMLXAppCore/Resources/dashboard2.html",

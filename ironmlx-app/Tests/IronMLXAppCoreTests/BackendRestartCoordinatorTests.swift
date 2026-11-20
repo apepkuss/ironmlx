@@ -459,6 +459,32 @@ func restartNeverPromotesAudioOrEmbeddingToGenerationDefault(runtimeKind: String
     ], "\(loaderCalls)")
 }
 
+@Test @MainActor func restoreIntoDFlash2LaunchSkipsLocalModelRegistration() async throws {
+    // A Dashboard switch to DFlash2 relaunches the backend as the DFlash2 server with no
+    // restored models listed yet; that server has no model admin routes.
+    let (root, _) = try restartModelRoot(repoID: "mlx-community/Tiny-4bit")
+    let loader = FakeRestartModelLoader()
+    let scanner = LocalModelScanner(rootURL: root)
+    let parameterStore = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    let coordinator = BackendRestartCoordinator(
+        scanner: scanner,
+        parameterStore: parameterStore,
+        clientFactory: { _, _ in loader }
+    )
+    let recoverySnapshot = BackendRecoverySnapshot.capture(
+        config: AppConfig(port: 9068),
+        scanner: scanner,
+        parameterStore: parameterStore
+    )
+
+    let result = await coordinator.restore(recoverySnapshot, launchID: nil, launchServesDFlash2: true)
+
+    #expect(result.success)
+    #expect(result.failures.isEmpty)
+    let loaderCalls = await loader.calls
+    #expect(loaderCalls.isEmpty, "\(loaderCalls)")
+}
+
 @Test @MainActor func restartUsesFirstConfirmedModelAsDefaultWhenNoPreferenceExists() async throws {
     let (root, snapshot) = try restartModelRoot(repoID: "mlx-community/Tiny-4bit")
     let loader = FakeRestartModelLoader()

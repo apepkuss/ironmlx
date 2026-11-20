@@ -112,6 +112,8 @@ public protocol BackendRuntimeManaging: AnyObject {
     var lastError: String? { get }
     var lastEvent: BackendRuntimeEvent? { get }
     var lastIncident: BackendIncidentRecord? { get }
+    /// Whether the running process was launched as the DFlash2 server, which has no model admin routes.
+    var launchServesDFlash2: Bool { get }
 
     func ensureRunning() async throws
     func restart(intent: BackendStopIntent) async -> BackendRestartResult
@@ -122,6 +124,10 @@ public protocol BackendRuntimeManaging: AnyObject {
         parameterConfirmedModelIDs: Set<String>
     )
     func refreshConfirmedSnapshot()
+}
+
+extension BackendRuntimeManaging {
+    public var launchServesDFlash2: Bool { false }
 }
 
 @MainActor
@@ -143,6 +149,10 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
 
     public var currentLaunchID: UUID? {
         processManager.currentLaunchID
+    }
+
+    public var launchServesDFlash2: Bool {
+        processManager.currentLaunchServesDFlash2
     }
 
     public var lastError: String? {
@@ -461,7 +471,11 @@ public final class BackendRuntimeSupervisor: BackendRuntimeManaging {
         appendRecoveryStep(.readinessCheckPassed, incidentID: incidentID)
         onProcessReady?()
         appendRecoveryStep(.modelRestoreStarted, incidentID: incidentID)
-        let result = await restartCoordinator.restore(snapshot, launchID: launchID)
+        let result = await restartCoordinator.restore(
+            snapshot,
+            launchID: launchID,
+            launchServesDFlash2: processManager.currentLaunchServesDFlash2
+        )
         forgetCancelledRestores(result.cancelledModels)
         guard processManager.currentLaunchID == launchID, processManager.isRunning else {
             throw CancellationError()

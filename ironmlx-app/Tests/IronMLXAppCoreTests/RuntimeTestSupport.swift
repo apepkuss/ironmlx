@@ -10,6 +10,7 @@ final class TestRuntimeBackend: MenuBarBackendProcessManaging {
     var lastError: String?
     var lastEvent: BackendRuntimeEvent?
     var lastIncident: BackendIncidentRecord?
+    var launchServesDFlash2 = false
     var restartResult: BackendRestartResult
     private(set) var calls: [String] = []
 
