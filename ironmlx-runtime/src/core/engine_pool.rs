@@ -43,6 +43,10 @@ use crate::core::engine_state::{
     CausalEngine as AppState, Gemma4DrafterEngine as Gemma4DrafterAppState,
 };
 use crate::core::runtime_health as health;
+use crate::core::runtime_metrics::{
+    CausalMetricsSource, MemorySampling, ModelMetricsReading, ModelMetricsSource, ModelMode,
+    RuntimeMetricsHub,
+};
 use ironmlx_lm::core::vision_input::VisionInputConfig;
 
 pub use crate::core::runtime_config::*;
@@ -175,6 +179,9 @@ struct EnginePoolInner {
     capacity_policy: EnginePoolCapacityPolicy,
     load_gate: Mutex<()>,
     load_registry: Arc<LoadRegistry>,
+    /// Snapshot source of the App's runtime glance surfaces; every slot
+    /// state change is published to it.
+    metrics: Arc<RuntimeMetricsHub>,
     #[cfg(any(test, feature = "test-support"))]
     test_load_hook: std::sync::Mutex<Option<Arc<TestLoadHook>>>,
 }
@@ -185,7 +192,9 @@ impl EnginePoolInner {
         slots: HashMap<String, Arc<EngineSlot>>,
         runtime: EngineRuntimeOptions,
         capacity_policy: EnginePoolCapacityPolicy,
+        metrics: Arc<RuntimeMetricsHub>,
     ) -> Self {
+        metrics.set_default_model(registry.default_model());
         Self {
             asr_settings: Mutex::new(HashMap::new()),
             registry: Mutex::new(registry),
@@ -194,6 +203,7 @@ impl EnginePoolInner {
             capacity_policy,
             load_gate: Mutex::new(()),
             load_registry: LoadRegistry::new(),
+            metrics,
             #[cfg(any(test, feature = "test-support"))]
             test_load_hook: std::sync::Mutex::new(None),
         }
@@ -220,6 +230,12 @@ struct EngineSlot {
     /// The load this slot is running, from registration until the slot state
     /// records its result. Changed only while `state` is locked.
     pending_load: std::sync::Mutex<Option<PendingSlotLoad>>,
+    metrics: Arc<RuntimeMetricsHub>,
+    /// Whether this slot is the one the pool serves its model from. A slot a
+    /// reload replaced (or a failed reload discarded) can still change state
+    /// through tasks holding it, but must not overwrite the current slot's
+    /// entry in the metrics hub.
+    metrics_attached: AtomicBool,
 }
 
 /// How the caller of a load is identified in the load registry.
@@ -343,6 +359,7 @@ impl SlotLoadSettler {
         let slot = self.slot.clone();
         let mut guard = slot.state.lock().await;
         *guard = state;
+        slot.publish_metrics_state(&guard);
         self.publish(outcome);
     }
 
@@ -358,6 +375,7 @@ impl SlotLoadSettler {
             changed_unix_ms: unix_time_ms(),
             load_attempts,
         };
+        slot.publish_metrics_state(&guard);
         self.publish(SlotLoadOutcome::Cancelled);
     }
 
@@ -402,6 +420,7 @@ impl Drop for SlotLoadSettler {
                     changed_unix_ms: unix_time_ms(),
                     load_attempts,
                 };
+                slot.publish_metrics_state(state);
             }
             slot.pending_load().take();
             slot.notify.notify_waiters();
@@ -456,6 +475,9 @@ enum EngineSlotState {
     },
     Loaded {
         engine: Arc<EngineVariant>,
+        /// Created once per load: re-publishing the same source tells the
+        /// metrics hub the engine (and its prefix-cache totals) is unchanged.
+        metrics_source: Arc<dyn ModelMetricsSource>,
         snapshot_use_lease: Option<Arc<ModelSnapshotUseLease>>,
         loaded_unix_ms: u64,
         last_used_unix_ms: u64,
@@ -730,6 +752,8 @@ pub enum EngineVariant {
 #[derive(Clone)]
 pub struct TestEngine {
     model_weight_bytes: usize,
+    /// Usage counters the metrics hub reads, so tests can record into them.
+    pub runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
 }
 
 pub struct EngineLease {
@@ -843,10 +867,16 @@ impl EnginePoolState {
     pub async fn new(config: EnginePoolConfig, runtime: EngineRuntimeOptions) -> Result<Self> {
         let registry = EngineRegistry::new(config.registry_manifest())?;
         config.validate_enabled_model_architectures()?;
+        let metrics = RuntimeMetricsHub::new(MemorySampling::Cached);
         let mut slots = HashMap::with_capacity(config.models.len());
         for model in config.models {
             let pinned = model.pinned;
-            let slot = Arc::new(EngineSlot::new_unloaded(model, runtime.clone(), pinned));
+            let slot = Arc::new(EngineSlot::new_unloaded(
+                model,
+                runtime.clone(),
+                pinned,
+                metrics.clone(),
+            ));
             slots.insert(slot.model.id.clone(), slot);
         }
         let state = Self {
@@ -855,6 +885,7 @@ impl EnginePoolState {
                 slots,
                 runtime,
                 EnginePoolCapacityPolicy::EvictLruIdle,
+                metrics,
             )),
         };
         state.preload().await?;
@@ -872,8 +903,14 @@ impl EnginePoolState {
                 HashMap::new(),
                 runtime,
                 EnginePoolCapacityPolicy::Reject,
+                RuntimeMetricsHub::new(MemorySampling::Cached),
             )),
         })
+    }
+
+    /// Runtime metrics of this pool's models, for the metrics endpoints.
+    pub fn metrics_hub(&self) -> Arc<RuntimeMetricsHub> {
+        self.inner.metrics.clone()
     }
 
     pub fn start_model_ttl_sweeper(&self) {
@@ -904,12 +941,18 @@ impl EnginePoolState {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(interval_duration);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut last_pressure_level = None;
             loop {
                 interval.tick().await;
                 let Some(inner) = weak.upgrade() else {
                     return;
                 };
                 let snapshot = global_process_memory_governor().sample_process();
+                if last_pressure_level.replace(snapshot.pressure_level)
+                    != Some(snapshot.pressure_level)
+                {
+                    inner.metrics.wake();
+                }
                 if snapshot.pressure_level == PressureLevel::Normal {
                     continue;
                 }
@@ -1420,6 +1463,7 @@ impl EnginePoolState {
             model.clone(),
             self.inner.runtime.clone(),
             model.pinned,
+            self.inner.metrics.clone(),
         ));
         // Requests that find the new slot join this load.
         let (outcome, outcome_receiver) = watch::channel(None);
@@ -1429,6 +1473,9 @@ impl EnginePoolState {
         });
 
         let old_slot = self.inner.slots.lock().await.remove(&model_id);
+        if let Some(old_slot) = &old_slot {
+            old_slot.detach_metrics().await;
+        }
         let previous_default = self
             .inner
             .registry
@@ -1440,7 +1487,7 @@ impl EnginePoolState {
         let registered = {
             let mut registry = self.inner.registry.lock().await;
             registry.remove_model(&model_id);
-            registry
+            let registered = registry
                 .upsert_model(model.manifest_view(), set_default || was_previous_default)
                 .and_then(|()| {
                     if previous_default.is_none()
@@ -1452,7 +1499,11 @@ impl EnginePoolState {
                         registry.restore_default_model(None)?;
                     }
                     Ok(())
-                })
+                });
+            self.inner
+                .metrics
+                .set_default_model(registry.default_model());
+            registered
         };
         if let Err(error) = registered {
             let error = anyhow::Error::from(error);
@@ -1506,16 +1557,30 @@ impl EnginePoolState {
         was_previous_default: bool,
         previous_default: Option<String>,
     ) -> Result<()> {
-        self.inner.slots.lock().await.remove(model_id);
-        {
+        let discarded = self.inner.slots.lock().await.remove(model_id);
+        if let Some(discarded) = discarded {
+            discarded.detach_metrics().await;
+        }
+        let restored = {
             let mut registry = self.inner.registry.lock().await;
             registry.remove_model(model_id);
-            if let Some(old_slot) = old_slot.as_ref() {
-                registry.upsert_model(old_slot.model.manifest_view(), was_previous_default)?;
+            let restored = match old_slot.as_ref() {
+                Some(old_slot) => {
+                    registry.upsert_model(old_slot.model.manifest_view(), was_previous_default)
+                }
+                None => Ok(()),
             }
-            registry.restore_default_model(previous_default)?;
-        }
+            .and_then(|()| registry.restore_default_model(previous_default));
+            self.inner
+                .metrics
+                .set_default_model(registry.default_model());
+            restored
+        };
+        restored?;
         if let Some(old_slot) = old_slot {
+            // The discarded slot published its end (failed or cancelled)
+            // over the model's entry; the restored slot is what serves it.
+            old_slot.attach_metrics().await;
             self.inner
                 .slots
                 .lock()
@@ -1565,21 +1630,43 @@ impl EnginePoolState {
                     model.clone(),
                     self.inner.runtime.clone(),
                     pinned,
+                    self.inner.metrics.clone(),
                 ));
-                self.inner
-                    .slots
-                    .lock()
-                    .await
-                    .insert(model_id.clone(), slot.clone());
+                if let Some(existing) = &existing {
+                    existing.detach_metrics().await;
+                }
+                let replaced = {
+                    let mut slots = self.inner.slots.lock().await;
+                    let replaced = slots.insert(model_id.clone(), slot.clone());
+                    // The new slot is unloaded: drop the replaced slot's entry
+                    // (a failed load) before any load of the new slot runs.
+                    if replaced.is_some() {
+                        self.inner.metrics.remove(&model_id);
+                    }
+                    replaced
+                };
+                if let Some(replaced) = replaced {
+                    if !existing.as_ref().is_some_and(|e| Arc::ptr_eq(e, &replaced)) {
+                        replaced.detach_metrics().await;
+                    }
+                }
                 slot
             }
         };
         {
             let mut registry = self.inner.registry.lock().await;
-            registry.upsert_model(model.manifest_view(), set_default)?;
-            if previous_default.is_none() && !set_default {
-                registry.restore_default_model(None)?;
-            }
+            let registered = registry
+                .upsert_model(model.manifest_view(), set_default)
+                .and_then(|()| {
+                    if previous_default.is_none() && !set_default {
+                        registry.restore_default_model(None)?;
+                    }
+                    Ok(())
+                });
+            self.inner
+                .metrics
+                .set_default_model(registry.default_model());
+            registered?;
         }
         Ok(slot.control_result().await)
     }
@@ -1637,11 +1724,11 @@ impl EnginePoolState {
         {
             bail!("embedding, ASR and alignment models cannot be the default generation model");
         }
+        let mut registry = self.inner.registry.lock().await;
+        registry.set_default_model(requested)?;
         self.inner
-            .registry
-            .lock()
-            .await
-            .set_default_model(requested)?;
+            .metrics
+            .set_default_model(registry.default_model());
         Ok(())
     }
 
@@ -2290,6 +2377,7 @@ impl EnginePoolInner {
             changed_unix_ms: unix_time_ms(),
             load_attempts,
         };
+        slot.publish_metrics_state(&guard);
         crate::core::cache::cancel_process_async_prefix_store_model(&evict_id);
         tracing::info!(
             "ironmlx EnginePool evicted idle model id={} for target={}",
@@ -2302,7 +2390,12 @@ impl EnginePoolInner {
 }
 
 impl EngineSlot {
-    fn new_unloaded(model: EngineModelConfig, runtime: EngineRuntimeOptions, pinned: bool) -> Self {
+    fn new_unloaded(
+        model: EngineModelConfig,
+        runtime: EngineRuntimeOptions,
+        pinned: bool,
+        metrics: Arc<RuntimeMetricsHub>,
+    ) -> Self {
         Self {
             configured_context_window: super::model_capacity::configured_context_window(&model),
             model,
@@ -2317,6 +2410,62 @@ impl EngineSlot {
             }),
             notify: Notify::new(),
             pending_load: std::sync::Mutex::new(None),
+            metrics,
+            metrics_attached: AtomicBool::new(true),
+        }
+    }
+
+    /// Publish `state`, just assigned to this slot, to the metrics hub. Call
+    /// with the slot state locked, so publishes keep the assignment order.
+    fn publish_metrics_state(&self, state: &EngineSlotState) {
+        if !self.metrics_attached.load(Ordering::SeqCst) {
+            return;
+        }
+        let id = self.model.id.as_str();
+        let kind = self.model.capabilities.runtime_kind;
+        let mode = (kind == "causal").then_some(if self.model.mtp.is_some() {
+            ModelMode::Mtp
+        } else {
+            ModelMode::Normal
+        });
+        match state {
+            EngineSlotState::Loading { .. } => self.metrics.set_loading(id, kind, mode),
+            EngineSlotState::Loaded { metrics_source, .. } => {
+                self.metrics
+                    .set_loaded(id, kind, mode, metrics_source.clone());
+            }
+            EngineSlotState::Failed { last_error, .. }
+            | EngineSlotState::Unloaded {
+                reason: EngineUnloadReason::CapacityRejected,
+                last_error: Some(last_error),
+                ..
+            } => {
+                self.metrics.set_failed(id, kind, mode, last_error.clone());
+            }
+            // Unloaded, cancelled, or a load that ended without a result.
+            EngineSlotState::Unloaded { .. } => self.metrics.remove(id),
+            // Still serving its in-flight requests: the entry stays loaded.
+            EngineSlotState::Draining { .. } => {}
+        }
+    }
+
+    /// The pool no longer serves the model from this slot. Taken under the
+    /// state lock, so a publish already holding it finishes first and none
+    /// starts after.
+    async fn detach_metrics(&self) {
+        let _state = self.state.lock().await;
+        self.metrics_attached.store(false, Ordering::SeqCst);
+    }
+
+    /// The pool serves the model from this slot again, after a reload that
+    /// replaced it failed or was cancelled. A loaded engine is what serves
+    /// the model, so it replaces the discarded load's entry; otherwise that
+    /// entry (failed with its error, or removed) describes the model.
+    async fn attach_metrics(&self) {
+        let state = self.state.lock().await;
+        self.metrics_attached.store(true, Ordering::SeqCst);
+        if matches!(&*state, EngineSlotState::Loaded { .. }) {
+            self.publish_metrics_state(&state);
         }
     }
 
@@ -2430,6 +2579,7 @@ impl EngineSlot {
                                 changed_unix_ms: unix_time_ms(),
                                 load_attempts,
                             };
+                            self.publish_metrics_state(&state);
                         } else {
                             bail!("engine model `{}` is currently unloading", self.model.id);
                         }
@@ -2635,6 +2785,7 @@ impl EngineSlot {
                 started_unix_ms: unix_time_ms(),
                 load_attempts,
             };
+            self.publish_metrics_state(&state);
             self.notify.notify_waiters();
             load_attempts
         };
@@ -2701,6 +2852,7 @@ impl EngineSlot {
         settler
             .settle(
                 EngineSlotState::Loaded {
+                    metrics_source: engine.metrics_source(),
                     engine,
                     snapshot_use_lease,
                     loaded_unix_ms: now,
@@ -2752,6 +2904,7 @@ impl EngineSlot {
             changed_unix_ms: now_unix_ms,
             load_attempts,
         };
+        self.publish_metrics_state(&state);
         crate::core::cache::cancel_process_async_prefix_store_model(&self.model.id);
         self.notify.notify_waiters();
         true
@@ -2800,6 +2953,7 @@ impl EngineSlot {
             changed_unix_ms: unix_time_ms(),
             load_attempts,
         };
+        self.publish_metrics_state(&state);
         crate::core::cache::cancel_process_async_prefix_store_model(&self.model.id);
         self.notify.notify_waiters();
         Ok(())
@@ -2819,6 +2973,7 @@ impl EngineSlot {
                             changed_unix_ms: unix_time_ms(),
                             load_attempts,
                         };
+                        slot.publish_metrics_state(&state);
                         crate::core::cache::cancel_process_async_prefix_store_model(&slot.model.id);
                         slot.notify.notify_waiters();
                     }
@@ -3203,6 +3358,121 @@ impl EngineVariant {
             Self::Embedding(state) => state.usage(),
             #[cfg(any(test, feature = "test-support"))]
             Self::Test(_) => Default::default(),
+        }
+    }
+
+    /// What the metrics hub reads for this engine: shared counters taken
+    /// now, never the engine itself. The hub then neither delays an idle
+    /// eviction (which needs the slot to hold the only engine reference) nor
+    /// becomes the last owner whose drop joins an engine worker thread.
+    fn metrics_source(&self) -> Arc<dyn ModelMetricsSource> {
+        let causal = |health: &Arc<health::SchedulerHealthCollector>,
+                      usage: &Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>|
+         -> Arc<dyn ModelMetricsSource> {
+            Arc::new(CausalMetricsSource::new(health.clone(), usage.clone()))
+        };
+        let queue = |active_and_queued: Box<dyn Fn() -> (usize, usize) + Send + Sync>,
+                     queue_capacity: usize|
+         -> Arc<dyn ModelMetricsSource> {
+            Arc::new(QueueMetricsSource {
+                active_and_queued,
+                queue_capacity: Some(queue_capacity),
+                usage: None,
+            })
+        };
+        let lane = |lane: &Arc<crate::core::diffusion_execution::DiffusionGemmaLane>| {
+            let lane = lane.clone();
+            Box::new(move || {
+                let stats = lane.stats();
+                (stats.active_requests, stats.queued_requests)
+            }) as Box<dyn Fn() -> (usize, usize) + Send + Sync>
+        };
+        match self {
+            Self::Qwen35(state) => causal(&state.health_collector, &state.runtime_usage),
+            Self::Qwen35Moe(state) => causal(&state.health_collector, &state.runtime_usage),
+            Self::Qwen36Moe(state) => causal(&state.health_collector, &state.runtime_usage),
+            Self::Gemma4(state) => causal(&state.health_collector, &state.runtime_usage),
+            Self::Gemma4Drafter(state) => {
+                causal(&state.base.health_collector, &state.base.runtime_usage)
+            }
+            Self::Glm4MoeLite(state) => causal(&state.health_collector, &state.runtime_usage),
+            Self::Llama(state) => causal(&state.health_collector, &state.runtime_usage),
+            Self::MiniCpmV46(state) => causal(&state.health_collector, &state.runtime_usage),
+            Self::Diarization(state) => queue(
+                Box::new(state.queue_counter()),
+                super::diarization_execution::DIARIZATION_QUEUE_CAPACITY,
+            ),
+            Self::Alignment(state) => queue(
+                Box::new(state.queue_counter()),
+                super::alignment_execution::ALIGNMENT_QUEUE_CAPACITY,
+            ),
+            Self::Asr(state) => queue(
+                Box::new(state.queue_counter()),
+                super::asr_execution::ASR_QUEUE_CAPACITY,
+            ),
+            Self::Embedding(state) => queue(
+                Box::new(state.queue_counter()),
+                super::embedding_execution::EMBEDDING_QUEUE_CAPACITY,
+            ),
+            Self::Decision(state) => queue(
+                Box::new(state.queue_counter()),
+                super::decision_execution::DECISION_QUEUE_CAPACITY,
+            ),
+            Self::Audio(state) => queue(
+                Box::new(state.queue_counter()),
+                super::audio_execution::AUDIO_QUEUE_CAPACITY,
+            ),
+            Self::DiffusionGemma(state) => Arc::new(QueueMetricsSource {
+                active_and_queued: lane(&state.lane),
+                queue_capacity: Some(state.lane.stats().queue_capacity),
+                usage: Some((state.runtime_usage.clone(), false)),
+            }),
+            Self::QwenImage(state) => queue(lane(&state.lane), state.lane.stats().queue_capacity),
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Test(engine) => Arc::new(QueueMetricsSource {
+                active_and_queued: Box::new(|| (0, 0)),
+                queue_capacity: None,
+                usage: Some((engine.runtime_usage.clone(), true)),
+            }),
+        }
+    }
+}
+
+/// Metrics of an engine without a causal scheduler, read from counters
+/// shared with it.
+struct QueueMetricsSource {
+    active_and_queued: Box<dyn Fn() -> (usize, usize) + Send + Sync>,
+    queue_capacity: Option<usize>,
+    /// Usage counters of a language model, and whether its prefix cache
+    /// applies.
+    usage: Option<(
+        Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
+        bool,
+    )>,
+}
+
+impl ModelMetricsSource for QueueMetricsSource {
+    fn read(&self) -> Option<ModelMetricsReading> {
+        let (active, queued) = (self.active_and_queued)();
+        Some(ModelMetricsReading {
+            active_requests: active as u64,
+            queued_requests: queued as u64,
+            queue_capacity: self.queue_capacity.map(|capacity| capacity as u64),
+            decoding_requests: self
+                .usage
+                .as_ref()
+                .map_or(0, |(usage, _)| usage.decoding_requests()),
+            usage: self
+                .usage
+                .as_ref()
+                .map(|(usage, prefix_cache)| usage.snapshot(*prefix_cache)),
+            ..Default::default()
+        })
+    }
+
+    fn attach_request_waker(&self, waker: &Arc<tokio::sync::Notify>) {
+        if let Some((usage, _)) = &self.usage {
+            usage.attach_request_waker(waker.clone());
         }
     }
 }
@@ -4258,6 +4528,7 @@ impl TestLoadHook {
         self.pause(TestLoadPause::AfterEngineStart).await;
         Ok(EngineVariant::Test(TestEngine {
             model_weight_bytes: 1000,
+            runtime_usage: Arc::default(),
         }))
     }
 }
@@ -5147,6 +5418,8 @@ mod tests {
             }),
             notify: Notify::new(),
             pending_load: std::sync::Mutex::new(None),
+            metrics: pool.metrics_hub(),
+            metrics_attached: std::sync::atomic::AtomicBool::new(true),
         });
 
         let error = slot
@@ -6295,6 +6568,204 @@ mod tests {
                     LoadStage::StartingEngine,
                 ]
             );
+        }
+
+        fn metrics_model(
+            pool: &EnginePoolState,
+            id: &str,
+        ) -> Option<crate::core::runtime_metrics::ModelView> {
+            pool.metrics_hub()
+                .snapshot_now()
+                .models
+                .into_iter()
+                .find(|model| model.id == id)
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn metrics_hub_tracks_slot_lifecycle() {
+            use crate::core::runtime_metrics::{ActivityState, ModelMode, ModelState};
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            // Registered but never loaded: not listed.
+            assert!(metrics_model(&pool, "alpha").is_none());
+
+            fixture
+                .hook
+                .pause_at(Some(TestLoadPause::AfterPreparingMemory));
+            let load = tokio::spawn({
+                let pool = pool.clone();
+                async move { pool.load_model("alpha").await }
+            });
+            assert_eq!(
+                fixture.hook.wait_reached().await,
+                TestLoadPause::AfterPreparingMemory
+            );
+            // The slot turns `Loading` only after memory preparation.
+            fixture.hook.pause_at(Some(TestLoadPause::ReadingWeights));
+            fixture.hook.release();
+            assert_eq!(
+                fixture.hook.wait_reached().await,
+                TestLoadPause::ReadingWeights
+            );
+            let loading = metrics_model(&pool, "alpha").expect("loading model listed");
+            assert_eq!(loading.state, ModelState::Loading);
+            assert_eq!(loading.kind, "causal");
+            assert_eq!(loading.mode, Some(ModelMode::Normal));
+            assert_eq!(
+                pool.metrics_hub().snapshot_now().activity.state,
+                ActivityState::Loading
+            );
+
+            fixture.hook.release();
+            tokio::time::timeout(WAIT, load)
+                .await
+                .expect("load finishes")
+                .expect("join")
+                .expect("load alpha");
+            let loaded = metrics_model(&pool, "alpha").expect("loaded model listed");
+            assert_eq!(loaded.state, ModelState::Loaded);
+            assert!(!loaded.is_default);
+            pool.set_default_model("alpha").await.expect("set default");
+            assert!(metrics_model(&pool, "alpha").expect("listed").is_default);
+
+            pool.unload_dynamic_model("alpha").await.expect("unload");
+            assert!(metrics_model(&pool, "alpha").is_none());
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn metrics_hub_keeps_failed_load_with_error() {
+            use crate::core::runtime_health::HealthDegradedReason;
+            use crate::core::runtime_metrics::ModelState;
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            fixture
+                .hook
+                .fail_with(Some(|| anyhow::anyhow!("weights are corrupted")));
+            pool.load_model("alpha").await.expect_err("load fails");
+
+            let failed = metrics_model(&pool, "alpha").expect("failed model listed");
+            assert_eq!(failed.state, ModelState::Failed);
+            let last_error = failed.last_error.expect("failed model keeps its error");
+            assert!(last_error.contains("weights are corrupted"), "{last_error}");
+            assert!(pool
+                .metrics_hub()
+                .snapshot_now()
+                .health
+                .degraded_reasons
+                .contains(&HealthDegradedReason::ModelFailed));
+        }
+
+        async fn record_prefix_lookup(pool: &EnginePoolState, id: &str) {
+            match &*loaded_engine(pool, id).await {
+                EngineVariant::Test(engine) => {
+                    engine.runtime_usage.record_prefix_cache_lookup(10, 4)
+                }
+                _ => panic!("`{id}` is not a test engine"),
+            }
+        }
+
+        fn prefix_totals(pool: &EnginePoolState) -> (u64, u64) {
+            let prefix = pool.metrics_hub().snapshot_now().prefix_cache;
+            (prefix.hit_tokens, prefix.eligible_tokens)
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn metrics_hub_reattach_keeps_prefix_totals() {
+            use crate::core::runtime_metrics::ModelState;
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            pool.load_model("alpha").await.expect("load alpha");
+            record_prefix_lookup(&pool, "alpha").await;
+            assert_eq!(prefix_totals(&pool), (4, 10));
+
+            // What a reload that fails before publishing anything does to the
+            // slot it restores: the same engine is published again.
+            let slot = pool.inner.slots.lock().await["alpha"].clone();
+            slot.detach_metrics().await;
+            slot.attach_metrics().await;
+            assert_eq!(
+                metrics_model(&pool, "alpha").expect("listed").state,
+                ModelState::Loaded
+            );
+            assert_eq!(prefix_totals(&pool), (4, 10));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn metrics_hub_restores_loaded_entry_after_failed_reload() {
+            use crate::core::runtime_metrics::ModelState;
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            pool.load_model("alpha").await.expect("load alpha");
+            fixture
+                .hook
+                .fail_with(Some(|| anyhow::anyhow!("weights are corrupted")));
+            pool.reload_dynamic_model(fixture.config.clone(), false)
+                .await
+                .expect_err("reload fails");
+            // The previous engine still serves the model.
+            let restored = metrics_model(&pool, "alpha").expect("listed");
+            assert_eq!(restored.state, ModelState::Loaded);
+            assert_eq!(restored.last_error, None);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn metrics_hub_drops_failed_entry_when_the_model_is_registered_again() {
+            use crate::core::runtime_metrics::ModelState;
+            let fixture = fixture(false).await;
+            let pool = fixture.pool.clone();
+            fixture
+                .hook
+                .fail_with(Some(|| anyhow::anyhow!("weights are corrupted")));
+            pool.load_model("alpha").await.expect_err("load fails");
+            assert_eq!(
+                metrics_model(&pool, "alpha").expect("listed").state,
+                ModelState::Failed
+            );
+            pool.register_dynamic_model(fixture.config.clone(), false, None)
+                .await
+                .expect("register alpha again");
+            assert!(metrics_model(&pool, "alpha").is_none());
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[serial_test::serial(model_load_governor)]
+        async fn metrics_hub_keeps_capacity_rejection_as_failed() {
+            use crate::core::runtime_metrics::ModelState;
+            let pool = EnginePoolState::new_dynamic(runtime_config(), Some(1)).expect("pool");
+            let _hook = pool.install_test_load_hook();
+            let mut dirs = Vec::new();
+            for id in ["alpha", "beta"] {
+                let model_dir = write_minimal_model_config("qwen3_5");
+                std::fs::write(model_dir.join("model.safetensors"), vec![0_u8; 1024])
+                    .expect("weight size fixture");
+                pool.register_dynamic_model(
+                    model_config(id, &model_dir, EngineLoadPolicy::Lazy),
+                    false,
+                    None,
+                )
+                .await
+                .expect("register model");
+                dirs.push(model_dir);
+            }
+            pool.load_model("alpha").await.expect("load alpha");
+            pool.load_model("beta").await.expect_err("pool is full");
+
+            let rejected = metrics_model(&pool, "beta").expect("rejected model listed");
+            assert_eq!(rejected.state, ModelState::Failed);
+            let last_error = rejected.last_error.expect("rejection keeps its error");
+            assert!(last_error.contains("capacity reached"), "{last_error}");
+            assert_eq!(
+                slot_snapshot(&pool, "beta").await.unload_reason,
+                Some(EngineUnloadReason::CapacityRejected)
+            );
+            for dir in dirs {
+                let _ = std::fs::remove_dir_all(dir);
+            }
         }
 
         #[test]

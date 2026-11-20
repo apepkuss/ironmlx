@@ -2,10 +2,12 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard, OnceLock,
     },
     time::{Duration, Instant},
 };
+
+use tokio::sync::Notify;
 
 use serde::Serialize;
 
@@ -81,6 +83,11 @@ pub struct ModelRuntimeUsageCounters {
     prefix_cache_hit_tokens: AtomicU64,
     prefix_cache_eligible_tokens: AtomicU64,
     next_request_id: AtomicU64,
+    /// Requests past their first token and not yet settled. One counter,
+    /// not in-flight minus awaiting: two separate loads can interleave with
+    /// a start or settle and momentarily report one decoding request too many.
+    decoding_requests: AtomicU64,
+    request_waker: OnceLock<Arc<Notify>>,
     decode_state: Mutex<ModelRuntimeDecodeState>,
     performance_samples: Mutex<VecDeque<ModelRuntimePerformanceSample>>,
 }
@@ -112,6 +119,9 @@ impl ModelRuntimeUsageCounters {
         started_at: Instant,
     ) -> ModelRuntimeRequestTracker {
         self.record_input_tokens(input_tokens);
+        if let Some(waker) = self.request_waker.get() {
+            waker.notify_one();
+        }
         ModelRuntimeRequestTracker {
             counters: self.clone(),
             request_id: self.next_request_id.fetch_add(1, Ordering::Relaxed),
@@ -120,6 +130,23 @@ impl ModelRuntimeUsageCounters {
             first_token_at: None,
             output_tokens: 0,
             finished: false,
+        }
+    }
+
+    /// Wakes `waker` once per started request. Only the first attachment takes
+    /// effect.
+    pub fn attach_request_waker(&self, waker: Arc<Notify>) {
+        let _ = self.request_waker.set(waker);
+    }
+
+    /// Requests that have produced their first token and are not finished.
+    pub fn decoding_requests(&self) -> u64 {
+        self.decoding_requests.load(Ordering::Relaxed)
+    }
+
+    fn settle_request(&self, had_first_token: bool) {
+        if had_first_token {
+            self.decoding_requests.fetch_sub(1, Ordering::Relaxed);
         }
     }
 
@@ -276,6 +303,11 @@ impl ModelRuntimeRequestTracker {
         if tokens == 0 {
             return;
         }
+        if self.first_token_at.is_none() {
+            self.counters
+                .decoding_requests
+                .fetch_add(1, Ordering::Relaxed);
+        }
         let first_token_at = *self.first_token_at.get_or_insert(now);
         self.output_tokens = self.output_tokens.saturating_add(tokens);
         self.counters.record_output_tokens(tokens);
@@ -291,6 +323,7 @@ impl ModelRuntimeRequestTracker {
             return;
         }
         self.finished = true;
+        self.counters.settle_request(self.first_token_at.is_some());
         let Some(first_token_at) = self.first_token_at else {
             self.counters.remove_active_decode_request(self.request_id);
             return;
@@ -316,6 +349,7 @@ impl ModelRuntimeRequestTracker {
 impl Drop for ModelRuntimeRequestTracker {
     fn drop(&mut self) {
         if !self.finished {
+            self.counters.settle_request(self.first_token_at.is_some());
             self.counters.remove_active_decode_request(self.request_id);
         }
     }
@@ -350,6 +384,31 @@ fn median(values: impl Iterator<Item = f64>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoding_requests_counts_requests_after_first_token_only() {
+        let counters = Arc::new(ModelRuntimeUsageCounters::default());
+        let t0 = Instant::now();
+        let mut a = counters.start_request(10, t0);
+        let b = counters.start_request(10, t0);
+        assert_eq!(counters.decoding_requests(), 0);
+        a.record_output_tokens(1);
+        assert_eq!(counters.decoding_requests(), 1);
+        a.complete();
+        drop(b); // dropped before first token
+        assert_eq!(counters.decoding_requests(), 0);
+    }
+
+    #[tokio::test]
+    async fn start_request_wakes_attached_waker() {
+        let counters = Arc::new(ModelRuntimeUsageCounters::default());
+        let waker = Arc::new(tokio::sync::Notify::new());
+        counters.attach_request_waker(waker.clone());
+        let _r = counters.start_request(1, Instant::now());
+        tokio::time::timeout(Duration::from_millis(50), waker.notified())
+            .await
+            .expect("woken");
+    }
 
     #[test]
     fn snapshot_saturates_hits_to_eligible_tokens() {

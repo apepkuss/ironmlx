@@ -21,6 +21,8 @@ import Testing
         "-",
         "Chat",
         "Dashboard",
+        "Show Floating HUD",
+        "Show Speed in Menu Bar",
         "-",
         "Start Server",
         "Restart Server",
@@ -55,6 +57,8 @@ import Testing
         "-",
         "Chat",
         "Dashboard",
+        "Show Floating HUD",
+        "Show Speed in Menu Bar",
         "-",
         "Stop Server",
         "Restart Server",
@@ -108,6 +112,8 @@ import Testing
         "-",
         "对话",
         "仪表盘",
+        "显示悬浮 HUD",
+        "在菜单栏显示速度",
         "-",
         "停止服务",
         "重启服务",
@@ -136,6 +142,8 @@ import Testing
         "-",
         "チャット",
         "ダッシュボード",
+        "フローティング HUD を表示",
+        "メニューバーに速度を表示",
         "-",
         "サーバー開始",
         "サーバー再起動",
@@ -310,6 +318,104 @@ import Testing
     #expect(row?.isEnabled == true)
 }
 
+@MainActor
+@Test func menuInsertsStatusCardFirstWhenProvided() {
+    let snapshot = MenuBarMenuSnapshot(
+        state: .running,
+        modelNames: ["mlx-community/Qwen3-0.6B-4bit"],
+        updatesEnabled: false,
+        language: "en"
+    )
+    let card = NSView()
+    let plain = MenuBarMenuBuilder.makeMenu(snapshot: snapshot, target: nil)
+    let menu = MenuBarMenuBuilder.makeMenu(snapshot: snapshot, target: nil, statusCard: card)
+
+    #expect(menu.items[0].view === card)
+    #expect(menu.items[1].isSeparatorItem)
+    #expect(Array(menuTitles(menu).dropFirst(2)) == menuTitles(plain))
+    #expect(plain.items.allSatisfy { $0.view == nil })
+}
+
+@MainActor
+@Test func glanceTogglesReflectPreferences() {
+    let menu = MenuBarMenuBuilder.makeMenu(
+        snapshot: MenuBarMenuSnapshot(
+            state: .running,
+            modelNames: [],
+            updatesEnabled: false,
+            language: "en",
+            hudVisible: true,
+            menuBarSpeedEnabled: false,
+            hudHotKeyDisplay: nil
+        ),
+        target: nil
+    )
+    let hud = menu.items.first { $0.action == #selector(MenuBarController.toggleHUD(_:)) }
+    let speed = menu.items.first { $0.action == #selector(MenuBarController.toggleMenuBarSpeed(_:)) }
+    #expect(hud?.title == "Show Floating HUD")
+    #expect(hud?.state == .on)
+    #expect(hud?.keyEquivalent == "")
+    #expect(speed?.title == "Show Speed in Menu Bar")
+    #expect(speed?.state == .off)
+
+    // Defaults: HUD off, speed on; a registered hotkey is shown on the HUD item.
+    let defaults = MenuBarMenuBuilder.makeMenu(
+        snapshot: MenuBarMenuSnapshot(
+            state: .running,
+            modelNames: [],
+            updatesEnabled: false,
+            language: "zh-Hans",
+            hudHotKeyDisplay: "⌃⌥⌘H"
+        ),
+        target: nil
+    )
+    let defaultHUD = defaults.items.first { $0.action == #selector(MenuBarController.toggleHUD(_:)) }
+    let defaultSpeed = defaults.items.first { $0.action == #selector(MenuBarController.toggleMenuBarSpeed(_:)) }
+    #expect(defaultHUD?.title == "显示悬浮 HUD")
+    #expect(defaultHUD?.state == .off)
+    #expect(defaultHUD?.keyEquivalent == "h")
+    #expect(defaultHUD?.keyEquivalentModifierMask == [.control, .option, .command])
+    #expect(defaultSpeed?.state == .on)
+}
+
+/// The rows the user sees: hidden items are left out.
 private func menuTitles(_ menu: NSMenu) -> [String] {
-    menu.items.map { $0.isSeparatorItem ? "-" : $0.title }
+    menu.items.filter { !$0.isHidden }.map { $0.isSeparatorItem ? "-" : $0.title }
+}
+
+/// "HUD Click-Through" sits right under "Show Floating HUD" and only while the HUD is on, since
+/// with click-through on the HUD's own context menu cannot be reached.
+@MainActor
+@Test func hudClickThroughItemShowsOnlyWhileHUDIsOn() throws {
+    func menu(hudVisible: Bool, clickThrough: Bool, language: String = "en") -> NSMenu {
+        MenuBarMenuBuilder.makeMenu(
+            snapshot: MenuBarMenuSnapshot(
+                state: .running,
+                modelNames: [],
+                updatesEnabled: false,
+                language: language,
+                hudVisible: hudVisible,
+                hudClickThrough: clickThrough
+            ),
+            target: nil
+        )
+    }
+    let hidden = menu(hudVisible: false, clickThrough: true)
+    #expect(!menuTitles(hidden).contains("HUD Click-Through"))
+    let showHUD = try #require(menuTitles(hidden).firstIndex(of: "Show Floating HUD"))
+    #expect(menuTitles(hidden)[showHUD + 1] == "Show Speed in Menu Bar")
+
+    let shown = menu(hudVisible: true, clickThrough: true)
+    let titles = menuTitles(shown)
+    let index = try #require(titles.firstIndex(of: "Show Floating HUD"))
+    #expect(titles[index + 1] == "HUD Click-Through")
+    #expect(titles[index + 2] == "Show Speed in Menu Bar")
+    let item = shown.items.first { $0.action == #selector(MenuBarController.toggleHUDClickThrough(_:)) }
+    #expect(item?.state == .on)
+    #expect(item?.isHidden == false)
+    #expect(menu(hudVisible: true, clickThrough: false).items.first {
+        $0.action == #selector(MenuBarController.toggleHUDClickThrough(_:))
+    }?.state == .off)
+
+    #expect(menuTitles(menu(hudVisible: true, clickThrough: false, language: "zh-Hans")).contains("HUD 点击穿透"))
 }

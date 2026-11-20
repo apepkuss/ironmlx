@@ -41,6 +41,8 @@ approx = "0.5"
 serial_test = { version = "3", default-features = false }
 # Unit-test builds do not enable crate features, so they need the macro here too.
 ctor = "1"
+# Paused-clock tokio tests (`start_paused`).
+tokio = { workspace = true, features = ["test-util"] }
 
 [[bin]]
 name = "ironmlx-core-bench"

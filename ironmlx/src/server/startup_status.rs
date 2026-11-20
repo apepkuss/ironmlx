@@ -3,8 +3,9 @@
 //!
 //! The listeners are bound before the load starts so clients can watch it:
 //! `/healthz` answers `503 {"status":"starting"}` (any non-2xx means "not
-//! ready"), `/admin/api/models/loads` reports the load, and every other path
-//! answers `503` with code `backend_starting`.
+//! ready"), `/admin/api/models/loads` reports the load, the runtime-metrics
+//! routes answer when a hub is attached, and every other path answers `503`
+//! with code `backend_starting`.
 
 use std::convert::Infallible;
 use std::sync::{Arc, PoisonError, RwLock};
@@ -17,6 +18,7 @@ use axum::routing::future::RouteFuture;
 use axum::routing::get;
 use axum::{Json, Router};
 use ironmlx_runtime::core::load_registry::LoadRegistry;
+use ironmlx_runtime::core::runtime_metrics::RuntimeMetricsHub;
 use tower::Service;
 
 use super::api_error::{ApiError, ApiProtocol};
@@ -32,6 +34,17 @@ impl SwitchableRouter {
     pub fn starting(registry: Arc<LoadRegistry>) -> Self {
         Self {
             current: Arc::new(RwLock::new(startup_router(registry))),
+        }
+    }
+
+    /// Startup routes plus `/admin/api/metrics` and its stream over `metrics`.
+    pub fn starting_with_metrics(
+        registry: Arc<LoadRegistry>,
+        metrics: Arc<RuntimeMetricsHub>,
+    ) -> Self {
+        let router = startup_router(registry).merge(super::runtime_metrics::routes(metrics));
+        Self {
+            current: Arc::new(RwLock::new(router)),
         }
     }
 
@@ -106,6 +119,7 @@ mod tests {
     use ironmlx_runtime::core::load_registry::{
         LoadBegin, LoadKind, LoadRegistry, LoadStage, LoadTriggerKind, LoadVariant,
     };
+    use ironmlx_runtime::core::runtime_metrics::{MemorySampling, ModelMode, RuntimeMetricsHub};
     use tower::ServiceExt;
 
     use super::SwitchableRouter;
@@ -244,7 +258,11 @@ mod tests {
         load.enter_stage(LoadStage::WarmingUp);
         load.finish_loaded();
         let state = crate::server::responses::eof_tests::state().await;
-        let router = crate::server::dflash2_router(state, Arc::clone(&registry));
+        let router = crate::server::dflash2_router(
+            state,
+            Arc::clone(&registry),
+            RuntimeMetricsHub::new(MemorySampling::Cached),
+        );
 
         let (status, body) = get_json(&router, "/admin/api/models/loads").await;
         assert_eq!(status, StatusCode::OK);
@@ -256,6 +274,76 @@ mod tests {
             serde_json::to_value(registry.list()).unwrap(),
             body["loads"].clone()
         );
+        let (status, _) = get_json(&router, "/healthz").await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn startup_router_serves_metrics_while_loading() {
+        let registry = LoadRegistry::new();
+        let metrics = RuntimeMetricsHub::new(MemorySampling::Cached);
+        metrics.set_loading(
+            "mlx-community/Qwen3.6-35B-A3B-4bit",
+            "causal",
+            Some(ModelMode::Dflash2),
+        );
+        metrics.set_default_model(Some("mlx-community/Qwen3.6-35B-A3B-4bit"));
+        let router = Router::new().fallback_service(SwitchableRouter::starting_with_metrics(
+            registry,
+            Arc::clone(&metrics),
+        ));
+
+        let (status, body) = get_json(&router, "/admin/api/metrics").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["schema_version"], 1);
+        let models = body["models"].as_array().unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["id"], "mlx-community/Qwen3.6-35B-A3B-4bit");
+        assert_eq!(models[0]["state"], "loading");
+        assert_eq!(models[0]["mode"], "dflash2");
+        assert_eq!(models[0]["is_default"], true);
+        assert_eq!(body["activity"]["state"], "loading");
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/metrics/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Everything else still answers the startup 503.
+        let (status, body) = get_json(&router, "/v1/models").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "backend_starting");
+    }
+
+    #[tokio::test]
+    async fn activated_dflash2_router_serves_metrics() {
+        let registry = LoadRegistry::new();
+        let metrics = RuntimeMetricsHub::new(MemorySampling::Cached);
+        metrics.set_loading("eof-test", "causal", Some(ModelMode::Dflash2));
+        let switchable =
+            SwitchableRouter::starting_with_metrics(registry.clone(), Arc::clone(&metrics));
+        let router = Router::new().fallback_service(switchable.clone());
+        let (status, _) = get_json(&router, "/admin/api/metrics").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let state = crate::server::responses::eof_tests::state().await;
+        switchable.activate(crate::server::dflash2_router(
+            state,
+            registry,
+            Arc::clone(&metrics),
+        ));
+
+        let (status, body) = get_json(&router, "/admin/api/metrics").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["schema_version"], 1);
+        assert!(body["models"].is_array(), "{body}");
         let (status, _) = get_json(&router, "/healthz").await;
         assert_eq!(status, StatusCode::OK);
     }

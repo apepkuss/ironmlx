@@ -10,19 +10,35 @@ public struct MenuBarMenuSnapshot: Equatable {
     /// The one-click starter download, shown as an extra row under "Chat".
     var starterDownload: StarterDownloadState = .idle
     var starterModelName: String?
+    /// Check state of "Show Floating HUD".
+    public var hudVisible: Bool
+    /// Check state of "HUD Click-Through", shown only while the HUD is on.
+    public var hudClickThrough: Bool
+    /// Check state of "Show Speed in Menu Bar".
+    public var menuBarSpeedEnabled: Bool
+    /// The HUD hotkey, shown on its menu item only when it was registered.
+    public var hudHotKeyDisplay: String?
 
     public init(
         state: BackendProcessState,
         modelNames: [String],
         updatesEnabled: Bool,
         configurationRecoveryAvailable: Bool = false,
-        language: String = "en"
+        language: String = "en",
+        hudVisible: Bool = false,
+        hudClickThrough: Bool = false,
+        menuBarSpeedEnabled: Bool = true,
+        hudHotKeyDisplay: String? = nil
     ) {
+        self.hudClickThrough = hudClickThrough
         self.state = state
         self.modelNames = modelNames
         self.updatesEnabled = updatesEnabled
         self.configurationRecoveryAvailable = configurationRecoveryAvailable
         self.language = language
+        self.hudVisible = hudVisible
+        self.menuBarSpeedEnabled = menuBarSpeedEnabled
+        self.hudHotKeyDisplay = hudHotKeyDisplay
     }
 
     init(
@@ -32,14 +48,22 @@ public struct MenuBarMenuSnapshot: Equatable {
         configurationRecoveryAvailable: Bool = false,
         language: String = "en",
         starterDownload: StarterDownloadState,
-        starterModelName: String?
+        starterModelName: String?,
+        hudVisible: Bool = false,
+        hudClickThrough: Bool = false,
+        menuBarSpeedEnabled: Bool = true,
+        hudHotKeyDisplay: String? = nil
     ) {
         self.init(
             state: state,
             modelNames: modelNames,
             updatesEnabled: updatesEnabled,
             configurationRecoveryAvailable: configurationRecoveryAvailable,
-            language: language
+            language: language,
+            hudVisible: hudVisible,
+            hudClickThrough: hudClickThrough,
+            menuBarSpeedEnabled: menuBarSpeedEnabled,
+            hudHotKeyDisplay: hudHotKeyDisplay
         )
         self.starterDownload = starterDownload
         self.starterModelName = starterModelName
@@ -78,9 +102,22 @@ public enum MenuBarMenuBuilder {
         return names
     }
 
-    public static func makeMenu(snapshot: MenuBarMenuSnapshot, target: AnyObject?) -> NSMenu {
+    /// Builds the status item menu. `statusCard`, when given, becomes the first item's view,
+    /// followed by a separator; every other item is the same with or without it.
+    public static func makeMenu(
+        snapshot: MenuBarMenuSnapshot,
+        target: AnyObject?,
+        statusCard: NSView? = nil
+    ) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
+
+        if let statusCard {
+            let card = NSMenuItem()
+            card.view = statusCard
+            menu.addItem(card)
+            menu.addItem(.separator())
+        }
 
         addStatus(snapshot.state, language: snapshot.language, to: menu)
         addModelRows(snapshot.modelNames, to: menu)
@@ -105,6 +142,7 @@ public enum MenuBarMenuBuilder {
                 symbol: "square.grid.2x2"
             )
         )
+        addGlanceToggles(snapshot, target: target, to: menu)
         menu.addItem(.separator())
 
         addBackendControlItems(snapshot.state, language: snapshot.language, target: target, to: menu)
@@ -144,6 +182,64 @@ public enum MenuBarMenuBuilder {
             )
         )
         return menu
+    }
+
+    /// The HUD hotkey shown on "Show Floating HUD": ⌃⌥⌘H. Display only; the hotkey itself is
+    /// registered system-wide elsewhere.
+    static let hudKeyEquivalent = "h"
+    static let hudKeyEquivalentModifiers: NSEvent.ModifierFlags = [.control, .option, .command]
+
+    /// True when `event` is the ⌃⌥⌘H keystroke while the Carbon hotkey is registered. One press
+    /// arrives either as the hotkey event or, while the status menu is tracking, as a key-down
+    /// matching the item's key equivalent; the menu action then takes the hotkey's path.
+    /// Clicks and other keyboard selections (Return on the highlighted item) are not the hotkey.
+    static func isHUDHotKeyKeystroke(_ event: NSEvent?, hotKeyRegistered: Bool) -> Bool {
+        guard hotKeyRegistered, let event, event.type == .keyDown else {
+            return false
+        }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            .intersection([.control, .option, .command, .shift])
+        return modifiers == hudKeyEquivalentModifiers
+            && event.charactersIgnoringModifiers?.lowercased() == hudKeyEquivalent
+    }
+
+    private static func addGlanceToggles(_ snapshot: MenuBarMenuSnapshot, target: AnyObject?, to menu: NSMenu) {
+        let hud = item(
+            GlanceText.localized(.showHUD, language: snapshot.language),
+            #selector(MenuBarController.toggleHUD(_:)),
+            "",
+            target: target,
+            symbol: "macwindow.on.rectangle"
+        )
+        hud.state = snapshot.hudVisible ? .on : .off
+        if snapshot.hudHotKeyDisplay != nil {
+            hud.keyEquivalent = hudKeyEquivalent
+            hud.keyEquivalentModifierMask = hudKeyEquivalentModifiers
+        }
+        menu.addItem(hud)
+
+        // Always built, hidden while the HUD is off, so turning the HUD on with the hotkey can
+        // reveal it in place without rebuilding the menu.
+        let clickThrough = item(
+            GlanceText.localized(.menuHUDClickThrough, language: snapshot.language),
+            #selector(MenuBarController.toggleHUDClickThrough(_:)),
+            "",
+            target: target,
+            symbol: "cursorarrow.motionlines"
+        )
+        clickThrough.state = snapshot.hudClickThrough ? .on : .off
+        clickThrough.isHidden = !snapshot.hudVisible
+        menu.addItem(clickThrough)
+
+        let speed = item(
+            GlanceText.localized(.menuBarSpeed, language: snapshot.language),
+            #selector(MenuBarController.toggleMenuBarSpeed(_:)),
+            "",
+            target: target,
+            symbol: "speedometer"
+        )
+        speed.state = snapshot.menuBarSpeedEnabled ? .on : .off
+        menu.addItem(speed)
     }
 
     /// Tag of the starter download row, so its title can change while the menu is open.
@@ -455,7 +551,7 @@ public enum MenuBarMenuBuilder {
         }
     }
 
-    nonisolated private static func normalizedLanguage(_ language: String) -> String {
+    nonisolated static func normalizedLanguage(_ language: String) -> String {
         switch language.trimmingCharacters(in: .whitespacesAndNewlines) {
         case "zh", "zh-Hans":
             return "zh"

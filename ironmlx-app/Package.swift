@@ -63,6 +63,7 @@ let package = Package(
             ],
             resources: [
                 .copy("Fixtures/backend_crash_helper.py"),
+                .copy("Fixtures/runtime-metrics-v1.json"),
             ]
         ),
     ]

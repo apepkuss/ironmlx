@@ -594,6 +594,7 @@ async fn app_embeddings_handler(
 }
 
 fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Router {
+    let metrics = manager.pool.metrics_hub();
     Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/healthz", get(app_healthz_handler))
@@ -664,6 +665,7 @@ fn app_router(manager: ModelManager, voices: super::voices::VoiceStore) -> Route
         .route("/admin/api/models/default", post(set_default_model_handler))
         .layer(Extension(voices))
         .with_state(manager)
+        .merge(super::runtime_metrics::routes(metrics))
 }
 
 async fn audio_execution_profile_handler(

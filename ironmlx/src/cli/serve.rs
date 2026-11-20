@@ -21,6 +21,7 @@ use ironmlx_runtime::core::load_registry::{
     LoadTriggerKind, LoadVariant, WeightComponent,
 };
 use ironmlx_runtime::core::process_memory::StaticMemoryEstimate;
+use ironmlx_runtime::core::runtime_metrics::{MemorySampling, ModelMode, RuntimeMetricsHub};
 use {
     crate::server, ironmlx_lm::core::loader::Loader, ironmlx_lm::core::model::Model,
     ironmlx_lm::core::tokenizer::Tokenizer,
@@ -1101,13 +1102,16 @@ where
 }
 
 /// The DFlash2 server during its startup load. Its listeners are bound and
-/// serve the startup status routes (`/healthz` 503, `/admin/api/models/loads`)
-/// while the main thread reads the weights and warms up; the full router is
-/// installed on the same listeners once the load finishes.
+/// serve the startup status routes (`/healthz` 503, `/admin/api/models/loads`,
+/// `/admin/api/metrics`) while the main thread reads the weights and warms
+/// up; the full router is installed on the same listeners once the load
+/// finishes.
 struct DFlash2Startup {
     runtime: tokio::runtime::Runtime,
     router: server::startup_status::SwitchableRouter,
     registry: Arc<LoadRegistry>,
+    metrics: Arc<RuntimeMetricsHub>,
+    model_id: String,
     load: LoadTracker,
     serve_task: tokio::task::JoinHandle<Result<()>>,
 }
@@ -1121,7 +1125,16 @@ impl DFlash2Startup {
         let listeners = server::security::BoundListeners::bind(&args.resolved_network_config()?)?;
         let runtime = serve_runtime()?;
         let registry = LoadRegistry::new();
-        let router = server::startup_status::SwitchableRouter::starting(registry.clone());
+        let model_id = single_model_id(args)?;
+        // No engine pool here samples the process footprint, so the hub
+        // samples it on every computation.
+        let metrics = RuntimeMetricsHub::new(MemorySampling::SampleOnTick);
+        metrics.set_loading(&model_id, "causal", Some(ModelMode::Dflash2));
+        metrics.set_default_model(Some(&model_id));
+        let router = server::startup_status::SwitchableRouter::starting_with_metrics(
+            registry.clone(),
+            Arc::clone(&metrics),
+        );
         let serve_task = runtime.spawn(server::security::serve_bound(
             listeners,
             router.clone(),
@@ -1129,7 +1142,7 @@ impl DFlash2Startup {
         ));
         let handle = registry.begin(LoadBegin {
             load_id: None,
-            model: single_model_id(args)?,
+            model: model_id.clone(),
             variant: LoadVariant::Dflash2,
             kind: LoadKind::Load,
             trigger: LoadTriggerKind::Startup,
@@ -1153,6 +1166,8 @@ impl DFlash2Startup {
                 runtime,
                 router,
                 registry,
+                metrics,
+                model_id,
                 load,
                 serve_task,
             },
@@ -1178,6 +1193,16 @@ impl DFlash2Startup {
         }
         self.load.enter_stage(stage);
         Ok(())
+    }
+
+    /// Report the failed load to the metrics hub.
+    fn fail(&self, error: &anyhow::Error) {
+        self.metrics.set_failed(
+            &self.model_id,
+            "causal",
+            Some(ModelMode::Dflash2),
+            format!("{error:#}"),
+        );
     }
 
     /// Record the load as finished, switch the listeners to `router` and
@@ -1214,6 +1239,7 @@ fn run_dflash2(
     ) {
         Ok(router) => startup.serve(load, router),
         Err(error) => {
+            startup.fail(&error);
             load.finish_failed(&error);
             Err(error)
         }
@@ -1434,6 +1460,7 @@ where
         scheduler_runtime_profile,
         static_memory_estimate,
         vision_input,
+        Arc::clone(&startup.metrics),
     ))
 }
 

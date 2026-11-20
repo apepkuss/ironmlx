@@ -12,6 +12,7 @@ pub mod memory_budget;
 pub mod mtp_draft_cap_calibration;
 pub mod process_memory;
 pub mod prompt_lookup;
+pub mod runtime_metrics;
 pub mod runtime_usage;
 pub mod scheduler;
 pub mod scheduler_autotune;

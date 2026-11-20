@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "seq": 1842,
+  "unix_ms": 1763280000000,
+  "backend": { "version": "0.5.0", "started_unix_ms": 1763268480000, "device_name": "Apple M5 Max" },
+  "health": { "status": "degraded", "degraded_reasons": ["scheduler_queue_high"] },
+  "activity": { "state": "generating", "active_requests": 2, "prefilling_requests": 0, "queued_requests": 1 },
+  "performance": {
+    "live_decode_tokens_per_second": 42.8,
+    "prefill_tokens_per_second": 1840.0,
+    "decode_tokens_per_second": 44.1,
+    "ttft_ms": 312.0,
+    "window_seconds": 60
+  },
+  "memory": {
+    "pressure_level": "normal",
+    "process_bytes": 41000000000,
+    "ceiling_bytes": 103000000000,
+    "kv_cache_bytes": 10300000000,
+    "mlx_cache_bytes": 6000000000,
+    "telemetry_degraded": false
+  },
+  "prefix_cache": { "hit_tokens": 120345, "eligible_tokens": 138200 },
+  "models": [
+    {
+      "id": "Qwen3.6-35B-A3B-4bit",
+      "kind": "causal",
+      "state": "loaded",
+      "mode": "dflash2",
+      "is_default": true,
+      "active_requests": 2,
+      "queued_requests": 1,
+      "queue_capacity": 2,
+      "live_decode_tokens_per_second": 42.8
+    },
+    {
+      "id": "Qwen3-ASR-1.7B",
+      "kind": "asr",
+      "state": "failed",
+      "last_error": "model weights not found",
+      "is_default": false,
+      "active_requests": 0,
+      "queued_requests": 0
+    }
+  ]
+}

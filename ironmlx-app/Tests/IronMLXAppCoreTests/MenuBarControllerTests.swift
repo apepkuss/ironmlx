@@ -168,6 +168,165 @@ func menuBarReflectsConfigurationRecoveryAndForwardsRecoveryAction() throws {
     #expect(recovery.presentationCount == 1)
 }
 
+@Test @MainActor
+func toggleMenuBarSpeedFlipsPreference() throws {
+    let root = try menuTemporaryDirectory()
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    let backend = TestRuntimeBackend(state: .stopped, isRunning: false)
+    let dashboard = DashboardWindowController(configStore: configStore, backend: backend)
+    let suite = "ironmlx.glance.menu-tests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let notificationCenter = NotificationCenter()
+    let glance = RuntimeGlanceCoordinator(
+        preferences: GlancePreferences(defaults: defaults),
+        endpoint: { nil },
+        backendState: { backend.state },
+        notificationCenter: notificationCenter
+    )
+    let controller = MenuBarController(
+        configStore: configStore,
+        backend: backend,
+        dashboard: dashboard,
+        notificationCenter: notificationCenter,
+        glance: glance
+    )
+    #expect(controller.rebuildMenu().menuBarSpeedEnabled)
+
+    controller.toggleMenuBarSpeed(NSMenuItem())
+
+    #expect(!glance.preferences.menuBarSpeedEnabled)
+    let snapshot = controller.rebuildMenu()
+    #expect(!snapshot.menuBarSpeedEnabled)
+    let menu = MenuBarMenuBuilder.makeMenu(snapshot: snapshot, target: controller)
+    let speed = menu.items.first { $0.action == #selector(MenuBarController.toggleMenuBarSpeed(_:)) }
+    #expect(speed?.state == .off)
+
+    controller.toggleHUD(NSMenuItem())
+    #expect(glance.preferences.hudVisible)
+    #expect(controller.rebuildMenu().hudVisible)
+
+    // The installed menu's check marks follow the preferences: the actions update them in place,
+    // and opening the menu picks up changes made elsewhere (e.g. the HUD hotkey) without a rebuild.
+    let installed = try #require(controller.installedMenu)
+    func toggleStates() -> (hud: NSControl.StateValue?, speed: NSControl.StateValue?) {
+        (
+            installed.items.first { $0.action == #selector(MenuBarController.toggleHUD(_:)) }?.state,
+            installed.items.first { $0.action == #selector(MenuBarController.toggleMenuBarSpeed(_:)) }?.state
+        )
+    }
+    #expect(toggleStates() == (.on, .off))
+
+    controller.toggleMenuBarSpeed(NSMenuItem())
+    #expect(controller.installedMenu === installed)
+    #expect(toggleStates() == (.on, .on))
+
+    glance.preferences.hudVisible = false
+    glance.preferences.menuBarSpeedEnabled = false
+    controller.menuWillOpen(installed)
+    #expect(controller.installedMenu === installed)
+    #expect(toggleStates() == (.off, .off))
+}
+
+@Test @MainActor
+func hudClickThroughItemFollowsPreferences() throws {
+    let root = try menuTemporaryDirectory()
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    let backend = TestRuntimeBackend(state: .stopped, isRunning: false)
+    let dashboard = DashboardWindowController(configStore: configStore, backend: backend)
+    let suite = "ironmlx.glance.menu-tests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let notificationCenter = NotificationCenter()
+    let glance = RuntimeGlanceCoordinator(
+        preferences: GlancePreferences(defaults: defaults),
+        endpoint: { nil },
+        backendState: { backend.state },
+        notificationCenter: notificationCenter
+    )
+    let controller = MenuBarController(
+        configStore: configStore,
+        backend: backend,
+        dashboard: dashboard,
+        notificationCenter: notificationCenter,
+        glance: glance
+    )
+    let installed = try #require(controller.installedMenu)
+    func clickThroughItem() -> NSMenuItem? {
+        installed.items.first { $0.action == #selector(MenuBarController.toggleHUDClickThrough(_:)) }
+    }
+    #expect(clickThroughItem()?.isHidden != false)
+
+    // Turning the HUD on (here as the hotkey would, with the menu installed) reveals the item in place.
+    glance.preferences.hudVisible = true
+    controller.menuWillOpen(installed)
+    #expect(controller.installedMenu === installed)
+    #expect(clickThroughItem()?.isHidden == false)
+    #expect(clickThroughItem()?.state == .off)
+
+    controller.toggleHUDClickThrough(NSMenuItem())
+    #expect(glance.preferences.hudClickThrough)
+    #expect(clickThroughItem()?.state == .on)
+    controller.toggleHUDClickThrough(NSMenuItem())
+    #expect(!glance.preferences.hudClickThrough)
+
+    glance.preferences.hudVisible = false
+    controller.menuWillOpen(installed)
+    #expect(clickThroughItem()?.isHidden != false)
+}
+
+@Test @MainActor
+func statusCardRefitsWhenMenuOpens() throws {
+    let root = try menuTemporaryDirectory()
+    let configStore = AppConfigStore(url: root.appendingPathComponent("app_config.json"))
+    let backend = TestRuntimeBackend(state: .stopped, isRunning: false)
+    let dashboard = DashboardWindowController(configStore: configStore, backend: backend)
+    let suite = "ironmlx.glance.menu-tests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let notificationCenter = NotificationCenter()
+    let glance = RuntimeGlanceCoordinator(
+        preferences: GlancePreferences(defaults: defaults),
+        endpoint: { nil },
+        backendState: { backend.state },
+        notificationCenter: notificationCenter
+    )
+    let controller = MenuBarController(
+        configStore: configStore,
+        backend: backend,
+        dashboard: dashboard,
+        notificationCenter: notificationCenter,
+        glance: glance
+    )
+    // Built while the store is not connected: a one-line card.
+    let menu = try #require(controller.installedMenu)
+    let card = try #require(menu.items.first?.view)
+    let oneLineHeight = card.frame.height
+    #expect(card.frame.width == RuntimeStatusCardView.width)
+
+    // The stream goes live with no menu rebuild in between.
+    let store = glance.store
+    store.setBackendState(.running)
+    store.setConnection(.connected)
+    store.apply(
+        RuntimeMetricsSnapshot(
+            activity: .init(state: .generating, activeRequests: 1),
+            performance: .init(liveDecodeTokensPerSecond: 42.8, prefillTokensPerSecond: 1_840, ttftMs: 312),
+            memory: .init(processBytes: 1 << 33, ceilingBytes: 1 << 36),
+            models: [.init(id: "mlx-community/Qwen3-0.6B-4bit")]
+        ),
+        receivedAt: Date()
+    )
+
+    controller.menuWillOpen(menu)
+
+    #expect(controller.installedMenu === menu)
+    #expect(menu.items.first?.view === card)
+    #expect(card.frame.width == RuntimeStatusCardView.width)
+    #expect(card.frame.height == card.fittingSize.height)
+    #expect(card.frame.height > oneLineHeight + 100)
+}
+
 @MainActor
 private final class MenuLoadedModelsNotificationProbe: NSObject {
     private(set) var notified = false

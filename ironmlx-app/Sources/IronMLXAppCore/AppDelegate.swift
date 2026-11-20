@@ -20,6 +20,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var chatWindow: ChatWindowController?
     private var dashboard: DashboardWindowController?
     private var menu: MenuBarController?
+    /// The runtime metrics store and its one client, kept for the App's lifetime.
+    private var glance: RuntimeGlanceCoordinator?
     private var updateManager: (any AppUpdateManaging)?
     private var terminationReplyPending = false
 
@@ -190,17 +192,30 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         dashboard.chatEntry = chatEntry
         let updateManager = SparkleAppUpdateManager.make()
+        let configStore = configStore
+        let backend = backend
+        let glance = RuntimeGlanceCoordinator(
+            endpoint: {
+                let config = configStore.load()
+                return RuntimeMetricsClient.streamURL(host: config.host, port: config.port)
+            },
+            backendState: { backend.state },
+            language: { configStore.load().language }
+        )
+        glance.start()
         let menu = MenuBarController(
             configStore: configStore,
             backend: backend,
             dashboard: dashboard,
             updateManager: updateManager,
-            configurationRecovery: configurationRecovery
+            configurationRecovery: configurationRecovery,
+            glance: glance
         )
         menu.chatEntry = chatEntry
         chatEntry?.menu = menu
         self.dashboard = dashboard
         self.menu = menu
+        self.glance = glance
         self.updateManager = updateManager
         return true
     }

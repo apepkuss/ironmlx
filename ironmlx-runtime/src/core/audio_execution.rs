@@ -151,6 +151,15 @@ struct Counts {
     active: AtomicUsize,
     queued: AtomicUsize,
 }
+
+impl Counts {
+    fn active_and_queued(&self) -> (usize, usize) {
+        (
+            self.active.load(Ordering::SeqCst),
+            self.queued.load(Ordering::SeqCst),
+        )
+    }
+}
 struct Queued(Arc<Counts>);
 impl Drop for Queued {
     fn drop(&mut self) {
@@ -421,10 +430,14 @@ impl AudioRuntime {
         self.inner.model_weight_bytes
     }
     pub fn active_and_queued(&self) -> (usize, usize) {
-        (
-            self.inner.counts.active.load(Ordering::SeqCst),
-            self.inner.counts.queued.load(Ordering::SeqCst),
-        )
+        self.inner.counts.active_and_queued()
+    }
+
+    /// Reads the queue counters without holding the runtime, whose drop
+    /// joins the worker thread.
+    pub(crate) fn queue_counter(&self) -> impl Fn() -> (usize, usize) + Send + Sync + 'static {
+        let counts = self.inner.counts.clone();
+        move || counts.active_and_queued()
     }
 
     pub async fn submit(

@@ -40,6 +40,7 @@ pub(crate) mod images;
 pub(crate) mod realtime;
 mod realtime_speakers;
 mod request_diagnostics;
+mod runtime_metrics;
 pub(crate) mod systemone;
 pub(crate) mod transcriptions;
 mod webrtc;
@@ -285,7 +286,8 @@ pub async fn serve_with_gemma4_drafter(
 
 /// Build the DFlash2 engine (including its startup warmup) and the full
 /// DFlash2 router. `/admin/api/models/loads` is served from `load_registry`,
-/// the registry that tracked the startup load.
+/// the registry that tracked the startup load; the model is reported loaded
+/// to `metrics`, the hub that reported its startup load.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_dflash2_router<M>(
     load_registry: std::sync::Arc<ironmlx_runtime::core::load_registry::LoadRegistry>,
@@ -307,15 +309,18 @@ pub(crate) async fn build_dflash2_router<M>(
     scheduler_runtime_profile: SchedulerAutotuneRuntimeProfile,
     static_memory_estimate: ironmlx_runtime::core::process_memory::StaticMemoryEstimate,
     vision_input: ironmlx_lm::core::vision_input::VisionInputConfig,
+    metrics: std::sync::Arc<ironmlx_runtime::core::runtime_metrics::RuntimeMetricsHub>,
 ) -> Result<Router>
 where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
 {
+    use ironmlx_runtime::core::runtime_metrics::{CausalMetricsSource, ModelMode};
+
     let state = build_dflash2_engine_with_options(
         model,
         draft,
         tokenizer,
-        model_id,
+        model_id.clone(),
         prefill_chunk_size,
         b_max,
         admission_deadline_ms,
@@ -332,13 +337,23 @@ where
         vision_input,
     )
     .await?;
-    Ok(dflash2_router(state, load_registry))
+    metrics.set_loaded(
+        &model_id,
+        "causal",
+        Some(ModelMode::Dflash2),
+        std::sync::Arc::new(CausalMetricsSource::new(
+            state.health_collector.clone(),
+            state.runtime_usage.clone(),
+        )),
+    );
+    Ok(dflash2_router(state, load_registry, metrics))
 }
 
 /// Routes of the exclusive DFlash2 server.
 pub(crate) fn dflash2_router<M>(
     state: AppState<M>,
     load_registry: std::sync::Arc<ironmlx_runtime::core::load_registry::LoadRegistry>,
+    metrics: std::sync::Arc<ironmlx_runtime::core::runtime_metrics::RuntimeMetricsHub>,
 ) -> Router
 where
     M: Model + DenseVlMethods + Send + 'static,
@@ -359,6 +374,7 @@ where
         .route("/v1/responses", post(responses::responses))
         .route("/v1/messages", post(anthropic::messages))
         .with_state(state)
+        .merge(runtime_metrics::routes(metrics))
 }
 
 #[derive(Debug, Serialize, PartialEq)]

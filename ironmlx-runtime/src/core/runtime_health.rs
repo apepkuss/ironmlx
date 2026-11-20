@@ -22,7 +22,7 @@ pub enum HealthStatus {
     Down,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthDegradedReason {
     SchedulerQueueHigh,
@@ -1481,15 +1481,14 @@ impl SchedulerHealthCollector {
     }
 }
 
-pub fn classify_status(
+pub fn scheduler_degraded_reasons(
     b_queued: usize,
     queue_max: usize,
     kv_cache_active_bytes: usize,
     kv_cache_soft_limit_bytes: usize,
     active_kv_offload_degraded: bool,
     prefix_store_backpressured: bool,
-    process_governor: &crate::core::process_memory::MemoryGovernorSnapshot,
-) -> (HealthStatus, Vec<HealthDegradedReason>) {
+) -> Vec<HealthDegradedReason> {
     let mut reasons = Vec::new();
     let queue_high = queue_max > 0 && b_queued >= queue_max / 2;
     let budget_near = kv_cache_soft_limit_bytes > 0
@@ -1506,6 +1505,26 @@ pub fn classify_status(
     if prefix_store_backpressured {
         reasons.push(HealthDegradedReason::PrefixStoreBackpressured);
     }
+    reasons
+}
+
+pub fn classify_status(
+    b_queued: usize,
+    queue_max: usize,
+    kv_cache_active_bytes: usize,
+    kv_cache_soft_limit_bytes: usize,
+    active_kv_offload_degraded: bool,
+    prefix_store_backpressured: bool,
+    process_governor: &crate::core::process_memory::MemoryGovernorSnapshot,
+) -> (HealthStatus, Vec<HealthDegradedReason>) {
+    let reasons = scheduler_degraded_reasons(
+        b_queued,
+        queue_max,
+        kv_cache_active_bytes,
+        kv_cache_soft_limit_bytes,
+        active_kv_offload_degraded,
+        prefix_store_backpressured,
+    );
     classify_process_status(process_governor, reasons)
 }
 

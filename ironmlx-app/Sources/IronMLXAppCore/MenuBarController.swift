@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Observation
 
 @MainActor
 public protocol MenuBarBackendProcessManaging: BackendRuntimeManaging {}
@@ -64,6 +65,12 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     private var loadedModelRefreshGeneration: UInt64 = 0
     private var loadedModelRefreshTask: Task<Void, Never>?
     private var refreshTimer: Timer?
+    /// Live runtime status: the speed readout and dot on the status item, and the card at the top of the menu.
+    private let glance: (any RuntimeGlanceControlling)?
+    private let statusDot = MenuBarStatusDotView()
+    private var defaultImagePosition: NSControl.ImagePosition = .imageOnly
+    /// The menu language, cached so the readout never reads the config file.
+    private var glanceLanguage = "en"
     /// Handles "Chat" and supplies the starter download row; set by the App.
     weak var chatEntry: (any ChatEntryHandling)? {
         didSet { rebuildMenu() }
@@ -75,7 +82,8 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         dashboard: DashboardWindowController,
         updateManager: any AppUpdateManaging = DisabledAppUpdateManager(),
         configurationRecovery: any ConfigurationRecoveryManaging = DisabledConfigurationRecoveryManager(),
-        notificationCenter: NotificationCenter = .default
+        notificationCenter: NotificationCenter = .default,
+        glance: (any RuntimeGlanceControlling)? = nil
     ) {
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.configStore = configStore
@@ -84,6 +92,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         self.updateManager = updateManager
         self.configurationRecovery = configurationRecovery
         self.notificationCenter = notificationCenter
+        self.glance = glance
         super.init()
         observeLanguageChanges()
         observeLoadedModelChanges()
@@ -91,6 +100,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         configureStatusItem()
         startLoadedModelRefreshTimer()
         rebuildMenu()
+        observeGlance()
     }
 
     deinit {
@@ -104,11 +114,29 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     @discardableResult
     public func rebuildMenu() -> MenuBarMenuSnapshot {
         let snapshot = snapshot()
-        let menu = MenuBarMenuBuilder.makeMenu(snapshot: snapshot, target: self)
-        menu.delegate = self
-        statusItem.menu = menu
+        installMenu(snapshot)
         refreshLoadedModelNamesIfNeeded(state: snapshot.state)
         return snapshot
+    }
+
+    /// The menu currently attached to the status item.
+    var installedMenu: NSMenu? {
+        statusItem.menu
+    }
+
+    /// Builds and installs the menu. The status card is created here once per build; while the
+    /// menu is open it updates through Observation, never by rebuilding the menu.
+    private func installMenu(_ snapshot: MenuBarMenuSnapshot) {
+        let statusCard = glance.map {
+            RuntimeStatusCardView.makeMenuItemView(store: $0.store, language: snapshot.language)
+        }
+        let menu = MenuBarMenuBuilder.makeMenu(snapshot: snapshot, target: self, statusCard: statusCard)
+        menu.delegate = self
+        statusItem.menu = menu
+        if glanceLanguage != snapshot.language {
+            glanceLanguage = snapshot.language
+            updateStatusItemGlance()
+        }
     }
 
     private func configureStatusItem() {
@@ -119,6 +147,47 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             preconditionFailure("IronMLX App Bundle has invalid menu bar icon resources")
         }
         button.image = image
+        guard glance != nil else {
+            return
+        }
+        defaultImagePosition = button.imagePosition
+        button.font = NSFont.monospacedDigitSystemFont(ofSize: 0, weight: .regular)
+        statusDot.install(in: button)
+    }
+
+    /// Keeps the speed readout and the status dot current. Observation re-runs it only when
+    /// something it read changes (store or preferences), so an idle App does no work here.
+    private func observeGlance() {
+        guard glance != nil else {
+            return
+        }
+        withObservationTracking {
+            updateStatusItemGlance()
+            // The HUD hotkey can flip the HUD toggle while the menu is open.
+            updateGlanceToggleStates(in: statusItem.menu)
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.observeGlance()
+            }
+        }
+    }
+
+    private func updateStatusItemGlance() {
+        guard let glance, let button = statusItem.button else {
+            return
+        }
+        let title = glance.store.menuBarReadout(
+            language: glanceLanguage,
+            enabled: glance.preferences.menuBarSpeedEnabled
+        ) ?? ""
+        statusDot.indicator = glance.store.indicator
+        guard button.title != title else {
+            return
+        }
+        button.title = title
+        // With no text, the icon sits exactly where it did before the readout existed.
+        button.imagePosition = title.isEmpty ? defaultImagePosition : .imageLeading
+        statusDot.reposition()
     }
 
     @objc public func openDashboard(_ sender: NSMenuItem) {
@@ -151,9 +220,7 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         if row == nil, title == nil {
             return
         }
-        let menu = MenuBarMenuBuilder.makeMenu(snapshot: snapshot, target: self)
-        menu.delegate = self
-        statusItem.menu = menu
+        installMenu(snapshot)
     }
 
     @objc public func startServer(_ sender: NSMenuItem) {
@@ -180,6 +247,48 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     @objc public func showConfigurationRecovery(_ sender: NSMenuItem) {
         configurationRecovery.presentRecovery(sender)
         rebuildMenu()
+    }
+
+    @objc public func toggleHUD(_ sender: NSMenuItem) {
+        handleHUDMenuAction(event: NSApp?.currentEvent)
+    }
+
+    /// ⌃⌥⌘H pressed while the menu is open arrives here as the item's key equivalent instead of
+    /// as the Carbon hotkey, so it takes the hotkey's path (which also drops a second delivery of
+    /// the same press). Clicks and Return on the item flip the checked preference.
+    func handleHUDMenuAction(event: NSEvent?) {
+        if MenuBarMenuBuilder.isHUDHotKeyKeystroke(event, hotKeyRegistered: glance?.hudHotKeyDisplay != nil) {
+            glance?.hudHotKeyPressed()
+        } else {
+            glance?.toggleHUD()
+        }
+        updateGlanceToggleStates(in: statusItem.menu)
+    }
+
+    @objc public func toggleHUDClickThrough(_ sender: NSMenuItem) {
+        glance?.preferences.hudClickThrough.toggle()
+        updateGlanceToggleStates(in: statusItem.menu)
+    }
+
+    @objc public func toggleMenuBarSpeed(_ sender: NSMenuItem) {
+        glance?.toggleMenuBarSpeed()
+        updateGlanceToggleStates(in: statusItem.menu)
+    }
+
+    /// Sets the glance toggles' check marks (and whether "HUD Click-Through" shows) in place; the
+    /// HUD can also be toggled by its hotkey or its context menu.
+    private func updateGlanceToggleStates(in menu: NSMenu?) {
+        guard let glance, let menu else {
+            return
+        }
+        let hudVisible = glance.preferences.hudVisible
+        menu.items.first { $0.action == #selector(toggleHUD(_:)) }?.state = hudVisible ? .on : .off
+        if let clickThrough = menu.items.first(where: { $0.action == #selector(toggleHUDClickThrough(_:)) }) {
+            clickThrough.isHidden = !hudVisible
+            clickThrough.state = glance.preferences.hudClickThrough ? .on : .off
+        }
+        menu.items.first { $0.action == #selector(toggleMenuBarSpeed(_:)) }?.state =
+            glance.preferences.menuBarSpeedEnabled ? .on : .off
     }
 
     @objc public func quit(_ sender: NSMenuItem) {
@@ -210,6 +319,12 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
     public func menuWillOpen(_ menu: NSMenu) {
         menu.items.first(where: { $0.action == #selector(checkForUpdates(_:)) })?.isEnabled =
             updateManager.canCheckForUpdates
+        updateGlanceToggleStates(in: menu)
+        if let card = menu.items.first?.view {
+            // The card may have changed shape since the menu was built (for example the stream
+            // went live after a rebuild while reconnecting) while it was not in a window.
+            RuntimeStatusCardView.refit(card)
+        }
         refreshLoadedModelNamesIfNeeded(state: snapshot().state)
     }
 
@@ -224,7 +339,11 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
             configurationRecoveryAvailable: configurationRecovery.hasIssues,
             language: config.language,
             starterDownload: chatEntry?.menuStarterState ?? .idle,
-            starterModelName: chatEntry?.starterModelName
+            starterModelName: chatEntry?.starterModelName,
+            hudVisible: glance?.preferences.hudVisible ?? false,
+            hudClickThrough: glance?.preferences.hudClickThrough ?? false,
+            menuBarSpeedEnabled: glance?.preferences.menuBarSpeedEnabled ?? true,
+            hudHotKeyDisplay: glance?.hudHotKeyDisplay
         )
     }
 
