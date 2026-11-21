@@ -13481,9 +13481,9 @@
     },
     {
       "type": "library",
-      "bom-ref": "native:MLX C++ with bundled JACCL@a9c9f3d3634093f431381ccd7aea5bb9ea691484",
+      "bom-ref": "native:MLX C++ with bundled JACCL@781603c6b5d39cbff9e808084f6cc5b4e944ebcd",
       "name": "MLX C++ with bundled JACCL",
-      "version": "a9c9f3d3634093f431381ccd7aea5bb9ea691484",
+      "version": "781603c6b5d39cbff9e808084f6cc5b4e944ebcd",
       "licenses": [
         {
           "expression": "MIT"
@@ -13500,7 +13500,7 @@
         },
         {
           "name": "ironmlx:source-commit",
-          "value": "a9c9f3d3634093f431381ccd7aea5bb9ea691484"
+          "value": "781603c6b5d39cbff9e808084f6cc5b4e944ebcd"
         }
       ],
       "externalReferences": [
@@ -13509,7 +13509,7 @@
           "url": "https://github.com/apepkuss/mlx.git"
         }
       ],
-      "purl": "pkg:github/apepkuss/mlx@a9c9f3d3634093f431381ccd7aea5bb9ea691484"
+      "purl": "pkg:github/apepkuss/mlx@781603c6b5d39cbff9e808084f6cc5b4e944ebcd"
     },
     {
       "type": "library",
