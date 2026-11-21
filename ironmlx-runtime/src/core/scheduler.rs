@@ -3664,6 +3664,7 @@ fn reject_flash_prefix(
 
 /// Flash state is saved whole at the boundary (see [`crate::core::cache::prefix_save`]),
 /// outside the async write queue: a long prefix is not limited by its byte cap.
+#[allow(clippy::too_many_arguments)]
 fn save_flash_prefix_for_row(
     store: Option<PagedPrefixStore>,
     prefix_lru_cache: Option<&PrefixLruCacheHandle>,
