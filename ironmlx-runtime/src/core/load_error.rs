@@ -200,7 +200,9 @@ pub fn classify_load_error(error: &anyhow::Error) -> ClassifiedLoadError {
             KV_MEMORY_BUDGET_EXCEEDED_MESSAGE,
         );
     }
+    // The process memory governor refuses a load it has no headroom for.
     if lower.contains("out of memory")
+        || lower.contains("memory headroom")
         || contains_word(&lower, "oom")
         || lower.contains("failed to allocate")
         || lower.contains("memory allocation")
