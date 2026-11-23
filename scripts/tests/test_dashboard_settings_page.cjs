@@ -227,7 +227,7 @@ function settingsRows() {
 test('restart_tags_match_restart_fields', () => {
   const fields = new Set(restartFields());
   const rows = settingsRows();
-  assert.equal(rows.length, 21);
+  assert.equal(rows.length, 22);
   for (const row of rows) {
     const expected = row.ids.some(id => fields.has(id));
     const tags = (row.html.match(/class="ds-restart-tag"/g) || []).length;

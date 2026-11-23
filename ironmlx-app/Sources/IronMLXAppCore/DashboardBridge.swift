@@ -3185,7 +3185,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             let client = modelStatusClientFactory(config.host, config.port)
             // The DFlash2 server has no model admin routes; its health names the model it serves.
             if backend.launchServesDFlash2 {
-                return await recoverDFlash2ModelState(config: config, client: client)
+                return await recoverDFlash2ModelState(client: client)
                     ?? persistedModelState(config: config)
             }
             do {

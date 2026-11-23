@@ -308,7 +308,7 @@ import Testing
     #expect(html.contains(#"<button type="button" class="profile-help-trigger" id="active-kv-help-trigger" aria-describedby="active-kv-help-tooltip" aria-label="Active KV offload help">?</button>"#))
     #expect(!html.contains("profile-help-trigger warning"))
     #expect(html.contains(#"data-i18n="active_kv_offload_help_not_applicable""#))
-    #expect(html.contains("不适用：DFlash2 模型、MTP 推测解码缓存。"))
+    #expect(html.contains("不适用：Qwen3.8-Flash-Next 以外的 DFlash2 模型、MTP 推测解码缓存。"))
     #expect(!html.contains("active_kv_offload_help_trigger"))
     #expect(!html.contains("active_kv_offload_help_applicable"))
 }

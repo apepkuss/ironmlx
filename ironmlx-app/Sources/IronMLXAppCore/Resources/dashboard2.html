@@ -6020,7 +6020,7 @@
         <div class="settings-row-right"><div class="slider-row"><input type="range" min="1" max="10" value="10" id="cfg-cold-cache"><span class="slider-value">10GB</span></div></div>
       </div>
       <div class="settings-row ds-sub-row" id="prefix-save-mode-row">
-        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="prefix_save_mode">Flash prefix saving</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="prefix_save_help">Adaptive saving uses a budgeted snapshot and may skip persistence. Sync waits for durable saving. Restart the service to apply.</div><div class="settings-row-desc" id="prefix-persistence-status" aria-live="polite"></div></div>
+        <div class="settings-row-left"><div class="settings-row-label"><span data-i18n="prefix_save_mode">Flash prefix saving</span> <span class="ds-restart-tag" data-i18n="settings_restart_tag">Restart required</span></div><div class="settings-row-desc" data-i18n="prefix_save_help">Adaptive copies a budgeted snapshot and saves it in the background; it may skip saving. Sync waits until the save is durable. Applies to Flash ordinary and DFlash2 paths and follows Prefix cache. Sync stays the default until more hardware is validated.</div><div class="settings-row-desc" id="prefix-persistence-status" aria-live="polite"></div></div>
         <div class="settings-row-right"><select id="cfg-prefix-save-mode" style="min-width:160px;"><option value="sync" data-i18n="prefix_save_sync">Sync (fallback)</option><option value="auto" data-i18n="prefix_save_auto">Adaptive</option></select></div>
       </div>
       <div class="settings-row">
@@ -7112,7 +7112,7 @@
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "This model is running with DFlash2 acceleration.",
       dflash2_acceleration: "DFlash2 Acceleration", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft Precision", dflash2_tensor_batch_max_width: "Tensor Batch Limit", auto_default_4: "Auto (4)",
       dflash2_tensor_batch_help_label: "About Tensor Batch Limit", dflash2_tensor_batch_help_title: "How Tensor Batch Limit is applied", dflash2_tensor_batch_help_body: "Limits how many compatible requests can be combined in one MLX tensor batch. Leave blank for Auto (4).", dflash2_tensor_batch_help_constraint: "The effective width is the minimum of this limit, Settings > Models and memory > Concurrent requests, and the number of ready compatible requests. This setting does not increase concurrent requests; incompatible or divergent requests use B1.",
-      dflash2_tensor_batch_help_not_applicable: "This limit does not apply to Qwen3.8-Flash-Next. With the M5 DFlash2 Profile active, compatible concurrent requests use automatic ragged batching, up to Concurrent requests or 4 requests, whichever is lower.",
+      dflash2_tensor_batch_help_not_applicable: "This limit does not apply to Qwen3.8-Flash-Next. With the M5 DFlash2 optimization on, compatible concurrent requests use automatic ragged batching, up to Concurrent requests or 4 requests, whichever is lower.",
       dflash2_help_label: "About DFlash2 acceleration", dflash2_help_title: "How DFlash2 acceleration works", dflash2_help_body: "DFlash2 uses a dedicated draft model and an isolated verification actor. Tensor Batch Limit caps compatible requests combined in one tensor operation; the actual width is the minimum of concurrent requests, this limit, and ready compatible requests. Empty uses the certified default 4. Changing this setting restarts the backend in single-target mode.", dflash2_help_exclusive: "DFlash2 cannot run together with MTP or repeated-text acceleration.",
       dflash2_help_status_available: "Current status: compatible DFlash2 draft detected. Block Size follows the selected draft checkpoint, capped at the qualified Q8 width, and cannot be edited.", dflash2_help_status_incompatible: "Current status: the detected DFlash2 draft is incompatible with this model.", dflash2_help_status_unavailable: "Current status: no compatible DFlash2 draft was found.", dflash2_status_incompatible: "DFlash2 draft is incompatible", dflash2_status_unavailable: "No compatible DFlash2 draft", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch Limit must be a positive integer, or empty for Auto (4).",
       model_exists_locally: "Model \"{name}\" already exists locally.",
@@ -7321,7 +7321,7 @@
       hot_cache: "Memory cache limit", hot_cache_desc: "In-memory prefix cache for frequent requests.", hot_cache_help_title: "How the memory cache works", hot_cache_help_body: "Keeps frequently used prompt prefixes in memory. Auto sizes the limit from system unified memory, up to 8GB; turn Auto off to set your own limit.",
       cold_cache: "SSD cache limit", cold_cache_desc: "Limits SSD Prefix Cache disk usage.", cold_cache_help_title: "How SSD cache works", cold_cache_help_body: "Keeps prefix cache data on local SSD so repeated long prompts skip prefill. The maximum follows the free disk space.",
       prefix_save_mode: "Flash prefix saving",
-      prefix_save_help: "Adaptive copies a budgeted snapshot and saves it in the background; it may skip saving. Sync waits for durable saving. Applies to Flash ordinary and DFlash2 paths, follows Enable Cache, and requires a service restart. Sync remains the default pending wider hardware validation.",
+      prefix_save_help: "Adaptive copies a budgeted snapshot and saves it in the background; it may skip saving. Sync waits until the save is durable. Applies to Flash ordinary and DFlash2 paths and follows Prefix cache. Sync stays the default until more hardware is validated.",
       prefix_save_sync: "Sync (fallback)",
       prefix_save_auto: "Adaptive",
       prefix_save_status: "Process: {status} · pending {pending} · committed {committed} · peak reserved {reserved}/{budget} · RAM / pending / SSD hits: {hits}",
@@ -7966,7 +7966,7 @@
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "该模型正在使用 DFlash2 加速。",
       dflash2_acceleration: "DFlash2 加速", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自动（4）",
       dflash2_tensor_batch_help_label: "了解 Tensor Batch 上限", dflash2_tensor_batch_help_title: "Tensor Batch 上限如何生效", dflash2_tensor_batch_help_body: "限制一次 MLX tensor batch 最多合并的兼容请求数。留空使用自动值 4。", dflash2_tensor_batch_help_constraint: "约束关系：实际宽度取该上限、【设置 → 模型与内存 → 并发请求数】和当前就绪兼容请求数的最小值。该配置不会提高并发请求数；不兼容或发生分叉的请求使用 B1。",
-      dflash2_tensor_batch_help_not_applicable: "此上限不适用于 Qwen3.8-Flash-Next。M5 DFlash2 优化配置生效时，兼容的并发请求自动使用 ragged 合批，上限取最大序列数与 4 的较小值。",
+      dflash2_tensor_batch_help_not_applicable: "此上限不适用于 Qwen3.8-Flash-Next。M5 DFlash2 优化开启时，兼容的并发请求自动使用 ragged 合批，上限取“并发请求数”与 4 中的较小值。",
       dflash2_help_label: "了解 DFlash2 加速", dflash2_help_title: "DFlash2 加速如何工作", dflash2_help_body: "DFlash2 使用独立 Draft 模型和隔离的验证 actor。Tensor Batch 上限控制一次 tensor 操作最多合并多少个兼容请求；实际宽度取并发请求数、该上限和当前就绪兼容请求数的最小值。留空使用认证默认值 4。修改此设置后，后端将以单 Target 模式重启。", dflash2_help_exclusive: "DFlash2 不能与 MTP 或重复文本加速同时启用。",
       dflash2_help_status_available: "当前状态：已检测到兼容的 DFlash2 Draft。Block Size 由所选 Draft 的 checkpoint 宽度决定，上限为已资格化的 Q8，不可编辑。", dflash2_help_status_incompatible: "当前状态：检测到的 DFlash2 Draft 与该模型不兼容。", dflash2_help_status_unavailable: "当前状态：未发现兼容的 DFlash2 Draft。", dflash2_status_incompatible: "DFlash2 Draft 不兼容", dflash2_status_unavailable: "未发现兼容的 DFlash2 Draft", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限必须为正整数，或留空使用自动值 4。",
       model_exists_locally: "模型 \"{name}\" 已存在于本地。",
@@ -8175,7 +8175,7 @@
       hot_cache: "内存缓存上限", hot_cache_desc: "用于频繁访问的前缀缓存。", hot_cache_help_title: "内存缓存的作用", hot_cache_help_body: "把常用的提示词前缀保存在内存中。自动模式按系统统一内存估算，上限为 8GB；关闭【自动】可自行设定。",
       cold_cache: "SSD 缓存上限", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁盘占用。", cold_cache_help_title: "SSD 缓存的作用", cold_cache_help_body: "把前缀缓存数据保存到本地 SSD，重复的长提示词可省去预填充。最大值随磁盘可用空间调整。",
       prefix_save_mode: "Flash 前缀保存",
-      prefix_save_help: "自适应模式按预算复制快照并在后台写入，条件不足时跳过保存；同步模式等待持久化完成。适用于 Flash 普通和 DFlash2 路径，受【启用缓存】控制，重启服务后生效。更多机型验证完成前默认保持同步。",
+      prefix_save_help: "自适应模式按预算复制快照并在后台写入，条件不足时跳过保存；同步模式等待持久化完成。适用于 Flash 普通和 DFlash2 路径，受“前缀缓存”开关控制。更多机型验证完成前默认保持同步。",
       prefix_save_sync: "同步（回退）",
       prefix_save_auto: "自适应",
       prefix_save_status: "进程：{status} · 待完成 {pending} · 已提交 {committed} · 峰值预留 {reserved}/{budget} · 内存／待写快照／SSD 命中：{hits}",
@@ -8820,7 +8820,7 @@
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "此模型正在使用 DFlash2 加速。",
       dflash2_acceleration: "DFlash2 加速", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自動（4）",
       dflash2_tensor_batch_help_label: "瞭解 Tensor Batch 上限", dflash2_tensor_batch_help_title: "Tensor Batch 上限如何生效", dflash2_tensor_batch_help_body: "限制一次 MLX tensor batch 最多合併的相容請求數。留空使用自動值 4。", dflash2_tensor_batch_help_constraint: "約束關係：實際寬度取此上限、【設定 → 模型與記憶體 → 並行請求數】與目前就緒相容請求數的最小值。此設定不會提高並行請求數；不相容或發生分歧的請求使用 B1。",
-      dflash2_tensor_batch_help_not_applicable: "此上限不適用於 Qwen3.8-Flash-Next。M5 DFlash2 最佳化設定生效時，相容的並行請求自動使用 ragged 合批，上限取最大序列數與 4 的較小值。",
+      dflash2_tensor_batch_help_not_applicable: "此上限不適用於 Qwen3.8-Flash-Next。M5 DFlash2 最佳化開啟時，相容的並行請求自動使用 ragged 合批，上限取「並行請求數」與 4 中的較小值。",
       dflash2_help_label: "瞭解 DFlash2 加速", dflash2_help_title: "DFlash2 加速如何運作", dflash2_help_body: "DFlash2 使用獨立 Draft 模型與隔離的驗證 actor。Tensor Batch 上限控制一次 tensor 操作最多合併多少個相容請求；實際寬度取並行請求數、該上限與目前就緒相容請求數的最小值。留空使用認證預設值 4。修改此設定後，後端將以單一 Target 模式重新啟動。", dflash2_help_exclusive: "DFlash2 無法與 MTP 或重複文字加速同時啟用。",
       dflash2_help_status_available: "目前狀態：已偵測到相容的 DFlash2 Draft。Block Size 由所選 Draft 的 checkpoint 寬度決定，上限為已資格化的 Q8，不可編輯。", dflash2_help_status_incompatible: "目前狀態：偵測到的 DFlash2 Draft 與此模型不相容。", dflash2_help_status_unavailable: "目前狀態：未發現相容的 DFlash2 Draft。", dflash2_status_incompatible: "DFlash2 Draft 不相容", dflash2_status_unavailable: "未發現相容的 DFlash2 Draft", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限必須是正整數，或留空使用自動值 4。",
       model_exists_locally: "模型 \"{name}\" 已存在於本地。",
@@ -9032,7 +9032,7 @@
       hot_cache: "記憶體快取上限", hot_cache_desc: "用於頻繁存取的前綴快取。", hot_cache_help_title: "記憶體快取的作用", hot_cache_help_body: "把常用的提示詞前綴保存在記憶體中。自動模式依系統統一記憶體估算，上限為 8GB；關閉「自動」可自行設定。",
       cold_cache: "SSD 快取上限", cold_cache_desc: "限制 SSD Prefix Cache 的最大磁碟占用。", cold_cache_help_title: "SSD 快取的作用", cold_cache_help_body: "把前綴快取資料保存到本機 SSD，重複的長提示詞可省去預填充。最大值隨磁碟可用空間調整。",
       prefix_save_mode: "Flash 前綴儲存",
-      prefix_save_help: "自適應模式按預算複製快照並於背景寫入，條件不足時略過儲存；同步模式等待持久化完成。適用於 Flash 一般與 DFlash2 路徑，受【啟用快取】控制，重啟服務後生效。更多機型驗證完成前預設保持同步。",
+      prefix_save_help: "自適應模式按預算複製快照並於背景寫入，條件不足時略過儲存；同步模式等待持久化完成。適用於 Flash 一般與 DFlash2 路徑，受「前綴快取」開關控制。更多機型驗證完成前預設保持同步。",
       prefix_save_sync: "同步（回退）",
       prefix_save_auto: "自適應",
       prefix_save_status: "程序：{status} · 待完成 {pending} · 已提交 {committed} · 峰值預留 {reserved}/{budget} · 記憶體／待寫快照／SSD 命中：{hits}",
@@ -9677,7 +9677,7 @@
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "このモデルは DFlash2 アクセラレーションで実行中です。",
       dflash2_acceleration: "DFlash2 アクセラレーション", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 精度", dflash2_tensor_batch_max_width: "Tensor Batch 上限", auto_default_4: "自動（4）",
       dflash2_tensor_batch_help_label: "Tensor Batch 上限について", dflash2_tensor_batch_help_title: "Tensor Batch 上限の適用方法", dflash2_tensor_batch_help_body: "1 回の MLX tensor batch にまとめる互換リクエスト数を制限します。空欄では自動値 4 を使用します。", dflash2_tensor_batch_help_constraint: "実際の幅は、この上限、［設定 → モデルとメモリ → 同時リクエスト数］、準備済み互換リクエスト数の最小値です。この設定で同時リクエスト数は増えません。非互換または分岐したリクエストは B1 を使用します。",
-      dflash2_tensor_batch_help_not_applicable: "この上限は Qwen3.8-Flash-Next には適用されません。M5 DFlash2 プロファイルが有効な場合、互換性のある同時リクエストは自動で ragged バッチ処理され、最大シーケンス数と 4 の小さい方が上限になります。",
+      dflash2_tensor_batch_help_not_applicable: "この上限は Qwen3.8-Flash-Next には適用されません。M5 DFlash2 最適化がオンのとき、互換性のある同時リクエストは自動で ragged バッチ処理され、「同時リクエスト数」と 4 の小さい方が上限になります。",
       dflash2_help_label: "DFlash2 アクセラレーションについて", dflash2_help_title: "DFlash2 アクセラレーションの仕組み", dflash2_help_body: "DFlash2 は専用 Draft モデルと分離された検証 actor を使用します。Tensor Batch 上限は、1 回の tensor 演算でまとめる互換リクエスト数を制限します。実際の幅は同時リクエスト数、この上限、準備済み互換リクエスト数の最小値です。空欄では認定済み既定値 4 を使用します。この設定を変更すると、バックエンドは単一 Target モードで再起動します。", dflash2_help_exclusive: "DFlash2 は MTP または繰り返しテキスト高速化と同時に使用できません。",
       dflash2_help_status_available: "現在の状態：互換性のある DFlash2 Draft が見つかりました。Block Size は選択した Draft の checkpoint 幅で決まり、認定済み Q8 を上限とします。編集はできません。", dflash2_help_status_incompatible: "現在の状態：検出された DFlash2 Draft はこのモデルと互換性がありません。", dflash2_help_status_unavailable: "現在の状態：互換性のある DFlash2 Draft が見つかりません。", dflash2_status_incompatible: "DFlash2 Draft は非互換です", dflash2_status_unavailable: "互換性のある DFlash2 Draft はありません", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 上限は正の整数で指定するか、空欄にして自動値 4 を使用してください。",
       model_exists_locally: "モデル \"{name}\" はローカルに既に存在します。",
@@ -9889,7 +9889,7 @@
       hot_cache: "メモリキャッシュ上限", hot_cache_desc: "頻繁に利用されるプレフィックスキャッシュです。", hot_cache_help_title: "メモリキャッシュの役割", hot_cache_help_body: "よく使うプロンプトの先頭部分をメモリに保持します。自動ではシステム統合メモリから上限を見積もり、最大 8GB です。「自動」をオフにすると自分で設定できます。",
       cold_cache: "SSDキャッシュ上限", cold_cache_desc: "SSD Prefix Cache の最大ディスク使用量です。", cold_cache_help_title: "SSD キャッシュの役割", cold_cache_help_body: "プレフィックスキャッシュのデータをローカル SSD に保存し、繰り返される長いプロンプトのプレフィルを省きます。最大値はディスクの空き容量に応じて調整されます。",
       prefix_save_mode: "Flash プレフィックス保存",
-      prefix_save_help: "自動調整は予算内でコピーして背景保存し、条件次第で保存を見送ります。同期は永続化の完了を待ちます。Flash の通常／DFlash2 経路に適用し、キャッシュ設定に従います。反映には再起動が必要です。他機種の検証までは同期が既定です。",
+      prefix_save_help: "自動調整は予算内でコピーして背景保存し、条件次第で保存を見送ります。同期は永続化の完了を待ちます。Flash の通常／DFlash2 経路に適用し、「プレフィックスキャッシュ」の設定に従います。他機種の検証までは同期が既定です。",
       prefix_save_sync: "同期（フォールバック）",
       prefix_save_auto: "自動調整",
       prefix_save_status: "プロセス: {status} · 保留 {pending} · 確定 {committed} · 最大予約 {reserved}/{budget} · RAM / 保留 / SSD ヒット: {hits}",
@@ -10534,7 +10534,7 @@
       dflash2_badge_enabled: "DFlash2", dflash2_badge_enabled_title: "이 모델은 DFlash2 가속으로 실행 중입니다.",
       dflash2_acceleration: "DFlash2 가속", dflash2_draft_model: "DFlash2 Draft", dflash2_block_size: "Block Size", dflash2_draft_bits: "Draft 정밀도", dflash2_tensor_batch_max_width: "Tensor Batch 제한", auto_default_4: "자동(4)",
       dflash2_tensor_batch_help_label: "Tensor Batch 제한 정보", dflash2_tensor_batch_help_title: "Tensor Batch 제한 적용 방식", dflash2_tensor_batch_help_body: "한 번의 MLX tensor batch에 결합할 호환 요청 수를 제한합니다. 비워 두면 자동값 4를 사용합니다.", dflash2_tensor_batch_help_constraint: "실제 너비는 이 제한, [설정 → 모델 및 메모리 → 동시 요청 수], 준비된 호환 요청 수 중 최솟값입니다. 이 설정은 동시 요청 수를 늘리지 않으며, 호환되지 않거나 분기된 요청은 B1을 사용합니다.",
-      dflash2_tensor_batch_help_not_applicable: "이 제한은 Qwen3.8-Flash-Next에 적용되지 않습니다. M5 DFlash2 프로필이 활성화되면 호환되는 동시 요청은 자동으로 ragged 배치 처리되며, 최대 시퀀스 수와 4 중 작은 값이 상한입니다.",
+      dflash2_tensor_batch_help_not_applicable: "이 제한은 Qwen3.8-Flash-Next에 적용되지 않습니다. M5 DFlash2 최적화가 켜져 있으면 호환되는 동시 요청은 자동으로 ragged 배치 처리되며, '동시 요청 수'와 4 중 작은 값이 상한입니다.",
       dflash2_help_label: "DFlash2 가속 정보", dflash2_help_title: "DFlash2 가속 작동 방식", dflash2_help_body: "DFlash2는 전용 Draft 모델과 분리된 검증 actor를 사용합니다. Tensor Batch 제한은 한 번의 tensor 연산에 결합되는 호환 요청 수를 제한합니다. 실제 너비는 동시 요청 수, 이 제한, 준비된 호환 요청 수 중 최솟값입니다. 비워 두면 인증된 기본값 4를 사용합니다. 이 설정을 변경하면 백엔드가 단일 Target 모드로 재시작됩니다.", dflash2_help_exclusive: "DFlash2는 MTP 또는 반복 텍스트 가속과 동시에 사용할 수 없습니다.",
       dflash2_help_status_available: "현재 상태: 호환되는 DFlash2 Draft를 찾았습니다. Block Size는 선택한 Draft의 checkpoint 폭으로 정해지며 검증된 Q8을 상한으로 합니다. 편집할 수 없습니다.", dflash2_help_status_incompatible: "현재 상태: 감지된 DFlash2 Draft가 이 모델과 호환되지 않습니다.", dflash2_help_status_unavailable: "현재 상태: 호환되는 DFlash2 Draft를 찾지 못했습니다.", dflash2_status_incompatible: "DFlash2 Draft가 호환되지 않습니다", dflash2_status_unavailable: "호환되는 DFlash2 Draft 없음", params_invalid_dflash2_tensor_batch_max_width: "DFlash2 Tensor Batch 제한은 양의 정수이거나 자동값 4를 사용하려면 비워 두어야 합니다.",
       model_exists_locally: "모델 \"{name}\"이(가) 이미 로컬에 존재합니다.",
@@ -10746,7 +10746,7 @@
       hot_cache: "메모리 캐시 한도", hot_cache_desc: "자주 사용하는 프리픽스 캐시입니다.", hot_cache_help_title: "메모리 캐시 역할", hot_cache_help_body: "자주 쓰는 프롬프트 앞부분을 메모리에 보관합니다. 자동은 시스템 통합 메모리를 기준으로 한도를 정하며 최대 8GB입니다. '자동'을 끄면 직접 설정할 수 있습니다.",
       cold_cache: "SSD 캐시 한도", cold_cache_desc: "SSD Prefix Cache의 최대 디스크 사용량입니다.", cold_cache_help_title: "SSD 캐시 역할", cold_cache_help_body: "프리픽스 캐시 데이터를 로컬 SSD에 저장해 반복되는 긴 프롬프트의 프리필을 줄입니다. 최대값은 디스크 여유 공간에 맞춰 조정됩니다.",
       prefix_save_mode: "Flash 프리픽스 저장",
-      prefix_save_help: "적응형은 예산 내에서 복사하고 백그라운드에서 저장하며 조건이 부족하면 건너뜁니다. 동기는 영구 저장 완료를 기다립니다. Flash 일반 및 DFlash2 경로에 적용되고 캐시 설정을 따릅니다. 재시작 후 적용되며 추가 실기 검증 전까지 기본값은 동기입니다.",
+      prefix_save_help: "적응형은 예산 내에서 복사하고 백그라운드에서 저장하며 조건이 부족하면 건너뜁니다. 동기는 영구 저장 완료를 기다립니다. Flash 일반 및 DFlash2 경로에 적용되며 '프리픽스 캐시' 설정을 따릅니다. 추가 실기 검증 전까지 기본값은 동기입니다.",
       prefix_save_sync: "동기 (대체)",
       prefix_save_auto: "적응형",
       prefix_save_status: "프로세스: {status} · 대기 {pending} · 완료 {committed} · 최대 예약 {reserved}/{budget} · RAM / 대기 / SSD 적중: {hits}",
@@ -11832,22 +11832,9 @@
     }
   }
 
-  // In-flight native operations. Model scans replace the table, so the busy
-  // state has to live outside the rows until the native callback arrives.
-  window.__MODEL_OPERATIONS__ = {}; // { modelId: 'loading' | 'unloading' }
-
-  function modelOperation(modelId) {
-    return window.__MODEL_OPERATIONS__[modelId] || '';
-  }
-
-  function finishModelOperation(modelId) {
-    delete window.__MODEL_OPERATIONS__[modelId];
-  }
-
   function loadModel(modelId, btn, useMtp, mtpModelId, useDFlash2, dflash2ModelId) {
     const dict = I18N[currentLang] || I18N.en;
     const saved = window.__MODEL_PARAMS__[modelId] || {};
-    window.__MODEL_OPERATIONS__[modelId] = 'loading';
     markModelActionLoading(btn, dict.action_loading || 'Loading...');
     updateModelStatusForAction(btn, 'model-busy', dict.status_loading || 'Loading...');
     if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.loadModel) {
@@ -11897,7 +11884,6 @@
 
   function unloadModel(modelId, btn) {
     const dict = I18N[currentLang] || I18N.en;
-    window.__MODEL_OPERATIONS__[modelId] = 'unloading';
     btn.disabled = true;
     btn.textContent = dict.action_unloading || 'Unloading...';
     updateModelStatusForAction(btn, 'model-busy', dict.status_unloading || 'Unloading...');
@@ -11930,14 +11916,12 @@
       // would otherwise stay pinned at "加载中...". Reset the table
       // from backend state and tell the user something is off.
       console.error('onModelLoaded: JSON.parse failed', e, resultJson);
-      finishModelOperation(modelId);
       const dict = I18N[currentLang] || I18N.en;
       showToast(dict.err_callback_malformed || 'Internal error: callback payload could not be parsed. The button has been reset.', 'warn');
       syncModelList();
       return;
     }
     if (result.success) {
-      finishModelOperation(modelId);
       clearServerBanner();
       // Older backends report every default-configuration load this way;
       // that case is shown passively now.
@@ -11961,7 +11945,6 @@
           }
         } else {
           // User declined — re-render to reset button
-          finishModelOperation(modelId);
           syncModelList();
         }
       });
@@ -11972,9 +11955,6 @@
         showToast(localizeErrorResult(result, 'err_load_failed'), 'warn');
       }
       // Re-render to reset button from "Loading..." back to correct state
-      syncModelList();
-    } else {
-      finishModelOperation(modelId);
       syncModelList();
     }
   }
@@ -12061,7 +12041,6 @@
 
   // Called from Rust after unload completes
   function onModelUnloaded(resultJson, modelId) {
-    finishModelOperation(modelId);
     let result = {};
     try {
       result = JSON.parse(resultJson);
@@ -15535,16 +15514,6 @@
         title: ''
       };
     }
-    const operation = modelOperation(model.id);
-    if (operation) {
-      return {
-        dot: 'model-busy',
-        text: operation === 'unloading'
-          ? (dict.status_unloading || 'Unloading...')
-          : (dict.status_loading || 'Loading...'),
-        title: ''
-      };
-    }
     const readiness = modelReadiness(model);
     if (readiness.status === 'unsupported' || readiness.status === 'incomplete') {
       const text = readiness.status === 'incomplete' ? dict.status_incomplete
@@ -18033,7 +18002,7 @@
     'cfg-hot-cache', 'cfg-hot-cache-auto',
     'cfg-cold-cache',
     'cfg-max-sequences', 'cfg-max-models',
-    'cfg-cache-enable', 'cfg-cache-dir', 'cfg-active-kv-offload', 'cfg-m5-dflash2-profile', 'cfg-ane',
+    'cfg-cache-enable', 'cfg-cache-dir', 'cfg-prefix-save-mode', 'cfg-active-kv-offload', 'cfg-m5-dflash2-profile', 'cfg-ane',
     'cfg-kv-quant', 'cfg-model-ttl',
     'cfg-distributed-backend', 'cfg-parallel-mode'
   ];
@@ -21081,7 +21050,6 @@
           return;
         }
         const data = JSON.parse(jsonStr);
-        window.__IRONMLX_ANE_HEALTH__ = data.ane || null;
         renderPrefixPersistence(data.prefix_persistence);
         syncAneUI();
         const runtimeModels = Array.isArray(data.runtime_models) ? data.runtime_models : [];

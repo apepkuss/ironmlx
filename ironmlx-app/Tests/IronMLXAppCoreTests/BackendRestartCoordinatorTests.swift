@@ -150,7 +150,7 @@ import Testing
         parameterStore: parameterStore
     )
     #expect(elsewhereSnapshot.models.first?.dflash2ModelDir == draft.path)
-    #expect(BackendRecoveryPolicy().readinessTimeout(for: elsewhereSnapshot) == 300)
+    #expect(BackendRecoveryPolicy().readinessTimeout == 300)
 
     let loader = FakeRestartModelLoader()
     let coordinator = BackendRestartCoordinator(

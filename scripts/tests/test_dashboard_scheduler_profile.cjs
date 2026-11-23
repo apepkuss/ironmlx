@@ -94,7 +94,7 @@ test('other-hardware and broken profiles each show one localized toast', () => {
 
 function statusCard(language) {
   const card = { style: {} };
-  const container = { innerHTML: '' };
+  const container = { innerHTML: '', querySelectorAll() { return []; } };
   const context = {
     I18N: translations(), currentLang: language, window: {}, Date,
     DECISION_RECENT_ACTIVITY_MS: 2500,

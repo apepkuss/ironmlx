@@ -182,7 +182,7 @@ private let fakeHome = URL(fileURLWithPath: "/Users/tester", isDirectory: true)
          .exact("setTextInput('cfg-cache-dir', appConfig.cache_dir, window.__IRONMLX_DEFAULT_CACHE_DIR__ || '~/.ironmlx/cache/paged_prefix_cache');"),
          "fallback only when the App did not inject the default cache dir"),
         (html,
-         .keyedText(key: "err_backend_readiness_failed: \"", text: "~/.ironmlx/logs/backend.log"),
+         .keyedText(key: "err_backend_readiness_failed: \"", text: "~/.ironmlx/logs/app.log"),
          "user-facing error copy naming the default log location"),
         (html,
          .keyedText(key: "err_backend_load_timeout: \"", text: "~/.ironmlx/logs/backend.log"),

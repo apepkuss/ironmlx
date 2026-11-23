@@ -48,7 +48,7 @@ import WebKit
       const primary = row.querySelector('[data-model-primary]');
       check(primary && primary.dataset.kind === 'unavailable' && primary.getAttribute('aria-disabled') === 'true' && !primary.onclick,
         'load button stays unavailable after integrity verification');
-      check(row.querySelector('.ds-model-detail').textContent.includes('已下载 · 当前不支持运行'), 'local model status');
+      check(row.querySelector('.ds-model-detail').textContent.includes('已保存 · 当前不支持运行'), 'local model status');
       row.querySelector('.model-more').click();
       check(!document.querySelector('.model-more-menu .model-more-default'), 'cannot be set as the default model');
       const files = [...document.querySelectorAll('.model-more-menu button')].find(button => button.textContent === '查看模型文件');

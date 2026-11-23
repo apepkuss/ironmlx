@@ -330,7 +330,7 @@ import WebKit
     _ = try await page.evaluateJavaScript("window.__DEFAULT_MODEL__ = 'mlx-community/Previous-Default'; 0")
     _ = try await page.evaluateJavaScript("\(script); 0")
     let selected = try await page.evaluateJavaScript(
-        "(document.querySelector('#tab-models-manage tbody input[type=radio]:checked') || {}).value || ''"
+        "((document.querySelector('.ds-model-row .ds-model-tag.is-default') || {closest: () => null}).closest('.ds-model-row') || {dataset: {}}).dataset.modelId || ''"
     ) as? String
     #expect(selected == modelID)
     withExtendedLifetime(bridge) {}
