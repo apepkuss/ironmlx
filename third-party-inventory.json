@@ -2009,7 +2009,7 @@
         "name": "form_urlencoded",
         "repository": "https://github.com/servo/rust-url",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
-        "version": "1.2.2"
+        "version": "1.2.3"
       },
       {
         "license_expression": "MIT OR Apache-2.0",
@@ -4642,7 +4642,7 @@
         "name": "url",
         "repository": "https://github.com/servo/rust-url",
         "source": "registry+https://github.com/rust-lang/crates.io-index",
-        "version": "2.5.8"
+        "version": "2.5.9"
       },
       {
         "license_expression": "MIT OR Apache-2.0",

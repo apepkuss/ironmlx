@@ -2,7 +2,7 @@
   "$schema": "https://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:d2259a5f-e915-53ed-bffa-8c72d16033c1",
+  "serialNumber": "urn:uuid:5a7050c5-1f4f-5824-8ed8-0f9f6ba6ef2a",
   "version": 1,
   "metadata": {
     "component": {
@@ -5042,10 +5042,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "cargo:form_urlencoded@1.2.2",
+      "bom-ref": "cargo:form_urlencoded@1.2.3",
       "group": "crates.io",
       "name": "form_urlencoded",
-      "version": "1.2.2",
+      "version": "1.2.3",
       "licenses": [
         {
           "expression": "MIT OR Apache-2.0"
@@ -5061,7 +5061,7 @@
           "value": "rust-license-20c7855c364d57ea.txt"
         }
       ],
-      "purl": "pkg:cargo/form_urlencoded@1.2.2",
+      "purl": "pkg:cargo/form_urlencoded@1.2.3",
       "externalReferences": [
         {
           "type": "vcs",
@@ -12669,10 +12669,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "cargo:url@2.5.8",
+      "bom-ref": "cargo:url@2.5.9",
       "group": "crates.io",
       "name": "url",
-      "version": "2.5.8",
+      "version": "2.5.9",
       "licenses": [
         {
           "expression": "MIT OR Apache-2.0"
@@ -12688,7 +12688,7 @@
           "value": "rust-license-b38f11f6096706e6.txt"
         }
       ],
-      "purl": "pkg:cargo/url@2.5.8",
+      "purl": "pkg:cargo/url@2.5.9",
       "externalReferences": [
         {
           "type": "vcs",

@@ -142,7 +142,7 @@ development dependencies excluded, build dependencies retained.
 | fluent-uri | 0.4.1 | MIT | `THIRD_PARTY_LICENSES/rust-license-e699bec719875d8e.txt` | https://github.com/yescallop/fluent-uri-rs |
 | fnv | 1.0.7 | Apache-2.0  OR  MIT | `THIRD_PARTY_LICENSES/rust-license-65fdb6c76cd61612.txt` | https://github.com/servo/rust-fnv |
 | foldhash | 0.2.0 | Zlib | `THIRD_PARTY_LICENSES/rust-license-1d4c38d56650edc2.txt` | https://github.com/orlp/foldhash |
-| form_urlencoded | 1.2.2 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-20c7855c364d57ea.txt` | https://github.com/servo/rust-url |
+| form_urlencoded | 1.2.3 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-20c7855c364d57ea.txt` | https://github.com/servo/rust-url |
 | fraction | 0.17.0 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6485b8ed310d3f03.txt` | https://github.com/dnsl48/fraction.git |
 | fs-err | 3.3.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/andrewhickman/fs-err |
 | futures | 0.3.33 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-6652c868f35dfe5e.txt` | https://github.com/rust-lang/futures-rs |
@@ -405,7 +405,7 @@ development dependencies excluded, build dependencies retained.
 | unicode-width | 0.2.2 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-7b63ecd5f1902af1.txt` | https://github.com/unicode-rs/unicode-width |
 | unicode_categories | 0.1.1 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-98a817e7b85e5fe4.txt` | https://github.com/swgillespie/unicode-categories |
 | untrusted | 0.9.0 | ISC | `THIRD_PARTY_LICENSES/rust-license-7abd9b6960dcf7d4.txt` | https://github.com/briansmith/untrusted |
-| url | 2.5.8 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-b38f11f6096706e6.txt` | https://github.com/servo/rust-url |
+| url | 2.5.9 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-b38f11f6096706e6.txt` | https://github.com/servo/rust-url |
 | utf-8 | 0.7.6 | MIT OR Apache-2.0 | `THIRD_PARTY_LICENSES/rust-license-23f18e03dc49df91.txt` | https://github.com/SimonSapin/rust-utf8 |
 | utf8_iter | 1.0.4 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-3fa4ca83dcc92378.txt` | https://github.com/hsivonen/utf8_iter |
 | utf8parse | 0.2.2 | Apache-2.0 OR MIT | `THIRD_PARTY_LICENSES/rust-license-e4c9b06fa850cb9b.txt` | https://github.com/alacritty/vte |
