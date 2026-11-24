@@ -926,19 +926,19 @@ fn qwen35_dense_qgt1_matches_sequential_verify() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires a real Qwen3.6 Dense checkpoint and Apple Silicon"]
+#[ignore = "requires a real Qwen3.8 Dense checkpoint and Apple Silicon"]
 #[serial(mlx_metal)]
-fn qwen36_dense_long_context_qgt1_matches_sequential_verify() -> Result<()> {
+fn qwen38_dense_long_context_qgt1_matches_sequential_verify() -> Result<()> {
     let Some(model_dir) = snapshot_from_env_or_cache(
-        "PROMPT_LOOKUP_VERIFY_QWEN36_DENSE_MODEL",
-        "models--mlx-community--Qwen3.6-27B-4bit",
+        "PROMPT_LOOKUP_VERIFY_QWEN38_DENSE_MODEL",
+        "models--mlx-community--Qwen3.8-27B-4bit",
     ) else {
-        eprintln!("skip: no Qwen3.6 Dense qualification checkpoint");
+        eprintln!("skip: no Qwen3.8 Dense qualification checkpoint");
         return Ok(());
     };
-    let loader = Loader::open(&model_dir).context("opening Qwen3.6 Dense checkpoint")?;
+    let loader = Loader::open(&model_dir).context("opening Qwen3.8 Dense checkpoint")?;
     let tokenizer = load_tokenizer(&loader, &model_dir)?;
-    let model = Qwen35Model::from_loader(&loader).context("loading Qwen3.6 Dense model")?;
+    let model = Qwen35Model::from_loader(&loader).context("loading Qwen3.8 Dense model")?;
     qualify_model(&model, &tokenizer)
 }
 

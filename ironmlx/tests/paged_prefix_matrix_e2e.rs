@@ -1315,15 +1315,15 @@ async fn qwen35_text_linear_paged_prefix_cache_batched_exact_hit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires QWEN36_DENSE_MODEL/MLX_DIR or default local Qwen3.6-27B checkpoint"]
-async fn qwen36_dense_active_kv_offload_restores_gated_delta_linear_state() {
-    let cache_dir = unique_temp_dir("qwen36-dense-active-kv-prefix");
-    let active_kv_dir = unique_temp_dir("qwen36-dense-active-kv-offload");
+#[ignore = "requires QWEN38_DENSE_MODEL/MLX_DIR or default local Qwen3.8-27B checkpoint"]
+async fn qwen38_dense_active_kv_offload_restores_gated_delta_linear_state() {
+    let cache_dir = unique_temp_dir("qwen38-dense-active-kv-prefix");
+    let active_kv_dir = unique_temp_dir("qwen38-dense-active-kv-offload");
     std::fs::create_dir_all(&cache_dir).expect("create prefix cache dir");
 
     let port = alloc_port().await;
     let mut server = ServerProcess::spawn_with_active_kv(
-        &qwen36_dense_model_dir(),
+        &qwen38_dense_model_dir(),
         &cache_dir,
         &active_kv_dir,
         port,
@@ -1344,7 +1344,7 @@ async fn qwen36_dense_active_kv_offload_restores_gated_delta_linear_state() {
             "gated_delta_linear",
             "mtp_speculative_side_cache"
         ]),
-        "Qwen3.6 Active KV health must advertise GatedDelta/Linear support: {before}"
+        "Qwen3.8 Active KV health must advertise GatedDelta/Linear support: {before}"
     );
 
     let body = serde_json::json!({
@@ -1367,19 +1367,19 @@ async fn qwen36_dense_active_kv_offload_restores_gated_delta_linear_state() {
             .as_u64()
             .unwrap_or_default()
             >= 1,
-        "Qwen3.6 mixed Full + Linear cache should swap out: {after}"
+        "Qwen3.8 mixed Full + Linear cache should swap out: {after}"
     );
     assert!(
         after["active_kv_offload"]["swap_in_count"]
             .as_u64()
             .unwrap_or_default()
             >= 1,
-        "Qwen3.6 mixed Full + Linear cache should swap in: {after}"
+        "Qwen3.8 mixed Full + Linear cache should swap in: {after}"
     );
     assert_eq!(
         after["active_kv_offload"]["parked_requests"].as_u64(),
         Some(0),
-        "Qwen3.6 Active KV should not leak parked requests: {after}"
+        "Qwen3.8 Active KV should not leak parked requests: {after}"
     );
 
     drop(server);
