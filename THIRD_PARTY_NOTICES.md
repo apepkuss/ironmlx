@@ -14,7 +14,7 @@ product.
 | gguflib | `8fa6eb65236618e28fd7710a0fba565f7faa1848` | MIT | `THIRD_PARTY_LICENSES/native-gguflib-mit.txt` | https://github.com/antirez/gguf-tools.git |
 | metal-cpp | `metal-cpp_26.zip` | Apache-2.0 | `THIRD_PARTY_LICENSES/native-metal-cpp-apache-2.0.txt` | https://developer.apple.com/metal/cpp/ |
 | MLX C++ with bundled JACCL | `781603c6b5d39cbff9e808084f6cc5b4e944ebcd` | MIT | `THIRD_PARTY_LICENSES/native-mlx-mit.txt` | https://github.com/apepkuss/mlx.git |
-| MLX Metal kernel headers (vendored, IronMLX fork) | `73ad5df20cb30be4192e5c4d0ae8130674773427` | MIT | `THIRD_PARTY_LICENSES/native-mlx-kernel-headers-fork-mit.txt` | https://github.com/apepkuss/mlx.git |
+| MLX Metal kernel headers (vendored, IronMLX fork) | `1a888a4ffb4442fe34e403016eb0bb751f10ccb5` | MIT | `THIRD_PARTY_LICENSES/native-mlx-kernel-headers-fork-mit.txt` | https://github.com/apepkuss/mlx.git |
 | MLX Metal kernel headers (vendored, upstream v0.32.3) | `64ea011cb65f14d9ce2737e60db9a4ae91ed7441` | MIT | `THIRD_PARTY_LICENSES/native-mlx-kernel-headers-v0.32.3-mit.txt` | https://github.com/ml-explore/mlx.git |
 | MLX-VLM GDN prefill reference kernel (vendored) | `ff788e98d82f6a931992a6a8ee0e74c7a7e6925e` | MIT | `THIRD_PARTY_LICENSES/native-mlx-vlm-mit.txt` | https://github.com/Blaizzy/mlx-vlm.git |
 | MLX-VLM QSA reference kernel (vendored) | `ff788e98d82f6a931992a6a8ee0e74c7a7e6925e` | MIT | `THIRD_PARTY_LICENSES/native-mlx-vlm-mit.txt` | https://github.com/Blaizzy/mlx-vlm.git |
