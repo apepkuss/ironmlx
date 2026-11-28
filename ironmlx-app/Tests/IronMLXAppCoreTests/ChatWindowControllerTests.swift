@@ -176,7 +176,7 @@ struct ChatWindowControllerTests {
         #expect(!bridge.receive(["type": "send", "text": "hi", "images": ["https://example.com/a.png"]]))
         #expect(!bridge.receive(["type": "send", "text": "hi", "images": Array(repeating: "data:image/png;base64,AA", count: 5)]))
         #expect(!bridge.receive(["type": "openConversation", "id": "../../etc"]))
-        #expect(!bridge.receive(["type": "setReasoning", "choice": "max"]))
+        #expect(!bridge.receive(["type": "setReasoning", "choice": "unknown"]))
         #expect(!bridge.receive(["type": "switchModel", "id": ""]))
         #expect(accepted.isEmpty)
 

@@ -320,6 +320,19 @@ test('memory hints distinguish unknown and excessive weight budgets', () => {
   assert.equal(p.context.catalogMemoryHint(entry).key, 'catalog_memory_unknown');
 });
 
+test('an installed Inkling base with a missing bundled draft offers download repair', () => {
+  const p = page();
+  const repo = 'mlx-community/Inkling-2-Mini-oQ4e-mtp';
+  const row = { repo_id: repo, source: 'hf', readiness: { status: 'ready' },
+    mtp: { status: 'missing_bundled_draft' } };
+  p.context.window.__LOCAL_MODELS__ = { row };
+  const repair = p.context.catalogDownloadState('huggingface', repo);
+  assert.equal(repair.action, 'download');
+  assert.match(repair.label, /修复下载/);
+  row.mtp.status = 'available';
+  assert.equal(p.context.catalogDownloadState('huggingface', repo).action, 'check');
+});
+
 for (const lang of ['en', 'zh-Hans', 'zh-Hant', 'ja', 'ko']) {
   test(`catalogue and its dynamic labels are translated in ${lang}`, () => {
     const p = page(lang); p.render();

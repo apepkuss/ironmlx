@@ -52,11 +52,25 @@ fn context_window_from_config(config: &Value, cache_cap: usize) -> Option<usize>
         ModelArchitecture::Qwen35Dense
         | ModelArchitecture::Qwen35Moe
         | ModelArchitecture::Gemma4
+        | ModelArchitecture::Inkling2
         | ModelArchitecture::MiniCpmV46 => config.get("text_config")?,
         ModelArchitecture::DiffusionGemma => return None,
     };
     // ModelMeta uses i32, so values outside that range are not usable limits.
-    let model_cap = i32::try_from(text.get("max_position_embeddings")?.as_u64()?).ok()?;
+    let model_cap = i32::try_from(
+        text.get(
+            if matches!(
+                ModelArchitecture::from_config_value(config).ok(),
+                Some(ModelArchitecture::Inkling2)
+            ) {
+                "model_max_length"
+            } else {
+                "max_position_embeddings"
+            },
+        )?
+        .as_u64()?,
+    )
+    .ok()?;
     let cap = cache_cap.min(usize::try_from(model_cap).ok()?);
     (cap > 0).then_some(cap)
 }

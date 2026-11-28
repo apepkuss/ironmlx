@@ -47,6 +47,7 @@ async fn boot(model: &str) -> (Server, reqwest::Client, String) {
             .unwrap(),
     );
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(180))
         .build()
         .unwrap();

@@ -199,6 +199,22 @@
         "usage": "Required attribution for audio implementation distributed with the server."
       },
       {
+        "bundled_hash_scope": "License notice text; not a hash of adapted implementations",
+        "bundled_modifications": "Retains upstream attribution for the Rust Inkling 2 looped text, routed expert, and vision implementation. Original model weights and Python are not bundled.",
+        "bundled_path": "ironmlx-lm/licenses/mlx-lm-MIT.txt",
+        "bundled_sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
+        "component": "Inkling 2 implementation MIT notice",
+        "copyright": "Copyright © 2023 Apple Inc.; Inkling implementation Copyright © 2026 Apple Inc.",
+        "license": "MIT",
+        "license_file": "lm-mlx-lm-MIT.txt",
+        "license_sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
+        "repository": "https://github.com/ml-explore/mlx-lm",
+        "revision": "0c4c99192230f1943dd468d297f0b8a64ae7b7c2",
+        "source_path": "LICENSE",
+        "source_url": "https://github.com/ml-explore/mlx-lm/blob/0c4c99192230f1943dd468d297f0b8a64ae7b7c2/LICENSE",
+        "usage": "Required attribution for the adapted Inkling 2 implementation."
+      },
+      {
         "bundled_modifications": "None; copied byte-for-byte from package/dist/katex.min.js in the npm tarball.",
         "bundled_path": "ironmlx-app/Sources/IronMLXAppCore/Resources/chat/vendor/katex.min.js",
         "bundled_sha256": "e6bfe5deebd4c7ccd272055bab63bd3ab2c73b907b6e6a22d352740a81381fd4",
@@ -781,7 +797,7 @@
       }
     ],
     "manifest": "compliance/bundled-assets.json",
-    "manifest_sha256": "27c925944549076b7810dc80ae4ab494a8066c76220fcec8ba4d31a6a89cc71e"
+    "manifest_sha256": "e28f9f4e0c1d64191640d26c8f2ea954f83f943029760553d386450b93568a78"
   },
   "generation": {
     "cargo_about_config": "about.toml",
@@ -833,9 +849,9 @@
         "license_file": "native-mlx-mit.txt",
         "license_sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
         "repository": "https://github.com/apepkuss/mlx.git",
-        "revision": "1a888a4ffb4442fe34e403016eb0bb751f10ccb5",
+        "revision": "ab6328fa3685511ba575ce05d78c540ebd352309",
         "source_integrity": {
-          "commit": "1a888a4ffb4442fe34e403016eb0bb751f10ccb5",
+          "commit": "ab6328fa3685511ba575ce05d78c540ebd352309",
           "type": "git"
         },
         "upstream_repository": "https://github.com/ml-explore/mlx.git",
@@ -847,9 +863,9 @@
         "license_file": "native-mlx-kernel-headers-fork-mit.txt",
         "license_sha256": "ccfab7ccb2ea306f71531c8ca77bb55507606cd90768b1e32b8b52ab5b48cf01",
         "repository": "https://github.com/apepkuss/mlx.git",
-        "revision": "1a888a4ffb4442fe34e403016eb0bb751f10ccb5",
+        "revision": "ab6328fa3685511ba575ce05d78c540ebd352309",
         "source_integrity": {
-          "commit": "1a888a4ffb4442fe34e403016eb0bb751f10ccb5",
+          "commit": "ab6328fa3685511ba575ce05d78c540ebd352309",
           "files": 17,
           "tree_sha256": "34427d535d5778e47a6b5764d792e6b6c2ae8e3bbbe629c3b54d77ea98687016",
           "type": "git-files"

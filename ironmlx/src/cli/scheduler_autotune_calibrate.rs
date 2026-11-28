@@ -273,6 +273,7 @@ fn default_candidate_configs(
     runtime_context: &SchedulerAutotuneRuntimeContext,
 ) -> Vec<SchedulerAutotuneProfileConfig> {
     let b_max_values: &[usize] = match runtime_context.speculative.mode {
+        SchedulerSpeculativeMode::InklingDspark => &[1],
         SchedulerSpeculativeMode::QwenMtp | SchedulerSpeculativeMode::QwenMtpPromptLookup => {
             &[1, 2]
         }
@@ -999,7 +1000,11 @@ fn wait_for_health(
         .build()
         .context("building scheduler-autotune health wait runtime")?;
     runtime.block_on(async move {
-        let client = reqwest::Client::new();
+        // The server is local; the macOS system proxy ignores its exceptions.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .context("building scheduler-autotune health client")?;
         let deadline = Instant::now() + timeout;
         loop {
             cancellation.check()?;

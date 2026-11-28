@@ -212,6 +212,12 @@ pub struct PagedPrefixEntry {
     pub mtp_layers: Vec<PrefixMtpLayerPayload>,
     pub mtp_last_hidden: Option<Array>,
     pub gemma4_drafter_last_hidden: Option<Array>,
+    /// The `[1, 1, vocab]` logits of the entry's last position, as the
+    /// prefill that saved it computed them. The same prompt sent again
+    /// restores the whole entry and samples its first token from these
+    /// instead of recomputing any position. Not part of the key: a longer
+    /// prompt restores the entry without them.
+    pub last_logits: Option<Array>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -259,6 +265,9 @@ impl PagedPrefixEntry {
         }
         if let Some(hidden) = self.gemma4_drafter_last_hidden.as_ref() {
             arrays.push(hidden);
+        }
+        if let Some(logits) = self.last_logits.as_ref() {
+            arrays.push(logits);
         }
         mlx::transforms::eval(&arrays).context("evaluate async prefix store payload")?;
         Ok(())
@@ -369,6 +378,12 @@ impl PagedPrefixEntry {
             stats.payload_bytes = stats
                 .payload_bytes
                 .saturating_add(tensor_payload_bytes(last_hidden));
+        }
+        if let Some(logits) = &self.last_logits {
+            stats.tensor_count += 1;
+            stats.payload_bytes = stats
+                .payload_bytes
+                .saturating_add(tensor_payload_bytes(logits));
         }
         stats
     }

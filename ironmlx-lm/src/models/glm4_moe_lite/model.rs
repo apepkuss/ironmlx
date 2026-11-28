@@ -447,6 +447,7 @@ impl Glm4MoeLiteModel {
             max_position_embeddings: cfg.max_position_embeddings,
             spatial_merge_size: 2,
             cache_cost: None,
+            prefill_peak: None,
         }
     }
 }

@@ -47,12 +47,14 @@ pub enum ToolDialect {
     Llama,
     MiniCpmV46,
     MiniCpm5,
+    Inkling2,
 }
 
 impl ToolDialect {
     pub(crate) fn ordinary_constraint_tokens(self) -> &'static [&'static str] {
         match self {
-            Self::Qwen35 | Self::Llama | Self::MiniCpmV46 => &[],
+            // Inkling grammars name its channel markers as special tokens.
+            Self::Qwen35 | Self::Llama | Self::MiniCpmV46 | Self::Inkling2 => &[],
             Self::MiniCpm5 => &["<function", "</function>", "<param", "</param>"],
             Self::Glm => &[
                 TOOL_CALL_OPEN,
@@ -77,6 +79,18 @@ impl ToolDialect {
     /// Recognize exact native template contracts. Similar-looking templates
     /// are deliberately not guessed into support.
     pub fn detect(model_type: &str, template: &str) -> Option<Self> {
+        if matches!(model_type, "inkling2" | "inkling2_loop")
+            && [
+                "<|content_invoke_tool_json|>",
+                "tool_declare",
+                "fn.arguments",
+                "tool_call_id",
+            ]
+            .iter()
+            .all(|marker| template.contains(marker))
+        {
+            return Some(Self::Inkling2);
+        }
         if matches!(model_type, "qwen3_5" | "qwen3_5_moe") {
             let required = [
                 "<tool_call>",
@@ -176,7 +190,10 @@ impl ToolDialect {
     /// remain visible to their parsers. Qwen and MiniCPM-V markers are ordinary
     /// text.
     pub fn skip_special_tokens(self) -> bool {
-        !matches!(self, Self::Gemma | Self::Glm | Self::MiniCpm5)
+        !matches!(
+            self,
+            Self::Gemma | Self::Glm | Self::MiniCpm5 | Self::Inkling2
+        )
     }
 }
 
@@ -722,6 +739,7 @@ impl From<ToolCall> for TemplateToolCall {
 /// Dialect-dispatched incremental parser used by protocol adapters.
 pub enum ToolCallParser {
     SchemaEnvelope(SchemaEnvelopeParser),
+    Inkling2(InklingToolCallParser),
     Qwen(QwenToolCallParser),
     Gemma(GemmaToolCallParser),
     Glm(GlmToolCallParser),
@@ -759,6 +777,10 @@ impl ToolCallParser {
             }));
         }
         match dialect {
+            ToolDialect::Inkling2 => Ok(Self::Inkling2(InklingToolCallParser::new(
+                response_id,
+                tools,
+            )?)),
             ToolDialect::Qwen35 => Ok(Self::Qwen(QwenToolCallParser::new(response_id, tools)?)),
             ToolDialect::Gemma => Ok(Self::Gemma(GemmaToolCallParser::new(response_id, tools)?)),
             ToolDialect::Glm => Ok(Self::Glm(GlmToolCallParser::new(response_id, tools)?)),
@@ -781,6 +803,7 @@ impl ToolCallParser {
     pub fn push(&mut self, delta: &str) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         match self {
             Self::SchemaEnvelope(parser) => parser.push(delta),
+            Self::Inkling2(parser) => parser.push(delta),
             Self::Qwen(parser) => parser.push(delta),
             Self::Gemma(parser) => parser.push(delta),
             Self::Glm(parser) => parser.push(delta),
@@ -793,6 +816,7 @@ impl ToolCallParser {
     pub fn finish(self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool)> {
         match self {
             Self::SchemaEnvelope(parser) => parser.finish(),
+            Self::Inkling2(parser) => parser.finish(),
             Self::Qwen(parser) => parser.finish(),
             Self::Gemma(parser) => parser.finish(),
             Self::Glm(parser) => parser.finish(),
@@ -800,6 +824,124 @@ impl ToolCallParser {
             Self::MiniCpmV46(parser) => parser.finish(),
             Self::MiniCpm5(parser) => parser.finish(),
         }
+    }
+
+    /// Finishes output that the token limit cut off: completed calls and
+    /// text stand, and a call the limit interrupted is dropped instead of
+    /// failing the response. Returns the events, whether any call was
+    /// completed, and whether an unfinished call was dropped.
+    pub fn finish_truncated(self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool, bool)> {
+        match self {
+            Self::SchemaEnvelope(parser) => parser.finish_truncated(),
+            Self::Inkling2(parser) => parser.finish_truncated(),
+            Self::Qwen(parser) => parser.finish_truncated(),
+            Self::Gemma(parser) => parser.finish_truncated(),
+            Self::Glm(parser) => parser.finish_truncated(),
+            Self::Llama(parser) => parser.finish_truncated(),
+            Self::MiniCpmV46(parser) => parser.finish_truncated(),
+            Self::MiniCpm5(parser) => parser.finish_truncated(),
+        }
+    }
+}
+
+/// Inkling JSON tool calls are delimited, so normal JSON answers remain text.
+pub struct InklingToolCallParser {
+    definitions: HashMap<String, ToolDefinition>,
+    response_id: String,
+    pending: String,
+    in_call: bool,
+    calls: usize,
+}
+impl InklingToolCallParser {
+    fn new(response_id: String, tools: &[ToolDefinition]) -> anyhow::Result<Self> {
+        validate_tool_definitions(tools)?;
+        Ok(Self {
+            definitions: tools.iter().cloned().map(|t| (t.name.clone(), t)).collect(),
+            response_id,
+            pending: String::new(),
+            in_call: false,
+            calls: 0,
+        })
+    }
+    fn push(&mut self, delta: &str) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
+        self.pending.push_str(delta);
+        anyhow::ensure!(
+            self.pending.len() <= MAX_PENDING_BYTES,
+            "Inkling tool call exceeds pending buffer limit"
+        );
+        self.advance(false)
+    }
+    fn finish(mut self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool)> {
+        let events = self.advance(true)?;
+        anyhow::ensure!(!self.in_call, "unterminated Inkling tool call");
+        Ok((events, self.calls > 0))
+    }
+    fn finish_truncated(mut self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool, bool)> {
+        let mut events = self.advance(false)?;
+        if !self.in_call {
+            events.extend(self.advance(true)?);
+        }
+        Ok((events, self.calls > 0, self.in_call))
+    }
+    fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
+        const OPEN: &str = "<|content_invoke_tool_json|>";
+        const CLOSE: &str = "<|end_message|>";
+        let mut events = Vec::new();
+        loop {
+            let marker = if self.in_call { CLOSE } else { OPEN };
+            if let Some(end) = self.pending.find(marker) {
+                let payload = self.pending[..end].to_owned();
+                self.pending.drain(..end + marker.len());
+                if self.in_call {
+                    #[derive(Deserialize)]
+                    #[serde(deny_unknown_fields)]
+                    struct Call {
+                        name: String,
+                        args: Value,
+                    }
+                    let call: Call =
+                        serde_json::from_str(&payload).context("invalid Inkling tool call JSON")?;
+                    let definition = self
+                        .definitions
+                        .get(&call.name)
+                        .ok_or_else(|| anyhow!("unknown Inkling tool {}", call.name))?;
+                    anyhow::ensure!(
+                        call.args.is_object(),
+                        "Inkling tool arguments must be an object"
+                    );
+                    validate_schema_value(&definition.parameters, &call.args)?;
+                    events.push(GeneratedOutputEvent::ToolCall(ToolCall {
+                        id: format!("call_{}_{}", self.response_id, self.calls),
+                        name: call.name,
+                        arguments: call.args,
+                    }));
+                    self.calls += 1;
+                } else if !payload.is_empty() {
+                    events.push(GeneratedOutputEvent::TextDelta(payload));
+                }
+                self.in_call = !self.in_call;
+                continue;
+            }
+            if !self.in_call {
+                let keep = if eof {
+                    0
+                } else {
+                    (1..OPEN.len())
+                        .rev()
+                        .find(|n| self.pending.ends_with(&OPEN[..*n]))
+                        .unwrap_or(0)
+                };
+                let end = self.pending.len() - keep;
+                if end > 0 {
+                    events.push(GeneratedOutputEvent::TextDelta(
+                        self.pending[..end].to_owned(),
+                    ));
+                    self.pending.drain(..end);
+                }
+            }
+            break;
+        }
+        Ok(events)
     }
 }
 
@@ -854,6 +996,11 @@ impl SchemaEnvelopeParser {
     fn finish(self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool)> {
         let (events, called) = self.inner.finish()?;
         Ok((Self::restore(&self.definitions, events)?, called))
+    }
+
+    fn finish_truncated(self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool, bool)> {
+        let (events, called, dropped) = self.inner.finish_truncated()?;
+        Ok((Self::restore(&self.definitions, events)?, called, dropped))
     }
 }
 
@@ -925,6 +1072,15 @@ impl QwenToolCallParser {
             bail!("unexpected text after native tool call");
         }
         Ok((events, self.saw_tool_call))
+    }
+
+    pub fn finish_truncated(mut self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool, bool)> {
+        let mut events = self.advance(false)?;
+        let in_call = !matches!(self.state, ParseState::Text);
+        if !in_call && !self.saw_tool_call {
+            events.extend(self.advance(true)?);
+        }
+        Ok((events, self.saw_tool_call, in_call))
     }
 
     fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
@@ -1190,6 +1346,15 @@ impl MiniCpm5ToolCallParser {
             bail!("unexpected text after native MiniCPM5 tool call");
         }
         Ok((events, self.saw_tool_call))
+    }
+
+    pub fn finish_truncated(mut self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool, bool)> {
+        let mut events = self.advance(false)?;
+        let in_call = !matches!(self.state, MiniCpm5ParseState::Text);
+        if !in_call && !self.saw_tool_call {
+            events.extend(self.advance(true)?);
+        }
+        Ok((events, self.saw_tool_call, in_call))
     }
 
     fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
@@ -1553,6 +1718,19 @@ impl LlamaToolCallParser {
         Ok((events, self.saw_tool_call))
     }
 
+    pub fn finish_truncated(mut self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool, bool)> {
+        let mut events = self.advance(false)?;
+        let open_json = !self.text_mode && !self.saw_tool_call && !self.pending.trim().is_empty();
+        if open_json && self.output_schema.is_some() {
+            // An unfinished structured answer is still the answer's text.
+            events.push(GeneratedOutputEvent::TextDelta(std::mem::take(
+                &mut self.pending,
+            )));
+            return Ok((events, false, false));
+        }
+        Ok((events, self.saw_tool_call, open_json))
+    }
+
     fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
         let Some(first) = self
             .pending
@@ -1688,6 +1866,15 @@ impl GlmToolCallParser {
             bail!("unexpected text after native GLM tool call");
         }
         Ok((events, self.saw_tool_call))
+    }
+
+    pub fn finish_truncated(mut self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool, bool)> {
+        let mut events = self.advance(false)?;
+        let in_call = !matches!(self.state, GlmParseState::Text);
+        if !in_call && !self.saw_tool_call {
+            events.extend(self.advance(true)?);
+        }
+        Ok((events, self.saw_tool_call, in_call))
     }
 
     fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<GeneratedOutputEvent>> {
@@ -1970,6 +2157,14 @@ impl GemmaToolCallParser {
             bail!("unexpected text after native tool call");
         }
         Ok((events, self.saw_tool_call))
+    }
+
+    pub fn finish_truncated(mut self) -> anyhow::Result<(Vec<GeneratedOutputEvent>, bool, bool)> {
+        let mut events = self.advance(false)?;
+        if !self.in_call && !self.saw_tool_call {
+            events.extend(self.advance(true)?);
+        }
+        Ok((events, self.saw_tool_call, self.in_call))
     }
 
     fn advance(&mut self, eof: bool) -> anyhow::Result<Vec<GeneratedOutputEvent>> {

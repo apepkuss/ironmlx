@@ -1643,12 +1643,12 @@ public actor ModelDownloadService {
                     // current backend's metadata preflight accepts it; the
                     // manifest is then rewritten from that result.
                     if manifest.compatibility.downloadOnly == true,
-                       ["embedding_gemma2", "qwen3_asr", "nemotron_diarization"].contains(manifest.compatibility.modelType)
+                       ["embedding_gemma2", "qwen3_asr", "nemotron_diarization", "inkling2", "inkling2_loop"].contains(manifest.compatibility.modelType)
                         || manifest.compatibility.artifactRole == ModelArtifactRole.dflash2Drafter,
                        let compatibility = try? await metadataPreflight.validate(metadataDirectory: finalSnapshot),
                        compatibility.modelType == manifest.compatibility.modelType,
                        compatibility.artifactRole == manifest.compatibility.artifactRole
-                        || ["embedding_gemma2", "qwen3_asr", "nemotron_diarization"].contains(manifest.compatibility.modelType) {
+                        || ["embedding_gemma2", "qwen3_asr", "nemotron_diarization", "inkling2", "inkling2_loop"].contains(manifest.compatibility.modelType) {
                         manifest.compatibility = ModelSnapshotCompatibility(
                             modelType: compatibility.modelType, artifactRole: compatibility.artifactRole,
                             quantizationMode: compatibility.quantization?.mode,

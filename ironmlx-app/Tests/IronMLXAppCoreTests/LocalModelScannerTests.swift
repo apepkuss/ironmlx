@@ -1216,3 +1216,50 @@ func localModelScannerReevaluatesDownloadedEmbeddingGemma2(quantized: Bool, visi
     try Data("changed weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
     #expect(scanner.scan().first?.readiness?.isLoadable == false)
 }
+
+@Test func localModelScannerReadsInklingVisionContextAndReasoning() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    _ = try writeVerifiedTestSnapshot(
+        root: root, repoID: "mlx-community/Inkling-2-Mini-4bit",
+        files: [
+            "config.json": Data(#"{"model_type":"inkling2_loop","text_config":{"hidden_size":2304,"model_max_length":1048576},"vision_config":{"hidden_size":1024}}"#.utf8),
+            "tokenizer_config.json": Data("{}".utf8),
+            "chat_template.jinja": Data("<|message_model|><|content_thinking|><|content_text|>reasoning_effort".utf8),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first)
+    #expect(model.maxPositionEmbeddings == 1048576)
+    #expect(model.reasoning?.nativeEfforts == ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+    #expect(model.reasoning?.defaultEffort == "high")
+    #expect(model.capabilities?.supportsVision == true)
+    #expect(model.capabilities?.supportsPromptLookup == false)
+    #expect(model.capabilities?.supportsMtp == false)
+}
+
+@Test func localModelScannerOffersInklingDSparkOnlyWhenBundledWeightsArePresent() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let repo = "mlx-community/Inkling-2-Mini-oQ4e-mtp"
+    let snapshot = try writeVerifiedTestSnapshot(root: root, repoID: repo, files: [
+        "config.json": Data(#"{"model_type":"inkling2_loop","vision_config":{"hidden_size":1024},"quantization":{"mode":"affine","bits":4,"group_size":64,"model.embed":{"mode":"affine","bits":8,"group_size":64}},"mtp_config":{"markov_head_type":"rnn_hidden","block_size":8}}"#.utf8),
+        "model.safetensors": Data("base".utf8),
+    ])
+    var manifest = try ModelSnapshotVerifier().loadManifest(at: snapshot)
+    manifest.compatibility.artifactRole = "download_only"
+    manifest.compatibility.downloadOnly = true
+    try ModelDownloadStore(rootURL: root).writeManifest(manifest, to: snapshot)
+    let scanner = LocalModelScanner(rootURL: root)
+    let base = try #require(scanner.scan().first)
+    #expect(base.readiness?.isLoadable == true)
+    #expect(base.mtp?.status == "missing_bundled_draft")
+    #expect(base.mtp?.candidates.isEmpty == true)
+    #expect(base.capabilities?.supportsMtp == false)
+    try Data("draft".utf8).write(to: snapshot.appendingPathComponent("mtp.safetensors"))
+    try refreshTestSnapshotManifest(at: snapshot)
+    let withDraft = try #require(scanner.scan().first)
+    #expect(withDraft.capabilities?.supportsMtp == true)
+    #expect(withDraft.mtp?.candidates.map(\.id) == [repo])
+    #expect(withDraft.mtp?.candidates.first?.path == snapshot.path)
+}

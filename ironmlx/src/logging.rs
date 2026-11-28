@@ -53,13 +53,32 @@ struct Controller {
 
 static CONTROLLER: OnceLock<Controller> = OnceLock::new();
 
+/// `RUST_LOG` as IronMLX applies it. A value inherited from another tool's
+/// environment (a bare level, or directives for other crates only) must not
+/// silence the server, so unless it names an `ironmlx` target, IronMLX's own
+/// crates keep logging at INFO; its other directives still apply.
+fn rust_log_directives(value: &str) -> String {
+    let names_ironmlx = value
+        .split(',')
+        .any(|directive| directive.trim_start().starts_with("ironmlx"));
+    if names_ironmlx {
+        value.to_string()
+    } else {
+        format!("{value},ironmlx=info")
+    }
+}
+
 /// Preserve CLI RUST_LOG behavior. App launches provide a canonical level.
 pub fn init() {
     let app_level = std::env::var("IRONMLX_LOG_LEVEL").ok().and_then(|value| {
         serde_json::from_value::<LogLevel>(serde_json::Value::String(value)).ok()
     });
     let filter = app_level.map(LogLevel::filter).unwrap_or_else(|| {
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| LogLevel::Info.filter())
+        std::env::var("RUST_LOG")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .and_then(|value| EnvFilter::try_new(rust_log_directives(&value)).ok())
+            .unwrap_or_else(|| LogLevel::Info.filter())
     });
     let (layer, handle) = reload::Layer::new(filter);
     tracing_subscriber::registry()
@@ -150,6 +169,42 @@ mod tests {
         type Writer = Self;
         fn make_writer(&'a self) -> Self::Writer {
             self.clone()
+        }
+    }
+
+    #[test]
+    fn an_inherited_rust_log_does_not_silence_ironmlx() {
+        let capture = Capture(Arc::new(Mutex::new(Vec::new())));
+        for (rust_log, ours, other) in [
+            // Inherited from another tool: IronMLX still logs at INFO.
+            ("warn", true, false),
+            ("error", true, false),
+            ("codex_core=info,codex_tui=info", true, false),
+            ("hyper=info", true, true),
+            // Explicit settings for IronMLX are honoured.
+            ("ironmlx=warn", false, false),
+            ("info,ironmlx_runtime=error", false, true),
+        ] {
+            let subscriber = tracing_subscriber::registry()
+                .with(EnvFilter::new(rust_log_directives(rust_log)))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .without_time()
+                        .with_ansi(false)
+                        .with_writer(capture.clone()),
+                );
+            capture.0.lock().unwrap().clear();
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::info!(target: "ironmlx_runtime::core::scheduler", "ours_marker");
+                tracing::info!(target: "hyper::proto", "other_marker");
+            });
+            let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+            assert_eq!(output.contains("ours_marker"), ours, "RUST_LOG={rust_log}");
+            assert_eq!(
+                output.contains("other_marker"),
+                other,
+                "RUST_LOG={rust_log}"
+            );
         }
     }
 

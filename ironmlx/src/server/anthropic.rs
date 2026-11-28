@@ -794,6 +794,13 @@ fn normalize_tool_choice(
 
 impl MessagesRequest {
     pub(crate) fn into_chat_request(self) -> anyhow::Result<super::openai::ChatRequest> {
+        self.into_chat_request_for_dialect(None)
+    }
+
+    fn into_chat_request_for_dialect(
+        self,
+        dialect: Option<ironmlx_lm::core::native_output::NativeOutputDialect>,
+    ) -> anyhow::Result<super::openai::ChatRequest> {
         self.validate_topology_contract()?;
         let allows_final_output = self.tool_choice.as_ref().is_none_or(|choice| {
             matches!(
@@ -866,10 +873,16 @@ impl MessagesRequest {
             presence_penalty: None,
             seed: None,
             reasoning_effort: None,
-            chat_template_kwargs: self
-                .thinking
-                .as_ref()
-                .map(|thinking| thinking.template_kwargs(reasoning_effort)),
+            chat_template_kwargs: self.thinking.as_ref().map(|thinking| {
+                let mut kwargs = thinking.template_kwargs(reasoning_effort);
+                if dialect == Some(ironmlx_lm::core::native_output::NativeOutputDialect::Inkling2) {
+                    if let Some(effort) = reasoning_effort {
+                        kwargs["reasoning_effort"] =
+                            serde_json::to_value(effort).expect("effort enum serializes");
+                    }
+                }
+                kwargs
+            }),
         })
     }
 }
@@ -958,7 +971,7 @@ where
         return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
     }
     let sampler = build_sampler(&req, state.sampling_defaults);
-    let req = match req.into_chat_request() {
+    let req = match req.into_chat_request_for_dialect(state.tokenizer.native_output_dialect()) {
         Ok(req) => req,
         Err(error) => {
             return anthropic_error_response(StatusCode::BAD_REQUEST, format!("{error:#}"));
@@ -1372,12 +1385,16 @@ fn collect_tool_events(
     Ok(())
 }
 
-fn validate_tool_output(options: &ToolConstraintOptions, calls: &[ToolCall]) -> anyhow::Result<()> {
+fn validate_tool_output(
+    options: &ToolConstraintOptions,
+    calls: &[ToolCall],
+    finish: &str,
+) -> anyhow::Result<()> {
     let names = calls
         .iter()
         .map(|call| call.name.clone())
         .collect::<Vec<_>>();
-    super::openai::validate_tool_choice_output(options, &names)
+    super::openai::validate_tool_choice_output(options, &names, finish)
 }
 
 fn tool_unary_response(
@@ -1700,7 +1717,7 @@ impl ToolStreamEncoder {
         output_tokens: u32,
         thinking_tokens: u32,
     ) -> anyhow::Result<Vec<Bytes>> {
-        super::openai::validate_tool_choice_output(options, &self.call_names)?;
+        super::openai::validate_tool_choice_output(options, &self.call_names, model_finish)?;
         let mut frames = Vec::new();
         self.close_thinking(&mut frames);
         self.close_text(&mut frames);
@@ -1887,7 +1904,8 @@ where
     if let Err(error) = collect_tool_events(&mut output, events) {
         return anthropic_error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
     }
-    if let Err(error) = validate_tool_output(&constraint_options, &output.tool_calls) {
+    if let Err(error) = validate_tool_output(&constraint_options, &output.tool_calls, model_finish)
+    {
         return anthropic_error_response(StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}"));
     }
     performance.complete();

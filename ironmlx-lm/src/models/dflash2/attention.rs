@@ -212,7 +212,7 @@ impl DFlash2KvCache {
     /// window followed by the proposal K/V (`concat(window, proposal)` on the
     /// sequence axis), written in place into the single-row backing buffer.
     /// The returned arrays hold exactly the values of the copying path.
-    fn append_with_proposal_on(
+    pub(super) fn append_with_proposal_on(
         &mut self,
         keys: &Array,
         values: &Array,

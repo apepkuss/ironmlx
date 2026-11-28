@@ -20,6 +20,8 @@ pub enum ModelArchitecture {
     /// `model_type = "llama"` / `architectures = ["LlamaForCausalLM"]` and is a
     /// plain GQA dense checkpoint (no MoE / MLA / sliding-window / Q-K norm).
     Llama,
+    /// Inkling 2 looped MoE decoder with an optional vision tower.
+    Inkling2,
     /// MiniCPM-V-4.6 (`model_type = "minicpmv4_6"`). A vision-language model
     /// whose language backbone is Qwen3.5-text verbatim
     /// (`text_config.model_type = "qwen3_5_text"`; mlx-vlm derives its
@@ -36,7 +38,7 @@ pub enum ModelArchitecture {
 
 impl ModelArchitecture {
     pub const EXPECTED_MODEL_TYPES: &'static str =
-        "'qwen3_5', 'qwen3_5_moe', 'gemma4', 'gemma4_unified', 'glm4_moe_lite', 'llama', 'minicpmv4_6', or 'diffusion_gemma'";
+        "'qwen3_5', 'qwen3_5_moe', 'gemma4', 'gemma4_unified', 'glm4_moe_lite', 'llama', 'minicpmv4_6', 'inkling2_loop', 'inkling2', or 'diffusion_gemma'";
 
     pub fn from_config_value(raw: &Value) -> Result<Self> {
         let model_type = raw
@@ -53,6 +55,7 @@ impl ModelArchitecture {
             "gemma4" | "gemma4_unified" => Ok(Self::Gemma4),
             "glm4_moe_lite" => Ok(Self::Glm4MoeLite),
             "llama" => Ok(Self::Llama),
+            "inkling2" | "inkling2_loop" => Ok(Self::Inkling2),
             "minicpmv4_6" => Ok(Self::MiniCpmV46),
             "diffusion_gemma" => Ok(Self::DiffusionGemma),
             other => Err(anyhow!(
@@ -69,13 +72,14 @@ impl ModelArchitecture {
             Self::Gemma4 => "gemma4",
             Self::Glm4MoeLite => "glm4_moe_lite",
             Self::Llama => "llama",
+            Self::Inkling2 => "inkling2_loop",
             Self::MiniCpmV46 => "minicpmv4_6",
             Self::DiffusionGemma => "diffusion_gemma",
         }
     }
 
     pub fn supports_prompt_lookup(self) -> bool {
-        !matches!(self, Self::DiffusionGemma)
+        !matches!(self, Self::DiffusionGemma | Self::Inkling2)
     }
 }
 

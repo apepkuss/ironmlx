@@ -832,6 +832,25 @@ impl MtpHealthConfig {
         }
     }
 
+    pub(crate) fn inkling_dspark(
+        tokens: usize,
+        actor: &crate::core::dflash2_actor::DFlash2ActorHandle,
+    ) -> Self {
+        Self {
+            enabled: true,
+            requested_draft_tokens: Some(tokens),
+            draft_tokens: Some(tokens),
+            drafted_tokens: actor.drafted_tokens.clone(),
+            accepted_draft_tokens: actor.accepted_draft_tokens.clone(),
+            windows: actor.windows.clone(),
+            exact_sampling_windows: actor.exact_sampling_windows.clone(),
+            exact_acceptance_draws: actor.exact_acceptance_draws.clone(),
+            exact_residual_corrections: actor.exact_residual_corrections.clone(),
+            exact_bonus_samples: actor.exact_bonus_samples.clone(),
+            ..Self::disabled()
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn enabled(
         requested_draft_tokens: usize,

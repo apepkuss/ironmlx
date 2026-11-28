@@ -3296,6 +3296,15 @@ mod tests {
         assert_eq!(defaults.top_k, Some(32));
         assert_eq!(defaults.repetition_penalty, Some(1.08));
 
+        std::fs::write(
+            root.join("generation_config.json"),
+            r#"{"do_sample": false, "temperature": 0.65, "top_p": 0.9}"#,
+        )
+        .expect("greedy generation config");
+        let defaults = read_generation_sampling_defaults(&root).expect("greedy defaults");
+        assert_eq!(defaults.temperature, Some(0.0));
+        assert_eq!(defaults.top_p, Some(0.9));
+
         let _ = std::fs::remove_dir_all(&root);
     }
 

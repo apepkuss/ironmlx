@@ -74,9 +74,12 @@ enum ChatRequestBuilder {
         switch choice {
         case .off: "none"
         case .on: "medium"
+        case .minimal: "minimal"
         case .low: "low"
         case .medium: "medium"
         case .high: "high"
+        case .xhigh: "xhigh"
+        case .max: "max"
         }
     }
 

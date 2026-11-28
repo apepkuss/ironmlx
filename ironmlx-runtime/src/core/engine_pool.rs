@@ -742,6 +742,7 @@ pub enum EngineVariant {
     Gemma4Drafter(Box<Gemma4DrafterAppState>),
     Glm4MoeLite(AppState<Glm4MoeLiteModel>),
     Llama(AppState<LlamaModel>),
+    Inkling2(AppState<ironmlx_lm::models::Inkling2Model>),
     MiniCpmV46(AppState<MiniCpmV46Model>),
     DiffusionGemma(crate::core::diffusion_execution::DiffusionGemmaRuntime),
     QwenImage(crate::core::qwen_image_execution::QwenImageRuntime),
@@ -3094,6 +3095,7 @@ impl EngineVariant {
             Self::Gemma4Drafter(state) => state.base.effective_cap_max,
             Self::Glm4MoeLite(state) => state.effective_cap_max,
             Self::Llama(state) => state.effective_cap_max,
+            Self::Inkling2(state) => state.effective_cap_max,
             Self::MiniCpmV46(state) => state.effective_cap_max,
             Self::DiffusionGemma(_)
             | Self::QwenImage(_)
@@ -3124,6 +3126,7 @@ impl EngineVariant {
             }
             Self::Glm4MoeLite(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::Llama(state) => state.request_execution.clear_shared_prompt_lookup().await,
+            Self::Inkling2(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::MiniCpmV46(state) => state.request_execution.clear_shared_prompt_lookup().await,
             Self::DiffusionGemma(_)
             | Self::QwenImage(_)
@@ -3217,6 +3220,9 @@ impl EngineVariant {
             Self::Llama(state) => {
                 LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
             }
+            Self::Inkling2(state) => {
+                LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
+            }
             Self::MiniCpmV46(state) => {
                 LoadedEngineHealth::Causal(Box::new(state.health_collector.snapshot()))
             }
@@ -3259,6 +3265,7 @@ impl EngineVariant {
             Self::Gemma4Drafter(state) => state.base.tokenizer.native_output_dialect(),
             Self::Glm4MoeLite(state) => state.tokenizer.native_output_dialect(),
             Self::Llama(state) => state.tokenizer.native_output_dialect(),
+            Self::Inkling2(state) => state.tokenizer.native_output_dialect(),
             Self::MiniCpmV46(state) => state.tokenizer.native_output_dialect(),
             Self::DiffusionGemma(state) => state.tokenizer.native_output_dialect(),
             Self::QwenImage(_)
@@ -3282,6 +3289,7 @@ impl EngineVariant {
             Self::Gemma4Drafter(_) => "gemma4",
             Self::Glm4MoeLite(_) => "glm4_moe_lite",
             Self::Llama(_) => "llama",
+            Self::Inkling2(_) => "inkling2_loop",
             Self::MiniCpmV46(_) => "minicpmv4_6",
             Self::DiffusionGemma(_) => "diffusion_gemma",
             Self::QwenImage(_) => "qwen_image_2_1",
@@ -3305,6 +3313,7 @@ impl EngineVariant {
             Self::Gemma4Drafter(state) => state.base.model_weight_bytes,
             Self::Glm4MoeLite(state) => state.model_weight_bytes,
             Self::Llama(state) => state.model_weight_bytes,
+            Self::Inkling2(state) => state.model_weight_bytes,
             Self::MiniCpmV46(state) => state.model_weight_bytes,
             Self::DiffusionGemma(state) => state.model_weight_bytes,
             Self::QwenImage(state) => state.model_weight_bytes,
@@ -3352,6 +3361,7 @@ impl EngineVariant {
             Self::Gemma4Drafter(state) => causal_pending_requests(&state.base),
             Self::Glm4MoeLite(state) => causal_pending_requests(state),
             Self::Llama(state) => causal_pending_requests(state),
+            Self::Inkling2(state) => causal_pending_requests(state),
             Self::MiniCpmV46(state) => causal_pending_requests(state),
             Self::DiffusionGemma(state) => {
                 let stats = state.lane.stats();
@@ -3375,6 +3385,7 @@ impl EngineVariant {
             Self::Gemma4Drafter(state) => state.base.runtime_usage.snapshot(true),
             Self::Glm4MoeLite(state) => state.runtime_usage.snapshot(true),
             Self::Llama(state) => state.runtime_usage.snapshot(true),
+            Self::Inkling2(state) => state.runtime_usage.snapshot(true),
             Self::MiniCpmV46(state) => state.runtime_usage.snapshot(true),
             Self::DiffusionGemma(state) => state.runtime_usage.snapshot(false),
             Self::QwenImage(state) => state.runtime_usage.snapshot(false),
@@ -3425,6 +3436,7 @@ impl EngineVariant {
             }
             Self::Glm4MoeLite(state) => causal(&state.health_collector, &state.runtime_usage),
             Self::Llama(state) => causal(&state.health_collector, &state.runtime_usage),
+            Self::Inkling2(state) => causal(&state.health_collector, &state.runtime_usage),
             Self::MiniCpmV46(state) => causal(&state.health_collector, &state.runtime_usage),
             Self::Diarization(state) => queue(
                 Box::new(state.queue_counter()),
@@ -3545,7 +3557,8 @@ fn resolve_engine_mtp_config(
     match architecture {
         ModelArchitecture::Qwen35Dense
         | ModelArchitecture::Qwen35Moe
-        | ModelArchitecture::Gemma4 => {}
+        | ModelArchitecture::Gemma4
+        | ModelArchitecture::Inkling2 => {}
         _ => bail!(
             "engine model `{}` configures MTP for a non-Qwen/Gemma4 architecture",
             model.id
@@ -3570,6 +3583,15 @@ fn resolve_engine_mtp_config(
             validation.reason_code,
             validation.message
         );
+    }
+    if architecture == ModelArchitecture::Inkling2 {
+        return Ok(Some(ResolvedEngineMtpConfig {
+            model_dir: settings.model_dir.clone(),
+            draft_tokens: crate::core::model_validation::resolve_inkling_dspark_block(
+                raw_config,
+                settings.draft_tokens,
+            )? - 1,
+        }));
     }
     let draft_tokens = crate::core::speculative::resolve_mtp_draft_tokens(
         raw_config,
@@ -3745,6 +3767,7 @@ async fn load_engine_variant(
                 vision_config,
                 image_token_id,
             },
+            model.sampling_defaults.temperature,
         );
         return Ok(EngineVariant::DiffusionGemma(state));
     }
@@ -3908,6 +3931,77 @@ async fn load_engine_variant(
             )
             .await?;
             Ok(EngineVariant::Llama(state))
+        }
+        ModelArchitecture::Inkling2 => {
+            let model_impl =
+                run_load_section(|| ironmlx_lm::models::Inkling2Model::from_loader(&loader))
+                    .context("ironmlx_lm::models::Inkling2Model::from_loader")?;
+            if let Some(mtp) = mtp_config {
+                anyhow::ensure!(
+                    prompt_lookup.is_none(),
+                    "Inkling DSpark cannot share decoding with PromptLookup"
+                );
+                anyhow::ensure!(
+                    runtime.kv_cache_turboquant_bits.is_none(),
+                    "Inkling DSpark requires the native KV cache"
+                );
+                let path = mtp.model_dir.join("mtp.safetensors");
+                let draft = run_load_section(|| {
+                    ironmlx_lm::models::DFlash2DraftModel::from_inkling_sidecar(&loader, &path)
+                })
+                .context("loading bundled Inkling DSpark")?;
+                let draft_bytes = std::fs::metadata(&path)?.len() as usize;
+                let estimate = StaticMemoryEstimate::from_allocated_weights(
+                    component_bytes.text.saturating_add(draft_bytes),
+                    component_bytes.vision,
+                );
+                let prefix_cache_disk = inkling_dspark_prefix_disk(
+                    paged_prefix_cache.as_ref(),
+                    prefix_lru_cache.as_ref(),
+                    model,
+                );
+                before_engine_start(tracker)?;
+                let state = crate::core::engine_state::build_dflash2_engine_with_options(
+                    model_impl,
+                    draft,
+                    tokenizer,
+                    model.id.clone(),
+                    scheduler_config.prefill_chunk_size,
+                    1,
+                    scheduler_config.admission_deadline_ms,
+                    1,
+                    scheduler_config.admission_queue_max,
+                    scheduler_config.max_cache_cap,
+                    mtp.draft_tokens + 1,
+                    crate::core::dflash2::DFlash2P2Options::default(),
+                    None,
+                    prefix_lru_cache,
+                    prefix_cache_disk,
+                    model
+                        .scheduler_runtime_profile
+                        .clone()
+                        .context("missing Inkling scheduler runtime profile")?,
+                    estimate,
+                    vision_input.context("missing Inkling vision configuration")?,
+                )
+                .await?
+                .with_sampling_defaults(model.sampling_defaults);
+                return Ok(EngineVariant::Inkling2(state));
+            }
+            let state = build_plain_or_prompt_lookup_causal_state(
+                model_impl,
+                tokenizer,
+                model,
+                runtime,
+                static_memory_estimate,
+                paged_prefix_cache,
+                prefix_lru_cache,
+                prompt_lookup,
+                vision_input,
+                tracker,
+            )
+            .await?;
+            Ok(EngineVariant::Inkling2(state))
         }
         ModelArchitecture::MiniCpmV46 => {
             let model_impl =
@@ -4074,6 +4168,26 @@ async fn build_qwen36_moe_engine(
         .await?;
         Ok(EngineVariant::Qwen36Moe(state))
     }
+}
+
+/// The disk store behind an Inkling DSpark engine's prefix cache: the pool's
+/// SSD prefix cache directory and size limit, as the ordinary channel of the
+/// same model uses them. None without an SSD directory or an in-memory cache,
+/// which the store sits behind.
+fn inkling_dspark_prefix_disk(
+    paged_prefix_cache: Option<&PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<&PrefixLruCacheConfig>,
+    model: &EngineModelConfig,
+) -> Option<crate::core::cache::DFlash2PrefixDiskConfig> {
+    let paged = paged_prefix_cache?;
+    prefix_lru_cache?;
+    Some(crate::core::cache::DFlash2PrefixDiskConfig {
+        dir: paged.root.clone()?,
+        max_bytes: paged
+            .max_disk_bytes
+            .map(|bytes| u64::try_from(bytes).unwrap_or(u64::MAX)),
+        model_dir: model.path.clone(),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4672,6 +4786,45 @@ mod tests {
                 false,
             ),
         }
+    }
+
+    #[test]
+    fn inkling_dspark_uses_the_pool_ssd_prefix_cache() {
+        use super::inkling_dspark_prefix_disk;
+        use crate::core::cache::{PagedPrefixCacheConfig, PrefixLruCacheConfig};
+        let model = model_config(
+            "inkling",
+            Path::new("/models/inkling"),
+            EngineLoadPolicy::Lazy,
+        );
+        let ssd = PagedPrefixCacheConfig::new_with_max_disk_bytes(
+            "/cache",
+            "inkling",
+            256,
+            64,
+            Some(4 << 30),
+        )
+        .unwrap();
+        let memory = PrefixLruCacheConfig::new(1 << 30).unwrap();
+        assert_eq!(
+            inkling_dspark_prefix_disk(Some(&ssd), Some(&memory), &model),
+            Some(crate::core::cache::DFlash2PrefixDiskConfig {
+                dir: PathBuf::from("/cache"),
+                max_bytes: Some(4 << 30),
+                model_dir: PathBuf::from("/models/inkling"),
+            })
+        );
+        // The disk store sits behind the in-memory cache and needs a directory.
+        assert_eq!(inkling_dspark_prefix_disk(Some(&ssd), None, &model), None);
+        let memory_only = PagedPrefixCacheConfig::memory_only("inkling", 256, 64).unwrap();
+        assert_eq!(
+            inkling_dspark_prefix_disk(Some(&memory_only), Some(&memory), &model),
+            None
+        );
+        assert_eq!(
+            inkling_dspark_prefix_disk(None, Some(&memory), &model),
+            None
+        );
     }
 
     fn write_minimal_model_config(model_type: &str) -> PathBuf {

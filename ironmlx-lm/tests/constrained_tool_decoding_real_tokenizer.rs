@@ -3,6 +3,9 @@
 use std::path::PathBuf;
 
 use ironmlx_lm::core::constrained::{ToolChoiceConstraint, ToolConstraintOptions};
+use ironmlx_lm::core::native_output::{
+    NativeOutputDecoderConfig, NativeOutputDialect, NativeOutputParser,
+};
 use ironmlx_lm::core::tool_calling::{ToolCallParser, ToolDefinition, ToolDialect};
 use ironmlx_lm::core::{GeneratedOutputEvent, Tokenizer};
 
@@ -87,6 +90,11 @@ fn native_weather_call(dialect: ToolDialect) -> &'static str {
             "<param name=\"days\">2</param>",
             "</function>"
         ),
+        ToolDialect::Inkling2 => concat!(
+            "<|message_model|>get_weather<|content_invoke_tool_json|>",
+            r#"{"name":"get_weather","args":{"city":"Tokyo","days":2}}"#,
+            "<|end_message|>"
+        ),
     }
 }
 
@@ -133,13 +141,24 @@ fn real_tokenizer_enforces_structured_output_and_auto_tool_union() {
             < invalid.len()
     );
 
+    // Next to tools, Inkling frames the structured answer as a text message,
+    // as its chat template renders every assistant message.
+    let framed = match dialect {
+        ToolDialect::Inkling2 => {
+            format!("<|message_model|><|content_text|>{structured}<|end_message|>")
+        }
+        _ => structured.to_owned(),
+    };
+    let framed_tokens = tokenizer
+        .encode(&framed, false)
+        .expect("encode framed structured JSON");
     let tools = [weather_tool()];
     let combined = tokenizer
         .compile_tool_or_json_constraint(&tools, &ToolConstraintOptions::default(), &schema)
         .expect("compile auto tool-or-JSON constraint");
     let mut structured_session = combined.start_session().expect("start JSON union branch");
     structured_session
-        .commit_tokens(&structured_tokens)
+        .commit_tokens(&framed_tokens)
         .expect("consume JSON union branch");
     assert!(structured_session
         .is_accepting()
@@ -161,10 +180,37 @@ fn real_tokenizer_enforces_structured_output_and_auto_tool_union() {
     let mut parser =
         ToolCallParser::new_with_output_schema(dialect, "structured-real", &tools, Some(schema))
             .expect("create structured-output parser");
+    // The native channel parser removes Inkling's message framing before
+    // the tool parser sees the text, as in generation.
+    let mut native = (dialect == ToolDialect::Inkling2).then(|| {
+        NativeOutputParser::new(NativeOutputDecoderConfig {
+            dialect: NativeOutputDialect::Inkling2,
+            reasoning_enabled: false,
+        })
+    });
     let mut events = Vec::new();
-    for token in structured_tokens {
+    let mut push_text = |parser: &mut ToolCallParser, text: &str, events: &mut Vec<_>| {
+        events.extend(parser.push(text).expect("parse structured token"));
+    };
+    for token in framed_tokens {
         if let Some(text) = detok.step(token).expect("decode structured token") {
-            events.extend(parser.push(&text).expect("parse structured token"));
+            match native.as_mut() {
+                Some(native) => {
+                    for event in native.push(&text).expect("split native channels") {
+                        if let GeneratedOutputEvent::TextDelta(text) = event {
+                            push_text(&mut parser, &text, &mut events);
+                        }
+                    }
+                }
+                None => push_text(&mut parser, &text, &mut events),
+            }
+        }
+    }
+    if let Some(native) = native {
+        for event in native.finish("stop").expect("finish native channels") {
+            if let GeneratedOutputEvent::TextDelta(text) = event {
+                push_text(&mut parser, &text, &mut events);
+            }
         }
     }
     let (tail, saw_tool_call) = parser.finish().expect("finish structured parser");

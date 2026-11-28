@@ -25,6 +25,7 @@ pub enum NativeOutputDialect {
     MiniCpmV46,
     MiniCpm5,
     Gemma,
+    Inkling2,
 }
 
 impl NativeOutputDialect {
@@ -32,6 +33,7 @@ impl NativeOutputDialect {
     /// Empty when the model only supports thinking on/off.
     pub fn native_efforts(self) -> &'static [&'static str] {
         match self {
+            Self::Inkling2 => &["none", "minimal", "low", "medium", "high", "xhigh", "max"],
             Self::Qwen38 => &["low", "medium", "xhigh"],
             Self::Qwen35
             | Self::Qwen36
@@ -45,6 +47,19 @@ impl NativeOutputDialect {
     /// Detect a native output contract from the model type and exact template
     /// markers. Similar-looking templates are deliberately not enabled.
     pub fn detect(model_type: &str, template: &str) -> Option<Self> {
+        if matches!(model_type, "inkling2" | "inkling2_loop")
+            && [
+                "<|message_model|>",
+                "<|content_thinking|>",
+                "<|content_text|>",
+                "<|end_message|>",
+                "reasoning_effort",
+            ]
+            .iter()
+            .all(|marker| template.contains(marker))
+        {
+            return Some(Self::Inkling2);
+        }
         if matches!(model_type, "qwen3_5" | "qwen3_5_moe") {
             let qwen38 = [
                 "message.reasoning_content is string",
@@ -121,7 +136,10 @@ impl NativeOutputDialect {
     /// Whether the template opens its native reasoning channel when callers
     /// do not explicitly supply `enable_thinking`.
     pub fn default_reasoning_enabled(self) -> bool {
-        matches!(self, Self::Qwen36 | Self::Qwen38 | Self::Glm)
+        matches!(
+            self,
+            Self::Qwen36 | Self::Qwen38 | Self::Glm | Self::Inkling2
+        )
     }
 
     /// Resolve the template's effective reasoning mode from request kwargs.
@@ -132,6 +150,13 @@ impl NativeOutputDialect {
         let object = kwargs
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("chat_template_kwargs must be a JSON object"))?;
+        if self == Self::Inkling2
+            && object.get("reasoning_effort").is_some_and(|effort| {
+                effort.as_str() == Some("none") || effort.as_f64() == Some(0.0)
+            })
+        {
+            return Ok(false);
+        }
         match object.get("enable_thinking") {
             None | Some(serde_json::Value::Null) => Ok(self.default_reasoning_enabled()),
             Some(serde_json::Value::Bool(enabled)) => Ok(*enabled),
@@ -143,7 +168,7 @@ impl NativeOutputDialect {
     /// tokens and must remain visible to the parser. The remaining tagged
     /// reasoning dialects encode their markers as ordinary text.
     pub fn skip_special_tokens(self) -> bool {
-        !matches!(self, Self::Gemma | Self::Glm)
+        !matches!(self, Self::Gemma | Self::Glm | Self::Inkling2)
     }
 }
 
@@ -168,6 +193,8 @@ pub struct NativeOutputParser {
     trim_reasoning_prefix: bool,
     trim_text_prefix: bool,
     saw_reasoning: bool,
+    inkling_header: bool,
+    inkling_tool: bool,
 }
 
 impl NativeOutputParser {
@@ -180,6 +207,7 @@ impl NativeOutputParser {
         }
         let close = match self.dialect {
             NativeOutputDialect::Gemma => GEMMA_CHANNEL_CLOSE,
+            NativeOutputDialect::Inkling2 => "<|end_message|>",
             _ => THINK_CLOSE,
         };
         Some(if close.starts_with(&self.pending) {
@@ -190,12 +218,15 @@ impl NativeOutputParser {
     }
 
     pub fn new(config: NativeOutputDecoderConfig) -> Self {
-        let state =
-            if config.reasoning_enabled && !matches!(config.dialect, NativeOutputDialect::Gemma) {
-                ChannelState::Reasoning
-            } else {
-                ChannelState::Text
-            };
+        let state = if config.reasoning_enabled
+            && !matches!(
+                config.dialect,
+                NativeOutputDialect::Gemma | NativeOutputDialect::Inkling2
+            ) {
+            ChannelState::Reasoning
+        } else {
+            ChannelState::Text
+        };
         Self {
             dialect: config.dialect,
             state,
@@ -203,6 +234,8 @@ impl NativeOutputParser {
             trim_reasoning_prefix: false,
             trim_text_prefix: false,
             saw_reasoning: matches!(state, ChannelState::Reasoning),
+            inkling_header: true,
+            inkling_tool: false,
         }
     }
 
@@ -216,6 +249,13 @@ impl NativeOutputParser {
     }
 
     pub fn finish(mut self, finish_reason: &'static str) -> Result<Vec<GeneratedOutputEvent>> {
+        if self.dialect == NativeOutputDialect::Inkling2 && finish_reason == "length" {
+            // A token budget may end inside a channel header or delimiter.
+            // Emit only completed payload and keep partial control tokens private.
+            let events = self.advance(false)?;
+            self.pending.clear();
+            return Ok(events);
+        }
         let events = self.advance(true)?;
         if matches!(self.state, ChannelState::Reasoning) && finish_reason != "length" {
             bail!("unterminated native reasoning channel")
@@ -226,8 +266,98 @@ impl NativeOutputParser {
     fn advance(&mut self, eof: bool) -> Result<Vec<GeneratedOutputEvent>> {
         match self.dialect {
             NativeOutputDialect::Gemma => self.advance_gemma(eof),
+            NativeOutputDialect::Inkling2 => self.advance_inkling(eof),
             _ => self.advance_tagged(eof),
         }
+    }
+
+    fn advance_inkling(&mut self, eof: bool) -> Result<Vec<GeneratedOutputEvent>> {
+        const END: &str = "<|end_message|>";
+        const STOP: &str = "<|content_model_end_sampling|>";
+        let mut events = Vec::new();
+        loop {
+            if self.pending.is_empty() {
+                break;
+            }
+            if self.inkling_header {
+                if self.pending.starts_with(STOP) {
+                    self.pending.drain(..STOP.len());
+                    continue;
+                }
+                if STOP.starts_with(&self.pending) && !eof {
+                    break;
+                }
+                if let Some(start) = self.pending.find("<|content_") {
+                    let Some(end) = self.pending[start..].find("|>").map(|n| start + n + 2) else {
+                        if eof {
+                            bail!("incomplete Inkling channel header");
+                        }
+                        break;
+                    };
+                    let channel = self.pending[start..end].to_owned();
+                    let prefix = &self.pending[..start];
+                    anyhow::ensure!(
+                        prefix.is_empty() || prefix.starts_with("<|message_model|>"),
+                        "invalid Inkling assistant header"
+                    );
+                    self.pending.drain(..end);
+                    self.inkling_tool = channel == "<|content_invoke_tool_json|>";
+                    self.state = match channel.as_str() {
+                        "<|content_thinking|>" => {
+                            self.saw_reasoning = true;
+                            ChannelState::Reasoning
+                        }
+                        "<|content_text|>"
+                        | "<|content_tool_error|>"
+                        | "<|content_invoke_tool_text|>"
+                        | "<|content_invoke_tool_json|>" => ChannelState::Text,
+                        _ => bail!("unsupported Inkling output channel {channel}"),
+                    };
+                    if self.inkling_tool {
+                        events.push(GeneratedOutputEvent::TextDelta(channel));
+                    }
+                    self.inkling_header = false;
+                    continue;
+                }
+                // Standalone constrained JSON starts at its payload, without
+                // model framing. Ordinary generation uses the native header.
+                if !self.pending.starts_with('<') {
+                    self.inkling_header = false;
+                    self.state = ChannelState::Text;
+                    continue;
+                }
+                if eof {
+                    bail!("incomplete Inkling assistant header");
+                }
+                break;
+            }
+            if let Some(end) = self.pending.find(END) {
+                let body = self.pending[..end].to_owned();
+                self.emit_current(&mut events, body);
+                self.pending.drain(..end + END.len());
+                if self.inkling_tool {
+                    events.push(GeneratedOutputEvent::TextDelta(END.to_owned()));
+                }
+                self.state = ChannelState::Text;
+                self.inkling_header = true;
+                self.inkling_tool = false;
+                continue;
+            }
+            let keep = if eof {
+                0
+            } else {
+                (1..END.len())
+                    .rev()
+                    .find(|n| self.pending.ends_with(&END[..*n]))
+                    .unwrap_or(0)
+            };
+            let end = self.pending.len() - keep;
+            let text = self.pending[..end].to_owned();
+            self.pending.drain(..end);
+            self.emit_current(&mut events, text);
+            break;
+        }
+        Ok(events)
     }
 
     fn advance_tagged(&mut self, eof: bool) -> Result<Vec<GeneratedOutputEvent>> {

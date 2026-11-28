@@ -36,6 +36,18 @@ pub struct ModelMeta {
     /// for every token ([`Self::uniform_kv_bytes_per_token`]), which
     /// overstates a model whose layers do not all do that.
     pub cache_cost: Option<CacheCost>,
+    /// The model's own measured transient for a single-row prefill chunk.
+    /// `None`: the generic estimate, which assumes every attention layer
+    /// materializes its score matrix and so grows with the context.
+    pub prefill_peak: Option<PrefillPeak>,
+}
+
+/// Transient memory one prefill chunk needs beyond what it writes to the
+/// cache, for a model whose attention does not grow it with the context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrefillPeak {
+    pub fixed_bytes: usize,
+    pub bytes_per_token: usize,
 }
 
 impl ModelMeta {
@@ -70,6 +82,28 @@ pub trait Model {
     }
 
     fn make_cache(&self, batch: i32, cap: i32, dtype: Dtype) -> Result<Vec<LayerCache>>;
+
+    /// Caches made from now on keep every layer's whole K/V history, which
+    /// saving and restoring a prefix needs. Only a model whose
+    /// sliding-window layers otherwise keep just their window acts on it.
+    /// Call before the first [`Self::make_cache`] and before reading
+    /// [`Self::model_meta`].
+    fn keep_full_kv_history(&self) {}
+
+    /// Caches made from now on store K/V in the model's dense dtype, not in
+    /// a quantized form of its own (a comparison against dense K/V). Call
+    /// before the first [`Self::make_cache`] and before reading
+    /// [`Self::model_meta`].
+    fn use_dense_kv(&self) {}
+
+    /// Whether this model's K/V stays dense when a prefix cache is
+    /// configured, instead of moving to paged storage. A model whose
+    /// attention reads K/V as one contiguous array would otherwise rebuild
+    /// that array from the pages on every step. Its prefix entries share
+    /// dense segments.
+    fn prefix_cache_keeps_dense_kv(&self) -> bool {
+        false
+    }
 
     /// Dtype expected by this model's KV cache tensors.
     fn cache_dtype(&self) -> Dtype {
@@ -125,6 +159,12 @@ pub trait Model {
     /// Whether an equal-length text batch must preserve the single-row
     /// scheduler's `[N - 1] + [1]` prefill morphology for greedy-token parity.
     fn requires_split_batched_prefill_for_token_parity(&self) -> bool {
+        false
+    }
+
+    /// Whether single-row prefill can project the final position directly
+    /// from the last chunk, without forwarding that position separately.
+    fn prefers_unsplit_b1_prefill(&self) -> bool {
         false
     }
 

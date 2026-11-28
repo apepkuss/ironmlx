@@ -411,6 +411,7 @@ pub fn test_meta_qwen35() -> ModelMeta {
         max_position_embeddings: 32768,
         spatial_merge_size: 2,
         cache_cost: None,
+        prefill_peak: None,
     }
 }
 
@@ -437,6 +438,7 @@ pub fn test_meta_qwen35_moe() -> ModelMeta {
         max_position_embeddings: 262144,
         spatial_merge_size: 2,
         cache_cost: None,
+        prefill_peak: None,
     }
 }
 
@@ -452,6 +454,7 @@ pub fn test_meta_gemma4_12b() -> ModelMeta {
         max_position_embeddings: 262144,
         spatial_merge_size: 3,
         cache_cost: None,
+        prefill_peak: None,
     }
 }
 
@@ -544,6 +547,7 @@ mod tests {
                 bytes_per_token: 65_536,
                 fixed_bytes_per_sequence: 154 << 20,
             }),
+            prefill_peak: None,
         }
     }
 

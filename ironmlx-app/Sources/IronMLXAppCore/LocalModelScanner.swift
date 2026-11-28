@@ -714,6 +714,18 @@ public struct LocalModelScanner: Sendable {
             .filter { $0.kind == .base }
             .map { artifact in
                 var model = artifact.model
+                if model.readiness?.isLoadable == true,
+                   let candidate = bundledInklingDraft(model: model, snapshot: artifact.path) {
+                    let enabled = mtpEnabledModels.contains(model.id)
+                    model.mtp = LocalModelMtpInfo(
+                        status: enabled ? "enabled" : "available",
+                        enabled: enabled, candidates: [candidate]
+                    )
+                } else if model.readiness?.isLoadable == true,
+                          model.source == "hf",
+                          model.repoID == "mlx-community/Inkling-2-Mini-oQ4e-mtp" {
+                    model.mtp = LocalModelMtpInfo(status: "missing_bundled_draft")
+                }
                 if let baseSignature = artifact.signature, baseSignature.supportsMtp {
                     let compatible = mtpArtifacts
                         .filter { $0.signature?.isMtpCandidateCompatible(withBase: baseSignature) == true }
@@ -1124,7 +1136,13 @@ public struct LocalModelScanner: Sendable {
             case .dflash2Draft:
                 type = "dflash2_drafter"
             }
-            let runtimeCapabilities = kind == .base ? capabilities : nil
+            var runtimeCapabilities = kind == .base ? capabilities : nil
+            if kind == .base, ["inkling2", "inkling2_loop"].contains(config["model_type"] as? String ?? "") {
+                let manifest = try? ModelSnapshotVerifier().loadManifest(at: snapshot)
+                let bundled = manifest?.files.contains { $0.path == "mtp.safetensors" } ?? false
+                runtimeCapabilities?.supportsMtp = bundled
+                runtimeCapabilities?.supportsSpeculativeDecoding = bundled
+            }
             return LocalModel(
                 id: id,
                 repoID: id,
@@ -1156,6 +1174,29 @@ public struct LocalModelScanner: Sendable {
                 dflash2Signature: dflash2Signature
             )
         }
+    }
+
+    private func bundledInklingDraft(model: LocalModel, snapshot: URL) -> LocalMtpCandidate? {
+        guard let config = configJSON(in: snapshot),
+              ["inkling2", "inkling2_loop"].contains(config["model_type"] as? String ?? ""),
+              (config["mtp_config"] as? [String: Any])?["markov_head_type"] as? String == "rnn_hidden",
+              let manifest = try? ModelSnapshotVerifier().loadManifest(at: snapshot),
+              let weights = manifest.files.first(where: { $0.path == "mtp.safetensors" })
+        else { return nil }
+        return LocalMtpCandidate(id: model.id, repoID: model.repoID, source: model.source,
+                                 sizeMB: Double(weights.size) / 1_048_576.0, path: snapshot.path)
+    }
+
+    private func isSupportedInklingSnapshot(_ config: [String: Any], manifest: ModelSnapshotManifest) -> Bool {
+        guard ["inkling2", "inkling2_loop"].contains(config["model_type"] as? String ?? ""),
+              let quant = config["quantization"] as? [String: Any],
+              let embed = quant["model.embed"] as? [String: Any],
+              embed["mode"] as? String == "affine", embed["bits"] as? Int == 8,
+              embed["group_size"] as? Int == 64
+        else { return false }
+        // Earlier builds downloaded this checkpoint for file use only. Its
+        // active snapshot remains valid after updating to the Inkling loader.
+        return manifest.compatibility.artifactRole == "download_only"
     }
 
     private func ttsDownloadInfo(snapshot: URL) -> LocalModelDownloadInfo? {
@@ -1241,10 +1282,17 @@ public struct LocalModelScanner: Sendable {
         snapshot: URL
     ) -> LocalModelReasoningMetadata? {
         guard let modelType = config["model_type"] as? String,
-              modelType == "qwen3_5" || modelType == "qwen3_5_moe",
               let template = chatTemplate(in: snapshot) else {
             return nil
         }
+        if ["inkling2", "inkling2_loop"].contains(modelType),
+           ["<|content_thinking|>", "<|message_model|>", "reasoning_effort"].allSatisfy(template.contains) {
+            return LocalModelReasoningMetadata(
+                nativeEfforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                defaultEffort: "high", supportsDisable: true, source: "chat_template"
+            )
+        }
+        guard modelType == "qwen3_5" || modelType == "qwen3_5_moe" else { return nil }
         let qwen38Markers = [
             "message.reasoning_content is string",
             "reasoning_effort|default('xhigh')",
@@ -1373,7 +1421,7 @@ public struct LocalModelScanner: Sendable {
                 signals: modelCapabilitySignals(config: config)
             ),
             supportsMtp: !isDiffusion && mtpCompatibilitySignature(config)?.supportsMtp == true,
-            supportsPromptLookup: !isDiffusion,
+            supportsPromptLookup: !isDiffusion && !["inkling2", "inkling2-loop"].contains(modelType),
             supportsSpeculativeDecoding: !isDiffusion
                 && mtpCompatibilitySignature(config)?.supportsMtp == true,
             supportsKvCache: !isDiffusion,
@@ -1920,6 +1968,10 @@ public struct LocalModelScanner: Sendable {
             return nil
         }
         if normalizedString(json["model_type"]) == "embedding-gemma2" { return 8192 }
+        if ["inkling2", "inkling2-loop"].contains(normalizedString(json["model_type"]) ?? ""),
+           let text = json["text_config"] as? [String: Any] {
+            return intValue(text["model_max_length"])
+        }
         if let value = intValue(json["max_position_embeddings"]) {
             return value
         }
@@ -1936,8 +1988,12 @@ public struct LocalModelScanner: Sendable {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
+        // `do_sample: false` means greedy decoding whatever temperature the
+        // file also carries; the backend reads it the same way.
+        let doSample = json["do_sample"] as? NSNumber
+        let greedy = doSample.map { CFGetTypeID($0) == CFBooleanGetTypeID() && !$0.boolValue } ?? false
         let defaults = BackendSamplingDefaults(
-            temperature: positiveDouble(json["temperature"]),
+            temperature: greedy ? 0 : positiveDouble(json["temperature"]),
             topP: probability(json["top_p"]),
             topK: positiveIntValue(json["top_k"]),
             repetitionPenalty: positiveDouble(json["repetition_penalty"])
@@ -2140,7 +2196,8 @@ public struct LocalModelScanner: Sendable {
         let supportedEmbedding = isSupportedEmbeddingConfig(configJSON)
         let supportedASR = Qwen3ASRModelSupport.isSupported(configJSON)
         let supportedDiarization = NemotronDiarizationModelSupport.isSupported(configJSON)
-        if manifest.compatibility.downloadOnly == true && !supportedEmbedding && !supportedASR && !supportedDiarization {
+        if manifest.compatibility.downloadOnly == true && !supportedEmbedding && !supportedASR && !supportedDiarization
+            && !isSupportedInklingSnapshot(configJSON, manifest: manifest) {
             readiness = LocalModelReadiness(
                 status: "unsupported", reasonCode: "download_only_model",
                 message: manifest.compatibility.runtimeSupportError ?? "Downloaded for file use only; this model cannot run in IronMLX."

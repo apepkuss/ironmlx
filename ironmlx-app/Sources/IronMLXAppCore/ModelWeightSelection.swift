@@ -78,6 +78,11 @@ struct ModelWeightSelection {
             // Missing optional MTP weights do not prevent base-model downloads.
             if inventory.contains(path) { optional.insert(path) }
         }
+        if ["inkling2", "inkling2_loop"].contains(modelType ?? ""),
+           (config["mtp_config"] as? [String: Any])?["markov_head_type"] as? String == "rnn_hidden",
+           inventory.contains("mtp.safetensors") {
+            optional.insert("mtp.safetensors")
+        }
         for path in required.union(optional) {
             _ = try safe(path)
             guard inventory.contains(path), path.hasSuffix(".safetensors") else {

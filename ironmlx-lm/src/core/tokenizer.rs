@@ -437,6 +437,9 @@ impl Tokenizer {
             (Some(ToolDialect::Llama), Some(constraint)) => {
                 constraint.compile_llama_tools(tools, options)
             }
+            (Some(ToolDialect::Inkling2), Some(constraint)) => {
+                constraint.compile_inkling_tools(tools, options)
+            }
             (Some(ToolDialect::MiniCpmV46), Some(constraint)) => {
                 constraint.compile_qwen_tools(tools, options)
             }
@@ -469,6 +472,9 @@ impl Tokenizer {
             }
             (Some(ToolDialect::Llama), Some(constraint)) => {
                 constraint.compile_llama_tools_with_output(tools, options, Some(output_schema))
+            }
+            (Some(ToolDialect::Inkling2), Some(constraint)) => {
+                constraint.compile_inkling_tools_with_output(tools, options, Some(output_schema))
             }
             (Some(ToolDialect::MiniCpmV46), Some(constraint)) => {
                 constraint.compile_qwen_tools_with_output(tools, options, Some(output_schema))

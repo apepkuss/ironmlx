@@ -719,6 +719,7 @@ mod tests {
         let router = super::super::startup_status::SwitchableRouter::starting(registry);
         let server = tokio::spawn(serve_bound(listeners, router.clone(), "startup LAN test"));
         let client = reqwest::Client::builder()
+            .no_proxy()
             .danger_accept_invalid_certs(true)
             .build()
             .unwrap();

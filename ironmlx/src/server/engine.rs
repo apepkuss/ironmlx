@@ -140,6 +140,7 @@ impl EngineVariantHttpAdapter for EngineVariant {
                 openai::chat_completions_with_state(state.clone(), req).await
             }
             Self::Llama(state) => openai::chat_completions_with_state(state.clone(), req).await,
+            Self::Inkling2(state) => openai::chat_completions_with_state(state.clone(), req).await,
             Self::MiniCpmV46(state) => {
                 openai::chat_completions_with_state(state.clone(), req).await
             }
@@ -172,6 +173,7 @@ impl EngineVariantHttpAdapter for EngineVariant {
             }
             Self::Glm4MoeLite(state) => responses::responses_with_state(state.clone(), req).await,
             Self::Llama(state) => responses::responses_with_state(state.clone(), req).await,
+            Self::Inkling2(state) => responses::responses_with_state(state.clone(), req).await,
             Self::MiniCpmV46(state) => responses::responses_with_state(state.clone(), req).await,
             Self::DiffusionGemma(state) => {
                 diffusion_gemma::openai_responses_with_state(state.clone(), req).await
@@ -216,6 +218,7 @@ impl EngineVariantHttpAdapter for EngineVariant {
             }
             Self::Glm4MoeLite(state) => anthropic::messages_with_state(state.clone(), req).await,
             Self::Llama(state) => anthropic::messages_with_state(state.clone(), req).await,
+            Self::Inkling2(state) => anthropic::messages_with_state(state.clone(), req).await,
             Self::MiniCpmV46(state) => anthropic::messages_with_state(state.clone(), req).await,
             Self::DiffusionGemma(state) => {
                 diffusion_gemma::anthropic_messages_with_state(state.clone(), req).await

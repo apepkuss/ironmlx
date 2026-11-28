@@ -26,6 +26,7 @@ fn sample_entry() -> PagedPrefixEntry {
         mtp_layers: Vec::new(),
         mtp_last_hidden: None,
         gemma4_drafter_last_hidden: None,
+        last_logits: None,
     }
 }
 
@@ -37,6 +38,7 @@ fn sample_dense_entry() -> PagedPrefixEntry {
         mtp_layers: Vec::new(),
         mtp_last_hidden: None,
         gemma4_drafter_last_hidden: None,
+        last_logits: None,
     }
 }
 
@@ -52,6 +54,7 @@ fn sample_linear_entry() -> PagedPrefixEntry {
         mtp_layers: Vec::new(),
         mtp_last_hidden: None,
         gemma4_drafter_last_hidden: None,
+        last_logits: None,
     }
 }
 

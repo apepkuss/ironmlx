@@ -423,7 +423,7 @@ MTP/辅助 drafter 和 DiffusionGemma。若因 token 上限以 `finish_reason:"l
 工具调用历史必须提供匹配且非空的 `tools` 数组。
 
 具有受支持原生工具模板的 Qwen 3.5/3.6/3.8、Gemma 4、DiffusionGemma、GLM、
-Llama 和 MiniCPM 模型，可通过 Chat Completions 的 `tools` 字段请求客户端
+Llama、MiniCPM 和 Inkling 2 模型，可通过 Chat Completions 的 `tools` 字段请求客户端
 函数调用。具体模型与模板要求见[支持模型矩阵](supported-models.md)：
 
 ```json
@@ -464,8 +464,8 @@ Chat tools 当前边界：
   `required`。无效 Schema 或缺失引用资源会在生成前返回 400。
 - 旧 `functions` / `function_call` 字段会被忽略；工具调用应使用 `tools`。Responses 客户端应使用上文独立的 `/v1/responses` typed-item 协议。
 - 当前支持经过精确模板契约检测的 Qwen 3.5/3.6/3.8、Gemma 4/Gemma 4 Unified、
-  DiffusionGemma、GLM-4 MoE Lite、Llama 3.1/3.2、MiniCPM-V 4.6 和 MiniCPM5
-  原生工具 dialect；其他模板收到 `tools` 时会在生成前返回 400。
+  DiffusionGemma、GLM-4 MoE Lite、Llama 3.1/3.2、MiniCPM-V 4.6、MiniCPM5
+  和 Inkling 2 原生工具 dialect；其他模板收到 `tools` 时会在生成前返回 400。
 - 工具结果必须引用此前尚未完成的 assistant tool call；孤立、重复或缺失 ID
   会在生成前返回 400。
 
@@ -781,6 +781,8 @@ Schema 校验采用 OpenCode 2.2.5 使用的 Draft 2020-12 语义。固定版本
 对于具有精确原生思考模板的 causal Qwen3.5/3.6/3.8 和 Gemma4/Unified，启用思考时会为正文/工具调用预留 min(floor(总输出预算/4),1024) token，另保留原生通道标记空间，其余用于思考。三套协议采用相同策略，不提高总预算，也不自动重试。关闭/不支持思考、DiffusionGemma 或不足以容纳通道标记的小额预算保留原行为。
 
 思考通道已完成不代表答案完整。解析完整约束 JSON 前应检查 Responses status/incomplete_details、Chat finish_reason:length 或 Messages stop_reason:max_tokens。
+
+要求必须调用工具的 tool choice（`required`、指定函数、`any` 或指定工具）不会把被截断的回复变成错误。如果预算在工具调用写完前耗尽，响应以同样的截断信号结束，不包含未写完的调用；截断前已写完的调用照常返回。
 
 ### 流式与取消
 

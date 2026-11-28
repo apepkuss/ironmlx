@@ -25,7 +25,8 @@ pub struct DFlash2DraftPrecision {
 
 #[derive(Clone)]
 pub struct DFlash2DraftCache {
-    layers: Vec<DFlash2KvCache>,
+    pub(super) layers: Vec<DFlash2KvCache>,
+    pub(super) last_draft_context: Option<Array>,
     /// Tokens of this request outside the target's draft vocabulary, in
     /// order of first appearance (prompt, then generated window anchors);
     /// greedy drafts may propose them too (see
@@ -41,6 +42,7 @@ impl DFlash2DraftCache {
     fn from_layers(layers: Vec<DFlash2KvCache>) -> Self {
         Self {
             layers,
+            last_draft_context: None,
             extra_vocab: Vec::new(),
             extra_seen: std::collections::HashSet::new(),
         }
@@ -116,7 +118,7 @@ impl DFlash2DraftCache {
     }
 }
 
-pub struct DFlash2DraftModel {
+struct NativeDraft {
     instance: super::DFlash2Instance,
     config: DFlash2Config,
     fc: Linear,
@@ -129,13 +131,255 @@ pub struct DFlash2DraftModel {
     m5_resident: bool,
 }
 
+/// Block draft used by the target verification runtime.
+pub struct DFlash2DraftModel(DraftKind);
+
+enum DraftKind {
+    Native(Box<NativeDraft>),
+    Inkling {
+        draft: Box<super::dspark::DSparkDraft>,
+        config: Box<DFlash2Config>,
+        instance: super::DFlash2Instance,
+    },
+}
+
+impl DFlash2DraftModel {
+    pub fn from_loader(
+        loader: &Loader,
+        target: impl Into<DFlash2TargetSpec>,
+        bits: Option<i32>,
+    ) -> Result<Self> {
+        Ok(Self(DraftKind::Native(Box::new(NativeDraft::from_loader(
+            loader, target, bits,
+        )?))))
+    }
+
+    pub fn from_inkling_sidecar(loader: &Loader, path: &std::path::Path) -> Result<Self> {
+        let target = crate::models::inkling2::Inkling2Config::from_loader(loader)?;
+        let draft = super::dspark::DSparkDraft::load(path, &target, loader)?;
+        let c = &draft.config;
+        let config = DFlash2Config {
+            architectures: vec!["Inkling2DSpark".to_owned()],
+            attention_bias: false,
+            dtype: "bfloat16".to_owned(),
+            hidden_act: "silu".to_owned(),
+            hidden_size: c.hidden_size,
+            intermediate_size: c.intermediate_size,
+            is_causal: false,
+            head_dim: c.head_dim,
+            layer_types: (0..c.num_hidden_layers)
+                .map(|i| {
+                    if c.local_layer_ids.contains(&i) {
+                        "sliding_attention".into()
+                    } else {
+                        "full_attention".into()
+                    }
+                })
+                .collect(),
+            max_position_embeddings: c.max_position_embeddings,
+            model_type: "inkling2_dspark".into(),
+            num_attention_heads: c.num_attention_heads,
+            num_hidden_layers: c.num_hidden_layers,
+            num_key_value_heads: c.num_key_value_heads,
+            num_target_layers: target.text_config.visits().len() as i32,
+            rms_norm_eps: c.rms_norm_eps,
+            rope_parameters: super::DFlash2RopeParameters {
+                rope_theta: c.rope_theta,
+                rope_type: "default".into(),
+            },
+            sliding_window: c.sliding_window_size,
+            vocab_size: target.text_config.unpadded_vocab_size,
+            dflash_config: super::DFlash2Parameters {
+                block_size: c.block_size,
+                conv_group_size: 0,
+                conv_kernel_size: 0,
+                mask_token_id: 0,
+                selector_rank: c.markov_rank,
+                selector_top_k: 1,
+                target_layer_ids: c.target_layer_ids.clone(),
+            },
+        };
+        Ok(Self(DraftKind::Inkling {
+            draft: Box::new(draft),
+            config: Box::new(config),
+            instance: super::DFlash2Instance::new(),
+        }))
+    }
+
+    pub fn is_inkling_dspark(&self) -> bool {
+        matches!(self.0, DraftKind::Inkling { .. })
+    }
+
+    /// The mask token a proposal never holds, when the drafter reserves one.
+    /// The Inkling DSpark drafter reserves none: its configured mask id (0)
+    /// only pads blocks and is an ordinary token ("!") the model may emit.
+    pub fn reserved_mask_token(&self) -> Option<u32> {
+        (!self.is_inkling_dspark()).then_some(self.config().dflash_config.mask_token_id)
+    }
+
+    pub fn config(&self) -> &DFlash2Config {
+        match &self.0 {
+            DraftKind::Native(d) => d.config(),
+            DraftKind::Inkling { config, .. } => config,
+        }
+    }
+
+    pub fn instance(&self) -> &super::DFlash2Instance {
+        match &self.0 {
+            DraftKind::Native(d) => d.instance(),
+            DraftKind::Inkling { instance, .. } => instance,
+        }
+    }
+
+    pub fn projection_precision(&self) -> Result<DFlash2DraftPrecision> {
+        match &self.0 {
+            DraftKind::Native(d) => d.projection_precision(),
+            DraftKind::Inkling { config, .. } => Ok(DFlash2DraftPrecision {
+                projections: 9 * config.num_hidden_layers as usize + 2,
+                bits: None,
+            }),
+        }
+    }
+
+    pub fn share_weight_layout_if_requested(&mut self) -> Result<usize> {
+        match &mut self.0 {
+            DraftKind::Native(d) => d.share_weight_layout_if_requested(),
+            DraftKind::Inkling { .. } => Ok(0),
+        }
+    }
+
+    pub fn make_cache(&self, offset: i32) -> Result<DFlash2DraftCache> {
+        match &self.0 {
+            DraftKind::Native(d) => d.make_cache(offset),
+            DraftKind::Inkling { config, .. } => Ok(DFlash2DraftCache::from_layers(
+                (0..config.num_hidden_layers)
+                    .map(|_| DFlash2KvCache::new(config.sliding_window - 1, offset))
+                    .collect::<Result<Vec<_>>>()?,
+            )),
+        }
+    }
+
+    pub fn prewarm_on<T: DFlash2Target>(&self, model: &T) -> Result<()> {
+        match &self.0 {
+            DraftKind::Native(d) => d.prewarm_on(model),
+            DraftKind::Inkling { .. } => Ok(()),
+        }
+    }
+
+    pub fn propose_greedy_on<T: DFlash2Target>(
+        &self,
+        model: &T,
+        input: &Array,
+        hidden: &Array,
+        cache: &mut DFlash2DraftCache,
+        t: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        Ok(self
+            .propose_greedy_with_confidence_on(model, input, hidden, cache, t, false)?
+            .0)
+    }
+
+    pub fn propose_greedy_with_confidence_on<T: DFlash2Target>(
+        &self,
+        model: &T,
+        input: &Array,
+        hidden: &Array,
+        cache: &mut DFlash2DraftCache,
+        t: impl Into<StreamOrDevice>,
+        confidence: bool,
+    ) -> Result<(Array, Option<Array>)> {
+        match &self.0 {
+            DraftKind::Native(d) => {
+                d.propose_greedy_with_confidence_on(model, input, hidden, cache, t, confidence)
+            }
+            DraftKind::Inkling { draft, .. } => {
+                draft.propose(model, input, hidden, cache, t.into(), confidence)
+            }
+        }
+    }
+
+    /// Start a DSpark proposal block of up to `limit` positions after
+    /// `anchor` (`[1, 1]`); `None` for other drafters.
+    pub fn dspark_begin<T: DFlash2Target>(
+        &self,
+        model: &T,
+        anchor: &Array,
+        hidden: &Array,
+        cache: &mut DFlash2DraftCache,
+        limit: usize,
+        t: StreamOrDevice,
+    ) -> Result<Option<super::dspark::DSparkBlock>> {
+        match &self.0 {
+            DraftKind::Native(_) => Ok(None),
+            DraftKind::Inkling { draft, .. } => draft
+                .begin(model, anchor, hidden, cache, limit, t)
+                .map(Some),
+        }
+    }
+
+    /// Project a DSpark block's proposals (with confidences) up to `count`.
+    pub fn dspark_extend<T: DFlash2Target>(
+        &self,
+        model: &T,
+        block: &mut super::dspark::DSparkBlock,
+        count: usize,
+        t: StreamOrDevice,
+    ) -> Result<()> {
+        match &self.0 {
+            DraftKind::Native(_) => anyhow::bail!("not a DSpark drafter"),
+            DraftKind::Inkling { draft, .. } => draft.extend(model, block, count, true, t),
+        }
+    }
+
+    pub fn propose_greedy_ragged_on<T: DFlash2Target>(
+        &self,
+        model: &T,
+        input: &Array,
+        hidden: &[&Array],
+        caches: &mut [&mut DFlash2DraftCache],
+        t: impl Into<StreamOrDevice>,
+    ) -> Result<Array> {
+        match &self.0 {
+            DraftKind::Native(d) => d.propose_greedy_ragged_on(model, input, hidden, caches, t),
+            DraftKind::Inkling { draft, .. } => {
+                anyhow::ensure!(
+                    hidden.len() == 1 && caches.len() == 1,
+                    "DSpark draft supports one row"
+                );
+                Ok(draft
+                    .propose(model, input, hidden[0], caches[0], t.into(), false)?
+                    .0)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn propose_tree_on<T: DFlash2Target>(
+        &self,
+        callback: &mut dyn FnMut() -> Result<()>,
+        model: &T,
+        input: &Array,
+        hidden: &Array,
+        cache: &mut DFlash2DraftCache,
+        tree: DFlash2TreeSpec,
+        t: impl Into<StreamOrDevice>,
+    ) -> Result<DFlash2DraftTree> {
+        match &self.0 {
+            DraftKind::Native(d) => {
+                d.propose_tree_on(callback, model, input, hidden, cache, tree, t)
+            }
+            DraftKind::Inkling { .. } => anyhow::bail!("DSpark uses linear block proposals"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DFlash2TreeSpec {
     pub max_nodes: usize,
     pub children_per_node: usize,
 }
 
-impl DFlash2DraftModel {
+impl NativeDraft {
     pub fn from_loader(
         loader: &Loader,
         target: impl Into<DFlash2TargetSpec>,
@@ -698,7 +942,7 @@ fn draft_logits_on<T: DFlash2Target>(
     ))
 }
 
-fn build_block_mask(
+pub(super) fn build_block_mask(
     query_len: i32,
     context_len: i32,
     sliding_window: i32,
@@ -915,7 +1159,7 @@ mod tests {
             Qwen35Model::from_loader_dflash2(&mut target_loader).expect("load DFlash2 target");
         let draft_loader = Loader::open_dflash2(std::path::Path::new(&draft_dir))
             .expect("open DFlash2 draft checkpoint");
-        let draft = DFlash2DraftModel::from_loader(&draft_loader, target.config(), Some(4))
+        let draft = NativeDraft::from_loader(&draft_loader, target.config(), Some(4))
             .expect("load 4-bit runtime DFlash2 draft");
 
         let batch = 2_i32;

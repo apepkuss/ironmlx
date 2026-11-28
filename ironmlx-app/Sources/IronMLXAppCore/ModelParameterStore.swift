@@ -107,7 +107,7 @@ public struct ModelParameters: Codable, Equatable, Sendable {
     public var samplingDefaults: BackendSamplingDefaults {
         BackendSamplingDefaults(
             defaultMaxOutputTokens: defaultMaxOutputTokens,
-            temperature: positiveDouble(temperature),
+            temperature: nonNegativeDouble(temperature),
             topP: probability(topP),
             topK: positiveInt(topK),
             repetitionPenalty: positiveDouble(repeatPenalty)
@@ -177,6 +177,15 @@ public struct ModelParameters: Codable, Equatable, Sendable {
         }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let parsed = Int(trimmed), parsed > 0 else {
+            return nil
+        }
+        return parsed
+    }
+
+    private func nonNegativeDouble(_ value: String?) -> Double? {
+        guard let value,
+              let parsed = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              parsed.isFinite, parsed >= 0 else {
             return nil
         }
         return parsed
@@ -546,7 +555,11 @@ public final class ModelParameterStore: @unchecked Sendable {
             parameters.dflash2TensorBatchMaxWidth,
             field: "dflash2_tensor_batch_max_width"
         )
-        try validatePositiveDouble(parameters.temperature, field: "temperature")
+        // Temperature 0 selects greedy decoding.
+        if let value = nonEmpty(parameters.temperature),
+           !(Double(value).map { $0.isFinite && $0 >= 0 } ?? false) {
+            throw ConfigurationPersistenceError.invalidValue("temperature")
+        }
         try validatePositiveDouble(parameters.repeatPenalty, field: "repeat_penalty")
         if let value = nonEmpty(parameters.topP),
            !(Double(value).map { $0.isFinite && $0 > 0 && $0 <= 1 } ?? false) {

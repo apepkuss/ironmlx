@@ -549,8 +549,22 @@ fn make_room_for_reservation(
     bytes: usize,
     need: crate::core::process_memory::ReservationNeed,
 ) -> crate::core::process_memory::MemoryGovernorSnapshot {
+    make_room_for_reservation_excluding(governor, cache, spare_model, purpose, bytes, need, 0)
+}
+
+/// [`make_room_for_reservation`] for a request whose own admission
+/// reservation of `own_reserved_bytes` does not compete with what it plans.
+fn make_room_for_reservation_excluding(
+    governor: &crate::core::process_memory::SharedProcessMemoryGovernor,
+    cache: Option<&PrefixLruCacheHandle>,
+    spare_model: Option<&str>,
+    purpose: &'static str,
+    bytes: usize,
+    need: crate::core::process_memory::ReservationNeed,
+    own_reserved_bytes: usize,
+) -> crate::core::process_memory::MemoryGovernorSnapshot {
     let blocked = |snapshot: &crate::core::process_memory::MemoryGovernorSnapshot| {
-        governor.reservation_blocked(snapshot, bytes, need)
+        governor.reservation_blocked_excluding(snapshot, bytes, need, own_reserved_bytes)
     };
     let process_cache;
     let cache = match cache {
@@ -568,7 +582,8 @@ fn make_room_for_reservation(
     // MLX's idle buffers first: they cost nothing to give back.
     mlx::transforms::clear_cache();
     let mut snapshot = governor.refresh_process();
-    let mut needed = governor.reservation_shortfall(&snapshot, bytes, need);
+    let mut needed =
+        governor.reservation_shortfall_excluding(&snapshot, bytes, need, own_reserved_bytes);
     if !blocked(&snapshot) || (needed > 0 && cached_bytes == 0) {
         // Admitted, or short of memory with nothing here to give.
         return snapshot;
@@ -576,7 +591,7 @@ fn make_room_for_reservation(
     // That release, and a level that only lags behind usage, show within a
     // few samples; evicting on the first one would take more than is needed.
     snapshot = governor.refresh_after_release(&mut |snapshot| !blocked(snapshot));
-    needed = governor.reservation_shortfall(&snapshot, bytes, need);
+    needed = governor.reservation_shortfall_excluding(&snapshot, bytes, need, own_reserved_bytes);
     let Some(cache) = cache.filter(|_| needed > 0) else {
         return snapshot;
     };
@@ -974,8 +989,15 @@ pub struct AdmitMidHandle {
         Option<Box<crate::core::process_memory::ColdMaterializationGuard>>,
     pub(crate) image_pad_consumed: usize,
     /// Last chunk's `[1, 1, vocab]` logits, captured only at the final
-    /// chunk for first-token sampling in `admit_mid_finalize`.
+    /// chunk for first-token sampling in `admit_mid_finalize`, or restored
+    /// with the whole prompt.
     pub(crate) last_logits: Option<Array>,
+    /// The whole prompt was restored with its last logits: no chunk runs
+    /// and nothing new is saved.
+    pub(crate) restored_whole_prompt: bool,
+    /// Save the whole prompt with its last logits (see
+    /// `restore_paged_prefix_for_prompt_row`).
+    pub(crate) keeps_whole_prompt_logits: bool,
 }
 
 /// MTP variant of [`AdmitMidHandle`].
@@ -3276,6 +3298,29 @@ fn prefix_split_point(
         .unwrap_or_else(|| prompt_ids.len().saturating_sub(1))
 }
 
+/// Whether a text prefill stops at the prompt's split point (from
+/// [`prefix_split_point`]) and forwards the rest apart, so the prefix there
+/// can be saved. A model that prefers to project the last position from the
+/// last chunk (`prefers_unsplit_b1_prefill`) does so only at a chat turn
+/// boundary: splitting off just the last token computes it another way than
+/// a prefill without a prefix cache does, which can change the output. Such
+/// a model saves the whole prompt with its last logits instead, which the
+/// same prompt sent again restores without forwarding anything.
+fn prefill_splits_at_split_point(
+    prefers_unsplit: bool,
+    config: Option<&PagedPrefixCacheConfig>,
+    prompt_ids: &[u32],
+    start: usize,
+) -> bool {
+    config.is_some()
+        && (!prefers_unsplit
+            || is_turn_boundary(
+                config,
+                prompt_ids,
+                prefix_split_point(config, prompt_ids, start),
+            ))
+}
+
 /// Whether `split` (from [`prefix_split_point`]) is a chat prompt's turn
 /// boundary: a prefix the restored-prompt paths save as well.
 fn is_turn_boundary(
@@ -3329,6 +3374,19 @@ fn paged_prefix_restore_candidates(
     config: &PagedPrefixCacheConfig,
     prompt_ids: &[u32],
 ) -> Result<Vec<(usize, i32)>> {
+    paged_prefix_restore_candidates_up_to(store, prefix_lru_cache, config, prompt_ids, false)
+}
+
+/// [`paged_prefix_restore_candidates`], led by the whole prompt when `whole`
+/// (a whole-prompt entry restores only with its last logits, see
+/// [`restore_paged_prefix_for_prompt_row`]).
+fn paged_prefix_restore_candidates_up_to(
+    store: Option<&PagedPrefixStore>,
+    prefix_lru_cache: Option<&PrefixLruCacheHandle>,
+    config: &PagedPrefixCacheConfig,
+    prompt_ids: &[u32],
+    whole: bool,
+) -> Result<Vec<(usize, i32)>> {
     let prompt_len = prompt_ids.len();
     if prompt_len <= 1 {
         return Ok(Vec::new());
@@ -3348,6 +3406,12 @@ fn paged_prefix_restore_candidates(
     }
     if let Some(store) = store {
         cached_lengths.extend(store.cached_lengths_descending(longest)?);
+    }
+    if whole {
+        cached_lengths.push(
+            i32::try_from(prompt_len)
+                .map_err(|_| anyhow!("paged prefix restore length exceeds i32"))?,
+        );
     }
     cached_lengths.sort_unstable_by(|a, b| b.cmp(a));
     cached_lengths.dedup();
@@ -3582,6 +3646,42 @@ fn try_restore_paged_prefix_for_prompt_row(
     fingerprint: &PrefixFingerprint,
     min_restore_len: usize,
 ) -> Result<Option<i32>> {
+    Ok(restore_paged_prefix_for_prompt_row(
+        config,
+        prefix_lru_cache,
+        cache,
+        cache_row,
+        prompt_ids,
+        fingerprint,
+        min_restore_len,
+        false,
+    )?
+    .map(|restored| restored.len))
+}
+
+/// A prefix restored into a cache row.
+struct RestoredPrefix {
+    len: i32,
+    /// The last position's logits when the whole prompt was restored.
+    whole_prompt_logits: Option<Array>,
+}
+
+/// Restore the longest saved prefix of `prompt_ids` into row `cache_row`.
+/// With `whole`, that may be the whole prompt, from an entry that kept its
+/// last logits ([`PagedPrefixEntry::last_logits`]): the caller samples the
+/// first token from them and forwards nothing. A whole-prompt entry without
+/// them is skipped for the next shorter one.
+#[allow(clippy::too_many_arguments)]
+fn restore_paged_prefix_for_prompt_row(
+    config: Option<&PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<&PrefixLruCacheHandle>,
+    cache: &mut [LayerCache],
+    cache_row: usize,
+    prompt_ids: &[u32],
+    fingerprint: &PrefixFingerprint,
+    min_restore_len: usize,
+    whole: bool,
+) -> Result<Option<RestoredPrefix>> {
     let Some(config) = config else {
         return Ok(None);
     };
@@ -3592,11 +3692,23 @@ fn try_restore_paged_prefix_for_prompt_row(
         return Ok(None);
     }
     let store = config.store();
-    for (restore_len, cached_len) in
-        paged_prefix_restore_candidates(store.as_ref(), prefix_lru_cache, config, prompt_ids)?
-            .into_iter()
-            .take_while(|&(restore_len, _)| restore_len >= min_restore_len)
+    for (restore_len, cached_len) in paged_prefix_restore_candidates_up_to(
+        store.as_ref(),
+        prefix_lru_cache,
+        config,
+        prompt_ids,
+        whole,
+    )?
+    .into_iter()
+    .take_while(|&(restore_len, _)| restore_len >= min_restore_len)
     {
+        let whole_prompt = restore_len == prompt_ids.len();
+        let usable = |entry: &SegmentedPrefixEntry| -> Option<Option<Array>> {
+            if !whole_prompt {
+                return Some(None);
+            }
+            entry.private.last_logits.clone().map(Some)
+        };
         let Some(spec) = prefix_key_spec_for_caches(
             &config.model_id,
             &prompt_ids[..restore_len],
@@ -3609,24 +3721,31 @@ fn try_restore_paged_prefix_for_prompt_row(
             return Ok(None);
         };
         if let Some(hit) = try_load_prefix_lru_entry(prefix_lru_cache, &spec)? {
-            restore_segmented_prefix_entry_for_rows(
-                cache,
-                &hit.entry,
-                &[cache_row],
-                cached_len,
-                config.block_size,
-            )?;
-            set_row_prefix_lineage(cache, cache_row, hit.lineage);
-            log_prefix_lru_hit(
-                "hit",
-                &hit.key,
-                cache_row,
-                None,
-                restore_len,
-                hit.stats,
-                hit.load_us,
-            );
-            return Ok(Some(cached_len));
+            if let Some(whole_prompt_logits) = usable(&hit.entry) {
+                restore_segmented_prefix_entry_for_rows(
+                    cache,
+                    &hit.entry,
+                    &[cache_row],
+                    cached_len,
+                    config.block_size,
+                )?;
+                set_row_prefix_lineage(cache, cache_row, hit.lineage);
+                log_prefix_lru_hit(
+                    "hit",
+                    &hit.key,
+                    cache_row,
+                    None,
+                    restore_len,
+                    hit.stats,
+                    hit.load_us,
+                );
+                return Ok(Some(RestoredPrefix {
+                    len: cached_len,
+                    whole_prompt_logits,
+                }));
+            }
+            // Held in memory without logits: the disk copy is no better.
+            continue;
         }
         // In memory only: the LRU lookup above was the whole search.
         let Some(store) = store.as_ref() else {
@@ -3647,6 +3766,9 @@ fn try_restore_paged_prefix_for_prompt_row(
             continue;
         };
         let key = observed.key;
+        let Some(whole_prompt_logits) = usable(&hit.segmented) else {
+            continue;
+        };
         try_insert_prefix_lru_entry(
             prefix_lru_cache,
             spec,
@@ -3671,7 +3793,10 @@ fn try_restore_paged_prefix_for_prompt_row(
             hit.stats,
             load_us,
         );
-        return Ok(Some(cached_len));
+        return Ok(Some(RestoredPrefix {
+            len: cached_len,
+            whole_prompt_logits,
+        }));
     }
     Ok(None)
 }
@@ -3824,6 +3949,96 @@ fn try_save_paged_prefix_for_prompt_row(
     prompt_ids: &[u32],
     fingerprint: &PrefixFingerprint,
 ) -> Result<Option<String>> {
+    save_paged_prefix_for_prompt_row(
+        config,
+        prefix_lru_cache,
+        cache,
+        cache_row,
+        prompt_ids,
+        fingerprint,
+        true,
+        None,
+    )
+}
+
+/// Save the whole prompt of row 0 with its last position's `logits`, so the
+/// same prompt sent again restores all of it (see
+/// [`restore_paged_prefix_for_prompt_row`]).
+fn try_save_whole_prompt_with_logits(
+    config: Option<&PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<&PrefixLruCacheHandle>,
+    cache: &mut [LayerCache],
+    prompt_ids: &[u32],
+    fingerprint: &PrefixFingerprint,
+    logits: &Array,
+) -> Result<Option<String>> {
+    save_paged_prefix_for_prompt_row(
+        config,
+        prefix_lru_cache,
+        cache,
+        0,
+        prompt_ids,
+        fingerprint,
+        true,
+        Some(logits),
+    )
+}
+
+/// Save a prefill checkpoint of row 0: in the prefix LRU cache, and on disk
+/// unless [`prefill_checkpoint_goes_to_disk`] says the store would drop it.
+fn try_save_prefill_checkpoint(
+    config: Option<&PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<&PrefixLruCacheHandle>,
+    cache: &mut [LayerCache],
+    prompt_ids: &[u32],
+    fingerprint: &PrefixFingerprint,
+    to_disk: bool,
+) -> Result<Option<String>> {
+    save_paged_prefix_for_prompt_row(
+        config,
+        prefix_lru_cache,
+        cache,
+        0,
+        prompt_ids,
+        fingerprint,
+        to_disk,
+        None,
+    )
+}
+
+/// Whether a prefill checkpoint of `len` tokens, saved after the line's
+/// previous position `previous`, is worth writing to disk.
+///
+/// An entry that stores sliding-window layers keeps its own window, so the
+/// store thins such a line out (`drop_superseded_window_checkpoints`): of
+/// the older positions it keeps only the shortest in each power-of-two
+/// length range. A checkpoint in the same range as the position before it
+/// would be written only to be deleted, so it stays in memory only. The
+/// prompt's split point (`split_point`) is always written: the same prompt
+/// sent again restores it. Other caches keep every checkpoint on disk.
+fn prefill_checkpoint_goes_to_disk(
+    cache: &[LayerCache],
+    previous: usize,
+    len: usize,
+    split_point: bool,
+) -> bool {
+    if split_point || ironmlx_lm::core::cache::layer::prefix_window(cache).is_none() {
+        return true;
+    }
+    previous == 0 || len.ilog2() > previous.ilog2()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn save_paged_prefix_for_prompt_row(
+    config: Option<&PagedPrefixCacheConfig>,
+    prefix_lru_cache: Option<&PrefixLruCacheHandle>,
+    cache: &mut [LayerCache],
+    cache_row: usize,
+    prompt_ids: &[u32],
+    fingerprint: &PrefixFingerprint,
+    to_disk: bool,
+    last_logits: Option<&Array>,
+) -> Result<Option<String>> {
     let Some(config) = config else {
         return Ok(None);
     };
@@ -3856,7 +4071,7 @@ fn try_save_paged_prefix_for_prompt_row(
     else {
         return Ok(None);
     };
-    let store = config.store();
+    let store = config.store().filter(|_| to_disk);
     let Some((key, permit)) =
         try_admit_prefix_store_entry(store, prefix_lru_cache, &spec, cache_row, None)?
     else {
@@ -3865,7 +4080,7 @@ fn try_save_paged_prefix_for_prompt_row(
     let Some(permit) = permit else {
         return Ok(Some(key));
     };
-    let Some((entry, cached_len)) =
+    let Some((mut entry, cached_len)) =
         export_segmented_prefix_for_row(prefix_lru_cache, cache, cache_row, &spec)?
     else {
         return Ok(None);
@@ -3878,6 +4093,10 @@ fn try_save_paged_prefix_for_prompt_row(
             "try_save_paged_prefix_for_prompt: cache cached_len {cached_len} != token length {}",
             prompt_ids.len()
         );
+    }
+    if let Some(logits) = last_logits {
+        mlx::transforms::eval(&[logits])?;
+        entry.private.last_logits = Some(logits.clone());
     }
     try_insert_prefix_lru_entry(
         prefix_lru_cache,
@@ -5846,6 +6065,11 @@ pub struct Scheduler<M: Model> {
     /// Shared Active KV metrics used by `/healthz` and Dashboard status.
     active_kv_stats: Option<ActiveKvOffloadSharedStats>,
     process_memory_governor: Option<crate::core::process_memory::SharedProcessMemoryGovernor>,
+    /// Decode steps left before a prefill's buffers are returned to the
+    /// system; see [`Self::schedule_prefill_buffer_release`].
+    buffer_release_in: Option<u32>,
+    /// Decode steps since decoding last released the pool.
+    steps_since_decode_release: u32,
     cold_materialization_tracker:
         Arc<OnceLock<Arc<crate::core::process_memory::ColdMaterializationTracker>>>,
     runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
@@ -5969,6 +6193,8 @@ impl<M: Model> Scheduler<M> {
             active_kv_config: ActiveKvOffloadConfig::disabled(),
             active_kv_stats: None,
             process_memory_governor: None,
+            buffer_release_in: None,
+            steps_since_decode_release: u32::MAX,
             cold_materialization_tracker: Arc::new(OnceLock::new()),
             runtime_usage: Arc::new(
                 crate::core::runtime_usage::ModelRuntimeUsageCounters::default(),
@@ -6088,6 +6314,60 @@ impl<M: Model> Scheduler<M> {
         self.process_memory_governor
             .as_ref()
             .map(|governor| governor.snapshot())
+    }
+
+    /// Decode steps after a prefill before its buffers are returned to the
+    /// system. They are not all idle when the prefill emits its token: the
+    /// last of them are dropped over the first decode steps.
+    const PREFILL_RELEASE_DELAY_STEPS: u32 = 8;
+    /// Decode steps between releases that decoding itself triggers. A K/V
+    /// buffer grows at most once per growth step of context, so this only
+    /// limits a model whose decode keeps a large pool busy.
+    const DECODE_RELEASE_INTERVAL_STEPS: u32 = 512;
+
+    /// Returns MLX's idle buffers to the system when they exceed the cold
+    /// ceiling; below it the pool is what the next steps reuse. The idle
+    /// sample alone only clears the pool above its normal limit, so a
+    /// request arriving first would shrink the pool under that limit and
+    /// leave a long prompt's buffers resident for good.
+    pub(crate) fn release_surplus_buffer_cache(&mut self) {
+        self.buffer_release_in = None;
+        let Some(governor) = self.process_memory_governor.as_ref() else {
+            return;
+        };
+        if mlx::memory::cache_bytes() > governor.config().mlx_cache_cold_max_bytes {
+            mlx::transforms::clear_cache();
+        }
+    }
+
+    /// A prefill has emitted its token: release its buffers once decoding
+    /// has dropped them.
+    pub(crate) fn schedule_prefill_buffer_release(&mut self) {
+        self.buffer_release_in = Some(Self::PREFILL_RELEASE_DELAY_STEPS);
+        self.steps_since_decode_release = u32::MAX;
+    }
+
+    /// One decode step is about to run.
+    fn advance_buffer_release(&mut self) {
+        self.steps_since_decode_release = self.steps_since_decode_release.saturating_add(1);
+        match self.buffer_release_in {
+            Some(0) => self.release_surplus_buffer_cache(),
+            Some(steps) => self.buffer_release_in = Some(steps - 1),
+            // A K/V buffer that grew has left its old storage in the pool,
+            // where it would stay until the batch ends.
+            None if self.steps_since_decode_release >= Self::DECODE_RELEASE_INTERVAL_STEPS
+                && self
+                    .process_memory_governor
+                    .as_ref()
+                    .is_some_and(|governor| {
+                        mlx::memory::cache_bytes() > governor.config().mlx_cache_cold_max_bytes
+                    }) =>
+            {
+                self.steps_since_decode_release = 0;
+                mlx::transforms::clear_cache();
+            }
+            None => {}
+        }
     }
 
     pub fn apply_process_memory_pressure(&mut self) -> Result<MemoryPressureReclaim> {
@@ -6226,6 +6506,31 @@ impl<M: Model> Scheduler<M> {
         kv_len: usize,
         batch_size: usize,
     ) -> Result<Option<crate::core::process_memory::PrefillChunkPlan>> {
+        self.plan_prefill_chunk_owned(requested_tokens, kv_len, batch_size, 0)
+    }
+
+    /// Plan a chunk of request `id`'s single-row prefill, leaving its own
+    /// admission reservation out of the baseline.
+    fn plan_prefill_chunk_for(
+        &self,
+        id: RequestId,
+        requested_tokens: usize,
+        kv_len: usize,
+    ) -> Result<Option<crate::core::process_memory::PrefillChunkPlan>> {
+        let own = self
+            .governor_admission_reservations
+            .get(&id)
+            .map_or(0, |reservation| reservation.bytes());
+        self.plan_prefill_chunk_owned(requested_tokens, kv_len, 1, own)
+    }
+
+    fn plan_prefill_chunk_owned(
+        &self,
+        requested_tokens: usize,
+        kv_len: usize,
+        batch_size: usize,
+        own_reserved_bytes: usize,
+    ) -> Result<Option<crate::core::process_memory::PrefillChunkPlan>> {
         let Some(governor) = self.process_memory_governor.as_ref() else {
             return Ok(None);
         };
@@ -6237,7 +6542,7 @@ impl<M: Model> Scheduler<M> {
         );
         let need = crate::core::process_memory::ReservationNeed::Prefill;
         let make_room = || {
-            make_room_for_reservation(
+            make_room_for_reservation_excluding(
                 governor,
                 self.prefix_lru_cache.as_ref(),
                 self.paged_prefix_cache
@@ -6246,6 +6551,7 @@ impl<M: Model> Scheduler<M> {
                 "prefill_chunk",
                 growth,
                 need,
+                own_reserved_bytes,
             )
         };
         // The chunk in full: a plan that only fits shrunk is a slower prefill.
@@ -6257,20 +6563,90 @@ impl<M: Model> Scheduler<M> {
             .and_then(|cache| lock_prefix_lru_cache(cache).ok())
             .map_or(0, |cache| cache.total_bytes());
         if cached_bytes > 0
-            && governor.reservation_blocked(&governor.sample_process(), growth, need)
+            && governor.reservation_blocked_excluding(
+                &governor.sample_process(),
+                growth,
+                need,
+                own_reserved_bytes,
+            )
         {
+            tracing::info!(
+                requested_tokens,
+                kv_len,
+                growth_bytes = growth,
+                cached_bytes,
+                "prefill chunk: making room before planning (MLX buffer cache released)"
+            );
             make_room();
         }
-        match governor.plan_prefill_chunk(requested_tokens, kv_len, batch_size, &self.meta) {
-            Ok(plan) => Ok(Some(plan)),
+        // Plan on a current sample. Without a periodic sampler (one model
+        // served from the command line) the last sample is as old as the
+        // previous chunk, and a plan on telemetry older than the governor's
+        // staleness limit is refused: the retry below would then release
+        // MLX's buffer cache before every chunk of a long prefill.
+        governor.sample_process();
+        // Each chunk's plan, to see where a long prefill is shrunk or made
+        // to release MLX's buffer cache.
+        let log_plan = |plan: &crate::core::process_memory::PrefillChunkPlan, retried: bool| {
+            if plan.selected_tokens < plan.requested_tokens {
+                tracing::info!(
+                    requested_tokens = plan.requested_tokens,
+                    selected_tokens = plan.selected_tokens,
+                    kv_len,
+                    estimated_peak_growth_bytes = plan.estimated_peak_growth_bytes,
+                    target_bytes = plan.target_bytes,
+                    current_usage_bytes = plan.current_usage_bytes,
+                    reserved_bytes = plan.reserved_bytes,
+                    own_reserved_bytes = plan.own_reserved_bytes,
+                    retried,
+                    "prefill chunk shrunk to fit memory headroom"
+                );
+            } else {
+                tracing::debug!(
+                    requested_tokens = plan.requested_tokens,
+                    kv_len,
+                    estimated_peak_growth_bytes = plan.estimated_peak_growth_bytes,
+                    target_bytes = plan.target_bytes,
+                    current_usage_bytes = plan.current_usage_bytes,
+                    reserved_bytes = plan.reserved_bytes,
+                    own_reserved_bytes = plan.own_reserved_bytes,
+                    retried,
+                    "prefill chunk planned"
+                );
+            }
+        };
+        match governor.plan_prefill_chunk_excluding(
+            requested_tokens,
+            kv_len,
+            batch_size,
+            &self.meta,
+            own_reserved_bytes,
+        ) {
+            Ok(plan) => {
+                log_plan(&plan, false);
+                Ok(Some(plan))
+            }
             Err(first_error) => {
                 // One idempotent reclaim-and-retry is part of the prefill
                 // contract. It releases MLX's reusable buffer cache and
                 // cached prefixes; it does not mutate model weights or
                 // request KV.
+                tracing::info!(
+                    requested_tokens,
+                    kv_len,
+                    error = %first_error,
+                    "prefill chunk plan refused; releasing MLX buffer cache and retrying"
+                );
                 make_room();
                 governor
-                    .plan_prefill_chunk(requested_tokens, kv_len, batch_size, &self.meta)
+                    .plan_prefill_chunk_excluding(
+                        requested_tokens,
+                        kv_len,
+                        batch_size,
+                        &self.meta,
+                        own_reserved_bytes,
+                    )
+                    .inspect(|plan| log_plan(plan, true))
                     .map(Some)
                     .map_err(|retry_error| {
                         tracing::warn!(
@@ -6323,6 +6699,7 @@ impl<M: Model> Scheduler<M> {
     fn extend_kv_charges_for_decode(
         &mut self,
     ) -> Vec<crate::core::process_memory::MemoryReservation> {
+        self.advance_buffer_release();
         let lookahead = self.kv_growth_lookahead();
         let bytes_per_token = crate::core::memory_budget::kv_bytes_per_token(&self.meta);
         let dense = self.paged_prefix_cache.is_none();
@@ -7542,7 +7919,11 @@ impl<M: Model> Scheduler<M> {
         let mut cache = model.make_cache(batch, cap, dtype)?;
         if let Some(bits) = turboquant_bits {
             enable_turboquant_kv_caches(&mut cache, bits)?;
-        } else if let Some(config) = &self.paged_prefix_cache {
+        } else if let Some(config) = self
+            .paged_prefix_cache
+            .as_ref()
+            .filter(|_| !model.prefix_cache_keeps_dense_kv())
+        {
             enable_paged_kv_caches(&mut cache, config.block_size, config.max_pages)?;
             if self.active_kv_config.enabled {
                 let active_kv_soft_limit = self.budget_state.soft_limit();
@@ -15981,6 +16362,8 @@ impl<M: Model> Scheduler<M> {
         };
         let paged_prefix_cache_config = self.paged_prefix_cache.clone();
         let prefix_lru_cache = self.prefix_lru_cache.clone();
+        let split_b1_prefill = max_len > 1
+            && (paged_prefix_cache_config.is_some() || !model.prefers_unsplit_b1_prefill());
         let mut immutable_replay_from = vec![0_usize; b];
         let mut prefix_restore_attempted = vec![false; b];
         let immutable_fullpaged_enabled = !any_vl
@@ -16087,6 +16470,12 @@ impl<M: Model> Scheduler<M> {
         // Single-row batches use the single-stream model API so text and VL
         // requests avoid right-pad masks that have no semantic work at B=1.
 
+        // A model that does not split off the last token (see
+        // `prefill_splits_at_split_point`) keeps the whole prompt's last
+        // logits with its entry, so the same text prompt sent again restores
+        // all of it and samples from them.
+        let keeps_whole_prompt_logits = model.prefers_unsplit_b1_prefill();
+        let mut restored_whole_prompt = false;
         let logits_result: anyhow::Result<Array> = (|| -> anyhow::Result<Array> {
             let prefill_cache = self
                 .cache
@@ -16211,7 +16600,7 @@ impl<M: Model> Scheduler<M> {
                                 }
                             },
                         )?
-                    } else if max_len > 1 {
+                    } else if split_b1_prefill {
                         let vision_embeds_full = pv
                             .map(|pv| {
                                 model.compute_vision_embeds(
@@ -16422,22 +16811,46 @@ impl<M: Model> Scheduler<M> {
                         dummy_position_ids.as_ref(),
                         &mut |_| {},
                     )?
-                } else if let Some(start_pos) = try_restore_paged_prefix_for_prompt(
+                } else if let Some(restored) = restore_paged_prefix_for_prompt_row(
                     paged_prefix_cache_config.as_ref(),
                     prefix_lru_cache.as_ref(),
                     prefill_cache,
+                    0,
                     prompt_ids,
                     &PrefixFingerprint::text(),
+                    0,
+                    keeps_whole_prompt_logits,
                 )? {
+                    let start_pos = restored.len;
                     self.runtime_usage
                         .record_prefix_cache_hit_tokens(start_pos as u64);
-                    let split_at = prefix_split_point(
+                    if let Some(logits) = restored.whole_prompt_logits {
+                        restored_whole_prompt = true;
+                        return Ok(logits);
+                    }
+                    let save_split = is_turn_boundary(
+                        paged_prefix_cache_config.as_ref(),
+                        prompt_ids,
+                        prefix_split_point(
+                            paged_prefix_cache_config.as_ref(),
+                            prompt_ids,
+                            start_pos as usize,
+                        ),
+                    );
+                    let split_at = if prefill_splits_at_split_point(
+                        model.prefers_unsplit_b1_prefill(),
                         paged_prefix_cache_config.as_ref(),
                         prompt_ids,
                         start_pos as usize,
-                    );
-                    let save_split =
-                        is_turn_boundary(paged_prefix_cache_config.as_ref(), prompt_ids, split_at);
+                    ) {
+                        prefix_split_point(
+                            paged_prefix_cache_config.as_ref(),
+                            prompt_ids,
+                            start_pos as usize,
+                        )
+                    } else {
+                        start_pos as usize
+                    };
                     forward_single_text_suffix(
                         model,
                         prefill_cache,
@@ -16459,7 +16872,15 @@ impl<M: Model> Scheduler<M> {
                             }
                         },
                     )?
-                } else if max_len > 1 {
+                } else if split_b1_prefill
+                    && (!model.prefers_unsplit_b1_prefill()
+                        || prefill_splits_at_split_point(
+                            true,
+                            paged_prefix_cache_config.as_ref(),
+                            prompt_ids,
+                            0,
+                        ))
+                {
                     let prefix_len =
                         prefix_split_point(paged_prefix_cache_config.as_ref(), prompt_ids, 0)
                             as i32;
@@ -16599,15 +17020,31 @@ impl<M: Model> Scheduler<M> {
                 (state.prompt_ids.clone(), prefix_fingerprint)
             };
             if let Some(cache) = self.cache.as_deref_mut().filter(|_| {
-                !whole_prompt_save_is_redundant(paged_prefix_cache_config.as_ref(), &prompt_ids)
+                !restored_whole_prompt
+                    && !whole_prompt_save_is_redundant(
+                        paged_prefix_cache_config.as_ref(),
+                        &prompt_ids,
+                    )
             }) {
-                match try_save_paged_prefix_for_prompt(
-                    paged_prefix_cache_config.as_ref(),
-                    prefix_lru_cache.as_ref(),
-                    cache,
-                    &prompt_ids,
-                    &prefix_fingerprint,
-                ) {
+                let saved = if keeps_whole_prompt_logits && !prefix_fingerprint.is_vl() {
+                    try_save_whole_prompt_with_logits(
+                        paged_prefix_cache_config.as_ref(),
+                        prefix_lru_cache.as_ref(),
+                        cache,
+                        &prompt_ids,
+                        &prefix_fingerprint,
+                        &logits,
+                    )
+                } else {
+                    try_save_paged_prefix_for_prompt(
+                        paged_prefix_cache_config.as_ref(),
+                        prefix_lru_cache.as_ref(),
+                        cache,
+                        &prompt_ids,
+                        &prefix_fingerprint,
+                    )
+                };
+                match saved {
                     Ok(Some(key)) => {
                         tracing::debug!("paged SSD prefix cache saved: key={key}");
                     }
@@ -17572,17 +18009,25 @@ impl<M: Model> Scheduler<M> {
         } else {
             self.make_model_cache_for_rows(model, &[row_idx], cap_for_temp, dtype, turboquant_bits)?
         };
+        let keeps_whole_prompt_logits = model.prefers_unsplit_b1_prefill() && !is_vl;
+        let mut whole_prompt_logits = None;
         let prefix_restored_start = if let Some(restored) = immutable_restored_start {
             restored
         } else {
-            try_restore_paged_prefix_for_prompt(
+            restore_paged_prefix_for_prompt_row(
                 self.paged_prefix_cache.as_ref(),
                 self.prefix_lru_cache.as_ref(),
                 &mut temp_cache,
+                0,
                 &prompt_ids,
                 &prefix_fingerprint,
+                0,
+                keeps_whole_prompt_logits,
             )?
-            .unwrap_or(0)
+            .map_or(0, |restored| {
+                whole_prompt_logits = restored.whole_prompt_logits;
+                restored.len
+            })
         };
         self.runtime_usage
             .record_prefix_cache_hit_tokens(prefix_restored_start as u64);
@@ -17677,7 +18122,9 @@ impl<M: Model> Scheduler<M> {
             vision_reservation,
             cold_materialization_guard,
             image_pad_consumed,
-            last_logits: None,
+            restored_whole_prompt: whole_prompt_logits.is_some(),
+            keeps_whole_prompt_logits,
+            last_logits: whole_prompt_logits,
         })
     }
 
@@ -17797,13 +18244,19 @@ impl<M: Model> Scheduler<M> {
         M: DenseVlMethods,
     {
         self.ensure_not_poisoned()?;
+        if handle.restored_whole_prompt {
+            return Ok(true);
+        }
 
         let requested_tokens = handle
             .chunk_size
             .min(handle.prompt_len.saturating_sub(handle.chunk_start))
             .max(1) as usize;
-        let mut prefill_plan =
-            self.plan_prefill_chunk(requested_tokens, handle.chunk_start as usize, 1)?;
+        let mut prefill_plan = self.plan_prefill_chunk_for(
+            handle.request_id,
+            requested_tokens,
+            handle.chunk_start as usize,
+        )?;
         let selected_tokens = prefill_plan
             .as_ref()
             .map_or(requested_tokens, |plan| plan.selected_tokens);
@@ -17827,8 +18280,11 @@ impl<M: Model> Scheduler<M> {
             // Re-reserve the true peak; never silently exceed the governor's
             // selected size.
             drop(prefill_plan.take());
-            prefill_plan =
-                self.plan_prefill_chunk(actual_tokens, handle.chunk_start as usize, 1)?;
+            prefill_plan = self.plan_prefill_chunk_for(
+                handle.request_id,
+                actual_tokens,
+                handle.chunk_start as usize,
+            )?;
             if prefill_plan
                 .as_ref()
                 .is_some_and(|plan| plan.selected_tokens < actual_tokens)
@@ -17840,7 +18296,12 @@ impl<M: Model> Scheduler<M> {
                 }));
             }
         }
-        if self.paged_prefix_cache.is_some() {
+        if prefill_splits_at_split_point(
+            model.prefers_unsplit_b1_prefill(),
+            self.paged_prefix_cache.as_ref(),
+            &handle.prompt_ids,
+            handle.chunk_start as usize,
+        ) {
             let split = prefix_split_point(
                 self.paged_prefix_cache.as_ref(),
                 &handle.prompt_ids,
@@ -17997,12 +18458,24 @@ impl<M: Model> Scheduler<M> {
             mlx::transforms::eval(&[&logits])?;
             handle.last_logits = Some(logits);
         } else {
-            match try_save_paged_prefix_for_prompt(
+            let split = prefix_split_point(
+                self.paged_prefix_cache.as_ref(),
+                &handle.prompt_ids,
+                handle.chunk_start as usize,
+            );
+            let to_disk = prefill_checkpoint_goes_to_disk(
+                &handle.temp_cache,
+                handle.chunk_start as usize,
+                chunk_end as usize,
+                chunk_end as usize == split,
+            );
+            match try_save_prefill_checkpoint(
                 self.paged_prefix_cache.as_ref(),
                 self.prefix_lru_cache.as_ref(),
                 &mut handle.temp_cache,
                 &handle.prompt_ids[..chunk_end as usize],
                 &handle.prefix_fingerprint,
+                to_disk,
             ) {
                 Ok(Some(key)) => {
                     tracing::debug!(
@@ -18047,6 +18520,8 @@ impl<M: Model> Scheduler<M> {
             prefix_fingerprint,
             last_logits,
             prompt_ids,
+            restored_whole_prompt,
+            keeps_whole_prompt_logits,
             ..
         } = handle;
 
@@ -18081,14 +18556,28 @@ impl<M: Model> Scheduler<M> {
                 }
             }
         } else {
-            if !whole_prompt_save_is_redundant(self.paged_prefix_cache.as_ref(), &prompt_ids) {
-                match try_save_paged_prefix_for_prompt(
-                    self.paged_prefix_cache.as_ref(),
-                    self.prefix_lru_cache.as_ref(),
-                    &mut temp_cache,
-                    &prompt_ids,
-                    &prefix_fingerprint,
-                ) {
+            if !restored_whole_prompt
+                && !whole_prompt_save_is_redundant(self.paged_prefix_cache.as_ref(), &prompt_ids)
+            {
+                let saved = if keeps_whole_prompt_logits {
+                    try_save_whole_prompt_with_logits(
+                        self.paged_prefix_cache.as_ref(),
+                        self.prefix_lru_cache.as_ref(),
+                        &mut temp_cache,
+                        &prompt_ids,
+                        &prefix_fingerprint,
+                        &logits,
+                    )
+                } else {
+                    try_save_paged_prefix_for_prompt(
+                        self.paged_prefix_cache.as_ref(),
+                        self.prefix_lru_cache.as_ref(),
+                        &mut temp_cache,
+                        &prompt_ids,
+                        &prefix_fingerprint,
+                    )
+                };
+                match saved {
                     Ok(Some(key)) => {
                         tracing::debug!("paged SSD prefix cache saved during mid-admit: key={key}");
                     }
@@ -18460,8 +18949,11 @@ impl<M: Model> Scheduler<M> {
             .chunk_size
             .min(handle.prompt_len.saturating_sub(handle.chunk_start))
             .max(1) as usize;
-        let mut prefill_plan =
-            self.plan_prefill_chunk(requested_tokens, handle.chunk_start as usize, 1)?;
+        let mut prefill_plan = self.plan_prefill_chunk_for(
+            handle.request_id,
+            requested_tokens,
+            handle.chunk_start as usize,
+        )?;
         let selected_tokens = prefill_plan
             .as_ref()
             .map_or(requested_tokens, |plan| plan.selected_tokens);
@@ -18482,8 +18974,11 @@ impl<M: Model> Scheduler<M> {
         let actual_tokens = (chunk_end - handle.chunk_start).max(0) as usize;
         if actual_tokens > selected_tokens {
             drop(prefill_plan.take());
-            prefill_plan =
-                self.plan_prefill_chunk(actual_tokens, handle.chunk_start as usize, 1)?;
+            prefill_plan = self.plan_prefill_chunk_for(
+                handle.request_id,
+                actual_tokens,
+                handle.chunk_start as usize,
+            )?;
             if prefill_plan
                 .as_ref()
                 .is_some_and(|plan| plan.selected_tokens < actual_tokens)
@@ -19108,8 +19603,11 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
             .chunk_size
             .min(handle.prompt_len.saturating_sub(handle.chunk_start))
             .max(1) as usize;
-        let mut prefill_plan =
-            self.plan_prefill_chunk(requested_tokens, handle.chunk_start as usize, 1)?;
+        let mut prefill_plan = self.plan_prefill_chunk_for(
+            handle.request_id,
+            requested_tokens,
+            handle.chunk_start as usize,
+        )?;
         let selected_tokens = prefill_plan
             .as_ref()
             .map_or(requested_tokens, |plan| plan.selected_tokens);
@@ -19130,8 +19628,11 @@ impl Scheduler<ironmlx_lm::models::Gemma4Model> {
         let actual_tokens = (chunk_end - handle.chunk_start).max(0) as usize;
         if actual_tokens > selected_tokens {
             drop(prefill_plan.take());
-            prefill_plan =
-                self.plan_prefill_chunk(actual_tokens, handle.chunk_start as usize, 1)?;
+            prefill_plan = self.plan_prefill_chunk_for(
+                handle.request_id,
+                actual_tokens,
+                handle.chunk_start as usize,
+            )?;
             if prefill_plan
                 .as_ref()
                 .is_some_and(|plan| plan.selected_tokens < actual_tokens)
@@ -22501,6 +23002,7 @@ mod tests {
                 mtp_layers: vec![],
                 mtp_last_hidden: None,
                 gemma4_drafter_last_hidden: None,
+                last_logits: None,
             };
             let spec = PagedPrefixKeySpec {
                 entry_kind: PrefixEntryKind::WholePrefix,

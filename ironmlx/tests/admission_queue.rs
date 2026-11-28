@@ -101,6 +101,7 @@ async fn iron_bench_c8_with_queue_no_4xx() {
     // respect the 127.0.0.1 exception, causing 502 Bad Gateway from the proxy
     // instead of the axum server.
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(60))
         .no_proxy()
         .build()

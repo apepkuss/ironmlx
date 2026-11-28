@@ -89,6 +89,7 @@ impl Server {
             url: format!("http://127.0.0.1:{port}"),
             client: reqwest::Client::builder()
                 .no_proxy()
+                .no_proxy()
                 .timeout(Duration::from_secs(120))
                 .build()
                 .unwrap(),

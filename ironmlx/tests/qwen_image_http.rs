@@ -90,6 +90,7 @@ impl Server {
             child,
             client: reqwest::Client::builder()
                 .no_proxy()
+                .no_proxy()
                 .timeout(Duration::from_secs(900))
                 .build()
                 .expect("HTTP client"),

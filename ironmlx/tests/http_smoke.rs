@@ -97,6 +97,7 @@ async fn p4_http_smoke() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(120))
         // Bypass any system proxy so we hit our local server directly.
         .no_proxy()

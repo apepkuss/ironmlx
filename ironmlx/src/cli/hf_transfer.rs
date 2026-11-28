@@ -461,6 +461,15 @@ fn validate_repository_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 /// HTTP client that follows redirects itself: every chain is bounded, Range
 /// headers reach the final location, and the token is sent only to the origin
 /// of the configured endpoint (never to a CDN or another host).
@@ -481,11 +490,17 @@ struct RedirectedResponse {
 impl RedirectingClient {
     fn new(url: &str, token: Option<String>) -> Result<Self> {
         let origin = Url::parse(url).context("parsing Hugging Face file URL")?;
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .user_agent(concat!("ironmlx/", env!("CARGO_PKG_VERSION")))
             .redirect(Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
-            .read_timeout(READ_TIMEOUT)
+            .read_timeout(READ_TIMEOUT);
+        // The macOS system proxy is applied without its exception list, so a
+        // mirror on this machine would otherwise be sent to the proxy.
+        if is_loopback(&origin) {
+            builder = builder.no_proxy();
+        }
+        let client = builder
             .build()
             .context("creating Hugging Face transfer client")?;
         Ok(Self {

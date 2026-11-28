@@ -539,17 +539,36 @@ pub fn engine_model_capabilities(
         .with_context(|| format!("reading model capabilities {}", config_path.display()))?;
     let config: serde_json::Value = serde_json::from_slice(&config_data)
         .with_context(|| format!("parsing model capabilities {}", config_path.display()))?;
-    let has_vision_config = config
-        .get("vision_config")
-        .and_then(serde_json::Value::as_object)
+    Ok(engine_model_capabilities_from_config(
+        architecture,
+        model_dir,
+        &config,
+    ))
+}
+
+fn engine_model_capabilities_from_config(
+    architecture: ModelArchitecture,
+    model_dir: &Path,
+    config: &serde_json::Value,
+) -> EngineModelCapabilities {
+    let has_vision_config = config["vision_config"]
+        .as_object()
         .is_some_and(|vision| !vision.is_empty());
-    Ok(EngineModelCapabilities::for_architecture(
+    let mut caps = EngineModelCapabilities::for_architecture(
         architecture,
         matches!(
             architecture,
             ModelArchitecture::DiffusionGemma | ModelArchitecture::MiniCpmV46
         ) || has_vision_config,
-    ))
+    );
+    if architecture == ModelArchitecture::Inkling2
+        && config["mtp_config"]["markov_head_type"].as_str() == Some("rnn_hidden")
+        && model_dir.join("mtp.safetensors").is_file()
+    {
+        caps.supports_mtp = true;
+        caps.supports_speculative_decoding = true;
+    }
+    caps
 }
 
 pub fn read_generation_sampling_defaults(model_dir: &Path) -> Result<SamplingDefaults> {
@@ -561,8 +580,15 @@ pub fn read_generation_sampling_defaults(model_dir: &Path) -> Result<SamplingDef
         .with_context(|| format!("reading generation config {}", path.display()))?;
     let json: serde_json::Value = serde_json::from_slice(&data)
         .with_context(|| format!("parsing generation config {}", path.display()))?;
+    // `do_sample: false` means greedy decoding whatever temperature the file
+    // also carries.
+    let greedy = json.get("do_sample") == Some(&serde_json::Value::Bool(false));
     Ok(SamplingDefaults {
-        temperature: json_number_as_f32(json.get("temperature")),
+        temperature: if greedy {
+            Some(0.0)
+        } else {
+            json_number_as_f32(json.get("temperature"))
+        },
         top_p: json_number_as_f32(json.get("top_p")),
         top_k: json_number_as_i32(json.get("top_k")),
         repetition_penalty: json_number_as_f32(json.get("repetition_penalty")),
@@ -1140,18 +1166,7 @@ pub fn build_engine_model_config_for_pool(
     let architecture = ironmlx_lm::models::ModelArchitecture::from_model_type(&model_type)?;
     let config_data = std::fs::read(model.path.join("config.json"))?;
     let config: serde_json::Value = serde_json::from_slice(&config_data)?;
-    let supports_vision = matches!(
-        architecture,
-        ironmlx_lm::models::ModelArchitecture::DiffusionGemma
-            | ironmlx_lm::models::ModelArchitecture::MiniCpmV46
-    ) || config
-        .get("vision_config")
-        .and_then(serde_json::Value::as_object)
-        .is_some_and(|vision| !vision.is_empty());
-    let capabilities = crate::core::engine_pool::EngineModelCapabilities::for_architecture(
-        architecture,
-        supports_vision,
-    );
+    let capabilities = engine_model_capabilities_from_config(architecture, &model.path, &config);
     if architecture == ironmlx_lm::models::ModelArchitecture::DiffusionGemma {
         if mtp.is_some() {
             bail!(
@@ -1208,6 +1223,7 @@ pub fn build_engine_model_config_for_pool(
             resolved.scheduler_config.b_max
         );
     }
+    let sampling_defaults = read_generation_sampling_defaults(&model.path)?;
     Ok(crate::core::engine_pool::EngineModelConfig {
         audio: None,
         decision: None,
@@ -1220,7 +1236,9 @@ pub fn build_engine_model_config_for_pool(
         scheduler_runtime_profile: Some(resolved.scheduler_runtime_profile),
         mtp,
         prompt_lookup,
-        sampling_defaults: crate::core::runtime_config::SamplingDefaults::default(),
+        // Like a model the App loads: requests that leave sampling out follow
+        // the checkpoint's generation_config.json.
+        sampling_defaults,
         default_max_output_tokens: None,
         capabilities,
     })

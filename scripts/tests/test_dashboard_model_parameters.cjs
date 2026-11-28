@@ -304,3 +304,26 @@ test('the parameter dialog closes only from its own controls and keeps unsaved e
     assert.ok(dictionary.params_unsaved_changes, `${language} explains the unsaved changes`);
   }
 });
+
+test('sampling values equal to the model defaults are not saved as overrides', () => {
+  const page = dashboard();
+  const fields = {
+    'modal-temperature': { value: '0', dataset: { modelDefault: '0' } },
+    'modal-top-p': { value: '0.90', dataset: { modelDefault: '0.9' } },
+    'modal-top-k': { value: '40', dataset: { modelDefault: '20' } },
+    'modal-repeat-penalty': { value: '1.1', dataset: { modelDefault: '' } },
+  };
+  const fallback = page.context.document.getElementById;
+  page.context.document.getElementById = id => fields[id] || fallback(id);
+  vm.runInContext('saveModelParams()', page.context);
+  assert.equal(page.payload.temperature, '', 'greedy without a generation config follows the model');
+  assert.equal(page.payload.top_p, '', 'equal values compare as numbers');
+  assert.equal(page.payload.top_k, '40');
+  assert.equal(page.payload.repeat_penalty, '1.1');
+});
+
+test('the temperature field shows greedy when the checkpoint names no temperature', () => {
+  const open = extract('openParamsModal', 'renderParamsSchedulerProfile');
+  assert.match(open, /\['modal-temperature', saved\.temperature, generationDefaults\.temperature \?\? 0\]/);
+  assert.match(html, /<input type="text" placeholder="0" id="modal-temperature">/);
+});

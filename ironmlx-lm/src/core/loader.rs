@@ -527,7 +527,7 @@ impl Loader {
 
         let optiq_metadata = load_optiq_metadata(model_dir)?;
         let quant = parse_quant_meta_with_optiq(&config_raw, optiq_metadata.as_ref())?;
-        let quant_overrides = match quant {
+        let mut quant_overrides = match quant {
             Some(global) => {
                 parse_quant_overrides_with_optiq(&config_raw, global, optiq_metadata.as_ref())?
             }
@@ -564,6 +564,18 @@ impl Loader {
                     .collect();
             }
             SanitizeMode::Text { keep_vision_tower } => {
+                if matches!(
+                    config_raw["model_type"].as_str(),
+                    Some("inkling2" | "inkling2_loop")
+                ) {
+                    let config = crate::models::inkling2::Inkling2Config::from_value(&config_raw)?;
+                    crate::models::inkling2::oq::normalize(
+                        &mut tensors,
+                        &mut quant_overrides,
+                        &config,
+                        keep_vision_tower,
+                    )?;
+                }
                 Self::sanitize(&mut tensors, &config_raw, keep_vision_tower)?;
             }
             SanitizeMode::Mtp => Self::sanitize_mtp(&mut tensors, &config_raw)?,
@@ -574,7 +586,28 @@ impl Loader {
             // Text sanitizing never rewrites encoder tensors.
             SanitizeMode::VisionOnly => tensors.retain(|key, _| is_vision_tensor_key(key)),
         }
-        validate_quantized_storage_manifest(&tensors, quant, &quant_overrides)?;
+        if matches!(
+            config_raw
+                .get("model_type")
+                .and_then(serde_json::Value::as_str),
+            Some("inkling2" | "inkling2_loop")
+        ) && !matches!(sanitize_mode, SanitizeMode::VisionOnly)
+        {
+            let weights = WeightMap::new(tensors.clone(), quant, quant_overrides.clone());
+            let experts = crate::models::inkling2::validate_experts(&weights, &config_raw)?;
+            let ordinary = tensors
+                .iter()
+                .filter(|(key, _)| {
+                    !key.strip_suffix(".scales")
+                        .or_else(|| key.strip_suffix(".biases"))
+                        .is_some_and(|prefix| experts.contains(prefix))
+                })
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            validate_quantized_storage_manifest(&ordinary, quant, &quant_overrides)?;
+        } else {
+            validate_quantized_storage_manifest(&tensors, quant, &quant_overrides)?;
+        }
         observer.check_cancelled()?;
 
         // Eagerly evaluate all tensors on the loading thread so that no lazy
@@ -711,6 +744,16 @@ impl Loader {
         config_raw: &serde_json::Value,
         keep_vision_tower: bool,
     ) -> Result<()> {
+        if matches!(
+            config_raw
+                .get("model_type")
+                .and_then(serde_json::Value::as_str),
+            Some("inkling2" | "inkling2_loop")
+        ) {
+            crate::models::inkling2::Inkling2Config::from_value(config_raw)?;
+            weights.retain(|key, _| keep_vision_tower || !key.starts_with("model.vision_tower."));
+            return Ok(());
+        }
         let is_qwen35 = is_qwen35_offset_gamma_model(config_raw);
 
         // 0. Drop non-text tower/embedder keys unless caller explicitly
@@ -1015,6 +1058,7 @@ fn tensor_component_storage_bytes(tensors: &HashMap<String, Array>) -> LoadedTen
 fn is_vision_tensor_key(key: &str) -> bool {
     const VISION_PREFIXES: &[&str] = &[
         "vision_tower.",
+        "model.vision_tower.",
         "vision_embedder.",
         "embed_vision.",
         "model.encoder.vision_tower.",
@@ -1136,6 +1180,25 @@ fn parse_quant_overrides_with_optiq(
         if value.as_object().is_none()
             || (value.get("bits").is_none() && value.get("group_size").is_none())
         {
+            continue;
+        }
+        // Inkling validates its mixed routed-expert storage from tensor shapes,
+        // including the FP32 per-expert scale, outside the generic quantizer.
+        if matches!(
+            config_raw["model_type"].as_str(),
+            Some("inkling2" | "inkling2_loop")
+        ) && key
+            .strip_prefix("model.layers.")
+            .and_then(|path| path.split_once('.'))
+            .is_some_and(|(layer, name)| {
+                layer.parse::<usize>().is_ok()
+                    && matches!(name, "mlp.experts.w13" | "mlp.experts.w2")
+            })
+            && value.get("mode").and_then(serde_json::Value::as_str) == Some("nvfp4")
+        {
+            if value["bits"].as_u64() != Some(4) || value["group_size"].as_u64() != Some(16) {
+                return Err(anyhow!("invalid NVFP4 expert metadata for {key}"));
+            }
             continue;
         }
         let prefix = normalize_quant_prefix(key);

@@ -503,6 +503,7 @@ fn vl_body(image_path: &Path) -> serde_json::Value {
 
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(300))
         .no_proxy()
         .build()
@@ -511,6 +512,7 @@ fn client() -> reqwest::Client {
 
 fn long_context_client() -> reqwest::Client {
     reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(1_200))
         .no_proxy()
         .build()

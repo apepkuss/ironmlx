@@ -39,12 +39,24 @@ pub struct KVCache {
     dtype: Dtype,
     turboquant: Option<Box<TurboQuantKVCache>>,
     paged: Option<Box<PagedKVCache>>,
+    /// 8-bit affine storage of the whole history (one row, no window).
+    int8: Option<Box<super::int8_kv::Int8KvStorage>>,
     /// Per row (length == batch): the shared prefix segments this row's K/V
     /// at positions `[0, covered_len)` came from. `None` means unknown.
     /// Every path that changes a row's K/V below the recorded length must
     /// cut or clear the record; a stale record would let a later save
     /// reference K/V that differs from the row's.
     prefix_lineage: Vec<Option<PrefixLineage>>,
+    /// How many positions a query attends back over, itself included; 0
+    /// keeps the whole history. When set, dense storage holds only a
+    /// trailing run of each row, in order, and `bases` says where it starts.
+    window: i32,
+    /// Extra positions kept behind the window so that appends made one at a
+    /// time can still be rolled back together.
+    rollback: i32,
+    /// Per row (length == batch): the absolute position held at physical
+    /// index 0. Offsets stay absolute. All zero unless `window > 0`.
+    bases: Vec<i32>,
 }
 
 /// Checkpoint for [`KVCache`] rollback.
@@ -55,6 +67,7 @@ pub struct KVCache {
 #[derive(Debug, Clone)]
 pub struct KVCacheSnapshot {
     offsets: Vec<i32>,
+    bases: Vec<i32>,
     dense_keys: Option<Array>,
     dense_values: Option<Array>,
     restores_dense_storage: bool,
@@ -76,7 +89,11 @@ impl KVCache {
     /// barriers by `IRONMLX_DIAGNOSTIC_DFLASH2_WINDOW_STAGES`.
     #[doc(hidden)]
     pub fn diagnostic_buffers(&self) -> Vec<&Array> {
-        self.keys.iter().chain(self.values.iter()).collect()
+        let mut out: Vec<&Array> = self.keys.iter().chain(self.values.iter()).collect();
+        if let Some(int8) = &self.int8 {
+            out.extend(int8.arrays());
+        }
+        out
     }
 
     /// Construct a fresh cache. Keys/values are allocated lazily on first
@@ -105,8 +122,67 @@ impl KVCache {
             dtype,
             turboquant: None,
             paged: None,
+            int8: None,
             prefix_lineage: vec![None; batch as usize],
+            window: 0,
+            rollback: 0,
+            bases: vec![0; batch as usize],
         }
+    }
+
+    /// Keep only the keys a sliding-window layer can still attend to: the
+    /// `window - 1` positions before each row's write position, plus what
+    /// is being written. Offsets stay absolute; [`Self::bases`] gives the
+    /// position of the first key that `update_and_fetch` returns. Older
+    /// keys are dropped as the row grows, so a rollback may go back at most
+    /// `rollback` positions before the start of the latest append;
+    /// [`Self::restore_offsets`] refuses anything further.
+    ///
+    /// Dense storage only: enabling paged or TurboQuant storage turns it off.
+    pub fn with_window(mut self, window: i32, rollback: i32) -> Self {
+        assert!(window >= 0, "KVCache window must be >= 0 (got {window})");
+        assert!(
+            rollback >= 0,
+            "KVCache rollback must be >= 0 (got {rollback})"
+        );
+        assert!(
+            self.turboquant.is_none() && self.paged.is_none(),
+            "KVCache window requires dense storage"
+        );
+        self.window = window;
+        self.rollback = if window > 0 { rollback } else { 0 };
+        self
+    }
+
+    /// The window set by [`Self::with_window`]; 0 keeps the whole history.
+    pub fn window(&self) -> i32 {
+        self.window
+    }
+
+    /// Per row: the absolute position of the first key held. A row's keys
+    /// cover `[bases[row], offsets[row])`.
+    pub fn bases(&self) -> &[i32] {
+        &self.bases
+    }
+
+    /// Keep the whole history from now on. Fails once a row has dropped keys.
+    pub fn keep_full_history(&mut self) -> Result<()> {
+        if self.bases.iter().any(|&base| base > 0) {
+            anyhow::bail!("KVCache::keep_full_history: a row has already dropped keys");
+        }
+        self.window = 0;
+        self.rollback = 0;
+        Ok(())
+    }
+
+    /// Positions a windowed row keeps before its write position.
+    fn kept_before_write(&self) -> i32 {
+        self.window - 1 + self.rollback
+    }
+
+    /// Per row: keys held, which is also where the next write lands.
+    fn held(&self, row: usize) -> i32 {
+        self.offsets[row] - self.bases[row]
     }
 
     /// Row `row`'s prefix segment record, if known.
@@ -221,6 +297,7 @@ impl KVCache {
     }
 
     pub fn enable_turboquant(&mut self, bits: TurboQuantKVBits) -> Result<()> {
+        self.keep_full_history()?;
         if self.paged.is_some() {
             anyhow::bail!("KVCache::enable_turboquant: paged KV cache is already enabled");
         }
@@ -276,6 +353,7 @@ impl KVCache {
     }
 
     pub fn enable_paged(&mut self, block_size: i32, max_pages: i32) -> Result<()> {
+        self.keep_full_history()?;
         if self.turboquant.is_some() {
             anyhow::bail!("KVCache::enable_paged: TurboQuant KV cache is already enabled");
         }
@@ -334,7 +412,35 @@ impl KVCache {
         self.turboquant.as_deref()
     }
 
+    /// Store this cache's K/V as 8-bit affine groups of 64 along the head
+    /// dimension ([`super::int8_kv`]). One row holding its whole history,
+    /// before anything is written; returns whether it took effect.
+    pub fn enable_int8(&mut self) -> bool {
+        let eligible = self.batch == 1
+            && self.window == 0
+            && self.turboquant.is_none()
+            && self.paged.is_none()
+            && self.keys.is_none()
+            && self.values.is_none()
+            && super::int8_kv::Int8KvStorage::supports(self.head_dim, self.v_head_dim);
+        if eligible && self.int8.is_none() {
+            self.int8 = Some(Box::new(super::int8_kv::Int8KvStorage::new(
+                self.n_kv_heads,
+                self.head_dim,
+                self.v_head_dim,
+            )));
+        }
+        self.int8.is_some()
+    }
+
+    pub fn int8(&self) -> Option<&super::int8_kv::Int8KvStorage> {
+        self.int8.as_deref()
+    }
+
     pub fn prefix_cache_profile(&self) -> Option<String> {
+        if self.int8.is_some() {
+            return Some("int8-affine-g64".to_owned());
+        }
         self.turboquant.as_ref().map(|tq| tq.bits().cache_profile())
     }
 
@@ -776,6 +882,10 @@ impl KVCache {
         row: usize,
         target: impl Into<StreamOrDevice>,
     ) -> Result<(Array, Array, i32)> {
+        anyhow::ensure!(
+            self.int8.is_none(),
+            "dense K/V access is not available for 8-bit storage"
+        );
         let target = target.into();
         if row >= self.batch as usize {
             anyhow::bail!(
@@ -828,21 +938,174 @@ impl KVCache {
         let values_full = self.values.as_ref().ok_or_else(|| {
             anyhow::anyhow!("KVCache::dense_prefix_layer_for_row_on: values are unallocated")
         })?;
+        // A windowed row exports the keys it still holds: the trailing
+        // `held` positions of the `cached_len` it stands for.
+        let held = self.held(row);
         let k = slice_strided_on(
             keys_full,
             [row as i32, 0, 0, 0],
-            [row as i32 + 1, self.n_kv_heads, cached_len, self.head_dim],
+            [row as i32 + 1, self.n_kv_heads, held, self.head_dim],
             [1_i32, 1, 1, 1],
             target,
         )?;
         let v = slice_strided_on(
             values_full,
             [row as i32, 0, 0, 0],
-            [row as i32 + 1, self.n_kv_heads, cached_len, self.v_head_dim],
+            [row as i32 + 1, self.n_kv_heads, held, self.v_head_dim],
             [1_i32, 1, 1, 1],
             target,
         )?;
         Ok((k, v, cached_len))
+    }
+
+    /// Whether this cache stores plain dense K/V of its whole history: no
+    /// paged or TurboQuant storage and no attention window.
+    pub fn is_plain_dense(&self) -> bool {
+        self.paged.is_none() && self.turboquant.is_none() && self.int8.is_none() && self.window == 0
+    }
+
+    /// Whether this cache stores dense K/V of only what its attention
+    /// window reaches ([`Self::with_window`]).
+    pub fn is_windowed_dense(&self) -> bool {
+        self.paged.is_none() && self.turboquant.is_none() && self.window > 0
+    }
+
+    /// K and V of `row` over `[start, stop)` as `[1, heads, stop - start,
+    /// dim]` arrays that own their buffers. Dense storage only; a windowed
+    /// row must still hold `start`.
+    pub fn owned_dense_range_for_row_on(
+        &self,
+        row: usize,
+        start: i32,
+        stop: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<(Array, Array)> {
+        anyhow::ensure!(
+            self.int8.is_none(),
+            "dense K/V access is not available for 8-bit storage"
+        );
+        let target = target.into();
+        if self.paged.is_some() || self.turboquant.is_some() {
+            anyhow::bail!("KVCache::owned_dense_range_for_row_on: requires dense K/V");
+        }
+        if row >= self.batch as usize {
+            anyhow::bail!(
+                "KVCache::owned_dense_range_for_row_on: row {row} >= batch {}",
+                self.batch
+            );
+        }
+        let (base, cached_len) = (self.bases[row], self.offsets[row]);
+        if start < base || start > stop || stop > cached_len {
+            anyhow::bail!(
+                "KVCache::owned_dense_range_for_row_on: [{start}, {stop}) outside row {row}'s [{base}, {cached_len})"
+            );
+        }
+        if start == stop {
+            return Ok((
+                Array::zeros_on(
+                    (1_i32, self.n_kv_heads, 0_i32, self.head_dim),
+                    self.dtype,
+                    target,
+                )?,
+                Array::zeros_on(
+                    (1_i32, self.n_kv_heads, 0_i32, self.v_head_dim),
+                    self.dtype,
+                    target,
+                )?,
+            ));
+        }
+        let missing = || anyhow::anyhow!("KVCache::owned_dense_range_for_row_on: unallocated");
+        let copy = |full: &Array, dim: i32| -> Result<Array> {
+            let view = slice_strided_on(
+                full,
+                [row as i32, 0, start - base, 0],
+                [row as i32 + 1, self.n_kv_heads, stop - base, dim],
+                [1_i32, 1, 1, 1],
+                target,
+            )?;
+            super::paged_kv::owned_copy_on(&view, target)
+        };
+        Ok((
+            copy(self.keys.as_ref().ok_or_else(missing)?, self.head_dim)?,
+            copy(self.values.as_ref().ok_or_else(missing)?, self.v_head_dim)?,
+        ))
+    }
+
+    /// Whether this cache saves and restores prefixes in the packed
+    /// four-tensor form: TurboQuant codes and norms, or 8-bit affine words
+    /// with scales and biases.
+    pub fn has_packed_prefix(&self) -> bool {
+        self.turboquant.is_some() || self.int8.is_some()
+    }
+
+    /// Tensor specs of a packed prefix of `cached_len` positions, in the
+    /// order of [`TurboQuantPrefixLayer`]'s fields. `None` when
+    /// [`Self::has_packed_prefix`] is false.
+    pub fn packed_prefix_tensor_specs(
+        &self,
+        cached_len: i32,
+    ) -> Option<Vec<super::prefix_payload::PrefixTensorSpec>> {
+        use super::prefix_payload::PrefixTensorSpec;
+        let heads = self.n_kv_heads;
+        if let Some(int8) = &self.int8 {
+            let [kw, ksb, vw, vsb] = int8.packed_prefix_dims();
+            return Some(
+                [
+                    (kw, Dtype::Uint32),
+                    (ksb, Dtype::Bfloat16),
+                    (vw, Dtype::Uint32),
+                    (vsb, Dtype::Bfloat16),
+                ]
+                .into_iter()
+                .map(|(dim, dtype)| PrefixTensorSpec {
+                    dtype,
+                    shape: vec![1, heads, cached_len, dim],
+                })
+                .collect(),
+            );
+        }
+        let tq = self.turboquant.as_ref()?;
+        Some(vec![
+            PrefixTensorSpec {
+                dtype: Dtype::Uint32,
+                shape: vec![1, heads, cached_len, tq.packed_head_dim()],
+            },
+            PrefixTensorSpec {
+                dtype: Dtype::Float32,
+                shape: vec![1, heads, cached_len],
+            },
+            PrefixTensorSpec {
+                dtype: Dtype::Uint32,
+                shape: vec![1, heads, cached_len, tq.packed_v_head_dim()],
+            },
+            PrefixTensorSpec {
+                dtype: Dtype::Float32,
+                shape: vec![1, heads, cached_len],
+            },
+        ])
+    }
+
+    /// `[start, stop)` of `row` in the packed prefix form, owning its
+    /// buffers.
+    pub fn owned_packed_range_for_row_on(
+        &self,
+        row: usize,
+        start: i32,
+        stop: i32,
+        target: impl Into<StreamOrDevice>,
+    ) -> Result<TurboQuantPrefixLayer> {
+        let target = target.into();
+        if let Some(int8) = &self.int8 {
+            anyhow::ensure!(
+                row == 0,
+                "KVCache::owned_packed_range_for_row_on: 8-bit storage holds one row"
+            );
+            return int8.owned_packed_range_on(self.offsets[0], start, stop, target);
+        }
+        let tq = self.turboquant.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("KVCache::owned_packed_range_for_row_on: no packed storage")
+        })?;
+        tq.owned_packed_range_for_row_on(&self.offsets, row, start, stop, target)
     }
 
     pub fn turboquant_prefix_layer_for_row_on(
@@ -850,6 +1113,14 @@ impl KVCache {
         row: usize,
         target: impl Into<StreamOrDevice>,
     ) -> Result<(TurboQuantPrefixLayer, i32)> {
+        if let Some(int8) = &self.int8 {
+            anyhow::ensure!(
+                row == 0,
+                "KVCache::turboquant_prefix_layer_for_row_on: 8-bit storage holds one row"
+            );
+            let len = self.offsets[0];
+            return Ok((int8.packed_prefix_view_on(len, target.into())?, len));
+        }
         let tq = self.turboquant.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "KVCache::turboquant_prefix_layer_for_row_on: TurboQuant is not enabled"
@@ -870,6 +1141,14 @@ impl KVCache {
         cached_len: i32,
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
+        if self.int8.is_some() {
+            return self.restore_turboquant_prefix_layer_parts_for_row_on(
+                std::slice::from_ref(layer),
+                row,
+                cached_len,
+                target,
+            );
+        }
         self.clear_row_prefix_lineage(row);
         let tq = self.turboquant.as_mut().ok_or_else(|| {
             anyhow::anyhow!(
@@ -894,6 +1173,15 @@ impl KVCache {
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
         self.clear_row_prefix_lineage(row);
+        if let Some(int8) = &mut self.int8 {
+            anyhow::ensure!(
+                row == 0 && self.offsets[0] == 0,
+                "KVCache::restore_turboquant_prefix_layer_parts_for_row_on: 8-bit storage restores into its one empty row"
+            );
+            int8.restore_packed_parts_on(parts, cached_len, self.step, self.cap, target.into())?;
+            self.offsets[0] = cached_len;
+            return Ok(());
+        }
         let tq = self.turboquant.as_mut().ok_or_else(|| {
             anyhow::anyhow!(
                 "KVCache::restore_turboquant_prefix_layer_parts_for_row_on: TurboQuant is not enabled"
@@ -915,6 +1203,10 @@ impl KVCache {
         cached_len: i32,
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
+        anyhow::ensure!(
+            self.int8.is_none(),
+            "dense K/V access is not available for 8-bit storage"
+        );
         self.restore_dense_prefix_segments_for_row_on(&[(k, v)], row, cached_len, target)
     }
 
@@ -929,6 +1221,10 @@ impl KVCache {
         cached_len: i32,
         target: impl Into<StreamOrDevice>,
     ) -> Result<()> {
+        anyhow::ensure!(
+            self.int8.is_none(),
+            "dense K/V access is not available for 8-bit storage"
+        );
         let target = target.into();
         self.clear_row_prefix_lineage(row);
         if row >= self.batch as usize {
@@ -988,11 +1284,18 @@ impl KVCache {
             })?;
             segment_lens.push(len);
         }
-        if total_len != cached_len {
+        // A windowed cache also takes a trailing run of the prefix, as a
+        // windowed row exports it, and keeps no more than its window needs.
+        let keep = (self.window > 0 && self.turboquant.is_none()).then(|| self.kept_before_write());
+        let stored_from = cached_len - total_len;
+        let complete =
+            stored_from == 0 || (keep.is_some() && stored_from > 0 && total_len >= self.window - 1);
+        if !complete {
             anyhow::bail!(
                 "KVCache::restore_dense_prefix_segments_for_row_on: segment lengths sum to {total_len}, expected {cached_len}"
             );
         }
+        let new_base = keep.map_or(0, |keep| stored_from.max(cached_len - keep));
         if let Some(tq) = &mut self.turboquant {
             let (k, v) = match segments {
                 [(k, v)] => ((*k).clone(), (*v).clone()),
@@ -1008,26 +1311,62 @@ impl KVCache {
             tq.restore_dense_prefix_for_row_on(&k, &v, &mut self.offsets, row, cached_len, target)?;
             return Ok(());
         }
-        if cached_len > 0 {
+        let held = cached_len - new_base;
+        if held > 0 {
             let current_capacity = self
                 .keys
                 .as_ref()
                 .map(|a| a.shape().as_slice()[2])
                 .unwrap_or(0);
-            if cached_len > current_capacity {
+            if held > current_capacity {
                 let target_capacity =
-                    ((cached_len + self.step - 1) / self.step * self.step).min(self.cap);
+                    ((held + self.step - 1) / self.step * self.step).min(self.cap);
                 self.grow_to(target_capacity, target)?;
             }
             let mut keys_full = self.keys.take().expect("grow_to allocated keys");
             let mut values_full = self.values.take().expect("grow_to allocated values");
-            let mut start = 0_i32;
+            // Absolute position of the next segment's first key.
+            let mut position = stored_from;
             let mut written: Result<()> = Ok(());
             for ((k, v), len) in segments.iter().zip(segment_lens) {
-                if len == 0 {
+                let skip = (new_base - position).clamp(0, len);
+                let start = position + skip - new_base;
+                let stop = position + len - new_base;
+                position += len;
+                if skip == len {
                     continue;
                 }
-                let stop = start + len;
+                let trimmed = (skip > 0)
+                    .then(|| -> Result<(Array, Array)> {
+                        Ok((
+                            slice_strided_on(
+                                k,
+                                [0_i32, 0, skip, 0],
+                                [1_i32, self.n_kv_heads, len, self.head_dim],
+                                [1_i32, 1, 1, 1],
+                                target,
+                            )?,
+                            slice_strided_on(
+                                v,
+                                [0_i32, 0, skip, 0],
+                                [1_i32, self.n_kv_heads, len, self.v_head_dim],
+                                [1_i32, 1, 1, 1],
+                                target,
+                            )?,
+                        ))
+                    })
+                    .transpose();
+                let trimmed = match trimmed {
+                    Ok(trimmed) => trimmed,
+                    Err(error) => {
+                        written = Err(error);
+                        break;
+                    }
+                };
+                let (k, v) = match &trimmed {
+                    Some((k, v)) => (k, v),
+                    None => (*k, *v),
+                };
                 let updated = slice_update_on(
                     &keys_full,
                     k,
@@ -1057,13 +1396,13 @@ impl KVCache {
                         break;
                     }
                 }
-                start = stop;
             }
             self.keys = Some(keys_full);
             self.values = Some(values_full);
             written?;
         }
         self.offsets[row] = cached_len;
+        self.bases[row] = new_base;
         Ok(())
     }
 
@@ -1131,6 +1470,9 @@ impl KVCache {
         for o in &mut self.offsets {
             *o = 0;
         }
+        for base in &mut self.bases {
+            *base = 0;
+        }
         self.clear_prefix_lineage();
         if let Some(tq) = &mut self.turboquant {
             tq.clear();
@@ -1142,9 +1484,11 @@ impl KVCache {
 
     /// Capture the current logical cache position. No K/V buffers are copied.
     pub fn snapshot(&self) -> KVCacheSnapshot {
-        let restores_dense_storage = self.turboquant.is_none() && self.paged.is_none();
+        let restores_dense_storage =
+            self.turboquant.is_none() && self.paged.is_none() && self.int8.is_none();
         KVCacheSnapshot {
             offsets: self.offsets.clone(),
+            bases: self.bases.clone(),
             dense_keys: if restores_dense_storage {
                 self.keys.clone()
             } else {
@@ -1162,13 +1506,16 @@ impl KVCache {
     /// Capture only logical offsets for an append-only transaction.
     ///
     /// Callers may use this checkpoint only when rollback truncates the
-    /// newly appended suffix and never overwrites an existing prefix. Unlike
+    /// newly appended suffix and never overwrites an existing prefix. A
+    /// windowed cache ([`Self::with_window`]) can only go back to positions
+    /// written since the checkpoint's last append. Unlike
     /// [`Self::snapshot`], this deliberately does not retain dense Array
     /// handles, allowing MLX to donate cache buffers during long-context
     /// speculative verification instead of copy-on-write duplicating them.
     pub fn append_snapshot(&self) -> KVCacheSnapshot {
         KVCacheSnapshot {
             offsets: self.offsets.clone(),
+            bases: self.bases.clone(),
             dense_keys: None,
             dense_values: None,
             restores_dense_storage: false,
@@ -1197,8 +1544,12 @@ impl KVCache {
         target: StreamOrDevice,
     ) -> Result<(Array, Array)> {
         anyhow::ensure!(
-            self.batch == 1 && self.turboquant.is_none() && self.paged.is_none(),
-            "flat tree requires dense B1 KV"
+            self.batch == 1
+                && self.turboquant.is_none()
+                && self.paged.is_none()
+                && self.int8.is_none()
+                && self.window == 0,
+            "flat tree requires dense B1 KV holding its whole history"
         );
         anyhow::ensure!(
             !rows.is_empty()
@@ -1251,16 +1602,31 @@ impl KVCache {
     /// snapshot also reverts K/V below that offset, so the records (which may
     /// have been set after the snapshot) are cleared instead.
     pub fn restore(&mut self, snapshot: &KVCacheSnapshot) -> Result<()> {
-        self.restore_offsets(snapshot.offsets())?;
-        if snapshot.restores_dense_storage {
-            anyhow::ensure!(
-                self.turboquant.is_none() && self.paged.is_none(),
-                "KVCache::restore: dense snapshot cannot restore into Paged or TurboQuant storage"
-            );
-            self.clear_prefix_lineage();
-            self.keys = snapshot.dense_keys.clone();
-            self.values = snapshot.dense_values.clone();
+        if !snapshot.restores_dense_storage {
+            return self.restore_offsets(snapshot.offsets());
         }
+        anyhow::ensure!(
+            self.turboquant.is_none() && self.paged.is_none() && self.int8.is_none(),
+            "KVCache::restore: dense snapshot cannot restore into Paged, TurboQuant or 8-bit storage"
+        );
+        anyhow::ensure!(
+            snapshot.bases.len() == self.bases.len(),
+            "KVCache::restore: snapshot has {} rows, cache has {}",
+            snapshot.bases.len(),
+            self.bases.len()
+        );
+        // The snapshot's buffers go with the snapshot's bases; offsets are
+        // checked against that pair.
+        let keys = std::mem::replace(&mut self.keys, snapshot.dense_keys.clone());
+        let values = std::mem::replace(&mut self.values, snapshot.dense_values.clone());
+        let bases = std::mem::replace(&mut self.bases, snapshot.bases.clone());
+        if let Err(error) = self.restore_offsets(snapshot.offsets()) {
+            self.keys = keys;
+            self.values = values;
+            self.bases = bases;
+            return Err(error);
+        }
+        self.clear_prefix_lineage();
         Ok(())
     }
 
@@ -1293,10 +1659,25 @@ impl KVCache {
             }
             return restored;
         }
-        let max_off = offsets.iter().copied().max().unwrap_or(0);
+        // Storage holds each row from its base on. A windowed row that has
+        // dropped keys can only go back to where its window is still whole.
+        let mut max_off = 0_i32;
+        for (i, &off) in offsets.iter().enumerate() {
+            let base = if off == 0 { 0 } else { self.bases[i] };
+            if base > 0 && off - (self.window - 1) < base {
+                anyhow::bail!(
+                    "KVCache::restore_offsets: offsets[{i}] = {off} needs keys before {base}, which the window of {} no longer holds",
+                    self.window,
+                );
+            }
+            max_off = max_off.max(off - base);
+        }
         if max_off > 0 {
             let (key_cap, value_cap) = if let Some(tq) = &self.turboquant {
                 let cap = tq.capacity();
+                (cap, cap)
+            } else if let Some(int8) = &self.int8 {
+                let cap = int8.capacity();
                 (cap, cap)
             } else {
                 let key_cap = self
@@ -1318,6 +1699,11 @@ impl KVCache {
             }
         }
         self.offsets.clone_from_slice(offsets);
+        for (base, &off) in self.bases.iter_mut().zip(offsets) {
+            if off == 0 {
+                *base = 0;
+            }
+        }
         self.truncate_prefix_lineage_to_offsets();
         Ok(())
     }
@@ -1641,6 +2027,29 @@ impl KVCache {
                 target,
             );
         }
+        if let Some(int8) = &mut self.int8 {
+            anyhow::ensure!(
+                per_row_lens.len() == 1,
+                "KVCache::update_and_fetch_on: 8-bit storage holds one row"
+            );
+            let len = per_row_lens[0];
+            anyhow::ensure!(
+                len >= 0 && len <= k.shape_at(2),
+                "KVCache::update_and_fetch_on: per_row_lens[0] = {len} out of range"
+            );
+            let fetched = int8.update_and_fetch_on(
+                k,
+                v,
+                self.offsets[0],
+                len,
+                self.step,
+                self.cap,
+                self.dtype,
+                target,
+            )?;
+            self.offsets[0] += len;
+            return Ok(fetched);
+        }
 
         // Validate per_row_lens. (Spec §4.7 invariants 3-5.)
         if per_row_lens.len() != self.batch as usize {
@@ -1689,15 +2098,15 @@ impl KVCache {
             return Ok((empty_k, empty_v));
         }
 
-        // Compute the post-write max offset across rows (the K dim of the
-        // returned fetched slice).
-        let max_off_after: i32 = self
-            .offsets
-            .iter()
-            .zip(per_row_lens.iter())
-            .map(|(o, n)| o + n)
-            .max()
-            .unwrap_or(0);
+        // Compute the post-write extent across rows (the K dim of the
+        // returned fetched slice), counted from each row's base.
+        let extent_after = |cache: &Self| -> i32 {
+            (0..cache.batch as usize)
+                .map(|row| cache.held(row) + per_row_lens[row])
+                .max()
+                .unwrap_or(0)
+        };
+        let mut max_off_after = extent_after(self);
 
         // Ensure backing buffers reach max_off_after along axis 2.
         let current_capacity = self
@@ -1706,9 +2115,24 @@ impl KVCache {
             .map(|a| a.shape().as_slice()[2])
             .unwrap_or(0);
         if max_off_after > current_capacity {
-            let target_capacity =
-                ((max_off_after + self.step - 1) / self.step * self.step).min(self.cap);
-            self.grow_to(target_capacity, target)?;
+            if self.window > 0 {
+                // Room for the window plus this write, and for at least a
+                // window of single-token writes between two compactions.
+                let widest = per_row_lens.iter().copied().max().unwrap_or(0);
+                let limit = (self.kept_before_write() + widest.max(self.window) + 255) / 256 * 256;
+                let limit = limit.min(self.cap);
+                if max_off_after > limit {
+                    self.drop_keys_before_window(target)?;
+                    max_off_after = extent_after(self);
+                }
+                if max_off_after > current_capacity {
+                    self.grow_to(limit.max(max_off_after), target)?;
+                }
+            } else {
+                let target_capacity =
+                    ((max_off_after + self.step - 1) / self.step * self.step).min(self.cap);
+                self.grow_to(target_capacity, target)?;
+            }
         }
 
         // Strategy A: per-row slice_update_on loop. Each row writes its own
@@ -1721,7 +2145,8 @@ impl KVCache {
             *o += n;
         }
 
-        // Return slices covering [0..max_off_after] along axis 2. Rows with
+        // Return slices covering [0..max_off_after] along axis 2, which for
+        // a windowed cache starts at each row's base. Rows with
         // smaller per-row offsets have stale data at positions
         // [offsets[i]..max_off_after] — the caller is responsible for
         // masking those out (via build_per_row_decode_mask for decode, via
@@ -2186,6 +2611,42 @@ impl KVCache {
         dst_row: usize,
         src_row: usize,
     ) -> Result<()> {
+        if let (None, Some(packed)) = (&self.int8, &src.int8) {
+            // A dense batch adopts a one-row 8-bit cache's history dequantized.
+            let mut dense = KVCache::new(
+                1,
+                src.n_kv_heads,
+                src.head_dim,
+                src.v_head_dim,
+                src.dtype,
+                src.cap,
+            );
+            let len = src.offsets[0];
+            if len > 0 {
+                let (k, v) = packed.dequantized_on(len, src.dtype, StreamOrDevice::default())?;
+                dense.update_and_fetch(&k, &v, &[len])?;
+            }
+            return self.adopt_row_from_inner(&dense, dst_row, 0);
+        }
+        if self.int8.is_some() || src.int8.is_some() {
+            // One-row 8-bit caches hand over their buffers whole.
+            anyhow::ensure!(
+                self.int8.is_some()
+                    && src.int8.is_some()
+                    && self.batch == 1
+                    && src.batch == 1
+                    && dst_row == 0
+                    && src_row == 0
+                    && self.n_kv_heads == src.n_kv_heads
+                    && self.head_dim == src.head_dim
+                    && self.v_head_dim == src.v_head_dim
+                    && src.offsets[0] <= self.cap,
+                "KVCache::adopt_row_from: 8-bit storage adopts only a matching one-row 8-bit cache"
+            );
+            self.int8 = src.int8.clone();
+            self.offsets[0] = src.offsets[0];
+            return Ok(());
+        }
         if self.n_kv_heads != src.n_kv_heads
             || self.head_dim != src.head_dim
             || self.v_head_dim != src.v_head_dim
@@ -2252,16 +2713,30 @@ impl KVCache {
             (None, None) => {}
         }
 
-        if src_off > 0 {
-            // Ensure self.keys / values are allocated up to src_off.
+        // A windowed destination takes only what its window needs; a full
+        // one needs the source's whole history.
+        let src_base = src.bases[src_row];
+        let dst_base = if self.window > 0 {
+            src_base.max(src_off - self.kept_before_write())
+        } else if src_base > 0 {
+            anyhow::bail!(
+                "KVCache::adopt_row_from: src row {src_row} holds keys from {src_base} on, but the destination keeps the whole history"
+            );
+        } else {
+            0
+        };
+        let held = src_off - dst_base;
+        let skip = dst_base - src_base;
+        if held > 0 {
+            // Ensure self.keys / values are allocated up to `held`.
             let current_capacity = self
                 .keys
                 .as_ref()
                 .map(|a| a.shape().as_slice()[2])
                 .unwrap_or(0);
-            if src_off > current_capacity {
+            if held > current_capacity {
                 let target_capacity =
-                    ((src_off + self.step - 1) / self.step * self.step).min(self.cap);
+                    ((held + self.step - 1) / self.step * self.step).min(self.cap);
                 self.grow_to(target_capacity, ().into())?;
             }
 
@@ -2278,35 +2753,40 @@ impl KVCache {
                 )
             })?;
 
-            // Slice src[src_row, :, 0..src_off, :].
+            // Slice src[src_row, :, skip..skip + held, :].
             let k_slice = slice_strided_on(
                 src_keys,
-                [src_row as i32, 0, 0, 0],
-                [src_row as i32 + 1, self.n_kv_heads, src_off, self.head_dim],
+                [src_row as i32, 0, skip, 0],
+                [
+                    src_row as i32 + 1,
+                    self.n_kv_heads,
+                    skip + held,
+                    self.head_dim,
+                ],
                 [1_i32, 1, 1, 1],
                 (),
             )?;
             let v_slice = slice_strided_on(
                 src_values,
-                [src_row as i32, 0, 0, 0],
+                [src_row as i32, 0, skip, 0],
                 [
                     src_row as i32 + 1,
                     self.n_kv_heads,
-                    src_off,
+                    skip + held,
                     self.v_head_dim,
                 ],
                 [1_i32, 1, 1, 1],
                 (),
             )?;
 
-            // Write into self[dst_row, :, 0..src_off, :].
+            // Write into self[dst_row, :, 0..held, :].
             let keys_full = self.keys.as_ref().expect("grow_to allocated keys");
             let values_full = self.values.as_ref().expect("grow_to allocated values");
             let new_keys = slice_update_on(
                 keys_full,
                 &k_slice,
                 [dst_row as i32, 0, 0, 0],
-                [dst_row as i32 + 1, self.n_kv_heads, src_off, self.head_dim],
+                [dst_row as i32 + 1, self.n_kv_heads, held, self.head_dim],
                 [1_i32, 1, 1, 1],
                 (),
             )?;
@@ -2314,12 +2794,7 @@ impl KVCache {
                 values_full,
                 &v_slice,
                 [dst_row as i32, 0, 0, 0],
-                [
-                    dst_row as i32 + 1,
-                    self.n_kv_heads,
-                    src_off,
-                    self.v_head_dim,
-                ],
+                [dst_row as i32 + 1, self.n_kv_heads, held, self.v_head_dim],
                 [1_i32, 1, 1, 1],
                 (),
             )?;
@@ -2328,6 +2803,59 @@ impl KVCache {
         }
 
         self.offsets[dst_row] = src_off;
+        self.bases[dst_row] = dst_base;
+        Ok(())
+    }
+
+    /// Move every row's base up to the oldest key its window still reaches
+    /// and shift what remains to the front, in order.
+    fn drop_keys_before_window(&mut self, target: StreamOrDevice) -> Result<()> {
+        let keep = self.kept_before_write();
+        let new_bases: Vec<i32> = self
+            .offsets
+            .iter()
+            .zip(&self.bases)
+            .map(|(&off, &base)| base.max(off - keep))
+            .collect();
+        if new_bases == self.bases {
+            return Ok(());
+        }
+        let (Some(keys), Some(values)) = (&self.keys, &self.values) else {
+            return Ok(());
+        };
+        let shift = |old: &Array, dim: i32| -> Result<Array> {
+            let capacity = old.shape().as_slice()[2];
+            let mut rows = Vec::with_capacity(self.batch as usize);
+            for (row, &new_base) in new_bases.iter().enumerate() {
+                let skip = new_base - self.bases[row];
+                let held = self.offsets[row] - new_base;
+                let kept = slice_strided_on(
+                    old,
+                    [row as i32, 0, skip, 0],
+                    [row as i32 + 1, self.n_kv_heads, skip + held, dim],
+                    [1_i32, 1, 1, 1],
+                    target,
+                )?;
+                let tail = Array::zeros_on(
+                    (1_i32, self.n_kv_heads, capacity - held, dim),
+                    self.dtype,
+                    target,
+                )?;
+                rows.push(concatenate_on(&[&kept, &tail], 2, target)?);
+            }
+            match rows.as_slice() {
+                [row] => Ok(row.clone()),
+                rows => Ok(concatenate_on(&rows.iter().collect::<Vec<_>>(), 0, target)?),
+            }
+        };
+        let new_keys = shift(keys, self.head_dim)?;
+        let new_values = shift(values, self.v_head_dim)?;
+        self.keys = Some(new_keys);
+        self.values = Some(new_values);
+        // A row's prefix record stays: what the row still holds came from
+        // the segments it names, and a save checks the row holds a range
+        // before copying it again.
+        self.bases = new_bases;
         Ok(())
     }
 
@@ -2339,7 +2867,10 @@ impl KVCache {
         // with smaller offsets still have valid data in their slab below
         // their offset; rows above their offset are zero (post-allocation)
         // or stale (post-shrink) — caller-mask handles both.
-        let max_off: i32 = self.offsets.iter().copied().max().unwrap_or(0);
+        let max_off: i32 = (0..self.batch as usize)
+            .map(|row| self.held(row))
+            .max()
+            .unwrap_or(0);
 
         let new_k = match (&self.keys, max_off) {
             (None, _) | (Some(_), 0) => Array::zeros_on(
@@ -2417,7 +2948,7 @@ impl KVCache {
             if n == 0 {
                 return Ok(());
             }
-            let off = self.offsets[0];
+            let off = self.held(0);
             let end = off + n;
             let keys_full = self.keys.as_ref().expect("keys allocated by grow_to");
             let values_full = self.values.as_ref().expect("values allocated by grow_to");
@@ -2447,7 +2978,7 @@ impl KVCache {
                 continue;
             }
             let i = i_usize as i32;
-            let off_i = self.offsets[i_usize];
+            let off_i = self.held(i_usize);
             let end_i = off_i + n;
 
             // Slice the row's K/V leading-n along axis 2 (the K shape is
@@ -4127,6 +4658,7 @@ mod tests {
                         start,
                         stop,
                         segment_stop: stop,
+                        window: false,
                     };
                     start = stop;
                     r
@@ -4485,6 +5017,238 @@ mod tests {
                 .restore_dense_prefix_layer_for_row_on(&k, &v, 0, 8, ())
                 .expect("restore dense");
             assert_eq!(covered(&dense, 0), None);
+        }
+    }
+
+    mod windowed {
+        use super::*;
+
+        const WINDOW: i32 = 16;
+        const ROLLBACK: i32 = 4;
+
+        fn windowed(batch: i32, cap: i32) -> KVCache {
+            KVCache::new(batch, 1, 2, 2, Dtype::Float32, cap).with_window(WINDOW, ROLLBACK)
+        }
+
+        /// Keys whose value is their absolute position; values are ten times it.
+        fn tokens(starts: &[i32], n: i32) -> (Array, Array) {
+            let batch = starts.len() as i32;
+            let mut k = Vec::new();
+            for &start in starts {
+                for j in 0..n {
+                    k.extend([(start + j) as f32; 2]);
+                }
+            }
+            let v: Vec<f32> = k.iter().map(|x| x * 10.0).collect();
+            (
+                (k.as_slice(), (batch, 1_i32, n, 2_i32)).try_into().unwrap(),
+                (v.as_slice(), (batch, 1_i32, n, 2_i32)).try_into().unwrap(),
+            )
+        }
+
+        /// Row `row` of a fetched `[batch, 1, n, 2]` array, one value per key.
+        fn row_values(a: &Array, row: usize) -> Vec<f32> {
+            let n = a.shape().as_slice()[2] as usize;
+            let all: Vec<f32> = a.to_vec().unwrap();
+            (0..n).map(|j| all[(row * n + j) * 2]).collect()
+        }
+
+        /// Append `n` tokens to a one-row cache and check the fetched keys
+        /// are the positions `[base, offset)` in order.
+        fn append(cache: &mut KVCache, n: i32) {
+            let start = cache.offsets()[0];
+            let (k, v) = tokens(&[start], n);
+            let (kf, vf) = cache.update_and_fetch(&k, &v, &[n]).expect("append");
+            let base = cache.bases()[0];
+            let expected: Vec<f32> = (base..start + n).map(|p| p as f32).collect();
+            assert_eq!(row_values(&kf, 0), expected);
+            let expected_v: Vec<f32> = expected.iter().map(|x| x * 10.0).collect();
+            assert_eq!(row_values(&vf, 0), expected_v);
+            // Every key the first new query can attend to is still there.
+            assert!(base <= (start - (WINDOW - 1)).max(0));
+        }
+
+        fn capacity(cache: &KVCache) -> i32 {
+            cache.keys.as_ref().map_or(0, |k| k.shape().as_slice()[2])
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn keeps_the_window_in_order_while_storage_stays_bounded() {
+            let mut c = windowed(1, 100_000);
+            for n in [40, 40, 1, 1, 7, 300, 1] {
+                append(&mut c, n);
+            }
+            for _ in 0..600 {
+                append(&mut c, 1);
+            }
+            assert_eq!(c.offsets(), &[990]);
+            assert!(c.bases()[0] >= 990 - 512);
+            // The widest write was 300 tokens.
+            assert!(capacity(&c) <= 512, "capacity {}", capacity(&c));
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn a_short_row_is_stored_like_a_full_history() {
+            let mut c = windowed(1, 12);
+            for n in [5, 1, 1, 5] {
+                append(&mut c, n);
+            }
+            assert_eq!(c.bases(), &[0]);
+            assert_eq!(capacity(&c), 12);
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn rolls_back_rows_appended_one_at_a_time() {
+            let mut c = windowed(1, 100_000);
+            for _ in 0..500 {
+                append(&mut c, 1);
+                let before = c.offsets()[0];
+                // Verification rows, then all but the first rejected.
+                for _ in 0..ROLLBACK {
+                    append(&mut c, 1);
+                }
+                c.restore_offsets(&[before + 1]).expect("roll back");
+            }
+            assert_eq!(c.offsets(), &[1000]);
+            append(&mut c, 3);
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn refuses_a_rollback_past_what_it_kept() {
+            let mut c = windowed(1, 100_000);
+            for _ in 0..400 {
+                append(&mut c, 1);
+            }
+            let base = c.bases()[0];
+            assert!(base > 0);
+            let error = c
+                .restore_offsets(&[base + WINDOW - 2])
+                .expect_err("window no longer whole");
+            assert!(error.to_string().contains("no longer holds"), "{error}");
+            assert_eq!(c.offsets(), &[400]);
+            c.restore_offsets(&[base + WINDOW - 1])
+                .expect("still whole");
+            c.restore_offsets(&[0]).expect("empty row");
+            assert_eq!(c.bases(), &[0]);
+            append(&mut c, 3);
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn dense_snapshot_restores_storage_and_base() {
+            let mut c = windowed(1, 100_000);
+            for _ in 0..100 {
+                append(&mut c, 1);
+            }
+            let snapshot = c.snapshot();
+            let base = c.bases()[0];
+            for _ in 0..200 {
+                append(&mut c, 1);
+            }
+            assert!(c.bases()[0] > base);
+            c.restore(&snapshot).expect("restore");
+            assert_eq!((c.offsets(), c.bases()), (&[100][..], &[base][..]));
+            append(&mut c, 2);
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn rows_of_a_batch_keep_their_own_bases() {
+            let mut one = windowed(1, 100_000);
+            for _ in 0..300 {
+                append(&mut one, 1);
+            }
+            let mut batch = windowed(2, 100_000);
+            batch.adopt_row_from(&one, 1, 0).expect("adopt long row");
+            assert_eq!(batch.offsets(), &[0, 300]);
+            assert_eq!(batch.bases()[1], 300 - (WINDOW - 1 + ROLLBACK));
+            for step in 0..200 {
+                let (k, v) = tokens(&[step, 300 + step], 1);
+                let (kf, _) = batch.update_and_fetch(&k, &v, &[1, 1]).expect("step");
+                for row in 0..2 {
+                    let (base, offset) = (batch.bases()[row], batch.offsets()[row]);
+                    let held = (offset - base) as usize;
+                    let expected: Vec<f32> = (base..offset).map(|p| p as f32).collect();
+                    assert_eq!(row_values(&kf, row)[..held], expected[..]);
+                    assert!(base <= (offset - WINDOW).max(0));
+                }
+            }
+            assert!(capacity(&batch) <= 256);
+
+            let mut back = windowed(1, 100_000);
+            back.adopt_row_from(&batch, 0, 1).expect("adopt back");
+            assert_eq!(back.offsets(), &[500]);
+            append(&mut back, 1);
+
+            let mut full = KVCache::new(1, 1, 2, 2, Dtype::Float32, 100_000);
+            let error = full
+                .adopt_row_from(&batch, 0, 1)
+                .expect_err("history is gone");
+            assert!(error.to_string().contains("whole history"), "{error}");
+        }
+
+        #[test]
+        #[serial_test::serial(mlx_metal)]
+        fn exports_and_restores_the_keys_it_holds() {
+            let mut c = windowed(1, 100_000);
+            for _ in 0..300 {
+                append(&mut c, 1);
+            }
+            let (k, v, len) = c.dense_prefix_layer_for_row_on(0, ()).expect("export");
+            assert_eq!(len, 300);
+            assert_eq!(k.shape().as_slice()[2], 300 - c.bases()[0]);
+
+            let mut restored = windowed(1, 100_000);
+            restored
+                .restore_dense_prefix_layer_for_row_on(&k, &v, 0, 300, ())
+                .expect("restore the held run");
+            assert_eq!(restored.offsets(), &[300]);
+            append(&mut restored, 2);
+
+            // A whole prefix restores too; only the window's share is kept.
+            let (k, v) = tokens(&[0], 300);
+            let mut from_full = windowed(1, 100_000);
+            from_full
+                .restore_dense_prefix_segments_for_row_on(
+                    &[
+                        (
+                            &slice_strided_on(&k, [0, 0, 0, 0], [1, 1, 290, 2], [1, 1, 1, 1], ())
+                                .unwrap(),
+                            &slice_strided_on(&v, [0, 0, 0, 0], [1, 1, 290, 2], [1, 1, 1, 1], ())
+                                .unwrap(),
+                        ),
+                        (
+                            &slice_strided_on(&k, [0, 0, 290, 0], [1, 1, 300, 2], [1, 1, 1, 1], ())
+                                .unwrap(),
+                            &slice_strided_on(&v, [0, 0, 290, 0], [1, 1, 300, 2], [1, 1, 1, 1], ())
+                                .unwrap(),
+                        ),
+                    ],
+                    0,
+                    300,
+                    (),
+                )
+                .expect("restore a whole prefix");
+            assert_eq!(from_full.bases(), &[300 - (WINDOW - 1 + ROLLBACK)]);
+            append(&mut from_full, 2);
+
+            // A full-history cache cannot take the held run alone.
+            let mut full = KVCache::new(1, 1, 2, 2, Dtype::Float32, 100_000);
+            let (k, v, _) = c.dense_prefix_layer_for_row_on(0, ()).expect("export");
+            assert!(full
+                .restore_dense_prefix_layer_for_row_on(&k, &v, 0, 300, ())
+                .is_err());
+        }
+
+        #[test]
+        fn paged_and_packed_storage_keep_the_whole_history() {
+            let mut c = windowed(1, 1024);
+            c.enable_paged(128, 16).expect("paged");
+            assert_eq!(c.window(), 0);
         }
     }
 }

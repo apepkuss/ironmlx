@@ -8,6 +8,8 @@
 mod attention;
 mod config;
 mod conv;
+mod dspark;
+pub use dspark::DSparkBlock;
 mod layer;
 mod model;
 mod selector;

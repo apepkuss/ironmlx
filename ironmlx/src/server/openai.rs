@@ -162,7 +162,7 @@ pub struct ChatRequest {
     /// Qwen3.8 native reasoning depth. The model's official template accepts
     /// exactly `low`, `medium`, and `xhigh`.
     #[serde(default)]
-    pub reasoning_effort: Option<QwenReasoningEffort>,
+    pub reasoning_effort: Option<ChatReasoningEffort>,
     /// HuggingFace `apply_chat_template` extra kwargs — passed through as
     /// top-level template render-context variables. Honors Qwen3+'s
     /// `enable_thinking` toggle, vLLM's `tools` / `documents`, etc.
@@ -172,18 +172,26 @@ pub struct ChatRequest {
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum QwenReasoningEffort {
+pub enum ChatReasoningEffort {
+    None,
+    Minimal,
     Low,
     Medium,
+    High,
     Xhigh,
+    Max,
 }
 
-impl QwenReasoningEffort {
+impl ChatReasoningEffort {
     fn as_str(self) -> &'static str {
         match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
             Self::Low => "low",
             Self::Medium => "medium",
+            Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
         }
     }
 }
@@ -231,7 +239,10 @@ impl ChatRequest {
         }
     }
 
-    fn resolved_chat_template_kwargs(&self) -> anyhow::Result<Option<serde_json::Value>> {
+    fn resolved_chat_template_kwargs(
+        &self,
+        dialect: Option<ironmlx_lm::core::native_output::NativeOutputDialect>,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
         let Some(reasoning_effort) = self.reasoning_effort else {
             return Ok(self.chat_template_kwargs.clone());
         };
@@ -240,6 +251,17 @@ impl ChatRequest {
             Some(serde_json::Value::Object(kwargs)) => kwargs,
             Some(_) => anyhow::bail!("chat_template_kwargs must be a JSON object"),
         };
+        if dialect != Some(ironmlx_lm::core::native_output::NativeOutputDialect::Inkling2) {
+            anyhow::ensure!(
+                matches!(
+                    reasoning_effort,
+                    ChatReasoningEffort::Low
+                        | ChatReasoningEffort::Medium
+                        | ChatReasoningEffort::Xhigh
+                ),
+                "this model accepts reasoning_effort low, medium or xhigh"
+            );
+        }
         let reasoning_effort = serde_json::Value::String(reasoning_effort.as_str().to_owned());
         if let Some(existing) = kwargs.get("reasoning_effort") {
             anyhow::ensure!(
@@ -1061,12 +1083,13 @@ where
     if allows_structured_final_output(prepared_tools.as_ref()) {
         output_format.apply_prompt_instruction(&mut req.messages);
     }
-    let chat_template_kwargs = match req.resolved_chat_template_kwargs() {
-        Ok(kwargs) => kwargs,
-        Err(error) => {
-            return bad_request_response("invalid_reasoning_effort", format!("{error:#}"))
-        }
-    };
+    let chat_template_kwargs =
+        match req.resolved_chat_template_kwargs(state.tokenizer.native_output_dialect()) {
+            Ok(kwargs) => kwargs,
+            Err(error) => {
+                return bad_request_response("invalid_reasoning_effort", format!("{error:#}"))
+            }
+        };
     let original_messages = prepared_tools.as_ref().map(|_| req.messages.clone());
 
     let (image_token_id, spatial_merge_size) =
@@ -1264,12 +1287,13 @@ pub(crate) async fn chat_completions_with_gemma4_drafter_state(
         Ok(cfg) => cfg,
         Err(e) => return bad_request_response("invalid_sampling_parameters", format!("{e:#}")),
     };
-    let chat_template_kwargs = match req.resolved_chat_template_kwargs() {
-        Ok(kwargs) => kwargs,
-        Err(error) => {
-            return bad_request_response("invalid_reasoning_effort", format!("{error:#}"))
-        }
-    };
+    let chat_template_kwargs =
+        match req.resolved_chat_template_kwargs(state.base.tokenizer.native_output_dialect()) {
+            Ok(kwargs) => kwargs,
+            Err(error) => {
+                return bad_request_response("invalid_reasoning_effort", format!("{error:#}"))
+            }
+        };
 
     let (image_token_id, spatial_merge_size) =
         ironmlx_lm::core::vision_input::derive_image_token_and_merge(
@@ -1468,6 +1492,7 @@ fn finish_output_decoder(
 pub(crate) fn validate_tool_choice_output(
     options: &ToolConstraintOptions,
     call_names: &[String],
+    finish: &str,
 ) -> anyhow::Result<()> {
     if !options.allow_parallel_calls {
         anyhow::ensure!(
@@ -1477,6 +1502,8 @@ pub(crate) fn validate_tool_choice_output(
     }
     match &options.choice {
         ToolChoiceConstraint::Auto => Ok(()),
+        // A reply the token limit cut off may not have reached its call.
+        ToolChoiceConstraint::Required if finish == "length" => Ok(()),
         ToolChoiceConstraint::Required => {
             anyhow::ensure!(
                 !call_names.is_empty(),
@@ -1484,6 +1511,7 @@ pub(crate) fn validate_tool_choice_output(
             );
             Ok(())
         }
+        ToolChoiceConstraint::Function(_) if finish == "length" && call_names.is_empty() => Ok(()),
         ToolChoiceConstraint::Function(expected) => {
             anyhow::ensure!(
                 call_names.len() == 1 && call_names[0] == *expected,
@@ -1953,11 +1981,11 @@ where
                 return;
             }
         }
-        if let Err(error) = validate_tool_choice_output(&constraint_options, &call_names) {
+        let finish = typed_finish.unwrap_or(model_finish);
+        if let Err(error) = validate_tool_choice_output(&constraint_options, &call_names, finish) {
             let _ = tx.send(Ok(format_sse_error(&error))).await;
             return;
         }
-        let finish = typed_finish.unwrap_or(model_finish);
         if let Err(error) =
             output_format.validate_completion(&content, !call_names.is_empty(), finish)
         {
@@ -2103,7 +2131,9 @@ where
         .iter()
         .map(|call| call.name.clone())
         .collect::<Vec<_>>();
-    if let Err(error) = validate_tool_choice_output(&constraint_options, &call_names) {
+    if let Err(error) =
+        validate_tool_choice_output(&constraint_options, &call_names, output.finish_reason)
+    {
         return generation_err_to_response(error);
     }
     if let Err(error) = output_format.validate_completion(
@@ -3067,7 +3097,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            request.resolved_chat_template_kwargs().unwrap(),
+            request.resolved_chat_template_kwargs(None).unwrap(),
             Some(serde_json::json!({
                 "preserve_thinking": false,
                 "reasoning_effort": "medium"
@@ -3078,7 +3108,10 @@ mod tests {
             "messages": [{"role": "user", "content": "Solve it"}],
             "reasoning_effort": "high"
         }));
-        assert!(unsupported.is_err());
+        assert!(unsupported
+            .unwrap()
+            .resolved_chat_template_kwargs(None)
+            .is_err());
     }
 
     #[test]
@@ -3090,7 +3123,7 @@ mod tests {
         }))
         .unwrap();
         assert!(request
-            .resolved_chat_template_kwargs()
+            .resolved_chat_template_kwargs(None)
             .unwrap_err()
             .to_string()
             .contains("conflicts"));
@@ -3595,30 +3628,34 @@ mod tests {
     #[test]
     fn generated_calls_are_postvalidated_against_request_semantics() {
         let auto = ToolConstraintOptions::default();
-        validate_tool_choice_output(&auto, &[]).unwrap();
-        validate_tool_choice_output(&auto, &["a".into(), "b".into()]).unwrap();
+        validate_tool_choice_output(&auto, &[], "stop").unwrap();
+        validate_tool_choice_output(&auto, &["a".into(), "b".into()], "stop").unwrap();
 
         let required = ToolConstraintOptions {
             choice: ToolChoiceConstraint::Required,
             allow_parallel_calls: true,
         };
-        assert!(validate_tool_choice_output(&required, &[]).is_err());
-        validate_tool_choice_output(&required, &["a".into()]).unwrap();
+        assert!(validate_tool_choice_output(&required, &[], "stop").is_err());
+        validate_tool_choice_output(&required, &["a".into()], "stop").unwrap();
 
         let serial = ToolConstraintOptions {
             choice: ToolChoiceConstraint::Auto,
             allow_parallel_calls: false,
         };
-        assert!(validate_tool_choice_output(&serial, &["a".into(), "b".into()]).is_err());
+        assert!(validate_tool_choice_output(&serial, &["a".into(), "b".into()], "stop").is_err());
 
         let forced = ToolConstraintOptions {
             choice: ToolChoiceConstraint::Function("a".into()),
             allow_parallel_calls: true,
         };
-        validate_tool_choice_output(&forced, &["a".into()]).unwrap();
-        assert!(validate_tool_choice_output(&forced, &[]).is_err());
-        assert!(validate_tool_choice_output(&forced, &["b".into()]).is_err());
-        assert!(validate_tool_choice_output(&forced, &["a".into(), "a".into()]).is_err());
+        validate_tool_choice_output(&forced, &["a".into()], "stop").unwrap();
+        assert!(validate_tool_choice_output(&forced, &[], "stop").is_err());
+        assert!(validate_tool_choice_output(&forced, &["b".into()], "stop").is_err());
+        assert!(validate_tool_choice_output(&forced, &["a".into(), "a".into()], "stop").is_err());
+        // The token limit may cut a reply off before its required call.
+        validate_tool_choice_output(&required, &[], "length").unwrap();
+        validate_tool_choice_output(&forced, &[], "length").unwrap();
+        assert!(validate_tool_choice_output(&forced, &["b".into()], "length").is_err());
     }
 
     #[tokio::test]

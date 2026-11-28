@@ -5,6 +5,10 @@ use mlx::Array;
 #[derive(Clone)]
 pub enum VisionInputConfig {
     TextOnly,
+    Inkling2 {
+        vision_config: crate::models::inkling2::config::VisionConfig,
+        max_pixels: usize,
+    },
     Qwen {
         spatial_merge_size: i32,
         /// Pixel range images are resized into: the checkpoint's processor
@@ -57,6 +61,13 @@ impl VisionInputConfig {
                     None => Self::TextOnly,
                 }
             }
+            ModelArchitecture::Inkling2 => crate::models::Inkling2Config::from_loader(loader)?
+                .vision_config
+                .map(|vision_config| Self::Inkling2 {
+                    vision_config,
+                    max_pixels: max_image_pixels.unwrap_or(4_194_304).max(1) as usize,
+                })
+                .unwrap_or(Self::TextOnly),
             ModelArchitecture::Gemma4 => crate::models::Gemma4Config::from_loader(loader)?
                 .vision_config
                 .map(|vision_config| Self::Gemma4 { vision_config })
@@ -124,6 +135,12 @@ pub fn derive_image_token_and_merge(
 ) -> (i32, i32) {
     match vision_input {
         VisionInputConfig::TextOnly => (-1, 1),
+        VisionInputConfig::Inkling2 { vision_config, .. } => (
+            tokenizer
+                .token_to_id(crate::models::inkling2::image_processor::IMAGE_TOKEN)
+                .unwrap_or(200_054) as i32,
+            vision_config.adapter_merge_size,
+        ),
         VisionInputConfig::Qwen {
             spatial_merge_size, ..
         } => (
@@ -191,6 +208,7 @@ pub fn expand_decoded_messages(
 ) -> anyhow::Result<ExpandedVisionInputs> {
     let spatial_merge_size = match vision_input {
         VisionInputConfig::TextOnly => 1,
+        VisionInputConfig::Inkling2 { vision_config, .. } => vision_config.adapter_merge_size,
         VisionInputConfig::Qwen {
             spatial_merge_size, ..
         } => *spatial_merge_size,
@@ -217,6 +235,24 @@ pub fn expand_decoded_messages(
                 vision_input.validate_image_input()?;
                 match vision_input {
                     VisionInputConfig::TextOnly => unreachable!("image input validated above"),
+                    VisionInputConfig::Inkling2 {
+                        vision_config,
+                        max_pixels,
+                    } => {
+                        let (pixels, gh, gw) =
+                            crate::models::inkling2::image_processor::preprocess(
+                                img_bytes,
+                                vision_config,
+                                *max_pixels,
+                            )?;
+                        let n = (gh / spatial_merge_size * (gw / spatial_merge_size)) as usize;
+                        placeholders.push(format!(
+                            "<|content_image|>{}<|end_message|>",
+                            crate::models::inkling2::image_processor::IMAGE_TOKEN.repeat(n)
+                        ));
+                        all_pixel_values.push(pixels);
+                        grid_thw.push((1, gh, gw));
+                    }
                     VisionInputConfig::Qwen { pixel_bounds, .. } => {
                         let (pv, gh, gw) =
                             qwen3_5::image_processor::preprocess(img_bytes, *pixel_bounds)?;

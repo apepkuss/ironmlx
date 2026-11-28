@@ -145,6 +145,7 @@ where
 
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(300))
         .no_proxy()
         .build()

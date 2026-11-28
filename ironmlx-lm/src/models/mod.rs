@@ -30,6 +30,7 @@ pub mod diffusion_gemma;
 pub mod embedding_gemma2;
 pub mod gemma4;
 pub mod glm4_moe_lite;
+pub mod inkling2;
 pub mod llama;
 pub mod minicpmv4_6;
 pub mod qwen3_5;
@@ -45,6 +46,7 @@ pub use diffusion_gemma::{
 };
 pub use gemma4::{Gemma4AssistantConfig, Gemma4Config, Gemma4Model, Gemma4TextConfig};
 pub use glm4_moe_lite::{Glm4MoeLiteConfig, Glm4MoeLiteModel};
+pub use inkling2::{Inkling2Config, Inkling2Model};
 pub use llama::{LlamaConfig, LlamaModel};
 pub use minicpmv4_6::MiniCpmV46Model;
 pub use qwen3_5::{Qwen35Config, Qwen35Model, Qwen35TextModel, RopeParams};

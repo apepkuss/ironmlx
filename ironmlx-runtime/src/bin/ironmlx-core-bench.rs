@@ -582,6 +582,11 @@ fn main() -> Result<()> {
             let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
             run_for_model(&model, &tokenizer, &args, load_ms)
         }
+        ModelArchitecture::Inkling2 => {
+            let model = ironmlx_lm::models::Inkling2Model::from_loader(&loader).context("ironmlx_lm::models::Inkling2Model::from_loader")?;
+            let load_ms = load_started.elapsed().as_secs_f64() * 1000.0;
+            run_for_model(&model, &tokenizer, &args, load_ms)
+        }
         ModelArchitecture::MiniCpmV46 => {
             // Full MiniCpmV46Model (text + optional SigLIP vision tower).
             let model = ironmlx_lm::models::minicpmv4_6::model_from_loader(&loader)

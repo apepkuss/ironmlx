@@ -430,7 +430,7 @@ Tool-call history requires the matching nonempty `tools` array. The client appen
 
 - `tool_choice` accepts `auto`, `none`, `required` or `{"type":"function","function":{"name":"..."}}`.
 - `parallel_tool_calls` defaults to true; false limits the turn to one call. Llama 3.1/3.2 native custom tools always allow only one call and exclude its built-in-tool dialect.
-- Only function tools and supported native Qwen, Gemma/Unified, DiffusionGemma, GLM, Llama and MiniCPM templates are accepted. Unknown templates fail before generation.
+- Only function tools and supported native Qwen, Gemma/Unified, DiffusionGemma, GLM, Llama, MiniCPM and Inkling 2 templates are accepted. Unknown templates fail before generation.
 - Legacy `functions` and `function_call` are ignored; use `tools` to request tool calling. Strict tool schemas follow the rules above.
 - Results must refer to preceding unfinished calls; orphaned, duplicate or missing IDs are rejected.
 
@@ -707,6 +707,8 @@ Input (including templates and images) plus requested output must fit the effect
 For causal Qwen3.5/3.6/3.8 and Gemma4/Unified with exact supported reasoning templates, enabled reasoning reserves min(floor(total_output_budget/4),1024) tokens for the answer/tool call plus native framing space. Remaining tokens are available for reasoning. The same policy applies across the three protocols. It does not enlarge the total budget or retry a request. Disabled/unsupported reasoning, DiffusionGemma and budgets too small for the framing retain their existing behavior.
 
 A completed thinking channel does not guarantee a complete answer. Check Responses status/incomplete_details, Chat finish_reason:length or Messages stop_reason:max_tokens before parsing constrained JSON as complete.
+
+A tool choice that requires a call (`required`, a named function, `any` or a named tool) does not turn a cut-off reply into an error. If the budget runs out before the call is complete, the response ends with the same truncation signal and without the unfinished call; calls completed before the limit are still returned.
 
 ### Streaming and cancellation
 

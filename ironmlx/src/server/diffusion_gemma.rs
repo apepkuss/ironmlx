@@ -428,7 +428,11 @@ fn collect_tool_events(
         .iter()
         .map(|call| call.name.clone())
         .collect::<Vec<_>>();
-    super::openai::validate_tool_choice_output(&context.constraint_options, &call_names)?;
+    super::openai::validate_tool_choice_output(
+        &context.constraint_options,
+        &call_names,
+        finish_reason,
+    )?;
     Ok(CompletionParts {
         content: (!content.is_empty()).then_some(content),
         reasoning,
@@ -1082,9 +1086,11 @@ async fn openai_stream_completion(
                     return;
                 }
             }
-            if let Err(error) =
-                super::openai::validate_tool_choice_output(&context.constraint_options, &call_names)
-            {
+            if let Err(error) = super::openai::validate_tool_choice_output(
+                &context.constraint_options,
+                &call_names,
+                model_finish,
+            ) {
                 let _ = tx.blocking_send(Ok(openai_error_frame(&format!("{error:#}"))));
                 let _ = tx.blocking_send(Ok(openai_done_frame()));
                 return;
@@ -1365,9 +1371,11 @@ async fn responses_stream_completion(
             }
         }
         if let Some(context) = tool_context.as_ref() {
-            if let Err(error) =
-                super::openai::validate_tool_choice_output(&context.constraint_options, &call_names)
-            {
+            if let Err(error) = super::openai::validate_tool_choice_output(
+                &context.constraint_options,
+                &call_names,
+                finish_reason,
+            ) {
                 let _ = tx.blocking_send(Ok(formatter.failed(format!("{error:#}"))));
                 return;
             }
@@ -1554,7 +1562,7 @@ pub(crate) async fn openai_chat_completions_with_state(
         .map(|options| options.include_usage)
         .unwrap_or(false);
     let max_tokens = req.output_budget();
-    let temperature = req.temperature.unwrap_or(0.0);
+    let temperature = req.temperature.or(state.default_temperature).unwrap_or(0.0);
     let seed = req.seed;
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
     let (prepared, prompt_tokens) =
@@ -1684,7 +1692,11 @@ pub(crate) async fn openai_responses_with_state(
     let meta = super::responses::ResponseMeta::from_normalized(&normalized, model_label);
     let stream = normalized.chat.stream;
     let max_tokens = normalized.chat.output_budget();
-    let temperature = normalized.chat.temperature.unwrap_or(0.0);
+    let temperature = normalized
+        .chat
+        .temperature
+        .or(state.default_temperature)
+        .unwrap_or(0.0);
     let seed = normalized.chat.seed;
     let output_schema = normalized.output_schema();
     let (prepared, prompt_tokens) = match prepare_openai_request(
@@ -1767,7 +1779,7 @@ pub(crate) async fn anthropic_messages_with_state(
 ) -> Response {
     let stream = req.stream;
     let max_tokens = req.max_tokens;
-    let temperature = req.temperature.unwrap_or(0.0);
+    let temperature = req.temperature.or(state.default_temperature).unwrap_or(0.0);
     let model_label = req.model.clone().unwrap_or_else(|| state.model_id.clone());
     let (prepared, input_tokens, output_format, native_output) =
         match prepare_anthropic_request(&state, req).await {
@@ -1844,6 +1856,7 @@ pub async fn serve_diffusion_gemma(
         model_id,
         model_weight_bytes,
         vision_input,
+        None,
     );
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))

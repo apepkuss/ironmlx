@@ -17,6 +17,7 @@ use thiserror::Error;
 use crate::core::chat_prefix::ChatTurnBoundary;
 use crate::core::dflash2_budget::{
     DFlash2BudgetPolicyKind, DFlash2DraftBudgetPolicy, DFlash2PolicyDomain, DFlash2WindowRole,
+    DSparkWindowPolicy,
 };
 use crate::core::generation_types::{GenerateEvent, GenerateRequest};
 use crate::core::speculative::{
@@ -68,7 +69,7 @@ pub(crate) struct DFlash2ExecutionOptions {
 use super::dflash2_prefix_store::DFlash2DiskSnapshot;
 use super::dflash2_prefix_store::{
     restore_planned, DFlash2DiskEntry, DFlash2DiskLayer, DFlash2DiskRange, DFlash2DiskRestored,
-    DFlash2DiskSave,
+    DFlash2DiskSave, DFlash2Kv,
 };
 use super::dflash2_prefix_writer::DFlash2PrefixWriter;
 use {
@@ -216,8 +217,9 @@ fn extend_batched_q16_qualification_capabilities(
 /// output and would stay resident for as long as the view does.
 #[derive(Debug)]
 struct DFlash2KvSegment {
-    /// `[1, heads, tokens, dim]` K and V per full-attention layer.
-    layers: Vec<(Array, Array)>,
+    /// K/V per full-attention layer (dense or 8-bit), or per sliding-window
+    /// layer (dense).
+    layers: Vec<DFlash2Kv>,
     tokens: i32,
     bytes: usize,
 }
@@ -267,10 +269,42 @@ fn context_suffix(context: &[DFlash2ContextRef], tokens: i32) -> Option<Vec<DFla
     (missing == 0).then_some(suffix)
 }
 
+/// Positions `start..stop` of a shared K/V chunk of the sliding-window
+/// layers: `[1, heads, tokens, dim]` K and V per such layer.
+#[derive(Debug, Clone)]
+struct DFlash2WindowRef {
+    chunk: Rc<DFlash2KvSegment>,
+    start: i32,
+    stop: i32,
+}
+
+/// The trailing `tokens` positions of `window`, or `None` when it is shorter.
+fn window_suffix(window: &[DFlash2WindowRef], tokens: i32) -> Option<Vec<DFlash2WindowRef>> {
+    let mut missing = tokens;
+    let mut suffix = Vec::new();
+    for part in window.iter().rev() {
+        if missing <= 0 {
+            break;
+        }
+        let taken = (part.stop - part.start).min(missing);
+        suffix.push(DFlash2WindowRef {
+            chunk: Rc::clone(&part.chunk),
+            start: part.stop - taken,
+            stop: part.stop,
+        });
+        missing -= taken;
+    }
+    suffix.reverse();
+    (missing == 0).then_some(suffix)
+}
+
 #[derive(Debug, Clone)]
 enum DFlash2ArtifactLayer {
     /// A full-attention layer; its K/V is the artifact's segment chain.
     Dense,
+    /// A sliding-window layer: only the K/V its window reaches at the
+    /// artifact's position, held in the artifact's window chain.
+    Window,
     /// Fixed-size per-artifact state (GatedDelta conv and recurrent state).
     State(PrefixLayerPayload),
 }
@@ -296,6 +330,10 @@ struct DFlash2PrefixArtifact {
     layers: Vec<DFlash2ArtifactLayer>,
     /// Consecutive K/V segments covering `[0, cached_len)`.
     kv: Vec<DFlash2KvSegmentRef>,
+    /// Consecutive chunks of the sliding-window layers' K/V covering the
+    /// positions their windows reach, which end at `cached_len`. Empty when
+    /// no layer is windowed.
+    window: Vec<DFlash2WindowRef>,
     /// Consecutive context chunks covering the retained tail, which ends at
     /// `cached_len`.
     context: Vec<DFlash2ContextRef>,
@@ -338,21 +376,44 @@ impl DFlash2PrefixArtifact {
             .count()
     }
 
-    /// K and V of dense layer `dense_index`, one pair per segment.
-    fn dense_segments(&self, dense_index: usize) -> Result<Vec<(Array, Array)>> {
+    fn window_layers(&self) -> usize {
+        self.layers
+            .iter()
+            .filter(|layer| matches!(layer, DFlash2ArtifactLayer::Window))
+            .count()
+    }
+
+    /// K and V of sliding-window layer `window_index`, one pair per chunk.
+    fn window_segments(&self, window_index: usize) -> Result<Vec<(Array, Array)>> {
+        let mut segments = Vec::with_capacity(self.window.len());
+        for part in &self.window {
+            let Some(DFlash2Kv::Dense(k, v)) = part.chunk.layers.get(window_index) else {
+                anyhow::bail!("DFlash2 prefix window chunk lacks dense layer {window_index}");
+            };
+            if part.start == 0 && part.stop == part.chunk.tokens {
+                segments.push((k.clone(), v.clone()));
+            } else {
+                segments.push((
+                    slice_sequence_range(k, part.start, part.stop)?,
+                    slice_sequence_range(v, part.start, part.stop)?,
+                ));
+            }
+        }
+        Ok(segments)
+    }
+
+    /// K/V of full-attention layer `dense_index`, one part per segment.
+    fn dense_segments(&self, dense_index: usize) -> Result<Vec<DFlash2Kv>> {
         let mut segments = Vec::with_capacity(self.kv.len());
         for part in &self.kv {
-            let (k, v) =
+            let layer =
                 part.segment.layers.get(dense_index).ok_or_else(|| {
                     anyhow!("DFlash2 prefix segment lacks dense layer {dense_index}")
                 })?;
             if part.tokens == part.segment.tokens {
-                segments.push((k.clone(), v.clone()));
+                segments.push(layer.clone());
             } else {
-                segments.push((
-                    slice_sequence_range(k, 0, part.tokens)?,
-                    slice_sequence_range(v, 0, part.tokens)?,
-                ));
+                segments.push(layer.slice(0, part.tokens)?);
             }
         }
         Ok(segments)
@@ -367,6 +428,7 @@ impl DFlash2PrefixArtifact {
             target_cache.len()
         );
         let mut dense_index = 0_usize;
+        let mut window_index = 0_usize;
         for (index, (cache, layer)) in target_cache.iter_mut().zip(&self.layers).enumerate() {
             match layer {
                 DFlash2ArtifactLayer::Dense => {
@@ -374,10 +436,20 @@ impl DFlash2PrefixArtifact {
                         anyhow::bail!("DFlash2 prefix artifact layer {index} expects dense K/V");
                     };
                     let segments = self.dense_segments(dense_index)?;
+                    DFlash2Kv::restore(kv, &segments, self.cached_len)?;
+                    dense_index += 1;
+                }
+                DFlash2ArtifactLayer::Window => {
+                    let LayerCache::Full(kv) = cache else {
+                        anyhow::bail!("DFlash2 prefix artifact layer {index} expects dense K/V");
+                    };
+                    // The chain is the trailing run of the prefix that a
+                    // windowed cache takes in place of the whole of it.
+                    let segments = self.window_segments(window_index)?;
                     let segments: Vec<(&Array, &Array)> =
                         segments.iter().map(|(k, v)| (k, v)).collect();
                     kv.restore_dense_prefix_segments_for_row_on(&segments, 0, self.cached_len, ())?;
-                    dense_index += 1;
+                    window_index += 1;
                 }
                 DFlash2ArtifactLayer::State(payload) => {
                     let entry = PagedPrefixEntry {
@@ -401,15 +473,28 @@ impl DFlash2PrefixArtifact {
     pub(crate) fn target_entry(&self) -> Result<PagedPrefixEntry> {
         let mut main_layers = Vec::with_capacity(self.layers.len());
         let mut dense_index = 0_usize;
+        let mut window_index = 0_usize;
         for layer in &self.layers {
             match layer {
-                DFlash2ArtifactLayer::Dense => {
-                    let segments = self.dense_segments(dense_index)?;
+                DFlash2ArtifactLayer::Window => {
+                    let segments = self.window_segments(window_index)?;
                     let keys: Vec<&Array> = segments.iter().map(|(k, _)| k).collect();
                     let values: Vec<&Array> = segments.iter().map(|(_, v)| v).collect();
                     main_layers.push(PrefixLayerPayload::FullDense {
                         k: mlx::ops::shape::concatenate(&keys, 2)?,
                         v: mlx::ops::shape::concatenate(&values, 2)?,
+                    });
+                    window_index += 1;
+                }
+                DFlash2ArtifactLayer::Dense => {
+                    main_layers.push(match DFlash2Kv::join(&self.dense_segments(dense_index)?)? {
+                        DFlash2Kv::Dense(k, v) => PrefixLayerPayload::FullDense { k, v },
+                        DFlash2Kv::Int8(p) => PrefixLayerPayload::FullTurboQuantPacked {
+                            k_packed: p.k_packed,
+                            k_norms: p.k_norms,
+                            v_packed: p.v_packed,
+                            v_norms: p.v_norms,
+                        },
                     });
                     dense_index += 1;
                 }
@@ -541,6 +626,10 @@ pub(crate) struct DFlash2PrefixCache {
     /// Where a chat prompt's next turn diverges; a prompt ending in a
     /// generation suffix is also saved without it (see [`ChatTurnBoundary`]).
     turn_boundary: Option<ChatTurnBoundary>,
+    /// The chat template adds no generation suffix, so a follow-up turn
+    /// shares a whole prompt: it is saved as a boundary (kept on disk too),
+    /// not as a prompt only an exact repeat restores.
+    whole_prompt_boundary: bool,
     /// What a prefill chunk needs while it runs; the cache makes room for it.
     prefill_working_set: PrefillWorkingSet,
     /// Where boundaries are also kept on disk, to be restored after the
@@ -622,6 +711,7 @@ impl DFlash2PrefixCache {
             evictions: 0,
             entries: Vec::new(),
             turn_boundary: None,
+            whole_prompt_boundary: false,
             prefill_working_set: PrefillWorkingSet::default(),
             disk: None,
         })
@@ -639,6 +729,11 @@ impl DFlash2PrefixCache {
 
     pub(crate) fn with_turn_boundary(mut self, turn_boundary: Option<ChatTurnBoundary>) -> Self {
         self.turn_boundary = turn_boundary;
+        self
+    }
+
+    pub(crate) fn with_whole_prompt_boundary(mut self, whole_prompt_boundary: bool) -> Self {
+        self.whole_prompt_boundary = whole_prompt_boundary;
         self
     }
 
@@ -791,11 +886,44 @@ impl DFlash2PrefixCache {
         let mut written = Vec::new();
         let mut layers = Vec::with_capacity(entry.main_layers.len());
         let mut dense_views = Vec::new();
-        for payload in entry.main_layers {
+        // A sliding-window layer exports what it still holds, which ends at
+        // `cached_len`; the store keeps the last `window_len` of it.
+        let mut window_views = Vec::new();
+        let mut window_len = 0_i32;
+        for (payload, cache) in entry.main_layers.into_iter().zip(save.target_cache) {
             match payload {
-                PrefixLayerPayload::FullDense { k, v } => {
+                PrefixLayerPayload::FullDense { k, v } => match cache {
+                    LayerCache::Full(kv) if kv.window() > 0 => {
+                        let held = k.shape().as_slice()[2];
+                        let reach = cached_len.min(kv.window() - 1);
+                        anyhow::ensure!(
+                            0 < reach && reach <= held && (window_len == 0 || window_len == reach),
+                            "DFlash2 prefix store window layer holds {held} positions, its window reaches {reach} (others {window_len})"
+                        );
+                        window_len = reach;
+                        layers.push(DFlash2DiskLayer::Window);
+                        window_views.push((k, v));
+                    }
+                    _ => {
+                        layers.push(DFlash2DiskLayer::Dense);
+                        dense_views.push(DFlash2Kv::Dense(k, v));
+                    }
+                },
+                PrefixLayerPayload::FullTurboQuantPacked {
+                    k_packed,
+                    k_norms,
+                    v_packed,
+                    v_norms,
+                } if matches!(cache, LayerCache::Full(kv) if kv.int8().is_some()) => {
                     layers.push(DFlash2DiskLayer::Dense);
-                    dense_views.push((k, v));
+                    dense_views.push(DFlash2Kv::Int8(
+                        ironmlx_lm::core::cache::TurboQuantPrefixLayer {
+                            k_packed,
+                            k_norms,
+                            v_packed,
+                            v_norms,
+                        },
+                    ));
                 }
                 PrefixLayerPayload::Linear {
                     conv_state,
@@ -821,7 +949,25 @@ impl DFlash2PrefixCache {
         let last_hidden = save.last_hidden.contiguous(false)?;
         let mut copied_bytes = array_payload_bytes(&context);
         written.extend([context.clone(), last_hidden.clone()]);
+        // The window positions the parent does not hold.
+        let window_start = lineage.parent_len.max(cached_len - window_len);
+        let mut window = Vec::with_capacity(window_views.len());
+        for (k, v) in &window_views {
+            let held = k.shape().as_slice()[2];
+            let added = cached_len - window_start;
+            let k = slice_sequence_range(k, held - added, held)?.contiguous(false)?;
+            let v = slice_sequence_range(v, held - added, held)?.contiguous(false)?;
+            copied_bytes = copied_bytes
+                .saturating_add(array_payload_bytes(&k))
+                .saturating_add(array_payload_bytes(&v));
+            written.extend([k.clone(), v.clone()]);
+            window.push((k, v));
+        }
+        drop(window_views);
 
+        let kv_format = dense_views
+            .first()
+            .map_or(DFlash2Kv::DENSE_FORMAT, DFlash2Kv::format);
         // The cached artifact's own segments when they are exactly the
         // missing positions (a cold prompt's whole K/V); a copy otherwise.
         let shared = saved
@@ -831,16 +977,11 @@ impl DFlash2PrefixCache {
             Some(ranges) => ranges,
             None => {
                 let mut range_layers = Vec::with_capacity(dense_views.len());
-                for (k, v) in &dense_views {
-                    let k = slice_sequence_range(k, lineage.parent_len, cached_len)?
-                        .contiguous(false)?;
-                    let v = slice_sequence_range(v, lineage.parent_len, cached_len)?
-                        .contiguous(false)?;
-                    copied_bytes = copied_bytes
-                        .saturating_add(array_payload_bytes(&k))
-                        .saturating_add(array_payload_bytes(&v));
-                    written.extend([k.clone(), v.clone()]);
-                    range_layers.push((k, v));
+                for view in &dense_views {
+                    let layer = view.slice(lineage.parent_len, cached_len)?.contiguous()?;
+                    copied_bytes = copied_bytes.saturating_add(layer.bytes());
+                    written.extend(layer.arrays().into_iter().cloned());
+                    range_layers.push(layer);
                 }
                 vec![DFlash2DiskRange {
                     start: lineage.parent_len,
@@ -865,10 +1006,14 @@ impl DFlash2PrefixCache {
             layers,
             parent: lineage.parent,
             ancestors: lineage.ancestors,
+            kv_format,
             kv,
             context_start,
             context,
             context_tail_len: tail_len,
+            window_start,
+            window,
+            window_len,
             last_hidden,
         }))
     }
@@ -973,12 +1118,50 @@ impl DFlash2PrefixCache {
 
         let mut layers = Vec::with_capacity(entry.main_layers.len());
         let mut dense_views = Vec::new();
+        // A sliding-window layer exports what it still holds, which ends at
+        // `cached_len`; the artifact keeps the last `window_len` of it.
+        let mut window_views = Vec::new();
+        let mut window_len = 0_i32;
+        let mut window_bytes_per_token = 0_usize;
         let mut state_bytes = 0_usize;
-        for payload in entry.main_layers {
+        for (payload, cache) in entry.main_layers.into_iter().zip(target_cache) {
             match payload {
-                PrefixLayerPayload::FullDense { k, v } => {
+                PrefixLayerPayload::FullDense { k, v } => match cache {
+                    LayerCache::Full(kv) if kv.window() > 0 => {
+                        let held = k.shape().as_slice()[2];
+                        let reach = cached_len.min(kv.window() - 1);
+                        anyhow::ensure!(
+                            0 < reach && reach <= held && (window_len == 0 || window_len == reach),
+                            "DFlash2 prefix cache window layer holds {held} positions, its window reaches {reach} (others {window_len})"
+                        );
+                        window_len = reach;
+                        window_bytes_per_token = window_bytes_per_token.saturating_add(
+                            array_payload_bytes(&k).saturating_add(array_payload_bytes(&v))
+                                / usize::try_from(held)?,
+                        );
+                        layers.push(DFlash2ArtifactLayer::Window);
+                        window_views.push((k, v));
+                    }
+                    _ => {
+                        layers.push(DFlash2ArtifactLayer::Dense);
+                        dense_views.push(DFlash2Kv::Dense(k, v));
+                    }
+                },
+                PrefixLayerPayload::FullTurboQuantPacked {
+                    k_packed,
+                    k_norms,
+                    v_packed,
+                    v_norms,
+                } if matches!(cache, LayerCache::Full(kv) if kv.int8().is_some()) => {
                     layers.push(DFlash2ArtifactLayer::Dense);
-                    dense_views.push((k, v));
+                    dense_views.push(DFlash2Kv::Int8(
+                        ironmlx_lm::core::cache::TurboQuantPrefixLayer {
+                            k_packed,
+                            k_norms,
+                            v_packed,
+                            v_norms,
+                        },
+                    ));
                 }
                 other => {
                     let stats = PagedPrefixEntry {
@@ -991,16 +1174,16 @@ impl DFlash2PrefixCache {
                 }
             }
         }
-        let dense_bytes = dense_views.iter().fold(0_usize, |bytes, (k, v)| {
-            bytes
-                .saturating_add(array_payload_bytes(k))
-                .saturating_add(array_payload_bytes(v))
-        });
+        let dense_bytes = dense_views
+            .iter()
+            .fold(0_usize, |bytes, view| bytes.saturating_add(view.bytes()));
         let own_bytes = state_bytes
             .saturating_add(array_payload_bytes(last_hidden))
             .saturating_add(token_ids.len().saturating_mul(std::mem::size_of::<u32>()))
             .saturating_add(fingerprint.len());
+        let window_bytes = window_bytes_per_token.saturating_mul(usize::try_from(window_len)?);
         if dense_bytes
+            .saturating_add(window_bytes)
             .saturating_add(tail_bytes)
             .saturating_add(own_bytes)
             > self.max_bytes
@@ -1016,6 +1199,7 @@ impl DFlash2PrefixCache {
                 parent.cached_len <= cached_len
                     && token_ids.starts_with(&parent.token_ids)
                     && parent.dense_layers() == dense_views.len()
+                    && parent.window_layers() == window_views.len()
             })
             .map(|parent| {
                 (
@@ -1025,6 +1209,29 @@ impl DFlash2PrefixCache {
                     parent.cached_len,
                 )
             });
+        // The window's leading positions are the end of the parent's window.
+        // A window spread over too many chunks is stored whole instead.
+        let mut window = Vec::new();
+        let mut shared_window_tokens = 0_i32;
+        if let Some((parent_id, _, _, parent_len)) = &parent {
+            let shared = window_len - (cached_len - parent_len);
+            let suffix = (shared > 0)
+                .then(|| {
+                    self.entries
+                        .iter()
+                        .find(|entry| entry.id == *parent_id)
+                        .and_then(|parent| window_suffix(&parent.window, shared))
+                })
+                .flatten()
+                .filter(|suffix| suffix.len() < Self::MAX_CONTEXT_CHUNKS);
+            if let Some(suffix) = suffix {
+                window = suffix;
+                shared_window_tokens = shared;
+            }
+        }
+        let added_window_tokens = window_len - shared_window_tokens;
+        let added_window_bytes =
+            window_bytes_per_token.saturating_mul(usize::try_from(added_window_tokens)?);
         // A long chain is folded: the new segment covers the whole prefix and
         // replaces the chain in every artifact that shares it.
         let fold = parent
@@ -1072,6 +1279,7 @@ impl DFlash2PrefixCache {
 
         let needed = shortfall(
             added_bytes
+                .saturating_add(added_window_bytes)
                 .saturating_add(added_context_bytes)
                 .saturating_add(own_bytes),
         );
@@ -1101,18 +1309,15 @@ impl DFlash2PrefixCache {
         // is in place.
         let mut copies = Vec::new();
         let mut new_segment = None;
-        if added_tokens > 0 {
+        if added_tokens > 0 && !dense_views.is_empty() {
             let mut segment_layers = Vec::with_capacity(dense_views.len());
-            for (k, v) in &dense_views {
-                segment_layers.push((
-                    slice_sequence_range(k, base_len, cached_len)?.contiguous(false)?,
-                    slice_sequence_range(v, base_len, cached_len)?.contiguous(false)?,
-                ));
+            for view in &dense_views {
+                segment_layers.push(view.slice(base_len, cached_len)?.contiguous()?);
             }
             copies.extend(
                 segment_layers
                     .iter()
-                    .flat_map(|(k, v)| [k.clone(), v.clone()]),
+                    .flat_map(|layer| layer.arrays().into_iter().cloned()),
             );
             let segment = Rc::new(DFlash2KvSegment {
                 layers: segment_layers,
@@ -1126,6 +1331,31 @@ impl DFlash2PrefixCache {
             });
         }
         drop(dense_views);
+        if added_window_tokens > 0 {
+            let mut chunk_layers = Vec::with_capacity(window_views.len());
+            for (k, v) in &window_views {
+                let held = k.shape().as_slice()[2];
+                chunk_layers.push(DFlash2Kv::Dense(
+                    slice_sequence_range(k, held - added_window_tokens, held)?.contiguous(false)?,
+                    slice_sequence_range(v, held - added_window_tokens, held)?.contiguous(false)?,
+                ));
+            }
+            copies.extend(
+                chunk_layers
+                    .iter()
+                    .flat_map(|layer| layer.arrays().into_iter().cloned()),
+            );
+            window.push(DFlash2WindowRef {
+                chunk: Rc::new(DFlash2KvSegment {
+                    layers: chunk_layers,
+                    tokens: added_window_tokens,
+                    bytes: added_window_bytes,
+                }),
+                start: 0,
+                stop: added_window_tokens,
+            });
+        }
+        drop(window_views);
         if added_context_tokens > 0 {
             let hidden = slice_context_range(context_hidden, shared_context_tokens, tail_len)?
                 .contiguous(false)?;
@@ -1160,6 +1390,7 @@ impl DFlash2PrefixCache {
             role,
             layers,
             kv,
+            window,
             context,
             last_hidden: last_hidden.clone(),
             cached_len,
@@ -1337,6 +1568,13 @@ impl DFlash2PrefixCache {
                 if !seen.contains(&pointer) {
                     seen.push(pointer);
                     total = total.saturating_add(part.segment.bytes);
+                }
+            }
+            for part in &entry.window {
+                let pointer = Rc::as_ptr(&part.chunk);
+                if !seen.contains(&pointer) {
+                    seen.push(pointer);
+                    total = total.saturating_add(part.chunk.bytes);
                 }
             }
             for part in &entry.context {
@@ -1660,6 +1898,8 @@ where
     )>,
     verify_capabilities: DFlash2VerifyCapabilities,
     draft_policy: DFlash2DraftBudgetPolicy,
+    /// Verify-width policy of single-request greedy DSpark text windows.
+    dspark_policy: Option<DSparkWindowPolicy>,
     experimental_fixed_budget: Option<usize>,
     /// Confidence-verify threshold and draft width (see [`confidence_verify`]).
     confidence_verify: Option<(f32, usize)>,
@@ -2265,7 +2505,10 @@ where
         ) && (fingerprint.contains("experimental-m5-affine4")
             || fingerprint.contains("projections=m5-affine4"));
         let cold_single_prefill = single_prefill && prefix_cache.is_some();
-        let single_prefill = single_prefill && prefix_cache.is_none();
+        // Use the same chunks as Inkling's ordinary target prefill, which
+        // projects the first token from the last row of the final chunk.
+        let single_prefill =
+            (single_prefill || model.prefers_unsplit_b1_prefill()) && prefix_cache.is_none();
         let mut request = request;
         if options.position_keyed_sampling {
             request.sampler = request.sampler.with_position_keyed_v1();
@@ -2504,6 +2747,7 @@ where
                     max_draft_tokens,
                     policy_domain(model, draft),
                 ),
+                dspark_policy: None,
                 experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
                 confidence_verify: confidence_verify(max_draft_tokens)?,
                 ragged_budget: ragged_group_budget(max_draft_tokens)?,
@@ -2715,6 +2959,7 @@ where
             prefill_execution
         };
 
+        let mut inkling_first_logits = None;
         while position < prompt_len_i32 {
             // Experimental, default off: at each bulk chunk boundary release
             // cached buffers sized for the previous chunk (attention scores
@@ -2792,17 +3037,26 @@ where
                 )?,
             };
             ensure_dflash2_request_not_cancelled(is_cancelled)?;
+            let target = StreamOrDevice::default();
+            let chunk_last = slice_sequence_position(&output.hidden, chunk_len - 1, target)?;
+            if draft.is_inkling_dspark() {
+                // Submit the same roots as the ordinary target before
+                // materializing captured draft taps or convolution tails.
+                if stop == prompt_len {
+                    let logits = model.dflash2_project_hidden_on(&chunk_last, target)?;
+                    mlx::transforms::eval(&[&logits])?;
+                    inkling_first_logits = Some(logits);
+                } else {
+                    mlx::transforms::eval(&[&output.hidden])?;
+                }
+            }
             context_hidden = Some(retain_context_tail(
                 context_hidden.as_ref(),
                 &output.context_hidden,
                 context_limit,
                 StreamOrDevice::default(),
             )?);
-            last_hidden = Some(slice_sequence_position(
-                &output.hidden,
-                chunk_len - 1,
-                StreamOrDevice::default(),
-            )?);
+            last_hidden = Some(chunk_last);
             let retained = context_hidden
                 .as_ref()
                 .ok_or_else(|| anyhow!("DFlash2 prefill retained no target context"))?;
@@ -2858,7 +3112,9 @@ where
                     Some(boundary) if stop as i32 != boundary => DFlash2PrefixRole::Prompt {
                         reusable_len: usize::try_from(boundary)?,
                     },
-                    None if stop == prompt_len => DFlash2PrefixRole::Prompt { reusable_len: stop },
+                    None if stop == prompt_len && !cache.whole_prompt_boundary => {
+                        DFlash2PrefixRole::Prompt { reusable_len: stop }
+                    }
                     _ => DFlash2PrefixRole::Boundary,
                 };
                 let save = DFlash2PrefixSave {
@@ -2900,9 +3156,20 @@ where
             Some(vl) => vl.finish()?,
             None => 0,
         };
+        // DSpark windows weigh each proposal against an ordinary step, and
+        // keep doing so: image prompts, sampled and constrained requests take
+        // them too, or the legacy budget settles on ordinary decoding for good
+        // after a few windows. A sampled request needs the exact verify, whose
+        // target tokens do not depend on the history (no penalties).
+        let dspark_sampled = !request.sampler.is_greedy();
+        let dspark_windows = draft.is_inkling_dspark()
+            && (!dspark_sampled || !request.sampler.requires_sampling_history())
+            && !request.sampler.uses_position_keyed_v1();
         request.pixel_values = None;
-        let first_logits =
-            model.dflash2_project_hidden_on(&last_hidden, StreamOrDevice::default())?;
+        let first_logits = match inkling_first_logits {
+            Some(logits) => logits,
+            None => model.dflash2_project_hidden_on(&last_hidden, StreamOrDevice::default())?,
+        };
         let context_hidden =
             context_hidden.ok_or_else(|| anyhow!("DFlash2 prefill produced no target context"))?;
         // Keep the target's canonical logits graph identical to ordinary
@@ -2959,6 +3226,17 @@ where
             "DFlash2 verify profile {} has no certified B1 speculative width",
             verify_capabilities.profile
         );
+        let mut draft_policy = DFlash2DraftBudgetPolicy::with_memory(
+            DFlash2BudgetPolicyKind::resolve(
+                model.dflash2_window_cost_budget_policy(),
+                p2_options.tree_max_nodes > 0,
+            )?,
+            max_draft_tokens,
+            policy_domain(model, draft),
+        );
+        if draft.is_inkling_dspark() {
+            draft_policy.start_inkling();
+        }
         Ok(Self {
             model,
             draft,
@@ -2972,14 +3250,9 @@ where
             first_accept: None,
             pending_tree_commit: None,
             verify_capabilities,
-            draft_policy: DFlash2DraftBudgetPolicy::with_memory(
-                DFlash2BudgetPolicyKind::resolve(
-                    model.dflash2_window_cost_budget_policy(),
-                    p2_options.tree_max_nodes > 0,
-                )?,
-                max_draft_tokens,
-                policy_domain(model, draft),
-            ),
+            dspark_policy: dspark_windows
+                .then(|| DSparkWindowPolicy::resume_for(dspark_sampled, constraint.is_some())),
+            draft_policy,
             experimental_fixed_budget: experimental_fixed_budget(max_draft_tokens)?,
             confidence_verify: confidence_verify(max_draft_tokens)?,
             ragged_budget: ragged_group_budget(max_draft_tokens)?,
@@ -3336,8 +3609,10 @@ where
     }
 
     fn fill_next_window(&mut self, current_token: u32) -> Result<()> {
-        if self.current_draft_budget() == 0 {
-            self.fill_ordinary_window(current_token)
+        if self.current_draft_budget() == 0
+            || self.dspark_window_policy().is_some_and(|p| p.paused())
+        {
+            self.fill_ordinary_window(current_token, None)
         } else if self.tree_eligible() {
             self.fill_tree_window(current_token, self.p2_options.tree_max_nodes)
         } else if let Some(nodes) = self.long_tree_nodes() {
@@ -3836,6 +4111,7 @@ where
         DFlash2VerifyPlan::build(&rows[0].verify_capabilities, batch_size, draft_len)?;
         let verify_len = draft_len + 1;
         let mask_token = rows[0].draft.config().dflash_config.mask_token_id;
+        let reserved_mask = rows[0].draft.reserved_mask_token();
         let positions_before = rows.iter().map(|r| r.history.len() - 1).collect::<Vec<_>>();
 
         // Persistent batched target cache.
@@ -3967,7 +4243,7 @@ where
                     &draft_tokens_arr,
                     batch_size,
                     draft_len,
-                    mask_token,
+                    reserved_mask,
                 )
             })
             .transpose()?;
@@ -4049,7 +4325,7 @@ where
                 &draft_tokens_arr,
                 batch_size,
                 draft_len,
-                mask_token,
+                reserved_mask,
             )?,
         };
         mark("t_draft_read");
@@ -4170,7 +4446,7 @@ where
                 )?;
             }
             anyhow::ensure!(
-                !tokens_to_append.contains(&mask_token),
+                !holds_reserved_token(&tokens_to_append, reserved_mask),
                 "ragged verification emitted the mask token"
             );
             accepted.push(resolution.accepted_draft_len);
@@ -4459,6 +4735,7 @@ where
         DFlash2VerifyPlan::build(&rows[0].verify_capabilities, batch_size, draft_len)?;
         let verify_len = draft_len + 1;
         let mask_token = rows[0].draft.config().dflash_config.mask_token_id;
+        let reserved_mask = rows[0].draft.reserved_mask_token();
         let sampling_prepare_started = Instant::now();
         let mut exact_uniforms = Vec::with_capacity(batch_size);
         for row in rows.iter_mut() {
@@ -4594,7 +4871,7 @@ where
                 &draft_tokens_arr,
                 batch_size,
                 draft_len,
-                mask_token,
+                reserved_mask,
             )?;
             host_sync_us = elapsed_us(host_sync_started);
             Some(tokens)
@@ -4652,7 +4929,7 @@ where
                 &draft_tokens_arr,
                 batch_size,
                 draft_len,
-                mask_token,
+                reserved_mask,
             )?,
         };
         let greedy_tokens_flat = verified_tokens_arr
@@ -4866,7 +5143,7 @@ where
                 constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
             }
             anyhow::ensure!(
-                !tokens_to_append.contains(&mask_token),
+                !holds_reserved_token(&tokens_to_append, reserved_mask),
                 "DFlash2 verification emitted reserved mask token {mask_token}"
             );
             let committed_tokens = tokens_to_append.len();
@@ -5395,36 +5672,138 @@ where
         }
         let mut stage_clock = StageClock::start()?;
         let history_before = self.history.len();
-        let draft_len = self.current_draft_budget().min(remaining);
+        let mask_token = self.draft.config().dflash_config.mask_token_id;
+        let reserved_mask = self.draft.reserved_mask_token();
+        let gated = self.dspark_window_policy().is_some();
+        let draft_len = if gated {
+            // The first text of a response waits for its first window: keep
+            // that window narrow.
+            let widest = if self.counters.windows == 0 {
+                DSparkWindowPolicy::FIRST_WINDOW_WIDTH
+            } else {
+                DSparkWindowPolicy::MAX_WIDTH
+            };
+            self.verify_capabilities
+                .max_draft_tokens(1)
+                .unwrap_or(0)
+                .min(self.block_size - 1)
+                .min(widest)
+                .min(remaining)
+        } else {
+            self.current_draft_budget().min(remaining)
+        };
         DFlash2VerifyPlan::build(&self.verify_capabilities, 1, draft_len)?;
-        let sampling_prepare_started = Instant::now();
-        let exact_sampling_uniforms = if self.request.sampler.temperature > 0.0
-            && !self.request.sampler.uses_position_keyed_v1()
-            && !self.request.sampler.requires_sampling_history()
-        {
-            Some(prepare_uniforms(&mut self.prng_state, draft_len + 1)?)
+        let draft_started = Instant::now();
+        let confidence_verify = self.confidence_verify_policy();
+        // Gated DSpark windows project the proposal block in stages and stop
+        // once the remaining positions would not be verified. When the first
+        // proposal agrees with the continuation of an earlier occurrence of
+        // the last tokens in the prompt, that continuation is proposed instead.
+        let mut copying = false;
+        let staged = if gated {
+            let target = StreamOrDevice::default();
+            let anchor: Array = (&[current_token][..], &[1_i32, 1][..]).try_into()?;
+            let mut block = self
+                .draft
+                .dspark_begin(
+                    self.model,
+                    &anchor,
+                    &self.pending_context_hidden,
+                    &mut self.draft_cache,
+                    draft_len,
+                    target,
+                )?
+                .ok_or_else(|| anyhow!("DSpark window policy without a DSpark drafter"))?;
+            let mut confidence: Vec<f32> = Vec::with_capacity(draft_len);
+            let mut width = 0;
+            let mut copied = None;
+            for stage in [1, 3, draft_len] {
+                let stage = stage.min(draft_len);
+                if stage <= confidence.len() {
+                    continue;
+                }
+                self.draft
+                    .dspark_extend(self.model, &mut block, stage, target)?;
+                let fresh: Vec<&Array> = block.confidence[confidence.len()..stage].iter().collect();
+                let host_sync_started = Instant::now();
+                confidence
+                    .extend(mlx::ops::shape::concatenate_on(&fresh, 0, target)?.to_vec::<f32>()?);
+                if stage == 1 {
+                    let first = block.tokens[0].item::<u32>()?;
+                    copied =
+                        prompt_continuation(&self.request.prompt_ids, &self.history, draft_len)
+                            .filter(|tokens| {
+                                tokens[0] == first && !holds_reserved_token(tokens, reserved_mask)
+                            })
+                            .and_then(|tokens| {
+                                let width = self.dspark_window_policy()?.copy_width(tokens.len());
+                                (width > 0).then(|| tokens[..width].to_vec())
+                            });
+                }
+                self.counters.host_sync_us = self
+                    .counters
+                    .host_sync_us
+                    .saturating_add(elapsed_us(host_sync_started));
+                if copied.is_some() {
+                    break;
+                }
+                // Unprojected positions count as certain: when even that does
+                // not widen the verify, the projected prefix decides.
+                let mut optimistic = confidence.clone();
+                optimistic.resize(draft_len, 0.0);
+                width = self
+                    .dspark_window_policy()
+                    .map_or(draft_len, |policy| policy.draft_width(&optimistic));
+                if width <= confidence.len() {
+                    break;
+                }
+            }
+            self.counters.draft_build_us = self
+                .counters
+                .draft_build_us
+                .saturating_add(elapsed_us(draft_started));
+            if let Some(tokens) = copied {
+                copying = true;
+                DFlash2VerifyPlan::build(&self.verify_capabilities, 1, tokens.len())?;
+                let array: Array =
+                    (tokens.as_slice(), &[1, i32::try_from(tokens.len())?][..]).try_into()?;
+                Some((array, confidence))
+            } else {
+                let width = width.min(confidence.len());
+                if width == 0 {
+                    // No proposal is worth a verify row: an ordinary decode
+                    // step, whose target context replaces the rows the block
+                    // consumed.
+                    return self
+                        .fill_ordinary_window(current_token, Some((window_started, confidence)));
+                }
+                DFlash2VerifyPlan::build(&self.verify_capabilities, 1, width)?;
+                let tokens: Vec<&Array> = block.tokens[..width].iter().collect();
+                Some((mlx::ops::shape::stack_on(&tokens, 1, target)?, confidence))
+            }
         } else {
             None
         };
-        self.counters.sampling_us = self
-            .counters
-            .sampling_us
-            .saturating_add(elapsed_us(sampling_prepare_started));
-        let mask_token = self.draft.config().dflash_config.mask_token_id;
-        let mut block = Vec::with_capacity(draft_len + 1);
-        block.push(current_token);
-        block.resize(draft_len + 1, mask_token);
-        let block_arr: Array = (&block[..], &[1_i32, block.len() as i32][..]).try_into()?;
-        let draft_started = Instant::now();
-        let confidence_verify = self.confidence_verify_policy();
-        let (draft_tokens_arr, confidence) = self.draft.propose_greedy_with_confidence_on(
-            self.model,
-            &block_arr,
-            &self.pending_context_hidden,
-            &mut self.draft_cache,
-            StreamOrDevice::default(),
-            confidence_verify.is_some(),
-        )?;
+        let draft_len = staged
+            .as_ref()
+            .map_or(draft_len, |(tokens, _)| tokens.shape_at(1) as usize);
+        let (draft_tokens_arr, confidence) = if let Some((tokens, _)) = &staged {
+            (tokens.clone(), None)
+        } else {
+            let mut block = Vec::with_capacity(draft_len + 1);
+            block.push(current_token);
+            block.resize(draft_len + 1, mask_token);
+            let block_arr: Array = (&block[..], &[1_i32, block.len() as i32][..]).try_into()?;
+            self.draft.propose_greedy_with_confidence_on(
+                self.model,
+                &block_arr,
+                &self.pending_context_hidden,
+                &mut self.draft_cache,
+                StreamOrDevice::default(),
+                confidence_verify.is_some() || window_trace_enabled(),
+            )?
+        };
+        let trace_confidence = confidence.clone();
         self.counters.draft_build_us = self
             .counters
             .draft_build_us
@@ -5439,6 +5818,7 @@ where
         // the verify (the rest could only be rejected or never reached).
         // Reading the confidence waits for the draft, which the verify needs
         // anyway; a window's draft width is then its verified prefix.
+        let gated_confidence = staged.map(|(_, confidence)| confidence);
         let (draft_tokens_arr, draft_len) = match (confidence_verify, confidence) {
             (Some((threshold, _)), Some(confidence)) => {
                 let host_sync_started = Instant::now();
@@ -5466,6 +5846,22 @@ where
             }
             _ => (draft_tokens_arr, draft_len),
         };
+        // One uniform per verify row, drawn once the window's width is final:
+        // a gated or confidence-trimmed window verifies fewer rows than it
+        // first allowed.
+        let sampling_prepare_started = Instant::now();
+        let exact_sampling_uniforms = if self.request.sampler.temperature > 0.0
+            && !self.request.sampler.uses_position_keyed_v1()
+            && !self.request.sampler.requires_sampling_history()
+        {
+            Some(prepare_uniforms(&mut self.prng_state, draft_len + 1)?)
+        } else {
+            None
+        };
+        self.counters.sampling_us = self
+            .counters
+            .sampling_us
+            .saturating_add(elapsed_us(sampling_prepare_started));
         StageClock::mark(&mut stage_clock, "draft", &[&draft_tokens_arr])?;
         let draft_schedule_started = Instant::now();
         mlx::transforms::async_eval(&[&draft_tokens_arr])?;
@@ -5553,6 +5949,10 @@ where
             draft_len,
             exact_sampling_uniforms.is_some(),
         )?;
+        let device_sampled_tokens = match (&prepared_sampling, &exact_sampling_uniforms) {
+            (Some(prepared), Some(uniforms)) => prepared.sample_on_device(uniforms)?,
+            _ => None,
+        };
         self.counters.sampling_us = self
             .counters
             .sampling_us
@@ -5560,6 +5960,8 @@ where
         let verify_schedule_started = Instant::now();
         if let Some(verified_tokens_arr) = verified_tokens_arr.as_ref() {
             mlx::transforms::async_eval(&[verified_tokens_arr, &verified.context_hidden])?;
+        } else if let Some(sampled) = device_sampled_tokens.as_ref() {
+            mlx::transforms::async_eval(&[sampled, &verified.context_hidden])?;
         } else if let (Some(prepared_sampling), Some(exact_sampling_uniforms)) =
             (prepared_sampling.as_ref(), exact_sampling_uniforms.as_ref())
         {
@@ -5601,13 +6003,15 @@ where
             .host_sync_us
             .saturating_add(elapsed_us(host_sync_started));
         StageClock::mark(&mut stage_clock, "head", &[])?;
-        if draft_tokens.contains(&mask_token) {
+        if holds_reserved_token(&draft_tokens, reserved_mask) {
             return Err(anyhow!(
                 "DFlash2 draft emitted reserved mask token {mask_token}"
             ));
         }
         let sampling_started = Instant::now();
-        let resolution = if let (Some(prepared_sampling), Some(exact_sampling_uniforms)) =
+        let resolution = if let Some(sampled) = device_sampled_tokens {
+            resolve_exact_deterministic_target_tokens(&draft_tokens, &sampled.to_vec::<u32>()?)?
+        } else if let (Some(prepared_sampling), Some(exact_sampling_uniforms)) =
             (prepared_sampling, exact_sampling_uniforms)
         {
             let uniforms = exact_sampling_uniforms.to_vec()?;
@@ -5657,7 +6061,7 @@ where
 
         let accepted_len = resolution.accepted_verify_input_len;
         let rollback_started = Instant::now();
-        self.pending_context_hidden = if resolution.needs_rollback {
+        let committed_context = if resolution.needs_rollback {
             self.model.dflash2_restore_target_prefix_on(
                 &mut self.target_cache,
                 &snapshots,
@@ -5675,6 +6079,7 @@ where
             }
             verified.context_hidden
         };
+        self.pending_context_hidden = committed_context;
         self.counters.rollback_us = self
             .counters
             .rollback_us
@@ -5685,7 +6090,9 @@ where
         }
 
         let accepted_draft_len = resolution.accepted_draft_len;
-        self.note_first_accept(accepted_draft_len > 0);
+        if !copying {
+            self.note_first_accept(accepted_draft_len > 0);
+        }
         let mut tokens_to_append = resolution.tokens_to_append;
         if let Some(stop_index) = tokens_to_append
             .iter()
@@ -5697,7 +6104,7 @@ where
         if let Some(constraint) = self.constraint.as_ref() {
             constraint.truncate_invalid_speculative_bonus(&mut tokens_to_append)?;
         }
-        if tokens_to_append.contains(&mask_token) {
+        if holds_reserved_token(&tokens_to_append, reserved_mask) {
             return Err(anyhow!(
                 "DFlash2 verification emitted reserved mask token {mask_token}"
             ));
@@ -5718,6 +6125,37 @@ where
         );
         let window_us = elapsed_us(window_started);
         self.counters.window_us = self.counters.window_us.saturating_add(window_us);
+        window_trace(|| {
+            serde_json::json!({
+                "context": history_before,
+                "kind": if copying { "copy" } else { "draft" },
+                "anchor": current_token,
+                "draft": draft_tokens,
+                "confidence": gated_confidence.clone().or_else(|| {
+                    trace_confidence.as_ref().and_then(|c| c.to_vec::<f32>().ok())
+                }),
+                "target": greedy_verified_tokens,
+                "accepted": accepted_draft_len,
+                "committed": committed_tokens,
+                "pending_context": self.pending_context_hidden.shape_at(1),
+                "window_us": window_us,
+            })
+        });
+        if gated {
+            self.record_budget_window(draft_len, window_us, DFlash2WindowRole::Exploit);
+            // The first window of a width can include a one-time cost.
+            let steady = self.counters.budget_windows[draft_len] > 1;
+            if let Some(policy) = self.dspark_policy.as_mut() {
+                policy.observe(
+                    gated_confidence.as_deref().filter(|_| !copying),
+                    draft_len,
+                    accepted_draft_len,
+                    window_us,
+                    steady,
+                );
+            }
+            return Ok(());
+        }
         self.observe_adaptive_window(MtpDraftPolicyWindow::from_measured_components(
             draft_tokens.len(),
             accepted_draft_len,
@@ -5794,19 +6232,11 @@ where
         } else {
             self.draft_policy.window_role()
         };
-        let width = window.attempted_draft_tokens;
-        if self.counters.budget_windows.len() <= width {
-            self.counters.budget_windows.resize(width + 1, 0);
-            self.counters.budget_window_us.resize(width + 1, 0);
-        }
-        self.counters.budget_windows[width] += 1;
-        self.counters.budget_window_us[width] =
-            self.counters.budget_window_us[width].saturating_add(window.measured_window_us());
-        match role {
-            DFlash2WindowRole::Probe => self.counters.budget_probe_windows += 1,
-            DFlash2WindowRole::Calibrate => self.counters.budget_calibration_windows += 1,
-            DFlash2WindowRole::Exploit => {}
-        }
+        self.record_budget_window(
+            window.attempted_draft_tokens,
+            window.measured_window_us(),
+            role,
+        );
         if fixed {
             return;
         }
@@ -5817,9 +6247,40 @@ where
         }
     }
 
-    fn fill_ordinary_window(&mut self, current_token: u32) -> Result<()> {
+    fn record_budget_window(&mut self, width: usize, window_us: u64, role: DFlash2WindowRole) {
+        if self.counters.budget_windows.len() <= width {
+            self.counters.budget_windows.resize(width + 1, 0);
+            self.counters.budget_window_us.resize(width + 1, 0);
+        }
+        self.counters.budget_windows[width] += 1;
+        self.counters.budget_window_us[width] =
+            self.counters.budget_window_us[width].saturating_add(window_us);
+        match role {
+            DFlash2WindowRole::Probe => self.counters.budget_probe_windows += 1,
+            DFlash2WindowRole::Calibrate => self.counters.budget_calibration_windows += 1,
+            DFlash2WindowRole::Exploit => {}
+        }
+    }
+
+    /// The DSpark verify-width policy when it drives this request's windows.
+    fn dspark_window_policy(&self) -> Option<&DSparkWindowPolicy> {
+        self.dspark_policy.as_ref().filter(|_| {
+            self.fixed_draft_budget().is_none() && self.confidence_verify_policy().is_none()
+        })
+    }
+
+    /// An ordinary decode step. `drafted` is the start of a DSpark window
+    /// whose proposal was not worth verifying, with the proposal confidences:
+    /// that proposal consumed the pending target context.
+    fn fill_ordinary_window(
+        &mut self,
+        current_token: u32,
+        drafted: Option<(Instant, Vec<f32>)>,
+    ) -> Result<()> {
         self.settle_target_cache()?;
-        let window_started = Instant::now();
+        let window_started = drafted
+            .as_ref()
+            .map_or_else(Instant::now, |(started, _)| *started);
         let remaining = self
             .request
             .max_new_tokens
@@ -5853,7 +6314,11 @@ where
             .dflash2_project_hidden_on(&output.hidden, StreamOrDevice::default())?;
         let row = logits.reshape((logits.shape().as_slice()[2],))?;
         let row = match self.constraint.as_mut() {
-            Some(constraint) => apply_token_mask(&row, &constraint.compute_mask()?)?,
+            Some(constraint) => {
+                // The GPU runs the step while the host walks the grammar.
+                mlx::transforms::async_eval(&[&row, &output.context_hidden])?;
+                apply_token_mask(&row, &constraint.compute_mask()?)?
+            }
             None => row,
         };
         let projection_build_us = elapsed_us(projection_started);
@@ -5884,7 +6349,7 @@ where
 
         let ordinary_context_hidden = output.context_hidden;
         self.pending_context_hidden = retain_context_tail(
-            Some(&self.pending_context_hidden),
+            drafted.is_none().then_some(&self.pending_context_hidden),
             &ordinary_context_hidden,
             // A d=0 probe is bounded to a handful of windows. Keep every raw
             // target context produced during the probe so its original
@@ -5903,6 +6368,29 @@ where
         self.counters.ordinary_windows = self.counters.ordinary_windows.saturating_add(1);
         let window_us = elapsed_us(window_started);
         self.counters.window_us = self.counters.window_us.saturating_add(window_us);
+        window_trace(|| {
+            serde_json::json!({
+                "context": context_tokens,
+                "kind": if drafted.is_some() { "draft" } else { "ordinary" },
+                "anchor": current_token,
+                "draft": [],
+                "confidence": drafted.as_ref().map(|(_, confidence)| confidence),
+                "target": [next_token], "accepted": 0, "committed": 1, "window_us": window_us,
+            })
+        });
+        if self.dspark_window_policy().is_some() {
+            self.record_budget_window(0, window_us, DFlash2WindowRole::Exploit);
+            let steady = self.counters.budget_windows[0] > 1;
+            if let Some(policy) = self.dspark_policy.as_mut() {
+                match drafted {
+                    Some((_, confidence)) => {
+                        policy.observe(Some(&confidence), 0, 0, window_us, steady)
+                    }
+                    None => policy.observe_paused(window_us),
+                }
+            }
+            return Ok(());
+        }
         self.observe_adaptive_window(MtpDraftPolicyWindow::from_measured_components(
             0,
             0,
@@ -6319,11 +6807,16 @@ fn slice_batch_row(array: &Array, row: usize, target: StreamOrDevice) -> Result<
     .map_err(Into::into)
 }
 
+/// Whether `tokens` hold the drafter's reserved mask token, when it has one.
+fn holds_reserved_token(tokens: &[u32], reserved: Option<u32>) -> bool {
+    reserved.is_some_and(|mask| tokens.contains(&mask))
+}
+
 fn materialize_dflash2_draft_tokens(
     draft_tokens: &Array,
     batch_size: usize,
     draft_len: usize,
-    mask_token: u32,
+    reserved: Option<u32>,
 ) -> Result<Vec<Vec<u32>>> {
     let flat = draft_tokens.to_vec::<u32>()?;
     let rows = flat
@@ -6337,8 +6830,8 @@ fn materialize_dflash2_draft_tokens(
     );
     for tokens in &rows {
         anyhow::ensure!(
-            !tokens.contains(&mask_token),
-            "DFlash2 draft emitted reserved mask token {mask_token}"
+            !holds_reserved_token(tokens, reserved),
+            "DFlash2 draft emitted reserved mask token {reserved:?}"
         );
     }
     Ok(rows)
@@ -6400,6 +6893,21 @@ fn slice_sequence_prefix(hidden: &Array, length: i32, target: StreamOrDevice) ->
         target,
     )
     .map_err(Into::into)
+}
+
+/// Return a continuation from this request's prompt. The small bounded scan
+/// avoids building a second prompt index on the latency-critical prefill path.
+fn prompt_continuation<'a>(prompt: &'a [u32], history: &[u32], limit: usize) -> Option<&'a [u32]> {
+    const MATCH: usize = 4;
+    let prompt = &prompt[prompt.len().saturating_sub(8192)..];
+    let suffix = history.get(history.len().checked_sub(MATCH)?..)?;
+    let searchable = prompt.get(..prompt.len().checked_sub(1)?)?;
+    let at = searchable
+        .windows(MATCH)
+        .rposition(|candidate| candidate == suffix)?
+        + MATCH;
+    let continuation = &prompt[at..prompt.len().min(at + limit)];
+    (continuation.len() >= 2).then_some(continuation)
 }
 
 fn retain_context_tail(
@@ -6543,6 +7051,30 @@ fn gpu_commit_requested() -> bool {
     *ENABLED.get_or_init(|| {
         ironmlx_core::m5_profile::flag(ironmlx_core::m5_profile::settings::DFLASH2_GPU_COMMIT)
     })
+}
+
+/// Diagnostic-only (`IRONMLX_DIAGNOSTIC_DFLASH2_WINDOW_TRACE=<path>`): append
+/// one JSON line per single-request window without synchronizing.
+fn window_trace(record: impl FnOnce() -> serde_json::Value) {
+    static FILE: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+        std::sync::OnceLock::new();
+    let file = FILE.get_or_init(|| {
+        let path = std::env::var_os("IRONMLX_DIAGNOSTIC_DFLASH2_WINDOW_TRACE")?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
+            .map(std::sync::Mutex::new)
+    });
+    if let Some(file) = file {
+        use std::io::Write;
+        let _ = writeln!(file.lock().expect("window trace"), "{}", record());
+    }
+}
+
+fn window_trace_enabled() -> bool {
+    std::env::var_os("IRONMLX_DIAGNOSTIC_DFLASH2_WINDOW_TRACE").is_some()
 }
 
 fn window_stages_enabled() -> bool {
@@ -6871,6 +7403,18 @@ mod moe_tests;
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn dspark_prompt_copy_uses_only_an_earlier_continuation_and_honors_the_budget() {
+        let prompt = [9, 1, 2, 3, 4, 11, 12, 1, 2, 3, 4, 21, 22, 23];
+        assert_eq!(
+            prompt_continuation(&prompt, &[8, 1, 2, 3, 4], 2),
+            Some(&[21, 22][..])
+        );
+        assert_eq!(prompt_continuation(&prompt, &[1, 2, 3, 4], 1), None);
+        assert_eq!(prompt_continuation(&prompt, &[4, 21, 22, 23], 7), None);
+        assert_eq!(prompt_continuation(&prompt, &[1, 2, 3], 7), None);
+    }
 
     #[test]
     fn automatic_block_size_uses_checkpoint_width_up_to_q8() {
@@ -7507,6 +8051,7 @@ mod tests {
             role: DFlash2PrefixRole::Boundary,
             layers: Vec::new(),
             kv: Vec::new(),
+            window: Vec::new(),
             context: vec![DFlash2ContextRef {
                 chunk: Rc::new(DFlash2ContextChunk {
                     hidden: hidden.clone(),
@@ -8377,6 +8922,171 @@ mod tests {
         assert_eq!(cache.snapshot().bytes, own(8) + shared);
         assert_eq!(restored_test_positions(&cache, second), test_positions(8));
         assert_eq!(restored_test_context(&cache, second), test_context(8));
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefix_cache_keeps_only_the_window_of_a_sliding_window_layer() {
+        // One layer whose queries reach 7 positions back.
+        let windowed = || -> Vec<LayerCache> {
+            vec![LayerCache::Full(
+                ironmlx_lm::core::cache::kv_cache::KVCache::new(
+                    1,
+                    2,
+                    4,
+                    4,
+                    mlx::Dtype::Float32,
+                    1 << 20,
+                )
+                .with_window(8, 0),
+            )]
+        };
+        let restored = |cache: &DFlash2PrefixCache, id: u64| -> (i32, Vec<f32>) {
+            let artifact = test_artifact(cache, id);
+            let mut target_cache = windowed();
+            artifact.restore_into(&mut target_cache).expect("restore");
+            let LayerCache::Full(kv) = &target_cache[0] else {
+                panic!("dense layer");
+            };
+            assert_eq!(kv.offsets(), &[artifact.cached_len]);
+            let (entry, _) = prefix_entry_for_row(&target_cache, 0)
+                .expect("entry")
+                .expect("restored state");
+            let PrefixLayerPayload::FullDense { k, .. } = &entry.main_layers[0] else {
+                panic!("dense layer");
+            };
+            let held = k.shape().as_slice()[2] as usize;
+            let values = k.to_vec::<f32>().expect("keys");
+            (
+                kv.bases()[0],
+                values.chunks(4).take(held).map(|p| p[0]).collect(),
+            )
+        };
+        let mut cache = DFlash2PrefixCache::new(1 << 20).expect("cache");
+        let mut target_cache = windowed();
+        append_test_positions(&mut target_cache, 0, 20);
+        let first = save_test_prefix(&mut cache, &target_cache, 20, None).expect("first");
+        append_test_positions(&mut target_cache, 20, 23);
+        let second = save_test_prefix(&mut cache, &target_cache, 23, Some(first)).expect("second");
+
+        assert!(test_artifact(&cache, first).kv.is_empty());
+        assert_eq!(
+            restored(&cache, first),
+            (13, (13..20).map(|p| p as f32).collect())
+        );
+        assert_eq!(
+            restored(&cache, second),
+            (16, (16..23).map(|p| p as f32).collect())
+        );
+        // The second window is the last four positions of the first and
+        // three new ones: 7 + 3 positions of 64 bytes are held, once.
+        assert_eq!(test_artifact(&cache, second).window.len(), 2);
+        let own = |tokens: usize| 8 + tokens * std::mem::size_of::<u32>() + "runtime".len();
+        // Context is 8 bytes a position: 20 positions, then 3 more.
+        assert_eq!(cache.snapshot().bytes, own(20) + own(23) + 10 * 64 + 23 * 8);
+
+        // A position past the window of every artifact left is released.
+        append_test_positions(&mut target_cache, 23, 40);
+        let third = save_test_prefix(&mut cache, &target_cache, 40, Some(second)).expect("third");
+        assert_eq!(test_artifact(&cache, third).window.len(), 1);
+        cache.entries.retain(|entry| entry.id == third);
+        cache.recount();
+        assert_eq!(
+            restored(&cache, third),
+            (33, (33..40).map(|p| p as f32).collect())
+        );
+        // The context tail still refers to chunks of all three saves.
+        assert_eq!(cache.snapshot().bytes, own(40) + 7 * 64 + 40 * 8);
+    }
+
+    #[test]
+    #[serial(mlx_metal)]
+    fn prefix_cache_stores_the_window_of_a_sliding_window_layer_on_disk() {
+        use crate::core::dflash2_prefix_store::tests::file_names;
+        // A layer that keeps its whole history and one whose queries reach
+        // 7 positions back.
+        let layers = || -> Vec<LayerCache> {
+            [0, 8]
+                .into_iter()
+                .map(|window| {
+                    LayerCache::Full(
+                        ironmlx_lm::core::cache::kv_cache::KVCache::new(
+                            1,
+                            2,
+                            4,
+                            4,
+                            mlx::Dtype::Float32,
+                            1 << 20,
+                        )
+                        .with_window(window, 0),
+                    )
+                })
+                .collect()
+        };
+        let append = |target_cache: &mut [LayerCache], start: i32, stop: i32| {
+            for layer in target_cache.chunks_mut(1) {
+                append_test_positions(layer, start, stop);
+            }
+        };
+        // The first head's key value at every position each layer holds.
+        let held = |target_cache: &[LayerCache]| -> Vec<Vec<f32>> {
+            let (entry, _) = prefix_entry_for_row(target_cache, 0)
+                .expect("entry")
+                .expect("state");
+            entry
+                .main_layers
+                .iter()
+                .map(|layer| {
+                    let PrefixLayerPayload::FullDense { k, .. } = layer else {
+                        panic!("dense layer");
+                    };
+                    let positions = k.shape().as_slice()[2] as usize;
+                    let values = k.to_vec::<f32>().expect("keys");
+                    values.chunks(4).take(positions).map(|p| p[0]).collect()
+                })
+                .collect()
+        };
+        let restore = |cache: &mut DFlash2PrefixCache, len: u32| -> Vec<Vec<f32>> {
+            let prompt: Vec<u32> = (0..len).collect();
+            let stored = cache
+                .disk_candidate(&prompt, &|_| "runtime".to_owned(), 0)
+                .expect("stored");
+            let mut target_cache = layers();
+            let restored = cache
+                .restore_from_disk(&stored, &mut target_cache, None, &|_| 0)
+                .expect("restore");
+            assert_eq!(restored.cached_len, len as i32);
+            held(&target_cache)
+        };
+        let range =
+            |start: i32, stop: i32| -> Vec<f32> { (start..stop).map(|p| p as f32).collect() };
+
+        let (mut cache, dir) = test_disk_cache("dflash2-cache-disk-window");
+        let root = cache
+            .disk
+            .as_ref()
+            .expect("disk")
+            .store()
+            .root()
+            .to_path_buf();
+        let mut target_cache = layers();
+        append(&mut target_cache, 0, 20);
+        let first = save_test_prefix(&mut cache, &target_cache, 20, None).expect("first");
+        append(&mut target_cache, 20, 23);
+        let second = save_test_prefix(&mut cache, &target_cache, 23, Some(first)).expect("second");
+        append(&mut target_cache, 23, 40);
+        save_test_prefix(&mut cache, &target_cache, 40, Some(second)).expect("third");
+        flush_disk(&cache);
+        // One window file per save: [13, 20), [20, 23), [33, 40).
+        assert_eq!(file_names(&root.join("window")).len(), 3);
+        cache.shrink_to(0);
+
+        assert_eq!(restore(&mut cache, 20), vec![range(0, 20), range(13, 20)]);
+        // The second window is the end of the first file and all of its own.
+        assert_eq!(restore(&mut cache, 23), vec![range(0, 23), range(16, 23)]);
+        assert_eq!(restore(&mut cache, 40), vec![range(0, 40), range(33, 40)]);
+        drop(cache);
+        std::fs::remove_dir_all(dir).expect("cleanup");
     }
 
     #[test]

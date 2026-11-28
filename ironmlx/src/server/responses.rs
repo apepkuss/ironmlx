@@ -1195,11 +1195,21 @@ struct PreparedResponse {
 
 async fn prepare_response<M>(
     state: &AppState<M>,
-    normalized: NormalizedRequest,
+    mut normalized: NormalizedRequest,
 ) -> std::result::Result<PreparedResponse, Response>
 where
     M: Model + DenseVlMethods + Send + 'static,
 {
+    if state.tokenizer.native_output_dialect()
+        == Some(ironmlx_lm::core::native_output::NativeOutputDialect::Inkling2)
+    {
+        if let Some(effort) = normalized.reasoning.effort {
+            normalized.chat.chat_template_kwargs = Some(serde_json::json!({
+                "enable_thinking": effort.enables_native_reasoning(),
+                "reasoning_effort": effort,
+            }));
+        }
+    }
     let native_output = match normalized.native_output_config(&state.tokenizer) {
         Ok(config) => config,
         Err(error) => {
@@ -1719,7 +1729,11 @@ fn validate_collected_output(
         .iter()
         .map(|call| call.name.clone())
         .collect::<Vec<_>>();
-    openai::validate_tool_choice_output(&context.constraint_options, &call_names)
+    openai::validate_tool_choice_output(
+        &context.constraint_options,
+        &call_names,
+        output.finish_reason,
+    )
 }
 
 pub(crate) fn unary_response(
@@ -2554,9 +2568,11 @@ where
             }
         }
         if let Some(context) = tool_context.as_ref() {
-            if let Err(error) =
-                openai::validate_tool_choice_output(&context.constraint_options, &call_names)
-            {
+            if let Err(error) = openai::validate_tool_choice_output(
+                &context.constraint_options,
+                &call_names,
+                output.finish_reason,
+            ) {
                 let frame = formatter.failed(format!("{error:#}"));
                 let _ = tx.send(Ok(frame)).await;
                 return;

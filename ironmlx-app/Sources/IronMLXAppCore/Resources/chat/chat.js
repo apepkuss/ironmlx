@@ -13,8 +13,8 @@
   // UTF-16 units; ChatBridge refuses more than 200 000 characters.
   var MAX_TEXT_LENGTH = 100000;
   var AUTO_LANGUAGES = ['python', 'javascript', 'typescript', 'rust', 'swift', 'bash', 'json', 'go', 'java', 'c', 'cpp'];
-  var LEVELS = ['off', 'low', 'medium', 'high'];
-  var LEVEL_KEYS = { off: 'thinkOff', low: 'thinkLow', medium: 'thinkMedium', high: 'thinkHigh' };
+  var LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+  var LEVEL_KEYS = { off: 'thinkOff', low: 'thinkLow', medium: 'thinkMedium', high: 'thinkHigh', minimal: 'thinkMinimal', xhigh: 'thinkXhigh', max: 'thinkMax' };
 
   var ICONS = {
     history: '<svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="7.25"/><path d="M10 6v4.25l2.75 1.75"/></svg>',
@@ -656,10 +656,25 @@
     return Boolean(S.reasoning && S.reasoning.native_efforts && S.reasoning.native_efforts.length);
   }
 
+  function availableLevels() {
+    var native = S.reasoning && S.reasoning.native_efforts || [];
+    return ['off'].concat(LEVELS.filter(function (level) { return native.indexOf(level) >= 0; }));
+  }
+
+  function defaultLevel() {
+    var levels = availableLevels();
+    return levels.indexOf('medium') >= 0 ? 'medium' : (levels[1] || 'off');
+  }
+
   function normalizeChoice(choice) {
     if (!S.reasoning) return 'off';
     if (!choice || choice === 'off') return 'off';
-    if (hasLevels()) return choice === 'on' ? 'medium' : (LEVELS.indexOf(choice) >= 0 ? choice : 'medium');
+    if (hasLevels()) {
+      var levels = availableLevels();
+      // Preserve the earlier High choice for models whose native level is xhigh.
+      if (choice === 'high' && levels.indexOf('high') < 0 && levels.indexOf('xhigh') >= 0) return 'xhigh';
+      return levels.indexOf(choice) >= 0 ? choice : defaultLevel();
+    }
     return 'on';
   }
 
@@ -680,7 +695,7 @@
         renderThink();
       } else if (!active) {
         // Turning thinking on starts at the default level.
-        setChoice('medium');
+        setChoice(defaultLevel());
         if (S.popover !== 'think') togglePopover('think');
         else renderThink();
       } else {
@@ -703,7 +718,7 @@
     ui.thinkMenu.replaceChildren();
     show(ui.thinkMenu, hasLevels() && S.popover === 'think');
     if (!hasLevels()) return;
-    LEVELS.forEach(function (level, index) {
+    availableLevels().forEach(function (level, index) {
       var item = button('mi' + (S.choice === level ? ' sel' : ''));
       item.append(el('span', 'mi-label', t(LEVEL_KEYS[level])), el('small', '', t(LEVEL_KEYS[level] + 'Sub')));
       on(item, 'click', function () {

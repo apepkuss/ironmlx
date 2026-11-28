@@ -173,12 +173,14 @@ pub enum PrefixSegmentLayer {
         v_packed: Array,
         v_norms: Array,
     },
+    /// `[1, H, tokens, D]` dense K and V over the segment's token range.
+    Dense { k: Array, v: Array },
 }
 
 impl PrefixSegmentLayer {
     fn arrays(&self) -> Vec<&Array> {
         match self {
-            Self::Paged { k, v } => vec![k, v],
+            Self::Paged { k, v } | Self::Dense { k, v } => vec![k, v],
             Self::TurboQuant {
                 k_packed,
                 k_norms,
@@ -252,6 +254,9 @@ pub struct PrefixLineageRef {
     pub start: i32,
     pub stop: i32,
     pub segment_stop: i32,
+    /// Whether the segment holds the sliding-window layers' K/V (the window
+    /// part of an entry) rather than the shared head.
+    pub window: bool,
 }
 
 impl PrefixLineageRef {
@@ -300,11 +305,30 @@ impl PrefixLineage {
 /// holds the tail `[aligned_len, cached_len)` of the shareable layers (paged:
 /// whole pages including padding; TurboQuant: `[1,H,tail,.]`) and everything
 /// else exactly as an unshared entry would.
+///
+/// The last `window_refs` of `segments` are the window part: K/V of the
+/// sliding-window layers only, continuing each other up to `aligned_len`
+/// from at or before `window_start`, the first position those layers store.
+/// The refs before them are the shared head of every other shareable layer.
 #[derive(Debug, Clone)]
 pub struct SegmentedPrefixEntry {
     pub segments: Vec<PrefixSegmentRef>,
+    pub window_refs: usize,
+    pub window_start: i32,
     pub aligned_len: i32,
     pub private: PagedPrefixEntry,
+}
+
+impl SegmentedPrefixEntry {
+    /// The refs of the shared head, which cover `[0, aligned_len)`.
+    pub fn head(&self) -> &[PrefixSegmentRef] {
+        &self.segments[..self.segments.len() - self.window_refs.min(self.segments.len())]
+    }
+
+    /// The refs of the window part.
+    pub fn window(&self) -> &[PrefixSegmentRef] {
+        &self.segments[self.head().len()..]
+    }
 }
 
 fn slice_axis(a: &Array, axis: usize, start: i32, stop: i32) -> anyhow::Result<Array> {
@@ -346,8 +370,37 @@ fn check_segment_refs(
     if block_size <= 0 || entry.aligned_len % block_size != 0 {
         anyhow::bail!("materialize_prefix_entry: aligned_len must be a multiple of block_size");
     }
+    if entry.window_refs > entry.segments.len() {
+        anyhow::bail!("materialize_prefix_entry: more window refs than segments");
+    }
+    if let Some(first) = entry.window().first() {
+        if entry.window_start % block_size != 0 || first.segment.start > entry.window_start {
+            anyhow::bail!(
+                "materialize_prefix_entry: window segments start at {}, after the window start {}",
+                first.segment.start,
+                entry.window_start
+            );
+        }
+        let mut pos = first.segment.start;
+        for r in entry.window() {
+            if r.segment.start != pos || r.stop > r.segment.stop || r.stop % block_size != 0 {
+                anyhow::bail!(
+                    "materialize_prefix_entry: window segment [{}, {}) does not continue at {pos}",
+                    r.segment.start,
+                    r.stop
+                );
+            }
+            pos = r.stop;
+        }
+        if pos != entry.aligned_len {
+            anyhow::bail!(
+                "materialize_prefix_entry: window segments cover up to {pos} != aligned_len {}",
+                entry.aligned_len
+            );
+        }
+    }
     let mut pos = 0;
-    for r in &entry.segments {
+    for r in entry.head() {
         if r.segment.start != pos || r.stop > r.segment.stop || r.stop <= r.segment.start {
             anyhow::bail!(
                 "materialize_prefix_entry: segment ref [{}, {}) of segment [{}, {}) does not continue at {pos}",
@@ -365,7 +418,7 @@ fn check_segment_refs(
         }
         pos = r.stop;
     }
-    if pos != entry.aligned_len {
+    if pos != entry.aligned_len && !(entry.head().is_empty() && entry.window_refs > 0) {
         anyhow::bail!(
             "materialize_prefix_entry: segments cover {pos} != aligned_len {}",
             entry.aligned_len
@@ -392,7 +445,7 @@ fn paged_layer_parts(
     let axis = split_axis(true);
     let mut ks = Vec::with_capacity(entry.segments.len() + 1);
     let mut vs = Vec::with_capacity(entry.segments.len() + 1);
-    for r in &entry.segments {
+    for r in entry.head() {
         let Some(PrefixSegmentLayer::Paged { k, v }) = r.segment.layer(idx) else {
             anyhow::bail!("materialize_prefix_entry: segment lacks paged layer {idx}");
         };
@@ -421,7 +474,7 @@ fn turboquant_layer_parts(
 ) -> anyhow::Result<Vec<TurboQuantPrefixLayer>> {
     let axis = split_axis(false);
     let mut parts = Vec::with_capacity(entry.segments.len() + 1);
-    for r in &entry.segments {
+    for r in entry.head() {
         let Some(PrefixSegmentLayer::TurboQuant {
             k_packed,
             k_norms,
@@ -456,6 +509,50 @@ fn turboquant_layer_parts(
         });
     }
     Ok(parts)
+}
+
+/// Dense layer `idx` as consecutive token-axis K/V parts: the referenced
+/// part of each segment that holds it, then the private tail when it has
+/// tokens. A layer of the shared head starts at 0; a sliding-window layer
+/// starts at `window_start`. `None` when no segment holds this layer (its
+/// payload is everything the entry stores of it).
+fn dense_layer_parts(
+    entry: &SegmentedPrefixEntry,
+    idx: usize,
+    k_tail: &Array,
+    v_tail: &Array,
+) -> anyhow::Result<Option<Vec<(Array, Array)>>> {
+    let holds = |refs: &[PrefixSegmentRef]| refs.iter().any(|r| r.segment.layer(idx).is_some());
+    let (refs, from) = if holds(entry.head()) {
+        (entry.head(), 0)
+    } else if holds(entry.window()) {
+        (entry.window(), entry.window_start)
+    } else {
+        return Ok(None);
+    };
+    let axis = split_axis(false);
+    let mut parts = Vec::with_capacity(refs.len() + 1);
+    for r in refs {
+        let Some(PrefixSegmentLayer::Dense { k, v }) = r.segment.layer(idx) else {
+            anyhow::bail!("materialize_prefix_entry: segment lacks dense layer {idx}");
+        };
+        if r.stop <= from {
+            continue;
+        }
+        let (start, stop) = ((from - r.segment.start).max(0), r.stop - r.segment.start);
+        if start == 0 && stop == axis_len(k, axis) {
+            parts.push((k.clone(), v.clone()));
+        } else {
+            parts.push((
+                slice_axis(k, axis, start, stop)?,
+                slice_axis(v, axis, start, stop)?,
+            ));
+        }
+    }
+    if axis_len(k_tail, axis) > 0 {
+        parts.push((k_tail.clone(), v_tail.clone()));
+    }
+    Ok(Some(parts))
 }
 
 /// Rebuild the unshared per-layer payloads: segment slices in order, then the
@@ -498,6 +595,14 @@ pub fn materialize_prefix_entry(
                 *k_norms = field(|p| &p.k_norms)?;
                 *v_packed = field(|p| &p.v_packed)?;
                 *v_norms = field(|p| &p.v_norms)?;
+            }
+            PrefixLayerPayload::FullDense { k, v } => {
+                let Some(parts) = dense_layer_parts(entry, idx, k, v)? else {
+                    continue;
+                };
+                let axis = split_axis(false);
+                *k = concat_axis(parts.iter().map(|p| p.0.clone()).collect(), axis)?;
+                *v = concat_axis(parts.iter().map(|p| p.1.clone()).collect(), axis)?;
             }
             _ => {}
         }
@@ -557,6 +662,27 @@ pub fn restore_segmented_prefix_entry_for_rows(
                     )?;
                 }
             }
+            (LayerCache::Full(kv), PrefixLayerPayload::FullDense { k, v }) => {
+                match dense_layer_parts(entry, idx, k, v)? {
+                    Some(parts) => {
+                        let parts: Vec<(&Array, &Array)> =
+                            parts.iter().map(|(k, v)| (k, v)).collect();
+                        for &row in rows {
+                            kv.restore_dense_prefix_segments_for_row_on(
+                                &parts,
+                                row,
+                                cached_len,
+                                (),
+                            )?;
+                        }
+                    }
+                    None => {
+                        for &row in rows {
+                            kv.restore_dense_prefix_layer_for_row_on(k, v, row, cached_len, ())?;
+                        }
+                    }
+                }
+            }
             (cache, layer) => {
                 restore_prefix_layer_for_rows(cache, layer, rows, cached_len, idx, WHAT)?;
             }
@@ -600,6 +726,7 @@ mod tests {
                 let base = KVCache::new(1, HEADS, DIM, DIM, Dtype::Float32, 512).with_step(128);
                 let mut kv = match kind {
                     "paged" => base.with_paged(BS, 8).expect("paged"),
+                    "dense" => base,
                     _ => base
                         .with_turboquant(TurboQuantKVBits::K3V4)
                         .expect("turboquant"),
@@ -648,7 +775,11 @@ mod tests {
         let shape = a.shape().as_slice().to_vec();
         match a.dtype() {
             Dtype::Uint32 => (shape, vec![], a.to_vec::<u32>().unwrap()),
-            _ => (shape, a.to_vec::<f32>().unwrap(), vec![]),
+            _ => (
+                shape,
+                a.astype(Dtype::Float32).unwrap().to_vec::<f32>().unwrap(),
+                vec![],
+            ),
         }
     }
 
@@ -660,6 +791,7 @@ mod tests {
                 PrefixLayerPayload::FullPaged { k_pages, v_pages } => {
                     vec![k_pages.clone(), v_pages.clone()]
                 }
+                PrefixLayerPayload::FullDense { k, v } => vec![k.clone(), v.clone()],
                 PrefixLayerPayload::FullTurboQuantPacked {
                     k_packed,
                     k_norms,
@@ -696,6 +828,8 @@ mod tests {
         let seg2 = seg2.expect("second segment");
         assert_eq!((seg2.start, seg2.stop), (BS, 2 * BS));
         let entry = SegmentedPrefixEntry {
+            window_refs: 0,
+            window_start: 0,
             segments: vec![
                 PrefixSegmentRef {
                     segment: Arc::new(seg1),
@@ -729,6 +863,7 @@ mod tests {
                 let base = KVCache::new(batch, HEADS, DIM, DIM, Dtype::Float32, 512).with_step(128);
                 let mut kv = match kind {
                     "paged" => base.with_paged(BS, 16).expect("paged"),
+                    "dense" => base,
                     _ => base
                         .with_turboquant(TurboQuantKVBits::K3V4)
                         .expect("turboquant"),
@@ -771,6 +906,8 @@ mod tests {
         let n = 2 * BS + tail;
         let (seg2, private, _) = export(&caches, BS);
         let entry = SegmentedPrefixEntry {
+            window_refs: 0,
+            window_start: 0,
             segments: vec![
                 PrefixSegmentRef {
                     segment: Arc::new(seg1.unwrap()),
@@ -809,7 +946,7 @@ mod tests {
     #[test]
     #[serial_test::serial(mlx_metal)]
     fn segmented_restore_matches_materialized_restore() {
-        for kind in ["paged", "turboquant"] {
+        for kind in ["paged", "turboquant", "dense"] {
             for tail in [0, 1, 127] {
                 // Paged: installed as the pool.
                 assert_segmented_restore_matches(kind, tail, 1, &[0], false);
@@ -817,6 +954,105 @@ mod tests {
                 assert_segmented_restore_matches(kind, tail, 2, &[0, 1], false);
                 // Paged: copied next to a live row.
                 assert_segmented_restore_matches(kind, tail, 2, &[0], true);
+            }
+        }
+    }
+
+    fn dequantized(kv: &KVCache) -> (Array, Array) {
+        kv.int8()
+            .unwrap()
+            .dequantized_on(
+                kv.offsets()[0],
+                Dtype::Bfloat16,
+                mlx::StreamOrDevice::default(),
+            )
+            .unwrap()
+    }
+
+    /// Two 8-bit layers of one row holding `n` tokens.
+    fn int8_filled(n: i32, salt: f32) -> Vec<LayerCache> {
+        (0..2)
+            .map(|layer| {
+                let mut kv = KVCache::new(1, HEADS, 128, 128, Dtype::Bfloat16, 1024).with_step(128);
+                assert!(kv.enable_int8());
+                let data = |salt: f32| -> Array {
+                    let v: Vec<f32> = (0..(HEADS * n * 128))
+                        .map(|i| ((i as f32) * 0.013 + salt).sin())
+                        .collect();
+                    let a: Array = (v.as_slice(), (1_i32, HEADS, n, 128)).try_into().unwrap();
+                    a.astype(Dtype::Bfloat16).unwrap()
+                };
+                kv.update_and_fetch(
+                    &data(salt + layer as f32),
+                    &data(salt + 3.0 + layer as f32),
+                    &[n],
+                )
+                .expect("fill");
+                LayerCache::Full(kv)
+            })
+            .collect()
+    }
+
+    /// 8-bit layers save their quantized words, scales and biases as they
+    /// are: the segments and tail rebuild the whole export, and restoring
+    /// them (whole or part by part) into an empty 8-bit cache gives back
+    /// the saved data and the same dequantized K/V, bit for bit.
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn int8_segments_round_trip_bit_for_bit() {
+        for tail in [0, 1, 127] {
+            let mut caches = int8_filled(BS, 0.0);
+            let (seg1, _, _) = export(&caches, 0);
+            let extra = int8_filled(BS + tail, 7.0);
+            for (cache, more) in caches.iter_mut().zip(&extra) {
+                let (LayerCache::Full(kv), LayerCache::Full(more)) = (cache, more) else {
+                    unreachable!()
+                };
+                let (k, v) = dequantized(more);
+                kv.update_and_fetch(&k, &v, &[BS + tail]).unwrap();
+            }
+            let n = 2 * BS + tail;
+            let (seg2, private, len) = export(&caches, BS);
+            assert_eq!(len, n);
+            let entry = SegmentedPrefixEntry {
+                window_refs: 0,
+                window_start: 0,
+                segments: vec![
+                    PrefixSegmentRef {
+                        segment: Arc::new(seg1.unwrap()),
+                        stop: BS,
+                    },
+                    PrefixSegmentRef {
+                        segment: Arc::new(seg2.unwrap()),
+                        stop: 2 * BS,
+                    },
+                ],
+                aligned_len: 2 * BS,
+                private,
+            };
+            let whole = materialize_prefix_entry(&entry, n, BS).unwrap();
+            let saved = row_arrays(&caches, 0);
+            assert_eq!(
+                payload_arrays(&whole).iter().map(flat).collect::<Vec<_>>(),
+                saved,
+                "tail={tail}"
+            );
+            let mut restored = int8_filled(0, 0.0);
+            restore_prefix_entry_for_rows(&mut restored, &whole, &[0], n).unwrap();
+            let mut parts = int8_filled(0, 0.0);
+            restore_segmented_prefix_entry_for_rows(&mut parts, &entry, &[0], n, BS).unwrap();
+            for target in [&restored, &parts] {
+                assert_eq!(row_arrays(target, 0), saved, "tail={tail}");
+                for (a, b) in target.iter().zip(&caches) {
+                    let (LayerCache::Full(a), LayerCache::Full(b)) = (a, b) else {
+                        unreachable!()
+                    };
+                    assert_eq!(a.offsets(), &[n]);
+                    let (ak, av) = dequantized(a);
+                    let (bk, bv) = dequantized(b);
+                    assert_eq!(flat(&ak), flat(&bk), "tail={tail}");
+                    assert_eq!(flat(&av), flat(&bv), "tail={tail}");
+                }
             }
         }
     }
@@ -913,6 +1149,8 @@ mod tests {
             let (seg2, private, _) = export(&src, HALF);
             drop(src);
             let entry = SegmentedPrefixEntry {
+                window_refs: 0,
+                window_start: 0,
                 segments: vec![
                     PrefixSegmentRef {
                         segment: Arc::new(seg1.unwrap()),
@@ -974,9 +1212,10 @@ mod tests {
 
     #[test]
     #[serial_test::serial(mlx_metal)]
-    fn materialize_matches_whole_copy_for_turboquant_layers() {
+    fn materialize_matches_whole_copy_for_token_axis_layers() {
         for tail in [0, 1, 127] {
             assert_matches_whole_copy("turboquant", tail);
+            assert_matches_whole_copy("dense", tail);
         }
     }
 
@@ -1122,6 +1361,7 @@ mod tests {
             start,
             stop,
             segment_stop: stop,
+            window: false,
         };
         let lineage = PrefixLineage {
             layout: layout(),
@@ -1137,7 +1377,8 @@ mod tests {
                 id: b,
                 start: 256,
                 stop: 384,
-                segment_stop: 512
+                segment_stop: 512,
+                window: false,
             }
         );
         assert!(!cut.refs[1].is_whole());

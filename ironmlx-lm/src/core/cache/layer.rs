@@ -12,7 +12,6 @@ use crate::core::cache::{
     TurboQuantKVBits,
 };
 use crate::models::glm4_moe_lite::mla_cache::MlaLatentCacheSnapshot;
-use mlx::Dtype;
 
 /// Model-side per-layer cache; separate from decoder layer computation.
 #[doc(hidden)]
@@ -173,13 +172,33 @@ impl LayerCache {
     }
 }
 
-/// A full-attention layer whose K/V can live in shared prefix segments
-/// (paged or TurboQuant storage).
+/// A full-attention layer whose K/V can live in shared prefix segments:
+/// paged or TurboQuant storage, or plain dense K/V of the whole history.
 fn shareable_full_kv(cache: &LayerCache) -> Option<&KVCache> {
     match cache {
-        LayerCache::Full(kv) if kv.paged().is_some() || kv.turboquant().is_some() => Some(kv),
+        LayerCache::Full(kv)
+            if kv.paged().is_some() || kv.has_packed_prefix() || kv.is_plain_dense() =>
+        {
+            Some(kv)
+        }
         _ => None,
     }
+}
+
+/// A sliding-window layer: dense K/V of only what its window reaches. Its
+/// K/V lives in the window part of an entry's segments.
+fn windowed_full_kv(cache: &LayerCache) -> Option<&KVCache> {
+    match cache {
+        LayerCache::Full(kv) if kv.is_windowed_dense() => Some(kv),
+        _ => None,
+    }
+}
+
+/// Where the stored K/V of a sliding-window layer begins in an entry of
+/// `cached_len` tokens: the block boundary at or before the oldest position
+/// the window reaches.
+pub fn prefix_window_start(cached_len: i32, window: i32, block_size: i32) -> i32 {
+    (cached_len - (window - 1)).max(0) / block_size * block_size
 }
 
 /// Row `row`'s prefix segment record, read from the first shareable
@@ -199,13 +218,56 @@ pub fn set_row_prefix_lineage(
     lineage: Option<PrefixLineage>,
 ) {
     for cache in caches {
-        if shareable_full_kv(cache).is_none() {
+        if shareable_full_kv(cache).is_none() && windowed_full_kv(cache).is_none() {
             continue;
         }
         if let LayerCache::Full(kv) = cache {
             kv.set_prefix_lineage(row, lineage.clone());
         }
     }
+}
+
+/// The window every sliding-window layer of `caches` uses, when they agree
+/// and there is one.
+pub fn prefix_window(caches: &[LayerCache]) -> Option<i32> {
+    let mut windows = caches
+        .iter()
+        .filter_map(windowed_full_kv)
+        .map(KVCache::window);
+    let first = windows.next()?;
+    windows.all(|window| window == first).then_some(first)
+}
+
+/// Copy `[start, stop)` of `row`'s sliding-window layers into a segment
+/// named `id`. `None` when there is no such layer or a layer no longer
+/// holds `start`.
+pub fn export_prefix_window_segment_for_row(
+    caches: &[LayerCache],
+    row: usize,
+    id: PrefixSegmentId,
+    start: i32,
+    stop: i32,
+    layout: PrefixSegmentLayout,
+) -> anyhow::Result<Option<PrefixKvSegment>> {
+    let mut layers = Vec::new();
+    for (idx, cache) in caches.iter().enumerate() {
+        let Some(kv) = windowed_full_kv(cache) else {
+            continue;
+        };
+        let held_from = kv.bases().get(row).copied().unwrap_or(i32::MAX);
+        if start < held_from || stop > full_row_len(kv, row, idx)? || stop <= start {
+            return Ok(None);
+        }
+        let (k, v) = kv.owned_dense_range_for_row_on(row, start, stop, ())?;
+        layers.push((idx, PrefixSegmentLayer::Dense { k, v }));
+    }
+    Ok((!layers.is_empty()).then(|| PrefixKvSegment {
+        id,
+        layout,
+        start,
+        stop,
+        layers,
+    }))
 }
 
 pub fn adopt_layer_cache_rows(
@@ -326,46 +388,39 @@ pub fn prefix_key_spec_for_caches(
                             },
                         ],
                     });
-                } else if let Some(tq) = kv.turboquant() {
+                } else if let Some(tensors) = kv.packed_prefix_tensor_specs(cached_len) {
                     let profile = kv.prefix_cache_profile().ok_or_else(|| {
                         anyhow::anyhow!(
-                            "prefix_key_spec_for_caches: TurboQuant cache missing prefix profile"
+                            "prefix_key_spec_for_caches: packed cache missing prefix profile"
                         )
                     })?;
                     remember_kv_cache_profile(&mut kv_cache_profile, Some(profile))?;
                     main_layers.push(PrefixLayerSpec {
                         kind: PrefixLayerKind::FullTurboQuantPacked,
+                        tensors,
+                    });
+                } else {
+                    // A sliding-window layer stores the positions from its
+                    // window's block boundary on; any other dense layer
+                    // stores all of them.
+                    let stored = if kv.is_windowed_dense() {
+                        cached_len - prefix_window_start(cached_len, kv.window(), block_size)
+                    } else {
+                        cached_len
+                    };
+                    main_layers.push(PrefixLayerSpec {
+                        kind: PrefixLayerKind::FullDense,
                         tensors: vec![
                             PrefixTensorSpec {
-                                dtype: Dtype::Uint32,
-                                shape: vec![
-                                    1_i32,
-                                    kv.n_kv_heads(),
-                                    cached_len,
-                                    tq.packed_head_dim(),
-                                ],
+                                dtype: kv.dtype(),
+                                shape: vec![1_i32, kv.n_kv_heads(), stored, kv.head_dim()],
                             },
                             PrefixTensorSpec {
-                                dtype: Dtype::Float32,
-                                shape: vec![1_i32, kv.n_kv_heads(), cached_len],
-                            },
-                            PrefixTensorSpec {
-                                dtype: Dtype::Uint32,
-                                shape: vec![
-                                    1_i32,
-                                    kv.n_kv_heads(),
-                                    cached_len,
-                                    tq.packed_v_head_dim(),
-                                ],
-                            },
-                            PrefixTensorSpec {
-                                dtype: Dtype::Float32,
-                                shape: vec![1_i32, kv.n_kv_heads(), cached_len],
+                                dtype: kv.dtype(),
+                                shape: vec![1_i32, kv.n_kv_heads(), stored, kv.v_head_dim()],
                             },
                         ],
                     });
-                } else {
-                    return Ok(None);
                 }
             }
             LayerCache::Linear(gd) => {
@@ -459,7 +514,7 @@ pub fn prefix_entry_for_row(
                     full_row_len(kv, row, idx)?,
                 )
             }
-            LayerCache::Full(kv) if kv.turboquant().is_some() => {
+            LayerCache::Full(kv) if kv.has_packed_prefix() => {
                 let (layer, packed_cached_len) = kv.turboquant_prefix_layer_for_row_on(row, ())?;
                 (
                     PrefixLayerPayload::FullTurboQuantPacked {
@@ -510,6 +565,7 @@ fn entry_from_layers(main_layers: Vec<PrefixLayerPayload>) -> PagedPrefixEntry {
         mtp_layers: vec![],
         mtp_last_hidden: None,
         gemma4_drafter_last_hidden: None,
+        last_logits: None,
     }
 }
 
@@ -570,6 +626,16 @@ pub fn export_prefix_segment_for_row(
     let mut cached_len = LayerLen::default();
     let mut aligned_len = from_len;
     for (idx, cache) in caches.iter().enumerate() {
+        if let Some(kv) = windowed_full_kv(cache) {
+            // The tail of a sliding-window layer; the rest of what its
+            // window reaches is the entry's window segments.
+            let len = full_row_len(kv, row, idx)?;
+            cached_len.check(idx, len)?;
+            let (k, v) =
+                kv.owned_dense_range_for_row_on(row, len / block_size * block_size, len, ())?;
+            private.push(PrefixLayerPayload::FullDense { k, v });
+            continue;
+        }
         let Some(kv) = shareable_full_kv(cache) else {
             let (payload, len) = unshared_layer_payload(cache, row)?;
             cached_len.check(idx, len)?;
@@ -601,10 +667,9 @@ pub fn export_prefix_segment_for_row(
             let (k_pages, v_pages) =
                 paged.owned_pages_for_row_on(kv.offsets(), row, aligned_blocks, row_blocks, ())?;
             private.push(PrefixLayerPayload::FullPaged { k_pages, v_pages });
-        } else if let Some(tq) = kv.turboquant() {
+        } else if kv.has_packed_prefix() {
             if aligned_len > from_len {
-                let seg =
-                    tq.owned_packed_range_for_row_on(kv.offsets(), row, from_len, aligned_len, ())?;
+                let seg = kv.owned_packed_range_for_row_on(row, from_len, aligned_len, ())?;
                 segment_layers.push((
                     idx,
                     PrefixSegmentLayer::TurboQuant {
@@ -615,13 +680,20 @@ pub fn export_prefix_segment_for_row(
                     },
                 ));
             }
-            let tail = tq.owned_packed_range_for_row_on(kv.offsets(), row, aligned_len, len, ())?;
+            let tail = kv.owned_packed_range_for_row_on(row, aligned_len, len, ())?;
             private.push(PrefixLayerPayload::FullTurboQuantPacked {
                 k_packed: tail.k_packed,
                 k_norms: tail.k_norms,
                 v_packed: tail.v_packed,
                 v_norms: tail.v_norms,
             });
+        } else {
+            if aligned_len > from_len {
+                let (k, v) = kv.owned_dense_range_for_row_on(row, from_len, aligned_len, ())?;
+                segment_layers.push((idx, PrefixSegmentLayer::Dense { k, v }));
+            }
+            let (k, v) = kv.owned_dense_range_for_row_on(row, aligned_len, len, ())?;
+            private.push(PrefixLayerPayload::FullDense { k, v });
         }
     }
     let segment = (!segment_layers.is_empty()).then(|| PrefixKvSegment {
@@ -687,8 +759,8 @@ pub fn export_prefix_segment_range_for_row(
                 (),
             )?;
             layers.push((idx, PrefixSegmentLayer::Paged { k, v }));
-        } else if let Some(tq) = kv.turboquant() {
-            let seg = tq.owned_packed_range_for_row_on(kv.offsets(), row, start, stop, ())?;
+        } else if kv.has_packed_prefix() {
+            let seg = kv.owned_packed_range_for_row_on(row, start, stop, ())?;
             layers.push((
                 idx,
                 PrefixSegmentLayer::TurboQuant {
@@ -698,6 +770,9 @@ pub fn export_prefix_segment_range_for_row(
                     v_norms: seg.v_norms,
                 },
             ));
+        } else {
+            let (k, v) = kv.owned_dense_range_for_row_on(row, start, stop, ())?;
+            layers.push((idx, PrefixSegmentLayer::Dense { k, v }));
         }
     }
     Ok((!layers.is_empty()).then(|| PrefixKvSegment {
@@ -950,6 +1025,7 @@ pub fn paged_prefix_layers_for_row(
         mtp_layers: vec![],
         mtp_last_hidden: None,
         gemma4_drafter_last_hidden: None,
+        last_logits: None,
     }))
 }
 
@@ -1071,7 +1147,8 @@ mod tests {
                 GatedDeltaCache::new_with_cap(2, 4, 8, 1, 4, 4, Dtype::Float32, 16)
                     .expect("linear cache"),
             ),
-            LayerCache::Full(KVCache::new(2, 1, 2, 2, Dtype::Float32, 64)),
+            // A sliding-window layer; its row here is empty.
+            LayerCache::Full(KVCache::new(2, 1, 2, 2, Dtype::Float32, 64).with_window(4, 0)),
             paged(),
             paged(),
             LayerCache::Full(turboquant),
@@ -1085,6 +1162,7 @@ mod tests {
                 start: 0,
                 stop: 8,
                 segment_stop: 8,
+                window: false,
             }],
         };
         set_row_prefix_lineage(&mut caches, 1, Some(lineage.clone()));
@@ -1101,12 +1179,17 @@ mod tests {
             per_layer,
             vec![
                 None,
-                Some(None),
+                // The windowed layer's row is empty: its record is cut to
+                // nothing.
+                Some(Some(PrefixLineage {
+                    layout: lineage.layout.clone(),
+                    refs: vec![],
+                })),
                 Some(Some(lineage.clone())),
                 Some(Some(lineage.clone())),
                 Some(Some(lineage))
             ],
-            "only shareable (paged / TurboQuant) full-attention layers carry the record"
+            "every full-attention layer carries the record; other layers do not"
         );
 
         set_row_prefix_lineage(&mut caches, 1, None);

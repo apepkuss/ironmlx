@@ -104,6 +104,8 @@ fn export(
     let aligned_len = fresh.as_ref().map_or(from, |(_, stop)| *stop);
     // The layout ignores lengths: key a spec with any one first.
     let probe = SegmentedPrefixEntry {
+        window_refs: 0,
+        window_start: 0,
         segments: segments.clone(),
         aligned_len: from,
         private: private.clone(),
@@ -144,6 +146,8 @@ fn export(
     (
         spec,
         SegmentedPrefixEntry {
+            window_refs: 0,
+            window_start: 0,
             segments,
             aligned_len,
             private,
@@ -553,6 +557,7 @@ fn block_entry() -> (PagedPrefixKeySpec, PagedPrefixEntry) {
         mtp_layers: vec![],
         mtp_last_hidden: None,
         gemma4_drafter_last_hidden: None,
+        last_logits: None,
     };
     let spec = PagedPrefixKeySpec {
         entry_kind: PrefixEntryKind::ImmutableBlock,
@@ -646,7 +651,8 @@ fn wp8_async_queue_writes_segmented_entries() {
             AsyncPrefixStoreAdmission::Admitted(permit) => *permit,
             _ => panic!("admitted"),
         };
-        assert_eq!(permit.payload_bytes, spec.payload_bytes());
+        // Bytes are reserved at submit, by what the writer puts on disk.
+        assert_eq!(permit.payload_bytes, 0);
         assert_eq!(
             permit.submit_segmented(entry.clone()),
             AsyncPrefixStoreSubmit::Queued
@@ -761,5 +767,471 @@ fn a_dropped_segment_the_row_only_partly_holds_is_not_rebuilt() {
     assert_eq!(b.segments.len(), 1, "one new segment from 0");
     assert_ne!(b.segments[0].segment.id, s.id);
     assert_eq!(b.segments[0].segment.start, 0);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// One layer that keeps its whole history and one sliding-window layer
+/// whose queries reach `WINDOW - 1` positions back, both holding `n` tokens.
+const WINDOW: i32 = 200;
+
+fn windowed_pair(n: i32) -> Vec<LayerCache> {
+    let mut caches: Vec<LayerCache> = [0, WINDOW]
+        .into_iter()
+        .map(|window| {
+            LayerCache::Full(
+                KVCache::new(1, HEADS, DIM, DIM, Dtype::Float32, 8192)
+                    .with_step(BS)
+                    .with_window(window, 0),
+            )
+        })
+        .collect();
+    if n > 0 {
+        extend(&mut caches, n, 0.1);
+    }
+    caches
+}
+
+fn windowed_spec(caches: &[LayerCache], len: i32) -> PagedPrefixKeySpec {
+    let tokens: Vec<u32> = (0..len as u32).collect();
+    ironmlx_lm::core::cache::layer::prefix_key_spec_for_caches(
+        "wp8-window-test",
+        &tokens,
+        len,
+        None,
+        BS,
+        caches,
+    )
+    .unwrap()
+    .expect("a spec for dense layers")
+}
+
+/// What the next query of each layer attends to: the K the row returns
+/// after appending one more token.
+fn next_keys(caches: &mut [LayerCache]) -> Vec<(Vec<i32>, Vec<f32>, Vec<u32>)> {
+    caches
+        .iter_mut()
+        .map(|cache| {
+            let LayerCache::Full(kv) = cache else {
+                unreachable!()
+            };
+            let (k, _) = kv
+                .update_and_fetch(&token_data(1, 9.0), &token_data(1, 9.5), &[1])
+                .unwrap();
+            // A sliding-window layer may hold more than its window reaches.
+            let held = k.shape().as_slice()[2];
+            let reach = if kv.window() > 0 {
+                held.min(kv.window())
+            } else {
+                held
+            };
+            flat(
+                &mlx::ops::indexing::slice_strided_on(
+                    &k,
+                    [0, 0, held - reach, 0],
+                    [1, HEADS, held, DIM],
+                    [1, 1, 1, 1],
+                    (),
+                )
+                .unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+#[serial_test::serial(mlx_metal)]
+fn sliding_window_layers_keep_only_their_window_and_share_it_between_saves() {
+    let root = temp_root("wp8-window");
+    let store = PagedPrefixStore::new(&root);
+    let hot = Arc::new(Mutex::new(
+        PrefixLruCache::new(PrefixLruCacheConfig::new(1 << 30).unwrap()).unwrap(),
+    ));
+    let window_segment = |entry: &SegmentedPrefixEntry, index: usize| {
+        let r = &entry.window()[index];
+        (r.segment.start, r.stop, r.segment.clone())
+    };
+
+    // A at 700 tokens: the window reaches back to 501, stored from 384.
+    let mut caches = windowed_pair(700);
+    let spec_a = windowed_spec(&caches, 700);
+    assert_eq!(spec_a.main_layers[0].tensors[0].shape[2], 700);
+    assert_eq!(spec_a.main_layers[1].tensors[0].shape[2], 700 - 384);
+    let (a, len) = export_segmented_prefix_for_row(Some(&hot), &caches, 0, &spec_a)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (len, a.aligned_len, a.window_start, a.window_refs),
+        (700, 640, 384, 1)
+    );
+    assert_eq!(a.head().len(), 1);
+    let (start, stop, a_window) = window_segment(&a, 0);
+    assert_eq!((start, stop), (384, 640));
+    assert_eq!(a_window.layers.len(), 1, "only the sliding-window layer");
+    assert_eq!(a.head()[0].segment.layers.len(), 1, "only the other layer");
+    hot.lock()
+        .unwrap()
+        .insert_segmented(spec_a.clone(), a.clone())
+        .unwrap();
+    store.save_segmented(&spec_a, &a).unwrap();
+    ironmlx_lm::core::cache::layer::set_row_prefix_lineage(
+        &mut caches,
+        0,
+        Some(segmented_entry_lineage(&a, prefix_segment_layout(&spec_a))),
+    );
+
+    // B at 830: stored from 512, which A's window segment still covers up
+    // to 640; only [640, 768) is new for either part.
+    extend(&mut caches, 130, 0.7);
+    let spec_b = windowed_spec(&caches, 830);
+    let (b, _) = export_segmented_prefix_for_row(Some(&hot), &caches, 0, &spec_b)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (b.aligned_len, b.window_start, b.window_refs),
+        (768, 512, 2)
+    );
+    assert!(
+        Arc::ptr_eq(&window_segment(&b, 0).2, &a_window),
+        "A's window is shared"
+    );
+    assert_eq!(
+        (window_segment(&b, 1).0, window_segment(&b, 1).1),
+        (640, 768)
+    );
+    assert!(Arc::ptr_eq(&b.head()[0].segment, &a.head()[0].segment));
+    let (_, written) = store.save_segmented_counted(&spec_b, &b).unwrap();
+    assert_eq!(
+        written, 2,
+        "one new head segment and one new window segment"
+    );
+    hot.lock()
+        .unwrap()
+        .insert_segmented(spec_b.clone(), b.clone())
+        .unwrap();
+
+    // Read back from disk and restored, B gives the next query of either
+    // layer exactly what the live row gives it.
+    let loaded = PagedPrefixStore::new(&root)
+        .load_segmented_observed(&spec_b, None)
+        .unwrap();
+    assert_eq!(loaded.status, PagedPrefixLoadStatus::Hit);
+    let loaded = loaded.entry.unwrap();
+    assert_eq!((loaded.window_start, loaded.window_refs), (512, 2));
+    for entry in [&b, &loaded] {
+        let mut restored = windowed_pair(0);
+        ironmlx_lm::core::cache::prefix_segments::restore_segmented_prefix_entry_for_rows(
+            &mut restored,
+            entry,
+            &[0],
+            830,
+            BS,
+        )
+        .unwrap();
+        let LayerCache::Full(kv) = &restored[1] else {
+            unreachable!()
+        };
+        assert_eq!(
+            (kv.offsets(), kv.bases()),
+            (&[830][..], &[830 - (WINDOW - 1)][..])
+        );
+        let mut live_copy = windowed_pair(700);
+        extend(&mut live_copy, 130, 0.7);
+        assert_eq!(next_keys(&mut restored), next_keys(&mut live_copy));
+    }
+
+    // C far beyond: nothing of the earlier windows is referenced.
+    ironmlx_lm::core::cache::layer::set_row_prefix_lineage(
+        &mut caches,
+        0,
+        Some(segmented_entry_lineage(&b, prefix_segment_layout(&spec_b))),
+    );
+    extend(&mut caches, 1170, 1.3);
+    let spec_c = windowed_spec(&caches, 2000);
+    let (c, _) = export_segmented_prefix_for_row(Some(&hot), &caches, 0, &spec_c)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (c.aligned_len, c.window_start, c.window_refs),
+        (1920, 1792, 1)
+    );
+    assert_eq!(
+        c.head().len(),
+        3,
+        "the head still shares A's and B's segments"
+    );
+    assert_eq!(
+        (window_segment(&c, 0).0, window_segment(&c, 0).1),
+        (1792, 1920)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[serial_test::serial(mlx_metal)]
+fn checkpoints_of_sliding_window_entries_are_thinned_out() {
+    let hot = Arc::new(Mutex::new(
+        PrefixLruCache::new(PrefixLruCacheConfig::new(1 << 30).unwrap()).unwrap(),
+    ));
+    // A prefill that saves a checkpoint every 512 tokens up to 6144.
+    let mut caches = windowed_pair(0);
+    let mut specs = Vec::new();
+    for step in 1..=12 {
+        extend(&mut caches, 512, step as f32);
+        let len = step * 512;
+        let spec = windowed_spec(&caches, len);
+        let (entry, _) = export_segmented_prefix_for_row(Some(&hot), &caches, 0, &spec)
+            .unwrap()
+            .unwrap();
+        assert!(entry.window_refs > 0);
+        ironmlx_lm::core::cache::layer::set_row_prefix_lineage(
+            &mut caches,
+            0,
+            Some(segmented_entry_lineage(
+                &entry,
+                prefix_segment_layout(&spec),
+            )),
+        );
+        hot.lock()
+            .unwrap()
+            .insert_segmented(spec.clone(), entry)
+            .unwrap();
+        specs.push(spec);
+    }
+    let held: Vec<i32> = specs
+        .iter()
+        .filter(|spec| hot.lock().unwrap().load_segmented(spec).unwrap().is_some())
+        .map(|spec| spec.cached_len)
+        .collect();
+    // The three newest, and the shortest of each power-of-two length range
+    // below them: [512, 1024), [1024, 2048), [2048, 4096), [4096, 8192).
+    assert_eq!(held, vec![512, 1024, 2048, 4096, 5120, 5632, 6144]);
+    // The head still reaches back to position 0 for every entry kept.
+    let longest = hot
+        .lock()
+        .unwrap()
+        .load_segmented(specs.last().unwrap())
+        .unwrap()
+        .unwrap()
+        .0;
+    assert_eq!(longest.head().first().unwrap().segment.start, 0);
+    assert_eq!(longest.aligned_len, 6144);
+
+    // Entries without sliding-window layers keep every checkpoint.
+    let hot = Arc::new(Mutex::new(
+        PrefixLruCache::new(PrefixLruCacheConfig::new(1 << 30).unwrap()).unwrap(),
+    ));
+    let mut caches = live("paged", 128, 0.1);
+    let mut kept = 0;
+    for step in 1..=6 {
+        if step > 1 {
+            extend(&mut caches, 128, step as f32);
+        }
+        let (spec, entry) = export("paged", &caches, vec![], (0..step * 128).collect());
+        hot.lock()
+            .unwrap()
+            .insert_segmented(spec.clone(), entry)
+            .unwrap();
+        kept += usize::from(hot.lock().unwrap().load_segmented(&spec).unwrap().is_some());
+    }
+    assert_eq!(kept, 6);
+    assert_eq!(hot.lock().unwrap().health().entry_count, 6);
+}
+
+#[test]
+#[serial_test::serial(mlx_metal)]
+fn stored_checkpoints_of_sliding_window_entries_are_thinned_out() {
+    let root = temp_root("wp8-window-thin");
+    let store = PagedPrefixStore::new(&root);
+    // A prefill that stores a checkpoint every 512 tokens up to 6144.
+    let mut caches = windowed_pair(0);
+    let mut specs = Vec::new();
+    for step in 1..=12 {
+        extend(&mut caches, 512, step as f32);
+        let spec = windowed_spec(&caches, step * 512);
+        let (entry, _) = export_segmented_prefix_for_row(None, &caches, 0, &spec)
+            .unwrap()
+            .unwrap();
+        ironmlx_lm::core::cache::layer::set_row_prefix_lineage(
+            &mut caches,
+            0,
+            Some(segmented_entry_lineage(
+                &entry,
+                prefix_segment_layout(&spec),
+            )),
+        );
+        store.save_segmented(&spec, &entry).unwrap();
+        specs.push(spec);
+    }
+    let stored = |store: &PagedPrefixStore, spec: &PagedPrefixKeySpec| {
+        store.load_segmented_observed(spec, None).unwrap().status == PagedPrefixLoadStatus::Hit
+    };
+    let held: Vec<i32> = specs
+        .iter()
+        .filter(|spec| stored(&store, spec))
+        .map(|spec| spec.cached_len)
+        .collect();
+    assert_eq!(held, vec![512, 1024, 2048, 4096, 5120, 5632, 6144]);
+
+    // Every head segment is still referenced (the longest entry reaches back
+    // to 0); only the windows of the entries kept remain: 12 head files and
+    // 7 window files.
+    let layout_dir = wp8_layout_dir(&root, &prefix_segment_layout(specs.last().unwrap()));
+    let segment_files = fs::read_dir(layout_dir.join(WP8_SEGMENTS_DIR))
+        .unwrap()
+        .count();
+    assert_eq!(segment_files, 12 + 7);
+
+    // The longest entry restores from a store opened afresh.
+    let reopened = PagedPrefixStore::new(&root);
+    let loaded = reopened
+        .load_segmented_observed(specs.last().unwrap(), None)
+        .unwrap()
+        .entry
+        .expect("the longest entry");
+    let mut restored = windowed_pair(0);
+    ironmlx_lm::core::cache::prefix_segments::restore_segmented_prefix_entry_for_rows(
+        &mut restored,
+        &loaded,
+        &[0],
+        6144,
+        BS,
+    )
+    .unwrap();
+    assert_eq!(next_keys(&mut restored), next_keys(&mut caches));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[serial_test::serial(mlx_metal)]
+fn a_queued_save_reserves_only_what_it_writes() {
+    let root = temp_root("wp8-write-bytes");
+    let store = PagedPrefixStore::new(&root);
+    let Pair {
+        spec_a,
+        a,
+        spec_b,
+        b,
+    } = pair("paged", 3);
+    store.save_segmented(&spec_a, &a).unwrap();
+    // B shares A's first segment, which is on disk now: its write is the
+    // new segment and its private tail, well under its logical size.
+    let write = store.segmented_write_bytes(&spec_b, &b, &std::collections::HashSet::new());
+    let shared = b.segments[0].segment.payload_bytes();
+    let logical = spec_b.payload_bytes();
+    assert!(
+        write > 0 && write + shared <= logical,
+        "{write} {shared} {logical}"
+    );
+    // A segment a save queued ahead writes first is not counted either.
+    let queued: std::collections::HashSet<_> = b.segments.iter().map(|r| r.segment.id).collect();
+    let private = b
+        .private
+        .observability_stats(spec_b.cached_len)
+        .payload_bytes;
+    assert_eq!(store.segmented_write_bytes(&spec_b, &b, &queued), private);
+    // A limit B's logical size would break but its write fits, with
+    // something else already reserved.
+    let queue = AsyncPrefixStoreQueue::new(2, write + 1).expect("queue");
+    assert!(queue.reserve_pending(1));
+    let permit = match queue.try_admit(
+        store.clone(),
+        spec_b.clone(),
+        AsyncPrefixStoreCancellation::default(),
+    ) {
+        AsyncPrefixStoreAdmission::Admitted(permit) => *permit,
+        _ => panic!("admitted"),
+    };
+    assert_eq!(
+        permit.submit_segmented(b.clone()),
+        AsyncPrefixStoreSubmit::Queued
+    );
+    queue.release_pending(0, 1);
+    queue.wait_idle();
+    assert_eq!(queue.stats().completed_total, 1);
+    assert_eq!(queue.stats().pending_bytes, 0);
+    assert_eq!(
+        store.load_segmented_observed(&spec_b, None).unwrap().status,
+        PagedPrefixLoadStatus::Hit
+    );
+    queue.shutdown();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[serial_test::serial(mlx_metal)]
+fn a_small_save_is_admitted_while_a_large_one_waits() {
+    let queue = AsyncPrefixStoreQueue::new(4, 100).expect("queue");
+    let store = PagedPrefixStore::new(temp_root("wp8-oversize-unused"));
+    let Pair { spec_a, spec_b, .. } = pair("paged", 3);
+    let admit = |spec: &PagedPrefixKeySpec| match queue.try_admit(
+        store.clone(),
+        spec.clone(),
+        AsyncPrefixStoreCancellation::default(),
+    ) {
+        AsyncPrefixStoreAdmission::Admitted(permit) => *permit,
+        _ => panic!("admitted"),
+    };
+    let mut large = admit(&spec_a);
+    // Its write is past the limit: it is the queue's one oversize job.
+    assert!(queue.reserve_pending_bytes(large.id, 1_000));
+    large.payload_bytes = 1_000;
+    // A second save is still admitted and its small write fits; a second
+    // large one does not.
+    let mut small = admit(&spec_b);
+    assert!(!queue.reserve_pending_bytes(small.id, 1_000));
+    assert!(queue.reserve_pending_bytes(small.id, 50));
+    small.payload_bytes = 50;
+    assert_eq!(queue.stats().pending_bytes, 1_050);
+    drop(large);
+    // Once the large one is gone, the next large write is taken again.
+    let mut next = admit(&spec_a);
+    assert!(queue.reserve_pending_bytes(next.id, 1_000));
+    next.payload_bytes = 1_000;
+    drop(next);
+    drop(small);
+    assert_eq!(
+        (queue.stats().pending_jobs, queue.stats().pending_bytes),
+        (0, 0)
+    );
+    queue.shutdown();
+}
+
+/// An entry's last logits are written with its private part and read back
+/// under the same key; an entry without them loads without them.
+#[test]
+#[serial_test::serial(mlx_metal)]
+fn wp8_keeps_the_last_logits_outside_the_key() {
+    let root = temp_root("wp8-last-logits");
+    let store = PagedPrefixStore::new(&root);
+    let Pair {
+        spec_a,
+        a,
+        spec_b,
+        mut b,
+    } = pair("paged", 1);
+    let logits: Array = (&[0.25_f32, -1.5, 3.0][..], &[1_i32, 1, 3][..])
+        .try_into()
+        .unwrap();
+    let key_before = PagedPrefixStore::key_for(&spec_b);
+    b.private.last_logits = Some(logits.clone());
+    store.save_segmented(&spec_a, &a).unwrap();
+    store.save_segmented(&spec_b, &b).unwrap();
+    assert_eq!(PagedPrefixStore::key_for(&spec_b), key_before);
+
+    let loaded = store
+        .load_segmented_observed(&spec_b, None)
+        .unwrap()
+        .entry
+        .expect("entry");
+    let read = loaded.private.last_logits.clone().expect("last logits");
+    assert_eq!(flat(&read), flat(&logits));
+    assert_same_entry(&whole(&spec_b, &loaded), &whole(&spec_b, &b), "with logits");
+
+    let without = store
+        .load_segmented_observed(&spec_a, None)
+        .unwrap()
+        .entry
+        .expect("entry");
+    assert!(without.private.last_logits.is_none());
     fs::remove_dir_all(root).unwrap();
 }

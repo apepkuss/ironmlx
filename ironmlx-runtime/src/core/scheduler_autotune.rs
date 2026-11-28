@@ -424,6 +424,7 @@ pub enum SchedulerSpeculativeMode {
     QwenMtpPromptLookup,
     Gemma4Drafter,
     Gemma4DrafterPromptLookup,
+    InklingDspark,
     PromptLookup,
 }
 

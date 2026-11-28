@@ -87,6 +87,20 @@ pub(super) struct Wp8EntryMetadata {
     pub(super) prefix: PrefixMetadata,
     pub(super) aligned_len: i32,
     pub(super) segments: Vec<Wp8SegmentMetadata>,
+    /// How many trailing `segments` hold the sliding-window layers, and the
+    /// first position those layers store. Absent when there are none.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub(super) window_refs: usize,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    pub(super) window_start: i32,
+}
+
+fn is_zero_usize(value: &usize) -> bool {
+    *value == 0
+}
+
+fn is_zero_i32(value: &i32) -> bool {
+    *value == 0
 }
 
 fn read_wp8_metadata(entry_dir: &Path) -> Option<Wp8EntryMetadata> {
@@ -129,6 +143,7 @@ fn segment_tensor_name(layer_idx: usize, part: &str) -> String {
 
 const PAGED_PARTS: [&str; 2] = ["k_pages", "v_pages"];
 const TURBOQUANT_PARTS: [&str; 4] = ["k_packed", "k_norms", "v_packed", "v_norms"];
+const DENSE_PARTS: [&str; 2] = ["k", "v"];
 
 /// Roots this process has cleaned of `wp8` leftovers.
 static WP8_CLEANED_ROOTS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
@@ -242,6 +257,8 @@ impl PagedPrefixStore {
             prefix: metadata_for(spec, &key)?,
             aligned_len: entry.aligned_len,
             segments,
+            window_refs: entry.window_refs,
+            window_start: entry.window_start,
         };
         let final_dir = entries_dir.join(&key);
         let tmp_dir = entries_dir.join(format!(
@@ -290,10 +307,102 @@ impl PagedPrefixStore {
                 final_dir.display()
             )
         })?;
+        if entry.window_refs > 0 {
+            self.drop_superseded_window_checkpoints(spec, &key)?;
+        }
         if let Some(max_bytes) = self.max_bytes {
             self.evict_to_disk_capacity(&key, max_bytes)?;
         }
         Ok((key, written))
+    }
+
+    /// Thin out the stored shorter prefixes of the entry just written at
+    /// `key`, which stores sliding-window layers, by the rule the hot cache
+    /// applies (`PrefixLruCache::drop_superseded_window_checkpoints`): each
+    /// carries its own window files, so keeping every prefill checkpoint
+    /// costs a window apiece. Segment files left without an entry go too.
+    fn drop_superseded_window_checkpoints(
+        &self,
+        spec: &PagedPrefixKeySpec,
+        key: &str,
+    ) -> Result<()> {
+        let layout_dir = wp8_layout_dir(&self.root, &prefix_segment_layout(spec));
+        let entries_dir = layout_dir.join(WP8_ENTRIES_DIR);
+        let Some(own) = read_wp8_metadata(&entries_dir.join(key)) else {
+            return Ok(());
+        };
+        let mut paths = Vec::new();
+        let mut line = Vec::new();
+        for item in list_dir(&entries_dir)? {
+            let name = item.file_name().to_string_lossy().into_owned();
+            let path = item.path();
+            if is_tmp(&name) || !path.is_dir() {
+                continue;
+            }
+            let Some(meta) = read_wp8_metadata(&path) else {
+                continue;
+            };
+            if meta.prefix.fingerprint_hash != own.prefix.fingerprint_hash {
+                continue;
+            }
+            let Some(tokens) = read_wp8_tokens(&path) else {
+                continue;
+            };
+            let continued = name == key
+                || (tokens.len() < spec.token_ids.len()
+                    && tokens
+                        .iter()
+                        .zip(&spec.token_ids)
+                        .all(|(stored, token)| i64::from(*stored) == i64::from(*token)));
+            if continued {
+                line.push((tokens.len(), paths.len()));
+                paths.push(path);
+            }
+        }
+        let dropped = crate::core::dflash2_prefix_store::superseded_boundaries(&mut line);
+        if dropped.is_empty() {
+            return Ok(());
+        }
+        for index in dropped {
+            remove_path(&paths[index]);
+        }
+        let referenced = referenced_segment_files(&layout_dir)?;
+        for item in list_dir(&layout_dir.join(WP8_SEGMENTS_DIR))? {
+            let name = item.file_name().to_string_lossy().into_owned();
+            if !is_tmp(&name) && !referenced.contains(&name) {
+                remove_path(&item.path());
+            }
+        }
+        Ok(())
+    }
+
+    /// Bytes writing `entry` for `spec` puts on disk: its private part and
+    /// every segment whose file is not there yet, except those in
+    /// `queued`, which a save ahead of it in the queue writes first.
+    pub(super) fn segmented_write_bytes(
+        &self,
+        spec: &PagedPrefixKeySpec,
+        entry: &SegmentedPrefixEntry,
+        queued: &HashSet<PrefixSegmentId>,
+    ) -> usize {
+        let segments_dir =
+            wp8_layout_dir(&self.root, &prefix_segment_layout(spec)).join(WP8_SEGMENTS_DIR);
+        let mut seen = HashSet::new();
+        let mut bytes = entry
+            .private
+            .observability_stats(spec.cached_len)
+            .payload_bytes;
+        for r in &entry.segments {
+            let segment = &r.segment;
+            let name = wp8_segment_file_name(segment.id, segment.start, segment.stop);
+            if seen.insert(segment.id)
+                && !queued.contains(&segment.id)
+                && !segments_dir.join(&name).is_file()
+            {
+                bytes = bytes.saturating_add(segment.payload_bytes());
+            }
+        }
+        bytes
     }
 
     /// Whether a readable `wp8` entry for exactly `spec` is on disk (its
@@ -415,6 +524,8 @@ impl PagedPrefixStore {
             });
         }
         let entry = SegmentedPrefixEntry {
+            window_refs: metadata.window_refs,
+            window_start: metadata.window_start,
             segments,
             aligned_len: metadata.aligned_len,
             private,
@@ -591,6 +702,11 @@ fn write_segment_file(segments_dir: &Path, name: &str, segment: &PrefixKvSegment
                     tensors.insert(segment_tensor_name(*idx, part), array.clone());
                 }
             }
+            PrefixSegmentLayer::Dense { k, v } => {
+                for (part, array) in DENSE_PARTS.iter().zip([k, v]) {
+                    tensors.insert(segment_tensor_name(*idx, part), array.clone());
+                }
+            }
             PrefixSegmentLayer::TurboQuant {
                 k_packed,
                 k_norms,
@@ -661,6 +777,7 @@ fn read_segment_file(
         let (parts, length_dim, length): (&[&str], usize, i32) = match layer_spec.kind {
             PrefixLayerKind::FullPaged => (&PAGED_PARTS, 0, len / spec.block_size),
             PrefixLayerKind::FullTurboQuantPacked => (&TURBOQUANT_PARTS, 2, len),
+            PrefixLayerKind::FullDense => (&DENSE_PARTS, 2, len),
             _ => continue,
         };
         let names = parts
@@ -681,6 +798,10 @@ fn read_segment_file(
             arrays.push(array);
         }
         let layer = match arrays.as_slice() {
+            [k, v] if layer_spec.kind == PrefixLayerKind::FullDense => PrefixSegmentLayer::Dense {
+                k: k.clone(),
+                v: v.clone(),
+            },
             [k, v] => PrefixSegmentLayer::Paged {
                 k: k.clone(),
                 v: v.clone(),

@@ -334,6 +334,18 @@ impl Sampler {
             let idx = reduction::argmax(&logits, All, false)?;
             return Ok(idx.item::<u32>()?);
         }
+        if let [vocab] = logits.shape().as_slice() {
+            let batched = logits.reshape(&[1_i32, *vocab][..])?;
+            if let Some((tokens, mut keys)) = sample_rows_on_device(
+                &[self],
+                &batched,
+                &[history],
+                |_| Ok(prng_state_row.clone()),
+            )? {
+                *prng_state_row = keys.remove(0);
+                return Ok(tokens[0]);
+            }
+        }
         self.distribution(logits, history)?.sample(prng_state_row)
     }
 
@@ -518,6 +530,35 @@ impl PreparedTargetTokenSampling {
 
     pub fn compact_indices(&self) -> Option<&Array> {
         self.compact_indices.as_ref()
+    }
+
+    /// The tokens [`Self::sample`] draws, computed on the device when every
+    /// row samples its whole distribution (no top-p, min-p or compact
+    /// candidates): the first token whose cumulative probability exceeds
+    /// `uniform * total`, in token order, as on the host. Only the `[rows]`
+    /// token ids then reach the host instead of `rows * vocab` probabilities.
+    /// The f32 cumulative sum moves each boundary by about 1e-7 of the mass.
+    pub fn sample_on_device(&self, uniforms: &Array) -> Result<Option<Array>> {
+        if self.compact_probabilities.is_some()
+            || self.top_p.iter().any(|top_p| *top_p < 1.0)
+            || self.min_p.iter().any(|min_p| *min_p > 0.0)
+        {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            uniforms.size() == self.rows,
+            "target token sampling requires one uniform per row"
+        );
+        let rows = i32::try_from(self.rows)?;
+        let vocab = i32::try_from(self.vocab)?;
+        let probabilities = self.probabilities.astype(Dtype::Float32)?;
+        let cumulative = mlx::ops::cumulative::cumsum(&probabilities, -1, false, true)?;
+        let total = indexing::slice(&cumulative, &[0, vocab - 1][..], &[rows, vocab][..])?;
+        let threshold = &uniforms.reshape(&[rows, 1][..])? * &total;
+        let below = cumulative.less_equal(&threshold)?.astype(Dtype::Uint32)?;
+        let index = reduction::sum(&below, &[-1_i32][..], false)?;
+        let last: Array = (&[u32::try_from(self.vocab - 1)?][..], ()).try_into()?;
+        Ok(Some(index.minimum(&last)?))
     }
 
     pub fn sample(self, uniforms: &[f32]) -> Result<Vec<u32>> {
@@ -905,8 +946,26 @@ fn configured_pipeline(
     histories: &[&[u32]],
     prng_state: &mut Array,
 ) -> Result<Vec<u32>> {
+    let b = samplers.len();
+    if let Some(tokens) = sample_rows_on_device(samplers, logits, histories, |row| {
+        indexing::slice(
+            prng_state,
+            &[i32::try_from(row)?, 0][..],
+            &[i32::try_from(row + 1)?, 2][..],
+        )?
+        .reshape(&[2_i32][..])
+        .map_err(Into::into)
+    })?
+    .map(|(tokens, keys)| -> Result<Vec<u32>> {
+        let refs: Vec<&Array> = keys.iter().collect();
+        *prng_state = mlx::ops::shape::stack(&refs, 0)?;
+        Ok(tokens)
+    })
+    .transpose()?
+    {
+        return Ok(tokens);
+    }
     let distributions = configured_distributions(samplers, logits, histories)?;
-    let b = distributions.len();
     // Read all prng_state rows to host ONCE (cheap: B*2 u32 scalars).
     let prng_host: Vec<u32> = prng_state.to_vec()?;
 
@@ -927,6 +986,42 @@ fn configured_pipeline(
     *prng_state = mlx::ops::shape::stack(&refs, 0)?;
 
     Ok(tokens)
+}
+
+/// Samples every row on the device when each one draws from its whole
+/// tempered distribution (temperature > 0, no top-p or min-p): penalties,
+/// temperature, top-k and softmax as in [`configured_distributions`], one
+/// uniform per row from that row's key as [`SamplingDistribution::sample`]
+/// draws it, and the token picked on the device. Only the `[B]` token ids
+/// reach the host instead of `B * vocab` probabilities. Returns the tokens
+/// and each row's advanced key, or `None` when a row needs the host path.
+fn sample_rows_on_device(
+    samplers: &[&Sampler],
+    logits: &Array,
+    histories: &[&[u32]],
+    key_of: impl Fn(usize) -> Result<Array>,
+) -> Result<Option<(Vec<u32>, Vec<Array>)>> {
+    if samplers.iter().any(|sampler| {
+        sampler.temperature <= 0.0
+            || sampler.top_p.is_some_and(|top_p| top_p < 1.0)
+            || sampler.min_p.is_some_and(|min_p| min_p > 0.0)
+    }) {
+        return Ok(None);
+    }
+    let prepared = prepare_target_tokens_with_uniforms_batch(samplers, logits, histories)?;
+    let mut keys = Vec::with_capacity(samplers.len());
+    let mut uniforms = Vec::with_capacity(samplers.len());
+    for row in 0..samplers.len() {
+        let mut key = key_of(row)?;
+        uniforms.push(prepare_uniforms(&mut key, 1)?);
+        keys.push(key);
+    }
+    let refs: Vec<&Array> = uniforms.iter().collect();
+    let uniforms = mlx::ops::shape::concatenate(&refs, 0)?;
+    let Some(tokens) = prepared.sample_on_device(&uniforms)? else {
+        return Ok(None);
+    };
+    Ok(Some((tokens.to_vec::<u32>()?, keys)))
 }
 
 fn configured_distributions(
@@ -2325,6 +2420,98 @@ mod tests {
                 .expect("sample target tokens");
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn device_sampling_matches_host_sampling_on_whole_distributions() {
+        let vocab = 1021_i32;
+        let rows = 3_i32;
+        let logits_host = (0..rows * vocab)
+            .map(|index| ((index * 37 % 509) as f32 - 254.0) * 0.017)
+            .collect::<Vec<_>>();
+        let logits: Array = (logits_host.as_slice(), &[rows, vocab][..])
+            .try_into()
+            .expect("logits");
+        let first = Sampler::greedy().with_temperature(1.0);
+        let second = Sampler::greedy().with_temperature(0.6).with_top_k(64);
+        let third = Sampler::greedy()
+            .with_temperature(1.3)
+            .with_repetition_penalty(1.05);
+        let samplers = [&first, &second, &third];
+        let histories = [&[][..], &[][..], &[2_u32, 2, 19, 31][..]];
+        let distributions =
+            configured_distributions(&samplers, &logits, &histories).expect("distributions");
+        let prepared = prepare_target_tokens_with_uniforms_batch(&samplers, &logits, &histories)
+            .expect("prepare");
+        for step in 0..200 {
+            let uniforms = [0, 1, 2].map(|row| ((step * 3 + row) as f32 * 0.618_034).fract());
+            let expected = distributions
+                .iter()
+                .zip(uniforms)
+                .map(|(distribution, uniform)| distribution.sample_with_uniform(uniform))
+                .collect::<Result<Vec<_>>>()
+                .expect("host samples");
+            let uniforms_arr: Array = (&uniforms[..], &[rows][..]).try_into().expect("uniforms");
+            let actual: Vec<u32> = prepared
+                .sample_on_device(&uniforms_arr)
+                .expect("device sample")
+                .expect("whole distributions sample on the device")
+                .to_vec()
+                .expect("tokens");
+            assert_eq!(actual, expected, "uniforms {uniforms:?}");
+        }
+
+        let nucleus = Sampler::greedy().with_temperature(1.0).with_top_p(0.9);
+        let prepared = prepare_target_tokens_with_uniforms_batch(
+            &[&nucleus],
+            &indexing::slice(&logits, &[0_i32, 0][..], &[1, vocab][..]).expect("row"),
+            &[&[][..]],
+        )
+        .expect("prepare nucleus");
+        let uniform: Array = (&[0.5_f32][..], &[1_i32][..]).try_into().expect("uniform");
+        assert!(prepared
+            .sample_on_device(&uniform)
+            .expect("check")
+            .is_none());
+    }
+
+    #[test]
+    fn device_sampled_rows_advance_each_key_like_host_sampling() {
+        let vocab = 257_i32;
+        let logits_host = (0..2 * vocab)
+            .map(|index| ((index * 13 % 97) as f32 - 48.0) * 0.05)
+            .collect::<Vec<_>>();
+        let logits: Array = (logits_host.as_slice(), &[2, vocab][..])
+            .try_into()
+            .expect("logits");
+        let sampler = Sampler::greedy().with_temperature(1.0);
+        let samplers = [&sampler, &sampler];
+        let histories = [&[][..], &[][..]];
+        let keys: Vec<u32> = vec![1, 2, 3, 4];
+        let mut device_state: Array = (&keys[..], &[2_i32, 2][..]).try_into().expect("keys");
+        let mut host_state = device_state.clone();
+        let device =
+            configured_pipeline(&samplers, &logits, &histories, &mut device_state).expect("device");
+        let distributions =
+            configured_distributions(&samplers, &logits, &histories).expect("distributions");
+        let mut host = Vec::new();
+        let mut host_keys = Vec::new();
+        for (row, distribution) in distributions.iter().enumerate() {
+            let mut key =
+                indexing::slice(&host_state, &[row as i32, 0][..], &[row as i32 + 1, 2][..])
+                    .expect("row key")
+                    .reshape(&[2_i32][..])
+                    .expect("flat key");
+            host.push(distribution.sample(&mut key).expect("host sample"));
+            host_keys.push(key);
+        }
+        let refs: Vec<&Array> = host_keys.iter().collect();
+        host_state = mlx::ops::shape::stack(&refs, 0).expect("stack");
+        assert_eq!(device, host);
+        assert_eq!(
+            device_state.to_vec::<u32>().expect("device keys"),
+            host_state.to_vec::<u32>().expect("host keys")
+        );
     }
 
     #[test]

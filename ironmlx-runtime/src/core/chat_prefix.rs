@@ -33,42 +33,23 @@ impl ChatTurnBoundary {
     /// servers render and encode chat prompts; `None` without a template, or
     /// when no variant ends in a suffix the next turn drops.
     pub(crate) fn probe(tokenizer: &Tokenizer) -> Option<Self> {
-        if !tokenizer.has_chat_template() {
-            return None;
-        }
-        let message = |role: &str, content: &str| Message {
-            role: role.to_owned(),
-            content: content.to_owned(),
-        };
-        let first = [message("user", "Hello there.")];
-        let next = [
-            message("user", "Hello there."),
-            message("assistant", "Hi."),
-            message("user", "How are you?"),
-        ];
-        let mut suffixes = Vec::new();
-        for kwargs in probe_kwargs() {
-            let render = |messages: &[Message]| {
-                tokenizer
-                    .apply_chat_template(messages, true, kwargs.as_ref())
-                    .ok()
-                    .and_then(|text| tokenizer.encode(&text, false).ok())
-            };
-            let (Some(first_ids), Some(next_ids)) = (render(&first), render(&next)) else {
-                continue;
-            };
-            let shared = first_ids
-                .iter()
-                .zip(&next_ids)
-                .take_while(|(a, b)| a == b)
-                .count();
-            let suffix = first_ids[shared..].to_vec();
+        let mut suffixes: Vec<Vec<u32>> = Vec::new();
+        for suffix in probe_suffixes(tokenizer) {
             if !suffix.is_empty() && !suffixes.contains(&suffix) {
                 suffixes.push(suffix);
             }
         }
         suffixes.sort_by_key(|suffix| std::cmp::Reverse(suffix.len()));
         (!suffixes.is_empty()).then_some(Self { suffixes })
+    }
+
+    /// Whether `tokenizer`'s chat template adds no generation suffix: every
+    /// variant renders a prompt that the next turn's prompt starts with, so
+    /// the next turn shares the whole of it (Inkling). [`Self::probe`] finds
+    /// no boundary for such a template.
+    pub(crate) fn whole_prompt_continues(tokenizer: &Tokenizer) -> bool {
+        let suffixes = probe_suffixes(tokenizer);
+        !suffixes.is_empty() && suffixes.iter().all(Vec::is_empty)
     }
 
     #[cfg(test)]
@@ -89,6 +70,44 @@ impl ChatTurnBoundary {
     pub(crate) fn suffixes(&self) -> &[Vec<u32>] {
         &self.suffixes
     }
+}
+
+/// The tokens each template variant's first-turn prompt ends in that the
+/// next turn's prompt does not repeat (empty when it repeats all of it); one
+/// entry per variant that renders.
+fn probe_suffixes(tokenizer: &Tokenizer) -> Vec<Vec<u32>> {
+    if !tokenizer.has_chat_template() {
+        return Vec::new();
+    }
+    let message = |role: &str, content: &str| Message {
+        role: role.to_owned(),
+        content: content.to_owned(),
+    };
+    let first = [message("user", "Hello there.")];
+    let next = [
+        message("user", "Hello there."),
+        message("assistant", "Hi."),
+        message("user", "How are you?"),
+    ];
+    let mut suffixes = Vec::new();
+    for kwargs in probe_kwargs() {
+        let render = |messages: &[Message]| {
+            tokenizer
+                .apply_chat_template(messages, true, kwargs.as_ref())
+                .ok()
+                .and_then(|text| tokenizer.encode(&text, false).ok())
+        };
+        let (Some(first_ids), Some(next_ids)) = (render(&first), render(&next)) else {
+            continue;
+        };
+        let shared = first_ids
+            .iter()
+            .zip(&next_ids)
+            .take_while(|(a, b)| a == b)
+            .count();
+        suffixes.push(first_ids[shared..].to_vec());
+    }
+    suffixes
 }
 
 #[cfg(test)]
@@ -142,5 +161,17 @@ mod tests {
             assert!(reusable < turn1.len());
             assert_eq!(turn2[..reusable], turn1[..reusable], "{kwargs:?}");
         }
+    }
+
+    /// The real Inkling template adds no generation suffix: the probe finds
+    /// no boundary, and the next turn starts with the whole first prompt.
+    #[test]
+    #[ignore = "needs a local Inkling checkpoint in INKLING_DS_PARK_TEST_DIR"]
+    fn inkling_follow_up_turns_share_the_whole_prompt() {
+        let dir = std::env::var("INKLING_DS_PARK_TEST_DIR").expect("INKLING_DS_PARK_TEST_DIR");
+        let loader = ironmlx_lm::core::Loader::open(std::path::Path::new(&dir)).unwrap();
+        let tokenizer = Tokenizer::from_loader(&loader).unwrap();
+        assert_eq!(ChatTurnBoundary::probe(&tokenizer), None);
+        assert!(ChatTurnBoundary::whole_prompt_continues(&tokenizer));
     }
 }

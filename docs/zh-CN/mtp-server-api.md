@@ -18,6 +18,7 @@
 
 兼容组合支持文本/VL CLI 和 OpenAI/Anthropic 服务，仍须满足下列请求条件。
 本页描述 Qwen MTP 路径。同一个 `--mtp-model-dir` CLI 参数也接受兼容的 Gemma4 assistant drafter，但使用不同执行路径和采样规则；下文 Qwen 限制不应套用于 Gemma4，见[支持模型](supported-models.md)。
+它也接受 Inkling 2 Mini 检查点自带的 DSpark drafter，前提是检查点包含 `mtp.safetensors`（例如 Inkling-2-Mini-oQ4e-mtp，传入同一个检查点目录）。DSpark 支持贪心、采样和带约束的请求（JSON Schema 与工具调用），提议不划算时会自动改用普通解码，不受下文 Qwen 限制约束。
 
 ## 请求与缓存限制
 

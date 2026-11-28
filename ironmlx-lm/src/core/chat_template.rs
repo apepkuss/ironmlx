@@ -34,6 +34,7 @@ pub struct Message {
 pub struct ChatTemplate {
     env: Environment<'static>,
     special_tokens: ChatTemplateSpecialTokens,
+    inkling_channels: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -69,6 +70,14 @@ impl ChatTemplate {
             |value: Value, kwargs: Kwargs| -> std::result::Result<String, minijinja::Error> {
                 let ensure_ascii: Option<bool> = kwargs.get("ensure_ascii")?;
                 let indent: Option<usize> = kwargs.get("indent")?;
+                let _sort_keys: Option<bool> = kwargs.get("sort_keys")?;
+                let separators: Option<Vec<String>> = kwargs.get("separators")?;
+                if separators.as_ref().is_some_and(|s| s != &[",", ":"]) {
+                    return Err(minijinja::Error::new(
+                        ErrorKind::InvalidOperation,
+                        "tojson supports compact separators only",
+                    ));
+                }
                 kwargs.assert_all_used()?;
                 if ensure_ascii == Some(true) {
                     return Err(minijinja::Error::new(
@@ -212,11 +221,24 @@ impl ChatTemplate {
                 format!("{} has no method named {}", value.kind(), method),
             ))
         });
-        env.add_template_owned("chat", jinja_source.to_owned())
+        let inkling_channels = jinja_source.contains("<|content_invoke_tool_json|>")
+            && jinja_source.contains("<|message_model|>")
+            && jinja_source.contains("<|content_thinking|>");
+        // HF generation annotations mark token spans for training; rendering them
+        // has no effect on an inference prompt.
+        let source = if inkling_channels {
+            jinja_source
+                .replace("{%- generation -%}", "")
+                .replace("{%- endgeneration -%}", "")
+        } else {
+            jinja_source.to_owned()
+        };
+        env.add_template_owned("chat", source)
             .map_err(|e| anyhow::anyhow!("compile chat template: {e}"))?;
         Ok(Self {
             env,
             special_tokens,
+            inkling_channels,
         })
     }
 
@@ -294,9 +316,93 @@ impl ChatTemplate {
                 dst.insert(k.clone(), v.clone());
             }
         }
-        tmpl.render(Value::from_serialize(ctx))
-            .map_err(|e| anyhow::anyhow!("render chat template: {e}"))
+        let image_counts = if self.inkling_channels {
+            prepare_inkling_messages(&mut ctx)?
+        } else {
+            Vec::new()
+        };
+        let rendered = tmpl
+            .render(Value::from_serialize(ctx))
+            .map_err(|e| anyhow::anyhow!("render chat template: {e}"))?;
+        if image_counts.is_empty() {
+            return Ok(rendered);
+        }
+        let marker = "<|content_image|><|unused_200054|><|end_message|>";
+        let parts: Vec<_> = rendered.split(marker).collect();
+        anyhow::ensure!(
+            parts.len() == image_counts.len() + 1,
+            "Inkling rendered image count mismatch"
+        );
+        let mut expanded = parts[0].to_owned();
+        for (count, part) in image_counts.iter().zip(&parts[1..]) {
+            expanded.push_str("<|content_image|>");
+            expanded.push_str(&"<|unused_200054|>".repeat(*count));
+            expanded.push_str("<|end_message|>");
+            expanded.push_str(part);
+        }
+        Ok(expanded)
     }
+}
+
+/// Convert preprocessed image spans back to typed parts before the upstream
+/// template renders its separate text/image messages. Expand patch counts only
+/// after rendering, so consecutive images retain separate channel boundaries.
+fn prepare_inkling_messages(ctx: &mut serde_json::Value) -> Result<Vec<usize>> {
+    use serde_json::json;
+    let mut counts = Vec::new();
+    if ctx
+        .get("enable_thinking")
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+    {
+        ctx["reasoning_effort"] = json!("none");
+    }
+    let messages = ctx["messages"]
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("messages must be an array"))?;
+    for message in messages {
+        if let Some(calls) = message
+            .get_mut("tool_calls")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for call in calls {
+                if let Some(args) = call["function"]["arguments"].as_str() {
+                    call["function"]["arguments"] = serde_json::from_str(args)?;
+                }
+            }
+        }
+        let Some(content) = message.get("content").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !content.contains("<|content_image|>") {
+            continue;
+        }
+        let mut rest = content;
+        let mut parts = Vec::new();
+        while let Some(start) = rest.find("<|content_image|>") {
+            if start > 0 {
+                parts.push(json!({"type":"text","text":&rest[..start]}));
+            }
+            rest = &rest[start + "<|content_image|>".len()..];
+            let end = rest
+                .find("<|end_message|>")
+                .ok_or_else(|| anyhow::anyhow!("unterminated Inkling image span"))?;
+            let tokens = &rest[..end];
+            let count = tokens.matches("<|unused_200054|>").count();
+            anyhow::ensure!(
+                count > 0 && tokens.len() == count * "<|unused_200054|>".len(),
+                "invalid Inkling image span"
+            );
+            counts.push(count);
+            parts.push(json!({"type":"image"}));
+            rest = &rest[end + "<|end_message|>".len()..];
+        }
+        if !rest.is_empty() {
+            parts.push(json!({"type":"text","text":rest}));
+        }
+        message["content"] = json!(parts);
+    }
+    Ok(counts)
 }
 
 #[cfg(test)]

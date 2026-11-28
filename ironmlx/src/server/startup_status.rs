@@ -156,7 +156,7 @@ mod tests {
         let registry = LoadRegistry::new();
         let router = SwitchableRouter::starting(registry.clone());
         let server = tokio::spawn(serve_bound(listeners, router.clone(), "startup test"));
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
 
         let health = client.get(format!("{base}/healthz")).send().await.unwrap();
         assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);

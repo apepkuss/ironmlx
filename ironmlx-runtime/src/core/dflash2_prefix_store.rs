@@ -28,6 +28,7 @@ use ironmlx_lm::core::cache::layer::{
     prefix_entry_for_row, restore_prefix_entry_for_row, LayerCache,
 };
 use ironmlx_lm::core::cache::prefix_payload::{PagedPrefixEntry, PrefixLayerPayload};
+use ironmlx_lm::core::cache::TurboQuantPrefixLayer;
 use mlx::{Array, StreamOrDevice};
 use serde::{Deserialize, Serialize};
 
@@ -36,7 +37,7 @@ use crate::Result;
 /// The subdirectory of a prefix cache directory this store owns.
 pub(crate) const DFLASH2_STORE_DIR: &str = "dflash2";
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 /// An artifact referencing more range files than this is rewritten to one
 /// K/V file and one context file.
 const MAX_RANGE_FILES: usize = 256;
@@ -51,6 +52,8 @@ const META_FILE: &str = "meta.json";
 const STATE_FILE: &str = "state.safetensors";
 const SEGMENTS_DIR: &str = "segments";
 const CONTEXT_DIR: &str = "context";
+/// K/V range files of the sliding-window layers.
+const WINDOW_DIR: &str = "window";
 const ARTIFACTS_DIR: &str = "artifacts";
 const TMP_MARK: &str = ".tmp-";
 const LAST_HIDDEN: &str = "last_hidden";
@@ -177,17 +180,172 @@ pub(crate) fn superseded_boundaries<T: Copy>(boundaries: &mut [(usize, T)]) -> V
 pub(crate) enum DFlash2DiskLayer {
     /// A full-attention layer; its K/V is in the artifact's range files.
     Dense,
+    /// A sliding-window layer; the K/V its window reaches is in the
+    /// artifact's window range files.
+    Window,
     /// Fixed-size per-artifact state.
     State(PrefixLayerPayload),
 }
 
-/// K and V of every full-attention layer at positions `start..stop`, each
-/// `[1, heads, stop - start, dim]`.
+/// One attention layer's K/V over a run of positions, the token count on
+/// axis 2 of every array: `[1, heads, tokens, dim]` K and V, or a global
+/// layer's 8-bit storage as it is held (each side's `uint32` words, and its
+/// `bfloat16` scales and biases joined), so a restore is bit-identical.
+#[derive(Debug, Clone)]
+pub(crate) enum DFlash2Kv {
+    Dense(Array, Array),
+    Int8(TurboQuantPrefixLayer),
+}
+
+impl DFlash2Kv {
+    pub(crate) const DENSE_FORMAT: &'static str = "dense";
+    pub(crate) const INT8_FORMAT: &'static str = "int8-affine-g64";
+
+    pub(crate) fn format(&self) -> &'static str {
+        match self {
+            Self::Dense(..) => Self::DENSE_FORMAT,
+            Self::Int8(_) => Self::INT8_FORMAT,
+        }
+    }
+
+    pub(crate) fn arrays(&self) -> Vec<&Array> {
+        match self {
+            Self::Dense(k, v) => vec![k, v],
+            Self::Int8(p) => vec![&p.k_packed, &p.k_norms, &p.v_packed, &p.v_norms],
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        self.arrays().into_iter().map(array_bytes).sum()
+    }
+
+    /// Tensor names in a range file, for dense layer `dense`.
+    fn names(format: &str, dense: usize) -> Vec<String> {
+        let sides: &[&str] = if format == Self::INT8_FORMAT {
+            &["kw", "ksb", "vw", "vsb"]
+        } else {
+            &["k", "v"]
+        };
+        sides
+            .iter()
+            .map(|side| format!("{side}{dense:04}"))
+            .collect()
+    }
+
+    fn from_arrays(format: &str, mut arrays: Vec<Array>) -> Result<Self> {
+        Ok(match (format, arrays.len()) {
+            (Self::INT8_FORMAT, 4) => {
+                let v_norms = arrays.pop().expect("four");
+                let v_packed = arrays.pop().expect("four");
+                let k_norms = arrays.pop().expect("four");
+                let k_packed = arrays.pop().expect("four");
+                Self::Int8(TurboQuantPrefixLayer {
+                    k_packed,
+                    k_norms,
+                    v_packed,
+                    v_norms,
+                })
+            }
+            (Self::DENSE_FORMAT, 2) => {
+                let v = arrays.pop().expect("two");
+                let k = arrays.pop().expect("two");
+                Self::Dense(k, v)
+            }
+            _ => anyhow::bail!("stored K/V format {format} with {} arrays", arrays.len()),
+        })
+    }
+
+    fn map(&self, f: impl Fn(&Array) -> Result<Array>) -> Result<Self> {
+        Ok(match self {
+            Self::Dense(k, v) => Self::Dense(f(k)?, f(v)?),
+            Self::Int8(p) => Self::Int8(TurboQuantPrefixLayer {
+                k_packed: f(&p.k_packed)?,
+                k_norms: f(&p.k_norms)?,
+                v_packed: f(&p.v_packed)?,
+                v_norms: f(&p.v_norms)?,
+            }),
+        })
+    }
+
+    /// Positions `start..stop`, a view.
+    pub(crate) fn slice(&self, start: i32, stop: i32) -> Result<Self> {
+        self.map(|a| {
+            let shape = a.shape();
+            let dims = shape.as_slice();
+            Ok(mlx::ops::indexing::slice_strided_on(
+                a,
+                &[0_i32, 0, start, 0][..],
+                &[dims[0], dims[1], stop, dims[3]][..],
+                &[1_i32, 1, 1, 1][..],
+                StreamOrDevice::default(),
+            )?)
+        })
+    }
+
+    /// A copy in its own buffers.
+    pub(crate) fn contiguous(&self) -> Result<Self> {
+        self.map(|a| Ok(a.contiguous(false)?))
+    }
+
+    /// Consecutive parts joined along the token axis.
+    pub(crate) fn join(parts: &[Self]) -> Result<Self> {
+        let [first, rest @ ..] = parts else {
+            anyhow::bail!("no K/V parts to join");
+        };
+        if rest.is_empty() {
+            return Ok(first.clone());
+        }
+        let columns = first.arrays().len();
+        let mut joined = Vec::with_capacity(columns);
+        for column in 0..columns {
+            let arrays = parts
+                .iter()
+                .map(|part| {
+                    part.arrays()
+                        .get(column)
+                        .copied()
+                        .ok_or_else(|| anyhow!("K/V parts of mixed formats"))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            joined.push(mlx::ops::shape::concatenate(&arrays, 2)?);
+        }
+        Self::from_arrays(first.format(), joined)
+    }
+
+    /// Write consecutive parts covering `[0, cached_len)` into row 0 of
+    /// `kv`, which is empty.
+    pub(crate) fn restore(
+        kv: &mut ironmlx_lm::core::cache::KVCache,
+        parts: &[Self],
+        cached_len: i32,
+    ) -> Result<()> {
+        if parts.iter().all(|part| matches!(part, Self::Dense(..))) {
+            let pairs: Vec<(&Array, &Array)> = parts
+                .iter()
+                .map(|part| match part {
+                    Self::Dense(k, v) => (k, v),
+                    Self::Int8(_) => unreachable!("checked above"),
+                })
+                .collect();
+            return kv.restore_dense_prefix_segments_for_row_on(&pairs, 0, cached_len, ());
+        }
+        let packed = parts
+            .iter()
+            .map(|part| match part {
+                Self::Int8(p) => Ok(p.clone()),
+                Self::Dense(..) => Err(anyhow!("K/V parts of mixed formats")),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        kv.restore_turboquant_prefix_layer_parts_for_row_on(&packed, 0, cached_len, ())
+    }
+}
+
+/// K/V of every full-attention layer at positions `start..stop`.
 #[derive(Debug)]
 pub(crate) struct DFlash2DiskRange {
     pub(crate) start: i32,
     pub(crate) stop: i32,
-    pub(crate) layers: Vec<(Array, Array)>,
+    pub(crate) layers: Vec<DFlash2Kv>,
 }
 
 /// One boundary artifact to store. Every array is evaluated and compact (not
@@ -204,6 +362,8 @@ pub(crate) struct DFlash2DiskSave {
     /// Shorter stored artifacts of the same conversation, the parent among
     /// them.
     pub(crate) ancestors: Vec<String>,
+    /// [`DFlash2Kv::format`] of every full-attention layer's K/V.
+    pub(crate) kv_format: &'static str,
     /// Consecutive ranges from the parent's length to this artifact's.
     pub(crate) kv: Vec<DFlash2DiskRange>,
     /// `[1, cached_len - context_start, hidden]`: the context positions the
@@ -211,6 +371,13 @@ pub(crate) struct DFlash2DiskSave {
     pub(crate) context_start: i32,
     pub(crate) context: Array,
     pub(crate) context_tail_len: i32,
+    /// K and V of every sliding-window layer at positions
+    /// `window_start..cached_len`: what of the trailing `window_len`
+    /// positions the parent does not hold. Empty with `window_len` 0 when
+    /// no layer is windowed.
+    pub(crate) window_start: i32,
+    pub(crate) window: Vec<(Array, Array)>,
+    pub(crate) window_len: i32,
     pub(crate) last_hidden: Array,
 }
 
@@ -218,9 +385,12 @@ impl DFlash2DiskSave {
     /// Bytes the writer holds until the save is on disk.
     pub(crate) fn payload_bytes(&self) -> usize {
         let mut bytes = array_bytes(&self.context) + array_bytes(&self.last_hidden);
+        for (k, v) in &self.window {
+            bytes += array_bytes(k) + array_bytes(v);
+        }
         for range in &self.kv {
-            for (k, v) in &range.layers {
-                bytes += array_bytes(k) + array_bytes(v);
+            for layer in &range.layers {
+                bytes += layer.bytes();
             }
         }
         for layer in &self.layers {
@@ -261,8 +431,11 @@ pub(crate) struct DFlash2DiskLineage {
 pub(crate) struct DFlash2DiskLoaded {
     pub(crate) cached_len: i32,
     pub(crate) layers: Vec<DFlash2DiskLayer>,
-    /// Per range file, K and V of every full-attention layer.
-    pub(crate) kv: Vec<Vec<(Array, Array)>>,
+    /// Per range file, K/V of every full-attention layer.
+    pub(crate) kv: Vec<Vec<DFlash2Kv>>,
+    /// K and V of every sliding-window layer over the trailing positions
+    /// its window reaches.
+    pub(crate) window: Vec<(Array, Array)>,
     pub(crate) context_tail: Array,
     pub(crate) last_hidden: Array,
 }
@@ -326,17 +499,45 @@ struct ArtifactMeta {
     cached_len: i32,
     /// `dense`, or the kind of a state layer.
     layers: Vec<String>,
+    /// [`DFlash2Kv::DENSE_FORMAT`] or [`DFlash2Kv::INT8_FORMAT`]: how the
+    /// full-attention layers' K/V range files hold it.
+    kv_format: String,
+    /// The dtype of dense K/V (the full-attention layers' in the dense
+    /// format, the sliding-window layers' in both).
     kv_dtype: String,
     kv: Vec<RangeRef>,
     context_tail_len: i32,
     context: Vec<RangeRef>,
+    /// Trailing positions the sliding-window layers store, and their range
+    /// files. Absent when no layer is windowed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    window_len: i32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    window: Vec<RangeRef>,
     state_bytes: u64,
     state_tensors: Vec<TensorMeta>,
+}
+
+fn is_zero(value: &i32) -> bool {
+    *value == 0
 }
 
 impl ArtifactMeta {
     fn dense_layers(&self) -> usize {
         self.layers.iter().filter(|kind| *kind == "dense").count()
+    }
+
+    fn window_layers(&self) -> usize {
+        self.layers.iter().filter(|kind| *kind == "window").count()
+    }
+
+    /// Every range file the artifact references, by directory.
+    fn range_files(&self) -> [(&'static str, &Vec<RangeRef>); 3] {
+        [
+            (SEGMENTS_DIR, &self.kv),
+            (CONTEXT_DIR, &self.context),
+            (WINDOW_DIR, &self.window),
+        ]
     }
 }
 
@@ -377,6 +578,7 @@ pub(crate) struct DFlash2SavePlan {
     key: String,
     parent_kv: Vec<RangeRef>,
     parent_context: Vec<RangeRef>,
+    parent_window: Vec<RangeRef>,
 }
 
 /// What a restore needs from the index before it reads.
@@ -404,9 +606,9 @@ impl DFlash2RestorePlan {
         self.meta.state_bytes
             + self
                 .meta
-                .kv
+                .range_files()
                 .iter()
-                .chain(&self.meta.context)
+                .flat_map(|(_, ranges)| ranges.iter())
                 .map(|range| range.bytes)
                 .sum::<u64>()
     }
@@ -446,7 +648,7 @@ impl DFlash2DiskStore {
         max_bytes: Option<u64>,
     ) -> Result<Self> {
         let root = dir.join(DFLASH2_STORE_DIR).join(identity.key());
-        for sub in [SEGMENTS_DIR, CONTEXT_DIR, ARTIFACTS_DIR] {
+        for sub in [SEGMENTS_DIR, CONTEXT_DIR, WINDOW_DIR, ARTIFACTS_DIR] {
             fs::create_dir_all(root.join(sub))
                 .with_context(|| format!("create DFlash2 prefix store {}", root.display()))?;
         }
@@ -476,7 +678,7 @@ impl DFlash2DiskStore {
     }
 
     fn scan(&mut self) -> Result<()> {
-        for sub in [SEGMENTS_DIR, CONTEXT_DIR, ARTIFACTS_DIR] {
+        for sub in [SEGMENTS_DIR, CONTEXT_DIR, WINDOW_DIR, ARTIFACTS_DIR] {
             for entry in fs::read_dir(self.root.join(sub))? {
                 let entry = entry?;
                 if entry.file_name().to_string_lossy().contains(TMP_MARK) {
@@ -580,9 +782,9 @@ impl DFlash2DiskStore {
         entry.own_bytes
             + entry
                 .meta
-                .kv
+                .range_files()
                 .iter()
-                .chain(&entry.meta.context)
+                .flat_map(|(_, ranges)| ranges.iter())
                 .map(|range| range.bytes)
                 .sum::<u64>()
     }
@@ -593,10 +795,7 @@ impl DFlash2DiskStore {
         let mut bytes = 0_u64;
         for entry in &self.entries {
             bytes += entry.own_bytes;
-            for (dir, ranges) in [
-                (SEGMENTS_DIR, &entry.meta.kv),
-                (CONTEXT_DIR, &entry.meta.context),
-            ] {
+            for (dir, ranges) in entry.meta.range_files() {
                 for range in ranges {
                     if seen.insert((dir, range.file.as_str())) {
                         bytes += range.bytes;
@@ -654,22 +853,27 @@ impl DFlash2DiskStore {
         if self.entries.iter().any(|entry| entry.key == key) {
             return Ok(None);
         }
-        let (parent_kv, parent_context) = match &save.parent {
+        let (parent_kv, parent_context, parent_window) = match &save.parent {
             Some(parent) => {
                 let parent = self
                     .entries
                     .iter()
                     .find(|entry| &entry.key == parent)
                     .ok_or_else(|| anyhow!("DFlash2 prefix store no longer holds the parent"))?;
-                (parent.meta.kv.clone(), parent.meta.context.clone())
+                (
+                    parent.meta.kv.clone(),
+                    parent.meta.context.clone(),
+                    parent.meta.window.clone(),
+                )
             }
-            None => (Vec::new(), Vec::new()),
+            None => (Vec::new(), Vec::new(), Vec::new()),
         };
         Ok(Some(DFlash2SavePlan {
             root: self.root.clone(),
             key,
             parent_kv,
             parent_context,
+            parent_window,
         }))
     }
 
@@ -811,6 +1015,7 @@ impl DFlash2DiskStore {
                 (|meta: &ArtifactMeta| &meta.kv) as fn(&ArtifactMeta) -> &Vec<RangeRef>,
             ),
             (CONTEXT_DIR, |meta: &ArtifactMeta| &meta.context),
+            (WINDOW_DIR, |meta: &ArtifactMeta| &meta.window),
         ] {
             let referenced: HashSet<&str> = self
                 .entries
@@ -835,7 +1040,9 @@ impl DFlash2DiskStore {
     /// disk until [`Self::finish_compaction`].
     pub(crate) fn begin_compaction(&mut self, key: &str) -> Option<DFlash2RestorePlan> {
         let entry = self.entries.iter_mut().find(|entry| entry.key == key)?;
-        if entry.meta.kv.len() + entry.meta.context.len() <= MAX_RANGE_FILES {
+        if entry.meta.kv.len() + entry.meta.context.len() + entry.meta.window.len()
+            <= MAX_RANGE_FILES
+        {
             return None;
         }
         entry.pins += 1;
@@ -938,19 +1145,20 @@ pub(crate) fn write_compaction(plan: &DFlash2RestorePlan) -> Result<DFlash2Writt
     let loaded = load_artifact(plan)?;
     let mut layers = Vec::with_capacity(meta.dense_layers());
     for dense in 0..meta.dense_layers() {
-        let keys: Vec<&Array> = loaded.kv.iter().map(|range| &range[dense].0).collect();
-        let values: Vec<&Array> = loaded.kv.iter().map(|range| &range[dense].1).collect();
-        layers.push((
-            mlx::ops::shape::concatenate(&keys, 2)?,
-            mlx::ops::shape::concatenate(&values, 2)?,
-        ));
+        let parts: Vec<DFlash2Kv> = loaded.kv.iter().map(|range| range[dense].clone()).collect();
+        layers.push(DFlash2Kv::join(&parts)?);
     }
+    let kv_format = match meta.kv_format.as_str() {
+        DFlash2Kv::INT8_FORMAT => DFlash2Kv::INT8_FORMAT,
+        _ => DFlash2Kv::DENSE_FORMAT,
+    };
     let save = DFlash2DiskSave {
         token_ids: meta.token_ids.clone(),
         fingerprint: meta.fingerprint.clone(),
         layers: loaded.layers,
         parent: None,
         ancestors: Vec::new(),
+        kv_format,
         kv: vec![DFlash2DiskRange {
             start: 0,
             stop: meta.cached_len,
@@ -959,6 +1167,9 @@ pub(crate) fn write_compaction(plan: &DFlash2RestorePlan) -> Result<DFlash2Writt
         context_start: meta.cached_len - meta.context_tail_len,
         context: loaded.context_tail,
         context_tail_len: meta.context_tail_len,
+        window_start: meta.cached_len - meta.window_len,
+        window: loaded.window,
+        window_len: meta.window_len,
         last_hidden: loaded.last_hidden,
     };
     let save_plan = DFlash2SavePlan {
@@ -966,6 +1177,7 @@ pub(crate) fn write_compaction(plan: &DFlash2RestorePlan) -> Result<DFlash2Writt
         key: plan.key.clone(),
         parent_kv: Vec::new(),
         parent_context: Vec::new(),
+        parent_window: Vec::new(),
     };
     write_save(&save_plan, &save)
 }
@@ -983,18 +1195,28 @@ pub(crate) fn restore_planned(
         target_cache.len()
     );
     let mut dense = 0_usize;
+    let mut windowed = 0_usize;
     for (index, (cache, layer)) in target_cache.iter_mut().zip(&loaded.layers).enumerate() {
         match layer {
+            DFlash2DiskLayer::Window => {
+                let LayerCache::Full(kv) = cache else {
+                    anyhow::bail!("stored DFlash2 prefix layer {index} expects dense K/V");
+                };
+                let (k, v) = loaded.window.get(windowed).ok_or_else(|| {
+                    anyhow!("stored DFlash2 prefix lacks window layer {windowed}")
+                })?;
+                // The trailing run a windowed cache takes in place of the
+                // whole prefix.
+                kv.restore_dense_prefix_segments_for_row_on(&[(k, v)], 0, loaded.cached_len, ())?;
+                windowed += 1;
+            }
             DFlash2DiskLayer::Dense => {
                 let LayerCache::Full(kv) = cache else {
                     anyhow::bail!("stored DFlash2 prefix layer {index} expects dense K/V");
                 };
-                let segments: Vec<(&Array, &Array)> = loaded
-                    .kv
-                    .iter()
-                    .map(|range| (&range[dense].0, &range[dense].1))
-                    .collect();
-                kv.restore_dense_prefix_segments_for_row_on(&segments, 0, loaded.cached_len, ())?;
+                let parts: Vec<DFlash2Kv> =
+                    loaded.kv.iter().map(|range| range[dense].clone()).collect();
+                DFlash2Kv::restore(kv, &parts, loaded.cached_len)?;
                 dense += 1;
             }
             DFlash2DiskLayer::State(payload) => {
@@ -1034,7 +1256,7 @@ fn check_files(root: &Path, meta: &ArtifactMeta) -> Result<()> {
     let key = artifact_key(&meta.token_ids, &meta.fingerprint);
     let state = root.join(ARTIFACTS_DIR).join(key).join(STATE_FILE);
     let mut files = vec![(state, meta.state_bytes)];
-    for (dir, ranges) in [(SEGMENTS_DIR, &meta.kv), (CONTEXT_DIR, &meta.context)] {
+    for (dir, ranges) in meta.range_files() {
         for range in ranges {
             files.push((root.join(dir).join(&range.file), range.bytes));
         }
@@ -1127,20 +1349,22 @@ fn load_artifact(plan: &DFlash2RestorePlan) -> Result<DFlash2DiskLoaded> {
         let mut tensors = load_tensors(&path)?;
         let mut layers = Vec::with_capacity(dense_layers);
         for dense in 0..dense_layers {
-            let k = take(&mut tensors, &kv_name('k', dense), &path)?;
-            let v = take(&mut tensors, &kv_name('v', dense), &path)?;
-            for array in [&k, &v] {
+            let mut arrays = Vec::new();
+            for name in DFlash2Kv::names(&meta.kv_format, dense) {
+                let array = take(&mut tensors, &name, &path)?;
                 let shape = array.shape();
                 let dims = shape.as_slice();
                 anyhow::ensure!(
                     dims.len() == 4
                         && dims[2] == range.stop - range.start
-                        && format!("{:?}", array.dtype()) == meta.kv_dtype,
-                    "{} holds K/V of shape {dims:?}",
+                        && (meta.kv_format != DFlash2Kv::DENSE_FORMAT
+                            || format!("{:?}", array.dtype()) == meta.kv_dtype),
+                    "{} holds K/V {name} of shape {dims:?}",
                     path.display()
                 );
+                arrays.push(array);
             }
-            layers.push((k, v));
+            layers.push(DFlash2Kv::from_arrays(&meta.kv_format, arrays)?);
         }
         anyhow::ensure!(
             tensors.is_empty(),
@@ -1200,6 +1424,81 @@ fn load_artifact(plan: &DFlash2RestorePlan) -> Result<DFlash2DiskLoaded> {
         _ => mlx::ops::shape::concatenate(&parts.iter().collect::<Vec<_>>(), 1)?,
     };
 
+    // The sliding-window layers' trailing run, from the range files that
+    // still reach into it.
+    let window_layers = meta.window_layers();
+    anyhow::ensure!(
+        (window_layers == 0) == (meta.window_len == 0)
+            && 0 <= meta.window_len
+            && meta.window_len <= meta.cached_len,
+        "stored window of {} positions for {window_layers} layers",
+        meta.window_len
+    );
+    let window_from = meta.cached_len - meta.window_len;
+    let mut window_parts: Vec<Vec<(Array, Array)>> = vec![Vec::new(); window_layers];
+    let mut position = window_from;
+    for range in &meta.window {
+        if range.stop <= window_from {
+            continue;
+        }
+        anyhow::ensure!(
+            range.start <= position && position < range.stop,
+            "stored window ranges are not consecutive at {position}"
+        );
+        let path = root.join(WINDOW_DIR).join(&range.file);
+        let mut tensors = load_tensors(&path)?;
+        for (layer, parts) in window_parts.iter_mut().enumerate() {
+            let mut pair = Vec::with_capacity(2);
+            for side in ['k', 'v'] {
+                let array = take(&mut tensors, &kv_name(side, layer), &path)?;
+                let shape = array.shape();
+                let dims = shape.as_slice();
+                anyhow::ensure!(
+                    dims.len() == 4
+                        && dims[2] == range.stop - range.start
+                        && format!("{:?}", array.dtype()) == meta.kv_dtype,
+                    "{} holds window K/V of shape {dims:?}",
+                    path.display()
+                );
+                pair.push(if position == range.start {
+                    array
+                } else {
+                    mlx::ops::indexing::slice_strided_on(
+                        &array,
+                        &[0_i32, 0, position - range.start, 0][..],
+                        &[1_i32, dims[1], dims[2], dims[3]][..],
+                        &[1_i32, 1, 1, 1][..],
+                        StreamOrDevice::default(),
+                    )?
+                });
+            }
+            let v = pair.pop().expect("v");
+            let k = pair.pop().expect("k");
+            parts.push((k, v));
+        }
+        anyhow::ensure!(
+            tensors.is_empty(),
+            "{} holds unexpected tensors",
+            path.display()
+        );
+        position = range.stop;
+    }
+    anyhow::ensure!(
+        window_layers == 0 || position == meta.cached_len,
+        "stored window covers up to {position} of {} positions",
+        meta.cached_len
+    );
+    let mut window = Vec::with_capacity(window_layers);
+    for parts in window_parts {
+        window.push(match parts.as_slice() {
+            [(k, v)] => (k.clone(), v.clone()),
+            _ => (
+                mlx::ops::shape::concatenate(&parts.iter().map(|p| &p.0).collect::<Vec<_>>(), 2)?,
+                mlx::ops::shape::concatenate(&parts.iter().map(|p| &p.1).collect::<Vec<_>>(), 2)?,
+            ),
+        });
+    }
+
     let state_path = root.join(ARTIFACTS_DIR).join(&plan.key).join(STATE_FILE);
     let mut tensors = load_tensors(&state_path)?;
     for tensor in &meta.state_tensors {
@@ -1223,6 +1522,8 @@ fn load_artifact(plan: &DFlash2RestorePlan) -> Result<DFlash2DiskLoaded> {
     for (index, kind) in meta.layers.iter().enumerate() {
         layers.push(if kind == "dense" {
             DFlash2DiskLayer::Dense
+        } else if kind == "window" {
+            DFlash2DiskLayer::Window
         } else {
             let mut arrays = Vec::new();
             for slot in 0..state_slots(kind)? {
@@ -1235,6 +1536,7 @@ fn load_artifact(plan: &DFlash2RestorePlan) -> Result<DFlash2DiskLoaded> {
         cached_len: meta.cached_len,
         layers,
         kv,
+        window,
         context_tail,
         last_hidden,
     })
@@ -1364,10 +1666,22 @@ fn write_save_files(
             range.stop
         );
         let mut tensors = HashMap::new();
-        for (dense, (k, v)) in range.layers.iter().enumerate() {
-            kv_dtype.get_or_insert_with(|| format!("{:?}", k.dtype()));
-            tensors.insert(kv_name('k', dense), k.clone());
-            tensors.insert(kv_name('v', dense), v.clone());
+        for (dense, layer) in range.layers.iter().enumerate() {
+            anyhow::ensure!(
+                layer.format() == save.kv_format,
+                "DFlash2 prefix save K/V of format {} in a {} artifact",
+                layer.format(),
+                save.kv_format
+            );
+            if let DFlash2Kv::Dense(k, _) = layer {
+                kv_dtype.get_or_insert_with(|| format!("{:?}", k.dtype()));
+            }
+            for (name, array) in DFlash2Kv::names(save.kv_format, dense)
+                .into_iter()
+                .zip(layer.arrays())
+            {
+                tensors.insert(name, array.clone());
+            }
         }
         let file = range_file_name(&save.token_ids, &save.fingerprint, range.start, range.stop);
         let dir = root.join(SEGMENTS_DIR);
@@ -1428,6 +1742,65 @@ fn write_save_files(
         });
     }
 
+    // The sliding-window layers' trailing run: the parent's range files
+    // that still reach into it, then one file of the new positions.
+    let window_layers = save
+        .layers
+        .iter()
+        .filter(|layer| matches!(layer, DFlash2DiskLayer::Window))
+        .count();
+    let window_from = cached_len - save.window_len;
+    let mut window: Vec<RangeRef> = plan
+        .parent_window
+        .iter()
+        .filter(|range| range.stop > window_from && range.start < save.window_start)
+        .cloned()
+        .collect();
+    let window_covered = window.last().map_or(window_from, |range| range.stop);
+    let window_added = save.window.first().map_or(0, |(k, _)| {
+        k.shape().as_slice().get(2).copied().unwrap_or(0)
+    });
+    anyhow::ensure!(
+        save.window.len() == window_layers
+            && (window_layers == 0) == (save.window_len == 0)
+            && 0 <= save.window_len
+            && save.window_len <= cached_len
+            && (window_layers == 0
+                || (save.window_start >= window_from
+                    && window_covered >= save.window_start
+                    && save.window_start + window_added == cached_len
+                    && window
+                        .first()
+                        .is_none_or(|range| range.start <= window_from))),
+        "DFlash2 prefix save window {}+{window_added} does not complete the last {} positions",
+        save.window_start,
+        save.window_len
+    );
+    if window_added > 0 {
+        let mut tensors = HashMap::new();
+        for (layer, (k, v)) in save.window.iter().enumerate() {
+            kv_dtype.get_or_insert_with(|| format!("{:?}", k.dtype()));
+            tensors.insert(kv_name('k', layer), k.clone());
+            tensors.insert(kv_name('v', layer), v.clone());
+        }
+        let file = range_file_name(
+            &save.token_ids,
+            &save.fingerprint,
+            save.window_start,
+            cached_len,
+        );
+        let dir = root.join(WINDOW_DIR);
+        let tmp = dir.join(tmp_name(&file));
+        installs.push((tmp.clone(), dir.join(&file)));
+        let bytes = write_tensors(&tmp, &tensors)?;
+        window.push(RangeRef {
+            file,
+            start: save.window_start,
+            stop: cached_len,
+            bytes,
+        });
+    }
+
     let artifacts = root.join(ARTIFACTS_DIR);
     let tmp_dir = artifacts.join(tmp_name(&plan.key));
     fs::create_dir_all(&tmp_dir).with_context(|| format!("create {}", tmp_dir.display()))?;
@@ -1438,6 +1811,7 @@ fn write_save_files(
     for (index, layer) in save.layers.iter().enumerate() {
         match layer {
             DFlash2DiskLayer::Dense => layers.push("dense".to_owned()),
+            DFlash2DiskLayer::Window => layers.push("window".to_owned()),
             DFlash2DiskLayer::State(payload) => {
                 let (kind, arrays) = state_arrays(payload)?;
                 layers.push(kind.to_owned());
@@ -1456,10 +1830,13 @@ fn write_save_files(
         fingerprint: save.fingerprint.clone(),
         cached_len,
         layers,
+        kv_format: save.kv_format.to_owned(),
         kv_dtype: kv_dtype.unwrap_or_default(),
         kv,
         context_tail_len: save.context_tail_len,
         context,
+        window_len: save.window_len,
+        window,
         state_bytes,
         state_tensors,
     };
@@ -1548,12 +1925,13 @@ pub(crate) mod tests {
             layers,
             parent: lineage.parent,
             ancestors: lineage.ancestors,
+            kv_format: DFlash2Kv::DENSE_FORMAT,
             kv: vec![DFlash2DiskRange {
                 start: lineage.parent_len,
                 stop: len,
                 layers: (0..2)
                     .map(|_| {
-                        (
+                        DFlash2Kv::Dense(
                             positions(lineage.parent_len, len, 2, 4),
                             positions(lineage.parent_len, len, 2, 4),
                         )
@@ -1563,6 +1941,9 @@ pub(crate) mod tests {
             context_start,
             context: context_positions(context_start, len),
             context_tail_len: tail,
+            window_start: 0,
+            window: Vec::new(),
+            window_len: 0,
             last_hidden: context_positions(len - 1, len),
         }
     }
@@ -1591,8 +1972,11 @@ pub(crate) mod tests {
             .kv
             .iter()
             .flat_map(|range| {
-                let len = range[0].0.shape().as_slice()[2] as usize;
-                values(&range[0].0)
+                let DFlash2Kv::Dense(k, _) = &range[0] else {
+                    panic!("dense K/V expected");
+                };
+                let len = k.shape().as_slice()[2] as usize;
+                values(k)
                     .chunks(4)
                     .take(len)
                     .map(|position| position[0])
@@ -1635,6 +2019,70 @@ pub(crate) mod tests {
         names
     }
 
+    /// An artifact whose full-attention layers hold 8-bit K/V, extending a
+    /// stored one, reads back with the same words, scales and biases.
+    #[test]
+    #[serial_test::serial(mlx_metal)]
+    fn disk_store_round_trips_eight_bit_kv() {
+        let packed = |start: i32, stop: i32, salt: u32| -> DFlash2Kv {
+            let n = stop - start;
+            let words = |extra: u32| -> Array {
+                let data: Vec<u32> = (0..2 * n * 32)
+                    .map(|i| (i as u32).wrapping_mul(2654435761) ^ (salt + extra))
+                    .collect();
+                (data.as_slice(), (1_i32, 2, n, 32)).try_into().unwrap()
+            };
+            let sb = |extra: f32| -> Array {
+                let data: Vec<f32> = (0..2 * n * 4)
+                    .map(|i| (i as f32) * 0.25 + salt as f32 + extra)
+                    .collect();
+                let a: Array = (data.as_slice(), (1_i32, 2, n, 4)).try_into().unwrap();
+                a.astype(mlx::Dtype::Bfloat16).unwrap()
+            };
+            DFlash2Kv::Int8(TurboQuantPrefixLayer {
+                k_packed: words(0),
+                k_norms: sb(0.0),
+                v_packed: words(7),
+                v_norms: sb(0.5),
+            })
+        };
+        let dir = temp_root("dflash2-store-int8");
+        let mut store = DFlash2DiskStore::open(&dir, &test_identity(), None).expect("open");
+        let mut saved = Vec::new();
+        for len in [40, 56] {
+            let tokens: Vec<u32> = (0..len).collect();
+            let mut save = test_save(&store, &tokens, false);
+            save.kv_format = DFlash2Kv::INT8_FORMAT;
+            for range in &mut save.kv {
+                range.layers = (0..2)
+                    .map(|layer| packed(range.start, range.stop, layer))
+                    .collect();
+                saved.push(range.layers.clone());
+            }
+            store.save(&save).expect("save");
+        }
+        drop(store);
+        let mut store = DFlash2DiskStore::open(&dir, &test_identity(), None).expect("reopen");
+        let tokens: Vec<u32> = (0..56).collect();
+        let loaded = load(&mut store, &artifact_key(&tokens, "runtime"));
+        assert_eq!(loaded.kv.len(), 2);
+        for (got, want) in loaded.kv.iter().zip(&saved) {
+            for (got, want) in got.iter().zip(want) {
+                assert_eq!(got.format(), DFlash2Kv::INT8_FORMAT);
+                for (a, b) in got.arrays().into_iter().zip(want.arrays()) {
+                    assert_eq!(a.dtype(), b.dtype());
+                    assert_eq!(a.shape(), b.shape());
+                    let (a, b) = (
+                        a.astype(mlx::Dtype::Float32).unwrap(),
+                        b.astype(mlx::Dtype::Float32).unwrap(),
+                    );
+                    assert_eq!(values(&a), values(&b));
+                }
+            }
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     #[serial_test::serial(mlx_metal)]
     fn disk_store_round_trips_an_artifact_bit_for_bit() {
@@ -1648,7 +2096,10 @@ pub(crate) mod tests {
         let loaded = load(&mut store, &key);
         assert_eq!(loaded.cached_len, 40);
         assert_eq!(kv_positions(&loaded), range(0, 40));
-        assert_eq!(values(&loaded.kv[0][1].1), values(&positions(0, 40, 2, 4)));
+        let DFlash2Kv::Dense(_, v) = &loaded.kv[0][1] else {
+            panic!("dense K/V expected");
+        };
+        assert_eq!(values(v), values(&positions(0, 40, 2, 4)));
         assert_eq!(context_values(&loaded), range(16, 40));
         assert_eq!(values(&loaded.last_hidden), vec![39.0, 39.0]);
         let DFlash2DiskLayer::State(PrefixLayerPayload::Linear {
@@ -1909,7 +2360,7 @@ pub(crate) mod tests {
         store.remove(&parent);
         assert!(store.commit_save(written).is_err());
         assert_eq!(store.snapshot().entries, 0);
-        for sub in [SEGMENTS_DIR, CONTEXT_DIR, ARTIFACTS_DIR] {
+        for sub in [SEGMENTS_DIR, CONTEXT_DIR, WINDOW_DIR, ARTIFACTS_DIR] {
             assert!(file_names(&store.root.join(sub)).is_empty(), "{sub}");
         }
         fs::remove_dir_all(dir).expect("cleanup");
@@ -1985,7 +2436,7 @@ pub(crate) mod tests {
         let tokens: Vec<u32> = (0..40).collect();
         assert!(store.save(&test_save(&store, &tokens, true)).is_err());
         assert_eq!(store.snapshot().entries, 0);
-        for sub in [SEGMENTS_DIR, CONTEXT_DIR, ARTIFACTS_DIR] {
+        for sub in [SEGMENTS_DIR, CONTEXT_DIR, WINDOW_DIR, ARTIFACTS_DIR] {
             assert!(file_names(&store.root.join(sub)).is_empty(), "{sub}");
         }
         fs::remove_dir_all(dir).expect("cleanup");

@@ -478,6 +478,7 @@ impl Qwen35Model {
             // Only the full-attention layers keep K and V per token; the
             // linear-attention layers hold a fixed state.
             cache_cost: Some(qwen35_dflash2_target_cache_cost(cfg).into()),
+            prefill_peak: None,
         }
     }
 

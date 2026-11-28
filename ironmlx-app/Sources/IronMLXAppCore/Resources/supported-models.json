@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-18",
+  "updatedAt": "2026-11-22",
   "starter": {
     "tiers": [
       {
@@ -1858,6 +1858,63 @@
       "evidence": [
         "docs/audio-transcriptions-api.md",
         "ironmlx-audio/src/diarization/model.rs"
+      ]
+    },
+    {
+      "id": "inkling-2-mini-4bit",
+      "modelId": "inkling-2-mini",
+      "name": "Inkling 2 Mini",
+      "parameters": "26.4B",
+      "weightFormat": "Affine 4-bit + NVFP4/MXFP8",
+      "variantLabel": "4 bit · NVFP4/MXFP8",
+      "weightBytes": 17308326283,
+      "downloadBytes": 17334682040,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "verified",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Inkling-2-Mini-4bit",
+      "msRepo": null,
+      "metadataRevision": "9856dc53edead71405f8348930937c3638ff21a2",
+      "msMetadataRevision": null,
+      "evidence": [
+        "ironmlx-lm/src/models/inkling2",
+        "ironmlx-lm/tests/inkling2_parity.rs",
+        "https://huggingface.co/mlx-community/Inkling-2-Mini-4bit/tree/9856dc53edead71405f8348930937c3638ff21a2"
+      ]
+    },
+    {
+      "id": "inkling-2-mini-oq4e-mtp",
+      "modelId": "inkling-2-mini",
+      "name": "Inkling 2 Mini",
+      "parameters": "26.4B",
+      "weightFormat": "NVFP4 + affine 4/8-bit",
+      "variantLabel": "oQ4e · DSpark",
+      "weightBytes": 16847493355,
+      "downloadBytes": 16873807686,
+      "category": "vision",
+      "capabilities": [
+        "text",
+        "vision",
+        "reasoning",
+        "tools"
+      ],
+      "status": "verified",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Inkling-2-Mini-oQ4e-mtp",
+      "msRepo": null,
+      "metadataRevision": "3eea042751cd296b7266628a8342c1749242e1fe",
+      "msMetadataRevision": null,
+      "evidence": [
+        "ironmlx-lm/src/models/inkling2/oq.rs",
+        "ironmlx-lm/src/models/dflash2/dspark.rs",
+        "ironmlx-runtime/tests/inkling_dspark.rs",
+        "https://huggingface.co/mlx-community/Inkling-2-Mini-oQ4e-mtp/tree/3eea042751cd296b7266628a8342c1749242e1fe"
       ]
     }
   ]

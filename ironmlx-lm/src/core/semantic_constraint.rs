@@ -208,6 +208,7 @@ impl PreparedSemantic<'_> {
                     ToolDialect::MiniCpm5 => b"</function>".as_slice(),
                     ToolDialect::Gemma => b"<tool_call|>".as_slice(),
                     ToolDialect::Llama => b"}".as_slice(),
+                    ToolDialect::Inkling2 => b"<|end_message|>".as_slice(),
                 };
                 if !token.contains(marker.last().expect("nonempty marker")) {
                     return false;

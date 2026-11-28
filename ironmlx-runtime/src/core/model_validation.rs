@@ -99,6 +99,31 @@ pub fn validate_mtp_pair(
             ));
         }
     };
+    if architecture == ModelArchitecture::Inkling2 {
+        let draft = model_dir.join("mtp.safetensors");
+        if model_dir.canonicalize()? != mtp_model_dir.canonicalize()? {
+            return Ok(MtpCompatibility::not_compatible(
+                MTP_INCOMPATIBLE_CODE,
+                "Inkling DSpark must come from the target snapshot.",
+                None,
+            ));
+        }
+        if !draft.is_file() {
+            return Ok(MtpCompatibility::not_compatible(
+                MTP_MODEL_NOT_FOUND_CODE,
+                "Inkling snapshot is missing mtp.safetensors.",
+                None,
+            ));
+        }
+        return match resolve_inkling_dspark_block(&base_raw, mtp_draft_tokens) {
+            Ok(block) => Ok(MtpCompatibility::compatible(block - 1)),
+            Err(error) => Ok(MtpCompatibility::not_compatible(
+                MTP_INVALID_CONFIG_CODE,
+                error.to_string(),
+                None,
+            )),
+        };
+    }
     match architecture {
         ModelArchitecture::Qwen35Dense
         | ModelArchitecture::Qwen35Moe
@@ -222,6 +247,28 @@ pub fn validate_mtp_pair(
         ));
     }
     Ok(MtpCompatibility::compatible(draft_tokens))
+}
+
+/// Resolve the block width of an Inkling DSpark draft, including its anchor.
+pub fn resolve_inkling_dspark_block(
+    raw: &serde_json::Value,
+    draft_tokens: Option<usize>,
+) -> Result<usize> {
+    let config = ironmlx_lm::models::inkling2::Inkling2Config::from_value(raw)?;
+    let draft = &raw["mtp_config"];
+    let trained_width = draft["block_size"].as_u64().unwrap_or(0) as usize;
+    anyhow::ensure!(
+        draft["markov_head_type"].as_str() == Some("rnn_hidden")
+            && draft["hidden_size"].as_i64() == Some(i64::from(config.text_config.hidden_size))
+            && (2..=8).contains(&trained_width),
+        "invalid Inkling DSpark configuration"
+    );
+    let count = draft_tokens.unwrap_or(trained_width - 1);
+    anyhow::ensure!(
+        (1..trained_width).contains(&count),
+        "Inkling DSpark draft tokens must be in 1..{trained_width}"
+    );
+    Ok(count + 1)
 }
 
 fn validate_qwen35_dense_mtp_config(

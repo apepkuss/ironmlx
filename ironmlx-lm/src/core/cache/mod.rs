@@ -3,6 +3,7 @@ pub mod active_payload;
 pub use active_payload::*;
 pub mod gated_delta;
 pub use gated_delta::*;
+pub mod int8_kv;
 pub mod kv_cache;
 pub use kv_cache::*;
 pub mod kv_growth;

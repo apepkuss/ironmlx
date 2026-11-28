@@ -769,6 +769,7 @@ where
             event_txs.remove(&id);
         }
     }
+    sched.schedule_prefill_buffer_release();
     if can_prime_b1_pipeline && mode.allow_b1_greedy_pipeline() {
         let _ = sched.prime_b1_greedy_pipeline(model)?;
     }
@@ -3663,6 +3664,7 @@ fn driver_loop<M, A>(
         // the live batch. Publish the recovered depth before blocking for the
         // next admit so health never retains a stale non-zero active count.
         publish_scheduler_depth(&sched, admission_queue.len(), &b_active, &b_queued);
+        sched.release_surplus_buffer_cache();
 
         // ===== Outer Idle: block waiting for first admit (or shutdown). =====
         // Outer Idle is reached only after evict_all clears all slots; the

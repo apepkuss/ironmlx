@@ -892,6 +892,13 @@ where
     // `serve` runs inside a Tokio runtime (tests S5 of 3d / 3f-T4 caught this).
     let mut meta = {
         let guard = model.lock().await;
+        // Paged storage holds every layer's K/V from position 0. A model
+        // that keeps its K/V dense caches a sliding-window layer's window.
+        if scheduler_actor_spawner.paged_prefix_cache_enabled()
+            && !guard.prefix_cache_keeps_dense_kv()
+        {
+            guard.keep_full_kv_history();
+        }
         guard.model_meta()
     };
     meta.weight_bytes =
@@ -1138,6 +1145,7 @@ pub async fn build_dflash2_engine_with_options<M>(
 where
     M: Model + DenseVlMethods + ironmlx_lm::models::dflash2::DFlash2Target + Send + 'static,
 {
+    let is_dspark = draft.is_inkling_dspark();
     let checkpoint_block_size = usize::try_from(draft.config().dflash_config.block_size)
         .context("DFlash2 checkpoint block_size")?;
     let block_size =
@@ -1278,7 +1286,11 @@ where
         kv_cache_logical_cap_tokens: dflash2_handle.kv_cache_logical_cap_tokens,
         kv_cache_resident_cap_tokens: dflash2_handle.kv_cache_resident_cap_tokens,
         kv_cache_budget_policy: dflash2_handle.kv_cache_budget_policy.to_owned(),
-        mtp: health::MtpHealthConfig::disabled(),
+        mtp: if is_dspark {
+            health::MtpHealthConfig::inkling_dspark(block_size - 1, &dflash2_handle)
+        } else {
+            health::MtpHealthConfig::disabled()
+        },
         dflash2: health::DFlash2HealthConfig::enabled(
             checkpoint_block_size,
             block_size,

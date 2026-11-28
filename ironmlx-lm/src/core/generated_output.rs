@@ -389,7 +389,16 @@ impl<'a> GeneratedOutputDecoder<'a> {
             None => Vec::new(),
         };
         let mut events = self.route_native_events(native_events)?;
+        let mut dropped_call = false;
         events.extend(match self.tool_parser.take() {
+            // The token limit can end output inside a call: report the cut
+            // as `length` with what completed, not as a failed response.
+            Some(parser) if reason == "length" => {
+                let (events, saw_tool_call, dropped) = parser.finish_truncated()?;
+                self.saw_tool_call |= saw_tool_call;
+                dropped_call = dropped;
+                events
+            }
             Some(parser) => {
                 let (events, saw_tool_call) = parser.finish()?;
                 self.saw_tool_call |= saw_tool_call;
@@ -398,9 +407,11 @@ impl<'a> GeneratedOutputDecoder<'a> {
             None => Vec::new(),
         });
         self.record_tool_calls(&events);
-        events.push(GeneratedOutputEvent::Finished(
-            GeneratedFinishReason::from_generation(reason, self.saw_tool_call)?,
-        ));
+        events.push(GeneratedOutputEvent::Finished(if dropped_call {
+            GeneratedFinishReason::Length
+        } else {
+            GeneratedFinishReason::from_generation(reason, self.saw_tool_call)?
+        }));
         Ok(events)
     }
 
@@ -541,6 +552,45 @@ mod tests {
                 GeneratedOutputEvent::Finished(GeneratedFinishReason::ToolCalls),
             ]
         );
+    }
+
+    #[test]
+    fn a_call_cut_off_by_the_token_limit_ends_the_reply_as_length() {
+        for dialect in [ToolDialect::Qwen35, ToolDialect::Glm, ToolDialect::Llama] {
+            let mut decoder = GeneratedOutputDecoder::from_decoded(Some(ToolOutputDecoderConfig {
+                dialect,
+                response_id: "response".to_owned(),
+                definitions: vec![weather_tool()],
+                output_schema: None,
+            }))
+            .unwrap();
+            let cut = match dialect {
+                ToolDialect::Qwen35 => "<tool_call><function=get_weather><parameter=city>Tok",
+                ToolDialect::Glm => "<tool_call>get_weather<arg_key>city</arg_key><arg_value>Tok",
+                _ => "{\"name\":\"get_weather\",\"parameters\":{\"city\":\"Tok",
+            };
+            let mut events = decoder.push_text_delta(cut).unwrap();
+            events.extend(decoder.finish("length").unwrap());
+            assert_eq!(
+                events,
+                vec![GeneratedOutputEvent::Finished(
+                    GeneratedFinishReason::Length
+                )],
+                "{dialect:?}"
+            );
+        }
+        // Without the limit the same cut stays an error.
+        let mut decoder = GeneratedOutputDecoder::from_decoded(Some(ToolOutputDecoderConfig {
+            dialect: ToolDialect::Qwen35,
+            response_id: "response".to_owned(),
+            definitions: vec![weather_tool()],
+            output_schema: None,
+        }))
+        .unwrap();
+        decoder
+            .push_text_delta("<tool_call><function=get_weather><parameter=city>Tok")
+            .unwrap();
+        assert!(decoder.finish("stop").is_err());
     }
 
     #[test]

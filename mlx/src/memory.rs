@@ -28,6 +28,12 @@ pub fn snapshot() -> MemorySnapshot {
     }
 }
 
+/// Bytes MLX holds in idle buffers. Cheaper than [`snapshot`], for callers
+/// that poll.
+pub fn cache_bytes() -> usize {
+    mlx_sys::memory::ffi::get_cache_memory()
+}
+
 /// Start measuring the peak of active memory afresh: [`peak_window_bytes`]
 /// then reports the peak reached since this call. [`snapshot`] keeps
 /// reporting the peak since the process started.

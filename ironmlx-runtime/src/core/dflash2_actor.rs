@@ -1292,8 +1292,13 @@ where
             .expect("validated DFlash2 prefix cache capacity")
             .map(|cache| {
                 let turn_boundary = crate::core::chat_prefix::ChatTurnBoundary::probe(&tokenizer);
+                let whole_prompt_boundary = turn_boundary.is_none()
+                    && crate::core::chat_prefix::ChatTurnBoundary::whole_prompt_continues(
+                        &tokenizer,
+                    );
                 tracing::info!(
                     generation_suffixes = ?turn_boundary.as_ref().map(|b| b.suffixes()),
+                    whole_prompt_boundary,
                     "DFlash2 prefix cache chat turn boundary"
                 );
                 let disk = prefix_cache_disk.as_ref().and_then(|(config, chunk_size)| {
@@ -1309,7 +1314,10 @@ where
                         .store
                         .set(disk.shared_store());
                 }
-                cache.with_turn_boundary(turn_boundary).with_disk(disk)
+                cache
+                    .with_turn_boundary(turn_boundary)
+                    .with_whole_prompt_boundary(whole_prompt_boundary)
+                    .with_disk(disk)
             });
         let mut next_request_id = 1_u64;
         let mut active = Vec::<ActiveDFlash2Request<'_, M>>::with_capacity(b_max);

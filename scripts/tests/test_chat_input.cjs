@@ -30,11 +30,11 @@ test('reasoning control by capability', () => {
   assert.deepEqual(page.last(), { type: 'setReasoning', choice: 'medium' }, 'turning it on starts at medium');
   assert.equal(levels.textContent, '思考 · 中 ▾');
   const items = page.$$('#think .mi');
-  assert.deepEqual(items.map(item => item.querySelector('.mi-label').textContent), ['关闭', '低', '中', '高']);
+  assert.deepEqual(items.map(item => item.querySelector('.mi-label').textContent), ['关闭', '低', '中', '极高']);
   assert.ok(visible(page.$('#think .menu')));
   items[3].click();
-  assert.deepEqual(page.last(), { type: 'setReasoning', choice: 'high' });
-  assert.equal(levels.textContent, '思考 · 高 ▾');
+  assert.deepEqual(page.last(), { type: 'setReasoning', choice: 'xhigh' });
+  assert.equal(levels.textContent, '思考 · 极高 ▾');
   levels.click();
   page.$$('#think .mi')[0].click();
   assert.deepEqual(page.last(), { type: 'setReasoning', choice: 'off' });
@@ -214,4 +214,18 @@ test('a reloaded page follows a reply that is still running', () => {
   other.receive({ type: 'delta', reasoning: '', text: '意外的输出' });
   other.flush();
   assert.equal(other.$('#send').classList.contains('stop'), true, 'a reply nobody started here still gets Stop');
+});
+
+test('Inkling exposes every native effort and restores extended choices', () => {
+  const page = loadChat();
+  const reasoning = { native_efforts: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] };
+  page.state({ reasoning, reasoningChoice: 'max' });
+  assert.equal(page.$('#think .tog').textContent, '思考 · 最大 ▾');
+  page.$('#think .tog').click();
+  const items = page.$$('#think .mi');
+  assert.deepEqual(items.map(item => item.querySelector('.mi-label').textContent), ['关闭', '极低', '低', '中', '高', '极高', '最大']);
+  items[1].click();
+  assert.deepEqual(page.last(), { type: 'setReasoning', choice: 'minimal' });
+  page.state({ reasoning, reasoningChoice: 'xhigh' });
+  assert.equal(page.$('#think .tog').textContent, '思考 · 极高 ▾');
 });

@@ -18,6 +18,9 @@ pub struct DiffusionGemmaRuntime {
     pub vision_input: VisionInputConfig,
     pub lane: Arc<DiffusionGemmaLane>,
     pub runtime_usage: Arc<crate::core::runtime_usage::ModelRuntimeUsageCounters>,
+    /// Temperature for requests that set none: the model's saved setting,
+    /// else greedy.
+    pub default_temperature: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +135,7 @@ pub fn build_diffusion_gemma_app_state(
     model_id: String,
     model_weight_bytes: usize,
     vision_input: VisionInputConfig,
+    default_temperature: Option<f32>,
 ) -> DiffusionGemmaRuntime {
     DiffusionGemmaRuntime {
         model: Arc::new(Mutex::new(model)),
@@ -144,6 +148,7 @@ pub fn build_diffusion_gemma_app_state(
             DEFAULT_DIFFUSION_GEMMA_QUEUE_CAPACITY,
         )),
         runtime_usage: Arc::new(crate::core::runtime_usage::ModelRuntimeUsageCounters::default()),
+        default_temperature,
     }
 }
 

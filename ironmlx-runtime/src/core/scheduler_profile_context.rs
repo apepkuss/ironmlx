@@ -60,7 +60,8 @@ pub fn build_scheduler_runtime_context(
                 (ModelArchitecture::Gemma4, true) => {
                     SchedulerSpeculativeMode::Gemma4DrafterPromptLookup
                 }
-                _ => bail!("scheduler profile MTP context supports Qwen and Gemma4 only"),
+                (ModelArchitecture::Inkling2, false) => SchedulerSpeculativeMode::InklingDspark,
+                _ => bail!("scheduler profile does not support this MTP configuration"),
             };
             let draft_config =
                 std::fs::read(mtp_model_dir.join("config.json")).with_context(|| {
@@ -78,13 +79,20 @@ pub fn build_scheduler_runtime_context(
                     config.cross_request
                 )
             });
-            let draft_tokens = crate::core::speculative::resolve_mtp_draft_tokens(
-                &config,
-                options
-                    .mtp_draft_tokens
-                    .map(crate::core::speculative::MtpDraftTokensArg::Explicit)
-                    .unwrap_or(crate::core::speculative::MtpDraftTokensArg::Omitted),
-            );
+            let draft_tokens = if mode == SchedulerSpeculativeMode::InklingDspark {
+                crate::core::model_validation::resolve_inkling_dspark_block(
+                    &config,
+                    options.mtp_draft_tokens,
+                )? - 1
+            } else {
+                crate::core::speculative::resolve_mtp_draft_tokens(
+                    &config,
+                    options
+                        .mtp_draft_tokens
+                        .map(crate::core::speculative::MtpDraftTokensArg::Explicit)
+                        .unwrap_or(crate::core::speculative::MtpDraftTokensArg::Omitted),
+                )
+            };
             SchedulerSpeculativeContext {
                 mode,
                 source_fingerprint: Some(source_fingerprint),
@@ -181,7 +189,9 @@ fn weight_quantization_context(
         .then(|| std::fs::read(&optiq_path))
         .transpose()
         .with_context(|| format!("reading {}", optiq_path.display()))?;
-    let mode = if optiq_bytes.is_some() {
+    let mode = if ironmlx_lm::models::inkling2::is_oq_checkpoint(config) {
+        "inkling2-oq".to_string()
+    } else if optiq_bytes.is_some() {
         "optiq".to_string()
     } else if let Some(quantization) = quantization {
         quantization

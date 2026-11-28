@@ -96,8 +96,8 @@ pub struct GenerateArgs {
     /// disables chunking (single-shot forward over the whole prompt).
     /// Intermediate chunks update the cache only; the last chunk runs
     /// the full forward + lm_head.
-    #[arg(long, default_value_t = 2048)]
-    pub prefill_chunk_size: usize,
+    #[arg(long)]
+    pub prefill_chunk_size: Option<usize>,
 
     /// MTP/drafter model directory. When set, generation uses Qwen MTP heads or
     /// Gemma4 assistant drafter weights for greedy or exact sampled speculative decoding.
@@ -163,7 +163,8 @@ fn ensure_mtp_generation_supported(
     match architecture {
         ironmlx_lm::models::ModelArchitecture::Qwen35Dense
         | ironmlx_lm::models::ModelArchitecture::Qwen35Moe
-        | ironmlx_lm::models::ModelArchitecture::Gemma4 => Ok(()),
+        | ironmlx_lm::models::ModelArchitecture::Gemma4
+        | ironmlx_lm::models::ModelArchitecture::Inkling2 => Ok(()),
         _ => Err(anyhow!(
             "--mtp-model-dir currently supports Qwen/Gemma4 generation only"
         )),
@@ -260,7 +261,14 @@ fn build_generate_request<M: Model>(
         max_new_tokens: args.max_tokens,
         sampler: build_sampler(args),
         stop_token_ids: tokenizer.eos_token_ids().to_vec(),
-        prefill_chunk_size: args.prefill_chunk_size,
+        prefill_chunk_size: args.prefill_chunk_size.unwrap_or_else(|| {
+            if model_type == ironmlx_lm::models::ModelArchitecture::Inkling2.model_type() {
+                let oq = ironmlx_lm::models::inkling2::is_oq_checkpoint(loader.config_raw_value());
+                ironmlx_lm::models::inkling2::b1_prefill_chunk_size(oq).unwrap_or(2048)
+            } else {
+                2048
+            }
+        }),
         decode_cadence_mid_chunk_cap: 256,
         kv_cache_turboquant_bits: args.kv_quant.turboquant_bits(),
         pixel_values: prepared_images.pixel_values,
@@ -656,6 +664,40 @@ pub fn run(mut args: GenerateArgs) -> Result<()> {
         ironmlx_lm::models::ModelArchitecture::Llama => {
             let model = ironmlx_lm::models::LlamaModel::from_loader(&loader)
                 .context("LlamaModel::from_loader")?;
+            run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
+        }
+        ironmlx_lm::models::ModelArchitecture::Inkling2 => {
+            let model = ironmlx_lm::models::Inkling2Model::from_loader(&loader)
+                .context("Inkling2Model::from_loader")?;
+            if let Some(draft_dir) = &args.mtp_model_dir {
+                let validated = ironmlx_runtime::core::model_validation::validate_mtp_pair(
+                    &model_dir,
+                    draft_dir,
+                    args.mtp_draft_tokens,
+                )?;
+                if !validated.compatible {
+                    return Err(anyhow!("{}", validated.message));
+                }
+                let block = ironmlx_runtime::core::model_validation::resolve_inkling_dspark_block(
+                    loader.config_raw_value(),
+                    args.mtp_draft_tokens,
+                )?;
+                let draft = ironmlx_lm::models::DFlash2DraftModel::from_inkling_sidecar(
+                    &loader,
+                    &draft_dir.join("mtp.safetensors"),
+                )?;
+                let request =
+                    build_generate_request(&model, &tokenizer, &loader, model_type, &args)?;
+                let mut stream = DFlash2TextGenerationStream::new_text_only(
+                    &model, &draft, &tokenizer, request, block,
+                )?;
+                write_generation_events(|| stream.next_token())?;
+                eprintln!(
+                    "ironmlx generate: dspark_metrics {}",
+                    serde_json::to_string(&stream.metrics())?
+                );
+                return Ok(());
+            }
             run_generation_with_model(&model, &tokenizer, &loader, model_type, &args)
         }
         ironmlx_lm::models::ModelArchitecture::MiniCpmV46 => {

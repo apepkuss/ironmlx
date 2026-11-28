@@ -23,6 +23,7 @@ MTP is exposed in two product entry points:
 
 Compatible combinations support text/VL CLI and OpenAI/Anthropic serving, subject to the request constraints below.
 This page describes the Qwen MTP path. The same `--mtp-model-dir` CLI option also accepts a compatible Gemma4 assistant drafter, which uses a separate execution path and sampling rules. Do not apply the Qwen-only constraints below to Gemma4; see [Supported models](supported-models.md).
+It also accepts the DSpark drafter shipped inside an Inkling 2 Mini checkpoint that includes `mtp.safetensors` (for example Inkling-2-Mini-oQ4e-mtp; pass the same checkpoint directory). DSpark serves greedy, sampled and constrained requests (JSON Schema and tool calls), skips proposals on its own when they would be slower than ordinary decoding, and is not bound by the Qwen-only constraints below.
 
 ## Current constraints
 

@@ -595,7 +595,10 @@ async fn main() -> Result<()> {
         ),
     }
 
+    // Benchmarks talk to the server directly: a proxy would add its own
+    // latency, and the macOS system proxy ignores its exception list.
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(args.timeout))
         .build()
         .context("reqwest::Client::build")?;

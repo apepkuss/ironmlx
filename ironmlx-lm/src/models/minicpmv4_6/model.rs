@@ -442,6 +442,7 @@ impl crate::core::model::Model for MiniCpmV46Model {
             max_position_embeddings: cfg.max_position_embeddings,
             spatial_merge_size,
             cache_cost: None,
+            prefill_peak: None,
         }
     }
 

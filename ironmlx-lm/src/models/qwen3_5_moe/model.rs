@@ -824,6 +824,7 @@ impl Qwen35MoeModel {
             cache_cost: Some(
                 crate::models::dflash2::DFlash2Target::dflash2_target_cache_cost(self).into(),
             ),
+            prefill_peak: None,
         }
     }
 }

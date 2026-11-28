@@ -114,6 +114,423 @@ pub(crate) enum DFlash2WindowRole {
     Probe,
 }
 
+/// Verify width of the single-request greedy DSpark windows.
+///
+/// The Inkling target reads its routed experts once per verified row, so each
+/// verified proposal costs a sizeable share of a decode step while the
+/// proposal block itself is cheap. Every window therefore proposes a block and
+/// verifies only the prefix that maximizes the expected committed tokens per
+/// unit of time, from two estimates:
+/// - the acceptance of a proposal given the drafter's probability for it,
+///   counted per probability bin for the first proposal and for later ones
+///   (the drafter is overconfident, so the probability is calibrated, not
+///   used directly); prompt-copy proposals carry no probability and are
+///   counted per depth only;
+/// - the measured window time per verify width. A sample below the estimate
+///   replaces it (noise only adds time); higher samples move it slowly.
+///
+/// Width 0 is an ordinary decode step that still paid for the proposal. After
+/// `PAUSE_AFTER` such windows in a row the proposals stop for `PAUSE_WINDOWS`
+/// ordinary steps and then resume, which bounds both the wasted proposals and
+/// the target context kept for the drafter.
+///
+/// How much a proposal and a verified row cost next to a decode step differs
+/// between machines by a factor of several, so widths not yet measured follow
+/// the line through the measured ones, and what a response learned (the cost
+/// shape, and whether proposing kept losing) seeds the next response.
+#[derive(Debug, Clone)]
+pub(crate) struct DSparkWindowPolicy {
+    /// (accepted, attempted) per [proposal depth, the last for all deeper
+    /// ones][probability bin].
+    draft: [[(f64, f64); Self::BINS.len()]; 3],
+    /// (accepted, attempted) for the first and for later copied tokens.
+    copy: [(f64, f64); 2],
+    /// Window time by verify width, proposal included.
+    cost_us: [Option<f64>; Self::MAX_WIDTH + 1],
+    /// Time of an ordinary decode step, measured while paused.
+    ordinary_us: Option<f64>,
+    /// Tokens, time and windows since proposing was last reviewed.
+    review: (f64, f64, usize),
+    zero_streak: usize,
+    pause: usize,
+    /// Window time by verify width relative to an ordinary decode step,
+    /// until this response has measured its own.
+    ratio: [f64; Self::MAX_WIDTH + 1],
+    /// Reviews in a row that found proposing slower than ordinary decoding.
+    losing: u32,
+    /// Whether reviews update what the next response starts from.
+    shared: bool,
+    /// Which memory this response shares: greedy and sampled responses
+    /// accept different shares of the same proposals, and constrained ones
+    /// (tool calls, JSON) win on text where free chat loses.
+    slot: usize,
+}
+
+/// What responses so far learned on this machine.
+#[derive(Debug, Clone, Copy)]
+struct DSparkLearned {
+    /// Window time by verify width relative to an ordinary decode step.
+    ratio: [f64; DSparkWindowPolicy::MAX_WIDTH + 1],
+    /// Share of recent reviews that found proposing at least as fast as
+    /// ordinary decoding. Whether it pays depends on the text where
+    /// proposals are cheap, and on nothing where they are dear.
+    winning: f64,
+    /// The latest response's losing reviews in a row and what is left of
+    /// the pause they called for.
+    losing: u32,
+    pause: usize,
+}
+
+static DSPARK_LEARNED: Mutex<[Option<DSparkLearned>; 4]> = Mutex::new([None; 4]);
+
+impl Default for DSparkWindowPolicy {
+    fn default() -> Self {
+        Self {
+            draft: [
+                Self::prior([0.15, 0.18, 0.40, 0.56, 0.80, 0.87]),
+                Self::prior([0.30, 0.40, 0.48, 0.68, 0.74, 0.89]),
+                Self::prior([0.15, 0.40, 0.40, 0.72, 0.68, 0.95]),
+            ],
+            copy: [0.85, 0.85].map(|rate| (rate * Self::PRIOR_WEIGHT, Self::PRIOR_WEIGHT)),
+            cost_us: [None; Self::MAX_WIDTH + 1],
+            ordinary_us: None,
+            review: (0.0, 0.0, 0),
+            zero_streak: 0,
+            pause: 0,
+            ratio: Self::COST_RATIO,
+            losing: 0,
+            shared: false,
+            slot: 0,
+        }
+    }
+}
+
+impl DSparkWindowPolicy {
+    fn prior(rates: [f64; Self::BINS.len()]) -> [(f64, f64); Self::BINS.len()] {
+        rates.map(|rate| (rate * Self::PRIOR_WEIGHT, Self::PRIOR_WEIGHT))
+    }
+
+    /// Widest proposal block: the drafter's later positions are cheap to
+    /// propose and rarely worth verifying beyond this depth.
+    pub(crate) const MAX_WIDTH: usize = 7;
+    /// Proposals of a response's first window, which delays its first text.
+    pub(crate) const FIRST_WINDOW_WIDTH: usize = 2;
+    /// Upper probability bounds of the calibration bins.
+    const BINS: [f32; 6] = [0.5, 0.7, 0.86, 0.95, 0.99, f32::INFINITY];
+    const PRIOR_WEIGHT: f64 = 4.0;
+    /// Window time by verify width relative to an ordinary decode step on an
+    /// M5 Max: the proposal costs about 0.15 of a 13.4 ms step and each
+    /// verified row about 0.25. An M1 Pro pays about 0.6 and 0.5. Replaced by
+    /// what earlier responses measured, then by the stream's own windows.
+    const COST_RATIO: [f64; Self::MAX_WIDTH + 1] = [1.15, 1.42, 1.67, 1.92, 2.17, 2.42, 2.67, 2.92];
+    const PAUSE_AFTER: usize = 8;
+    const PAUSE_WINDOWS: usize = 16;
+    /// Windows between comparisons of proposing with ordinary decoding, and
+    /// the ordinary steps taken when proposing was the slower of the two.
+    const REVIEW_WINDOWS: usize = 16;
+    const LOSING_PAUSE_WINDOWS: usize = 48;
+    /// Share of winning reviews below which a pause carries over to the
+    /// next response.
+    const RARELY_WINNING: f64 = 0.2;
+    /// Break-even acceptance above which proposals count as dear.
+    const DEAR_PROPOSALS: f64 = 0.75;
+    /// Ordinary steps timed before the first proposal on a machine.
+    const ORDINARY_SAMPLES: usize = 3;
+    /// The pause doubles with each further losing review, up to this many
+    /// times.
+    const LOSING_PAUSE_DOUBLINGS: u32 = 3;
+    /// The same where proposals are dear and reviews have rarely found
+    /// proposing faster. Each review spends windows that cost about three
+    /// decode steps and yield fewer tokens, so the pause keeps doubling and
+    /// each review costs well under 1%. Where some text does win (tool
+    /// calls, say), the shorter limit lets the next win come soon.
+    const DEAR_LOSING_PAUSE_DOUBLINGS: u32 = 6;
+
+    /// A policy for a new greedy response, starting from what the last one
+    /// learned.
+    #[cfg(test)]
+    pub(crate) fn resume() -> Self {
+        Self::resume_for(false, false)
+    }
+
+    /// A policy for a new response, starting from what the last response of
+    /// the same kind (greedy or sampled, free or constrained) learned.
+    pub(crate) fn resume_for(sampled: bool, constrained: bool) -> Self {
+        let slot = usize::from(sampled) + 2 * usize::from(constrained);
+        let mut policy = Self {
+            shared: true,
+            slot,
+            ..Self::default()
+        };
+        if sampled {
+            // A sampled verify accepts a proposal with the target's
+            // probability of it, not when it is the target's top token:
+            // the drafter's mid-confidence proposals land far less often.
+            policy.draft = [
+                Self::prior([0.05, 0.10, 0.35, 0.40, 0.55, 0.90]),
+                Self::prior([0.10, 0.30, 0.30, 0.60, 0.75, 0.95]),
+                Self::prior([0.05, 0.15, 0.25, 0.50, 0.75, 0.95]),
+            ];
+        }
+        let learned = Self::learned()[slot];
+        match learned {
+            Some(learned) => {
+                policy.ratio = learned.ratio;
+                // A pause outlives its response only where proposing loses
+                // whatever the text: it has rarely won, or its cost leaves
+                // it a win only on text the drafter gets almost all right.
+                if learned.winning < Self::RARELY_WINNING
+                    || Self::break_even_acceptance(&learned.ratio) > Self::DEAR_PROPOSALS
+                {
+                    policy.losing = learned.losing;
+                    policy.pause = learned.pause;
+                }
+            }
+            // Nothing says yet what a proposal costs next to a decode step
+            // here: time a few ordinary steps before the first proposal.
+            None => policy.pause = Self::ORDINARY_SAMPLES,
+        }
+        policy
+    }
+
+    fn learned() -> std::sync::MutexGuard<'static, [Option<DSparkLearned>; 4]> {
+        DSPARK_LEARNED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The lowest per-proposal acceptance at which some verify width yields
+    /// more tokens per unit of time than ordinary decoding: about 0.4 on an
+    /// M5 Max and 0.85 on an M1 Pro.
+    fn break_even_acceptance(ratio: &[f64; Self::MAX_WIDTH + 1]) -> f64 {
+        (0..=100)
+            .map(|percent| f64::from(percent) / 100.0)
+            .find(|acceptance| {
+                let (mut expected, mut reach) = (1.0, 1.0);
+                ratio[1..].iter().any(|cost| {
+                    reach *= acceptance;
+                    expected += reach;
+                    expected >= *cost
+                })
+            })
+            .unwrap_or(f64::INFINITY)
+    }
+
+    fn losing_pause(losing: u32, hopeless: bool) -> usize {
+        let doublings = if hopeless {
+            Self::DEAR_LOSING_PAUSE_DOUBLINGS
+        } else {
+            Self::LOSING_PAUSE_DOUBLINGS
+        };
+        Self::LOSING_PAUSE_WINDOWS << losing.saturating_sub(1).min(doublings)
+    }
+
+    /// The least-squares line through the measured widths, when two or more
+    /// are measured and wider windows cost more.
+    fn measured_line(&self) -> Option<(f64, f64)> {
+        let points: Vec<(f64, f64)> = self
+            .cost_us
+            .iter()
+            .enumerate()
+            .filter_map(|(width, cost)| cost.map(|cost| (width as f64, cost)))
+            .collect();
+        if points.len() < 2 {
+            return None;
+        }
+        let n = points.len() as f64;
+        let mean_x = points.iter().map(|p| p.0).sum::<f64>() / n;
+        let mean_y = points.iter().map(|p| p.1).sum::<f64>() / n;
+        let spread = points.iter().map(|p| (p.0 - mean_x).powi(2)).sum::<f64>();
+        let slope = points
+            .iter()
+            .map(|p| (p.0 - mean_x) * (p.1 - mean_y))
+            .sum::<f64>()
+            / spread;
+        let base = mean_y - slope * mean_x;
+        (slope > 0.0 && base > 0.0).then_some((base, slope))
+    }
+
+    fn bin(log_probability: f32) -> usize {
+        let probability = log_probability.exp();
+        Self::BINS
+            .iter()
+            .position(|bound| probability < *bound)
+            .unwrap_or(Self::BINS.len() - 1)
+    }
+
+    fn cost(&self, width: usize) -> f64 {
+        if let Some(cost) = self.cost_us[width] {
+            return cost;
+        }
+        if let Some((base, slope)) = self.measured_line() {
+            return base + slope * width as f64;
+        }
+        // Scale the nearest measured width by the prior ratios.
+        let nearest = (0..=Self::MAX_WIDTH)
+            .filter(|w| self.cost_us[*w].is_some())
+            .min_by_key(|w| w.abs_diff(width));
+        match nearest {
+            Some(w) => self.cost_us[w].unwrap_or(1.0) * self.ratio[width] / self.ratio[w],
+            None => self.ratio[width],
+        }
+    }
+
+    fn best_width(&self, acceptance: impl Iterator<Item = f64>) -> usize {
+        let mut best = (1.0 / self.cost(0), 0);
+        let (mut expected, mut reach) = (1.0, 1.0);
+        for (depth, rate) in acceptance.take(Self::MAX_WIDTH).enumerate() {
+            reach *= rate;
+            expected += reach;
+            let rate = expected / self.cost(depth + 1);
+            if rate > best.0 {
+                best = (rate, depth + 1);
+            }
+        }
+        best.1
+    }
+
+    /// Proposals to verify given the drafter's log-probability of each.
+    pub(crate) fn draft_width(&self, confidence: &[f32]) -> usize {
+        self.best_width(confidence.iter().enumerate().map(|(depth, value)| {
+            let (accepted, attempted) = self.draft[depth.min(2)][Self::bin(*value)];
+            accepted / attempted
+        }))
+    }
+
+    /// Copied prompt tokens to verify out of `available`, the first of which
+    /// the drafter also proposed.
+    pub(crate) fn copy_width(&self, available: usize) -> usize {
+        self.best_width((0..available).map(|depth| {
+            let (accepted, attempted) = self.copy[depth.min(1)];
+            accepted / attempted
+        }))
+    }
+
+    /// Whether the next window is an ordinary decode step without a proposal.
+    pub(crate) fn paused(&self) -> bool {
+        self.pause > 0
+    }
+
+    /// An ordinary decode step taken while paused.
+    pub(crate) fn observe_paused(&mut self, window_us: u64) {
+        // A review weighs this against the mean time of its windows, so
+        // this follows the mean too rather than the fastest step seen.
+        let sample = window_us as f64;
+        self.ordinary_us = Some(match self.ordinary_us {
+            Some(cost) => cost + 0.2 * (sample - cost),
+            None => sample,
+        });
+        self.pause = self.pause.saturating_sub(1);
+        // The pause a losing review called for runs across responses.
+        if self.shared && self.losing > 0 {
+            if let Some(learned) = Self::learned()[self.slot].as_mut() {
+                learned.pause = self.pause;
+            }
+        }
+    }
+
+    /// Choosing the best width per window still pays for every proposal.
+    /// When a run of windows yields fewer tokens per second than ordinary
+    /// steps would have, stop proposing for a while.
+    fn review(&mut self, tokens: usize, window_us: u64) {
+        self.review.0 += tokens as f64;
+        self.review.1 += window_us as f64;
+        self.review.2 += 1;
+        // After a losing review the next one only has to confirm it.
+        let windows = if self.losing > 0 {
+            Self::REVIEW_WINDOWS / 2
+        } else {
+            Self::REVIEW_WINDOWS
+        };
+        if self.review.2 < windows {
+            return;
+        }
+        let (tokens, elapsed, _) = std::mem::take(&mut self.review);
+        if self.cost_us.iter().all(Option::is_none) {
+            return;
+        }
+        let ordinary = self
+            .ordinary_us
+            .unwrap_or_else(|| self.cost(0) / self.ratio[0]);
+        let mut ratio = self.ratio;
+        for (width, ratio) in ratio.iter_mut().enumerate() {
+            *ratio = self.cost(width) / ordinary;
+        }
+        let measured = ratio.iter().all(|ratio| ratio.is_finite() && *ratio > 0.0);
+        let won = tokens * ordinary >= elapsed;
+        if won {
+            self.losing = self.losing.saturating_sub(1);
+        } else {
+            self.zero_streak = 0;
+            self.losing += 1;
+            let shape = if measured { &ratio } else { &self.ratio };
+            let winning = if self.shared {
+                Self::learned()[self.slot].map_or(0.5, |learned| learned.winning)
+            } else {
+                0.5
+            };
+            let hopeless = winning < Self::RARELY_WINNING
+                && Self::break_even_acceptance(shape) > Self::DEAR_PROPOSALS;
+            self.pause = Self::losing_pause(self.losing, hopeless);
+        }
+        // The shape is only worth passing on once an ordinary step was timed.
+        if self.shared && self.ordinary_us.is_some() && measured {
+            let mut slots = Self::learned();
+            let learned = &mut slots[self.slot];
+            let winning = learned.map_or(0.5, |learned| learned.winning);
+            *learned = Some(DSparkLearned {
+                ratio,
+                winning: winning + 0.2 * (f64::from(u8::from(won)) - winning),
+                losing: self.losing,
+                pause: self.pause,
+            });
+        }
+    }
+
+    /// A window that verified `width` proposals and accepted `accepted`;
+    /// `confidence` is `None` for copied proposals. `steady` is false when the
+    /// window also paid a one-time cost (the first use of its shape).
+    pub(crate) fn observe(
+        &mut self,
+        confidence: Option<&[f32]>,
+        width: usize,
+        accepted: usize,
+        window_us: u64,
+        steady: bool,
+    ) {
+        for depth in 0..width.min(accepted + 1) {
+            let stat = match confidence {
+                Some(confidence) => &mut self.draft[depth.min(2)][Self::bin(confidence[depth])],
+                None => &mut self.copy[depth.min(1)],
+            };
+            stat.0 += f64::from(u8::from(depth < accepted));
+            stat.1 += 1.0;
+        }
+        if steady {
+            self.review(accepted.min(width) + 1, window_us);
+        }
+        if confidence.is_none() {
+            return;
+        }
+        if width == 0 {
+            self.zero_streak += 1;
+            if self.zero_streak >= Self::PAUSE_AFTER {
+                self.zero_streak = 0;
+                self.pause = Self::PAUSE_WINDOWS;
+            }
+        } else {
+            self.zero_streak = 0;
+        }
+        if steady && width <= Self::MAX_WIDTH {
+            let sample = window_us as f64;
+            self.cost_us[width] = Some(match self.cost_us[width] {
+                Some(cost) if sample > cost => cost + 0.2 * (sample - cost),
+                _ => sample,
+            });
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum DFlash2DraftBudgetPolicy {
     Legacy(QwenMtpDraftPolicyState),
@@ -148,6 +565,12 @@ impl DFlash2DraftBudgetPolicy {
         match self {
             Self::Legacy(_) => DFlash2BudgetPolicyKind::Legacy,
             Self::WindowCost(_) => DFlash2BudgetPolicyKind::WindowCost,
+        }
+    }
+
+    pub(crate) fn start_inkling(&mut self) {
+        if let Self::Legacy(policy) = self {
+            policy.seed_initial_budget(2);
         }
     }
 
@@ -2008,7 +2431,7 @@ mod tests {
     fn window_cost_state(policy: &DFlash2DraftBudgetPolicy) -> &DFlash2WindowCostPolicy {
         match policy {
             DFlash2DraftBudgetPolicy::WindowCost(policy) => policy,
-            DFlash2DraftBudgetPolicy::Legacy(_) => unreachable!(),
+            DFlash2DraftBudgetPolicy::Legacy(..) => unreachable!(),
         }
     }
 
@@ -2017,7 +2440,7 @@ mod tests {
     ) -> &mut DFlash2WindowCostPolicy {
         match policy {
             DFlash2DraftBudgetPolicy::WindowCost(policy) => policy,
-            DFlash2DraftBudgetPolicy::Legacy(_) => unreachable!(),
+            DFlash2DraftBudgetPolicy::Legacy(..) => unreachable!(),
         }
     }
 
@@ -2398,6 +2821,189 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn dspark_width_follows_calibrated_confidence_and_pauses_after_idle_proposals() {
+        let mut policy = DSparkWindowPolicy::default();
+        let (sure, unsure) = (0.999_f32.ln(), 0.3_f32.ln());
+        assert_eq!(policy.draft_width(&[unsure, sure, sure]), 0);
+        assert!(policy.draft_width(&[sure, sure, unsure]) >= 2);
+        // Confident proposals that keep failing stop being verified.
+        for _ in 0..40 {
+            policy.observe(Some(&[sure]), 1, 0, 23_000, true);
+        }
+        assert_eq!(policy.draft_width(&[sure, sure]), 0);
+        // Unverified proposals pause the drafter for a bounded stretch.
+        let mut policy = DSparkWindowPolicy::default();
+        assert!(!policy.paused());
+        for _ in 0..DSparkWindowPolicy::PAUSE_AFTER {
+            policy.observe(Some(&[unsure]), 0, 0, 19_000, true);
+        }
+        for _ in 0..DSparkWindowPolicy::PAUSE_WINDOWS {
+            assert!(policy.paused());
+            policy.observe_paused(13_000);
+        }
+        assert!(!policy.paused());
+        // Proposals that are verified but yield fewer tokens per second than
+        // ordinary steps pause proposing for longer.
+        let mut policy = DSparkWindowPolicy::default();
+        for _ in 0..DSparkWindowPolicy::REVIEW_WINDOWS {
+            policy.observe(Some(&[sure]), 1, 0, 19_000, true);
+        }
+        assert_eq!(policy.pause, DSparkWindowPolicy::LOSING_PAUSE_WINDOWS);
+        let mut policy = DSparkWindowPolicy::default();
+        for _ in 0..DSparkWindowPolicy::REVIEW_WINDOWS {
+            policy.observe(Some(&[sure]), 1, 1, 19_000, true);
+        }
+        assert!(!policy.paused());
+        // Copied tokens widen while they are accepted and stop after failures.
+        let mut policy = DSparkWindowPolicy::default();
+        assert!(policy.copy_width(7) >= 2);
+        for _ in 0..30 {
+            policy.observe(None, 3, 0, 28_000, true);
+        }
+        assert_eq!(policy.copy_width(7), 0);
+    }
+
+    /// Decode `tokens` tokens of one response the way the engine drives the
+    /// policy, on a machine where a proposal costs `proposal` decode steps
+    /// and each verified row `row`, with every proposal accepted with
+    /// probability `accept`. Returns the speed relative to ordinary decoding.
+    fn dspark_response_speed(
+        policy: &mut DSparkWindowPolicy,
+        seed: &mut u64,
+        (proposal, row, accept): (f64, f64, f64),
+        tokens: usize,
+    ) -> f64 {
+        const STEP_US: f64 = 40_000.0;
+        let confidence = [0.9_f32.ln(); DSparkWindowPolicy::MAX_WIDTH];
+        let (mut done, mut elapsed) = (0, 0.0);
+        while done < tokens {
+            if policy.paused() {
+                policy.observe_paused(STEP_US as u64);
+                done += 1;
+                elapsed += STEP_US;
+                continue;
+            }
+            let width = policy.draft_width(&confidence);
+            let mut accepted = 0;
+            while accepted < width {
+                *seed = seed
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                if (*seed >> 11) as f64 / (1_u64 << 53) as f64 >= accept {
+                    break;
+                }
+                accepted += 1;
+            }
+            let window_us = STEP_US * (1.0 + proposal + row * width as f64);
+            policy.observe(Some(&confidence), width, accepted, window_us as u64, true);
+            done += accepted + 1;
+            elapsed += window_us;
+        }
+        done as f64 * STEP_US / elapsed
+    }
+
+    #[test]
+    fn dspark_stops_proposing_where_it_cannot_pay_and_keeps_it_where_it_does() {
+        let _guard = DSPARK_SHARED_TEST.lock().unwrap();
+        // An M1 Pro: the proposal costs 0.6 of a step and each row 0.5.
+        *DSparkWindowPolicy::learned() = [None; 4];
+        let mut seed = 7;
+        let speeds: Vec<f64> = (0..10)
+            .map(|_| {
+                let mut policy = DSparkWindowPolicy::resume();
+                dspark_response_speed(&mut policy, &mut seed, (0.6, 0.5, 0.7), 128)
+            })
+            .collect();
+        // The first responses pay for finding out; later ones for an
+        // occasional check that it still holds.
+        assert!(speeds.iter().all(|speed| *speed > 0.9), "{speeds:?}");
+        let settled = speeds[2..].iter().sum::<f64>() / (speeds.len() - 2) as f64;
+        assert!(settled > 0.975, "{speeds:?}");
+        // An M5 Max: 0.15 and 0.27. Proposing pays and stays on.
+        *DSparkWindowPolicy::learned() = [None; 4];
+        let speeds: Vec<f64> = (0..6)
+            .map(|_| {
+                let mut policy = DSparkWindowPolicy::resume();
+                dspark_response_speed(&mut policy, &mut seed, (0.15, 0.27, 0.7), 128)
+            })
+            .collect();
+        assert!(speeds.iter().all(|speed| *speed > 1.1), "{speeds:?}");
+        assert!(
+            speeds.iter().sum::<f64>() / speeds.len() as f64 > 1.25,
+            "{speeds:?}"
+        );
+        // The M1 Pro's lesson does not outlive a change of fortune: once a
+        // long response finds proposing pays again, it stays on.
+        *DSparkWindowPolicy::learned() = [None; 4];
+        for _ in 0..3 {
+            let mut policy = DSparkWindowPolicy::resume();
+            dspark_response_speed(&mut policy, &mut seed, (0.6, 0.5, 0.7), 128);
+        }
+        let mut policy = DSparkWindowPolicy::resume();
+        dspark_response_speed(&mut policy, &mut seed, (0.15, 0.27, 0.7), 2000);
+        let mut policy = DSparkWindowPolicy::resume();
+        assert!(!policy.paused());
+        let speed = dspark_response_speed(&mut policy, &mut seed, (0.15, 0.27, 0.7), 128);
+        assert!(speed > 1.1, "{speed}");
+        *DSparkWindowPolicy::learned() = [None; 4];
+    }
+
+    #[test]
+    fn dspark_sampled_responses_keep_their_own_memory() {
+        let _guard = DSPARK_SHARED_TEST.lock().unwrap();
+        // Sampled responses on an M1 Pro learn that proposing loses; the
+        // greedy responses that follow start from nothing they learned.
+        *DSparkWindowPolicy::learned() = [None; 4];
+        let mut seed = 11;
+        for _ in 0..4 {
+            let mut policy = DSparkWindowPolicy::resume_for(true, false);
+            dspark_response_speed(&mut policy, &mut seed, (0.6, 0.5, 0.5), 128);
+        }
+        assert!(DSparkWindowPolicy::learned()[1].is_some());
+        assert!(DSparkWindowPolicy::learned()[0].is_none());
+        assert!(DSparkWindowPolicy::learned()[3].is_none());
+        let greedy = DSparkWindowPolicy::resume_for(false, false);
+        assert_eq!(greedy.losing, 0);
+        assert_eq!(greedy.pause, DSparkWindowPolicy::ORDINARY_SAMPLES);
+        *DSparkWindowPolicy::learned() = [None; 4];
+    }
+
+    #[test]
+    fn dspark_probes_rarely_where_proposals_are_dear_and_keep_losing() {
+        let _guard = DSPARK_SHARED_TEST.lock().unwrap();
+        // Sampled responses on an M1 Pro: a window that verifies proposals
+        // costs about three decode steps and yields two to three tokens, so
+        // every check that proposing still loses costs time.
+        *DSparkWindowPolicy::learned() = [None; 4];
+        let mut seed = 13;
+        let speeds: Vec<f64> = (0..24)
+            .map(|_| {
+                let mut policy = DSparkWindowPolicy::resume_for(true, false);
+                dspark_response_speed(&mut policy, &mut seed, (0.6, 0.5, 0.6), 512)
+            })
+            .collect();
+        let settled = speeds[8..].iter().sum::<f64>() / (speeds.len() - 8) as f64;
+        assert!(settled > 0.993, "{settled} {speeds:?}");
+        assert!(DSparkWindowPolicy::resume_for(true, false).pause > 384);
+        // Tool calls between those responses win, and keep their own memory.
+        let mut longest = 0;
+        let speeds: Vec<f64> = (0..8)
+            .map(|_| {
+                let mut chat = DSparkWindowPolicy::resume_for(true, false);
+                dspark_response_speed(&mut chat, &mut seed, (0.6, 0.5, 0.6), 512);
+                longest = longest.max(chat.pause);
+                let mut tools = DSparkWindowPolicy::resume_for(true, true);
+                dspark_response_speed(&mut tools, &mut seed, (0.6, 0.5, 0.95), 512)
+            })
+            .collect();
+        assert!(speeds.iter().all(|speed| *speed > 1.05), "{speeds:?}");
+        assert!(longest > 384, "{longest}");
+        *DSparkWindowPolicy::learned() = [None; 4];
+    }
+
+    static DSPARK_SHARED_TEST: Mutex<()> = Mutex::new(());
 
     fn fixed_window(budget: usize, accepted: usize, window_us: u64) -> MtpDraftPolicyWindow {
         MtpDraftPolicyWindow::from_measured_components(

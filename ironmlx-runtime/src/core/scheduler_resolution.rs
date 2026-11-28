@@ -475,6 +475,17 @@ pub fn resolve_scheduler_runtime_profile(
         .cloned()
         .unwrap_or_else(|| default_scheduler_runtime_profile(runtime_context.clone()));
     resolved.config = apply_scheduler_overrides(args, resolved.config);
+    if profile.is_none()
+        && args.prefill_chunk_size.is_none()
+        && resolved.config.b_max == 1
+        && runtime_context.model_architecture
+            == ironmlx_lm::models::ModelArchitecture::Inkling2.model_type()
+    {
+        let oq = runtime_context.weight_quantization.mode == "inkling2-oq";
+        if let Some(chunk) = ironmlx_lm::models::inkling2::b1_prefill_chunk_size(oq) {
+            resolved.config.prefill_chunk_size = chunk;
+        }
+    }
     for rule in &mut resolved.rules {
         rule.config = apply_scheduler_overrides(args, rule.config);
     }

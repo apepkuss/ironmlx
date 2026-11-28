@@ -434,6 +434,7 @@ async fn qwen38_all_reasoning_efforts_real_http_acceptance() {
     let port = alloc_port().await;
     let (server, model_id) = boot_server(port).await;
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(180))
         .no_proxy()
         .build()

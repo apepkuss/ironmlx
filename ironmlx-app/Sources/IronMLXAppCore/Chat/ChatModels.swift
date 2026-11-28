@@ -83,11 +83,14 @@ struct ChatConversation: Codable, Identifiable, Equatable, Sendable {
 }
 
 /// The user's thinking setting for one model. `on` is the plain switch;
-/// `low`/`medium`/`high` are native levels.
+/// Other cases select the levels advertised by the loaded model.
 enum ReasoningChoice: String, Codable, Sendable {
     case off
     case on
+    case minimal
     case low
     case medium
     case high
+    case xhigh
+    case max
 }

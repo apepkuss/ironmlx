@@ -54,6 +54,15 @@ impl Default for ToolConstraintOptions {
     }
 }
 
+#[cfg(test)]
+pub(crate) const INKLING_TEST_MARKERS: [&str; 5] = [
+    "<|message_model|>",
+    "<|content_text|>",
+    "<|content_thinking|>",
+    "<|content_invoke_tool_json|>",
+    "<|end_message|>",
+];
+
 /// Tokenizer-level state shared by every constrained request for one model.
 pub struct ConstraintTokenizer {
     factory: Arc<ParserFactory>,
@@ -164,6 +173,32 @@ impl ConstraintTokenizer {
         let eos = 256_u32;
         let info = TokRxInfo::new(token_bytes.len() as u32, eos);
         let trie = TokTrie::from(&info, &token_bytes);
+        let tok_env: TokEnv = Arc::new(ApproximateTokEnv::new(trie));
+        let mut factory = ParserFactory::new_simple(&tok_env)?;
+        factory.quiet();
+        Ok(Self {
+            factory: Arc::new(factory),
+            vocab_size: token_bytes.len(),
+            eos_token_ids: Arc::from([eos]),
+        })
+    }
+
+    /// Byte tokens plus Inkling's channel markers as special tokens, ids
+    /// 256.. in [`INKLING_TEST_MARKERS`] order, then EOS.
+    #[cfg(test)]
+    pub(crate) fn byte_level_inkling() -> Result<Self> {
+        let mut token_bytes = (0_u16..=255)
+            .map(|byte| vec![byte as u8])
+            .collect::<Vec<_>>();
+        for marker in INKLING_TEST_MARKERS {
+            let mut bytes = vec![llguidance::toktrie::TokTrie::SPECIAL_TOKEN_MARKER];
+            bytes.extend_from_slice(marker.as_bytes());
+            token_bytes.push(bytes);
+        }
+        token_bytes.push(b"\xFF<eos>".to_vec());
+        let eos = (token_bytes.len() - 1) as u32;
+        let info = TokRxInfo::new(token_bytes.len() as u32, eos);
+        let trie = TokTrie::from(&info, &token_bytes).with_eos_tokens(&[eos]);
         let tok_env: TokEnv = Arc::new(ApproximateTokEnv::new(trie));
         let mut factory = ParserFactory::new_simple(&tok_env)?;
         factory.quiet();
@@ -366,6 +401,58 @@ impl ConstraintTokenizer {
         .and_then(|plan| plan.guard_tool_schemas(ToolDialect::Llama, tools, output_schema, None))
     }
 
+    pub fn compile_inkling_tools(
+        &self,
+        tools: &[ToolDefinition],
+        options: &ToolConstraintOptions,
+    ) -> Result<ConstraintPlan> {
+        self.compile_inkling_tools_with_output(tools, options, None)
+    }
+
+    pub fn compile_inkling_tools_with_output(
+        &self,
+        tools: &[ToolDefinition],
+        options: &ToolConstraintOptions,
+        output_schema: Option<&Value>,
+    ) -> Result<ConstraintPlan> {
+        validate_tool_schemas(tools)?;
+        if let Some(schema) = output_schema {
+            validate_constraint_output_schema(schema)?;
+        }
+        let grammar_source = build_inkling_tool_grammar(tools, options, output_schema)?;
+        let grammar = TopLevelGrammar::from_lark(grammar_source.clone());
+        let matcher = Matcher::new(self.factory.create_parser(grammar.clone()));
+        if matcher.is_error() {
+            bail!(
+                "compile constrained Inkling2 tool grammar: {}",
+                matcher
+                    .get_error()
+                    .unwrap_or_else(|| "unknown parser error".to_string())
+            );
+        }
+        Ok(ConstraintPlan {
+            factory: Arc::clone(&self.factory),
+            grammar,
+            grammar_source: Arc::from(grammar_source),
+            vocab_size: self.vocab_size,
+            eos_token_ids: Arc::clone(&self.eos_token_ids),
+            require_accepting_state_at_length: requires_accepting_state_at_length(options),
+            budget_plan: None,
+            semantic: None,
+        })
+        .and_then(|plan| {
+            plan.guard_tool_schemas(
+                ToolDialect::Inkling2,
+                tools,
+                output_schema,
+                Some(NativeOutputDecoderConfig {
+                    dialect: NativeOutputDialect::Inkling2,
+                    reasoning_enabled: false,
+                }),
+            )
+        })
+    }
+
     pub fn compile_minicpm5_tools(
         &self,
         tools: &[ToolDefinition],
@@ -482,6 +569,7 @@ impl ConstraintTokenizer {
             ToolDialect::Gemma => build_gemma_tool_grammar(tools, options, output_schema)?,
             ToolDialect::Glm => build_glm_tool_grammar(tools, options, output_schema)?,
             ToolDialect::Llama => build_llama_tool_grammar(tools, options, output_schema)?,
+            ToolDialect::Inkling2 => build_inkling_tool_grammar(tools, options, output_schema)?,
             ToolDialect::MiniCpm5 => build_minicpm5_tool_grammar(tools, options, output_schema)?,
         };
         self.compile_reasoning_wrapped_lark(
@@ -1657,6 +1745,12 @@ fn wrap_with_native_reasoning(
         .ok_or_else(|| anyhow!("reasoning-aware output grammar must begin with a start rule"))?;
     let output_grammar = format!("native_output:{grammar_source}");
     let prefix = match dialect {
+        NativeOutputDialect::Inkling2 => concat!(
+            "start: native_reasoning? ws native_output\n",
+            // Inkling's channel markers are special tokens: no text can
+            // spell them, so reasoning ends exactly at the model's marker.
+            "native_reasoning: <|message_model|> <|content_thinking|> REASONING_TEXT <|end_message|>\n",
+        ),
         NativeOutputDialect::Gemma => concat!(
             "start: native_reasoning? ws native_output\n",
             "native_reasoning[lazy]: \"<|channel>thought\\n\" REASONING_TEXT \"<channel|>\"\n",
@@ -2056,6 +2150,54 @@ fn build_llama_tool_grammar(
          WS: /[ \\t\\r\\n]+/\n\
          PLAIN_TEXT: /[ \\t\\r\\n]*([^{ \\t\\r\\n](.|\\n)*)?/\n",
     );
+    Ok(grammar)
+}
+
+fn build_inkling_tool_grammar(
+    tools: &[ToolDefinition],
+    options: &ToolConstraintOptions,
+    output_schema: Option<&Value>,
+) -> Result<String> {
+    let tools = crate::core::tool_calling::lower_tool_definitions(tools)?;
+    let indexes = selected_tool_indexes(&tools, options)?;
+    let multiple = options.allow_parallel_calls
+        && !matches!(options.choice, ToolChoiceConstraint::Function(_));
+    let mut grammar = String::from("start: calls");
+    if matches!(options.choice, ToolChoiceConstraint::Auto) {
+        grammar.push_str(if output_schema.is_some() {
+            " | text_header structured_output message_end"
+        } else {
+            // A reply's text precedes its calls, as the chat template renders
+            // an assistant message.
+            " | text_message calls?"
+        });
+    }
+    grammar.push_str("\ncalls: function_dispatch");
+    if multiple {
+        grammar.push_str(" (function_dispatch)*");
+    }
+    grammar.push_str("\nfunction_dispatch: ");
+    grammar.push_str(
+        &indexes
+            .iter()
+            .map(|i| format!("function_{i}"))
+            .collect::<Vec<_>>()
+            .join(" | "),
+    );
+    grammar.push('\n');
+    append_structured_output_rule(&mut grammar, output_schema)?;
+    for (index, tool) in tools.iter().enumerate() {
+        let schema = serde_json::json!({"type":"object","properties":{"name":{"const":tool.name},"args":tool.parameters},"required":["name","args"],"additionalProperties":false});
+        let name = serde_json::to_string(&tool.name)?;
+        grammar.push_str(&format!(
+            "function_{index}: <|message_model|> {name} <|content_invoke_tool_json|> call_{index} message_end\ncall_{index}: %json {}\n",
+            serde_json::to_string(&grammar_schema(&schema))?
+        ));
+    }
+    // The channel markers are special tokens, not text: TEXT and the JSON
+    // strings cannot contain one, so a message ends exactly at the model's
+    // `<|end_message|>`.
+    grammar.push_str("text_header: <|message_model|> <|content_text|>\nmessage_end: <|end_message|>\ntext_message: text_header TEXT message_end\nTEXT: /(.|\\n)*/\nws: WS?\nWS: /[ \\t\\r\\n]+/\n");
     Ok(grammar)
 }
 
@@ -3582,6 +3724,7 @@ mod tests {
                 ToolDialect::Qwen35 | ToolDialect::MiniCpmV46 => format!("<tool_call><function=count><parameter=count>{count}</parameter></function></tool_call>"),
                 ToolDialect::Glm => format!("<tool_call>count<arg_key>count</arg_key><arg_value>{count}</arg_value></tool_call>"),
                 ToolDialect::Llama => format!("{{\"name\":\"count\",\"parameters\":{{\"count\":{count}}}}}"),
+                ToolDialect::Inkling2 => format!("<|message_model|>count<|content_invoke_tool_json|>{{\"name\":\"count\",\"args\":{{\"count\":{count}}}}}<|end_message|>"),
                 ToolDialect::MiniCpm5 => format!("<function name=\"count\"><param name=\"count\">{count}</param></function>"),
                 ToolDialect::Gemma => format!("<|tool_call>call:count{{count:{count}}}<tool_call|>"),
             }
@@ -3592,6 +3735,7 @@ mod tests {
                 }
                 ToolDialect::Glm => tokenizer.compile_glm_tools(tools, &options),
                 ToolDialect::Llama => tokenizer.compile_llama_tools(tools, &options),
+                ToolDialect::Inkling2 => tokenizer.compile_inkling_tools(tools, &options),
                 ToolDialect::MiniCpm5 => tokenizer.compile_minicpm5_tools(tools, &options),
                 ToolDialect::Gemma => ConstraintTokenizer::byte_level_gemma()
                     .unwrap()
@@ -3614,6 +3758,106 @@ mod tests {
                 assert_eq!(parsed.is_ok(), valid, "parser {dialect:?}: {text}");
             }
         }
+    }
+
+    /// Token ids of `value` on [`ConstraintTokenizer::byte_level_inkling`]:
+    /// markers become their special token, everything else bytes.
+    fn inkling_tokens(value: &str) -> Vec<u32> {
+        let mut tokens = Vec::new();
+        let mut rest = value;
+        while !rest.is_empty() {
+            if let Some((index, marker)) = INKLING_TEST_MARKERS
+                .iter()
+                .enumerate()
+                .find(|(_, marker)| rest.starts_with(**marker))
+            {
+                tokens.push(256 + index as u32);
+                rest = &rest[marker.len()..];
+            } else {
+                tokens.push(u32::from(rest.as_bytes()[0]));
+                rest = &rest[1..];
+            }
+        }
+        tokens
+    }
+
+    #[test]
+    fn inkling_channel_markers_are_special_tokens_no_text_or_json_can_hold() {
+        let tool = ToolDefinition {
+            name: "count".into(),
+            description: None,
+            parameters: serde_json::json!({
+                "type":"object","properties":{"note":{"type":"string"}},
+                "required":["note"],"additionalProperties":false
+            }),
+            strict: Some(true),
+        };
+        let options = ToolConstraintOptions {
+            choice: ToolChoiceConstraint::Auto,
+            allow_parallel_calls: true,
+        };
+        let tokenizer = ConstraintTokenizer::byte_level_inkling().unwrap();
+        let plan = tokenizer
+            .compile_inkling_tools(std::slice::from_ref(&tool), &options)
+            .unwrap();
+        let text = "<|message_model|><|content_text|>Saving it.<|end_message|>";
+        let call = "<|message_model|>count<|content_invoke_tool_json|>{\"name\":\"count\",\"args\":{\"note\":\"ok\"}}<|end_message|>";
+        let end = 256 + 4;
+        let mut spelled = inkling_tokens("<|message_model|><|content_text|>a ");
+        spelled.extend("<|end_message|>".bytes().map(u32::from));
+        spelled.push(end);
+        let mut in_string = inkling_tokens(
+            "<|message_model|>count<|content_invoke_tool_json|>{\"name\":\"count\",\"args\":{\"note\":\"o",
+        );
+        in_string.push(end);
+        for (tokens, accepted, case) in [
+            (inkling_tokens(text), true, "text"),
+            (
+                inkling_tokens(&format!("{text}{call}")),
+                true,
+                "text then call",
+            ),
+            (inkling_tokens(&format!("{call}{call}")), true, "two calls"),
+            // A message ends at its marker: nothing may follow the reply.
+            (
+                inkling_tokens(&format!("{text}<|end_message|>")),
+                false,
+                "second end",
+            ),
+            (
+                inkling_tokens(&format!("{text}<|message_model|><|content_thinking|>")),
+                false,
+                "thinking after text",
+            ),
+            (
+                inkling_tokens(&format!("{call}{text}")),
+                false,
+                "text after call",
+            ),
+            // Spelling the marker in bytes is only text, then the real one ends.
+            (spelled, true, "spelled marker is text"),
+            // The marker cannot sit inside a JSON string.
+            (in_string, false, "marker inside JSON string"),
+        ] {
+            let mut session = plan.start_session().unwrap();
+            let ok = session.commit_tokens(&tokens).is_ok() && session.is_accepting().unwrap();
+            assert_eq!(ok, accepted, "{case}");
+        }
+        let reasoning = tokenizer
+            .compile_tools_with_output_and_reasoning(
+                ToolDialect::Inkling2,
+                NativeOutputDialect::Inkling2,
+                std::slice::from_ref(&tool),
+                &options,
+                None,
+            )
+            .unwrap();
+        let thought = "<|message_model|><|content_thinking|>Plan it.<|end_message|>";
+        let mut session = reasoning.start_session().unwrap();
+        assert!(session
+            .commit_tokens(&inkling_tokens(&format!("{thought}{call}")))
+            .is_ok());
+        assert!(session.is_accepting().unwrap());
     }
 
     #[test]
@@ -3907,6 +4151,7 @@ mod tests {
                 }
                 ToolDialect::Glm => tokenizer.compile_glm_tools(tools, &options),
                 ToolDialect::Llama => tokenizer.compile_llama_tools(tools, &options),
+                ToolDialect::Inkling2 => tokenizer.compile_inkling_tools(tools, &options),
                 ToolDialect::MiniCpm5 => tokenizer.compile_minicpm5_tools(tools, &options),
                 ToolDialect::Gemma => ConstraintTokenizer::byte_level_gemma()
                     .unwrap()
@@ -3921,6 +4166,7 @@ mod tests {
                     ToolDialect::Qwen35|ToolDialect::MiniCpmV46 => format!("<tool_call><function=edit><parameter=arguments_json>{encoded}</parameter></function></tool_call>"),
                     ToolDialect::Glm => format!("<tool_call>edit<arg_key>arguments_json</arg_key><arg_value>{encoded}</arg_value></tool_call>"),
                     ToolDialect::Llama => serde_json::json!({"name":"edit","parameters":{"arguments_json":encoded}}).to_string(),
+                    ToolDialect::Inkling2 => format!("<|message_model|>edit<|content_invoke_tool_json|>{}<|end_message|>", serde_json::json!({"name":"edit","args":{"arguments_json":encoded}})),
                     ToolDialect::MiniCpm5 => format!("<function name=\"edit\"><param name=\"arguments_json\">{encoded}</param></function>"),
                     ToolDialect::Gemma => format!("<|tool_call>call:edit{{arguments_json:<|\"|>{encoded}<|\"|>}}<tool_call|>"),
                 };

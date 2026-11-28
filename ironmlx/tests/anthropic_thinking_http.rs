@@ -170,6 +170,7 @@ async fn anthropic_thinking_real_http_acceptance() {
     let port = alloc_port().await;
     let server = boot_server(port).await;
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(120))
         .no_proxy()
         .build()

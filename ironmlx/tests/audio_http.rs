@@ -96,6 +96,7 @@ impl Server {
             child,
             client: reqwest::Client::builder()
                 .no_proxy()
+                .no_proxy()
                 .timeout(Duration::from_secs(330))
                 .build()
                 .unwrap(),

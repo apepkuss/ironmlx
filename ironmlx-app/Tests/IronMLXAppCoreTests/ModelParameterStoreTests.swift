@@ -497,6 +497,38 @@ func configurationRecoveryManagerInspectsAndResetsBothStores() throws {
     #expect(model.generationDefaults?.repetitionPenalty == 1.08)
 }
 
+@Test func localModelScannerReadsDoSampleFalseAsGreedy() throws {
+    let root = try temporaryDirectory()
+    _ = try writeVerifiedTestSnapshot(
+        root: root,
+        repoID: "mlx-community/GreedyDefaults-4bit",
+        files: [
+            "config.json": Data(#"{"max_position_embeddings":32768}"#.utf8),
+            "generation_config.json": Data(
+                #"{"do_sample":false,"temperature":0.65,"top_p":0.9}"#.utf8
+            ),
+            "model.safetensors": Data("weights".utf8),
+        ]
+    )
+
+    let model = try #require(LocalModelScanner(rootURL: root).scan().first)
+
+    #expect(model.generationDefaults?.temperature == 0)
+    #expect(model.generationDefaults?.topP == 0.9)
+}
+
+@Test func savedTemperatureZeroSelectsGreedy() throws {
+    let root = try temporaryDirectory()
+    let store = ModelParameterStore(url: root.appendingPathComponent("model_params.json"))
+    try store.save(ModelParameters(modelID: "mlx-community/Greedy-4bit", temperature: "0"))
+
+    let params = try #require(try store.loadAll()["mlx-community/Greedy-4bit"])
+    #expect(params.samplingDefaults.temperature == 0)
+    #expect(throws: ConfigurationPersistenceError.self) {
+        try store.save(ModelParameters(modelID: "mlx-community/Greedy-4bit", temperature: "-0.1"))
+    }
+}
+
 @Test func modelLoadParametersPreferSavedMaxTokensOverModelContextWindow() throws {
     let root = try temporaryDirectory()
     _ = try writeLongContextSnapshot(root: root)

@@ -61,6 +61,7 @@ async fn p5c_http_smoke_chat_completion_non_stream() {
 
     // Wait up to 120s for /healthz 200 (MoE load + warmup is heavier than dense).
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(30))
         .no_proxy()
         .build()

@@ -16,7 +16,7 @@ symbol), so they are kept as qualified. `vendor/` holds only the MLX kernel
 headers these sources include (MIT, see each `LICENSE`):
 
 - `vendor/mlx-0.32.2`: from the pinned MLX fork commit
-  1a888a4ffb4442fe34e403016eb0bb751f10ccb5 (version 0.32.2), the MLX this
+  ab6328fa3685511ba575ce05d78c540ebd352309 (version 0.32.2), the MLX this
   project links (`scripts/release-config.sh`).
 - `vendor/mlx-0.32.3`: from upstream MLX tag v0.32.3 (commit
   64ea011cb65f14d9ce2737e60db9a4ae91ed7441), which adds

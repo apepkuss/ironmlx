@@ -607,6 +607,11 @@ impl MlxCacheController {
             state.applied_limit_bytes = applied;
         }
         if applied == 0 || observed_cache_bytes > applied {
+            tracing::debug!(
+                observed_cache_bytes,
+                limit_bytes = applied,
+                "MLX buffer cache released: over its limit"
+            );
             mlx::transforms::clear_cache();
         }
         applied
@@ -868,7 +873,7 @@ impl ProcessMemoryGovernor {
         self: &Arc<Self>,
         bytes: usize,
     ) -> Result<MemoryReservation, MemoryReservationError> {
-        self.try_reserve_inner(bytes, "model_load", ReservationKind::ModelLoad)
+        self.try_reserve_inner(bytes, "model_load", ReservationKind::ModelLoad, 0)
     }
 
     pub fn try_reserve(
@@ -876,7 +881,7 @@ impl ProcessMemoryGovernor {
         bytes: usize,
         purpose: &'static str,
     ) -> Result<MemoryReservation, MemoryReservationError> {
-        self.try_reserve_inner(bytes, purpose, ReservationKind::General)
+        self.try_reserve_inner(bytes, purpose, ReservationKind::General, 0)
     }
 
     fn try_reserve_cold_materialization(
@@ -887,6 +892,7 @@ impl ProcessMemoryGovernor {
             bytes,
             "cold_materialization",
             ReservationKind::ColdMaterialization,
+            0,
         )
     }
 
@@ -898,7 +904,24 @@ impl ProcessMemoryGovernor {
         transient_bytes: usize,
         purpose: &'static str,
     ) -> Result<MemoryReservation, MemoryReservationError> {
-        self.try_reserve_inner(transient_bytes, purpose, ReservationKind::Prefill)
+        self.try_reserve_inner(transient_bytes, purpose, ReservationKind::Prefill, 0)
+    }
+
+    /// [`Self::try_reserve_prefill`] for a request whose own admission
+    /// reservation of `own_reserved_bytes` is left out of the projection,
+    /// as [`Self::plan_prefill_chunk_excluding`] leaves it out of the plan.
+    pub fn try_reserve_prefill_excluding(
+        self: &Arc<Self>,
+        transient_bytes: usize,
+        purpose: &'static str,
+        own_reserved_bytes: usize,
+    ) -> Result<MemoryReservation, MemoryReservationError> {
+        self.try_reserve_inner(
+            transient_bytes,
+            purpose,
+            ReservationKind::Prefill,
+            own_reserved_bytes,
+        )
     }
 
     fn try_reserve_inner(
@@ -906,6 +929,7 @@ impl ProcessMemoryGovernor {
         bytes: usize,
         purpose: &'static str,
         kind: ReservationKind,
+        excluded_bytes: usize,
     ) -> Result<MemoryReservation, MemoryReservationError> {
         let mut state = self.state.lock().expect("memory governor state poisoned");
         let telemetry_stale = state
@@ -932,15 +956,19 @@ impl ProcessMemoryGovernor {
             snapshot.effective_ceiling_bytes,
             self.config.prefill_headroom_ratio,
         );
+        let counted = MemoryGovernorSnapshot {
+            reserved_bytes: snapshot.reserved_bytes.saturating_sub(excluded_bytes),
+            ..snapshot
+        };
         let cache_growth_liability = if kind == ReservationKind::Prefill {
-            prefill_cache_growth_liability(snapshot, bytes, target)
+            prefill_cache_growth_liability(counted, bytes, target)
         } else {
             0
         };
         let reserved_bytes = bytes.saturating_add(cache_growth_liability);
-        let projected = snapshot
+        let projected = counted
             .current_usage_bytes
-            .saturating_add(snapshot.reserved_bytes)
+            .saturating_add(counted.reserved_bytes)
             .saturating_add(reserved_bytes);
         if projected > target {
             return Err(MemoryReservationError::InsufficientHeadroom {
@@ -1091,6 +1119,20 @@ impl ProcessMemoryGovernor {
         bytes: usize,
         need: ReservationNeed,
     ) -> usize {
+        self.reservation_shortfall_excluding(snapshot, bytes, need, 0)
+    }
+
+    /// [`Self::reservation_shortfall`] for a request whose own admission
+    /// reservation of `own_reserved_bytes` is left out, as
+    /// [`Self::plan_prefill_chunk_excluding`] leaves it out.
+    pub fn reservation_shortfall_excluding(
+        &self,
+        snapshot: &MemoryGovernorSnapshot,
+        bytes: usize,
+        need: ReservationNeed,
+        own_reserved_bytes: usize,
+    ) -> usize {
+        let reserved = snapshot.reserved_bytes.saturating_sub(own_reserved_bytes);
         let ceiling = snapshot.effective_ceiling_bytes;
         if ceiling == 0 {
             return 0;
@@ -1099,7 +1141,7 @@ impl ProcessMemoryGovernor {
         // leaves, and nothing is freed to make room for it.
         let headroom = snapshot
             .current_usage_bytes
-            .saturating_add(snapshot.reserved_bytes)
+            .saturating_add(reserved)
             .saturating_add(bytes)
             .saturating_sub(ratio_bytes(ceiling, self.config.prefill_headroom_ratio));
         // The level follows usage plus outstanding reservations, so both
@@ -1107,9 +1149,7 @@ impl ProcessMemoryGovernor {
         let pressure = if need.refused_at(snapshot.pressure_level) {
             self.pressure_overage_with(
                 snapshot,
-                snapshot
-                    .reserved_bytes
-                    .saturating_sub(snapshot.model_load_reserved_bytes),
+                reserved.saturating_sub(snapshot.model_load_reserved_bytes),
             )
         } else {
             0
@@ -1124,8 +1164,20 @@ impl ProcessMemoryGovernor {
         bytes: usize,
         need: ReservationNeed,
     ) -> bool {
+        self.reservation_blocked_excluding(snapshot, bytes, need, 0)
+    }
+
+    /// [`Self::reservation_blocked`] leaving out the request's own admission
+    /// reservation (see [`Self::reservation_shortfall_excluding`]).
+    pub fn reservation_blocked_excluding(
+        &self,
+        snapshot: &MemoryGovernorSnapshot,
+        bytes: usize,
+        need: ReservationNeed,
+        own_reserved_bytes: usize,
+    ) -> bool {
         need.refused_at(snapshot.pressure_level)
-            || self.reservation_shortfall(snapshot, bytes, need) > 0
+            || self.reservation_shortfall_excluding(snapshot, bytes, need, own_reserved_bytes) > 0
     }
 
     /// Bytes that have to go for usage alone to classify as normal again:
@@ -1165,6 +1217,22 @@ impl ProcessMemoryGovernor {
         batch_size: usize,
         meta: &ModelMeta,
     ) -> Result<PrefillChunkPlan, PrefillGuardError> {
+        self.plan_prefill_chunk_excluding(requested_tokens, kv_len, batch_size, meta, 0)
+    }
+
+    /// [`Self::plan_prefill_chunk`] for a request that holds
+    /// `own_reserved_bytes` of its own admission reservation. That
+    /// reservation stands for the request's K/V, which the footprint counts
+    /// as the chunks write it and the chunk estimate covers as it grows, so
+    /// counting it as well would charge the same K/V twice.
+    pub fn plan_prefill_chunk_excluding(
+        self: &Arc<Self>,
+        requested_tokens: usize,
+        kv_len: usize,
+        batch_size: usize,
+        meta: &ModelMeta,
+        own_reserved_bytes: usize,
+    ) -> Result<PrefillChunkPlan, PrefillGuardError> {
         if requested_tokens == 0 {
             return Err(PrefillGuardError::ZeroRequestedTokens);
         }
@@ -1180,9 +1248,8 @@ impl ProcessMemoryGovernor {
         // is itself sized to the headroom, so counting it here would leave
         // no chunk any room whenever headroom is short. The reservation
         // gives the cache only what the chunk leaves over.
-        let baseline = snapshot
-            .current_usage_bytes
-            .saturating_add(snapshot.reserved_bytes);
+        let others_reserved = snapshot.reserved_bytes.saturating_sub(own_reserved_bytes);
+        let baseline = snapshot.current_usage_bytes.saturating_add(others_reserved);
         let minimum = requested_tokens.min(self.config.minimum_prefill_chunk_tokens.max(1));
         let minimum_bytes = estimate_prefill_peak_growth(meta, minimum, kv_len, batch_size);
         if baseline.saturating_add(minimum_bytes) > target {
@@ -1206,7 +1273,7 @@ impl ProcessMemoryGovernor {
         };
         let reserved_bytes = estimate_prefill_peak_growth(meta, selected, kv_len, batch_size);
         let reservation = self
-            .try_reserve_prefill(reserved_bytes, "prefill_chunk")
+            .try_reserve_prefill_excluding(reserved_bytes, "prefill_chunk", own_reserved_bytes)
             .map_err(PrefillGuardError::Reservation)?;
         let cache_growth_liability_bytes = reservation.bytes().saturating_sub(reserved_bytes);
         Ok(PrefillChunkPlan {
@@ -1215,6 +1282,9 @@ impl ProcessMemoryGovernor {
             estimated_peak_growth_bytes: reserved_bytes,
             cache_growth_liability_bytes,
             target_bytes: target,
+            current_usage_bytes: snapshot.current_usage_bytes,
+            reserved_bytes: others_reserved,
+            own_reserved_bytes,
             reservation,
         })
     }
@@ -1331,6 +1401,11 @@ pub fn estimate_prefill_peak_growth(
         .uniform_kv_bytes_per_token()
         .saturating_mul(query)
         .saturating_mul(batch);
+    if let (1, Some(peak)) = (batch, meta.prefill_peak) {
+        return kv_growth
+            .saturating_add(peak.fixed_bytes)
+            .saturating_add(peak.bytes_per_token.saturating_mul(query));
+    }
     let score_peak = (meta.num_attention_heads.max(1) as usize)
         .saturating_mul(query)
         .saturating_mul(context)
@@ -1450,6 +1525,12 @@ pub struct PrefillChunkPlan {
     pub estimated_peak_growth_bytes: usize,
     pub cache_growth_liability_bytes: usize,
     pub target_bytes: usize,
+    /// Process footprint the plan started from.
+    pub current_usage_bytes: usize,
+    /// Bytes other reservations held when the plan was made.
+    pub reserved_bytes: usize,
+    /// The planning request's own admission reservation, left out.
+    pub own_reserved_bytes: usize,
     pub reservation: MemoryReservation,
 }
 
@@ -2263,6 +2344,7 @@ mod tests {
             max_position_embeddings: 131_072,
             spatial_merge_size: 2,
             cache_cost: None,
+            prefill_peak: None,
         };
         let plan = governor
             .plan_prefill_chunk(4096, 32_768, 1, &meta)
@@ -2280,6 +2362,74 @@ mod tests {
                     MemoryReservationError::Pressure { .. }
                 ))
         ));
+    }
+
+    #[test]
+    fn prefill_plan_leaves_out_the_requests_own_admission_and_uses_the_models_peak() {
+        let governor = Arc::new(ProcessMemoryGovernor::new(config()).unwrap());
+        governor.update(telemetry(gib(16)));
+        governor.update(telemetry(gib(16)));
+        use ironmlx_lm::core::model::PrefillPeak;
+        let meta = ModelMeta {
+            num_hidden_layers: 48,
+            num_attention_heads: 24,
+            num_key_value_heads: 8,
+            hidden_size: 2048,
+            head_dim: Some(128),
+            weight_bytes: 0,
+            max_position_embeddings: 262_144,
+            spatial_merge_size: 1,
+            cache_cost: None,
+            prefill_peak: Some(PrefillPeak {
+                fixed_bytes: 1280 << 20,
+                bytes_per_token: 400 << 10,
+            }),
+        };
+        // The model's own peak does not grow with the context; the generic
+        // estimate does.
+        assert_eq!(
+            estimate_prefill_peak_growth(&meta, 2048, 0, 1),
+            estimate_prefill_peak_growth(&meta, 2048, 57_344, 1)
+        );
+        let generic = ModelMeta {
+            prefill_peak: None,
+            ..meta
+        };
+        assert!(
+            estimate_prefill_peak_growth(&generic, 2048, 57_344, 1)
+                > 4 * estimate_prefill_peak_growth(&meta, 2048, 57_344, 1)
+        );
+        // Several rows fall back to the generic estimate.
+        assert_eq!(
+            estimate_prefill_peak_growth(&meta, 2048, 57_344, 2),
+            estimate_prefill_peak_growth(&generic, 2048, 57_344, 2)
+        );
+
+        let admission = governor
+            .try_reserve(gib(4), "scheduler_admission")
+            .expect("admission fits");
+        // The check before planning, which makes room when it fails, leaves
+        // it out as well.
+        let growth = ProcessMemoryGovernor::prefill_chunk_growth(2048, 57_344, 1, &meta);
+        let sample = governor.snapshot();
+        assert!(governor.reservation_blocked(&sample, growth, ReservationNeed::Prefill));
+        assert!(!governor.reservation_blocked_excluding(
+            &sample,
+            growth,
+            ReservationNeed::Prefill,
+            admission.bytes()
+        ));
+        let counted = governor
+            .plan_prefill_chunk(2048, 57_344, 1, &meta)
+            .expect("a shrunk chunk fits");
+        assert!(counted.selected_tokens < 2048);
+        drop(counted);
+        let own = governor
+            .plan_prefill_chunk_excluding(2048, 57_344, 1, &meta, admission.bytes())
+            .expect("the whole chunk fits");
+        assert_eq!(own.selected_tokens, 2048);
+        assert_eq!(own.reserved_bytes, 0);
+        assert_eq!(own.own_reserved_bytes, gib(4));
     }
 
     #[test]
@@ -2302,6 +2452,7 @@ mod tests {
             max_position_embeddings: 131_072,
             spatial_merge_size: 2,
             cache_cost: None,
+            prefill_peak: None,
         };
 
         let plan = governor

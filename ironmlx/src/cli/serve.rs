@@ -640,6 +640,27 @@ fn resolve_serve_mtp_config(
     let Some(model_dir) = args.mtp_model_dir.as_ref() else {
         return Ok(None);
     };
+    if architecture == ironmlx_lm::models::ModelArchitecture::Inkling2 {
+        let target = Path::new(
+            args.model
+                .as_deref()
+                .context("Inkling DSpark needs --model")?,
+        );
+        let validation = ironmlx_runtime::core::model_validation::validate_mtp_pair(
+            target,
+            model_dir,
+            args.mtp_draft_tokens,
+        )?;
+        if !validation.compatible {
+            bail!("{}", validation.message);
+        }
+        return Ok(Some(ServeMtpConfig {
+            model_dir: model_dir.clone(),
+            draft_tokens: validation
+                .draft_tokens
+                .context("missing Inkling DSpark draft width")?,
+        }));
+    }
     match architecture {
         ironmlx_lm::models::ModelArchitecture::Qwen35Dense
         | ironmlx_lm::models::ModelArchitecture::Qwen35Moe
@@ -1121,7 +1142,8 @@ impl DFlash2Startup {
         let draft_dir = args
             .dflash2_model_dir
             .as_ref()
-            .context("DFlash2 server started without --dflash2-model-dir")?;
+            .or(args.mtp_model_dir.as_ref())
+            .context("block-draft server needs a draft model directory")?;
         let listeners = server::security::BoundListeners::bind(&args.resolved_network_config()?)?;
         let runtime = serve_runtime()?;
         let registry = LoadRegistry::new();
@@ -2031,6 +2053,58 @@ pub fn run(mut args: ServeArgs) -> Result<()> {
                 load_timer,
             )
         }
+        ironmlx_lm::models::ModelArchitecture::Inkling2 => {
+            let model = ironmlx_lm::models::Inkling2Model::from_loader(&loader)
+                .context("Inkling2Model::from_loader")?;
+            if let Some(mtp) = mtp_config {
+                if args.kv_quant.turboquant_bits().is_some() || args.active_kv_offload {
+                    bail!("Inkling DSpark requires native KV cache without active KV offload");
+                }
+                let path = mtp.model_dir.join("mtp.safetensors");
+                let draft =
+                    ironmlx_lm::models::DFlash2DraftModel::from_inkling_sidecar(&loader, &path)?;
+                let estimate = StaticMemoryEstimate::from_allocated_weights(
+                    component_bytes
+                        .text
+                        .saturating_add(std::fs::metadata(path)?.len() as usize),
+                    component_bytes.vision,
+                );
+                let (startup, load) = DFlash2Startup::start(&args, &model_dir)?;
+                let router = startup.runtime.block_on(server::build_dflash2_router(
+                    Arc::clone(&startup.registry),
+                    model,
+                    draft,
+                    tokenizer,
+                    single_model_id(&args)?,
+                    scheduler_config.prefill_chunk_size,
+                    1,
+                    scheduler_config.admission_deadline_ms,
+                    1,
+                    scheduler_config.admission_queue_max,
+                    scheduler_config.max_cache_cap,
+                    mtp.draft_tokens + 1,
+                    Default::default(),
+                    None,
+                    resolve_dflash2_prefix_lru_cache_config(&args)?,
+                    resolve_dflash2_prefix_disk_config(&args)?,
+                    scheduler_runtime_profile,
+                    estimate,
+                    vision_input.context("missing Inkling vision input")?,
+                    Arc::clone(&startup.metrics),
+                ))?;
+                return startup.serve(load, router);
+            }
+            serve_with_model(
+                model,
+                tokenizer,
+                &args,
+                scheduler_config,
+                scheduler_runtime_profile,
+                vision_input,
+                static_memory_estimate,
+                load_timer,
+            )
+        }
         ironmlx_lm::models::ModelArchitecture::MiniCpmV46 => {
             // MiniCpmV46Model serves text + single-image VL (vision_input set above).
             let model = ironmlx_lm::models::minicpmv4_6::model_from_loader(&loader)
@@ -2593,6 +2667,11 @@ mod scheduler_profile_tests {
         )
         .expect("write config");
         std::fs::write(
+            model_dir.join("generation_config.json"),
+            r#"{"do_sample":true,"temperature":1.0,"top_k":64}"#,
+        )
+        .expect("write generation config");
+        std::fs::write(
             mtp_dir.join("config.json"),
             r#"{"model_type":"gemma4_assistant"}"#,
         )
@@ -2623,6 +2702,8 @@ mod scheduler_profile_tests {
                 .b_max,
             4
         );
+        assert_eq!(config.sampling_defaults.temperature, Some(1.0));
+        assert_eq!(config.sampling_defaults.top_k, Some(64));
         std::fs::remove_dir_all(temp_dir).expect("cleanup");
     }
 

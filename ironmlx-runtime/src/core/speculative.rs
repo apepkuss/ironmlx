@@ -1492,6 +1492,12 @@ impl QwenMtpDraftPolicyState {
         self.current_budget.min(self.max_draft_tokens)
     }
 
+    pub(crate) fn seed_initial_budget(&mut self, budget: usize) {
+        if self.active_regime.is_none() {
+            self.current_budget = budget.clamp(1, self.max_draft_tokens);
+        }
+    }
+
     pub(crate) fn acceptance_ewma(&self) -> Option<f64> {
         self.acceptance_ewma
     }

@@ -298,11 +298,13 @@ pub fn segmented_entry_lineage(
         refs: entry
             .segments
             .iter()
-            .map(|r| PrefixLineageRef {
+            .enumerate()
+            .map(|(index, r)| PrefixLineageRef {
                 id: r.segment.id,
                 start: r.segment.start,
                 stop: r.stop,
                 segment_stop: r.segment.stop,
+                window: index >= entry.head().len(),
             })
             .collect(),
     }
@@ -330,15 +332,25 @@ pub fn export_segmented_prefix_for_row(
 ) -> Result<Option<(SegmentedPrefixEntry, i32)>> {
     let layout = prefix_segment_layout(spec);
     let block_size = spec.block_size;
-    let mut segments = match row_prefix_lineage(caches, row) {
-        Some(lineage) if lineage.layout == layout => lineage_segments_for_row(
-            prefix_lru_cache,
-            caches,
-            row,
-            &lineage.truncated(spec.cached_len, block_size),
-            block_size,
-        )?,
-        _ => Vec::new(),
+    let lineage = row_prefix_lineage(caches, row)
+        .filter(|lineage| lineage.layout == layout)
+        .map(|lineage| lineage.truncated(spec.cached_len, block_size));
+    let part = |window: bool| {
+        lineage.as_ref().map(|lineage| PrefixLineage {
+            layout: lineage.layout.clone(),
+            refs: lineage
+                .refs
+                .iter()
+                .copied()
+                .filter(|r| r.window == window)
+                .collect(),
+        })
+    };
+    let mut segments = match part(false) {
+        Some(lineage) => {
+            lineage_segments_for_row(prefix_lru_cache, caches, row, &lineage, block_size)?
+        }
+        None => Vec::new(),
     };
     if segments.len() >= MAX_PREFIX_ENTRY_SEGMENTS {
         segments.clear();
@@ -356,15 +368,143 @@ pub fn export_segmented_prefix_for_row(
             stop,
         });
     }
-    let aligned_len = segments.last().map_or(0, |r| r.stop);
+    // Sliding-window layers store from their window's block boundary on:
+    // the segments the row's window still came from, then one new segment
+    // up to the aligned length (their tail is in `private`).
+    let window = ironmlx_lm::core::cache::layer::prefix_window(caches);
+    let aligned_len = match window {
+        Some(_) => cached_len / block_size * block_size,
+        None => segments.last().map_or(0, |r| r.stop),
+    };
+    let (mut window_refs, mut window_start) = (0, 0);
+    if let Some(window) = window {
+        window_start =
+            ironmlx_lm::core::cache::layer::prefix_window_start(cached_len, window, block_size)
+                .min(aligned_len);
+        let mut refs = match part(true) {
+            Some(lineage) => window_segments_for_row(
+                prefix_lru_cache,
+                caches,
+                row,
+                &lineage,
+                window_start,
+                aligned_len,
+            )?,
+            None => Vec::new(),
+        };
+        if refs.len() >= MAX_PREFIX_ENTRY_SEGMENTS {
+            refs.clear();
+        }
+        let from = refs.last().map_or(window_start, |r| r.stop);
+        if from < aligned_len {
+            let Some(segment) =
+                ironmlx_lm::core::cache::layer::export_prefix_window_segment_for_row(
+                    caches,
+                    row,
+                    PrefixSegmentId::new(),
+                    from,
+                    aligned_len,
+                    prefix_segment_layout(spec),
+                )?
+            else {
+                anyhow::bail!(
+                    "export_segmented_prefix_for_row: row {row} no longer holds its window from {from}"
+                );
+            };
+            segment.eval()?;
+            refs.push(PrefixSegmentRef {
+                segment: Arc::new(segment),
+                stop: aligned_len,
+            });
+        }
+        window_refs = refs.len();
+        segments.extend(refs);
+    }
     Ok(Some((
         SegmentedPrefixEntry {
+            window_refs,
+            window_start,
             segments,
             aligned_len,
             private,
         },
         cached_len,
     )))
+}
+
+/// The window segments `lineage` names that still reach into
+/// `[window_start, aligned_len)`, in order, as far as they continue each
+/// other from at or before `window_start`. A segment the hot cache holds is
+/// reused; one it no longer holds is copied again from the row under the
+/// same id when the row still holds its whole range.
+fn window_segments_for_row(
+    prefix_lru_cache: Option<&SharedPrefixLruCache>,
+    caches: &[LayerCache],
+    row: usize,
+    lineage: &PrefixLineage,
+    window_start: i32,
+    aligned_len: i32,
+) -> Result<Vec<PrefixSegmentRef>> {
+    let wanted: Vec<&PrefixLineageRef> = lineage
+        .refs
+        .iter()
+        .filter(|r| r.stop > window_start && r.stop <= aligned_len)
+        .collect();
+    let held = match prefix_lru_cache {
+        Some(prefix_lru_cache) => {
+            let cache = lock_shared_prefix_lru_cache(prefix_lru_cache)?;
+            wanted
+                .iter()
+                .map(|r| cache.segment(r.id))
+                .collect::<Vec<_>>()
+        }
+        None => vec![None; wanted.len()],
+    };
+    let mut refs: Vec<PrefixSegmentRef> = Vec::with_capacity(wanted.len());
+    for (r, held) in wanted.into_iter().zip(held) {
+        let continues = match refs.last() {
+            Some(last) => r.start == last.stop,
+            None => r.start <= window_start,
+        };
+        if !continues || r.stop <= r.start {
+            break;
+        }
+        let segment = match held {
+            Some(segment) => {
+                if segment.start != r.start
+                    || r.stop > segment.stop
+                    || segment.layout != lineage.layout
+                {
+                    break;
+                }
+                segment
+            }
+            None => {
+                if !r.is_whole() {
+                    break;
+                }
+                let Some(segment) =
+                    ironmlx_lm::core::cache::layer::export_prefix_window_segment_for_row(
+                        caches,
+                        row,
+                        r.id,
+                        r.start,
+                        r.stop,
+                        lineage.layout.clone(),
+                    )?
+                else {
+                    break;
+                };
+                segment.eval()?;
+                Arc::new(segment)
+            }
+        };
+        refs.push(PrefixSegmentRef {
+            segment,
+            stop: r.stop,
+        });
+    }
+    Ok(refs)
 }
 
 /// The segments `lineage` names, in order, as far as they continue each
@@ -670,6 +810,31 @@ struct AsyncPrefixStoreCounters {
     failed_total: AtomicU64,
     cancelled_total: AtomicU64,
     backpressured_total: AtomicU64,
+    /// The one job allowed past the byte limit (0: none) and its bytes.
+    oversize_job: AtomicU64,
+    oversize_bytes: AtomicUsize,
+}
+
+impl AsyncPrefixStoreCounters {
+    /// Pending bytes other than the oversize job's.
+    fn regular_bytes(&self) -> usize {
+        self.pending_bytes
+            .load(Ordering::Acquire)
+            .saturating_sub(self.oversize_bytes.load(Ordering::Acquire))
+    }
+
+    /// Give back job `id`'s slot and its `bytes`.
+    fn release(&self, id: u64, bytes: usize) {
+        if self
+            .oversize_job
+            .compare_exchange(id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.oversize_bytes.store(0, Ordering::Release);
+        }
+        self.pending_jobs.fetch_sub(1, Ordering::AcqRel);
+        self.pending_bytes.fetch_sub(bytes, Ordering::AcqRel);
+    }
 }
 
 /// What a queued save writes: an immutable block (or a whole prefix kept as
@@ -681,6 +846,20 @@ enum AsyncPrefixStorePayload {
 }
 
 impl AsyncPrefixStorePayload {
+    /// Bytes writing the entry puts on disk: a segmented entry skips the
+    /// segment files already there.
+    fn write_bytes(
+        &self,
+        store: &PagedPrefixStore,
+        spec: &PagedPrefixKeySpec,
+        queued: &std::collections::HashSet<PrefixSegmentId>,
+    ) -> usize {
+        match self {
+            Self::Whole(entry) => entry.observability_stats(spec.cached_len).payload_bytes,
+            Self::Segmented(entry) => store.segmented_write_bytes(spec, entry, queued),
+        }
+    }
+
     /// The entry's logical bytes: every token it restores, shared or not.
     fn logical_bytes(&self, spec: &PagedPrefixKeySpec) -> Result<usize> {
         Ok(match self {
@@ -710,6 +889,8 @@ impl AsyncPrefixStorePayload {
     fn segmented(&self) -> SegmentedPrefixEntry {
         match self {
             Self::Whole(entry) => SegmentedPrefixEntry {
+                window_refs: 0,
+                window_start: 0,
                 segments: Vec::new(),
                 aligned_len: 0,
                 private: entry.clone(),
@@ -795,7 +976,7 @@ impl Drop for AsyncPrefixStorePermit {
         if self.active {
             self.queue
                 .remove_pending_if_current(&self.pending_key, self.id);
-            self.queue.release_pending(self.payload_bytes);
+            self.queue.release_pending(self.id, self.payload_bytes);
         }
     }
 }
@@ -871,16 +1052,10 @@ impl AsyncPrefixStoreQueue {
                         }
                     }
                     if let Ok(_idle_guard) = worker_idle.0.lock() {
-                        worker_counters.pending_jobs.fetch_sub(1, Ordering::AcqRel);
-                        worker_counters
-                            .pending_bytes
-                            .fetch_sub(job.payload_bytes, Ordering::AcqRel);
+                        worker_counters.release(job.id, job.payload_bytes);
                         worker_idle.1.notify_all();
                     } else {
-                        worker_counters.pending_jobs.fetch_sub(1, Ordering::AcqRel);
-                        worker_counters
-                            .pending_bytes
-                            .fetch_sub(job.payload_bytes, Ordering::AcqRel);
+                        worker_counters.release(job.id, job.payload_bytes);
                     }
                 }
                 mlx::clear_streams();
@@ -950,8 +1125,13 @@ impl AsyncPrefixStoreQueue {
             Ok(_) => {}
             Err(_) => return AsyncPrefixStoreAdmission::Closed,
         }
-        let payload_bytes = spec.payload_bytes();
-        if !self.reserve_pending(payload_bytes) {
+        // A job slot now; the bytes once the entry is known (see
+        // `submit_permit`): a segmented entry writes only the segment files
+        // not on disk yet, often a small part of its logical size.
+        let payload_bytes = 0;
+        if self.0.counters.regular_bytes() >= self.0.max_pending_bytes
+            || !self.reserve_pending(payload_bytes)
+        {
             self.0
                 .counters
                 .backpressured_total
@@ -989,11 +1169,11 @@ impl AsyncPrefixStoreQueue {
                 active: true,
             })),
             Ok(false) => {
-                self.release_pending(payload_bytes);
+                self.release_pending(id, payload_bytes);
                 AsyncPrefixStoreAdmission::Coalesced
             }
             Err(_) => {
-                self.release_pending(payload_bytes);
+                self.release_pending(id, payload_bytes);
                 AsyncPrefixStoreAdmission::Closed
             }
         }
@@ -1005,25 +1185,26 @@ impl AsyncPrefixStoreQueue {
         entry: AsyncPrefixStorePayload,
     ) -> AsyncPrefixStoreSubmit {
         let spec = permit.spec.take().expect("active permit owns spec");
-        // The reservation is the entry's logical size, an upper bound on
-        // what the writer puts on disk (segments already there are skipped).
-        let actual_payload_bytes = match entry.logical_bytes(&spec) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                self.0.counters.failed_total.fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(%error, "async paged prefix store payload does not fit its spec");
-                return AsyncPrefixStoreSubmit::Closed;
-            }
-        };
-        if actual_payload_bytes != permit.payload_bytes {
+        if let Err(error) = entry.logical_bytes(&spec) {
             self.0.counters.failed_total.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(
-                reserved_bytes = permit.payload_bytes,
-                actual_bytes = actual_payload_bytes,
-                "async paged prefix store payload size changed after admission"
-            );
+            tracing::warn!(%error, "async paged prefix store payload does not fit its spec");
             return AsyncPrefixStoreSubmit::Closed;
         }
+        // The reservation is what the writer puts on disk: the segment files
+        // already there, and those a save queued ahead of this one writes,
+        // are skipped. The writer takes jobs in order, so they are on disk
+        // by the time it reaches this one.
+        let store = permit.store.as_ref().expect("active permit owns store");
+        let queued = self.queued_segment_ids(store);
+        let write_bytes = entry.write_bytes(store, &spec, &queued);
+        if !self.reserve_pending_bytes(permit.id, write_bytes) {
+            self.0
+                .counters
+                .backpressured_total
+                .fetch_add(1, Ordering::Relaxed);
+            return AsyncPrefixStoreSubmit::Backpressured;
+        }
+        permit.payload_bytes = write_bytes;
         if let Err(error) = entry.eval() {
             self.0.counters.failed_total.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(%error, "async paged prefix store payload evaluation failed");
@@ -1076,7 +1257,7 @@ impl AsyncPrefixStoreQueue {
             }
             Some(Err(TrySendError::Full(job))) => {
                 self.remove_pending_if_current(&job.pending_key, job.id);
-                self.release_pending(job.payload_bytes);
+                self.release_pending(job.id, job.payload_bytes);
                 permit.active = false;
                 self.0
                     .counters
@@ -1086,13 +1267,13 @@ impl AsyncPrefixStoreQueue {
             }
             Some(Err(TrySendError::Disconnected(job))) => {
                 self.remove_pending_if_current(&job.pending_key, job.id);
-                self.release_pending(job.payload_bytes);
+                self.release_pending(job.id, job.payload_bytes);
                 permit.active = false;
                 AsyncPrefixStoreSubmit::Closed
             }
             None => {
                 self.remove_pending_if_current(&permit.pending_key, permit.id);
-                self.release_pending(permit.payload_bytes);
+                self.release_pending(permit.id, permit.payload_bytes);
                 permit.active = false;
                 AsyncPrefixStoreSubmit::Closed
             }
@@ -1162,6 +1343,25 @@ impl AsyncPrefixStoreQueue {
         entry.entry.clone()
     }
 
+    /// Segments of the segmented saves queued for `store`.
+    fn queued_segment_ids(
+        &self,
+        store: &PagedPrefixStore,
+    ) -> std::collections::HashSet<PrefixSegmentId> {
+        let Ok(pending) = self.0.pending.lock() else {
+            return Default::default();
+        };
+        pending
+            .iter()
+            .filter(|((root, _), entry)| *root == store.root && !entry.cancellation.is_cancelled())
+            .filter_map(|(_, entry)| match &entry.entry {
+                Some(AsyncPrefixStorePayload::Segmented(entry)) => Some(entry),
+                _ => None,
+            })
+            .flat_map(|entry| entry.segments.iter().map(|r| r.segment.id))
+            .collect()
+    }
+
     fn contains_pending(&self, store: &PagedPrefixStore, spec: &PagedPrefixKeySpec) -> bool {
         let key = PagedPrefixStore::key_for(spec);
         let pending_key = (store.root.clone(), key);
@@ -1194,15 +1394,17 @@ impl AsyncPrefixStoreQueue {
         if self.0.counters.pending_jobs.load(Ordering::Acquire) >= self.0.capacity {
             return false;
         }
-        // One save larger than the byte limit is still accepted when nothing
-        // else is waiting: otherwise a long prompt could never reach disk.
+        // The oversize job's bytes (see `reserve_pending_bytes`) do not
+        // count against the limit here; nothing larger than it is taken
+        // unless the queue holds no bytes at all.
+        let oversize = self.0.counters.oversize_bytes.load(Ordering::Acquire);
         let reserved = self.0.counters.pending_bytes.fetch_update(
             Ordering::AcqRel,
             Ordering::Acquire,
             |current| {
-                current
-                    .checked_add(bytes)
-                    .filter(|projected| *projected <= self.0.max_pending_bytes || current == 0)
+                current.checked_add(bytes).filter(|projected| {
+                    projected.saturating_sub(oversize) <= self.0.max_pending_bytes || current == 0
+                })
             },
         );
         if reserved.is_err() {
@@ -1220,17 +1422,36 @@ impl AsyncPrefixStoreQueue {
         true
     }
 
-    fn release_pending(&self, bytes: usize) {
-        self.0.counters.pending_jobs.fetch_sub(1, Ordering::AcqRel);
-        self.0
-            .counters
-            .pending_bytes
-            .fetch_sub(bytes, Ordering::AcqRel);
+    /// Add job `id`'s `bytes` to the pending total; its slot is already
+    /// held. A write that fits next to the other jobs' bytes is taken. One
+    /// larger than that is still taken when no other job is past the limit,
+    /// as that job: otherwise a long prompt's write could never reach disk,
+    /// nor the small writes queued while it waits.
+    fn reserve_pending_bytes(&self, id: u64, bytes: usize) -> bool {
+        let counters = &self.0.counters;
+        if counters.regular_bytes().saturating_add(bytes) <= self.0.max_pending_bytes {
+            counters.pending_bytes.fetch_add(bytes, Ordering::AcqRel);
+            return true;
+        }
+        if counters
+            .oversize_job
+            .compare_exchange(0, id, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        counters.oversize_bytes.store(bytes, Ordering::Release);
+        counters.pending_bytes.fetch_add(bytes, Ordering::AcqRel);
+        true
+    }
+
+    fn release_pending(&self, id: u64, bytes: usize) {
+        self.0.counters.release(id, bytes);
     }
 
     pub fn is_backpressured(&self) -> bool {
         self.0.counters.pending_jobs.load(Ordering::Acquire) >= self.0.capacity
-            || self.0.counters.pending_bytes.load(Ordering::Acquire) >= self.0.max_pending_bytes
+            || self.0.counters.regular_bytes() >= self.0.max_pending_bytes
     }
 
     /// Cancel queued store work owned by a model that is being unloaded.
@@ -1436,13 +1657,18 @@ impl PrefixLruCache {
         let mut refs = Vec::with_capacity(lineage.refs.len());
         let mut pos = 0;
         for &PrefixLineageRef {
-            id, start, stop, ..
+            id,
+            start,
+            stop,
+            window,
+            ..
         } in &lineage.refs
         {
             let Some(segment) = self.segment(id) else {
                 break;
             };
-            if start != pos
+            if window
+                || start != pos
                 || segment.start != start
                 || stop <= start
                 || stop > segment.stop
@@ -1467,6 +1693,8 @@ impl PrefixLruCache {
         self.insert_segmented(
             spec,
             SegmentedPrefixEntry {
+                window_refs: 0,
+                window_start: 0,
                 segments: vec![],
                 aligned_len: 0,
                 private: entry,
@@ -1594,6 +1822,7 @@ impl PrefixLruCache {
             },
         );
         self.recency.push_back((key.clone(), generation));
+        self.drop_superseded_window_checkpoints(&key);
         self.shrink_to(self.max_bytes);
 
         Ok(PrefixLruInsertResult {
@@ -1602,6 +1831,44 @@ impl PrefixLruCache {
             stats,
             charged_bytes,
         })
+    }
+
+    /// Thin out the shorter prefixes of the entry just cached at `key` when
+    /// it stores sliding-window layers.
+    ///
+    /// Such an entry carries its own window of K/V (about a window's worth
+    /// per sliding-window layer): prefill checkpoints a chunk apart share
+    /// their head but not their windows, so keeping every one costs a window
+    /// each. The prompt's line keeps its newest positions and, of the older
+    /// ones, the shortest in each power-of-two length range, as the DFlash2
+    /// prefix cache does: a prompt that rewinds further recomputes at most
+    /// half of what it keeps.
+    fn drop_superseded_window_checkpoints(&mut self, key: &str) {
+        let Some(newest) = self.entries.get(key) else {
+            return;
+        };
+        if newest.segmented.window_refs == 0 {
+            return;
+        }
+        let keys: Vec<&String> = self
+            .entries
+            .iter()
+            .filter(|(other, entry)| other.as_str() == key || newest.spec.continues(&entry.spec))
+            .map(|(other, _)| other)
+            .collect();
+        let mut line: Vec<(usize, usize)> = keys
+            .iter()
+            .enumerate()
+            .map(|(index, other)| (self.entries[*other].spec.token_ids.len(), index))
+            .collect();
+        let dropped: Vec<String> =
+            crate::core::dflash2_prefix_store::superseded_boundaries(&mut line)
+                .into_iter()
+                .map(|index| keys[index].clone())
+                .collect();
+        for dropped in dropped {
+            self.remove_entry(&dropped);
+        }
     }
 
     fn next_generation(&mut self) -> u64 {
@@ -1873,6 +2140,8 @@ impl PagedPrefixStore {
             return self.save_segmented(
                 spec,
                 &SegmentedPrefixEntry {
+                    window_refs: 0,
+                    window_start: 0,
                     segments: Vec::new(),
                     aligned_len: 0,
                     private: entry.clone(),
@@ -2593,14 +2862,17 @@ fn validate_layer_spec(
             require_tensor_count(idx, spec, 2)?;
             for (name, tensor) in ["K", "V"].iter().zip(spec.tensors.iter()) {
                 let dims = tensor.shape.as_slice();
+                // A sliding-window layer stores only the trailing positions
+                // its window reaches; any other stores all of them.
                 if dims.len() != 4
                     || dims[0] != 1
                     || dims[1] <= 0
-                    || dims[2] != cached_len
+                    || dims[2] < 0
+                    || dims[2] > cached_len
                     || dims[3] <= 0
                 {
                     anyhow::bail!(
-                        "PagedPrefixStore: FullDense layer {idx} {name} shape {:?} incompatible with [1,heads,{cached_len},dim]",
+                        "PagedPrefixStore: FullDense layer {idx} {name} shape {:?} incompatible with [1,heads,<={cached_len},dim]",
                         dims
                     );
                 }
@@ -2676,16 +2948,16 @@ fn validate_turboquant_norm_spec(
     tensor: &PrefixTensorSpec,
     cached_len: i32,
 ) -> Result<()> {
-    if tensor.dtype != Dtype::Float32 {
-        anyhow::bail!(
-            "PagedPrefixStore: FullTurboQuantPacked layer {idx} {name} dtype {} != Float32",
-            tensor.dtype
-        );
-    }
+    // TurboQuant: `[1, heads, len]` float32 norms. 8-bit affine:
+    // `[1, heads, len, 2 * groups]` bfloat16 scales then biases.
     let dims = tensor.shape.as_slice();
-    if dims.len() != 3 || dims[0] != 1 || dims[1] <= 0 || dims[2] != cached_len {
+    let turboquant = tensor.dtype == Dtype::Float32 && dims.len() == 3;
+    let int8 =
+        tensor.dtype == Dtype::Bfloat16 && dims.len() == 4 && dims[3] > 0 && dims[3] % 2 == 0;
+    if !(turboquant || int8) || dims[0] != 1 || dims[1] <= 0 || dims[2] != cached_len {
         anyhow::bail!(
-            "PagedPrefixStore: FullTurboQuantPacked layer {idx} {name} shape {:?} incompatible with [1,heads,{cached_len}]",
+            "PagedPrefixStore: FullTurboQuantPacked layer {idx} {name} {} {:?} is neither [1,heads,{cached_len}] float32 norms nor [1,heads,{cached_len},2*groups] bfloat16 scales and biases",
+            tensor.dtype,
             dims
         );
     }
@@ -2897,6 +3169,9 @@ fn insert_entry_tensors(entry: &PagedPrefixEntry, tensors: &mut HashMap<String, 
     if let Some(last_hidden) = &entry.gemma4_drafter_last_hidden {
         tensors.insert(gemma4_drafter_last_hidden_name(), last_hidden.clone());
     }
+    if let Some(logits) = &entry.last_logits {
+        tensors.insert(LAST_LOGITS_NAME.to_string(), logits.clone());
+    }
 }
 
 fn entry_from_tensors(
@@ -2951,11 +3226,15 @@ fn entry_from_tensors(
         None
     };
 
+    // Optional and outside the key (see `PagedPrefixEntry::last_logits`).
+    let last_logits = tensors.remove(LAST_LOGITS_NAME);
+
     Ok(PagedPrefixEntry {
         main_layers,
         mtp_layers,
         mtp_last_hidden,
         gemma4_drafter_last_hidden,
+        last_logits,
     })
 }
 
@@ -3020,6 +3299,9 @@ fn mtp_k_name(layer_idx: usize) -> String {
 fn mtp_v_name(layer_idx: usize) -> String {
     format!("mtp_{layer_idx:04}_v")
 }
+
+/// Tensor name of [`PagedPrefixEntry::last_logits`] in a private payload.
+const LAST_LOGITS_NAME: &str = "last_logits";
 
 fn mtp_last_hidden_name() -> String {
     "mtp_last_hidden".to_owned()
@@ -3168,6 +3450,7 @@ mod tests {
             mtp_layers: vec![PrefixMtpLayerPayload { k: mtp_k, v: mtp_v }],
             mtp_last_hidden: Some(mtp_last_hidden),
             gemma4_drafter_last_hidden: None,
+            last_logits: None,
         };
 
         let stats = entry.observability_stats(3);
@@ -3205,6 +3488,7 @@ mod tests {
             mtp_layers: vec![],
             mtp_last_hidden: None,
             gemma4_drafter_last_hidden: None,
+            last_logits: None,
         };
         let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
         let missed = store.load_observed(&wanted).expect("miss load");
@@ -3265,6 +3549,7 @@ mod tests {
             mtp_layers: vec![],
             mtp_last_hidden: None,
             gemma4_drafter_last_hidden: None,
+            last_logits: None,
         };
         let mut wanted = spec(
             vec![1, 2, 3, 4],
@@ -3320,6 +3605,7 @@ mod tests {
             mtp_layers: vec![],
             mtp_last_hidden: None,
             gemma4_drafter_last_hidden: None,
+            last_logits: None,
         }
     }
 
@@ -3696,7 +3982,8 @@ mod tests {
         );
         let payload_bytes = entry.observability_stats(2).payload_bytes;
         let queue = AsyncPrefixStoreQueue::new(2, payload_bytes - 1).expect("queue");
-        // Larger than the byte limit, but nothing else is waiting.
+        // Admission holds a job slot; the bytes are reserved when the entry
+        // is submitted and its write size is known.
         let oversize = match queue.try_admit(
             PagedPrefixStore::new(temp_root("unused")),
             wanted,
@@ -3705,25 +3992,50 @@ mod tests {
             AsyncPrefixStoreAdmission::Admitted(permit) => permit,
             _ => panic!("an oversize save is admitted into an empty queue"),
         };
-        let second_entry = single_full_paged_entry(51.0);
-        let second = spec(
-            vec![52, 53],
-            2,
-            None,
-            second_entry.main_layer_specs(),
-            vec![],
-            None,
-        );
         assert_eq!(
-            queue.try_enqueue(
-                PagedPrefixStore::new(temp_root("unused")),
-                second,
-                second_entry
-            ),
-            AsyncPrefixStoreSubmit::Backpressured
+            (queue.stats().pending_jobs, queue.stats().pending_bytes),
+            (1, 0)
         );
-        assert_eq!(queue.stats().backpressured_total, 1);
+        // Larger than the byte limit: taken as the one job past it.
+        assert!(queue.reserve_pending_bytes(1, payload_bytes));
+        // A second one past the limit is not, while a small write still is.
+        assert!(!queue.reserve_pending_bytes(2, payload_bytes));
+        assert!(queue.reserve_pending_bytes(3, 1));
+        queue
+            .0
+            .counters
+            .pending_bytes
+            .fetch_sub(1, Ordering::AcqRel);
+        // Once it is written, the next large one is taken.
+        queue.0.counters.pending_jobs.fetch_add(1, Ordering::AcqRel);
+        queue.release_pending(1, payload_bytes);
+        assert!(queue.reserve_pending_bytes(2, payload_bytes));
+        queue.0.counters.pending_jobs.fetch_add(1, Ordering::AcqRel);
+        queue.release_pending(2, payload_bytes);
         drop(oversize);
+        assert_eq!(
+            (queue.stats().pending_jobs, queue.stats().pending_bytes),
+            (0, 0)
+        );
+        // A queue over its byte limit admits nothing.
+        assert!(queue.reserve_pending(payload_bytes - 1));
+        assert!(matches!(
+            queue.try_admit(
+                PagedPrefixStore::new(temp_root("unused")),
+                spec(
+                    vec![52, 53],
+                    2,
+                    None,
+                    entry.main_layer_specs(),
+                    vec![],
+                    None
+                ),
+                AsyncPrefixStoreCancellation::default(),
+            ),
+            AsyncPrefixStoreAdmission::Backpressured
+        ));
+        assert_eq!(queue.stats().backpressured_total, 1);
+        queue.release_pending(0, payload_bytes - 1);
         assert_eq!(queue.stats().pending_bytes, 0);
         queue.shutdown();
 
@@ -3903,6 +4215,7 @@ mod tests {
             mtp_layers: vec![],
             mtp_last_hidden: None,
             gemma4_drafter_last_hidden: None,
+            last_logits: None,
         };
 
         let len2 = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
@@ -4038,6 +4351,7 @@ mod tests {
             mtp_layers: vec![],
             mtp_last_hidden: None,
             gemma4_drafter_last_hidden: None,
+            last_logits: None,
         };
         let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
 
@@ -4079,6 +4393,7 @@ mod tests {
             mtp_layers: vec![],
             mtp_last_hidden: None,
             gemma4_drafter_last_hidden: None,
+            last_logits: None,
         };
         let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
         let key = store.save(&wanted, &entry).expect("save");
@@ -4155,6 +4470,7 @@ mod tests {
             }],
             mtp_last_hidden: Some(mtp_last_hidden.clone()),
             gemma4_drafter_last_hidden: None,
+            last_logits: None,
         };
         let spec = spec(
             vec![1, 2, 3],
@@ -4243,6 +4559,7 @@ mod tests {
             mtp_layers: vec![],
             mtp_last_hidden: None,
             gemma4_drafter_last_hidden: None,
+            last_logits: None,
         };
         let wanted = spec(vec![1, 2], 2, None, entry.main_layer_specs(), vec![], None);
         store.save(&wanted, &entry).expect("save");
@@ -4300,6 +4617,7 @@ mod tests {
             mtp_layers: vec![],
             mtp_last_hidden: None,
             gemma4_drafter_last_hidden: None,
+            last_logits: None,
         }
     }
 
@@ -4359,6 +4677,8 @@ mod tests {
         evaluated: bool,
     ) -> (PagedPrefixKeySpec, SegmentedPrefixEntry) {
         let entry = SegmentedPrefixEntry {
+            window_refs: 0,
+            window_start: 0,
             segments: vec![PrefixSegmentRef {
                 segment: segment.clone(),
                 stop,
@@ -4633,6 +4953,8 @@ mod tests {
             stop,
         });
         let mut entry = SegmentedPrefixEntry {
+            window_refs: 0,
+            window_start: 0,
             segments,
             aligned_len: stop,
             private,
