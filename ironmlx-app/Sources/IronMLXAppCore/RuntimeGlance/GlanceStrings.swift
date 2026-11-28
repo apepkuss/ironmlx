@@ -30,7 +30,6 @@ public enum GlanceText: CaseIterable, Sendable {
     case hudDensity
     case hudMini
     case hudStandard
-    case hudAutoHide
     case hudClickThrough
     case hudResetPosition
     case hudClose
@@ -122,11 +121,6 @@ public enum GlanceText: CaseIterable, Sendable {
             .init(en: "Mini", zh: "迷你", zhHant: "迷你", ja: "ミニ", ko: "미니")
         case .hudStandard:
             .init(en: "Standard", zh: "标准", zhHant: "標準", ja: "標準", ko: "표준")
-        case .hudAutoHide:
-            .init(
-                en: "Hide When Idle", zh: "空闲时自动隐藏", zhHant: "閒置時自動隱藏",
-                ja: "アイドル時に自動で隠す", ko: "유휴 시 자동 숨기기"
-            )
         case .hudClickThrough:
             .init(en: "Click Through", zh: "点击穿透", zhHant: "點擊穿透", ja: "クリックを透過", ko: "클릭 통과")
         case .hudResetPosition:

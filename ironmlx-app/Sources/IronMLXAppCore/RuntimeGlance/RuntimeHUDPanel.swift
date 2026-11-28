@@ -59,7 +59,7 @@ final class RuntimeHUDPanel: NSPanel {
     }
 }
 
-/// The HUD's context menu (spec 5.6): density, hide when idle, click-through, reset position,
+/// The HUD's context menu (spec 5.6): density, click-through, reset position,
 /// close. Built fresh for each right-click so its check marks match the preferences; the
 /// builder is each item's target, so the caller keeps it alive while the menu is open.
 @MainActor
@@ -97,9 +97,6 @@ final class RuntimeHUDContextMenu: NSObject {
         densityItem.submenu = density
         menu.addItem(densityItem)
 
-        let autoHide = item(.hudAutoHide, #selector(toggleAutoHide(_:)))
-        autoHide.state = preferences.hudAutoHide ? .on : .off
-        menu.addItem(autoHide)
         let clickThrough = item(.hudClickThrough, #selector(toggleClickThrough(_:)))
         clickThrough.state = preferences.hudClickThrough ? .on : .off
         menu.addItem(clickThrough)
@@ -114,10 +111,6 @@ final class RuntimeHUDContextMenu: NSObject {
             return
         }
         preferences.hudDensity = density
-    }
-
-    @objc private func toggleAutoHide(_ sender: NSMenuItem) {
-        preferences.hudAutoHide.toggle()
     }
 
     @objc private func toggleClickThrough(_ sender: NSMenuItem) {

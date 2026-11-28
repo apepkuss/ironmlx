@@ -3,94 +3,17 @@ import CoreGraphics
 import Observation
 import SwiftUI
 
-/// When the HUD is on screen (spec 5.6).
+/// The HUD's alert rule. Visibility has no policy: the HUD is on screen whenever the user has
+/// it on.
 enum HUDVisibilityPolicy {
-    /// How long the HUD stays after the backend goes idle while "Hide When Idle" is on.
-    static let idleGrace: TimeInterval = 5
-
-    static func isActive(_ activity: RuntimeActivityState?) -> Bool {
-        switch activity {
-        case .prefilling?, .generating?, .loading?: true
-        case .idle?, .unknown?, nil: false
-        }
-    }
-
-    /// Whether the HUD shows its alert style and stays up through idle auto-hide: a health alert
-    /// (red or amber, the menu bar dot's rule) or a crashed backend. A backend the user stopped
-    /// keeps its red menu bar dot but follows normal auto-hide here.
+    /// Whether the HUD shows its alert style: a health alert (red or amber, the menu bar dot's
+    /// rule) or a crashed backend. A backend the user stopped keeps its red menu bar dot but is
+    /// not an alert here.
     static func isAlert(indicator: GlanceIndicator?, backendState: BackendProcessState) -> Bool {
         guard indicator == .red || indicator == .amber else {
             return false
         }
         return backendState != .stopped
-    }
-
-    static func shouldShow(
-        userEnabled: Bool,
-        autoHide: Bool,
-        activity: RuntimeActivityState?,
-        isAlert: Bool,
-        idleSince: Date?,
-        now: Date
-    ) -> Bool {
-        guard userEnabled else {
-            return false
-        }
-        if isAlert || !autoHide || isActive(activity) {
-            return true
-        }
-        guard let idleSince else {
-            return false
-        }
-        return now.timeIntervalSince(idleSince) < idleGrace
-    }
-
-    /// When to look again because the idle grace runs out; nil when nothing would change with
-    /// time alone. This is the HUD's only timer, so a hidden, idle HUD schedules nothing.
-    static func recheckDate(
-        autoHide: Bool,
-        activity: RuntimeActivityState?,
-        isAlert: Bool,
-        idleSince: Date?,
-        now: Date
-    ) -> Date? {
-        guard autoHide, !isAlert, !isActive(activity), let idleSince else {
-            return nil
-        }
-        let end = idleSince.addingTimeInterval(idleGrace)
-        return end > now ? end : nil
-    }
-}
-
-/// Tracks when the idle grace started: when the user turns the HUD on (so the hotkey always
-/// shows it, if only for 5 s) and when work ends. Not reset by updates that stay idle.
-struct HUDIdleTracker {
-    private var wasEnabled = false
-    private var wasActive = false
-    private(set) var idleSince: Date?
-
-    mutating func update(enabled: Bool, active: Bool, now: Date) -> Date? {
-        defer {
-            wasEnabled = enabled
-            wasActive = active
-        }
-        guard enabled else {
-            idleSince = nil
-            return nil
-        }
-        if active {
-            idleSince = nil
-        } else if !wasEnabled || wasActive || idleSince == nil {
-            idleSince = now
-        }
-        return idleSince
-    }
-
-    /// Starts the grace again, so a HUD hidden for being idle shows for another 5 s.
-    mutating func restartGrace(now: Date) {
-        if !wasActive {
-            idleSince = now
-        }
     }
 }
 
@@ -175,7 +98,7 @@ protocol RuntimeHUDPresenting: AnyObject {
     func setLanguage(_ language: String)
 }
 
-/// Shows and hides the HUD panel by `HUDVisibilityPolicy`, follows the click-through
+/// Shows the HUD panel while the user has it on, follows the click-through
 /// preference and remembers the position per screen. The panel is created on first show.
 @MainActor
 final class RuntimeHUDController: NSObject, NSWindowDelegate, RuntimeHUDPresenting {
@@ -186,14 +109,12 @@ final class RuntimeHUDController: NSObject, NSWindowDelegate, RuntimeHUDPresenti
     private(set) var language: String
     private var panel: RuntimeHUDPanel?
     private var hostingView: RuntimeHUDHostingView?
-    private var idleTracker = HUDIdleTracker()
-    private var recheckTimer: Timer?
     /// The state being shown or faded to; the panel may still be fading out while false.
     private var isPresented = false
     /// Set while the controller itself moves the panel, so only user drags are remembered.
     private var isPlacing = false
     /// The panel is placed on first show, when screens change and on "Reset Position" only, so
-    /// an idle fade-in never moves a HUD the user left on another screen or spot.
+    /// showing it again never moves a HUD the user left on another screen or spot.
     private var needsPlacement = true
     private var screenObserver: (any NSObjectProtocol)?
     private var contextMenu: RuntimeHUDContextMenu?
@@ -216,7 +137,6 @@ final class RuntimeHUDController: NSObject, NSWindowDelegate, RuntimeHUDPresenti
     }
 
     isolated deinit {
-        recheckTimer?.invalidate()
         panel?.orderOut(nil)
         if let screenObserver {
             NotificationCenter.default.removeObserver(screenObserver)
@@ -230,20 +150,15 @@ final class RuntimeHUDController: NSObject, NSWindowDelegate, RuntimeHUDPresenti
         place()
     }
 
-    /// Turns the HUD on or off. Turning it on while it is already on shows it again for the idle
-    /// grace if "Hide When Idle" had faded it out.
+    /// Turns the HUD on or off; it stays on screen for as long as it is on.
     func setVisible(_ visible: Bool) {
-        if visible, preferences.hudVisible {
-            idleTracker.restartGrace(now: Date())
-        }
         preferences.hudVisible = visible
         evaluate()
     }
 
-    /// The hotkey: hides the HUD when it is on screen, otherwise shows it, including when it is
-    /// on but faded out for being idle (a second press is never needed to see it).
+    /// The hotkey: a plain on/off switch.
     func toggle() {
-        setVisible(!isPresented)
+        setVisible(!preferences.hudVisible)
     }
 
     func resetPosition() {
@@ -266,8 +181,8 @@ final class RuntimeHUDController: NSObject, NSWindowDelegate, RuntimeHUDPresenti
 
     // MARK: Visibility
 
-    /// Re-evaluates whenever something the policy read changes. While the user has the HUD off
-    /// only that preference is read, so store updates cost nothing then.
+    /// Re-evaluates whenever a preference read here changes. The store is not read: what the
+    /// backend is doing never shows or hides the HUD.
     private func observe() {
         let inputs = withObservationTracking {
             readInputs()
@@ -281,24 +196,11 @@ final class RuntimeHUDController: NSObject, NSWindowDelegate, RuntimeHUDPresenti
 
     private struct Inputs {
         var enabled: Bool
-        var autoHide = true
-        var clickThrough = false
-        var activity: RuntimeActivityState?
-        var isAlert = false
+        var clickThrough: Bool
     }
 
-    /// Everything the policy depends on, and nothing else, so only these are observed.
     private func readInputs() -> Inputs {
-        guard preferences.hudVisible else {
-            return Inputs(enabled: false)
-        }
-        return Inputs(
-            enabled: true,
-            autoHide: preferences.hudAutoHide,
-            clickThrough: preferences.hudClickThrough,
-            activity: store.isStale ? nil : store.snapshot?.activity.state,
-            isAlert: HUDVisibilityPolicy.isAlert(indicator: store.indicator, backendState: store.backendState)
-        )
+        Inputs(enabled: preferences.hudVisible, clickThrough: preferences.hudClickThrough)
     }
 
     private func evaluate() {
@@ -306,43 +208,12 @@ final class RuntimeHUDController: NSObject, NSWindowDelegate, RuntimeHUDPresenti
     }
 
     private func apply(_ inputs: Inputs) {
-        recheckTimer?.invalidate()
-        recheckTimer = nil
-        let now = Date()
-        let idleSince = idleTracker.update(
-            enabled: inputs.enabled, active: HUDVisibilityPolicy.isActive(inputs.activity), now: now
-        )
-        let show = HUDVisibilityPolicy.shouldShow(
-            userEnabled: inputs.enabled, autoHide: inputs.autoHide, activity: inputs.activity,
-            isAlert: inputs.isAlert, idleSince: idleSince, now: now
-        )
-        if show {
+        if inputs.enabled {
             present(clickThrough: inputs.clickThrough)
         } else {
             panel?.ignoresMouseEvents = inputs.clickThrough
             dismiss()
         }
-        guard inputs.enabled,
-              let date = HUDVisibilityPolicy.recheckDate(
-                  autoHide: inputs.autoHide, activity: inputs.activity, isAlert: inputs.isAlert,
-                  idleSince: idleSince, now: now
-              )
-        else {
-            return
-        }
-        scheduleRecheck(at: date)
-    }
-
-    private func scheduleRecheck(at date: Date) {
-        let timer = Timer(fire: date, interval: 0, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.recheckTimer = nil
-                self?.evaluate()
-            }
-        }
-        timer.tolerance = 0.1
-        RunLoop.main.add(timer, forMode: .common)
-        recheckTimer = timer
     }
 
     private func present(clickThrough: Bool) {

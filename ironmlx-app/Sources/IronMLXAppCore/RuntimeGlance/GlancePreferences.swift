@@ -15,7 +15,6 @@ public final class GlancePreferences: Observable {
         static let menuBarSpeed = "ironmlx.glance.menuBarSpeed"
         static let hudVisible = "ironmlx.glance.hudVisible"
         static let hudDensity = "ironmlx.glance.hudDensity"
-        static let hudAutoHide = "ironmlx.glance.hudAutoHide"
         static let hudClickThrough = "ironmlx.glance.hudClickThrough"
         static let hudOrigins = "ironmlx.glance.hudOrigins"
         static let hudLastScreen = "ironmlx.glance.hudLastScreen"
@@ -60,18 +59,6 @@ public final class GlancePreferences: Observable {
         set {
             registrar.withMutation(of: self, keyPath: \.hudDensity) {
                 defaults.set(newValue.rawValue, forKey: Key.hudDensity)
-            }
-        }
-    }
-
-    public var hudAutoHide: Bool {
-        get {
-            registrar.access(self, keyPath: \.hudAutoHide)
-            return bool(Key.hudAutoHide, default: true)
-        }
-        set {
-            registrar.withMutation(of: self, keyPath: \.hudAutoHide) {
-                defaults.set(newValue, forKey: Key.hudAutoHide)
             }
         }
     }

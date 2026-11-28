@@ -58,135 +58,6 @@ private func keyDownEvent(_ characters: String, _ modifiers: NSEvent.ModifierFla
 
 @Suite("RuntimeHUD policy")
 struct RuntimeHUDPolicyTests {
-    private let now = Date(timeIntervalSince1970: 1_000_000)
-
-    @Test func hiddenWhenUserDisabled() {
-        #expect(
-            !HUDVisibilityPolicy.shouldShow(
-                userEnabled: false, autoHide: false, activity: .generating, isAlert: true, idleSince: now, now: now
-            )
-        )
-    }
-
-    @Test func alertAlwaysShowsEvenWhenIdleAndAutoHide() {
-        #expect(
-            HUDVisibilityPolicy.shouldShow(
-                userEnabled: true, autoHide: true, activity: .idle, isAlert: true,
-                idleSince: now.addingTimeInterval(-600), now: now
-            )
-        )
-        #expect(
-            HUDVisibilityPolicy.shouldShow(
-                userEnabled: true, autoHide: true, activity: nil, isAlert: true, idleSince: nil, now: now
-            )
-        )
-    }
-
-    @Test func idleFadesAfterFiveSeconds() {
-        #expect(
-            HUDVisibilityPolicy.shouldShow(
-                userEnabled: true, autoHide: true, activity: .idle, isAlert: false,
-                idleSince: now.addingTimeInterval(-4.9), now: now
-            )
-        )
-        #expect(
-            !HUDVisibilityPolicy.shouldShow(
-                userEnabled: true, autoHide: true, activity: .idle, isAlert: false,
-                idleSince: now.addingTimeInterval(-5), now: now
-            )
-        )
-        #expect(
-            !HUDVisibilityPolicy.shouldShow(
-                userEnabled: true, autoHide: true, activity: nil, isAlert: false, idleSince: nil, now: now
-            )
-        )
-    }
-
-    @Test func activityShowsWhenAutoHideOn() {
-        for state in [RuntimeActivityState.prefilling, .generating, .loading] {
-            #expect(
-                HUDVisibilityPolicy.shouldShow(
-                    userEnabled: true, autoHide: true, activity: state, isAlert: false,
-                    idleSince: now.addingTimeInterval(-600), now: now
-                )
-            )
-        }
-        #expect(
-            !HUDVisibilityPolicy.shouldShow(
-                userEnabled: true, autoHide: true, activity: .unknown, isAlert: false,
-                idleSince: now.addingTimeInterval(-600), now: now
-            )
-        )
-    }
-
-    @Test func autoHideOffAlwaysShows() {
-        #expect(
-            HUDVisibilityPolicy.shouldShow(
-                userEnabled: true, autoHide: false, activity: .idle, isAlert: false,
-                idleSince: now.addingTimeInterval(-600), now: now
-            )
-        )
-        #expect(
-            HUDVisibilityPolicy.shouldShow(
-                userEnabled: true, autoHide: false, activity: nil, isAlert: false, idleSince: nil, now: now
-            )
-        )
-    }
-
-    /// The only timer the HUD runs: one re-check when the 5 s idle grace ends, and none while
-    /// active, alerting, with auto-hide off, or once the grace is over (hidden and idle).
-    @Test func idleRecheckOnlyDuringGrace() {
-        let idleSince = now.addingTimeInterval(-2)
-        #expect(
-            HUDVisibilityPolicy.recheckDate(
-                autoHide: true, activity: .idle, isAlert: false, idleSince: idleSince, now: now
-            ) == idleSince.addingTimeInterval(5)
-        )
-        #expect(
-            HUDVisibilityPolicy.recheckDate(
-                autoHide: true, activity: .generating, isAlert: false, idleSince: idleSince, now: now
-            ) == nil
-        )
-        #expect(
-            HUDVisibilityPolicy.recheckDate(
-                autoHide: true, activity: .idle, isAlert: true, idleSince: idleSince, now: now
-            ) == nil
-        )
-        #expect(
-            HUDVisibilityPolicy.recheckDate(
-                autoHide: false, activity: .idle, isAlert: false, idleSince: idleSince, now: now
-            ) == nil
-        )
-        #expect(
-            HUDVisibilityPolicy.recheckDate(
-                autoHide: true, activity: .idle, isAlert: false, idleSince: now.addingTimeInterval(-5), now: now
-            ) == nil
-        )
-    }
-
-    /// Idle starts counting when the user turns the HUD on and when work ends, not on every update.
-    @Test func idleTrackerStartsGraceOnEnableAndWhenWorkEnds() {
-        var tracker = HUDIdleTracker()
-        #expect(tracker.update(enabled: false, active: false, now: now) == nil)
-        #expect(tracker.update(enabled: true, active: false, now: now) == now)
-        #expect(tracker.update(enabled: true, active: false, now: now.addingTimeInterval(3)) == now)
-        #expect(tracker.update(enabled: true, active: true, now: now.addingTimeInterval(10)) == nil)
-        let end = now.addingTimeInterval(20)
-        #expect(tracker.update(enabled: true, active: false, now: end) == end)
-        #expect(tracker.update(enabled: true, active: false, now: end.addingTimeInterval(30)) == end)
-        // Turning the HUD off and on again restarts the grace, so the hotkey always shows it.
-        #expect(tracker.update(enabled: false, active: false, now: end.addingTimeInterval(40)) == nil)
-        let reenabled = end.addingTimeInterval(50)
-        #expect(tracker.update(enabled: true, active: false, now: reenabled) == reenabled)
-        // The hotkey on an idle-hidden HUD restarts the grace; it does nothing while active.
-        let pressed = reenabled.addingTimeInterval(60)
-        tracker.restartGrace(now: pressed)
-        #expect(tracker.update(enabled: true, active: false, now: pressed) == pressed)
-        #expect(tracker.update(enabled: true, active: true, now: pressed.addingTimeInterval(1)) == nil)
-        tracker.restartGrace(now: pressed.addingTimeInterval(2))
-        #expect(tracker.update(enabled: true, active: true, now: pressed.addingTimeInterval(2)) == nil)
-    }
-
     /// The HUD's context menu is plain AppKit (SwiftUI's never opened in the non-activating
     /// panel): same items and strings as before, states from the preferences, and each item
     /// changes the right preference or calls the right action.
@@ -197,7 +68,6 @@ struct RuntimeHUDPolicyTests {
         defer { defaults.removePersistentDomain(forName: suite) }
         let preferences = GlancePreferences(defaults: defaults)
         preferences.hudDensity = .standard
-        preferences.hudAutoHide = true
         preferences.hudClickThrough = false
         var resets = 0
         var closes = 0
@@ -210,31 +80,27 @@ struct RuntimeHUDPolicyTests {
         let menu = builder.makeMenu()
         #expect(
             menu.items.map { $0.isSeparatorItem ? "-" : $0.title }
-                == ["Density", "Hide When Idle", "Click Through", "-", "Reset Position", "Close"]
+                == ["Density", "Click Through", "-", "Reset Position", "Close"]
         )
         let density = try #require(menu.items[0].submenu)
         #expect(density.items.map(\.title) == ["Mini", "Standard"])
         #expect(density.items.map(\.state) == [.off, .on])
-        #expect(menu.items[1].state == .on)
-        #expect(menu.items[2].state == .off)
+        #expect(menu.items[1].state == .off)
         #expect(menu.items.allSatisfy { $0.isSeparatorItem || $0.submenu != nil || $0.target === builder })
 
         density.performActionForItem(at: 0)
         #expect(preferences.hudDensity == .mini)
         menu.performActionForItem(at: 1)
-        #expect(!preferences.hudAutoHide)
-        menu.performActionForItem(at: 2)
         #expect(preferences.hudClickThrough)
-        menu.performActionForItem(at: 4)
+        menu.performActionForItem(at: 3)
         #expect(resets == 1 && closes == 0)
-        menu.performActionForItem(at: 5)
+        menu.performActionForItem(at: 4)
         #expect(closes == 1)
 
         // A fresh menu shows the new states; titles follow the language.
         let rebuilt = builder.makeMenu()
         #expect(rebuilt.items[0].submenu?.items.map(\.state) == [.on, .off])
-        #expect(rebuilt.items[1].state == .off)
-        #expect(rebuilt.items[2].state == .on)
+        #expect(rebuilt.items[1].state == .on)
         rebuilt.items[0].submenu?.performActionForItem(at: 1)
         #expect(preferences.hudDensity == .standard)
         let chinese = RuntimeHUDContextMenu(preferences: preferences, language: "zh-Hans").makeMenu()
@@ -314,8 +180,9 @@ struct RuntimeHUDPolicyTests {
         )
     }
 
-    /// Health alerts (and a crashed backend) keep the HUD up; a backend the user stopped does not.
-    @Test func stoppedBackendDoesNotPinHUD() {
+    /// Health alerts (and a crashed backend) give the HUD its alert style; a backend the user
+    /// stopped does not.
+    @Test func stoppedBackendIsNotAnAlert() {
         #expect(!HUDVisibilityPolicy.isAlert(indicator: .red, backendState: .stopped))
         #expect(HUDVisibilityPolicy.isAlert(indicator: .red, backendState: .failed))
         #expect(HUDVisibilityPolicy.isAlert(indicator: .red, backendState: .running))
@@ -324,22 +191,6 @@ struct RuntimeHUDPolicyTests {
         #expect(!HUDVisibilityPolicy.isAlert(indicator: .blue, backendState: .starting))
         #expect(!HUDVisibilityPolicy.isAlert(indicator: .green, backendState: .running))
         #expect(!HUDVisibilityPolicy.isAlert(indicator: nil, backendState: .running))
-
-        // So a stopped backend follows idle auto-hide: shown during the grace, hidden after it.
-        let now = Date(timeIntervalSince1970: 1_000_000)
-        let isAlert = HUDVisibilityPolicy.isAlert(indicator: .red, backendState: .stopped)
-        #expect(
-            HUDVisibilityPolicy.shouldShow(
-                userEnabled: true, autoHide: true, activity: nil, isAlert: isAlert,
-                idleSince: now.addingTimeInterval(-1), now: now
-            )
-        )
-        #expect(
-            !HUDVisibilityPolicy.shouldShow(
-                userEnabled: true, autoHide: true, activity: nil, isAlert: isAlert,
-                idleSince: now.addingTimeInterval(-5), now: now
-            )
-        )
     }
 
     /// ⌃⌥⌘H reaches the App either as the Carbon hotkey or, while the status menu is tracking, as a

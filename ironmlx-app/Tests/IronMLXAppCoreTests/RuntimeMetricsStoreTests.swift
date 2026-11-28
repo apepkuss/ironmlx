@@ -171,14 +171,12 @@ func glancePreferencesDefaultsAndPersistence() throws {
     #expect(preferences.menuBarSpeedEnabled)
     #expect(!preferences.hudVisible)
     #expect(preferences.hudDensity == .standard)
-    #expect(preferences.hudAutoHide)
     #expect(!preferences.hudClickThrough)
     #expect(preferences.hudOrigins.isEmpty)
 
     preferences.menuBarSpeedEnabled = false
     preferences.hudVisible = true
     preferences.hudDensity = .mini
-    preferences.hudAutoHide = false
     preferences.hudClickThrough = true
     preferences.hudOrigins = ["1": "{10, 20}"]
 
@@ -186,7 +184,6 @@ func glancePreferencesDefaultsAndPersistence() throws {
     #expect(!reloaded.menuBarSpeedEnabled)
     #expect(reloaded.hudVisible)
     #expect(reloaded.hudDensity == .mini)
-    #expect(!reloaded.hudAutoHide)
     #expect(reloaded.hudClickThrough)
     #expect(reloaded.hudOrigins == ["1": "{10, 20}"])
     #expect(defaults.object(forKey: "ironmlx.glance.hudDensity") as? String == "mini")
