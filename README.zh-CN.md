@@ -16,6 +16,7 @@
 
 <p align="center">
   <a href="#安装与首次运行">安装</a> ·
+  <a href="#性能">性能</a> ·
   <a href="https://apepkuss.github.io/ironmlx/zh/docs/supported-models.html">支持的模型</a> ·
   <a href="https://apepkuss.github.io/ironmlx/zh/docs/api-reference.html">API 参考</a> ·
   <a href="https://apepkuss.github.io/ironmlx/zh/docs/">文档</a> ·
@@ -27,10 +28,14 @@
   <span lang="zh-Hans">🇨🇳 中文</span>
 </p>
 
-## 系统要求
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/dashboard-overview-dark.png">
+    <img src="docs/images/dashboard-overview.png" width="820" alt="IronMLX Dashboard 状态页，Qwen3.8-27B-4bit 以 DFlash2 运行">
+  </picture>
+</p>
 
-- Apple Silicon（arm64）；不支持 Intel Mac；
-- macOS 26.4 或更高版本；
+IronMLX 是一款内置本地推理服务的 macOS App，服务用 Rust 编写，基于 [MLX](https://github.com/ml-explore/mlx)。它在你的 Mac 上运行开源模型，并提供兼容 OpenAI 与 Anthropic 的接口，提示词和输出都留在本机。
 
 ## 核心能力
 
@@ -48,7 +53,20 @@
 
 - **隐私与诊断** — 默认仅本机访问，支持可选的[局域网认证](docs/zh-CN/security-boundary.md)和[本地脱敏诊断导出](docs/zh-CN/diagnostic-bundle.md)。
 
+## 性能
+
+以预填充和解码速度为目标。与其他本地推理应用在同一台 Mac 上实测，测试配置和结果完整公布，包括 IronMLX 不是最快的项目。
+
+| 模型 | 短提示词 | 30K 提示词 |
+| --- | --- | --- |
+| Qwen3.8 27B（Dense） | [单请求](https://apepkuss.github.io/ironmlx/zh/docs/benchmarks/qwen38-dense-b1-short.html) · [4 路并发](https://apepkuss.github.io/ironmlx/zh/docs/benchmarks/qwen38-dense-b4-short.html) | [单请求](https://apepkuss.github.io/ironmlx/zh/docs/benchmarks/qwen38-dense-b1-30k.html) · [4 路并发](https://apepkuss.github.io/ironmlx/zh/docs/benchmarks/qwen38-dense-b4-30k.html) |
+| Qwen3.6 35B A3B（MoE） | [单请求](https://apepkuss.github.io/ironmlx/zh/docs/benchmarks/qwen36-moe-b1-short.html) · [4 路并发](https://apepkuss.github.io/ironmlx/zh/docs/benchmarks/qwen36-moe-b4-short.html) | [单请求](https://apepkuss.github.io/ironmlx/zh/docs/benchmarks/qwen36-moe-b1-30k.html) · [4 路并发](https://apepkuss.github.io/ironmlx/zh/docs/benchmarks/qwen36-moe-b4-30k.html) |
+
+长上下文：[128K 与 256K 提示词](https://apepkuss.github.io/ironmlx/zh/docs/benchmarks/ironmlx-long-context.html)。
+
 ## 安装与首次运行
+
+需要 Apple Silicon 和 macOS 26.4 或更高版本，不支持 Intel Mac。
 
 1. **下载** — 从 [GitHub Releases](https://github.com/apepkuss/ironmlx/releases) 获取 Apple Silicon 版 DMG 或 ZIP。
 2. **安装并启动** — 使用 DMG 时，将 `IronMLX.app` 拖入 `Applications`，等待复制完成，推出磁盘映像，再从 Finder 的“应用程序”中启动；使用 ZIP 时，解压后打开 App。
@@ -57,6 +75,22 @@
 
 > [!TIP]
 > 完整配置说明见[用户指南](docs/zh-CN/user-guide.md#安装与启动)。
+
+### 发送第一个请求
+
+把 `your-model-id` 换成第一条命令返回的 ID。
+
+```bash
+curl http://127.0.0.1:9068/v1/models
+
+curl http://127.0.0.1:9068/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "your-model-id", "messages": [{"role": "user", "content": "你好"}]}'
+```
+
+## 开发
+
+[从源码构建](docs/zh-CN/building-from-source.md) · [参与贡献](docs/zh-CN/contributing.md) · [支持](docs/zh-CN/support.md) · [安全](docs/zh-CN/security.md)
 
 ## 许可证
 
