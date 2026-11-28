@@ -85,7 +85,7 @@ Installed variants show **Downloaded · Check for updates**. Checking only compa
 
 In **Download tasks**, **Pause** retains downloaded data and remains paused after restarting the App. **Resume** uses the recorded snapshot and retained files. Credential-protected tasks may require the token again; tokens are not saved to disk. **Delete** removes unfinished tasks and partial files after confirmation. **Clear** on a completed task keeps the installed model.
 
-Independent model components are downloaded alongside the main weight set, using each component's own index. Breeze and Qwen3-TTS downloads require their audio codec weights even for file-only storage; this does not enable inference support. Optional MTP files declared by the repository are included when available. Older snapshots missing required components are marked incomplete; re-download the same revision to repair them. Matching main weights are verified and reused on filesystems that support cloning, and the old snapshot is retained until the repair is verified. `Verified` describes the selected files and component checks, not runtime support.
+Independent model components are downloaded alongside the main weight set, using each component's own index. Breeze and Qwen3-TTS downloads require their audio codec weights even for file-only storage; a file-only download does not by itself enable inference support. Optional MTP files declared by the repository are included when available. Older snapshots missing required components are marked incomplete; re-download the same revision to repair them. Matching main weights are verified and reused on filesystems that support cloning, and the old snapshot is retained until the repair is verified. `Verified` describes the selected files and component checks, not runtime support.
 
 ## Import a model already on this Mac
 
@@ -158,6 +158,10 @@ Use IronMLX as an Agent's local inference backend and choose the configuration g
 
 ## Speech synthesis
 
+IndexTTS 2.5 and Breeze TTS 2 use the same model-management service. Breeze is
+available as BF16 (`Breeze-TTS-2-mlx`) or MXFP8 (`Breeze-TTS-2-mlx-8bit`) and
+supports Chinese and English at 24 kHz.
+
 ### Voices
 
 With a speech model loaded, open Dashboard **Voices**, import reference audio,
@@ -167,19 +171,38 @@ through `ref_audio` in a request. OpenAI-compatible clients can discover enabled
 voices through `GET /v1/audio/voices`.
 
 The Dashboard previews the reference recording saved in a voice profile.
-Synthesized audio is played by the caller or the
+Breeze synthesis can also be played from the model settings described below.
+Other clients play synthesized audio through the API or the
 [standalone example client](../examples/speech-client.swift). Voice profiles are
 saved under `~/.ironmlx/audio/voices/`; changing the display name preserves the
 voice ID. Request fields and WAV/PCM examples are in the [speech API](audio-speech-api.md).
 
+### Breeze voice design and cloning
+
+Load a Breeze model, then open its gear button in **Model Management**:
+
+- To design a voice, enter the text and a natural-language voice description; leave the voice profile ID empty.
+- To clone a voice, use a managed voice ID with the exact transcript of its reference recording. Save the transcript in **Voices** or enter a request override.
+- To direct a cloned voice, add a delivery instruction to the cloning inputs. CFG, seed, maximum audio tokens and temperature can be adjusted in the same panel.
+
+Choose **Generate speech** to synthesize a complete WAV and play it; **Stop**
+cancels generation or stops playback. Dashboard playback starts after the WAV
+finishes. Incremental PCM is available through the [Breeze API](audio-speech-api.md#breeze-tts-2).
+Replacing a voice profile's recording without a new transcript clears its old transcript.
+
 ### Resource readiness
 
-The App prepares speech resources automatically. If the model list reports that
+For IndexTTS, the App prepares additional speech resources automatically. If the model list reports that
 resources are missing, choose **Prepare resources**. Retry after an interruption;
 verified model files and cached resources are reused. Initial preparation needs
 network access; once the complete resources are ready, synthesis can run offline.
 The App saves the resource configuration and restores previously loaded or pinned
 models after restart.
+
+Breeze downloads include the independent `audio_tokenizer/model.safetensors`.
+Both variants require this file and its configuration; no IndexTTS resource
+preparation is needed. Existing verified `download_only` snapshots are rechecked
+by the native backend during registration before becoming loadable.
 
 ### Model settings
 
@@ -197,7 +220,7 @@ allowed ranges shown in the settings window.
 | Execution timeout | 900 seconds | Positive, at most 24 hours; starts after the request obtains an execution permit |
 | Slow consumer timeout | 30 seconds | Positive, at most 24 hours; limits how long output can remain blocked by the consumer |
 | Max output duration | 600 seconds | Positive, up to the runtime profile maximum; includes silence between segments |
-| Segment tokens | 120 | Integer from 6 through 120; token budget for each synthesis segment |
+| Segment tokens | 120 | Integer from 6 through 120; IndexTTS segment budget. Breeze uses 600-character segments and the request's `max_tokens` audio-frame cap |
 
 If the execution profile is unavailable, these controls and the save action stay
 disabled. Saving stores the policies for that model. If the model is loaded, the

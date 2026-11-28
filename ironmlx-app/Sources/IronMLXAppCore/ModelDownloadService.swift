@@ -1639,16 +1639,24 @@ public actor ModelDownloadService {
                    record.state == .verified,
                    snapshotContainsRepositoryWeights(manifest, repository: repository, snapshot: finalSnapshot)
                 {
+                    if manifest.compatibility.modelType == "breeze_tts",
+                       BreezeTTSModelSupport.isSupportedSnapshot(at: finalSnapshot) {
+                        guard BreezeTTSModelSupport.missingFiles(in: finalSnapshot).isEmpty,
+                              manifest.files.contains(where: { $0.path == BreezeTTSModelSupport.codecWeight }) else {
+                            throw DownloadFailure(repoID: repoID, code: "incomplete_breeze_resources",
+                                message: "Breeze speech codec is absent from this snapshot. Remove the incomplete snapshot and download the model again.")
+                        }
+                    }
                     // A download-only snapshot becomes runnable only when the
                     // current backend's metadata preflight accepts it; the
                     // manifest is then rewritten from that result.
                     if manifest.compatibility.downloadOnly == true,
-                       ["embedding_gemma2", "qwen3_asr", "nemotron_diarization", "inkling2", "inkling2_loop"].contains(manifest.compatibility.modelType)
+                       ["embedding_gemma2", "qwen3_asr", "nemotron_diarization", "inkling2", "inkling2_loop", "breeze_tts"].contains(manifest.compatibility.modelType)
                         || manifest.compatibility.artifactRole == ModelArtifactRole.dflash2Drafter,
                        let compatibility = try? await metadataPreflight.validate(metadataDirectory: finalSnapshot),
                        compatibility.modelType == manifest.compatibility.modelType,
                        compatibility.artifactRole == manifest.compatibility.artifactRole
-                        || ["embedding_gemma2", "qwen3_asr", "nemotron_diarization", "inkling2", "inkling2_loop"].contains(manifest.compatibility.modelType) {
+                        || ["embedding_gemma2", "qwen3_asr", "nemotron_diarization", "inkling2", "inkling2_loop", "breeze_tts"].contains(manifest.compatibility.modelType) {
                         manifest.compatibility = ModelSnapshotCompatibility(
                             modelType: compatibility.modelType, artifactRole: compatibility.artifactRole,
                             quantizationMode: compatibility.quantization?.mode,
@@ -1657,7 +1665,7 @@ public actor ModelDownloadService {
                         )
                         try store.writeManifest(manifest, to: finalSnapshot)
                     }
-                    if manifest.compatibility.artifactRole == "tts" {
+                    if manifest.compatibility.artifactRole == "tts", manifest.compatibility.modelType != "breeze_tts" {
                         try await prepareAudio(snapshot: finalSnapshot, repository: repository, token: token, key: key)
                     }
                     try store.updateRef(for: manifest)
@@ -1817,7 +1825,7 @@ public actor ModelDownloadService {
                 repository: repository
             )
             let remainingBytes = try reservedBytesIncludingAudio(resumePlan.remainingBytes,
-                                                                 required: ttsProfile != nil, repoID: repoID)
+                                                                 required: ttsProfile?.modelType == "indextts2_5", repoID: repoID)
             try adjustDiskReservation(
                 key: key,
                 remainingBytes: remainingBytes,
@@ -2234,6 +2242,7 @@ public actor ModelDownloadService {
     private func prepareAudio(
         snapshot: URL, repository: ResolvedModelRepository, token: String?, key: String
     ) async throws {
+        if let manifest = try? ModelSnapshotVerifier().loadManifest(at: snapshot), manifest.compatibility.modelType == "breeze_tts" { return }
         try adjustDiskReservation(key: key, remainingBytes: AudioResourcePreparationService.diskReservationBytes,
                                   observedBytesByPath: [:])
         let preparer = repository.huggingFaceEndpoint == mirrorEndpoint ? mirrorAudioPreparer : audioPreparer

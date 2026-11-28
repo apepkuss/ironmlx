@@ -304,6 +304,7 @@ public enum LocalModelBackendRegistrar {
                         IronMLXAppLogger.error("Failed to register local model \(model.id): model path not found")
                         continue
                     }
+                    try await BreezeTTSModelSupport.upgradeDownloadOnlySnapshot(at: modelDir)
                     try await Qwen3ASRModelSupport.upgradeDownloadOnlySnapshot(at: modelDir)
                     try await NemotronDiarizationModelSupport.upgradeDownloadOnlySnapshot(at: modelDir)
                     ledger?.recordComputation(of: model.id)

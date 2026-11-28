@@ -1916,6 +1916,52 @@
         "ironmlx-runtime/tests/inkling_dspark.rs",
         "https://huggingface.co/mlx-community/Inkling-2-Mini-oQ4e-mtp/tree/3eea042751cd296b7266628a8342c1749242e1fe"
       ]
+    },
+    {
+      "id": "breeze-tts2-bf16",
+      "modelId": "breeze-tts2",
+      "name": "Breeze TTS 2",
+      "parameters": "3.45B",
+      "weightFormat": "BF16",
+      "variantLabel": "BF16",
+      "weightBytes": 7590912274,
+      "downloadBytes": 7625546547,
+      "category": "tts",
+      "capabilities": [
+        "tts"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Breeze-TTS-2-mlx",
+      "msRepo": null,
+      "metadataRevision": "3c8829fb7fd335818f085cd2ef49b4100c0e46c8",
+      "msMetadataRevision": null,
+      "evidence": [
+        "ironmlx-audio/src/breeze_tts/mod.rs"
+      ]
+    },
+    {
+      "id": "breeze-tts2-mxfp8",
+      "modelId": "breeze-tts2",
+      "name": "Breeze TTS 2",
+      "parameters": "3.45B",
+      "weightFormat": "MXFP8",
+      "variantLabel": "MXFP8",
+      "weightBytes": 4568014628,
+      "downloadBytes": 4602674558,
+      "category": "tts",
+      "capabilities": [
+        "tts"
+      ],
+      "status": "compatible",
+      "noteKey": null,
+      "hfRepo": "mlx-community/Breeze-TTS-2-mlx-8bit",
+      "msRepo": null,
+      "metadataRevision": "c6e4a2ff6ab9afba68b7853de802273ffe23fb49",
+      "msMetadataRevision": null,
+      "evidence": [
+        "ironmlx-audio/src/breeze_tts/mod.rs"
+      ]
     }
   ]
 }

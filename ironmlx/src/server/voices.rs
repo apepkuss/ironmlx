@@ -47,6 +47,8 @@ struct StoredVoiceProfile {
     language: Option<String>,
     enabled: bool,
     reference_file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ref_text: Option<String>,
     reference_format: String,
     reference_sha256: String,
     sample_rate: u32,
@@ -64,6 +66,8 @@ pub(crate) struct VoiceProfile {
     #[serde(skip_serializing_if = "Option::is_none")]
     language: Option<String>,
     enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ref_text: Option<String>,
     reference_format: String,
     reference_sha256: String,
     sample_rate: u32,
@@ -81,6 +85,7 @@ impl From<&StoredVoiceProfile> for VoiceProfile {
             name: value.name.clone(),
             language: value.language.clone(),
             enabled: value.enabled,
+            ref_text: value.ref_text.clone(),
             reference_format: value.reference_format.clone(),
             reference_sha256: value.reference_sha256.clone(),
             sample_rate: value.sample_rate,
@@ -137,6 +142,8 @@ struct CreateVoiceRequest {
     #[serde(default = "enabled_by_default")]
     enabled: bool,
     ref_audio: String,
+    #[serde(default)]
+    ref_text: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +157,8 @@ struct UpdateVoiceRequest {
     enabled: Option<bool>,
     #[serde(default)]
     ref_audio: Option<String>,
+    #[serde(default)]
+    ref_text: Option<String>,
 }
 
 fn enabled_by_default() -> bool {
@@ -275,9 +284,16 @@ impl VoiceStore {
             .collect()
     }
 
+    #[cfg(test)]
     pub(crate) async fn reference_bytes(&self, id: &str) -> Result<Vec<u8>, VoiceStoreError> {
+        Ok(self.reference_with_text(id).await?.0)
+    }
+    pub(crate) async fn reference_with_text(
+        &self,
+        id: &str,
+    ) -> Result<(Vec<u8>, Option<String>), VoiceStoreError> {
         self.ensure_available()?;
-        let (file, expected_sha256) = {
+        let (file, expected_sha256, text) = {
             let document = self.document.read().await;
             let voice = document
                 .voices
@@ -287,13 +303,17 @@ impl VoiceStore {
             if !voice.enabled {
                 return Err(VoiceStoreError::Disabled(id.to_owned()));
             }
-            (voice.reference_file.clone(), voice.reference_sha256.clone())
+            (
+                voice.reference_file.clone(),
+                voice.reference_sha256.clone(),
+                voice.ref_text.clone(),
+            )
         };
         let bytes = tokio::fs::read(self.root.join("files").join(file))
             .await
             .map_err(|error| VoiceStoreError::Resource(error.to_string()))?;
         verify_reference_hash(&bytes, &expected_sha256)?;
-        Ok(bytes)
+        Ok((bytes, text))
     }
 
     async fn create(&self, request: CreateVoiceRequest) -> Result<VoiceProfile, VoiceStoreError> {
@@ -301,6 +321,7 @@ impl VoiceStore {
         validate_id(&request.id)?;
         let name = validate_name(request.name)?;
         let language = validate_language(request.language)?;
+        validate_ref_text(request.ref_text.as_deref())?;
         let reference = validate_reference(request.ref_audio).await?;
         let now = unix_seconds();
         let file_name = reference_file_name(&request.id, &reference);
@@ -314,6 +335,7 @@ impl VoiceStore {
             name,
             language,
             enabled: request.enabled,
+            ref_text: request.ref_text.filter(|s| !s.trim().is_empty()),
             reference_file: file_name.clone(),
             reference_format: reference.format.to_owned(),
             reference_sha256: reference.sha256,
@@ -346,11 +368,13 @@ impl VoiceStore {
             && request.language.is_none()
             && request.enabled.is_none()
             && request.ref_audio.is_none()
+            && request.ref_text.is_none()
         {
             return Err(VoiceStoreError::Invalid(
                 "at least one field must be provided".into(),
             ));
         }
+        validate_ref_text(request.ref_text.as_deref())?;
         let name = request.name.map(validate_name).transpose()?;
         let language = request.language.map(validate_language).transpose()?;
         let reference = match request.ref_audio {
@@ -387,6 +411,17 @@ impl VoiceStore {
             voice.sample_rate = reference.sample_rate;
             voice.channels = reference.channels;
             voice.duration_ms = reference.duration_ms;
+        }
+        // Replacing audio invalidates its old transcript unless replaced together.
+        if reference.is_some() {
+            voice.ref_text = request.ref_text.clone();
+        }
+        if let Some(text) = request.ref_text {
+            voice.ref_text = if text.trim().is_empty() {
+                None
+            } else {
+                Some(text)
+            };
         }
         voice.updated_at = unix_seconds();
         let updated = voice.clone();
@@ -520,6 +555,8 @@ fn drop_invalid_profiles(document: VoiceDocument) -> (VoiceDocument, Vec<String>
             Some(error.to_string())
         } else if ids.contains(&voice.id) {
             Some("duplicate voice profile id".to_owned())
+        } else if let Err(error) = validate_ref_text(voice.ref_text.as_deref()) {
+            Some(error.to_string())
         } else if path.components().count() != 1
             || !matches!(path.components().next(), Some(Component::Normal(_)))
         {
@@ -907,6 +944,7 @@ mod tests {
                     language: None,
                     enabled: true,
                     ref_audio: STANDARD.encode(&wav),
+                    ref_text: None,
                 })
                 .await;
             assert!(matches!(created, Err(VoiceStoreError::Resource(_))));
@@ -951,12 +989,46 @@ mod tests {
                 language: Some("zh-CN".into()),
                 enabled: true,
                 ref_audio: encoded,
+                ref_text: Some("Reference words".into()),
             })
             .await
             .expect("create");
         assert_eq!(created.id, "speaker_a");
+        assert_eq!(created.ref_text.as_deref(), Some("Reference words"));
+        assert_eq!(
+            store
+                .reference_with_text("speaker_a")
+                .await
+                .unwrap()
+                .1
+                .as_deref(),
+            Some("Reference words")
+        );
+        let persisted = VoiceStore::open(root.clone()).unwrap();
+        assert_eq!(
+            persisted.list(true).await[0].ref_text.as_deref(),
+            Some("Reference words")
+        );
         assert_eq!(created.duration_ms, 100);
         assert_eq!(store.reference_bytes("speaker_a").await.unwrap(), wav);
+
+        let replaced = store
+            .update(
+                "speaker_a",
+                UpdateVoiceRequest {
+                    name: None,
+                    language: None,
+                    enabled: None,
+                    ref_audio: Some(STANDARD.encode(&wav)),
+                    ref_text: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            replaced.ref_text.is_none(),
+            "replacing a reference invalidates its transcript"
+        );
 
         let updated = store
             .update(
@@ -966,11 +1038,13 @@ mod tests {
                     language: None,
                     enabled: Some(false),
                     ref_audio: None,
+                    ref_text: Some(String::new()),
                 },
             )
             .await
             .expect("update");
         assert_eq!(updated.name, "Narrator");
+        assert!(updated.ref_text.is_none());
         assert!(matches!(
             store.reference_bytes("speaker_a").await,
             Err(VoiceStoreError::Disabled(_))
@@ -1103,4 +1177,13 @@ mod tests {
         assert_eq!(delete.status(), StatusCode::OK);
         std::fs::remove_dir_all(root).expect("remove temp voice store");
     }
+}
+
+fn validate_ref_text(text: Option<&str>) -> Result<(), VoiceStoreError> {
+    if text.is_some_and(|s| s.len() > 16384) {
+        return Err(VoiceStoreError::Invalid(
+            "ref_text must contain 0–16384 UTF-8 bytes".into(),
+        ));
+    }
+    Ok(())
 }

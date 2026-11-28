@@ -17,7 +17,11 @@ pub fn run(args: ModelPreflightArgs) -> Result<()> {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
-    let json = if config["model_type"] == "nemotron_diarization" {
+    let json = if config["model_type"] == "breeze_tts" {
+        serde_json::to_string(&ironmlx_audio::breeze_tts::preflight_model_metadata(
+            &args.metadata_dir,
+        )?)
+    } else if config["model_type"] == "nemotron_diarization" {
         serde_json::to_string(&ironmlx_audio::diarization::preflight_model_metadata(
             &args.metadata_dir,
         )?)

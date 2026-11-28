@@ -4,7 +4,7 @@
 
 Native audio model infrastructure for IronMLX. The crate owns PCM values,
 audio decoding/encoding, reference waveform preparation, text preparation,
-component weight loading and native IndexTTS 2.5 speech synthesis.
+component weight loading and native IndexTTS 2.5 / Breeze TTS 2 speech synthesis.
 
 ```mermaid
 flowchart TD
@@ -224,7 +224,7 @@ not establish the required precision. The caller owns process configuration;
 this library does not mutate it. This is the numerically verified profile for
 float32 reference encoders on hardware supporting TF32.
 
-See [offline tools](tools/README.md) for conversion and baseline regeneration.
+See [offline audio tools](tools/README.md) for conversion and baseline regeneration.
 For explicit full-chain parity tests, supply the pinned snapshot plus:
 
 - `IRONMLX_INDEXTTS25_DERIVED`: verified converted auxiliary directory.
@@ -395,3 +395,46 @@ worker-local caches across turns; `DiarizationStream::snapshot` flushes a copy
 without consuming the live right context. Dropping a stream cancels its work and
 releases its cache reservation and model lease.
 The APIs label speakers; they do not identify people or extract separate voices.
+
+## Breeze TTS 2
+
+`breeze_tts::BreezeTts` supports the two mlx-community Breeze-TTS-2 MLX
+snapshots: BF16 and MXFP8 (8 bits, group size 32). `preflight` checks the local
+resource layout; `preflight_model_metadata` validates configuration before weights
+are downloaded. The independent `audio_tokenizer/model.safetensors` is mandatory
+and contains both the reference encoder and waveform decoder. No IndexTTS
+auxiliary weights, WeText FSTs or Japanese dictionary are needed.
+
+The native pipeline uses a bidirectional T5Gemma2 text encoder, Qwen3 backbone,
+16-codebook depth generation and a Qwen3-TTS codec. Output is finite mono f32 at
+24000 Hz. `BreezeOptions` selects reference-free voice design (`instructions`),
+voice cloning (`reference` plus exact `ref_text`), or directed cloning (both).
+English and Chinese are supported, including the checkpoint's inline vocal-event
+tokens. References are resampled to mono 24 kHz and are used in full, up to 60
+seconds, so their transcript remains aligned. Instruction and reference text are
+limited to 16384 UTF-8 bytes each; the assembled model prompt is bounded to 8192
+positions. Text is split at newlines or 600 characters, with at most 256 segments.
+
+Streaming emits waveform after every four code frames (320 ms of generated
+audio), preserving convolution history, transposed-convolution overlap and codec
+attention state. This duration describes chunk size, not wall-clock latency.
+Collect mode buffers the same incremental decode path. Both modes use a
+request-local random key, cancellation checkpoints, continuous sample offsets and
+a native-frame output cap (default service policy: 600 seconds). Reaching a token
+or output limit fails explicitly; it does not return a successful truncation.
+Dropping or terminating a session resets codec state.
+
+Real acceptance tests are opt-in and use local files:
+
+```sh
+export IRONMLX_BREEZE_SNAPSHOT=/absolute/path/to/model/snapshot
+export IRONMLX_BREEZE_REFERENCE=/absolute/path/to/network-reference.safetensors
+MLX_ENABLE_TF32=0 cargo test -p ironmlx-audio --lib breeze_tts::tests::real_network_parity -- --ignored --nocapture
+MLX_ENABLE_TF32=0 cargo test -p ironmlx-audio --lib breeze_tts::tests::real_synthesis_acceptance -- --ignored --nocapture
+```
+
+Run each command once per precision variant. Set `IRONMLX_BREEZE_OUTPUT` to save
+synthesis WAV evidence. See the offline tools for the pinned Python baseline.
+Network parity checks Chinese/English token IDs, projected text, backbone logits,
+all fifteen depth heads and cached next-frame output. This verifies numerical
+agreement, not perceptual voice quality or an end-to-end latency guarantee.

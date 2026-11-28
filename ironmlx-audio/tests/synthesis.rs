@@ -65,6 +65,7 @@ fn real_synthesis_session_acceptance() {
         deadline: Instant::now() + Duration::from_secs(900),
     };
     let request = |text: &str, output_policy| TtsRequest {
+        breeze: None,
         text: text.into(),
         reference: pcm.clone(),
         language: Language::Auto,

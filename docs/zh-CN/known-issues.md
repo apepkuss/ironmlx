@@ -7,8 +7,9 @@
 ## 模型与 API 限制
 
 - 图片请求接受 JPEG/PNG/WebP base64 内容，不接受远程图片 URL。
-- 文本、图片与音频向量仅支持 EmbeddingGemma 2 BF16 和 affine4，当前不支持视频向量，详见[Embedding API](text-embeddings.md)。识别其他 embedding 和 reranker 元数据不代表运行时受支持。语音合成仅限文档中的 IndexTTS 2.5 配置及其独立音频运行时。
+- 文本、图片与音频向量仅支持 EmbeddingGemma 2 BF16 和 affine4，当前不支持视频向量，详见[Embedding API](text-embeddings.md)。识别其他 embedding 和 reranker 元数据不代表运行时受支持。语音合成通过独立音频运行时支持文档中的 IndexTTS 2.5 配置及 Breeze TTS 2 BF16/MXFP8，详见[语音 API](audio-speech-api.md)。
 - 语音识别仅支持文档中的 Qwen3-ASR 检查点；时间戳／字幕需要 Qwen3 ForcedAligner，说话人标注需要 Nemotron 3。实时会话支持转写、可选 VAD 与说话人标签，不提供翻译、语音输出或降噪。Dashboard 不提供录音／转写客户端。限制与扩展见[音频 API](audio-transcriptions-api.md)；识别其他 ASR 元数据不代表运行时受支持。
+- Breeze Dashboard 在完整 WAV 就绪后播放。增量 PCM 可通过 API 使用；流式输出不保证实时合成速度。
 - 决策服务仅限文档中的 Laya 模型及 System One／Decisions 契约，Decisions 输入仅支持文本；不是通用分类或 embedding 运行时。
 - DiffusionGemma 不支持 KV cache、Prompt Lookup 或 MTP，可用采样参数也较少。
 - MTP 和辅助 drafter 取决于具体 Qwen/Gemma 模型及兼容辅助模型。DFlash2 有独立的组合限制，详见[支持模型](supported-models.md)。

@@ -11,7 +11,7 @@
 | [服务与管理 API](service-api.md) | 公共访问约定、健康检查、模型发现与管理接口 |
 | [文本与视觉 API](text-vision-api.md) | Responses、Chat Completions、Messages；文本与图片理解、思考、工具、结构化输出 |
 | [Embedding API](text-embeddings.md) | 文本、图片、音频与组合输入；输出维度与编码 |
-| [语音合成 API](audio-speech-api.md) | 语音输出、声音配置与参考音频 |
+| [语音合成 API](audio-speech-api.md) | IndexTTS / Breeze 语音输出、音色设计、声音配置与参考文字稿 |
 | [语音识别与对齐 API](audio-transcriptions-api.md) | 独立转写、强制对齐、时间戳与 SRT/WebVTT 字幕 |
 | [图片生成 API](image-generation-api.md) | 文生图与单图条件编辑 |
 | [System One API](laya-systemone-api.md) | Laya 的选择、评分与真假概率请求 |

@@ -117,6 +117,10 @@ public struct LocalTTSMetadata: Codable, Equatable, Sendable {
     }
 
     static func read(config: [String: Any]) -> Self? {
+        if BreezeTTSModelSupport.isSupported(config) {
+            return Self(supportedLanguages: ["zh", "en"], maxTextTokens: config["max_position_embeddings"] as? Int,
+                        maxAudioTokens: nil, outputSampleRateHz: 24000)
+        }
         let supportedLanguages = (config["supported_languages"] as? [Any])?
             .compactMap { value -> String? in
                 guard let code = value as? String else { return nil }
@@ -647,6 +651,10 @@ public struct LocalModelScanner: Sendable {
         guard let model = scannedModelWithoutPairing(for: reference), model.type == "tts" else { return nil }
         guard model.readiness?.isLoadable == true else {
             throw AudioResourceError.invalid(model.readiness?.message ?? "model is not ready")
+        }
+        if model.architecture == "breeze-tts" || model.architecture == "breeze_tts" {
+            guard let execution else { return nil }
+            return BackendAudioResources(derivedResources: "", resourceLock: "", wetextFsts: "", unidicDir: "", execution: execution)
         }
         var resources = try AudioResourcePreparationService(rootURL: rootURL).readyConfiguration()
         resources.execution = execution
@@ -2135,6 +2143,9 @@ public struct LocalModelScanner: Sendable {
                 !FileManager.default.isReadableFile(atPath: url.appendingPathComponent($0).path)
             })
         }
+        if configJSON["model_type"] as? String == "breeze_tts" {
+            missingFiles.append(contentsOf: BreezeTTSModelSupport.missingFiles(in: url))
+        }
         missingFiles.append(contentsOf: quantization.missingFiles)
 
         let readiness: LocalModelReadiness
@@ -2196,7 +2207,14 @@ public struct LocalModelScanner: Sendable {
         let supportedEmbedding = isSupportedEmbeddingConfig(configJSON)
         let supportedASR = Qwen3ASRModelSupport.isSupported(configJSON)
         let supportedDiarization = NemotronDiarizationModelSupport.isSupported(configJSON)
-        if manifest.compatibility.downloadOnly == true && !supportedEmbedding && !supportedASR && !supportedDiarization
+        let supportedBreeze = BreezeTTSModelSupport.isSupported(configJSON)
+        if supportedBreeze {
+            capabilityType = "tts"
+            if !manifest.files.contains(where: { $0.path == BreezeTTSModelSupport.codecWeight }) {
+                missingFiles.append("verified audio_tokenizer/model.safetensors")
+            }
+        }
+        if manifest.compatibility.downloadOnly == true && !supportedEmbedding && !supportedASR && !supportedDiarization && !supportedBreeze
             && !isSupportedInklingSnapshot(configJSON, manifest: manifest) {
             readiness = LocalModelReadiness(
                 status: "unsupported", reasonCode: "download_only_model",
@@ -2210,7 +2228,7 @@ public struct LocalModelScanner: Sendable {
             )
         } else if capabilityType == "tts", manifest.compatibility.modelType == "indextts2_5", missingFiles.isEmpty {
             readiness = audioReadiness(manifest: manifest)
-        } else if !supportedEmbedding && !supportedASR && !supportedDiarization, let unsupportedReason = unsupportedModelTypeReason(for: capabilityType) {
+        } else if !supportedEmbedding && !supportedASR && !supportedDiarization && !supportedBreeze, let unsupportedReason = unsupportedModelTypeReason(for: capabilityType) {
             readiness = LocalModelReadiness(
                 status: "unsupported",
                 reasonCode: "unsupported_model_type",
@@ -2229,7 +2247,7 @@ public struct LocalModelScanner: Sendable {
         return SnapshotInspection(
             path: url,
             config: configJSON,
-            artifactRole: manifest.compatibility.artifactRole,
+            artifactRole: supportedBreeze ? "tts" : manifest.compatibility.artifactRole,
             capabilityType: capabilityType,
             readiness: readiness,
             quantization: quantization.quantization

@@ -13,7 +13,10 @@
 
 ## 注册本地资源
 
-音频模型需要经过验证的源 snapshot、派生的参考编码器资源、固定的资源锁、
+下述资源示例适用于 IndexTTS 2.5。Breeze 只需要完整的模型快照，见
+[Breeze TTS 2](#breeze-tts-2)。
+
+IndexTTS 模型需要经过验证的源 snapshot、派生的参考编码器资源、固定的资源锁、
 WeText FST 文件和 UniDic-lite 字典。资源 profile 与转换工具见
 [ironmlx-audio 开发参考](../../ironmlx-audio/README.zh-CN.md)。资源路径均为明确的本地路径；加载时
 会进行校验，服务器不会自行下载或转换这些资源。
@@ -42,11 +45,11 @@ WeText FST 文件和 UniDic-lite 字典。资源 profile 与转换工具见
 `/admin/api/models/register` 和 `/admin/api/models/load` 接受相同的 `audio`
 对象，并同时接收 `model`（公开标识）和 `model_dir`（源 snapshot）。已有的卸载、
 固定、TTL 和模型数量策略同样适用。音频模型报告 `runtime_kind: "tts"`、架构
-`indextts25` 和调度器 `serial_audio`。因果调度器、采样、MTP 和 PromptLookup
+`indextts25` 或 `breeze_tts`，调度器为 `serial_audio`。因果调度器、采样、MTP 和 PromptLookup
 覆盖参数会被拒绝。
 
 可执行文件会在初始化 MLX 或启动 worker 前将 `MLX_ENABLE_TF32` 默认设为 `0`。
-用户显式设置的环境变量会保留，但音频加载器会拒绝 `0` 以外的值。嵌入 Rust
+用户显式设置的环境变量会保留，但 IndexTTS 加载器会拒绝 `0` 以外的值。嵌入 Rust
 runtime 的应用必须在首次调用 MLX 前设置这一进程级精度策略。音频 worker 使用
 单独注册的 stream 和请求级随机状态。内存与 allocator cache 限制仍为进程级，
 并与语言模型共享。
@@ -109,32 +112,34 @@ PCM 流：
 }
 ```
 
-`model` 和 `input` 是必填的非空字符串。`ref_audio` 与 `voice` 必须且只能提供
-一个。`voice` 接受稳定的字符串 ID 或 `{ "id": "speaker_a" }`。
+`model` 和 `input` 是必填的非空字符串。IndexTTS 要求 `ref_audio` 与 `voice`
+必须且只能提供一个；Breeze 还支持无参考音频的[音色设计](#breeze-tts-2)。`voice` 接受稳定的字符串 ID 或 `{ "id": "speaker_a" }`。
 `response_format` 默认为 `wav`，`stream` 默认为 `false`。支持上面列出的两种输出
 组合。未知字段、重复字段和显式 `null` 均会被拒绝。
 
 `ref_audio` 使用带 padding、无空白字符的标准规范 Base64。应将完整音频文件编码
 为该字符串；不接受文件路径、URL 或 data URL。音频格式从解码后的字节中识别。
 输入支持 WAV（PCM 16/24/32 或 IEEE float32）、FLAC 和 MP3。服务先验证完整输入
-文件，再截取开头 15 秒作为参考。
+文件。IndexTTS 截取开头 15 秒作为参考；Breeze 完整使用最长 60 秒的参考录音，
+并要求文字稿与完整录音匹配。
 
-输入是一个完整 JSON 请求。自动语言选择和固定合成 profile 见 ironmlx-audio 开发参考。流式
+输入是一个完整 JSON 请求。自动语言选择和合成 profile 见 ironmlx-audio 开发参考。IndexTTS 流式
 粒度为完成的文本分段：每个分段必须完成语音生成、声学解码与声码器处理后，才能
 输出对应 PCM。
 
 ## 响应与客户端处理
 
-两种模式都产生 22050 Hz、单声道、有符号 16 位小端采样。响应包含
-`X-Request-Id`、`X-Audio-Sample-Rate: 22050`、`X-Audio-Channels: 1` 和
-`X-Audio-Sample-Format: s16le`。
+两种模式都产生单声道、有符号 16 位小端采样：IndexTTS 为 22050 Hz，Breeze
+为 24000 Hz。响应包含 `X-Request-Id`、`X-Audio-Sample-Rate`、
+`X-Audio-Channels: 1` 和 `X-Audio-Sample-Format: s16le`；客户端应读取实际采样率。
 
 | 模式 | Content-Type | 长度 | Cache-Control |
 | --- | --- | --- | --- |
 | 完整 WAV | `audio/wav` | 完整文件 `Content-Length` | `no-store` |
 | PCM 流 | `audio/pcm` | 无 `Content-Length` | `no-store, no-transform` |
 
-PCM 响应还包含 `X-IronMLX-Streaming-Granularity: segment`。流中只有无 WAV
+PCM 响应还包含 `X-IronMLX-Streaming-Granularity`：IndexTTS 为 `segment`，
+Breeze 为 `incremental_waveform`。流中只有无 WAV
 头、无 JSON 事件的原始采样。网络读取可以在任意字节边界结束，包括奇数字节数；
 客户端必须保留最后一个未配对字节，与下一次读取合并后再解释小端采样。传输 chunk
 不标识文本分段。WAV 和 PCM 使用相同的舍入与饱和规则。
@@ -149,6 +154,9 @@ PCM 响应还包含 `X-IronMLX-Streaming-Granularity: segment`。流中只有无
 模型进入 draining，不能在 worker 仍在使用时释放模型。
 
 ## 限制与调度
+
+下表的模型专属数值适用于 IndexTTS。Breeze 的文本、输出和内存策略见
+[Breeze TTS 2](#breeze-tts-2)。
 
 | 策略 | 默认值 |
 | --- | --- |
@@ -253,3 +261,50 @@ IRONMLX_AUDIO_HTTP_BUNDLE="$PWD/dist/IronMLX.app" \
 `DYLD_*` 覆盖变量，并在 checkout 之外运行。模型、派生权重、FST 和字典数据仍为
 明确的外部资源，不随 App 打包。还需针对 Bundle helper 单独重复客户端播放检查。
 本地 ad-hoc 签名的 Bundle 不代表 Developer ID 签名、公证或公开分发授权。
+
+
+## Breeze TTS 2
+
+支持 Breeze-TTS-2 BF16 和 MXFP8（`bits=8`、`group_size=32`）快照。
+服务根据 `config.json` 中的 `model_type: breeze_tts` 自动识别；注册时无需提供
+IndexTTS 的 `audio` 辅助资源配置。快照必须包括主权重索引及全部分片、文本
+分词器、`audio_tokenizer` 的配置和权重。推理使用原生实现，不启动 Python。
+
+两个版本均可通过 `POST /admin/api/models/load` 注册并加载：
+
+```json
+{"model":"mlx-community/Breeze-TTS-2-mlx-8bit","model_dir":"/absolute/path/to/snapshot"}
+```
+
+`POST /v1/audio/speech` 为 Breeze 增加以下字段：
+
+| 字段 | 默认值 | 用途 |
+| --- | --- | --- |
+| `instructions` | 无 | 音色设计或语气指令 |
+| `ref_text` | 无 | 参考录音的完整准确文字稿 |
+| `cfg_scale` | 1 | 指令引导强度，1–10 |
+| `max_tokens` | 750 | 音频帧生成上限，1–1500 |
+| `temperature` | 0.9 | 采样温度，0–2 |
+| `top_p` | 1 | 核采样范围，0–1 |
+| `top_k` | 50 | 候选数量，0–2052；0 表示禁用 |
+| `seed` | 无 | 请求随机种子 |
+
+音色设计仅传 `instructions`，不传参考录音。声音克隆传一个 `ref_audio` 或
+`voice`，并提供准确的 `ref_text`。声音控制在克隆参数基础上增加 `instructions`。
+Voice profile 创建和更新也支持可选 `ref_text`；请求可覆盖保存的文字稿。
+将 profile 的 `ref_text` 设为空字符串可以清除它。替换参考录音却不提供新文字稿
+时，旧文字稿会清除，避免声音与文字不匹配。指令和文字稿上限为 16384 UTF-8 字节。
+
+```json
+{"model":"mlx-community/Breeze-TTS-2-mlx-8bit","input":"你好，欢迎使用 IronMLX。","instructions":"温柔、自然的女声","cfg_scale":4,"seed":42,"response_format":"wav"}
+```
+
+输出为 24000 Hz 单声道，可选完整 WAV 或流式 s16le PCM。客户端应读取
+`X-Audio-Sample-Rate`，不能假设固定 22050 Hz。Breeze 流式响应的
+`X-IronMLX-Streaming-Granularity` 为 `incremental_waveform`。
+IndexTTS 继续使用原有参考音频要求、22050 Hz 和分段流式输出，并拒绝 Breeze 专用参数。
+
+两种模型共用排队、取消、超时、模型租约、有界输出通道和进程内存管理。
+Breeze 按换行或 600 个字符分段，最多 256 段；组合后的 prompt 最多 8192 个位置。
+Breeze 输出上限为 600 秒（14400000 帧），计算阶段预留 4 GiB，独立于常驻权重
+及输出缓存。这是准入预算，不是实测峰值内存或延迟保证。

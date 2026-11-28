@@ -148,7 +148,7 @@ def generate(catalog, language):
             if title == "Embedding":
                 lines.append(local(f"EmbeddingGemma 2 supports BF16 and Affine 4-bit; video inputs are unsupported. See the [{en_api}]({api}) for input formats, dimensions and limits.", f"EmbeddingGemma 2 支持 BF16 与 Affine 4-bit，不支持视频输入。输入格式、维度与限制见[{zh_api}]({api})。", language))
             elif title == "Audio":
-                lines.append(local(f"The App prepares additional IndexTTS resources automatically. See the [{en_api}]({api}).", f"IndexTTS 额外资源由 App 自动准备。详见[{zh_api}]({api})。", language))
+                lines.append(local(f"The App prepares additional IndexTTS resources automatically. Breeze TTS 2 BF16/MXFP8 includes a separate speech codec and needs no IndexTTS resource preparation. See the [{en_api}]({api}).", f"IndexTTS 额外资源由 App 自动准备。Breeze TTS 2 BF16/MXFP8 包含独立语音 codec，无需准备 IndexTTS 资源。详见[{zh_api}]({api})。", language))
             elif title == "Image":
                 lines.append(local("Qwen Image uses the Qwen Research License, which does not license commercial use. See [model rights](model-license-boundary.md).", "Qwen Image 受 Qwen Research License 约束，不授权商业用途。详见[模型许可边界](model-license-boundary.md)。", language))
     lines.append("## " + local("Before downloading", "下载前须知", language))
