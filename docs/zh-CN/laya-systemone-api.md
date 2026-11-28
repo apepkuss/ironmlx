@@ -101,10 +101,10 @@ Python 与 JavaScript 官方 SDK 示例见[英文 API 文档](../laya-systemone-
 
 ## 使用步骤
 
-1. 打开 **模型 → 模型下载 → Hugging Face**，搜索并下载 `aac6fef/laya-multilingual-mlx`。
-2. 在 **模型管理** 中找到 `DECISION` 类型的模型并点击 **加载**。如果当前运行 DFlash2
+1. 打开 **模型 → 下载 → HuggingFace**，搜索并下载 `aac6fef/laya-multilingual-mlx`。
+2. 在 **模型 → 我的模型** 中找到 `DECISION` 类型的模型并点击 **加载**。如果当前运行 DFlash2
    独占模型，先在 App 中卸载该模型。
-3. 点击该行的齿轮按钮，打开 **模型参数设置**，查看模型别名、`DECISION` 类型和只读的
+3. 点击该行的参数按钮（滑杆图标），打开 **模型参数设置**，查看模型别名、`DECISION` 类型和只读的
    Context Size。上下文长度来自模型配置，包含任务说明、选项和待判断内容。
    服务地址可在 **状态** 页面查看。
 4. 在外部应用中配置这些地址和精确的模型 ID，即可调用 `POST /v1/systemone`。

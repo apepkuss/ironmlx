@@ -144,11 +144,11 @@ console.log(result.answers.refund.noul);
 
 ## Use the App
 
-1. In **Models → Model Download → Hugging Face**, search for
+1. In **Models → Download → HuggingFace**, search for
    `aac6fef/laya-multilingual-mlx` and download it.
-2. In **Model Management**, click **Load** on its `DECISION` row. If a DFlash2
+2. In **Models → My models**, click **Load** on its `DECISION` row. If a DFlash2
    target is running, unload that exclusive target first.
-3. Open **Model Param Settings** using the row's gear button to view the model
+3. Open **Model Param Settings** using the row's parameters button (the sliders icon) to view the model
    alias, `DECISION` type and read-only context size. The context size comes from
    the checkpoint configuration and includes instructions, options and state.
    Find the service address on **Status** and use the exact model ID.

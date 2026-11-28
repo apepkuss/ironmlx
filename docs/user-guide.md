@@ -5,10 +5,10 @@
 This guide organizes the user path for the latest public release. It links to
 focused reference pages instead of repeating their details.
 
-![IronMLX Dashboard showing Qwen3.8-27B-4bit with DFlash2](images/dashboard-qwen38-dflash2.png)
+![IronMLX Dashboard Status page with Qwen3.8-27B-4bit running with DFlash2](images/dashboard-overview.png)
 
-The status page shows a running local endpoint, the loaded
-`mlx-community/Qwen3.8-27B-4bit` model, and its matching DFlash2 draft.
+The Status page shows the local endpoint, decode and prefill speed, memory use,
+and the loaded `mlx-community/Qwen3.8-27B-4bit` model running with DFlash2.
 
 ## Install and start
 
@@ -50,14 +50,14 @@ then loads it as the default model. If the window stays open, chat opens when
 the model is ready. If you close it or choose **Continue in Background**, the
 download keeps running, the menu shows its progress under **Chat**, and
 IronMLX asks for permission to notify you when the model is ready.
-**Choose a Model Myself** opens **Models → Model Download** in the Dashboard.
+**Choose a Model Myself** opens **Models → Download** in the Dashboard.
 
 Chat uses a loaded chat model, preferring the default model. If none is
 loaded, it loads a downloaded one (the default model, otherwise a starter
 model, otherwise the smallest) and makes it the default. The model menu at the
 top of the window lists downloaded chat models. Switching asks for confirmation,
 unloads the current default model unless it is pinned, and loads the new one as
-the default; **Manage models…** opens **Models → Model Manager**. Chat does not load or
+the default; **Manage models…** opens **Models → My models**. Chat does not load or
 switch DFlash2 models: while a model runs with DFlash2, chat uses that model,
 and switching happens in the Dashboard.
 
@@ -75,7 +75,11 @@ the Dashboard **Agent** page at the [DeepSeek Harness](dsh.md) guide.
 
 ## Download and update models
 
-In **Models → Model Download → Supported models**, browse by type, select a quantization variant, then choose **HuggingFace**. Variants of the same model share a row. Options show format and bit width; selecting one reveals its repository, approximate size, memory hint, and validation status.
+![IronMLX Dashboard Models page listing one loaded model and four downloaded models](images/dashboard-models.png)
+
+**Models → My models** lists the models on this Mac, with the loaded ones first.
+
+In **Models → Download → Supported models**, browse by type, select a quantization variant, then choose **HuggingFace**. Variants of the same model share a row. Options show format and bit width; selecting one reveals its repository, approximate size, memory hint, and validation status.
 
 The catalogue downloads public repositories without an HF token. ModelScope buttons stay hidden until repository availability and mirror contents are verified. Use the separate HuggingFace / ModelScope tabs for other repositories or credentials.
 
@@ -89,7 +93,7 @@ Independent model components are downloaded alongside the main weight set, using
 
 ## Import a model already on this Mac
 
-In Dashboard, open **Models → Model Manager** and select **Import local model**
+In Dashboard, open **Models → My models** and select **Import local model**
 at the upper right. Choose the model directory containing `config.json`, weights,
 and a tokenizer. For a Hugging Face cache, choose the `snapshots/<commit>`
 directory rather than its parent cache directory. Review the source, destination,
@@ -119,9 +123,33 @@ If you cancel the DFlash2 model that the App restores at startup, the backend
 restarts in normal mode with no models loaded; the model's DFlash2 setting is
 kept, so you can load it with DFlash2 again later.
 
+## Runtime status
+
+The Dashboard **Status** page shows what the server is doing: decode and prefill
+speed, time to first token, and the number of active and queued requests.
+**Trend** plots throughput or memory over the last 10 minutes, 1 hour or 24
+hours. Below it are the loaded models, memory use by category, the prefix-cache
+hit rate, and recent requests with a link to the logs.
+
+The same state is available without opening the Dashboard. A dot on the menu bar
+icon shows the server state, and the decode speed can appear next to the icon;
+**Show Speed in Menu Bar** in the menu turns the speed on or off. The top of the
+menu shows a status card with the current activity, speed, memory and
+prefix-cache hits.
+
+![IronMLX floating HUD showing a DFlash2 model generating at 102.2 tok/s](images/runtime-hud.png)
+
+**Show Floating HUD** in the menu, or ⌃⌥⌘H, turns on a small floating panel with
+the state, decode speed, time to first token, active and queued requests, and
+memory. It is off by default. Once on, it stays on screen while the server is
+idle, appears on every Space and over full-screen Apps, and does not take
+keyboard focus. Drag it to move it; the position is remembered for each display.
+Right-click it to choose **Density** (**Mini** or **Standard**), turn on
+**Click Through**, **Reset Position**, or **Close** it.
+
 ## Weight format labels
 
-In the App's **Model Management** list, quantized checkpoints display their
+In the App's **Models → My models** list, quantized checkpoints display their
 detected quantization format or bit width. Unquantized checkpoints display the
 detected weight data type, such as `FP16` or `BF16`; the tooltip identifies the
 checkpoint as unquantized and includes the normalized `dtype`. If neither model
@@ -179,7 +207,7 @@ voice ID. Request fields and WAV/PCM examples are in the [speech API](audio-spee
 
 ### Breeze voice design and cloning
 
-Load a Breeze model, then open its gear button in **Model Management**:
+Load a Breeze model, then open its parameters button (the sliders icon) in **Models → My models**:
 
 - To design a voice, enter the text and a natural-language voice description; leave the voice profile ID empty.
 - To clone a voice, use a managed voice ID with the exact transcript of its reference recording. Save the transcript in **Voices** or enter a request override.
@@ -206,7 +234,7 @@ by the native backend during registration before becoming loadable.
 
 ### Model settings
 
-In **Model Management**, select the gear button for the speech model. Basic model
+In **Models → My models**, select the parameters button (the sliders icon) for the speech model. Basic model
 information is read-only; configuration-backed fields appear only when the model
 files provide valid values.
 
