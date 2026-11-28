@@ -518,8 +518,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             }
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
-                let loaded = try await client.fetchLoadedModels()
-                guard loaded.contains(where: { $0.id == modelID && $0.capabilities.runtimeKind == "causal" }) else {
+                guard try await loadedAgentModel(modelID, client: client, config: config) != nil else {
                     sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
                     return
                 }
@@ -566,8 +565,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             }
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
-                let loaded = try await client.fetchLoadedModels()
-                guard loaded.contains(where: { $0.id == modelID && $0.capabilities.runtimeKind == "causal" }) else {
+                guard try await loadedAgentModel(modelID, client: client, config: config) != nil else {
                     sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
                     return
                 }
@@ -612,20 +610,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             }
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
-                let loaded: [BackendLoadedModelInfo]
-                if configuredDFlash2Target(in: config) == modelID {
-                    // Exclusive DFlash2 serving exposes health and /v1/models, not daemon admin APIs.
-                    let health = try await client.fetchHealthz()
-                    guard health.status == "healthy", health.dflash2?.enabled == true,
-                          AppConfig.normalizedModelReference(health.model.name) == modelID else {
-                        sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
-                        return
-                    }
-                    loaded = LegacyHealthAdapter().legacyStatus(from: health).runtimeModels
-                } else {
-                    loaded = try await client.fetchLoadedModels()
-                }
-                guard let selected = loaded.first(where: { $0.id == modelID && $0.capabilities.runtimeKind == "causal" }) else {
+                guard let selected = try await loadedAgentModel(modelID, client: client, config: config) else {
                     sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
                     return
                 }
@@ -675,8 +660,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             }
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
-                let loaded = try await client.fetchLoadedModels()
-                guard loaded.contains(where: { $0.id == modelID && $0.capabilities.runtimeKind == "causal" }) else {
+                guard try await loadedAgentModel(modelID, client: client, config: config) != nil else {
                     sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
                     return
                 }
@@ -724,8 +708,7 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
             defer { dshDesktopSetupPending = false }
             do {
                 let client = BackendAPIClient(host: config.host, port: config.port)
-                let loaded = try await client.fetchLoadedModels()
-                guard loaded.contains(where: { $0.id == modelID && $0.capabilities.runtimeKind == "causal" }) else {
+                guard try await loadedAgentModel(modelID, client: client, config: config) != nil else {
                     sendFetchResult(path: path, jsonString: #"{"success":false,"code":"model_unavailable"}"#)
                     return
                 }
@@ -3490,6 +3473,37 @@ public final class DashboardBridge: NSObject, WKScriptMessageHandler {
 
     private func sendModelParameters() {
         sendJavaScript("onModelParamsLoaded(\(Self.jsStringLiteral(parameterStore.jsonString())))")
+    }
+
+    /// The loaded causal model an agent client will be configured for, or nil.
+    private func loadedAgentModel(_ modelID: String, client: BackendAPIClient,
+                                  config: AppConfig) async throws -> BackendLoadedModelInfo? {
+        try await Self.loadedAgentModel(
+            modelID, dflash2Target: configuredDFlash2Target(in: config),
+            health: { try await client.fetchHealthz() },
+            loadedModels: { try await client.fetchLoadedModels() })
+    }
+
+    /// Exclusive DFlash2 serving exposes health and /v1/models, not daemon admin APIs,
+    /// so its target is confirmed from health instead of the loaded-model list.
+    static func loadedAgentModel(
+        _ modelID: String,
+        dflash2Target: String?,
+        health: () async throws -> HealthzSnapshot,
+        loadedModels: () async throws -> [BackendLoadedModelInfo]
+    ) async throws -> BackendLoadedModelInfo? {
+        let loaded: [BackendLoadedModelInfo]
+        if dflash2Target == modelID {
+            let snapshot = try await health()
+            guard snapshot.status == "healthy", snapshot.dflash2?.enabled == true,
+                  AppConfig.normalizedModelReference(snapshot.model.name) == modelID else {
+                return nil
+            }
+            loaded = LegacyHealthAdapter().legacyStatus(from: snapshot).runtimeModels
+        } else {
+            loaded = try await loadedModels()
+        }
+        return loaded.first { $0.id == modelID && $0.capabilities.runtimeKind == "causal" }
     }
 
     private func configuredDFlash2Target(in config: AppConfig) -> String? {
