@@ -313,7 +313,7 @@ footer {
 }
 
 .lede {
-  max-width: 440px;
+  max-width: 500px;
   color: var(--muted);
   font-size: 20px;
 }
@@ -572,5 +572,143 @@ html[lang="zh-Hans"] .hero-art img {
   .nav .nav-icon {
     width: 14px;
     height: 14px;
+  }
+}
+
+/* Home page sections below the feature cards. */
+.band {
+  padding: 84px 28px;
+  border-top: 1px solid var(--line);
+}
+
+.band h2 {
+  margin: 0 0 12px;
+  font-size: 38px;
+  line-height: 1.12;
+  letter-spacing: -0.04em;
+}
+
+.band p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.band .eyebrow {
+  margin: 0 0 18px;
+  color: var(--blue);
+}
+
+.band .intro {
+  max-width: 620px;
+  font-size: 17px;
+}
+
+.band-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 22px;
+  margin-top: 26px;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: 1fr 1.15fr;
+  gap: 48px;
+  align-items: center;
+}
+
+.split > div,
+.split > pre {
+  min-width: 0;
+}
+
+.shot img,
+.demo {
+  width: 100%;
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: 0 25px 70px var(--image-shadow);
+}
+
+.demo {
+  aspect-ratio: 16 / 9;
+}
+
+.shot .shot-dark,
+html[data-theme="dark"] .shot .shot-light {
+  display: none;
+}
+
+html[data-theme="dark"] .shot .shot-dark {
+  display: block;
+}
+
+@media (prefers-color-scheme: dark) {
+  html[data-theme="system"] .shot .shot-light {
+    display: none;
+  }
+
+  html[data-theme="system"] .shot .shot-dark {
+    display: block;
+  }
+}
+
+.agent-list {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 20px;
+  margin: 26px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-list a {
+  color: var(--ink);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.agent-list a:hover {
+  color: var(--blue);
+}
+
+.agent-list span {
+  display: block;
+  color: var(--meta);
+  font-size: 13px;
+}
+
+.code {
+  margin: 0;
+  padding: 22px 24px;
+  overflow-x: auto;
+  border-radius: 14px;
+  background: var(--code-bg);
+  color: var(--code-ink);
+  font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.code .c {
+  color: #8b98ad;
+}
+
+@media (max-width: 760px) {
+  .band {
+    padding: 56px 20px;
+  }
+
+  .band h2 {
+    font-size: 30px;
+  }
+
+  .split {
+    grid-template-columns: 1fr;
+    gap: 32px;
+  }
+
+  .agent-list {
+    grid-template-columns: 1fr;
   }
 }
